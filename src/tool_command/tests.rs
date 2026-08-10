@@ -826,7 +826,8 @@ fn canonical_problem_markdown_matches_the_golden_contract() {
             )
             .unwrap(),
         ),
-    ));
+    )
+    .expect("construct canonical CLI golden problem"));
     let view = crate::cli::output::view::CanonicalHumanView::from_application_result(
         "feedback_list",
         &BindingId::new("binding.cli.feedback-list.v1").unwrap(),
@@ -879,7 +880,8 @@ fn application_problem_makes_the_tool_command_fail() {
                 )
                 .unwrap(),
             ),
-        )),
+        )
+        .expect("construct canonical configuration conflict problem")),
         requested_format: RequestedOutputFormat::Json,
     };
 

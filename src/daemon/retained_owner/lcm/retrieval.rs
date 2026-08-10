@@ -535,7 +535,6 @@ fn retrieval_query(
             workflow_scope: None,
         },
         false,
-        SessionRetrievalStoreScope::Profile,
     )
     .query()
     .clone())
@@ -574,6 +573,9 @@ fn retrieval_page(
 
 fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
+        SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
+            reset_required_error(store_scope)
+        }
         SessionRetrievalServiceOutcome::WrongScope
         | SessionRetrievalServiceOutcome::Denied
         | SessionRetrievalServiceOutcome::Redacted
@@ -598,6 +600,9 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
 
 fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
+        LcmDescribeServiceOutcome::ResetRequired { store_scope } => {
+            reset_required_error(store_scope)
+        }
         LcmDescribeServiceOutcome::WrongScope
         | LcmDescribeServiceOutcome::Denied
         | LcmDescribeServiceOutcome::Redacted
@@ -616,6 +621,7 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
 
 fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
+        LcmExpandServiceOutcome::ResetRequired { store_scope } => reset_required_error(store_scope),
         LcmExpandServiceOutcome::WrongScope
         | LcmExpandServiceOutcome::Denied
         | LcmExpandServiceOutcome::Redacted
@@ -629,6 +635,19 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
         | LcmExpandServiceOutcome::Complete { .. }
         | LcmExpandServiceOutcome::Partial { .. }
         | LcmExpandServiceOutcome::Stale { .. } => RetainedSurfaceExecutionErrorV1::Unavailable,
+    }
+}
+
+fn reset_required_error(
+    store_scope: SessionRetrievalStoreScope,
+) -> RetainedSurfaceExecutionErrorV1 {
+    match store_scope {
+        SessionRetrievalStoreScope::Project => {
+            RetainedSurfaceExecutionErrorV1::ProjectResetRequired
+        }
+        SessionRetrievalStoreScope::Profile => {
+            RetainedSurfaceExecutionErrorV1::ProfileResetRequired
+        }
     }
 }
 

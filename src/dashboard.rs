@@ -278,22 +278,26 @@ pub async fn dashboard_lcm_read_authority_for_test(
     registry: &crate::global_db::RegisteredGlobalDb,
     project_database: std::sync::Arc<crate::global_db::RegisteredGlobalDb>,
 ) -> Option<std::sync::Arc<dyn DashboardLcmReadPortV1>> {
-    let root = match crate::mcp::server::DaemonSessionRetrievalRoot::project(cg, registry).await {
-        Some(root) => root,
-        None => crate::mcp::server::DaemonSessionRetrievalRoot::project_for_test(cg),
-    };
-    let service = crate::mcp::server::DaemonSessionRetrievalService::new(
+    let root =
+        match crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project(cg, registry)
+            .await
+        {
+            Some(root) => root,
+            None => {
+                crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::project_for_test(cg)
+            }
+        };
+    let identity = root.identity().clone();
+    let service = crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
         std::sync::Arc::clone(&project_database),
         root,
         None,
     )?;
-    let project_id = cg.store_layout().identity.project_id.clone()?;
-    Some(std::sync::Arc::new(
-        crate::mcp::tools::handlers::DashboardLcmReadAdapter::new(
-            std::sync::Arc::new(service),
-            project_id,
-        ),
-    ))
+    let adapter = crate::mcp::tools::handlers::DashboardLcmReadAdapter::new(
+        std::sync::Arc::new(service),
+        identity,
+    )?;
+    Some(std::sync::Arc::new(adapter))
 }
 
 /// Composes the daemon-owned verified graph read authority over the fixture's

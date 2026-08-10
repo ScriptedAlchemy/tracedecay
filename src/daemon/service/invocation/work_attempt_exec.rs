@@ -63,6 +63,7 @@ use tracedecay_application::{
 use tracedecay_domain::{
     ObservationSourceIdentityV1, WorkAttemptIdentityV1, WorkAttemptV1, WorkExecutableReference,
     WorkFallbackTopology, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteV1,
+    WorktreeId,
 };
 use tracedecay_sessions::runtime::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerLaunchReceipt, CodexAppServerSummaryConfig,
@@ -97,13 +98,19 @@ const CANCELLATION_GRACE: std::time::Duration = std::time::Duration::from_secs(1
 /// lives in the attempt row, and restart recovery never consults this map.
 #[derive(Default)]
 pub(super) struct WorkAttemptProcessRegistryV1 {
-    channels: ProcessMapMutex<BTreeMap<String, Arc<Notify>>>,
+    channels: ProcessMapMutex<BTreeMap<String, WorkAttemptProcessHolderV1>>,
+}
+
+struct WorkAttemptProcessHolderV1 {
+    worktree_id: Option<WorktreeId>,
+    cancellation: Arc<Notify>,
 }
 
 impl WorkAttemptProcessRegistryV1 {
-    fn key(identity: &WorkAttemptIdentityV1) -> String {
+    fn key(worktree_id: Option<&WorktreeId>, identity: &WorkAttemptIdentityV1) -> String {
         format!(
-            "{}/{}/{}",
+            "{}/{}/{}/{}",
+            worktree_id.map_or("unscoped-test", WorktreeId::as_str),
             identity.task_id().as_str(),
             identity.run_id().as_str(),
             identity.attempt_id().as_str()
@@ -112,39 +119,108 @@ impl WorkAttemptProcessRegistryV1 {
 
     /// Registers a live attempt and returns its cancellation channel, or
     /// `None` when the attempt is already owned by a live task.
+    #[cfg(test)]
     fn register(&self, identity: &WorkAttemptIdentityV1) -> Option<Arc<Notify>> {
+        self.register_entry(identity, None)
+    }
+
+    fn register_for_worktree(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        worktree_id: &WorktreeId,
+    ) -> Option<Arc<Notify>> {
+        self.register_entry(identity, Some(worktree_id))
+    }
+
+    fn register_entry(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        worktree_id: Option<&WorktreeId>,
+    ) -> Option<Arc<Notify>> {
         let mut channels = self
             .channels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = Self::key(identity);
+        let key = Self::key(worktree_id, identity);
         if channels.contains_key(&key) {
             return None;
         }
         let notify = Arc::new(Notify::new());
-        channels.insert(key, Arc::clone(&notify));
+        channels.insert(
+            key,
+            WorkAttemptProcessHolderV1 {
+                worktree_id: worktree_id.cloned(),
+                cancellation: Arc::clone(&notify),
+            },
+        );
         Some(notify)
     }
 
-    fn release(&self, identity: &WorkAttemptIdentityV1) {
+    pub(super) fn holds_attempt(
+        &self,
+        worktree_id: &WorktreeId,
+        identity: &WorkAttemptIdentityV1,
+    ) -> bool {
         self.channels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&Self::key(identity));
+            .get(&Self::key(Some(worktree_id), identity))
+            .is_some_and(|holder| holder.worktree_id.as_ref() == Some(worktree_id))
+    }
+
+    pub(super) fn holds_worktree(&self, worktree_id: &WorktreeId) -> bool {
+        self.channels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|holder| holder.worktree_id.as_ref() == Some(worktree_id))
+    }
+
+    #[cfg(test)]
+    fn release(&self, identity: &WorkAttemptIdentityV1) {
+        self.release_entry(identity, None);
+    }
+
+    fn release_for_worktree(&self, identity: &WorkAttemptIdentityV1, worktree_id: &WorktreeId) {
+        self.release_entry(identity, Some(worktree_id));
+    }
+
+    fn release_entry(&self, identity: &WorkAttemptIdentityV1, worktree_id: Option<&WorktreeId>) {
+        self.channels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&Self::key(worktree_id, identity));
     }
 
     /// Signals the live task for this attempt, if this daemon owns one. The
     /// durable cancellation request is already persisted by the caller; a
     /// missing channel means the process is not alive here and recovery will
     /// observe the request instead.
-    pub(super) fn signal_cancellation(&self, identity: &WorkAttemptIdentityV1) {
+    pub(super) fn signal_cancellation(
+        &self,
+        worktree_id: &WorktreeId,
+        identity: &WorkAttemptIdentityV1,
+    ) {
+        self.signal_cancellation_entry(identity, Some(worktree_id));
+    }
+
+    #[cfg(test)]
+    fn signal_test_cancellation(&self, identity: &WorkAttemptIdentityV1) {
+        self.signal_cancellation_entry(identity, None);
+    }
+
+    fn signal_cancellation_entry(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        worktree_id: Option<&WorktreeId>,
+    ) {
         if let Some(notify) = self
             .channels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&Self::key(identity))
+            .get(&Self::key(worktree_id, identity))
         {
-            notify.notify_waiters();
+            notify.cancellation.notify_waiters();
         }
     }
 }
@@ -159,7 +235,8 @@ pub(super) fn spawn_attempt_execution(
     attempt: WorkAttemptV1,
     observability_producer: Option<Arc<BoundedObservabilityProducerV1>>,
 ) {
-    let Some(cancel) = registry.register(attempt.identity()) else {
+    let worktree_id = attempt.execution().worktree_id().clone();
+    let Some(cancel) = registry.register_for_worktree(attempt.identity(), &worktree_id) else {
         return;
     };
     let admitted_environment =
@@ -172,23 +249,28 @@ pub(super) fn spawn_attempt_execution(
             admitted: std::time::Instant::now(),
         };
         run_attempt(
-            registered,
-            Arc::clone(&registry),
-            project_root,
+            registered.clone(),
+            project_root.clone(),
             attempt,
             admitted_environment,
             cancel,
-            observability_producer,
+            observability_producer.clone(),
             timing,
         )
         .await;
-        registry.release(&identity);
+        super::work::workflow_fan_out::reconcile_workflow_fan_out_after_attempt(
+            &registered,
+            Arc::clone(&registry),
+            &project_root,
+            &identity,
+            observability_producer,
+        );
+        registry.release_for_worktree(&identity, &worktree_id);
     });
 }
 
 async fn run_attempt(
     registered: RegisteredWorkRuntime,
-    _registry: Arc<WorkAttemptProcessRegistryV1>,
     project_root: PathBuf,
     attempt: WorkAttemptV1,
     admitted_environment: BTreeMap<String, std::ffi::OsString>,

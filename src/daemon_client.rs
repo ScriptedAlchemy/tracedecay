@@ -488,6 +488,91 @@ impl DaemonInvocationClient {
         result
     }
 
+    pub(crate) async fn acknowledge_work_delivery(
+        &self,
+        target_request_id: &str,
+        outcome: tracedecay_domain::DeliverySettlementOutcomeV1,
+        reason: Option<tracedecay_domain::DeliveryDropReasonV1>,
+    ) -> crate::errors::Result<()> {
+        let request = match (outcome, reason) {
+            (tracedecay_domain::DeliverySettlementOutcomeV1::Delivered, None) => {
+                crate::daemon_contract::DaemonInvocationDeliveryAckRequest::delivered(
+                    target_request_id,
+                )
+            }
+            (tracedecay_domain::DeliverySettlementOutcomeV1::Dropped, Some(reason)) => {
+                crate::daemon_contract::DaemonInvocationDeliveryAckRequest::dropped(
+                    target_request_id,
+                    reason,
+                )
+            }
+            (
+                tracedecay_domain::DeliverySettlementOutcomeV1::Delivered
+                | tracedecay_domain::DeliverySettlementOutcomeV1::Deduplicated
+                | tracedecay_domain::DeliverySettlementOutcomeV1::Dropped,
+                _,
+            ) => {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: "invalid Work delivery acknowledgement outcome".to_owned(),
+                });
+            }
+        };
+        let request_id = target_request_id.to_owned();
+        let mut state = self.state.lock().await;
+        let result = async {
+            let connection = state.as_mut().ok_or_else(|| {
+                crate::errors::TraceDecayError::Config {
+                    message: "daemon invocation connection is unavailable for Work delivery acknowledgement"
+                        .to_owned(),
+                }
+            })?;
+            connection
+                .writer
+                .write_all(serde_json::to_string(&request)?.as_bytes())
+                .await?;
+            connection.writer.write_all(b"\n").await?;
+            connection.writer.flush().await?;
+
+            let Some(line) = crate::daemon::next_daemon_response_line(
+                &mut connection.reader,
+                &self.connection,
+                "invocation_delivery_ack",
+                crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+            )
+            .await?
+            else {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: "daemon closed the invocation connection before acknowledging Work delivery"
+                        .to_owned(),
+                });
+            };
+            let response: crate::daemon_contract::DaemonInvocationDeliveryAckResponse =
+                serde_json::from_str(&line).map_err(|_| crate::errors::TraceDecayError::Config {
+                    message: "daemon returned an invalid Work delivery acknowledgement response"
+                        .to_owned(),
+                })?;
+            if !response.matches_request(&request_id) {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: "daemon Work delivery acknowledgement did not match the request"
+                        .to_owned(),
+                });
+            }
+            if let Some(reason) = response.rejection_reason() {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon rejected the Work delivery acknowledgement: {reason:?}"
+                    ),
+                });
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            *state = None;
+        }
+        result
+    }
+
     pub async fn observe_feedback(
         &self,
         subject_digest: ManifestDigest,
@@ -898,6 +983,9 @@ fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationErro
         ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
             InvocationError::Conflict
         }
+        ApplicationProblemKind::PartialEffect | ApplicationProblemKind::ResetRequired => {
+            InvocationError::Problem(Box::new(problem.clone()))
+        }
         ApplicationProblemKind::Unavailable
         | ApplicationProblemKind::Unsupported
         | ApplicationProblemKind::Saturated => InvocationError::Unavailable,
@@ -933,6 +1021,21 @@ fn semantic_evaluation_application_problem(
                 "Semantic evaluation publication conflicted with newer state",
             )
         }
+        ApplicationProblemKind::PartialEffect => crate::errors::TraceDecayError::project_route(
+            "semantic_evaluation_partial_effect",
+            retryable,
+            problem.diagnostic().map_or(
+                "Semantic evaluation publication committed only part of its required effect",
+                |diagnostic| diagnostic.message.as_str(),
+            ),
+        ),
+        ApplicationProblemKind::ResetRequired => crate::errors::TraceDecayError::reset_required(
+            "semantic evaluation publication",
+            problem.diagnostic().map_or(
+                "the semantic evaluation authority requires reset",
+                |diagnostic| diagnostic.message.as_str(),
+            ),
+        ),
         ApplicationProblemKind::NotFoundOrNotAuthorized => {
             crate::errors::TraceDecayError::project_route(
                 "semantic_evaluation_denied",

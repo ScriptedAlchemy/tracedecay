@@ -31,6 +31,7 @@ pub(crate) use dispatch::NativeContextScoutLifecycleV1;
 pub use dispatch::native_capture_material;
 pub(crate) use dispatch::project_and_worktree_locators_for_scope as hook_scope_locators;
 pub(crate) use dispatch::project_id_for_layout as hook_project_id_for_layout;
+#[cfg(test)]
 pub(crate) use dispatch::protected_session_id_for_native as protected_native_session_id;
 pub(crate) use dispatch::publish_daemon_bindings as publish_hook_bindings;
 

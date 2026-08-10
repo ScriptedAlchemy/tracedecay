@@ -57,10 +57,11 @@ pub(super) fn execute_github_stack_signal_expand(
             );
         }
     };
-    let signal = match live_cancellation_signal(&cancellation, observed_at) {
-        Ok(signal) => signal,
-        Err(problem) => return application_problem(wire_request_id, problem),
-    };
+    let signal =
+        match super::native_integration::live_cancellation_signal(&cancellation, observed_at) {
+            Ok(signal) => signal,
+            Err(problem) => return application_problem(wire_request_id, problem),
+        };
     let result = match runtime.expand(request.into_application_request(context), &signal) {
         Ok(result) => result,
         Err(error) => error.into_surface_result(),

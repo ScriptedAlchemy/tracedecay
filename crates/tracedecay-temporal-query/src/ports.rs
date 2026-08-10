@@ -40,6 +40,8 @@ pub enum TemporalPortError {
     DeadlineExceeded,
     #[error("temporal execution exceeded its {resource} budget")]
     BudgetExceeded { resource: &'static str },
+    #[error("temporal persisted state requires an explicit reset: {resource}")]
+    ResetRequired { resource: &'static str },
     #[error("temporal read failed during {operation}: {message}")]
     Read {
         operation: &'static str,

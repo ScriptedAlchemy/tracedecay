@@ -19,8 +19,7 @@ use crate::errors::{Result, TraceDecayError};
 use super::super::TraceDecay;
 use super::file_authority::SourceEditFileAuthority;
 use super::plan::{
-    PlannedSourceEditFile, SourceEditManifestPublishOutcome, capture_planned_source_edit,
-    publish_planned_source_edit_manifest,
+    PlannedSourceEditFile, capture_planned_source_edit, publish_planned_source_edit,
 };
 use super::preview::{
     MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, edit_success_message,
@@ -212,50 +211,29 @@ enum EvidenceResolution {
 fn resolve_graph_site(
     source: &str,
     old_name_ranges: &[(usize, usize)],
-    old_name: &str,
     evidence: &RenameGraphSiteV1,
 ) -> EvidenceResolution {
-    let ranges = if let Some(span) = evidence.evidence_span {
-        let Ok(start) = usize::try_from(span.start_byte) else {
-            return EvidenceResolution::Missing;
-        };
-        let Ok(end) = usize::try_from(span.end_byte) else {
-            return EvidenceResolution::Missing;
-        };
-        if start > end
-            || end > source.len()
-            || !source.is_char_boundary(start)
-            || !source.is_char_boundary(end)
-        {
-            return EvidenceResolution::Missing;
-        }
-        old_name_ranges
-            .iter()
-            .copied()
-            .filter(|(candidate_start, candidate_end)| {
-                *candidate_start >= start && *candidate_end <= end
-            })
-            .collect::<Vec<_>>()
-    } else {
-        let lines = source_lines(source);
-        let Some((line_offset, line)) = lines.get(evidence.line as usize).copied() else {
-            return EvidenceResolution::Missing;
-        };
-        let column = evidence.column as usize;
-        let mut ranges = identifier_ranges(line, old_name)
-            .into_iter()
-            .filter(|(start, _)| {
-                !string_literal_at(line, *start, &evidence.file) && !comment_at(line, *start)
-            })
-            .map(|(start, end)| (line_offset + start, line_offset + end))
-            .collect::<Vec<_>>();
-        if let Some(exact) = ranges.iter().copied().find(|(start, end)| {
-            column >= start.saturating_sub(line_offset) && column < end.saturating_sub(line_offset)
-        }) {
-            ranges = vec![exact];
-        }
-        ranges
+    let span = evidence.evidence_span;
+    let Ok(start) = usize::try_from(span.start_byte) else {
+        return EvidenceResolution::Missing;
     };
+    let Ok(end) = usize::try_from(span.end_byte) else {
+        return EvidenceResolution::Missing;
+    };
+    if start > end
+        || end > source.len()
+        || !source.is_char_boundary(start)
+        || !source.is_char_boundary(end)
+    {
+        return EvidenceResolution::Missing;
+    }
+    let ranges = old_name_ranges
+        .iter()
+        .copied()
+        .filter(|(candidate_start, candidate_end)| {
+            *candidate_start >= start && *candidate_end <= end
+        })
+        .collect::<Vec<_>>();
     let [(start, end)] = ranges.as_slice() else {
         return if ranges.is_empty() {
             EvidenceResolution::Missing
@@ -404,7 +382,7 @@ impl TraceDecay {
             let mut exact_target = BTreeMap::<(usize, usize), ResolvedRenameSite>::new();
             let mut exact_other = BTreeMap::<(usize, usize), ResolvedRenameSite>::new();
             for evidence in target_sites.remove(&relative_path).unwrap_or_default() {
-                match resolve_graph_site(&source, &old_name_ranges, &binding.old_name, &evidence) {
+                match resolve_graph_site(&source, &old_name_ranges, &evidence) {
                     EvidenceResolution::Exact(site) => {
                         if site.kind == RenameSiteKindV1::Reexport {
                             reexports.insert(site.source_qualified_name.clone());
@@ -449,7 +427,7 @@ impl TraceDecay {
                 }
             }
             for evidence in other_sites.remove(&relative_path).unwrap_or_default() {
-                match resolve_graph_site(&source, &old_name_ranges, &binding.old_name, &evidence) {
+                match resolve_graph_site(&source, &old_name_ranges, &evidence) {
                     EvidenceResolution::Exact(site) => {
                         let range = (site.start, site.end);
                         if exact_other
@@ -827,7 +805,7 @@ impl TraceDecay {
                 intended: Some(file.modified.clone()),
             })
             .collect::<Vec<_>>();
-        let mut outcome = RenameResult {
+        let outcome = RenameResult {
             success: true,
             preview_id: Some(identity),
             preview_digest: None,
@@ -850,31 +828,20 @@ impl TraceDecay {
             message: "rename applied".to_owned(),
         };
         ensure_active(&graph)?;
-        match publish_planned_source_edit_manifest(&self.project_root, &rollback_files)? {
-            SourceEditManifestPublishOutcome::Committed => {}
-            SourceEditManifestPublishOutcome::Refused { message } => {
-                outcome.success = false;
-                outcome.hazards.push(RenameHazardV1 {
-                    kind: RenameHazardKindV1::StaleEvidence,
-                    blocking: true,
-                    message: message.clone(),
-                    site_id: None,
-                });
-                outcome.message = message;
-                return Ok(outcome);
-            }
-            SourceEditManifestPublishOutcome::RolledBack { message } => {
-                outcome.success = false;
-                outcome.rolled_back = true;
-                outcome.hazards.push(RenameHazardV1 {
-                    kind: RenameHazardKindV1::StaleEvidence,
-                    blocking: true,
-                    message: message.clone(),
-                    site_id: None,
-                });
-                outcome.message = message;
-                return Ok(outcome);
-            }
+        for file in &rollback_files {
+            ensure_active(&graph)?;
+            let intended = file
+                .intended
+                .as_deref()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!("rename plan lost its postimage for {}", file.relative_path),
+                })?;
+            publish_planned_source_edit(
+                &self.project_root,
+                &file.relative_path,
+                file.expected.as_deref(),
+                intended,
+            )?;
         }
         Ok(outcome)
     }
@@ -943,12 +910,10 @@ mod tests {
         let ranges = identifier_ranges(source, "old");
         let evidence = |end_byte| RenameGraphSiteV1 {
             file: "src/lib.rs".to_owned(),
-            evidence_span: Some(SourceSpan {
+            evidence_span: SourceSpan {
                 start_byte: 14,
                 end_byte,
-            }),
-            line: 0,
-            column: 0,
+            },
             source_occurrence: "occurrence:caller".to_owned(),
             source_qualified_name: "caller".to_owned(),
             declaration_kind: None,
@@ -956,11 +921,11 @@ mod tests {
             apply_grade: true,
         };
         assert!(matches!(
-            resolve_graph_site(source, &ranges, "old", &evidence(19)),
+            resolve_graph_site(source, &ranges, &evidence(19)),
             EvidenceResolution::Exact(_)
         ));
         assert!(matches!(
-            resolve_graph_site(source, &ranges, "old", &evidence(source.len() as u64)),
+            resolve_graph_site(source, &ranges, &evidence(source.len() as u64)),
             EvidenceResolution::Ambiguous
         ));
     }

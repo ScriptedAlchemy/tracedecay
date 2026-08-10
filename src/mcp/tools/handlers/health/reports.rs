@@ -1,10 +1,15 @@
 //! `tracedecay_gini`, `tracedecay_dependency_depth`, and `tracedecay_health`.
 
 use super::*;
+use tracedecay_domain::RelationEdgeKindV1;
+
+const MAX_GINI_SYMBOLS: usize = 500_000;
+const MAX_GINI_RELATIONS: usize = 2_000_000;
 
 /// Handles `tracedecay_gini` tool calls.
 pub(crate) async fn handle_gini(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -19,69 +24,7 @@ pub(crate) async fn handle_gini(
         .map_or(10, |v| v.min(100) as usize);
     let path_prefix = effective_path(&args, scope_prefix);
 
-    // The file-level aggregates (`complexity`, `lines`, `fan_in`, `fan_out`,
-    // and the default) are folded inside SQLite so the whole node/edge tables
-    // never materialize in the process. Only the node-level `members` and
-    // per-symbol metrics still read node rows, so load them lazily.
-    let needs_nodes = metric == "members";
-    let scoped_nodes = if needs_nodes {
-        cg.get_all_nodes()
-            .await?
-            .into_iter()
-            .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let nodes = &scoped_nodes;
-
-    let named_values: Vec<(String, f64)> = match (metric, scope) {
-        ("complexity", "file") => {
-            scope_filter_pairs(cg.db().complexity_sum_by_file().await?, path_prefix)
-        }
-        ("lines", "file") => {
-            scope_filter_pairs(cg.db().line_span_sum_by_file().await?, path_prefix)
-        }
-        ("fan_in", "file") => gini_fan_values(cg, path_prefix, true).await?,
-        ("fan_out", "file") => gini_fan_values(cg, path_prefix, false).await?,
-        ("members", _) => {
-            // Count members of each Class/Struct via parent_id (v9+).
-            let class_nodes: HashSet<String> = nodes
-                .iter()
-                .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Struct))
-                .map(|n| n.id.clone())
-                .collect();
-            let mut per_class: HashMap<String, (String, f64)> = nodes
-                .iter()
-                .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Struct))
-                .map(|n| (n.id.clone(), (n.name.clone(), 0.0)))
-                .collect();
-            for n in nodes {
-                if let Some(parent) = n.parent_id.as_deref()
-                    && class_nodes.contains(parent)
-                    && let Some(entry) = per_class.get_mut(parent)
-                {
-                    entry.1 += 1.0;
-                }
-            }
-            per_class.into_values().collect()
-        }
-        (_, "symbol") => {
-            // Per-function/method complexity, projected in SQL and scope-filtered
-            // in rowid order — the same order (and tie-break) as the node fold.
-            cg.db()
-                .symbol_complexity()
-                .await?
-                .into_iter()
-                .filter(|(file, _, _)| crate::path_scope::path_matches_scope(file, path_prefix))
-                .map(|(file, name, value)| (format!("{file}:{name}"), value))
-                .collect()
-        }
-        _ => {
-            // Default: file-level complexity.
-            scope_filter_pairs(cg.db().complexity_sum_by_file().await?, path_prefix)
-        }
-    };
+    let named_values = verified_gini_values(graph, metric, scope, path_prefix)?;
 
     let values: Vec<f64> = named_values.iter().map(|(_, v)| *v).collect();
     let gini = gini_coefficient(&values);
@@ -126,47 +69,158 @@ pub(crate) async fn handle_gini(
     ))
 }
 
-/// Keeps only the `(name, value)` pairs whose file path is in scope.
-///
-/// Filtering the SQL-grouped per-file rows here is byte-identical to filtering
-/// nodes before the per-file fold: every node in a file shares that file's
-/// path, so a scope predicate keyed on `file_path` partitions whole groups and
-/// never splits a per-file sum.
-fn scope_filter_pairs(pairs: Vec<(String, f64)>, path_prefix: Option<&str>) -> Vec<(String, f64)> {
-    pairs
-        .into_iter()
-        .filter(|(file, _)| crate::path_scope::path_matches_scope(file, path_prefix))
-        .collect()
-}
-
-/// Per-file cross-file fan computed from SQL aggregates. `fan_in` counts
-/// incoming cross-file edges per target file, `fan_out` counts outgoing per
-/// source file. Every in-scope file seeds a zero entry, then each cross-file
-/// directed pair with both endpoints in scope adds its edge count to the
-/// target (`fan_in`) or source (`fan_out`). This mirrors the previous
-/// `node → file` map + whole-edge-table fold exactly (both endpoints of a
-/// counted edge had to be in-scope nodes, i.e. in-scope files).
-async fn gini_fan_values(
-    cg: &TraceDecay,
+fn verified_gini_values(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    metric: &str,
+    scope: &str,
     path_prefix: Option<&str>,
-    fan_in: bool,
 ) -> Result<Vec<(String, f64)>> {
-    let mut per_file: HashMap<String, f64> = HashMap::new();
-    for file in cg.db().distinct_node_file_paths().await? {
-        if crate::path_scope::path_matches_scope(&file, path_prefix) {
-            per_file.entry(file).or_insert(0.0);
+    let page = graph.symbols_page(None, MAX_GINI_SYMBOLS)?;
+    if page.has_more {
+        return Err(TraceDecayError::project_route(
+            "code-graph-budget-exhausted",
+            false,
+            "verified Gini symbol census exceeded its analytical budget",
+        ));
+    }
+    let mut symbols = Vec::with_capacity(page.symbols.len());
+    for symbol in page.symbols {
+        let binding = symbol.binding.as_ref().ok_or_else(|| {
+            TraceDecayError::project_route(
+                "code-graph-corrupt",
+                false,
+                "verified Gini symbol is missing its file binding",
+            )
+        })?;
+        let path = binding.logical_path.as_ref().ok_or_else(|| {
+            TraceDecayError::project_route(
+                "code-graph-corrupt",
+                false,
+                "verified Gini symbol is missing its logical file path",
+            )
+        })?;
+        let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+            TraceDecayError::project_route(
+                "code-graph-corrupt",
+                false,
+                "verified Gini symbol is missing lineage metadata",
+            )
+        })?;
+        if crate::path_scope::path_matches_scope(path, path_prefix) {
+            symbols.push((symbol.occurrence, path.clone(), metadata.clone()));
         }
     }
-    for (src, tgt, count) in cg.db().cross_file_edge_pair_counts().await? {
-        if src != tgt
-            && crate::path_scope::path_matches_scope(&src, path_prefix)
-            && crate::path_scope::path_matches_scope(&tgt, path_prefix)
-        {
-            let key = if fan_in { tgt } else { src };
-            *per_file.entry(key).or_insert(0.0) += count as f64;
+
+    match (metric, scope) {
+        ("fan_in", "file") | ("fan_out", "file") => {
+            verified_gini_fan_values(graph, &symbols, metric == "fan_in")
+        }
+        ("lines", "file") => {
+            let mut per_file = HashMap::<String, f64>::new();
+            for (_, path, metadata) in symbols {
+                *per_file.entry(path).or_default() += f64::from(metadata.line_span);
+            }
+            Ok(per_file.into_iter().collect())
+        }
+        ("members", _) => verified_gini_member_values(graph, &symbols),
+        (_, "symbol") => Ok(symbols
+            .into_iter()
+            .filter(|(_, _, metadata)| matches!(metadata.kind.as_str(), "function" | "method"))
+            .map(|(_, path, metadata)| {
+                let value = metadata
+                    .branches
+                    .saturating_add(metadata.loops)
+                    .saturating_add(metadata.max_nesting);
+                (format!("{path}:{}", metadata.simple_name), f64::from(value))
+            })
+            .collect()),
+        _ => {
+            let mut per_file = HashMap::<String, f64>::new();
+            for (_, path, metadata) in symbols {
+                let value = metadata
+                    .branches
+                    .saturating_add(metadata.loops)
+                    .saturating_add(metadata.max_nesting);
+                *per_file.entry(path).or_default() += f64::from(value);
+            }
+            Ok(per_file.into_iter().collect())
+        }
+    }
+}
+
+fn verified_gini_fan_values(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    symbols: &[(
+        tracedecay_domain::SymbolOccurrenceId,
+        String,
+        tracedecay_code_index::lineage::LineageSymbolRecordV1,
+    )],
+    fan_in: bool,
+) -> Result<Vec<(String, f64)>> {
+    let paths = symbols
+        .iter()
+        .map(|(occurrence, path, _)| (occurrence.clone(), path.clone()))
+        .collect::<HashMap<_, _>>();
+    let occurrences = symbols
+        .iter()
+        .map(|(occurrence, _, _)| occurrence.clone())
+        .collect::<Vec<_>>();
+    let edges = graph.edges_among(&occurrences, &[], MAX_GINI_RELATIONS)?;
+    let mut per_file = symbols
+        .iter()
+        .map(|(_, path, _)| (path.clone(), 0.0))
+        .collect::<HashMap<_, _>>();
+    for edge in edges {
+        let (Some(source), Some(target)) = (
+            paths.get(&edge.edge.from_occurrence),
+            paths.get(&edge.edge.to_occurrence),
+        ) else {
+            return Err(TraceDecayError::project_route(
+                "code-graph-corrupt",
+                false,
+                "verified Gini relation endpoint is missing from its symbol census",
+            ));
+        };
+        if source != target {
+            let key = if fan_in { target } else { source };
+            *per_file.entry(key.clone()).or_default() += 1.0;
         }
     }
     Ok(per_file.into_iter().collect())
+}
+
+fn verified_gini_member_values(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    symbols: &[(
+        tracedecay_domain::SymbolOccurrenceId,
+        String,
+        tracedecay_code_index::lineage::LineageSymbolRecordV1,
+    )],
+) -> Result<Vec<(String, f64)>> {
+    let containers = symbols
+        .iter()
+        .filter(|(_, _, metadata)| matches!(metadata.kind.as_str(), "class" | "struct"))
+        .map(|(occurrence, _, metadata)| (occurrence.clone(), (metadata.simple_name.clone(), 0.0)))
+        .collect::<HashMap<_, _>>();
+    if containers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let occurrences = symbols
+        .iter()
+        .map(|(occurrence, _, _)| occurrence.clone())
+        .collect::<Vec<_>>();
+    let edges = graph.edges_among(
+        &occurrences,
+        &[RelationEdgeKindV1::Contains],
+        MAX_GINI_RELATIONS,
+    )?;
+    let mut members = containers;
+    for edge in edges {
+        if let Some((_, count)) = members.get_mut(&edge.edge.from_occurrence) {
+            *count += 1.0;
+        }
+    }
+    Ok(members.into_values().collect())
 }
 
 /// Handles `tracedecay_dependency_depth` tool calls.
@@ -182,7 +236,7 @@ pub(crate) async fn handle_dependency_depth(
         .map_or(10, |v| v.min(100) as usize);
     let path_prefix = effective_path(&args, scope_prefix);
 
-    let adj = cg.build_verified_file_adjacency(graph, path_prefix).await?;
+    let adj = graph.build_file_adjacency(path_prefix).await?;
 
     let result = dependency_depth(&adj, limit);
     let score = depth_score(result.max_depth, result.ideal_depth);

@@ -19,7 +19,7 @@ pub(crate) async fn handle_dsm(
         .and_then(serde_json::Value::as_u64)
         .map_or(30, |v| v.min(200) as usize);
 
-    let adj = cg.build_verified_file_adjacency(graph, path_prefix).await?;
+    let adj = graph.build_file_adjacency(path_prefix).await?;
 
     let file_count = adj.len();
     let edge_count: usize = adj.values().map(std::collections::HashSet::len).sum();

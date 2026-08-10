@@ -46,7 +46,6 @@ fn main() { println!("hi"); }
     let cg = crate::fixture::init_project_from_template_with_options(project, open_options)
         .await
         .unwrap();
-    cg.index_all().await.unwrap();
     (cg, dir, home)
 }
 

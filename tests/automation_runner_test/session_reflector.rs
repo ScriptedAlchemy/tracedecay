@@ -809,7 +809,6 @@ async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact(
 async fn session_automatic_facts_replay_same_run_idempotently() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
     let owner = project_memory_owner(&cg);
     let memory = tracedecay::application::memory::MemoryApplication::new(
         owner,

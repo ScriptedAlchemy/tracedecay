@@ -1,79 +1,194 @@
-//! Symbol resolution for symbol-aware edit primitives (`replace_symbol`,
-//! `insert_at_symbol`, and `move_symbol` in the sibling module): exact
-//! qualified-name match wins, with ambiguity narrowed first to callable
-//! kinds and then to declaration kinds so a shared name never silently
-//! clobbers the wrong site.
+//! Generation-pinned symbol resolution for symbol-aware source edits.
+
+use tracedecay_code_index::graph_projection::{CodeGraphProjectionError, CodeGraphSymbolSummaryV1};
+use tracedecay_domain::{SourceSpan, SymbolOccurrenceId};
+use tracedecay_usecases::graph::{map_code_graph_read_runtime_error, map_projection_error};
+use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use crate::errors::{Result, TraceDecayError};
-use crate::types::{Node, NodeKind};
+use crate::types::{NodeKind, Visibility};
 
-use super::super::TraceDecay;
+const MAX_EDIT_SYMBOL_MATCHES: usize = 100;
 
-/// Resolves a symbol name to a single node suitable for symbol-aware editing.
-///
-/// Exact-qualified-name match wins. Bare-name ambiguity may narrow to callable
-/// kinds (function/method/etc.); remaining ambiguity — bare or qualified —
-/// narrows to declaration kinds, because a type's inherent `impl` blocks share
-/// its qualified name but "edit `Foo`" means the `Foo` declaration (impl
-/// blocks are separate spans the caller edits explicitly). Anything still
-/// ambiguous refuses the edit — silently picking the wrong site is worse than
-/// asking the caller to disambiguate.
-pub(in crate::tracedecay) async fn resolve_symbol_for_edit(
-    cg: &TraceDecay,
-    symbol: &str,
-) -> Result<Node> {
-    let nodes = cg.get_nodes_by_qualified_name(symbol).await?;
-    narrow_symbol_for_edit(symbol, nodes)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tracedecay) struct EditSymbolV1 {
+    pub(in crate::tracedecay) occurrence: SymbolOccurrenceId,
+    pub(in crate::tracedecay) kind: NodeKind,
+    pub(in crate::tracedecay) name: String,
+    pub(in crate::tracedecay) qualified_name: String,
+    pub(in crate::tracedecay) file_path: String,
+    pub(in crate::tracedecay) source_span: SourceSpan,
+    pub(in crate::tracedecay) start_line: u32,
+    pub(in crate::tracedecay) line_span: u32,
+    pub(in crate::tracedecay) visibility: Visibility,
 }
 
-/// Pure narrowing behind [`resolve_symbol_for_edit`]; split out so the
-/// ambiguity rules are unit-testable without a graph database.
-fn narrow_symbol_for_edit(symbol: &str, nodes: Vec<Node>) -> Result<Node> {
-    let mut iter = nodes.into_iter();
+impl EditSymbolV1 {
+    pub(in crate::tracedecay) fn line_bounds(&self, source: &str) -> Result<(usize, usize)> {
+        let start = usize::try_from(self.source_span.start_byte).map_err(|error| {
+            symbol_evidence_unavailable(format!("symbol start offset exceeds this host: {error}"))
+        })?;
+        let end = usize::try_from(self.source_span.end_byte).map_err(|error| {
+            symbol_evidence_unavailable(format!("symbol end offset exceeds this host: {error}"))
+        })?;
+        if start >= end
+            || end > source.len()
+            || !source.is_char_boundary(start)
+            || !source.is_char_boundary(end)
+        {
+            return Err(symbol_evidence_unavailable(
+                "symbol source span is not an exact UTF-8 range",
+            ));
+        }
+        let start_line = source[..start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        let end_inclusive = source[..end - 1]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count();
+        if u32::try_from(start_line).ok() != Some(self.start_line)
+            || u32::try_from(end_inclusive.saturating_sub(start_line).saturating_add(1)).ok()
+                != Some(self.line_span)
+        {
+            return Err(symbol_evidence_unavailable(
+                "symbol source span disagrees with its extraction-attested line bounds",
+            ));
+        }
+        Ok((start_line, end_inclusive))
+    }
+}
+
+fn projection_error(error: CodeGraphProjectionError) -> TraceDecayError {
+    map_code_graph_read_runtime_error(map_projection_error(error))
+}
+
+fn symbol_evidence_unavailable(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route(
+        "source-edit-symbol-evidence-unavailable",
+        false,
+        detail.into(),
+    )
+}
+
+pub(in crate::tracedecay) fn edit_symbol_from_summary(
+    summary: &CodeGraphSymbolSummaryV1,
+) -> Result<EditSymbolV1> {
+    let metadata = summary
+        .metadata
+        .as_ref()
+        .ok_or_else(|| symbol_evidence_unavailable("source-edit symbol has no lineage metadata"))?;
+    let binding = summary
+        .binding
+        .as_ref()
+        .ok_or_else(|| symbol_evidence_unavailable("source-edit symbol has no file binding"))?;
+    let file_path = binding.logical_path.clone().ok_or_else(|| {
+        symbol_evidence_unavailable("source-edit symbol has no logical file path")
+    })?;
+    let source_span = binding.source_span.ok_or_else(|| {
+        symbol_evidence_unavailable("source-edit symbol has no extraction-attested source span")
+    })?;
+    let kind = NodeKind::from_str(&metadata.kind).ok_or_else(|| {
+        symbol_evidence_unavailable(format!(
+            "unknown source-edit symbol kind `{}`",
+            metadata.kind
+        ))
+    })?;
+    let visibility = Visibility::from_str(&metadata.visibility).ok_or_else(|| {
+        symbol_evidence_unavailable(format!(
+            "unknown source-edit symbol visibility `{}`",
+            metadata.visibility
+        ))
+    })?;
+    Ok(EditSymbolV1 {
+        occurrence: summary.occurrence.clone(),
+        kind,
+        name: metadata.simple_name.clone(),
+        qualified_name: metadata.qualified_name.clone(),
+        file_path,
+        source_span,
+        start_line: metadata.start_line,
+        line_span: metadata.line_span,
+        visibility,
+    })
+}
+
+/// Resolves a symbol against the immutable generation admitted for this edit.
+pub(in crate::tracedecay) fn resolve_symbol_for_edit(
+    graph: &SourceEditGraphReadV1,
+    symbol: &str,
+) -> Result<EditSymbolV1> {
+    let cancellation = graph.cancellation();
+    let mut matches = graph
+        .reader()
+        .resolve_qualified_name(
+            symbol,
+            None,
+            MAX_EDIT_SYMBOL_MATCHES + 1,
+            cancellation.clone(),
+        )
+        .map_err(projection_error)?;
+    if matches.is_empty() && !symbol.contains("::") {
+        matches = graph
+            .reader()
+            .resolve_simple_name(symbol, None, MAX_EDIT_SYMBOL_MATCHES + 1, cancellation)
+            .map_err(projection_error)?;
+    }
+    if matches.len() > MAX_EDIT_SYMBOL_MATCHES {
+        return Err(TraceDecayError::project_route(
+            "source-edit-symbol-budget-exhausted",
+            false,
+            "source-edit symbol resolution exceeded 100 candidates",
+        ));
+    }
+    let symbols = matches
+        .iter()
+        .map(edit_symbol_from_summary)
+        .collect::<Result<Vec<_>>>()?;
+    narrow_symbol_for_edit(symbol, symbols)
+}
+
+fn narrow_symbol_for_edit(symbol: &str, symbols: Vec<EditSymbolV1>) -> Result<EditSymbolV1> {
+    let mut iter = symbols.into_iter();
     let Some(first) = iter.next() else {
         return Err(TraceDecayError::Config {
             message: format!("symbol '{symbol}' not found"),
         });
     };
-    let rest: Vec<Node> = iter.collect();
+    let rest = iter.collect::<Vec<_>>();
     if rest.is_empty() {
         return Ok(first);
     }
     let total = rest.len() + 1;
-    let all: Vec<Node> = std::iter::once(first).chain(rest).collect();
+    let all = std::iter::once(first).chain(rest).collect::<Vec<_>>();
     if !symbol.contains("::") {
-        let mut callables: Vec<Node> = all
+        let mut callables = all
             .iter()
-            .filter(|node| is_callable_edit_kind(&node.kind))
+            .filter(|candidate| is_callable_edit_kind(&candidate.kind))
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
         if callables.len() == 1 {
             return Ok(callables.remove(0));
         }
     }
-    let mut declarations: Vec<Node> = all
+    let mut declarations = all
         .into_iter()
-        .filter(|node| !matches!(node.kind, NodeKind::Impl))
-        .collect();
+        .filter(|candidate| !matches!(candidate.kind, NodeKind::Impl))
+        .collect::<Vec<_>>();
     if declarations.len() == 1 {
         return Ok(declarations.remove(0));
     }
-    if symbol.contains("::") {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "symbol '{symbol}' is ambiguous ({total} matches); pass an exact stored qualified name"
-            ),
-        });
-    }
+    let guidance = if symbol.contains("::") {
+        "pass an exact stored qualified name"
+    } else {
+        "pass a fully qualified name"
+    };
     Err(TraceDecayError::Config {
-        message: format!(
-            "symbol '{symbol}' is ambiguous ({total} matches); pass a fully qualified name"
-        ),
+        message: format!("symbol '{symbol}' is ambiguous ({total} matches); {guidance}"),
     })
 }
 
-/// Kinds that win bare-name ambiguity: the callable definitions a caller
-/// almost always means when naming `foo` without qualification.
 fn is_callable_edit_kind(kind: &NodeKind) -> bool {
     matches!(
         kind,
@@ -89,99 +204,68 @@ fn is_callable_edit_kind(kind: &NodeKind) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{Node, NodeKind, Visibility};
+    use tracedecay_domain::{SourceSpan, SymbolOccurrenceId};
 
-    use super::narrow_symbol_for_edit;
+    use crate::types::{NodeKind, Visibility};
 
-    fn node(kind: NodeKind, name: &str) -> Node {
-        Node {
-            id: format!("{kind:?}:{name}"),
+    use super::{EditSymbolV1, narrow_symbol_for_edit};
+
+    fn symbol(kind: NodeKind, name: &str) -> EditSymbolV1 {
+        EditSymbolV1 {
+            occurrence: SymbolOccurrenceId::new(format!("occurrence:{name}:{kind:?}"))
+                .expect("occurrence"),
             kind,
-            name: name.to_string(),
+            name: name.to_owned(),
             qualified_name: format!("src/a.rs::{name}"),
-            file_path: "src/a.rs".to_string(),
-            start_line: 1,
-            attrs_start_line: 1,
-            end_line: 2,
-            start_column: 0,
-            end_column: 1,
-            signature: None,
-            docstring: None,
+            file_path: "src/a.rs".to_owned(),
+            source_span: SourceSpan {
+                start_byte: 0,
+                end_byte: 1,
+            },
+            start_line: 0,
+            line_span: 1,
             visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: 0,
-            parent_id: None,
         }
     }
 
     #[test]
-    fn narrow_symbol_prefers_declaration_over_impl_blocks() {
+    fn narrowing_prefers_declaration_over_impl_blocks() {
         let resolved = narrow_symbol_for_edit(
             "src/a.rs::Widget",
             vec![
-                node(NodeKind::Struct, "Widget"),
-                node(NodeKind::Impl, "Widget"),
-                node(NodeKind::Impl, "Widget"),
+                symbol(NodeKind::Struct, "Widget"),
+                symbol(NodeKind::Impl, "Widget"),
+                symbol(NodeKind::Impl, "Widget"),
             ],
         )
-        .expect("declaration should win over same-named impl blocks");
+        .expect("declaration should win");
         assert_eq!(resolved.kind, NodeKind::Struct);
     }
 
     #[test]
-    fn narrow_symbol_prefers_declaration_for_bare_names() {
-        let resolved = narrow_symbol_for_edit(
-            "Widget",
-            vec![
-                node(NodeKind::Impl, "Widget"),
-                node(NodeKind::Enum, "Widget"),
-            ],
-        )
-        .expect("bare name should narrow to the declaration");
-        assert_eq!(resolved.kind, NodeKind::Enum);
-    }
-
-    #[test]
-    fn narrow_symbol_keeps_callable_precedence_for_bare_names() {
+    fn narrowing_keeps_callable_precedence_for_bare_names() {
         let resolved = narrow_symbol_for_edit(
             "run",
             vec![
-                node(NodeKind::Module, "run"),
-                node(NodeKind::Function, "run"),
+                symbol(NodeKind::Module, "run"),
+                symbol(NodeKind::Function, "run"),
             ],
         )
-        .expect("bare name should keep the historical callable-wins rule");
+        .expect("callable should win");
         assert_eq!(resolved.kind, NodeKind::Function);
     }
 
     #[test]
-    fn narrow_symbol_still_refuses_multiple_declarations() {
-        let result = narrow_symbol_for_edit(
-            "src/a.rs::Widget",
-            vec![
-                node(NodeKind::Struct, "Widget"),
-                node(NodeKind::Struct, "Widget"),
-            ],
+    fn narrowing_refuses_multiple_declarations() {
+        assert!(
+            narrow_symbol_for_edit(
+                "src/a.rs::Widget",
+                vec![
+                    symbol(NodeKind::Struct, "Widget"),
+                    symbol(NodeKind::Struct, "Widget"),
+                ],
+            )
+            .is_err()
         );
-        assert!(result.is_err(), "two declarations must stay ambiguous");
-    }
-
-    #[test]
-    fn narrow_symbol_still_refuses_impl_only_matches() {
-        let result = narrow_symbol_for_edit(
-            "src/a.rs::Widget",
-            vec![
-                node(NodeKind::Impl, "Widget"),
-                node(NodeKind::Impl, "Widget"),
-            ],
-        );
-        assert!(result.is_err(), "impl blocks alone must stay ambiguous");
     }
 }

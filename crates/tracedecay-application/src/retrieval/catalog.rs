@@ -149,10 +149,11 @@ pub fn primitive_http_executable_binding_registry()
     let contribution = primitive_read_contribution()?;
     let service_id = ServiceId::new("service.application.primitive")?;
     let mut bindings = Vec::new();
-    for spec in PRIMITIVE_READ_SPECS
-        .iter()
-        .filter(|spec| !spec.operation.starts_with("code_") && spec.operation != "session_lookup")
-    {
+    for spec in PRIMITIVE_READ_SPECS.iter().filter(|spec| {
+        !spec.operation.starts_with("code_")
+            && spec.operation != "session_lookup"
+            && primitive_read_surfaces(spec).contains(&BindingSurface::Http)
+    }) {
         let capability_id = CapabilityId::new(format!(
             "capability.application.primitive.{}",
             spec.capability.replace('_', "-")
@@ -249,11 +250,21 @@ fn primitive_lsp_methods(operation: &str) -> &'static [&'static str] {
     }
 }
 
-const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 17] = [
+const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 27] = [
     primitive_spec("code_signature_search"),
     primitive_spec("code_implementations"),
     primitive_spec("code_type_hierarchy"),
     primitive_spec("code_callers"),
+    primitive_spec("context"),
+    primitive_spec("redundancy"),
+    primitive_spec("node"),
+    primitive_spec("callees"),
+    primitive_spec("impact"),
+    primitive_spec("similar"),
+    primitive_spec("rename_preview"),
+    primitive_spec("port_status"),
+    primitive_spec("port_order"),
+    primitive_spec("todos"),
     primitive_spec("session_lookup"),
     primitive_spec("qualified_name"),
     primitive_spec("call_chain"),
@@ -275,6 +286,8 @@ const PRE_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Http,
 ];
 
+const MCP_PRIMITIVE_SURFACE: [BindingSurface; 1] = [BindingSurface::Mcp];
+
 const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
@@ -284,6 +297,11 @@ const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
 
 fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
     match spec.operation {
+        // These established MCP handlers retain their current wire schemas and
+        // rendering, but use this operation identity for the canonical
+        // verified code-graph read admission boundary.
+        "context" | "redundancy" | "node" | "callees" | "impact" | "similar" | "rename_preview"
+        | "port_status" | "port_order" | "todos" => &MCP_PRIMITIVE_SURFACE,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }

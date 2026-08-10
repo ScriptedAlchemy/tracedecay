@@ -66,7 +66,8 @@ mod tests {
             .unwrap(),
             RequestId::new("request.cli.workflow.7").unwrap(),
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        )
+        .expect("construct canonical workflow problem fixture"));
 
         let rendered = workflow_json_line(&outcome).expect("workflow JSON line");
         let problem: serde_json::Value =

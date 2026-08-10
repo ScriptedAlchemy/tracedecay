@@ -28,13 +28,6 @@ impl TraceDecay {
         })
     }
 
-    pub(super) async fn resolve_store_layout_for_project(
-        project_root: &Path,
-        open_options: &TraceDecayOpenOptions,
-    ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_for_authority(project_root, open_options, None, true).await
-    }
-
     pub(crate) async fn resolve_registered_configuration_layout(
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,

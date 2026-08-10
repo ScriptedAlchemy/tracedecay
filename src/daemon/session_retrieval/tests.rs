@@ -1,4 +1,6 @@
 use super::*;
+use tracedecay_domain::RetrievalAnchorId;
+use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 
 #[test]
 fn stored_retrieval_does_not_require_refresh_worker() {
@@ -59,7 +61,6 @@ fn registered_project_binding_uses_one_durable_profile_and_typed_project() {
         store_scope: SessionRetrievalStoreScope::Project,
         identity,
         project_id: Some(project_id.as_str().to_owned()),
-        project_paths: HashSet::new(),
         authorized_root: None,
         expected_runtime_shard: None,
     }
@@ -168,11 +169,13 @@ fn stale_lcm_retrieval_remains_typed_instead_of_generic_unavailable() {
         SessionRetrievalOutcome::Stale { freshness },
         RetrievalGrainV1::Summary,
         SessionTemporalMetadataView::default(),
+        SessionRetrievalStoreScope::Project,
     );
     let expand = expand_retrieval_outcome(
         SessionRetrievalOutcome::Stale { freshness },
         RetrievalGrainV1::Summary,
         SessionTemporalMetadataView::default(),
+        SessionRetrievalStoreScope::Project,
     );
 
     assert!(matches!(
@@ -196,6 +199,35 @@ fn stale_lcm_retrieval_remains_typed_instead_of_generic_unavailable() {
 }
 
 #[test]
+fn reset_required_lcm_retrieval_preserves_the_owning_store_scope() {
+    let describe = describe_retrieval_outcome(
+        SessionRetrievalOutcome::ResetRequired,
+        RetrievalGrainV1::Summary,
+        SessionTemporalMetadataView::default(),
+        SessionRetrievalStoreScope::Project,
+    );
+    let expand = expand_retrieval_outcome(
+        SessionRetrievalOutcome::ResetRequired,
+        RetrievalGrainV1::Summary,
+        SessionTemporalMetadataView::default(),
+        SessionRetrievalStoreScope::Profile,
+    );
+
+    assert!(matches!(
+        describe,
+        LcmDescribeServiceOutcome::ResetRequired {
+            store_scope: SessionRetrievalStoreScope::Project
+        }
+    ));
+    assert!(matches!(
+        expand,
+        LcmExpandServiceOutcome::ResetRequired {
+            store_scope: SessionRetrievalStoreScope::Profile
+        }
+    ));
+}
+
+#[test]
 fn zero_item_partial_lcm_retrieval_remains_partial_instead_of_deleted() {
     let freshness = SessionDataFreshness::Partial { generation_lag: 3 };
 
@@ -207,6 +239,7 @@ fn zero_item_partial_lcm_retrieval_remains_partial_instead_of_deleted() {
         },
         RetrievalGrainV1::Summary,
         SessionTemporalMetadataView::default(),
+        SessionRetrievalStoreScope::Project,
     );
     let expand = expand_retrieval_outcome(
         SessionRetrievalOutcome::Partial {
@@ -216,6 +249,7 @@ fn zero_item_partial_lcm_retrieval_remains_partial_instead_of_deleted() {
         },
         RetrievalGrainV1::Summary,
         SessionTemporalMetadataView::default(),
+        SessionRetrievalStoreScope::Project,
     );
 
     assert!(matches!(

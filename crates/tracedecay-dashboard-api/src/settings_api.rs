@@ -37,6 +37,8 @@ use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 
+use crate::application_surface::{DashboardConfigurationApplyError, configuration_apply_error};
+
 pub use tracedecay_api::configuration::{ProjectSettingsPatch, UserSettingsPatch};
 
 type ApiResult = std::result::Result<
@@ -296,13 +298,14 @@ pub async fn patch_project_settings(
             .await
         {
             Ok(outcome) => Some(outcome),
-            Err(problem) => {
+            Err(DashboardConfigurationApplyError::ApplicationProblem(problem)) => {
                 return Err(project_apply_error(
                     &state.project_root,
                     &expected_revision,
                     problem,
                 ));
             }
+            Err(error) => return Err(configuration_apply_error(error)),
         }
     } else {
         None
@@ -360,7 +363,7 @@ pub async fn patch_user_settings(
     if !plan.mutations.is_empty() {
         let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
             .map_err(|_| configuration_authority_unavailable_error())?;
-        if let Err(problem) = runtime
+        if let Err(error) = runtime
             .apply_configuration_batch(
                 request_id,
                 plan.mutations,
@@ -369,7 +372,7 @@ pub async fn patch_user_settings(
             )
             .await
         {
-            return Err(configuration_application_problem_error(problem));
+            return Err(configuration_apply_error(error));
         }
     }
 

@@ -1,1353 +1,212 @@
-//! Tests for the `TraceDecay` orchestrator methods that aren't fully exercised
-//! by the MCP handler tests.
+//! CLI journeys for the product surfaces that replaced the retired direct
+//! `TraceDecay` graph/index API.
 
-use std::{collections::BTreeSet, fs, process::Command, time::Duration};
+use std::{
+    fs,
+    path::Path,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
+
 use tempfile::TempDir;
-use tracedecay::branch::BranchAddOutcome;
-use tracedecay::errors::TraceDecayError;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, is_test_file};
-use tracedecay::types::EdgeKind;
-use tracedecay_application::{
-    ApplicationOperation, AuthorityReceipt, CancellationContext, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, IdempotencyKey, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
-    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditEffectProofV1,
-    SourceEditEffectRequestV1, SourceEditRequest, SourceEditVerificationStateV1,
-    source_edit_operation,
-};
-use tracedecay_domain::{
-    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
-};
-use tracedecay_usecases::edit::{
-    SourceEditSurfaceResultV1, execute_source_edit, preview_source_edit_expected_state,
-};
 
-// ---------------------------------------------------------------------------
-// Shared setup
-// ---------------------------------------------------------------------------
+use crate::common::{self, canonical_existing_path, tracedecay_command_with_home};
 
-/// Hermetic open options for this suite's fixtures: pins the profile inside
-/// the fixture's own ephemeral `TempDir` so `TraceDecay::init_with_options`
-/// never falls back to resolving the durable `TRACEDECAY_DATA_DIR` profile
-/// that `.cargo/config.toml` points cargo-launched processes at. Pairing an
-/// ephemeral `TempDir` project root with that durable profile is exactly the
-/// combination `project_registry::ephemeral_root_rejection` refuses ("project
-/// root '/tmp/.tmpXXXX' is under the OS temporary directory and cannot be
-/// registered as a durable authority in profile '...'"). The shard lives
-/// under the fixture's own root so it is ephemeral too (satisfying the
-/// guard) and unique per fixture (no cross-test lease contention) — the same
-/// shape `tests/automation_runner_test/support.rs::fixture_open_options`
-/// already uses for the same trap.
-pub(crate) fn hermetic_open_options(project_root: &std::path::Path) -> TraceDecayOpenOptions {
-    let profile_root = project_root.join(".tracedecay-test-profile");
-    TraceDecayOpenOptions {
-        global_db_path: Some(profile_root.join("global.db")),
-        profile_root: Some(profile_root),
-    }
-}
-
-/// Creates a temporary Rust project with cross-file calls, then initializes
-/// and indexes a `TraceDecay`.
-async fn setup() -> (TempDir, TraceDecay) {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
+fn init_daemon_project(project: &Path, home: &Path, source: &str) {
     fs::create_dir_all(project.join("src")).unwrap();
-
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-pub fn foo() { bar(); }
-fn bar() {}
-fn unused_private() {}
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("src/utils.rs"),
-        r#"
-use crate::lib::foo;
-pub fn helper() { foo(); }
-"#,
-    )
-    .unwrap();
-
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.index_all().await.unwrap();
-    (dir, cg)
-}
-
-/// Pushes a file's mtime a few seconds into the future so second-resolution
-/// staleness checks (`mtime > indexed_at`) fire without sleeping past a
-/// wall-clock second boundary.
-fn bump_mtime(path: &std::path::Path) {
-    let future = std::time::SystemTime::now() + Duration::from_secs(5);
-    fs::File::options()
-        .write(true)
-        .open(path)
-        .unwrap()
-        .set_modified(future)
-        .unwrap();
-}
-
-fn run_git(project: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(["-c", "core.hooksPath=.git/no-hooks"])
-        .args(args)
+    fs::write(project.join("src/lib.rs"), source).unwrap();
+    let git = Command::new(common::git_program())
+        .args(["init", "--quiet", "--initial-branch=main"])
         .current_dir(project)
         .output()
-        .expect("git command should run");
+        .expect("initialize Git worktree");
+    assert!(
+        git.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&git.stderr)
+    );
+
+    let output = tracedecay_command_with_home(home)
+        .arg("init")
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tracedecay init should run");
     assert!(
         output.status.success(),
-        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
 }
 
-const SOURCE_EDIT_SHA256_A: &str =
-    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const SOURCE_EDIT_SHA256_B: &str =
-    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
-fn source_edit_digest(value: &str) -> ManifestDigest {
-    ManifestDigest::new(value).unwrap()
+fn run_tool(project: &Path, home: &Path, args: &[&str]) -> std::process::Output {
+    tracedecay_command_with_home(home)
+        .current_dir(project)
+        .arg("tool")
+        .args(args)
+        .output()
+        .expect("tracedecay tool should run")
 }
 
-#[derive(Clone)]
-struct FixtureSourceEditAuthorization(tracedecay_application::SourceEditAuthorizationAdmissionV1);
-
-impl SourceEditAuthorizationPort for FixtureSourceEditAuthorization {
-    fn admit<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _operation: &'a ApplicationOperation,
-        _observed_at: UtcMicros,
-    ) -> SourceEditAuthorizationFuture<'a> {
-        Box::pin(async move { Ok(self.0.clone()) })
-    }
-
-    fn recheck_effect<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _operation: &'a ApplicationOperation,
-        _admission: &'a tracedecay_application::SourceEditAuthorizationAdmissionV1,
-        _observed_at: UtcMicros,
-    ) -> SourceEditAuthorizationFuture<'a> {
-        Box::pin(async move { Ok(self.0.clone()) })
-    }
+fn setup_daemon_project(
+    source: &str,
+) -> (TempDir, TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    common::ensure_tracedecay_daemon(&home_path);
+    init_daemon_project(&project_path, &home_path, source);
+    (home, project, home_path, project_path)
 }
-
-async fn run_authorized_source_edit(
-    graph: &TraceDecay,
-    edit: SourceEditRequest,
-    idempotency_key: &str,
-) -> SourceEditSurfaceResultV1 {
-    let operation = source_edit_operation(edit.kind()).unwrap();
-    let scope = ResolvedScope::new(
-        ProjectId::new("project.core-cli-source-edit").unwrap(),
-        RepositoryId::new("repository.core-cli-source-edit").unwrap(),
-        WorktreeId::new("worktree.core-cli-source-edit").unwrap(),
-        None,
-    )
-    .unwrap();
-    let grant = CapabilityGrantSnapshot::new(
-        tracedecay_application::CapabilityGrantId::new("grant.core-cli-source-edit").unwrap(),
-        1,
-        source_edit_digest(SOURCE_EDIT_SHA256_A),
-        ActorId::new("actor.core-cli-source-edit-issuer").unwrap(),
-        UtcMicros(1),
-        UtcMicros(1_000),
-        scope.clone(),
-        BTreeSet::from([operation.capability_id().clone()]),
-        BTreeSet::from([operation.use_case_id().clone()]),
-        DisclosureClass::Sensitive,
-    )
-    .unwrap();
-    let context = RequestContext::new(
-        ActorId::new("actor.core-cli-source-edit-requester").unwrap(),
-        scope,
-        grant,
-        RequestId::new(format!("request.{idempotency_key}")).unwrap(),
-        Deadline::new(UtcMicros(900)).unwrap(),
-        CancellationContext::active(format!("cancel.{idempotency_key}")).unwrap(),
-    )
-    .unwrap();
-    let authority = AuthorityReceipt::from_context(
-        &context,
-        PolicyDecisionRef::new(
-            "policy.core-cli-source-edit",
-            1,
-            source_edit_digest(SOURCE_EDIT_SHA256_B),
-            ComponentVersion::new("policy.core-cli-source-edit.v1").unwrap(),
-        )
-        .unwrap(),
-        UtcMicros(2),
-    )
-    .unwrap();
-    let expected_state = preview_source_edit_expected_state(graph, edit.clone())
-        .await
-        .unwrap();
-    let request = SourceEditEffectRequestV1 {
-        context,
-        authority: authority.clone(),
-        edit,
-        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
-        expected_state,
-        proof: SourceEditEffectProofV1 {
-            policy_digest: source_edit_digest(SOURCE_EDIT_SHA256_B),
-            configuration_revision_id:
-                tracedecay_domain::configuration::ConfigurationRevisionId::new(
-                    "configuration.core-cli-source-edit.v1",
-                )
-                .unwrap(),
-            configuration_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
-            catalog_revision: 1,
-            catalog_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
-            privacy_domain_id: tracedecay_domain::PrivacyDomainId::new(
-                "privacy.core-cli-source-edit",
-            )
-            .unwrap(),
-            privacy_key_epoch: 1,
-            privacy_digest: source_edit_digest(SOURCE_EDIT_SHA256_A),
-            external_proof: None,
-        },
-        observed_at: UtcMicros(3),
-    };
-    let authorization = FixtureSourceEditAuthorization(
-        tracedecay_application::SourceEditAuthorizationAdmissionV1::new(
-            authority,
-            request.proof.clone(),
-            request.context.scope(),
-        )
-        .unwrap(),
-    );
-    execute_source_edit(graph, &operation, request, &authorization)
-        .await
-        .unwrap()
-}
-
-// ---------------------------------------------------------------------------
-// is_test_file
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_is_test_file_test_dir() {
-    assert!(is_test_file("tests/my_test.rs"));
-    assert!(is_test_file("tests/integration.rs"));
+    assert!(tracedecay::tracedecay::is_test_file("tests/my_test.rs"));
+    assert!(tracedecay::tracedecay::is_test_file("tests/integration.rs"));
 }
 
 #[test]
 fn test_is_test_file_test_prefix() {
-    assert!(is_test_file("test/foo.rs"));
+    assert!(tracedecay::tracedecay::is_test_file("test/foo.rs"));
 }
 
 #[test]
 fn test_is_test_file_spec_dir() {
-    assert!(is_test_file("spec/models/user_spec.rb"));
+    assert!(tracedecay::tracedecay::is_test_file(
+        "spec/models/user_spec.rb"
+    ));
 }
 
 #[test]
 fn test_is_test_file_e2e_dir() {
-    assert!(is_test_file("e2e/login.test.ts"));
+    assert!(tracedecay::tracedecay::is_test_file("e2e/login.test.ts"));
 }
 
 #[test]
 fn test_is_test_file_dot_test() {
-    assert!(is_test_file("src/utils.test.ts"));
-    assert!(is_test_file("src/utils.spec.js"));
+    assert!(tracedecay::tracedecay::is_test_file("src/utils.test.ts"));
+    assert!(tracedecay::tracedecay::is_test_file("src/utils.spec.js"));
 }
 
 #[test]
 fn test_is_test_file_underscore_test() {
-    assert!(is_test_file("src/utils_test.rs"));
-    assert!(is_test_file("src/utils_spec.py"));
+    assert!(tracedecay::tracedecay::is_test_file("src/utils_test.rs"));
+    assert!(tracedecay::tracedecay::is_test_file("src/utils_spec.py"));
 }
 
 #[test]
 fn test_is_test_file_dunder_tests() {
-    assert!(is_test_file("__tests__/component.test.tsx"));
+    assert!(tracedecay::tracedecay::is_test_file(
+        "__tests__/component.test.tsx"
+    ));
 }
 
 #[test]
 fn test_is_test_file_normal_source() {
-    assert!(!is_test_file("src/lib.rs"));
-    assert!(!is_test_file("src/main.rs"));
-    assert!(!is_test_file("src/utils.rs"));
+    assert!(!tracedecay::tracedecay::is_test_file("src/lib.rs"));
+    assert!(!tracedecay::tracedecay::is_test_file("src/main.rs"));
+    assert!(!tracedecay::tracedecay::is_test_file("src/utils.rs"));
 }
 
 #[test]
 fn test_is_test_file_case_insensitive() {
-    assert!(is_test_file("Tests/MyTest.rs"));
-    assert!(is_test_file("TESTS/foo.rs"));
+    assert!(tracedecay::tracedecay::is_test_file("Tests/MyTest.rs"));
+    assert!(tracedecay::tracedecay::is_test_file("TESTS/foo.rs"));
 }
 
-// ---------------------------------------------------------------------------
-// get_all_files / get_all_nodes / get_all_edges through TraceDecay
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_all_files() {
-    let (_dir, cg) = setup().await;
-    let files = cg.get_all_files().await.unwrap();
-    assert!(
-        files.len() >= 2,
-        "should have at least 2 indexed files (lib.rs, utils.rs), got {}",
-        files.len(),
-    );
-    let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
-    assert!(paths.contains(&"src/lib.rs"));
-    assert!(paths.contains(&"src/utils.rs"));
-}
-
-#[tokio::test]
-async fn test_get_all_nodes() {
-    let (_dir, cg) = setup().await;
-    let nodes = cg.get_all_nodes().await.unwrap();
-    assert!(
-        !nodes.is_empty(),
-        "should have extracted some nodes from the project",
-    );
-    let names: Vec<&str> = nodes.iter().map(|n| n.name.as_str()).collect();
-    assert!(names.contains(&"foo"), "should have extracted 'foo'");
-    assert!(names.contains(&"bar"), "should have extracted 'bar'");
-}
-
-#[tokio::test]
-async fn test_get_all_edges() {
-    let (_dir, cg) = setup().await;
-    let edges = cg.get_all_edges().await.unwrap();
-    // foo() calls bar(), so there should be at least one edge
-    assert!(!edges.is_empty(), "should have at least one edge");
-}
-
-// ---------------------------------------------------------------------------
-// get_file_coupling
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_file_coupling_fan_in() {
-    let (_dir, cg) = setup().await;
-    let coupling = cg.get_file_coupling(true, None, 10).await.unwrap();
-    // Even if coupling is empty (due to how the extractor resolves cross-file refs),
-    // the method should succeed.
-    for (path, count) in &coupling {
-        assert!(!path.is_empty());
-        assert!(*count > 0);
-    }
-}
-
-#[tokio::test]
-async fn test_get_file_coupling_fan_out() {
-    let (_dir, cg) = setup().await;
-    let coupling = cg.get_file_coupling(false, None, 10).await.unwrap();
-    for (path, count) in &coupling {
-        assert!(!path.is_empty());
-        assert!(*count > 0);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// check_file_staleness
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_check_file_staleness_not_stale() {
-    let (_dir, cg) = setup().await;
-    // Right after indexing, files should not be stale
-    let stale = cg.check_file_staleness(&["src/lib.rs".to_string()]).await;
-    // Immediately after indexing, the file should not be stale
-    // (mtime <= indexed_at in most cases)
-    assert!(
-        stale.is_empty(),
-        "files should not be stale right after indexing"
-    );
-}
-
-#[tokio::test]
-async fn test_check_file_staleness_after_modification() {
-    let (dir, cg) = setup().await;
-
-    // Modify the file and push its mtime forward so mtime > indexed_at
-    // without sleeping past the second-resolution boundary.
-    let file_path = dir.path().join("src/lib.rs");
-    fs::write(
-        &file_path,
-        "pub fn foo() { bar(); }\nfn bar() {}\nfn new_function() {}\n",
-    )
-    .unwrap();
-    bump_mtime(&file_path);
-
-    let stale = cg.check_file_staleness(&["src/lib.rs".to_string()]).await;
-    assert!(
-        stale.contains(&"src/lib.rs".to_string()),
-        "src/lib.rs should be stale after modification"
-    );
-}
-
-#[tokio::test]
-async fn test_check_file_staleness_new_file_not_in_db() {
-    use tempfile::tempdir;
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-    fs::write(project.join("a.rs"), "fn a() {}").unwrap();
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-
-    // Now add a new file but DON'T sync. b.rs is on disk but not in the DB.
-    fs::write(project.join("b.rs"), "fn b() {}").unwrap();
-
-    let stale = cg.check_file_staleness(&["b.rs".to_string()]).await;
-    assert_eq!(
-        stale,
-        vec!["b.rs".to_string()],
-        "new file on disk but not in DB should be reported stale"
-    );
-}
-
-#[tokio::test]
-async fn test_check_file_staleness_deleted_indexed_file() {
-    use tempfile::tempdir;
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-    fs::write(project.join("a.rs"), "fn a() {}").unwrap();
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-
-    // Delete the file. It's indexed but no longer on disk.
-    fs::remove_file(project.join("a.rs")).unwrap();
-
-    let stale = cg.check_file_staleness(&["a.rs".to_string()]).await;
-    assert_eq!(
-        stale,
-        vec!["a.rs".to_string()],
-        "indexed file deleted from disk should be reported stale"
-    );
-}
-
-#[tokio::test]
-async fn branch_tracking_is_explicit_and_sync_does_not_mutate_main_db() {
-    let tmp = TempDir::new().unwrap();
-    let project = tmp.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
-
-    run_git(project, &["init", "-b", "main"]);
-    run_git(project, &["config", "user.email", "test@test.com"]);
-    run_git(project, &["config", "user.name", "Test"]);
-    run_git(project, &["add", "."]);
-    run_git(project, &["commit", "-m", "initial"]);
-
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.index_all().await.unwrap();
-    // The user-sessions graph is single-writer: the init handle must be
-    // released before `open` acquires the project again, or the second open
-    // is refused with a typed locked state.
-    drop(cg);
-
-    run_git(project, &["checkout", "-b", "feature/sync-safety"]);
-    fs::write(
-        project.join("src/feature.rs"),
-        "pub fn feature_symbol() {}\n",
-    )
-    .unwrap();
-    run_git(project, &["add", "."]);
-    run_git(project, &["commit", "-m", "feature"]);
-
-    // Branch tracking is explicit: a plain open on a branch that was never
-    // added must not silently start tracking it. Before the first
-    // `branch add` no branch metadata exists, so the open reports the live
-    // git branch but serves the single project store without a branch
-    // provenance scope.
-    let untracked_cg = TraceDecay::open_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    assert_eq!(untracked_cg.active_branch(), Some("feature/sync-safety"));
-    assert_eq!(
-        untracked_cg.serving_branch(),
-        None,
-        "an open must not auto-track the live branch"
-    );
-    assert!(!untracked_cg.is_fallback());
-    drop(untracked_cg);
-
-    let outcome = TraceDecay::add_branch_tracking_with_options(
-        project,
-        "feature/sync-safety",
-        hermetic_open_options(project),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        outcome,
-        BranchAddOutcome::Added,
-        "explicit registration must track the branch"
-    );
-
-    let feature_cg = TraceDecay::open_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    assert_eq!(feature_cg.active_branch(), Some("feature/sync-safety"));
-    assert_eq!(feature_cg.serving_branch(), Some("feature/sync-safety"));
-    assert!(!feature_cg.is_fallback());
-    for attempt in 0..40 {
-        match feature_cg.sync().await {
-            Ok(_) => break,
-            Err(TraceDecayError::SyncLock { .. }) if attempt < 39 => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(err) => panic!("tracked branch sync should write to the branch scope: {err}"),
-        }
-    }
-    drop(feature_cg);
-
-    let main_cg =
-        TraceDecay::open_branch_with_options(project, "main", hermetic_open_options(project))
-            .await
-            .unwrap();
-    let main_files = main_cg.get_all_files().await.unwrap();
-    assert!(
-        !main_files.iter().any(|file| file.path == "src/feature.rs"),
-        "tracked branch sync must not insert feature files into the main branch scope"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// #87 — Windows path-separator normalization
-// ---------------------------------------------------------------------------
-// The DB stores all file paths in canonical forward-slash form (the walker
-// in `accept_file` normalizes before insert). If a caller passed a
-// backslash-form path (`src\foo.py`) into the staleness / sync entry
-// points, the old code treated it as a different file from the
-// normalized `src/foo.py` already in the DB — which produced both a
-// "stale" verdict (DB miss for the backslash variant) and, after the
-// follow-up sync, a *second* row alongside the original. Tools doubled
-// their results, the redundancy score halved. This test pins the
-// post-fix behaviour: backslash-form input is treated as the same file
-// as the forward-slash row.
-
-#[tokio::test]
-async fn check_file_staleness_normalizes_backslash_paths() {
-    use tempfile::tempdir;
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/a.rs"), "fn a() {}").unwrap();
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-
-    // The DB row is stored under `src/a.rs`. A caller handing us the
-    // Windows-shaped `src\a.rs` must hit the same row — not be treated
-    // as a missing file that needs indexing.
-    let stale = cg.check_file_staleness(&["src\\a.rs".to_string()]).await;
-    assert!(
-        stale.is_empty(),
-        "backslash-form path should match the forward-slash DB row, got stale={stale:?}"
-    );
-}
-
-#[tokio::test]
-async fn sync_if_stale_silent_does_not_create_duplicate_row_for_backslash_path() {
-    use tempfile::tempdir;
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/a.rs"), "fn a() {}").unwrap();
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-
-    // Push the mtime past the indexed_at second boundary so the mtime check
-    // in `check_file_staleness` fires when we rewrite the file. Without
-    // this, second-resolution mtimes on some filesystems can leave
-    // `mtime == indexed_at` and the staleness check returns empty.
-    fs::write(project.join("src/a.rs"), "fn a() { let _x = 1; }").unwrap();
-    bump_mtime(&project.join("src/a.rs"));
-
-    cg.sync_if_stale_silent(&["src\\a.rs".to_string()])
-        .await
-        .unwrap();
-
-    // Exactly one row should exist for this physical file. Pre-fix,
-    // both `src/a.rs` and `src\a.rs` would appear.
-    let all = cg.get_all_files().await.unwrap();
-    let matches: Vec<&String> = all
-        .iter()
-        .map(|f| &f.path)
-        .filter(|p| p.ends_with("a.rs"))
-        .collect();
-    assert_eq!(
-        matches.len(),
-        1,
-        "expected exactly one a.rs row in DB, found {matches:?}"
-    );
-    assert_eq!(
-        matches[0], "src/a.rs",
-        "the surviving row must be the canonical forward-slash form"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// get_tokens_saved / set_tokens_saved — round-trip
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_tokens_saved_round_trip() {
-    let (_dir, cg) = setup().await;
-
-    // Initially should be 0
-    let initial = cg.get_tokens_saved().await.unwrap();
-    assert_eq!(initial, 0, "initial tokens_saved should be 0");
-
-    // Set a value
-    cg.set_tokens_saved(42_000).await.unwrap();
-    let saved = cg.get_tokens_saved().await.unwrap();
-    assert_eq!(saved, 42_000);
-
-    // Overwrite
-    cg.set_tokens_saved(100_000).await.unwrap();
-    let saved2 = cg.get_tokens_saved().await.unwrap();
-    assert_eq!(saved2, 100_000);
-}
-
-#[tokio::test]
-async fn concurrent_local_counter_updates_are_not_lost() {
-    let (_dir, cg) = setup().await;
-    let cg = std::sync::Arc::new(cg);
-    let mut updates = Vec::new();
-    for _ in 0..32 {
-        let cg = std::sync::Arc::clone(&cg);
-        updates.push(tokio::spawn(async move { cg.add_local_counter(1).await }));
-    }
-    for update in updates {
-        update.await.unwrap().unwrap();
-    }
-
-    assert_eq!(cg.get_local_counter().await.unwrap(), 32);
-}
-
-// ---------------------------------------------------------------------------
-// get_complexity_ranked through TraceDecay
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_complexity_ranked() {
-    let (_dir, cg) = setup().await;
-    let ranked = cg.get_complexity_ranked(None, None, 10).await.unwrap();
-    // Should return functions/methods from our indexed project
-    assert!(
-        !ranked.is_empty(),
-        "should have at least one function in complexity ranking",
-    );
-    // Verify the tuple structure (node, lines, fan_out, fan_in, score)
-    let (node, lines, _fan_out, _fan_in, score) = &ranked[0];
-    assert!(!node.name.is_empty());
-    assert!(*lines > 0);
-    assert!(*score > 0);
-}
-
-// ---------------------------------------------------------------------------
-// get_undocumented_public_symbols through TraceDecay
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_undocumented_public_symbols_no_filter() {
-    let (_dir, cg) = setup().await;
-    let undoc = cg.get_undocumented_public_symbols(None, 50).await.unwrap();
-    // foo is pub and has no docstring
-    let names: Vec<&str> = undoc.iter().map(|n| n.name.as_str()).collect();
-    assert!(
-        names.contains(&"foo"),
-        "foo is pub without docs, should appear, found: {:?}",
-        names,
-    );
-}
-
-#[tokio::test]
-async fn test_get_undocumented_public_symbols_with_prefix() {
-    let (_dir, cg) = setup().await;
-    let undoc = cg
-        .get_undocumented_public_symbols(Some("src/utils"), 50)
-        .await
-        .unwrap();
-    // helper in utils.rs is pub without docs
-    for node in &undoc {
-        assert!(
-            node.file_path.starts_with("src/utils"),
-            "path prefix filter should only return src/utils files, got: {}",
-            node.file_path,
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// get_node_distribution through TraceDecay
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_node_distribution() {
-    let (_dir, cg) = setup().await;
-    let dist = cg.get_node_distribution(None, 100).await.unwrap();
-    assert!(!dist.is_empty(), "should have node distribution data");
-    // Each entry is (file_path, kind, count)
-    for (file, kind, count) in &dist {
-        assert!(!file.is_empty());
-        assert!(!kind.is_empty());
-        assert!(*count > 0);
-    }
-
-    // The summary path reports the same kinds without a per-file read.
-    let totals = cg.get_node_kind_totals(None).await.unwrap();
-    assert!(!totals.is_empty(), "should have per-kind totals");
-    for (kind, count) in &totals {
-        assert!(!kind.is_empty());
-        assert!(*count > 0);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// is_initialized
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_is_initialized() {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    assert!(
-        !TraceDecay::is_initialized(project),
-        "should not be initialized before init"
-    );
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "fn main() {}\n").unwrap();
-    let _cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    assert!(
-        TraceDecay::is_initialized(project),
-        "should be initialized after init"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// get_god_classes through TraceDecay (empty for Rust-only project)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_god_classes_empty() {
-    let (_dir, cg) = setup().await;
-    let god = cg.get_god_classes(None, 10).await.unwrap();
-    // Pure Rust project with no classes should return empty
-    assert!(
-        god.is_empty(),
-        "Rust project without classes should have no god classes"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// get_inheritance_depth through TraceDecay (empty for Rust-only project)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_inheritance_depth_empty() {
-    let (_dir, cg) = setup().await;
-    let depths = cg.get_inheritance_depth(None, 10).await.unwrap();
-    assert!(
-        depths.is_empty(),
-        "Rust project without class hierarchies should have no inheritance depth"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// search through TraceDecay
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_search() {
-    let (_dir, cg) = setup().await;
-    let results = cg.search("foo", 10).await.unwrap();
-    assert!(!results.is_empty(), "should find 'foo' via search");
-    assert_eq!(results[0].node.name, "foo");
-}
-
-// ---------------------------------------------------------------------------
-// get_stats through TraceDecay
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_get_stats() {
-    let (_dir, cg) = setup().await;
-    let stats = cg.get_stats().await.unwrap();
-    assert!(stats.node_count > 0, "should have nodes");
-    assert!(stats.file_count > 0, "should have files");
-}
-
-// ---------------------------------------------------------------------------
-// sync_if_stale_silent
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn sync_if_stale_removes_deleted_indexed_file() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/keep.rs"), "pub fn keep() {}\n").unwrap();
-    fs::write(
-        project.join("src/remove_me.rs"),
-        "pub fn deleted_symbol() {}\n",
-    )
-    .unwrap();
-
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-    fs::remove_file(project.join("src/remove_me.rs")).unwrap();
-
-    let still_stale = cg
-        .sync_if_stale(&["src/remove_me.rs".to_string()])
-        .await
-        .unwrap();
-
-    assert!(
-        !still_stale,
-        "targeted sync should clear stale state for deleted indexed files"
-    );
-    let files = cg.get_all_files().await.unwrap();
-    assert!(
-        !files.iter().any(|file| file.path == "src/remove_me.rs"),
-        "deleted file row should be removed, got {files:?}"
-    );
-    let nodes = cg.get_all_nodes().await.unwrap();
-    assert!(
-        !nodes
-            .iter()
-            .any(|node| node.file_path == "src/remove_me.rs"),
-        "deleted file nodes should be removed"
-    );
-}
-
-#[tokio::test]
-async fn str_replace_reindex_resolves_new_cross_file_call() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
-    fs::write(project.join("src/caller.rs"), "pub fn caller() {}\n").unwrap();
-
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-
-    let result = run_authorized_source_edit(
-        &cg,
-        SourceEditRequest::StrReplace {
-            path: "src/caller.rs".to_owned(),
-            old_str: "pub fn caller() {}\n".to_owned(),
-            new_str: "pub fn caller() { target(); }\n".to_owned(),
-            dry_run: false,
-            verify: false,
+#[test]
+fn daemon_tool_searches_the_active_project() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn findable_symbol() {}\n");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = common::poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(100),
+        || {
+            let output = run_tool(
+                &project_path,
+                &home_path,
+                &[
+                    "--project",
+                    &project_arg,
+                    "search",
+                    "--json",
+                    "--args",
+                    r#"{"query":"findable_symbol","limit":10}"#,
+                ],
+            );
+            (output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("findable_symbol"))
+            .then_some(output)
         },
-        "source-edit.core-cli.reindex",
-    )
-    .await;
-    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Edit(edit) = result.outcome else {
-        panic!("str_replace returned the wrong outcome");
-    };
-    assert!(edit.success, "edit should succeed: {edit:?}");
-    // A real (non-dry-run) edit writes and carries no preview diff.
-    assert!(
-        !edit.dry_run,
-        "real edit should not be flagged dry_run: {edit:?}"
+        || "daemon scheduler did not publish findable_symbol for search".to_owned(),
     );
     assert!(
-        edit.diff.is_none(),
-        "real edit should not return a diff: {edit:?}"
-    );
-
-    let nodes = cg.get_all_nodes().await.unwrap();
-    let caller = nodes
-        .iter()
-        .find(|node| node.name == "caller" && node.file_path == "src/caller.rs")
-        .unwrap();
-    let target = nodes
-        .iter()
-        .find(|node| node.name == "target" && node.file_path == "src/target.rs")
-        .unwrap();
-    let edges = cg.get_all_edges().await.unwrap();
-
-    assert!(
-        edges.iter().any(|edge| {
-            edge.kind == EdgeKind::Calls && edge.source == caller.id && edge.target == target.id
-        }),
-        "direct edit reindex should resolve the new caller -> target edge; edges={edges:?}"
+        String::from_utf8_lossy(&output.stdout).contains("findable_symbol"),
+        "daemon-owned search must return the indexed symbol"
     );
 }
 
-#[tokio::test]
-async fn str_replace_dry_run_writes_nothing_but_returns_diff() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    let original = "pub fn caller() {}\n";
-    fs::write(project.join("src/caller.rs"), original).unwrap();
-
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-
-    let result = run_authorized_source_edit(
-        &cg,
-        SourceEditRequest::StrReplace {
-            path: "src/caller.rs".to_owned(),
-            old_str: "pub fn caller() {}\n".to_owned(),
-            new_str: "pub fn caller() { target(); }\n".to_owned(),
-            dry_run: true,
-            verify: false,
-        },
-        "source-edit.core-cli.dry-run",
-    )
-    .await;
-    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Edit(edit) = result.outcome else {
-        panic!("str_replace returned the wrong outcome");
-    };
-
-    assert!(edit.success, "dry run should still validate: {edit:?}");
-    assert!(
-        edit.dry_run,
-        "result should be flagged as a dry run: {edit:?}"
-    );
-    let diff = edit
-        .diff
-        .as_deref()
-        .expect("dry run should return a preview diff");
-    assert!(
-        diff.contains("+pub fn caller() { target(); }"),
-        "diff should show the would-be addition: {diff}"
+#[test]
+fn daemon_tool_str_replace_updates_source() {
+    let (_home, _project, home_path, project_path) =
+        setup_daemon_project("pub fn answer() -> u32 { 1 }\n");
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = run_tool(
+        &project_path,
+        &home_path,
+        &[
+            "--project",
+            &project_arg,
+            "str_replace",
+            "--json",
+            "--args",
+            r#"{"path":"src/lib.rs","old_str":"pub fn answer() -> u32 { 1 }","new_str":"pub fn answer() -> u32 { 2 }"}"#,
+        ],
     );
 
-    // Nothing may be written to disk on a dry run.
-    let on_disk = fs::read_to_string(project.join("src/caller.rs")).unwrap();
-    assert_eq!(on_disk, original, "dry run must not modify the file");
-
-    // And the graph must not have picked up the (never-written) call edge.
-    let nodes = cg.get_all_nodes().await.unwrap();
-    let caller = nodes
-        .iter()
-        .find(|node| node.name == "caller" && node.file_path == "src/caller.rs")
-        .unwrap();
-    let edges = cg.get_all_edges().await.unwrap();
     assert!(
-        !edges
-            .iter()
-            .any(|edge| edge.kind == EdgeKind::Calls && edge.source == caller.id),
-        "dry run must not reindex a new call edge; edges={edges:?}"
+        output.status.success(),
+        "daemon-owned source edit failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
-}
-
-/// `rename_preview` with a `new_name` must list the declaration site and every
-/// resolved call site for a fixture symbol, read-only. Uses a same-file caller
-/// so the Calls edge resolves deterministically.
-#[tokio::test]
-async fn rename_preview_lists_declaration_and_call_sites() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        "pub fn greet() -> u32 { 1 }\npub fn caller() -> u32 { greet() }\n",
-    )
-    .unwrap();
-
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-
-    let nodes = cg.get_all_nodes().await.unwrap();
-    let greet = nodes
-        .iter()
-        .find(|node| node.name == "greet" && node.file_path == "src/lib.rs")
-        .expect("greet node should exist");
-
-    let result = tracedecay::mcp::handle_tool_call(
-        &cg,
-        "tracedecay_rename_preview",
-        serde_json::json!({
-            "node_id": greet.id,
-            "new_name": "salute",
-            "format": "json",
-        }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = result.value["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default();
-
-    // Declaration site with its current-text snippet.
-    assert!(
-        text.contains("greet"),
-        "preview should name the symbol: {text}"
-    );
-    assert!(
-        text.contains("pub fn greet"),
-        "preview should show the declaration snippet: {text}"
-    );
-    // Proposed name is echoed, read-only marker present.
-    assert!(
-        text.contains("salute"),
-        "preview should echo new_name: {text}"
-    );
-    assert!(
-        text.contains("read_only"),
-        "preview should flag itself read-only: {text}"
-    );
-    // The resolved call site from `caller`.
-    assert!(
-        text.contains("reference_count"),
-        "preview should report a reference count: {text}"
-    );
-    assert!(
-        text.contains("caller"),
-        "preview should list the calling symbol as a reference site: {text}"
-    );
-}
-
-/// Exercises the post-edit verification loop through the authorized effect
-/// boundary: a preview-pinned real edit that plants a type error, with
-/// `verify: true`, must re-run file-scoped diagnostics and surface the planted
-/// error; the same edit without `verify` must not attach a verdict. Compiles a
-/// tiny throwaway crate, so it shells out to `cargo check`.
-#[tokio::test]
-async fn edit_verify_flag_surfaces_planted_compiler_error() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path().join("project");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("Cargo.toml"),
-        "[package]\nname = \"verify_fixture\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
-    )
-    .unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn answer() -> u32 { 1 }\n").unwrap();
-
-    let profile_root = tmp.path().join("profile");
-    let cg = TraceDecay::init_with_options(
-        &project,
-        TraceDecayOpenOptions {
-            global_db_path: Some(profile_root.join("global.db")),
-            profile_root: Some(profile_root),
-        },
-    )
-    .await
-    .unwrap();
-
-    // Default path (no `verify`): `run_authorized_source_edit` previews the
-    // exact state before applying it through the idempotency/CAS boundary.
-    let clean = run_authorized_source_edit(
-        &cg,
-        SourceEditRequest::StrReplace {
-            path: "src/lib.rs".to_owned(),
-            old_str: "pub fn answer() -> u32 { 1 }".to_owned(),
-            new_str: "pub fn answer() -> u32 { 2 }".to_owned(),
-            dry_run: false,
-            verify: false,
-        },
-        "core-cli.edit-verify.clean",
-    )
-    .await;
-    assert!(
-        clean.verification.is_none(),
-        "edit without verify should not run verification"
-    );
-
-    // verify=true on an edit that introduces `-> u32 { "no" }` (E0308) must
-    // surface the planted error in a verification verdict.
-    let broken = run_authorized_source_edit(
-        &cg,
-        SourceEditRequest::StrReplace {
-            path: "src/lib.rs".to_owned(),
-            old_str: "pub fn answer() -> u32 { 2 }".to_owned(),
-            new_str: "pub fn answer() -> u32 { \"no\" }".to_owned(),
-            dry_run: false,
-            verify: true,
-        },
-        "core-cli.edit-verify.broken",
-    )
-    .await;
-    let verification = broken
-        .verification
-        .expect("verify=true should attach a verification verdict");
     assert_eq!(
-        verification.state,
-        SourceEditVerificationStateV1::Errors,
-        "the real compiler verdict should report errors: {verification:?}"
+        fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
+        "pub fn answer() -> u32 { 2 }\n"
     );
+}
+
+#[test]
+fn daemon_tool_str_replace_dry_run_preserves_source() {
+    let original = "pub fn answer() -> u32 { 1 }\n";
+    let (_home, _project, home_path, project_path) = setup_daemon_project(original);
+    let project_arg = project_path.to_string_lossy().to_string();
+    let output = run_tool(
+        &project_path,
+        &home_path,
+        &[
+            "--project",
+            &project_arg,
+            "str_replace",
+            "--json",
+            "--args",
+            r#"{"path":"src/lib.rs","old_str":"pub fn answer() -> u32 { 1 }","new_str":"pub fn answer() -> u32 { 2 }","dry_run":true}"#,
+        ],
+    );
+
     assert!(
-        verification.first_errors.iter().any(|diagnostic| {
-            diagnostic.code == "E0308" && diagnostic.message.contains("mismatched types")
-        }),
-        "verification should surface the planted E0308 diagnostic: {verification:?}"
+        output.status.success(),
+        "daemon-owned source-edit dry run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
-}
-
-#[tokio::test]
-async fn replace_symbol_dry_run_previews_without_writing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    let original = "pub fn greet() -> u32 { 1 }\n";
-    fs::write(project.join("src/lib.rs"), original).unwrap();
-
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.sync().await.unwrap();
-
-    let result = run_authorized_source_edit(
-        &cg,
-        SourceEditRequest::ReplaceSymbol {
-            symbol: "greet".to_owned(),
-            new_source: "pub fn greet() -> u32 { 2 }".to_owned(),
-            dry_run: true,
-            verify: false,
-        },
-        "source-edit.core-cli.replace-preview",
-    )
-    .await;
-    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Edit(edit) = result.outcome else {
-        panic!("replace_symbol returned the wrong outcome");
-    };
-
-    assert!(edit.success, "dry run should validate: {edit:?}");
-    assert!(edit.dry_run, "result should be flagged dry_run: {edit:?}");
-    assert!(
-        edit.diff.is_some(),
-        "symbol replace dry run should return a diff: {edit:?}"
-    );
-    // replaced_span is still computed so callers can review the old text.
-    assert!(
-        edit.replaced_span.is_some(),
-        "dry run should still report the span it would replace: {edit:?}"
-    );
-    let on_disk = fs::read_to_string(project.join("src/lib.rs")).unwrap();
-    assert_eq!(on_disk, original, "dry run must not modify the file");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn sync_if_stale_silent_waits_for_peer_then_returns_ok() {
-    let tmp = tempfile::tempdir().unwrap();
-    let project = tmp.path().to_path_buf();
-    std::fs::write(project.join("a.rs"), "fn a() {}").unwrap();
-
-    let cg = tracedecay::tracedecay::TraceDecay::init_with_options(
-        &project,
-        hermetic_open_options(&project),
-    )
-    .await
-    .unwrap();
-    cg.sync().await.unwrap();
-
-    // Hold the sync lock to simulate a peer MCP syncing, then release it
-    // from a background task so the silent variant's bounded wait can make
-    // progress.
-    let lock = tracedecay::tracedecay::try_acquire_sync_lock(&project).expect("lock");
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        drop(lock);
-    });
-
-    // Touch the file so it's stale.
-    std::fs::write(project.join("a.rs"), "fn a() { let x = 1; }").unwrap();
-
-    // Silent variant should wait for the peer to release the lock and
-    // return Ok(()).
-    let result = cg.sync_if_stale_silent(&["a.rs".to_string()]).await;
-    assert!(result.is_ok(), "expected Ok, got {result:?}");
-}
-
-// ---------------------------------------------------------------------------
-// #86 — last_sync_timestamp prefers metadata over max(indexed_at)
-// ---------------------------------------------------------------------------
-
-/// Regression for #86: the MCP `last synced N ago` warning was reading
-/// `MAX(files.indexed_at)`, which only advances when a file is actually
-/// reindexed. On quiet repos a successful sync (with 0 changes) leaves
-/// `indexed_at` stuck and the warning fires forever. `last_sync_at`
-/// metadata is the right source of truth because `sync()` writes it
-/// unconditionally.
-#[tokio::test]
-async fn last_sync_timestamp_uses_metadata_not_indexed_at() {
-    let (_dir, cg) = setup().await;
-
-    // Backdate every file's `indexed_at` to simulate a long-quiet repo
-    // (typical state before a no-change sync). We use `1` rather than 0
-    // because `last_sync_timestamp` treats 0 as "no info available".
-    let stale = 1_i64;
-    cg.db()
-        .execute_write(
-            "backdate indexed files fixture",
-            "UPDATE files SET indexed_at = ?1",
-            (stale,),
-        )
-        .await
-        .unwrap();
-
-    // Have the metadata reflect a recent sync.
-    let fresh = tracedecay::tracedecay::current_timestamp();
-    cg.db()
-        .set_metadata("last_sync_at", &fresh.to_string())
-        .await
-        .unwrap();
-
-    let observed = cg.last_sync_timestamp().await;
     assert_eq!(
-        observed, fresh,
-        "last_sync_timestamp must return the metadata value, not MAX(indexed_at) (stale={stale}, got {observed})",
-    );
-    assert_ne!(
-        observed, stale,
-        "regression: still reading stale indexed_at"
-    );
-}
-
-/// Fallback: if `last_sync_at` metadata is missing, fall back to
-/// `last_index_time`. This keeps freshly-imported projects (no sync yet,
-/// only an `init`) honest.
-#[tokio::test]
-async fn last_sync_timestamp_falls_back_to_indexed_at_without_metadata() {
-    let (_dir, cg) = setup().await;
-    cg.db()
-        .execute_write(
-            "remove last sync metadata fixture",
-            "DELETE FROM metadata WHERE key = ?1",
-            ("last_sync_at",),
-        )
-        .await
-        .unwrap();
-
-    let observed = cg.last_sync_timestamp().await;
-    let fallback = cg.last_index_time().await.unwrap();
-    assert_eq!(observed, fallback);
-}
-
-// ---------------------------------------------------------------------------
-// attrs_start_line = 0 (first-in-file documented item) end-to-end
-// ---------------------------------------------------------------------------
-
-/// Creates a temp project whose first file line is a doc comment for the fn
-/// on line two — the extractor emits attrs_start_line=0 / start_line=1.
-async fn setup_first_in_file_doc() -> (TempDir, TraceDecay) {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "/// doc\nfn foo() {}\n").unwrap();
-    let cg = TraceDecay::init_with_options(project, hermetic_open_options(project))
-        .await
-        .unwrap();
-    cg.index_all().await.unwrap();
-    (dir, cg)
-}
-
-/// Regression: a stored attrs_start_line of 0 is a legitimate value (doc block
-/// at the very top of a file) and must survive the DB round-trip. The read
-/// path used to treat 0 as "unset" and substitute start_line, collapsing the
-/// doc block out of the item's full span after indexing.
-#[tokio::test]
-async fn attrs_start_line_zero_survives_indexing_round_trip() {
-    let (_dir, cg) = setup_first_in_file_doc().await;
-
-    let nodes = cg
-        .get_nodes_by_qualified_name("src/lib.rs::foo")
-        .await
-        .unwrap();
-    assert_eq!(nodes.len(), 1, "expected exactly one foo node");
-    let n = &nodes[0];
-    assert_eq!(n.start_line, 1, "fn foo is on 0-based row 1");
-    assert_eq!(
-        n.attrs_start_line, 0,
-        "doc block starts at row 0 and must round-trip as 0, not be rewritten to start_line"
-    );
-    assert!(
-        n.attrs_start_line < n.start_line,
-        "leading doc block must remain part of the item's full span"
-    );
-}
-
-/// Regression: replace_symbol on a first-in-file documented fn must preserve
-/// the leading doc comment (replace only the item lines, never orphan or eat
-/// the doc block above).
-#[tokio::test]
-async fn replace_symbol_preserves_first_in_file_doc_comment() {
-    let (dir, cg) = setup_first_in_file_doc().await;
-
-    let application_result = run_authorized_source_edit(
-        &cg,
-        SourceEditRequest::ReplaceSymbol {
-            symbol: "src/lib.rs::foo".to_owned(),
-            new_source: "fn foo() { let _x = 1; }".to_owned(),
-            dry_run: false,
-            verify: false,
-        },
-        "source-edit.core-cli.preserve-doc",
-    )
-    .await;
-    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Edit(result) =
-        application_result.outcome
-    else {
-        panic!("replace_symbol returned the wrong outcome");
-    };
-    assert!(result.success, "replace failed: {}", result.message);
-
-    let content = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
-    assert_eq!(
-        content, "/// doc\nfn foo() { let _x = 1; }\n",
-        "doc comment must stay attached above the replaced item"
-    );
-}
-
-/// Regression: insert_at_symbol position=before must insert ABOVE the leading
-/// doc block, not between the doc comment and the fn. Only works when the
-/// legitimate attrs_start_line=0 survives the DB round-trip.
-#[tokio::test]
-async fn insert_before_first_in_file_documented_fn_goes_above_doc_block() {
-    let (dir, cg) = setup_first_in_file_doc().await;
-
-    let application_result = run_authorized_source_edit(
-        &cg,
-        SourceEditRequest::InsertAtSymbol {
-            symbol: "src/lib.rs::foo".to_owned(),
-            content: "// SPDX-License-Identifier: MIT".to_owned(),
-            position: "before".to_owned(),
-            dry_run: false,
-            verify: false,
-        },
-        "source-edit.core-cli.insert-before-doc",
-    )
-    .await;
-    let tracedecay_usecases::edit::SourceEditSurfaceOutcomeV1::Insert(result) =
-        application_result.outcome
-    else {
-        panic!("insert_at_symbol returned the wrong outcome");
-    };
-    assert!(result.success, "insert failed: {}", result.message);
-
-    let content = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
-    assert_eq!(
-        content, "// SPDX-License-Identifier: MIT\n/// doc\nfn foo() {}\n",
-        "insertion must land above the doc block, not split doc from fn"
+        fs::read_to_string(project_path.join("src/lib.rs")).unwrap(),
+        original
     );
 }

@@ -58,7 +58,6 @@ impl DaemonSessionRetrievalService {
                 store_scope: SessionRetrievalStoreScope::Profile,
                 identity,
                 project_id: None,
-                project_paths: std::collections::HashSet::new(),
                 authorized_root: None,
                 expected_runtime_shard: None,
             },
@@ -291,6 +290,9 @@ fn task_session_binding_outcome(
     match outcome {
         SessionRetrievalServiceOutcome::WrongScope => TaskSessionRetrievalOutcomeV1::WrongScope,
         SessionRetrievalServiceOutcome::Denied => TaskSessionRetrievalOutcomeV1::Denied,
+        SessionRetrievalServiceOutcome::ResetRequired { .. } => {
+            TaskSessionRetrievalOutcomeV1::ResetRequired
+        }
         SessionRetrievalServiceOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
         SessionRetrievalServiceOutcome::BudgetExhausted
         | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
@@ -305,6 +307,9 @@ fn describe_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmDescr
         SessionRetrievalServiceOutcome::WrongScope => LcmDescribeServiceOutcome::WrongScope,
         SessionRetrievalServiceOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
         SessionRetrievalServiceOutcome::Denied => LcmDescribeServiceOutcome::Denied,
+        SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
+            LcmDescribeServiceOutcome::ResetRequired { store_scope }
+        }
         SessionRetrievalServiceOutcome::BudgetExhausted
         | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
             LcmDescribeServiceOutcome::BudgetExhausted
@@ -321,6 +326,9 @@ fn expand_binding_outcome(outcome: SessionRetrievalServiceOutcome) -> LcmExpandS
         SessionRetrievalServiceOutcome::WrongScope => LcmExpandServiceOutcome::WrongScope,
         SessionRetrievalServiceOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
         SessionRetrievalServiceOutcome::Denied => LcmExpandServiceOutcome::Denied,
+        SessionRetrievalServiceOutcome::ResetRequired { store_scope } => {
+            LcmExpandServiceOutcome::ResetRequired { store_scope }
+        }
         SessionRetrievalServiceOutcome::BudgetExhausted
         | SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => {
             LcmExpandServiceOutcome::BudgetExhausted
@@ -422,7 +430,7 @@ const fn temporal_store_unavailable_value() -> SessionRetrievalUnavailable {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::BTreeSet;
 
     use tracedecay_application::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -457,7 +465,6 @@ mod tests {
             store_scope: SessionRetrievalStoreScope::Project,
             identity,
             project_id: Some(project_id.as_str().to_owned()),
-            project_paths: HashSet::new(),
             authorized_root: None,
             expected_runtime_shard: None,
         };

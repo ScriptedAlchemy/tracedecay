@@ -2,9 +2,8 @@
 //! `tracedecay_redundancy` — AST-level functional-duplicate detector.
 //!
 //! Wire surface only: argument parsing, the scan call, and rendering. The
-//! pipeline itself lives in [`crate::graph::redundancy_scan`] so the root
-//! engine's `GraphRuntimePort` can produce the same payload without going
-//! through this handler.
+//! pipeline itself lives in [`crate::graph::redundancy_scan`]; this handler
+//! supplies the admitted verified graph and renders the resulting payload.
 
 use serde_json::{Value, json};
 
@@ -20,11 +19,12 @@ use super::support::effective_path;
 /// `tracedecay_redundancy` handler.
 pub(crate) async fn handle_redundancy(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let options = redundancy_options(&args, scope_prefix);
-    let scan = redundancy_scan(cg, &options).await?;
+    let scan = redundancy_scan(cg, graph, &options).await?;
     let text = render::finalize(Some(cg.project_root()), &args, &scan.output, || {
         if scan.semantic_active {
             render::generic_md(&scan.output)
@@ -153,97 +153,54 @@ fn append_group_md(md: &mut Md, group: &[String]) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{RedundancyOptions, RedundancyScanV1, redundancy_md};
-    use crate::graph::redundancy_scan::{group_views, pair_views};
-    use crate::redundancy::{
-        Fingerprint, RedundancyMatchScore, RedundantPair, connected_node_groups,
-    };
-    use crate::types::{Node, NodeKind, Visibility};
+    use crate::graph::redundancy_scan::{RedundancyNodeViewV1, RedundancyPairViewV1};
 
-    fn test_node(id: &str, name: &str, line: u32) -> Node {
-        Node {
-            id: id.to_string(),
-            kind: NodeKind::Function,
-            name: name.to_string(),
-            qualified_name: name.to_string(),
-            file_path: "src/lib.rs".to_string(),
-            start_line: line,
-            attrs_start_line: line,
-            end_line: line + 10,
-            start_column: 0,
-            end_column: 0,
-            signature: None,
-            docstring: None,
-            visibility: Visibility::default(),
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: 0,
-            parent_id: None,
-        }
-    }
-
-    fn test_fingerprint(body_tokens: usize) -> Fingerprint {
-        Fingerprint {
-            ast_hash: "ast".into(),
-            cfg_hash: "cfg".into(),
-            call_seq_hash: "call".into(),
-            shingles: vec![1, 2, 3],
-            body_tokens,
-            source_hash: "src".into(),
-        }
-    }
-
-    fn test_score(ranking_score: f64) -> RedundancyMatchScore {
-        RedundancyMatchScore {
-            similarity: 0.9,
-            ranking_score,
-            vector_cosine: 0.8,
-            shingle_jaccard: 0.7,
-            overlap_kind: "body_vector",
+    fn test_pair(
+        id_a: &str,
+        name_a: &str,
+        line_a: u32,
+        id_b: &str,
+        name_b: &str,
+        line_b: u32,
+        body_tokens: [usize; 2],
+        ranking_score: f64,
+    ) -> RedundancyPairViewV1 {
+        let a = RedundancyNodeViewV1 {
+            name: name_a.to_owned(),
+            file: "src/lib.rs".to_owned(),
+            line: line_a,
+            id: id_a.to_owned(),
+        };
+        let b = RedundancyNodeViewV1 {
+            name: name_b.to_owned(),
+            file: "src/lib.rs".to_owned(),
+            line: line_b,
+            id: id_b.to_owned(),
+        };
+        RedundancyPairViewV1 {
+            label_a: format!("{name_a} (src/lib.rs:{line_a})"),
+            label_b: format!("{name_b} (src/lib.rs:{line_b})"),
+            id_a: id_a.to_owned(),
+            id_b: id_b.to_owned(),
+            a,
+            b,
             severity: "high",
+            overlap_kind: "body_vector",
+            ranking_score,
+            similarity: 0.9,
+            vector_cosine: 0.8,
             generic_helper_downranked: false,
+            body_tokens,
         }
     }
 
     #[test]
     fn redundancy_md_renders_ranked_pairs_and_full_groups() {
         // Chain a->b->c->d so the connected component has more than 3 members.
-        let a = test_node("id_a", "alpha", 10);
-        let b = test_node("id_b", "beta", 20);
-        let c = test_node("id_c", "gamma", 30);
-        let d = test_node("id_d", "delta", 40);
-        let fa = test_fingerprint(50);
-        let fb = test_fingerprint(52);
-        let fc = test_fingerprint(54);
-        let fd = test_fingerprint(56);
-
         let pairs = vec![
-            RedundantPair {
-                score: test_score(0.95),
-                node_a: &a,
-                node_b: &b,
-                fp_a: &fa,
-                fp_b: &fb,
-            },
-            RedundantPair {
-                score: test_score(0.9),
-                node_a: &b,
-                node_b: &c,
-                fp_a: &fb,
-                fp_b: &fc,
-            },
-            RedundantPair {
-                score: test_score(0.85),
-                node_a: &c,
-                node_b: &d,
-                fp_a: &fc,
-                fp_b: &fd,
-            },
+            test_pair("id_a", "alpha", 10, "id_b", "beta", 20, [50, 52], 0.95),
+            test_pair("id_b", "beta", 20, "id_c", "gamma", 30, [52, 54], 0.9),
+            test_pair("id_c", "gamma", 30, "id_d", "delta", 40, [54, 56], 0.85),
         ];
 
         let options = RedundancyOptions {
@@ -255,14 +212,18 @@ mod tests {
             include_generated: false,
         };
 
-        let groups = connected_node_groups(&pairs);
         let scan = RedundancyScanV1 {
             output: serde_json::Value::Null,
             semantic_active: false,
             total_candidates: 4,
             scanned: 4,
-            pairs: pair_views(&pairs),
-            groups: group_views(&groups),
+            pairs,
+            groups: vec![vec![
+                "alpha (src/lib.rs:10)".to_owned(),
+                "beta (src/lib.rs:20)".to_owned(),
+                "gamma (src/lib.rs:30)".to_owned(),
+                "delta (src/lib.rs:40)".to_owned(),
+            ]],
         };
         let md = redundancy_md(&options, &scan);
 

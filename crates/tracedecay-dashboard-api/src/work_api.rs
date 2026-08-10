@@ -182,8 +182,7 @@ mod tests {
             "dashboard must expose each core Work operation exactly once"
         );
         assert_eq!(
-            actual_ids,
-            expected_ids,
+            actual_ids, expected_ids,
             "dashboard routes must cover every core Work operation exactly once"
         );
         assert_eq!(

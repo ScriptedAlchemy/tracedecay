@@ -29,7 +29,8 @@ pub mod tracedecay;
 // `crate::dashboard::*` shim: the application-surface injection contract and
 // the dashboard-facing project runtime trait.
 pub use application_surface::{
-    DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyFuture,
+    DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
+    DashboardConfigurationApplyFuture,
 };
 pub use tracedecay::DashboardProjectRuntime;
 
@@ -1049,7 +1050,7 @@ static DASHBOARD_HTTP_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 /// Graph adapters pass these values intact to canonical application admission;
 /// they never manufacture an actor, grant, scope, or projection generation.
 #[derive(Clone, Debug)]
-pub(crate) struct DashboardHttpRequestControlV1 {
+pub struct DashboardHttpRequestControlV1 {
     request_id: tracedecay_application::RequestId,
     deadline: tracedecay_application::Deadline,
     cancellation: tracedecay_application::CancellationSignal,
@@ -1057,19 +1058,19 @@ pub(crate) struct DashboardHttpRequestControlV1 {
 }
 
 impl DashboardHttpRequestControlV1 {
-    pub(crate) fn request_id(&self) -> tracedecay_application::RequestId {
+    pub fn request_id(&self) -> tracedecay_application::RequestId {
         self.request_id.clone()
     }
 
-    pub(crate) fn deadline(&self) -> tracedecay_application::Deadline {
+    pub fn deadline(&self) -> tracedecay_application::Deadline {
         self.deadline.clone()
     }
 
-    pub(crate) fn cancellation(&self) -> &tracedecay_application::CancellationSignal {
+    pub fn cancellation(&self) -> &tracedecay_application::CancellationSignal {
         &self.cancellation
     }
 
-    pub(crate) const fn observed_at(&self) -> tracedecay_domain::UtcMicros {
+    pub const fn observed_at(&self) -> tracedecay_domain::UtcMicros {
         self.observed_at
     }
 }
@@ -1929,9 +1930,24 @@ mod authority_tests {
 
     struct FakeDashboardLcmRead;
 
+    fn dashboard_lcm_test_control() -> DashboardHttpRequestControlV1 {
+        DashboardHttpRequestControlV1 {
+            request_id: tracedecay_application::RequestId::new("request.dashboard-lcm-test")
+                .expect("dashboard LCM test request"),
+            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(i64::MAX))
+                .expect("dashboard LCM test deadline"),
+            cancellation: tracedecay_application::CancellationSignal::active(
+                "cancel.dashboard-lcm-test",
+            )
+            .expect("dashboard LCM test cancellation"),
+            observed_at: tracedecay_domain::UtcMicros(1),
+        }
+    }
+
     impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
         fn read(
             &self,
+            _control: DashboardHttpRequestControlV1,
             _project_id: Option<&str>,
             request: DashboardLcmReadRequestV1,
         ) -> DashboardLcmReadFutureV1<'_> {
@@ -2583,6 +2599,7 @@ mod authority_tests {
                 .oneshot(
                     Request::builder()
                         .uri(uri)
+                        .extension(dashboard_lcm_test_control())
                         .body(Body::empty())
                         .expect("LCM browse request"),
                 )
@@ -2624,6 +2641,7 @@ mod authority_tests {
                 .oneshot(
                     Request::builder()
                         .uri(uri)
+                        .extension(dashboard_lcm_test_control())
                         .body(Body::empty())
                         .expect("LCM aggregate request"),
                 )

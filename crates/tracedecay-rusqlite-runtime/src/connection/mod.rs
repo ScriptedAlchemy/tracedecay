@@ -87,27 +87,17 @@ impl OpenedDatabaseFile {
         })
     }
 
-    #[cfg(any(unix, windows))]
+    #[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
     pub(crate) fn worker_open_path(
         &self,
-        canonical_path: &Path,
+        _canonical_path: &Path,
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
+        use std::os::unix::io::AsRawFd;
 
-            let descriptor = self.file.as_raw_fd();
-            #[cfg(any(target_os = "linux", target_os = "android"))]
-            let path = PathBuf::from(format!("/proc/self/fd/{descriptor}"));
-            #[cfg(not(any(target_os = "linux", target_os = "android")))]
-            let path = PathBuf::from(format!("/dev/fd/{descriptor}"));
-            let _ = canonical_path;
-            Ok(path)
-        }
-        #[cfg(windows)]
-        {
-            Ok(canonical_path.to_path_buf())
-        }
+        Ok(PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            self.file.as_raw_fd()
+        )))
     }
 
     /// Selects the pathname used by a writer connection.
@@ -159,14 +149,6 @@ impl OpenedDatabaseFile {
         canonical_path: &Path,
     ) -> Result<PathBuf, OpenedDatabaseFileError> {
         self.writer_open_path(canonical_path)
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    pub(crate) fn worker_open_path(
-        &self,
-        _canonical_path: &Path,
-    ) -> Result<PathBuf, OpenedDatabaseFileError> {
-        Err(OpenedDatabaseFileError::Unsupported)
     }
 
     #[cfg(not(any(unix, windows)))]

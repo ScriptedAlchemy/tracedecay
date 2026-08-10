@@ -72,7 +72,19 @@ use crate::errors::{Result, TraceDecayError};
 mod observability;
 
 #[cfg(test)]
-pub(super) use observability::remote_query_result_observation;
+pub(super) fn remote_query_result_observation(
+    operation_ref: &str,
+    expected_shards: usize,
+    result: &tracedecay_application::remote::query::RemoteQueryResultV1,
+    terminal_succeeded: tracedecay_domain::ObservedTernaryV1,
+) -> tracedecay_domain::RemoteCoverageObservedV1 {
+    observability::remote_query_result_observation(
+        operation_ref,
+        expected_shards,
+        result,
+        terminal_succeeded,
+    )
+}
 
 const MAX_REGISTERED_REMOTE_NODES: usize = 128;
 const MAX_REGISTERED_REMOTE_CREDENTIALS: usize = 8_192;

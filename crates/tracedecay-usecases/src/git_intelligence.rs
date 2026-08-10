@@ -47,9 +47,7 @@ use tracedecay_domain::git::{
     HUNK_REF_SCHEMA_VERSION_V1, HunkDirectionV1, HunkRefV1, full_hunk_selection_bitmap,
 };
 use tracedecay_domain::research::time::UtcMicros;
-use tracedecay_domain::research::{
-    ManifestDigest, RepositoryId, WorktreeId, canonical_sha256,
-};
+use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 mod topology;

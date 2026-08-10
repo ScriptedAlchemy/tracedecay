@@ -8,6 +8,7 @@ use tracedecay_usecases::observability::{
 pub(crate) struct RegisteredObservabilityProducerV1 {
     database: Arc<crate::global_db::RegisteredGlobalDb>,
     producer: Arc<BoundedObservabilityProducerV1>,
+    delivery_settlement_authority: Arc<DeliverySettlementAuthorityV1>,
     delivery_settlements: Arc<BoundedDeliverySettlementRecorderV1>,
     work_observations: Arc<WorkOwnerObservationRecoveryV1>,
 }
@@ -22,13 +23,13 @@ impl RegisteredObservabilityProducerV1 {
             .work_storage()
             .map_err(|_| "work_owner_observation_storage_unavailable")?;
         let producer = Arc::new(producer);
-        let authority = Arc::new(DeliverySettlementAuthorityV1::new(
+        let delivery_settlement_authority = Arc::new(DeliverySettlementAuthorityV1::new(
             Arc::clone(&database),
             Arc::clone(&producer),
             producer.identity().clone(),
         )?);
         let delivery_settlements = Arc::new(BoundedDeliverySettlementRecorderV1::start(
-            authority,
+            Arc::clone(&delivery_settlement_authority),
             delivery_capacity,
         )?);
         let work_observations = Arc::new(WorkOwnerObservationRecoveryV1::start(
@@ -38,6 +39,7 @@ impl RegisteredObservabilityProducerV1 {
         Ok(Self {
             database,
             producer,
+            delivery_settlement_authority,
             delivery_settlements,
             work_observations,
         })
@@ -53,14 +55,8 @@ impl RegisteredObservabilityProducerV1 {
 
     pub(crate) fn delivery_settlement_authority(
         &self,
-    ) -> Result<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>, &'static str>
-    {
-        tracedecay_usecases::observability::DeliverySettlementAuthorityV1::new(
-            Arc::clone(&self.database),
-            Arc::clone(&self.producer),
-            self.producer.identity().clone(),
-        )
-        .map(Arc::new)
+    ) -> Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1> {
+        Arc::clone(&self.delivery_settlement_authority)
     }
 
     pub(crate) fn delivery_settlement_recorder(&self) -> Arc<BoundedDeliverySettlementRecorderV1> {

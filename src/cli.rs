@@ -10,7 +10,6 @@ mod workflow;
 pub use automation::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
     AutomationRunAction, AutomationRunsAction, AutomationSkillsAction,
-    AutomationSkillsInstallTarget,
 };
 use help::*;
 pub use package_hook::{PackageHookAction, ScoopPackageHookAction};

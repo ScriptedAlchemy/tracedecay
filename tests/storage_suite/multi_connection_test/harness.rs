@@ -10,10 +10,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
-use tracedecay::storage::{default_profile_project_id, profile_sharded_data_root};
-
 use crate::common;
+use serde_json::{Value, json};
 
 pub(super) const PROCESS_TIMEOUT: Duration = Duration::from_secs(20);
 pub(super) const CLIENT_COUNT: usize = 12;
@@ -63,9 +61,7 @@ pub(super) fn init_project(home: &Path, project: &Path, socket_path: &Path) -> P
         .expect("tracedecay init should run");
     assert_command_success("tracedecay init", &output);
 
-    let profile_root = home.join(".tracedecay");
-    let data_root = profile_sharded_data_root(&profile_root, &default_profile_project_id(project));
-    data_root.join(tracedecay::config::db_filename(&data_root))
+    home.join(".tracedecay").join("global.db")
 }
 
 pub(super) fn assert_command_success(label: &str, output: &std::process::Output) {

@@ -109,39 +109,11 @@ async fn handle_init_with_daemon_availability(
     if daemon_available {
         return brokered_init(&project_path, &skip_folders, &include_folders, &handshake).await;
     }
-
-    let profile_root = handshake.client_identity.profile_root.clone();
-    let lifecycle_lease = match tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
-        &profile_root,
-        "init bootstrap",
-    ) {
-        Ok(lease) => lease,
-        Err(lease_error) => {
-            // A daemon may have acquired its shared lease after our availability
-            // probe. Only retry the broker when a fresh, pre-request probe proves
-            // it is now reachable; otherwise preserve the lifecycle error.
-            #[cfg(unix)]
-            if tracedecay::daemon::daemon_reachable() {
-                return brokered_init(&project_path, &skip_folders, &include_folders, &handshake)
-                    .await;
-            }
-            return Err(lease_error);
-        }
-    };
-    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
-        &lifecycle_lease,
-        &profile_root,
-        "init bootstrap",
-    )?;
-
-    maintenance_bootstrap_init(
-        &project_path,
-        &skip_folders,
-        &include_folders,
-        &handshake,
-        &lifecycle_lease,
-    )
-    .await
+    Err(tracedecay::errors::TraceDecayError::project_route(
+        "code_index_scheduler_unavailable",
+        true,
+        "project initialization requires the daemon-owned code-index scheduler; start the daemon and retry",
+    ))
 }
 
 async fn brokered_init(
@@ -155,7 +127,7 @@ async fn brokered_init(
             message: "brokered init does not yet support --skip-folders/--include-folders; configure tracedecay.toml first".to_string(),
         });
     }
-    // Init deliberately triggers a cold project open+index behind this single
+    // Init deliberately triggers a cold project open behind this single
     // status call. The default warming-retry grace is far tighter than a cold
     // open can take on a debug build or slow shared runner, which surfaced as
     // "daemon tracedecay_status timed out during read before deadline" failures
@@ -170,63 +142,7 @@ async fn brokered_init(
     )
     .await?;
     eprintln!(
-        "initialized and indexed {} via daemon",
-        project_path.display()
-    );
-    Ok(())
-}
-
-async fn maintenance_bootstrap_init(
-    project_path: &Path,
-    skip_folders: &[String],
-    include_folders: &[String],
-    handshake: &tracedecay::daemon::DaemonHandshake,
-    lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
-) -> tracedecay::errors::Result<()> {
-    if !project_path.is_dir() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "project path is not a directory: {}",
-                project_path.display()
-            ),
-        });
-    }
-    if !project_path.is_absolute() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("project path must be absolute: {}", project_path.display()),
-        });
-    }
-
-    let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(handshake.client_identity.profile_root.clone()),
-        global_db_path: Some(handshake.client_identity.global_db_path.clone()),
-    };
-    if TraceDecay::try_initialized_store_layout_with_options(project_path, &open_options)
-        .await?
-        .is_some()
-    {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "TraceDecay is already initialized at '{}'; use `tracedecay sync` to update the index",
-                project_path.display()
-            ),
-        });
-    }
-
-    let mut cg =
-        TraceDecay::init_with_exclusive_maintenance(project_path, open_options, lifecycle_lease)
-            .await?;
-    cg.add_skip_folders(skip_folders);
-    cg.add_include_folders(include_folders);
-    if let Err(error) = cg.index_all().await {
-        cg.close();
-        return Err(error);
-    }
-    let checkpoint_result = cg.checkpoint().await;
-    cg.close();
-    checkpoint_result?;
-    eprintln!(
-        "initialized and indexed {} under exclusive maintenance bootstrap",
+        "initialized {}; daemon code-index reconciliation requested",
         project_path.display()
     );
     Ok(())
@@ -258,106 +174,39 @@ mod init_bootstrap_tests {
         }
     }
 
-    /// A directory guaranteed to sit outside `std::env::temp_dir()`, so the
-    /// project/profile fixtures built inside it are never treated as
-    /// isolated-test paths by `db::access::is_isolated_test_path` (which
-    /// would let a direct open acquire the test-only authority escape hatch
-    /// instead of exercising the fail-closed production path this test
-    /// verifies). `env!("CARGO_MANIFEST_DIR")).join("target")` used to serve
-    /// this purpose, but that only holds when the checkout itself lives
-    /// outside the OS temp directory; a repo cloned under `/tmp` (as some
-    /// sandboxed CI/dev environments do) breaks that assumption. Deriving the
-    /// base from the running test binary's own on-disk location is robust
-    /// regardless of where the checkout lives, because cargo (or any
-    /// build-cache shim in front of it) never places build output inside the
-    /// volatile system temp directory.
-    fn checkout_tempdir() -> tempfile::TempDir {
-        let exe = std::env::current_exe().expect("test binary has a current_exe path");
-        let profile_dir = exe
-            .parent() // .../target/<profile>/deps
-            .and_then(Path::parent) // .../target/<profile>
-            .expect("test binary sits under a cargo target profile directory")
-            .to_path_buf();
-        let base = profile_dir.join("commands-init-tests");
-        std::fs::create_dir_all(&base).unwrap();
-        tempfile::Builder::new()
-            .prefix("daemonless-init-")
-            .tempdir_in(base)
-            .unwrap()
-    }
-
     #[tokio::test(flavor = "current_thread")]
-    async fn daemonless_init_uses_maintenance_authority_and_keeps_direct_open_fail_closed() {
-        let temp = checkout_tempdir();
+    async fn daemonless_init_refuses_without_the_code_index_scheduler() {
+        let temp = tempfile::TempDir::new().unwrap();
         let project = temp.path().join("project");
         let profile = temp.path().join("profile");
-        std::fs::create_dir_all(project.join("src")).unwrap();
-        std::fs::create_dir_all(project.join("ignored")).unwrap();
-        gix::init(&project).unwrap();
-        std::fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(project.join("ignored/skip.rs"), "fn skipped() {}\n").unwrap();
+        std::fs::create_dir_all(&project).unwrap();
         let handshake = test_handshake(&project, &profile);
 
-        handle_init_with_daemon_availability(
+        let error = handle_init_with_daemon_availability(
             project.clone(),
-            vec!["ignored".to_string()],
-            vec!["src".to_string()],
-            handshake.clone(),
+            Vec::new(),
+            Vec::new(),
+            handshake,
             false,
         )
         .await
-        .unwrap();
-
-        let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(profile.join("global.db")),
-        };
-        let direct_open_error =
-            match TraceDecay::open_with_options(&project, open_options.clone()).await {
-                Ok(cg) => {
-                    cg.close();
-                    panic!("ordinary direct open unexpectedly acquired writable authority");
-                }
-                Err(error) => error,
-            };
+        .unwrap_err();
         assert!(
-            direct_open_error.to_string().contains(
-                "configuration authority unavailable: a registered project session runtime is required"
+            matches!(
+                error.project_route_context(),
+                Some(("code_index_scheduler_unavailable", true, _))
             ),
-            "unexpected direct-open error: {direct_open_error}"
-        );
-
-        let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile,
-            "inspect daemonless init test",
-        )
-        .unwrap();
-        let _database_scope = tracedecay::db::enter_maintenance_database_scope(
-            &lifecycle,
-            &profile,
-            "inspect daemonless init test",
-        )
-        .unwrap();
-        let cg = TraceDecay::open_with_exclusive_maintenance(&project, open_options, &lifecycle)
-            .await
-            .unwrap();
-        let files = cg.get_all_files().await.unwrap();
-        cg.close();
-        assert!(
-            files.iter().any(|file| file.path.ends_with("src/main.rs")),
-            "included source file was not indexed: {files:?}"
+            "unexpected daemonless init error: {error}"
         );
         assert!(
-            files
-                .iter()
-                .all(|file| !file.path.ends_with("ignored/skip.rs")),
-            "skipped folder was indexed: {files:?}"
+            !profile.exists(),
+            "scheduler refusal must not initialize a local store"
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn brokered_init_retains_folder_option_error_before_sending_request() {
-        let temp = checkout_tempdir();
+        let temp = tempfile::TempDir::new().unwrap();
         let project = temp.path().join("project");
         let profile = temp.path().join("profile");
         std::fs::create_dir_all(&project).unwrap();
@@ -421,7 +270,7 @@ pub(crate) async fn handle_sync(
         );
     }
     eprintln!(
-        "sync completed via daemon for {}",
+        "code-index reconciliation queued via daemon for {}",
         resolved.project_path.display()
     );
     if doctor {

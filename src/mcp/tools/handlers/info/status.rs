@@ -5,32 +5,38 @@ use super::*;
 /// Daemon-only sync entry point used by the first-party CLI. It is deliberately
 /// not advertised in the MCP catalog: external agents should rely on the
 /// daemon watcher while the CLI can request an explicit serialized refresh.
-pub(crate) async fn handle_admin_sync(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_admin_sync(
+    cg: &TraceDecay,
+    args: Value,
+    reconcile_sink: Option<&crate::mcp::server::CodeIndexReconcileSink>,
+) -> Result<ToolResult> {
     let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
-    let output = if force {
-        let result = cg.index_all().await?;
-        json!({
-            "mode": "full",
-            "files": result.file_count,
-            "nodes": result.node_count,
-            "edges": result.edge_count,
-            "duration_ms": result.duration_ms,
-        })
-    } else {
-        let result = cg.sync().await?;
-        json!({
-            "mode": "incremental",
-            "files_added": result.files_added,
-            "files_modified": result.files_modified,
-            "files_removed": result.files_removed,
-            "duration_ms": result.duration_ms,
-        })
-    };
+    let reconcile_sink = reconcile_sink.ok_or_else(|| {
+        TraceDecayError::project_route(
+            "code_index_scheduler_unavailable",
+            true,
+            "admin sync requires the daemon code-index scheduler",
+        )
+    })?;
+    if !reconcile_sink(cg.project_root().to_path_buf()).await {
+        return Err(TraceDecayError::project_route(
+            "code_index_scheduler_unavailable",
+            true,
+            "admin sync was not accepted by the code-index scheduler",
+        ));
+    }
+    let output = json!({
+        "requested_mode": if force { "force" } else { "refresh" },
+        "reconcile_scope": "authoritative_project",
+        "status": "queued",
+        "project_root": cg.project_root(),
+    });
+    let text = serde_json::to_string(&output)?;
     Ok(ToolResult::new(
         json!({
             "content": [{
                 "type": "text",
-                "text": serde_json::to_string(&output).unwrap_or_default(),
+                "text": text,
             }]
         }),
         Vec::new(),
@@ -115,6 +121,9 @@ pub(crate) async fn handle_status(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
     project_session_db: Option<&RegisteredGlobalDb>,
+    code_index_freshness_reader: Option<
+        &crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
+    >,
 ) -> Result<ToolResult> {
     if status_arg_flag(&args, "admission_only", false) {
         let mut output = json!({
@@ -140,22 +149,40 @@ pub(crate) async fn handle_status(
     let include_session_ingest = status_arg_flag(&args, "include_session_ingest", true);
     let include_staleness = status_arg_flag(&args, "include_staleness", true);
 
-    let stats = cg.get_stats().await?;
-    let mut output: Value = serde_json::to_value(&stats).unwrap_or(json!({}));
-    let graph_rebuild = cg.graph_rebuild_status().await?;
-    if !matches!(
-        &graph_rebuild,
-        crate::tracedecay::GraphRebuildStatusV1::Current { .. }
-    ) {
-        output["graph_rebuild"] = serde_json::to_value(&graph_rebuild).unwrap_or_else(|error| {
-            json!({
-                "state": "failed",
-                "reason": format!("could not serialize graph rebuild state: {error}"),
-            })
-        });
-        output["graph_rebuild_warning"] =
-            json!("graph counts are not authoritative while the graph rebuild is pending");
-    }
+    let mut output = json!({
+        "project_root": cg.project_root(),
+        "graph_statistics": {
+            "status": "unavailable",
+            "reason": "sealed_generation_statistics_not_published",
+        },
+    });
+    let code_index_freshness = match code_index_freshness_reader {
+        Some(reader) => match reader(cg.project_root().to_path_buf()).await {
+            Some(freshness) => {
+                let authoritative = freshness.latest_generation_id.is_some()
+                    && freshness.coverage == "complete"
+                    && freshness.staleness_state.as_deref() == Some("fresh");
+                if !authoritative {
+                    output["code_index_freshness_warning"] = json!(
+                        "graph counts are not authoritative until the scheduler seals a complete fresh generation"
+                    );
+                }
+                json!({
+                    "status": if authoritative { "current" } else { "warming" },
+                    "worktree": freshness,
+                })
+            }
+            None => json!({
+                "status": "unavailable",
+                "reason": "code_index_scheduler_not_mounted",
+            }),
+        },
+        None => json!({
+            "status": "unavailable",
+            "reason": "code_index_scheduler_authority_not_attached",
+        }),
+    };
+    output["code_index_freshness"] = code_index_freshness;
     if include_storage_health {
         let mut storage_health =
             serde_json::to_value(crate::runtime_telemetry::collect_database(cg, false).await?)
@@ -222,27 +249,11 @@ pub(crate) async fn handle_status(
     }
 
     if include_staleness {
-        // Git commit staleness: count commits since last index
-        let stale_commit_count = cg.git_commits_since(stats.last_updated as i64);
-        if stale_commit_count > 0 {
-            output["stale_commits"] = json!(stale_commit_count);
-            output["stale_warning"] = json!(format!(
-                "{} commit(s) since last sync. Run `tracedecay sync` to update the index.",
-                stale_commit_count
-            ));
-        }
-
-        // File-level staleness summary (sample up to 100 files for efficiency).
-        // A store failure here must surface as a tool error, not as "no stale
-        // files" — silently dropping the staleness section makes a broken store
-        // look healthy.
-        let all_files = cg.get_all_files().await?;
-        let sample_paths: Vec<String> =
-            all_files.iter().take(100).map(|f| f.path.clone()).collect();
-        let stale_files = cg.check_file_staleness(&sample_paths).await;
-        if !stale_files.is_empty() {
-            output["stale_files"] = json!(stale_files.len());
-        }
+        output["git_staleness"] = json!({
+            "status": "unavailable",
+            "reason": "sealed_generation_git_watermark_not_published",
+            "message": "the verified code generation does not publish a Git commit watermark",
+        });
     }
 
     if let Some(prefix) = scope_prefix {

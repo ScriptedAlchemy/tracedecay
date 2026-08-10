@@ -46,8 +46,7 @@ use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
 use crate::tracedecay::TraceDecay;
 use interactive::{UnsignalledRead, interactive_neighborhood, neighbor_node, verify_scope};
 use read_models::{
-    decode_edge, decode_node, i64_field, map_graph_error, overview_read_model, relation_kind_str,
-    str_field, unavailable,
+    decode_edge, decode_node, i64_field, map_graph_error, relation_kind_str, str_field, unavailable,
 };
 
 /// Safety cap on the BFS visited set for path reads.
@@ -117,16 +116,13 @@ impl TopologyWatermark {
     }
 }
 
-/// Cached whole-graph degree aggregation feeding the overview's
-/// `top_connected` and the default subgraph's candidate pool, rebuilt when
-/// the edge fingerprint moves.
+/// Cached whole-graph degree aggregation feeding the default subgraph's
+/// candidate pool, rebuilt when the edge fingerprint moves.
 struct DegreeSummary {
     fingerprint: (i64, i64),
     /// Top [`DEGREE_POOL_CAP`] `(node_id, degree)` rows, ordered by degree
     /// descending then qualified name ascending (zero-degree nodes included).
     pool: Vec<(String, i64)>,
-    /// Overview `top_connected` rows (top 12 by degree, hydrated node rows).
-    top_connected: Vec<DashboardGraphNodeV1>,
 }
 
 /// Daemon-owned dashboard graph read authority over one retained project
@@ -356,37 +352,18 @@ impl DashboardGraphReadAdapter {
                     .map(|id| (id.to_owned(), i64_field(row, "degree")))
             })
             .collect();
-        let top_connected = queries::top_connected_rows(&conn)
-            .await
-            .map_err(unavailable)?
-            .into_iter()
-            .map(decode_node)
-            .collect::<Result<Vec<_>, _>>()?;
-        let summary = Arc::new(DegreeSummary {
-            fingerprint,
-            pool,
-            top_connected,
-        });
+        let summary = Arc::new(DegreeSummary { fingerprint, pool });
         *guard = Some(Arc::clone(&summary));
         Ok(summary)
     }
 
     async fn overview(&self) -> Result<DashboardGraphOverviewV1, DashboardGraphReadErrorV1> {
-        let (stats, files, summary) = tokio::join!(
-            self.graph_database.get_stats(),
-            self.graph_database.get_all_files(),
-            self.degree_summary(),
-        );
-        let stats = stats.map_err(|error| unavailable(error.to_string()))?;
-        let files = files.map_err(|error| unavailable(error.to_string()))?;
-        let summary = summary?;
-        Ok(overview_read_model(
-            &stats,
-            &files,
-            summary.top_connected.clone(),
-        ))
+        let reader = self.interactive_reader().await?;
+        Err(unavailable(format!(
+            "dashboard overview is unavailable for code generation {}: the verified code graph does not carry generation-bound file sizes required by the overview contract",
+            reader.generation().as_str()
+        )))
     }
-
     async fn search(
         &self,
         query: &str,

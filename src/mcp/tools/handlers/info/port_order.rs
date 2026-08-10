@@ -1,9 +1,23 @@
 //! `tracedecay_port_order` — dependency-first porting order (Kahn levels) with SCC cycle reporting.
 
 use super::*;
+use tracedecay_domain::RelationEdgeKindV1;
+
+#[derive(Clone, Copy)]
+struct PortOrderSymbol<'a> {
+    id: &'a str,
+    name: &'a str,
+    kind: &'a str,
+    file: &'a str,
+    start_line: u32,
+}
 
 /// Handles `tracedecay_port_order` tool calls.
-pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_port_order(
+    cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_port_order")?;
 
     let source_dir = args
@@ -46,7 +60,20 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         ));
     }
 
-    let nodes = cg.get_nodes_by_dir(source_dir, &kinds).await?;
+    let summaries = symbols_in_dir(graph, source_dir, &kinds)?;
+    let nodes = summaries
+        .iter()
+        .map(|symbol| {
+            let (metadata, file) = required_symbol_parts(symbol)?;
+            Ok(PortOrderSymbol {
+                id: symbol.occurrence.as_str(),
+                name: &metadata.simple_name,
+                kind: &metadata.kind,
+                file,
+                start_line: metadata.start_line.saturating_add(1),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let total_symbols = nodes.len();
 
     if nodes.is_empty() {
@@ -65,12 +92,25 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         ));
     }
 
-    let node_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
-    let node_map: HashMap<&str, &crate::types::Node> =
-        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let id_set: HashSet<&str> = node_ids.iter().map(std::string::String::as_str).collect();
+    let node_ids: Vec<&str> = nodes.iter().map(|node| node.id).collect();
+    let node_map: HashMap<&str, &PortOrderSymbol<'_>> =
+        nodes.iter().map(|node| (node.id, node)).collect();
+    let id_set: HashSet<&str> = node_ids.iter().copied().collect();
 
-    let edges = cg.get_internal_edges(&node_ids).await?;
+    let occurrences = summaries
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    let edges = graph.edges_among(
+        &occurrences,
+        &[
+            RelationEdgeKindV1::Calls,
+            RelationEdgeKindV1::Uses,
+            RelationEdgeKindV1::Extends,
+            RelationEdgeKindV1::Implements,
+        ],
+        INFO_RELATION_LIMIT,
+    )?;
 
     // Build adjacency list and in-degree map for Kahn's algorithm.
     // Edge direction: source depends on target (source calls/uses target),
@@ -84,32 +124,26 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
     // Reframe: dependency_graph[A] = {B, C} means A depends on B and C.
     // in_degree[A] = number of nodes A depends on.
     // Kahn's starts with in_degree 0 = nodes with no dependencies = safe to port first.
-    let dep_edge_kinds: HashSet<&str> = ["calls", "uses", "extends", "implements"]
-        .iter()
-        .copied()
-        .collect();
-
     let mut dep_graph: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut in_degree: HashMap<&str, usize> = HashMap::new();
 
     // Initialize all nodes
     for id in &node_ids {
-        dep_graph.entry(id.as_str()).or_default();
-        in_degree.entry(id.as_str()).or_insert(0);
+        dep_graph.entry(*id).or_default();
+        in_degree.entry(*id).or_insert(0);
     }
 
     // reverse_dep_graph[B] = list of nodes that depend on B.
     // When B is sorted, we decrement in_degree for each of its reverse deps.
     let mut reverse_dep_graph: HashMap<&str, Vec<&str>> = HashMap::new();
     for id in &node_ids {
-        reverse_dep_graph.entry(id.as_str()).or_default();
+        reverse_dep_graph.entry(*id).or_default();
     }
 
     for edge in &edges {
-        if !dep_edge_kinds.contains(edge.kind.as_str()) {
-            continue;
-        }
-        if !id_set.contains(edge.source.as_str()) || !id_set.contains(edge.target.as_str()) {
+        let source = edge.edge.from_occurrence.as_str();
+        let target = edge.edge.to_occurrence.as_str();
+        if !id_set.contains(source) || !id_set.contains(target) {
             continue;
         }
         // Self-edges are common resolver artifacts for methods with generic
@@ -118,20 +152,14 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         // single symbol unsortable in Kahn's algorithm, producing noisy
         // singleton cycles instead of useful porting order. Mutual cycles are
         // still reported below.
-        if edge.source == edge.target {
+        if source == target {
             continue;
         }
         // source depends on target: add dependency source -> target
-        dep_graph
-            .entry(edge.source.as_str())
-            .or_default()
-            .push(edge.target.as_str());
+        dep_graph.entry(source).or_default().push(target);
         // reverse: target is depended on by source
-        reverse_dep_graph
-            .entry(edge.target.as_str())
-            .or_default()
-            .push(edge.source.as_str());
-        *in_degree.entry(edge.source.as_str()).or_insert(0) += 1;
+        reverse_dep_graph.entry(target).or_default().push(source);
+        *in_degree.entry(source).or_insert(0) += 1;
     }
 
     // Kahn's algorithm (BFS topological sort)
@@ -189,7 +217,7 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
     // Detect cycles: any unsorted nodes form cycles.
     let cycle_node_ids: HashSet<&str> = node_ids
         .iter()
-        .map(std::string::String::as_str)
+        .copied()
         .filter(|id| !sorted_set.contains(id))
         .collect();
 
@@ -258,8 +286,8 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
                 let node = node_map.get(id)?;
                 Some(json!({
                     "name": node.name,
-                    "kind": node.kind.as_str(),
-                    "file": node.file_path,
+                    "kind": node.kind,
+                    "file": node.file,
                     "line": node.start_line,
                     "in_cycle_out_degree": out_deg,
                     "in_cycle_in_degree": in_deg,
@@ -272,7 +300,7 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         let mut file_counts: HashMap<&str, usize> = HashMap::new();
         for id in &scc {
             if let Some(n) = node_map.get(id) {
-                *file_counts.entry(n.file_path.as_str()).or_insert(0) += 1;
+                *file_counts.entry(n.file).or_insert(0) += 1;
             }
         }
         let mut files_ranked: Vec<(&str, usize)> = file_counts.into_iter().collect();
@@ -293,10 +321,10 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
             "files": files_json,
             "symbols": symbols_detailed,
             "entry_point": entry_point.map(|n| json!({
-                "name": n.name, "file": n.file_path, "line": n.start_line,
+                "name": n.name, "file": n.file, "line": n.start_line,
             })),
             "break_point_candidate": hub.map(|n| json!({
-                "name": n.name, "file": n.file_path, "line": n.start_line,
+                "name": n.name, "file": n.file, "line": n.start_line,
                 "rationale": "Highest in-cycle in-degree — refactoring its callers is the most effective way to fragment this SCC.",
             })),
             "note": "Mutual dependency — port together, starting at `entry_point` and refactoring `break_point_candidate` to split the cycle.",
@@ -322,15 +350,15 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
                         .get(id)
                         .map(|d| {
                             d.iter()
-                                .filter_map(|dep_id| node_map.get(dep_id).map(|n| n.name.as_str()))
+                                .filter_map(|dep_id| node_map.get(dep_id).map(|n| n.name))
                                 .collect()
                         })
                         .unwrap_or_default();
 
                     let mut sym = json!({
                         "name": node.name,
-                        "kind": node.kind.as_str(),
-                        "file": node.file_path,
+                        "kind": node.kind,
+                        "file": node.file,
                         "line": node.start_line,
                     });
                     if !deps.is_empty() {
@@ -348,7 +376,7 @@ pub(crate) async fn handle_port_order(cg: &TraceDecay, args: Value) -> Result<To
         })
         .collect();
 
-    let touched_files = unique_file_paths(nodes.iter().map(|n| n.file_path.as_str()));
+    let touched_files = unique_file_paths(nodes.iter().map(|node| node.file));
 
     let result = json!({
         "source_dir": source_dir,

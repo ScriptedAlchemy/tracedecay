@@ -853,7 +853,7 @@ mod tests {
                 "params": {"threadId": "summary-thread"}
             })
             .to_string()))
-            .is_ok()
+                .is_ok()
         );
 
         let error = wait_for_turn_summary(

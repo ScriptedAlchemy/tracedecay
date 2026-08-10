@@ -1,18 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::context::ContextBuilder;
 use crate::errors::Result;
-use crate::graph::{GraphQueryManager, GraphTraverser};
+use crate::graph::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
-use crate::types::*;
+use crate::types::NodeKind;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+    CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
+    CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_domain::{CodeGenerationId, RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_usecases::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadAdmissionPort, CodeGraphReadAdmissionRequest,
     CodeGraphReadRequest, application_graph_cancellation, map_code_graph_read_runtime_error,
+    map_projection_error,
 };
 
 pub(crate) struct VerifiedGraphQuery {
@@ -34,6 +36,296 @@ impl VerifiedGraphQuery {
     pub(crate) fn manager(&self) -> GraphQueryManager<'_> {
         GraphQueryManager::new(&self.reader, Arc::clone(&self.cancellation))
     }
+
+    pub(crate) fn reader(&self) -> &CodeGraphInteractiveReader {
+        &self.reader
+    }
+
+    pub(crate) fn cancellation(&self) -> Arc<dyn GraphCancellation> {
+        Arc::clone(&self.cancellation)
+    }
+
+    pub(crate) async fn find_dead_code(
+        &self,
+        kinds: &[NodeKind],
+        include_public: bool,
+        limit: usize,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        self.manager()
+            .find_dead_code(kinds, include_public, Some(limit))
+            .await
+    }
+
+    pub(crate) async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
+        self.manager().find_circular_dependencies().await
+    }
+
+    pub(crate) async fn build_file_adjacency(
+        &self,
+        path_prefix: Option<&str>,
+    ) -> Result<HashMap<String, HashSet<String>>> {
+        self.manager().build_file_adjacency(path_prefix).await
+    }
+
+    pub(crate) fn generation(&self) -> &CodeGenerationId {
+        self.reader.generation()
+    }
+
+    pub(crate) fn symbol_summary(
+        &self,
+        occurrence: &SymbolOccurrenceId,
+    ) -> Result<Option<CodeGraphSymbolSummaryV1>> {
+        self.reader
+            .symbol_summary(occurrence, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn symbols_page(
+        &self,
+        after: Option<&SymbolOccurrenceId>,
+        max_symbols: usize,
+    ) -> Result<CodeGraphSymbolPageV1> {
+        self.reader
+            .symbols_page(after, max_symbols, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    /// Returns one stable page restricted to the requested logical files.
+    ///
+    /// The underlying projection pages by occurrence rather than by file. We
+    /// therefore continue its canonical occurrence scan until this page is
+    /// full, one additional matching symbol proves `has_more`, or the
+    /// generation ends. `max_symbols_examined` bounds unrelated symbols that
+    /// may occur between requested files; exhausting it is a typed budget
+    /// refusal rather than a false end-of-page result.
+    pub(crate) fn symbols_in_logical_files_page(
+        &self,
+        logical_paths: &HashSet<String>,
+        after: Option<&SymbolOccurrenceId>,
+        limit: usize,
+        max_symbols_examined: usize,
+    ) -> Result<CodeGraphSymbolPageV1> {
+        if limit == 0 || max_symbols_examined == 0 {
+            return Err(graph_invalid_request(
+                "verified graph file-symbol paging requires positive limits",
+            ));
+        }
+        if logical_paths.is_empty() {
+            return Ok(CodeGraphSymbolPageV1 {
+                symbols: Vec::new(),
+                has_more: false,
+            });
+        }
+        let mut cursor = after.cloned();
+        let mut symbols = Vec::with_capacity(limit);
+        let mut examined = 0usize;
+        loop {
+            let remaining = max_symbols_examined.saturating_sub(examined);
+            if remaining == 0 {
+                return Err(graph_budget_exhausted(
+                    "verified graph file-symbol paging exceeded its scan budget",
+                ));
+            }
+            let page = self.symbols_page(cursor.as_ref(), remaining.min(1_024))?;
+            if page.symbols.is_empty() {
+                return Ok(CodeGraphSymbolPageV1 {
+                    symbols,
+                    has_more: false,
+                });
+            }
+            examined = examined.saturating_add(page.symbols.len());
+            cursor = page.symbols.last().map(|symbol| symbol.occurrence.clone());
+            for symbol in page.symbols {
+                let Some(path) = symbol
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_ref())
+                else {
+                    return Err(graph_corrupt(
+                        "verified graph symbol is missing its logical file binding",
+                    ));
+                };
+                if !logical_paths.contains(path) {
+                    continue;
+                }
+                if symbols.len() == limit {
+                    return Ok(CodeGraphSymbolPageV1 {
+                        symbols,
+                        has_more: true,
+                    });
+                }
+                symbols.push(symbol);
+            }
+            if !page.has_more {
+                return Ok(CodeGraphSymbolPageV1 {
+                    symbols,
+                    has_more: false,
+                });
+            }
+        }
+    }
+
+    pub(crate) fn symbols_in_logical_file(
+        &self,
+        logical_path: &str,
+        limit: usize,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        self.reader
+            .symbols_in_logical_file(logical_path, limit, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn resolve_simple_name(
+        &self,
+        name: &str,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        self.reader
+            .resolve_simple_name(name, kind, limit, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn resolve_qualified_name(
+        &self,
+        qualified_name: &str,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        self.reader
+            .resolve_qualified_name(qualified_name, kind, limit, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn callers(
+        &self,
+        seeds: &[SymbolOccurrenceId],
+        kinds: &[RelationEdgeKindV1],
+        max_relations: usize,
+    ) -> Result<Vec<Vec<CodeGraphSemanticEdgeV1>>> {
+        self.reader
+            .callers(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn callees(
+        &self,
+        seeds: &[SymbolOccurrenceId],
+        kinds: &[RelationEdgeKindV1],
+        max_relations: usize,
+    ) -> Result<Vec<Vec<CodeGraphSemanticEdgeV1>>> {
+        self.reader
+            .callees(seeds, kinds, max_relations, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn edges_among(
+        &self,
+        occurrences: &[SymbolOccurrenceId],
+        kinds: &[RelationEdgeKindV1],
+        max_relations: usize,
+    ) -> Result<Vec<CodeGraphSemanticEdgeV1>> {
+        self.reader
+            .edges_among(
+                occurrences,
+                kinds,
+                max_relations,
+                Arc::clone(&self.cancellation),
+            )
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn impact(
+        &self,
+        seeds: &[SymbolOccurrenceId],
+        kinds: &[RelationEdgeKindV1],
+        max_depth: u32,
+        max_symbols: usize,
+        max_relations_per_hop: usize,
+    ) -> Result<CodeGraphImpactBatchV1> {
+        self.reader
+            .impact(
+                seeds,
+                kinds,
+                max_depth,
+                max_symbols,
+                max_relations_per_hop,
+                Arc::clone(&self.cancellation),
+            )
+            .map_err(graph_projection_error)
+    }
+
+    /// Finds files containing functions targeted by canonical annotation
+    /// edges whose source is a recognized test annotation marker.
+    pub(crate) fn test_annotated_logical_files(
+        &self,
+        logical_paths: Option<&HashSet<String>>,
+        max_symbols: usize,
+        max_relations: usize,
+    ) -> Result<HashSet<String>> {
+        let page = self.symbols_page(None, max_symbols)?;
+        if page.has_more {
+            return Err(graph_budget_exhausted(
+                "verified test-attribution census exceeded its symbol budget",
+            ));
+        }
+        let mut paths = HashMap::new();
+        let mut test_markers = HashSet::new();
+        for symbol in &page.symbols {
+            let binding = symbol.binding.as_ref().ok_or_else(|| {
+                graph_corrupt("verified graph symbol is missing its file binding")
+            })?;
+            let path = binding.logical_path.as_ref().ok_or_else(|| {
+                graph_corrupt("verified graph symbol is missing its logical file path")
+            })?;
+            let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+                graph_corrupt("verified graph symbol is missing lineage metadata")
+            })?;
+            paths.insert(symbol.occurrence.clone(), path.clone());
+            if metadata.kind == "annotation_usage"
+                && matches!(
+                    metadata.simple_name.as_str(),
+                    "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
+                )
+            {
+                test_markers.insert(symbol.occurrence.clone());
+            }
+        }
+        let occurrences = page
+            .symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<Vec<_>>();
+        Ok(self
+            .edges_among(
+                &occurrences,
+                &[RelationEdgeKindV1::Annotates],
+                max_relations,
+            )?
+            .into_iter()
+            .filter(|edge| test_markers.contains(&edge.edge.from_occurrence))
+            .filter_map(|edge| paths.get(&edge.edge.to_occurrence).cloned())
+            .filter(|path| logical_paths.is_none_or(|requested| requested.contains(path)))
+            .collect())
+    }
+}
+
+fn graph_projection_error(
+    error: tracedecay_code_index::graph_projection::CodeGraphProjectionError,
+) -> crate::errors::TraceDecayError {
+    map_code_graph_read_runtime_error(map_projection_error(error))
+}
+
+fn graph_invalid_request(detail: &str) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::project_route("code-graph-invalid-request", false, detail)
+}
+
+fn graph_budget_exhausted(detail: &str) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::project_route("code-graph-budget-exhausted", false, detail)
+}
+
+fn graph_corrupt(detail: &str) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::project_route("code-graph-corrupt", false, detail)
 }
 
 impl TraceDecay {
@@ -70,422 +362,5 @@ impl TraceDecay {
             .reader_with_cancellation(&context, observed_at, Arc::clone(&graph_cancellation))
             .map_err(map_code_graph_read_runtime_error)?;
         Ok(VerifiedGraphQuery::from_reader(reader, graph_cancellation))
-    }
-
-    /// Returns aggregate statistics about the code graph.
-    pub async fn get_stats(&self) -> Result<GraphStats> {
-        self.db.get_stats().await
-    }
-
-    /// Retrieves a single node by its unique ID.
-    pub async fn get_node(&self, id: &str) -> Result<Option<Node>> {
-        self.db.get_node_by_id(id).await
-    }
-
-    /// Returns all nodes that transitively call the given node, up to `max_depth`.
-    pub async fn get_callers(&self, node_id: &str, max_depth: usize) -> Result<Vec<(Node, Edge)>> {
-        let traverser = GraphTraverser::new(&self.db);
-        traverser.get_callers(node_id, max_depth).await
-    }
-
-    /// Returns all nodes that the given node transitively calls, up to `max_depth`.
-    pub async fn get_callees(&self, node_id: &str, max_depth: usize) -> Result<Vec<(Node, Edge)>> {
-        let traverser = GraphTraverser::new(&self.db);
-        traverser.get_callees(node_id, max_depth).await
-    }
-
-    /// Computes the impact radius: all nodes that directly or indirectly
-    /// depend on the given node, up to `max_depth`.
-    pub async fn get_impact_radius(&self, node_id: &str, max_depth: usize) -> Result<Subgraph> {
-        let traverser = GraphTraverser::new(&self.db);
-        traverser.get_impact_radius(node_id, max_depth).await
-    }
-
-    /// Same as `get_impact_radius` but multi-source: takes many seed node
-    /// IDs and walks the union of their impact radii with a single shared
-    /// `visited` set, so each downstream node is traversed at most once.
-    pub async fn get_impact_radius_multi(
-        &self,
-        seed_ids: &[String],
-        max_depth: usize,
-    ) -> Result<Vec<Node>> {
-        let traverser = GraphTraverser::new(&self.db);
-        traverser.get_impact_radius_multi(seed_ids, max_depth).await
-    }
-
-    /// [`TraceDecay::get_impact_radius_multi`] with cooperative batch
-    /// checkpoints.
-    pub async fn get_impact_radius_multi_controlled<F>(
-        &self,
-        seed_ids: &[String],
-        max_depth: usize,
-        checkpoint: &mut F,
-    ) -> Result<Vec<Node>>
-    where
-        F: FnMut() -> Result<()>,
-    {
-        let traverser = GraphTraverser::new(&self.db);
-        traverser
-            .get_impact_radius_multi_controlled(seed_ids, max_depth, checkpoint)
-            .await
-    }
-
-    /// Multi-source impact traversal reusing an already-read seed snapshot.
-    pub async fn get_impact_radius_multi_from_nodes_controlled<F>(
-        &self,
-        seed_nodes: &[Node],
-        max_depth: usize,
-        checkpoint: &mut F,
-    ) -> Result<Vec<Node>>
-    where
-        F: FnMut() -> Result<()>,
-    {
-        let traverser = GraphTraverser::new(&self.db);
-        traverser
-            .get_impact_radius_multi_from_nodes_controlled(seed_nodes, max_depth, checkpoint)
-            .await
-    }
-
-    /// Finds the shortest directed call chain from `from_id` to `to_id`,
-    /// following only outgoing `Calls` edges. Returns `None` if no chain
-    /// exists within `max_depth` hops.
-    pub async fn get_call_chain(
-        &self,
-        from_id: &str,
-        to_id: &str,
-        max_depth: usize,
-    ) -> Result<Option<crate::graph::traversal::GraphPath>> {
-        let traverser = GraphTraverser::new(&self.db);
-        traverser
-            .find_path_directed(from_id, to_id, &[crate::types::EdgeKind::Calls], max_depth)
-            .await
-    }
-
-    /// Builds a bidirectional call graph around a node.
-    pub async fn get_call_graph(&self, node_id: &str, depth: usize) -> Result<Subgraph> {
-        let traverser = GraphTraverser::new(&self.db);
-        traverser.get_call_graph(node_id, depth).await
-    }
-
-    /// Returns a bounded dead-code page for interactive tools.
-    pub(crate) async fn find_dead_code_bounded(
-        &self,
-        graph: &VerifiedGraphQuery,
-        kinds: &[NodeKind],
-        include_public: bool,
-        limit: usize,
-    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-        graph
-            .manager()
-            .find_dead_code(kinds, include_public, Some(limit))
-            .await
-    }
-
-    /// Returns all nodes for a given file, ordered by start line.
-    pub async fn get_nodes_by_file(&self, file_path: &str) -> Result<Vec<Node>> {
-        self.db.get_nodes_by_file(file_path).await
-    }
-
-    /// Returns one stable, bounded symbol page across requested files.
-    pub async fn get_nodes_by_files_page_controlled<F>(
-        &self,
-        file_paths: &[String],
-        config_paths: &[String],
-        after: Option<&crate::db::NodesByFilesPageKey>,
-        limit: usize,
-        checkpoint: F,
-    ) -> Result<crate::db::NodesByFilesPage>
-    where
-        F: FnMut() -> Result<()>,
-    {
-        self.db
-            .get_nodes_by_files_page_controlled(file_paths, config_paths, after, limit, checkpoint)
-            .await
-    }
-
-    /// Returns every node in the database.
-    pub async fn get_all_nodes(&self) -> Result<Vec<Node>> {
-        self.db.get_all_nodes().await
-    }
-
-    /// Returns the distinct file paths holding at least one node of `kind`, in
-    /// path order after `after_path`, so a whole-repository walk over one kind
-    /// can page instead of loading the graph.
-    pub async fn file_paths_with_nodes_of_kind(
-        &self,
-        kind: NodeKind,
-        after_path: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<String>> {
-        self.db
-            .file_paths_with_nodes_of_kind(kind, after_path, limit)
-            .await
-    }
-
-    /// Returns incoming edges to a target node.
-    pub async fn get_incoming_edges(&self, node_id: &str) -> Result<Vec<Edge>> {
-        self.db.get_incoming_edges(node_id, &[]).await
-    }
-
-    /// Returns the subset of `candidate_ids` that have a `#[test]` annotation.
-    pub async fn get_test_annotated_node_ids(
-        &self,
-        candidate_ids: &[String],
-    ) -> Result<HashSet<String>> {
-        self.db.get_test_annotated_node_ids(candidate_ids).await
-    }
-
-    /// Returns all file paths containing at least one `#[test]`-annotated function.
-    pub async fn get_files_with_test_annotations(&self) -> Result<HashSet<String>> {
-        self.db.get_files_with_test_annotations().await
-    }
-
-    /// Returns all node IDs marked with `/// skip-test-coverage`.
-    pub async fn get_skip_test_coverage_node_ids(&self) -> Result<HashSet<String>> {
-        self.db.get_skip_test_coverage_node_ids().await
-    }
-
-    /// Returns incoming edges for many target nodes in one round-trip.
-    /// Empty `kinds` matches every edge kind.
-    pub async fn get_incoming_edges_bulk(
-        &self,
-        target_ids: &[String],
-        kinds: &[EdgeKind],
-    ) -> Result<Vec<Edge>> {
-        self.db.get_incoming_edges_bulk(target_ids, kinds).await
-    }
-
-    /// [`TraceDecay::get_incoming_edges_bulk`] with cooperative page
-    /// checkpoints.
-    pub async fn get_incoming_edges_bulk_controlled<F>(
-        &self,
-        target_ids: &[String],
-        kinds: &[EdgeKind],
-        checkpoint: F,
-    ) -> Result<Vec<Edge>>
-    where
-        F: FnMut() -> Result<()>,
-    {
-        self.db
-            .get_incoming_edges_bulk_controlled(target_ids, kinds, checkpoint)
-            .await
-    }
-
-    /// Returns outgoing edges for many source nodes in one round-trip.
-    /// Empty `kinds` matches every edge kind.
-    pub async fn get_outgoing_edges_bulk(
-        &self,
-        source_ids: &[String],
-        kinds: &[EdgeKind],
-    ) -> Result<Vec<Edge>> {
-        self.db.get_outgoing_edges_bulk(source_ids, kinds).await
-    }
-
-    /// Returns all nodes whose `qualified_name` matches `qname`.
-    /// Cross-run lookup independent of the content-hash node IDs.
-    pub async fn get_nodes_by_qualified_name(&self, qname: &str) -> Result<Vec<Node>> {
-        self.db.get_nodes_by_qualified_name(qname).await
-    }
-
-    /// Exact bare-name lookup using `idx_nodes_name`. No relevance scoring,
-    /// no fuzzy matching — for that, use [`search`](Self::search).
-    pub async fn get_nodes_by_name(&self, name: &str) -> Result<Vec<Node>> {
-        self.db.get_nodes_by_name(name).await
-    }
-
-    /// Returns outgoing edges from a source node.
-    pub async fn get_outgoing_edges(&self, node_id: &str) -> Result<Vec<Edge>> {
-        self.db.get_outgoing_edges(node_id, &[]).await
-    }
-
-    /// Returns every edge in the database.
-    pub async fn get_all_edges(&self) -> Result<Vec<Edge>> {
-        self.db.get_all_edges().await
-    }
-
-    /// Returns nodes ranked by edge count for a given edge kind and direction,
-    /// optionally filtered by node kind.
-    pub async fn get_ranked_nodes_by_edge_kind(
-        &self,
-        edge_kind: &EdgeKind,
-        node_kind: Option<&NodeKind>,
-        incoming: bool,
-        path_prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(Node, u64)>> {
-        self.db
-            .get_ranked_nodes_by_edge_kind(edge_kind, node_kind, incoming, path_prefix, limit)
-            .await
-    }
-
-    /// Returns nodes ranked by total incoming and outgoing connectivity.
-    pub async fn get_hotspot_nodes(
-        &self,
-        path_prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(Node, u64, u64)>> {
-        self.db.get_hotspot_nodes(path_prefix, limit).await
-    }
-
-    /// Returns nodes ranked by line span, optionally filtered by node kind and path.
-    pub async fn get_largest_nodes(
-        &self,
-        node_kind: Option<&NodeKind>,
-        path_prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(Node, u32)>> {
-        self.db
-            .get_largest_nodes(node_kind, path_prefix, limit)
-            .await
-    }
-
-    /// Returns files ranked by coupling (fan-in or fan-out).
-    pub async fn get_file_coupling(
-        &self,
-        fan_in: bool,
-        path_prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(String, u64)>> {
-        self.db.get_file_coupling(fan_in, path_prefix, limit).await
-    }
-
-    /// Returns classes/interfaces ranked by inheritance depth via extends chains.
-    pub async fn get_inheritance_depth(
-        &self,
-        path_prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(Node, u64)>> {
-        self.db.get_inheritance_depth(path_prefix, limit).await
-    }
-
-    /// Returns node kind distribution for the highest-node-count files,
-    /// optionally filtered by path prefix.
-    pub async fn get_node_distribution(
-        &self,
-        path_prefix: Option<&str>,
-        file_limit: u32,
-    ) -> Result<Vec<(String, String, u64)>> {
-        self.db.get_node_distribution(path_prefix, file_limit).await
-    }
-
-    /// Returns whole-scope node counts per kind.
-    pub async fn get_node_kind_totals(
-        &self,
-        path_prefix: Option<&str>,
-    ) -> Result<Vec<(String, u64)>> {
-        self.db.get_node_kind_totals(path_prefix).await
-    }
-
-    /// Returns the number of files in the distribution scope.
-    pub async fn count_distribution_files(&self, path_prefix: Option<&str>) -> Result<u64> {
-        self.db.count_distribution_files(path_prefix).await
-    }
-
-    /// Returns calls edges as (`source_id`, `target_id`) pairs for cycle detection.
-    pub async fn get_call_edges(&self, path_prefix: Option<&str>) -> Result<Vec<(String, String)>> {
-        self.db.get_call_edges(path_prefix).await
-    }
-
-    /// Returns calls edges as (`source_id`, `target_id`, `line`) tuples.
-    pub async fn get_call_edges_with_lines(
-        &self,
-        path_prefix: Option<&str>,
-    ) -> Result<Vec<(String, String, Option<u32>)>> {
-        self.db.get_call_edges_with_lines(path_prefix).await
-    }
-
-    /// Returns functions/methods ranked by composite complexity score.
-    pub async fn get_complexity_ranked(
-        &self,
-        node_kind: Option<&NodeKind>,
-        path_prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(Node, u32, u64, u64, u64)>> {
-        self.db
-            .get_complexity_ranked(node_kind, path_prefix, limit)
-            .await
-    }
-
-    /// Returns public symbols missing docstrings.
-    pub async fn get_undocumented_public_symbols(
-        &self,
-        path_prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<Node>> {
-        self.db
-            .get_undocumented_public_symbols(path_prefix, limit)
-            .await
-    }
-
-    /// Returns classes ranked by member count (methods + fields).
-    pub async fn get_god_classes(
-        &self,
-        path_prefix: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(Node, u64, u64, u64)>> {
-        self.db.get_god_classes(path_prefix, limit).await
-    }
-
-    /// Detects circular dependencies at the file level.
-    pub(crate) async fn find_circular_dependencies(
-        &self,
-        graph: &VerifiedGraphQuery,
-    ) -> Result<Vec<Vec<String>>> {
-        graph.manager().find_circular_dependencies().await
-    }
-
-    pub(crate) async fn build_verified_file_adjacency(
-        &self,
-        graph: &VerifiedGraphQuery,
-        path_prefix: Option<&str>,
-    ) -> Result<HashMap<String, HashSet<String>>> {
-        graph.manager().build_file_adjacency(path_prefix).await
-    }
-
-    /// Builds an AI-ready context for a given task description.
-    pub async fn build_context(
-        &self,
-        task: &str,
-        options: &BuildContextOptions,
-    ) -> Result<TaskContext> {
-        let builder = ContextBuilder::new(&self.db, &self.project_root);
-        builder.build_context(task, options).await
-    }
-
-    /// Returns all indexed file records.
-    pub async fn get_all_files(&self) -> Result<Vec<FileRecord>> {
-        self.db.get_all_files().await
-    }
-
-    /// Returns all indexed logical file paths without full record metadata.
-    pub async fn get_all_file_paths(&self) -> Result<Vec<String>> {
-        self.db.get_all_file_paths().await
-    }
-
-    /// Returns file paths that depend on the given file.
-    pub(crate) async fn get_file_dependents(
-        &self,
-        graph: &VerifiedGraphQuery,
-        file_path: &str,
-    ) -> Result<Vec<String>> {
-        graph.manager().get_file_dependents(file_path).await
-    }
-
-    /// Returns a map of file path to approximate token count (size / 4).
-    ///
-    /// Delegates to the DB keyset-paged reader so callers never force an
-    /// unbounded full-`FileRecord` materialization on startup or refresh.
-    pub async fn get_file_token_map(&self) -> Result<HashMap<String, u64>> {
-        self.db.get_file_token_map().await
-    }
-
-    /// Returns all nodes under a directory prefix filtered by kinds.
-    pub async fn get_nodes_by_dir(&self, dir: &str, kinds: &[NodeKind]) -> Result<Vec<Node>> {
-        self.db.get_nodes_by_dir(dir, kinds).await
-    }
-
-    /// Returns edges where both source and target are in the given node ID set.
-    pub async fn get_internal_edges(&self, node_ids: &[String]) -> Result<Vec<Edge>> {
-        self.db.get_internal_edges(node_ids).await
     }
 }

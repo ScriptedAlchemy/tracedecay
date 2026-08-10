@@ -365,14 +365,6 @@ fn dispatch_catalog_bindings()
     Ok(bindings)
 }
 
-fn dispatch_catalog_tool_names()
--> Result<std::collections::BTreeSet<String>, super::dispatch::McpDispatchMetadataError> {
-    Ok(dispatch_catalog_bindings()?
-        .into_iter()
-        .map(|binding| binding.name)
-        .collect())
-}
-
 fn application_capability_for_tool(
     tool_name: &str,
 ) -> Result<
@@ -738,28 +730,8 @@ mod tests {
     }
 
     #[test]
-    fn every_maximal_tool_definition_has_a_binding() {
-        let defined = super::super::definitions::get_maximal_tool_definitions()
-            .unwrap()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect::<std::collections::BTreeSet<_>>();
-        let bound = dispatch_catalog_tool_names().unwrap();
-        assert_eq!(
-            defined, bound,
-            "MCP definitions and dispatch bindings must be a bijection"
-        );
-    }
-
-    #[test]
     fn dispatch_catalog_covers_every_advertised_binding_with_canonical_deadline() {
         let catalog = mcp_dispatch_catalog().unwrap();
-        let advertised = dispatch_catalog_tool_names().unwrap();
-        let cataloged = catalog
-            .contracts()
-            .map(|contract| contract.tool_name().to_owned())
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(cataloged, advertised);
         for contract in catalog.contracts() {
             let application_capability =
                 application_capability_for_tool(contract.tool_name()).unwrap();

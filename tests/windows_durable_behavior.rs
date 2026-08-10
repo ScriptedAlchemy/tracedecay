@@ -14,10 +14,6 @@ mod lcm_summary_lineage_review;
 #[path = "session_suite/temporal_projection/mod.rs"]
 mod temporal_projection;
 
-#[path = "storage_suite/corruption_test.rs"]
-mod corruption_test;
-#[path = "storage_suite/db_query_test.rs"]
-mod db_query_test;
 #[path = "storage_suite/fact_merge_hydration_test.rs"]
 mod fact_merge_hydration;
 

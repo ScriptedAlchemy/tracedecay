@@ -17,9 +17,9 @@ use tracedecay_application::git::{
     git_surface_operation,
 };
 use tracedecay_application::{
-    CancellationSignal, NativeIntegrationContractError, NativeIntegrationPort,
-    NativeIntegrationPortError, NativeIntegrationPreflightOutcomeV1,
-    NativeIntegrationPreflightRequestV1, RequestAdmission, RequestContext, ResolvedScope,
+    CancellationSignal, NativeIntegrationContractError, NativeIntegrationPortError,
+    NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1, RequestAdmission,
+    RequestContext, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, NativeIntegrationApprovalV1, ProjectId, StackDeliveryWatermarkId,

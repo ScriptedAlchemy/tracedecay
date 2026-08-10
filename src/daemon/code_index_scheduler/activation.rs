@@ -292,6 +292,36 @@ impl CodeIndexActivationV1 {
         }
     }
 
+    /// Request one authoritative worktree reconciliation without waiting for
+    /// indexing. The bounded pre-mount queue collapses repeated overflow
+    /// requests into one bit, while a mounted route forwards the same signal
+    /// to the retained scheduler owner.
+    pub(in crate::daemon) async fn notify_hook_overflow(&self, project_root: &Path) -> bool {
+        if !self.route_is_live() || !self.accepts_root(project_root) {
+            return false;
+        }
+        let direct = {
+            let mut pending = self
+                .pending_hooks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.state.load(Ordering::Acquire) == ACTIVATION_MOUNTED {
+                Some(CodeIndexActivationHookBatchV1 {
+                    paths: Vec::new(),
+                    overflow: true,
+                })
+            } else {
+                pending.overflow = true;
+                None
+            }
+        };
+        match direct {
+            Some(batch) if self.route_is_live() => (self.hint_sink)(batch).await,
+            Some(_) => false,
+            None => self.activate(),
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn activation_attempts(&self) -> usize {
         self.activation_attempts.load(Ordering::SeqCst)

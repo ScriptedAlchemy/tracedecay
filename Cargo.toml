@@ -413,6 +413,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fau
 [[bench]]
 name = "large_repos"
 harness = false
+required-features = ["test-transport"]
+
+[[bench]]
+name = "queries"
+required-features = ["test-transport"]
 
 [[bench]]
 name = "session_temporal"

@@ -5,12 +5,12 @@ use super::*;
 /// Handles `tracedecay_files` tool calls.
 pub(crate) async fn handle_files(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_files")?;
-    let mut files = cg.get_all_files().await?;
-    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut files = indexed_files(cg, graph)?;
 
     // Apply directory prefix filter
     if let Some(dir) = effective_path(&args, scope_prefix) {
@@ -23,9 +23,10 @@ pub(crate) async fn handle_files(
     }
 
     // Apply glob pattern filter
-    if let Some(pat) = args.get("pattern").and_then(|v| v.as_str())
-        && let Ok(glob) = glob::Pattern::new(pat)
-    {
+    if let Some(pat) = args.get("pattern").and_then(|v| v.as_str()) {
+        let glob = glob::Pattern::new(pat).map_err(|error| TraceDecayError::Config {
+            message: format!("invalid file glob '{pat}': {error}"),
+        })?;
         files.retain(|f| glob.matches(&f.path));
     }
 
@@ -57,7 +58,7 @@ pub(crate) async fn handle_files(
 
 /// Renders the listing from the records the handler already holds, rather than
 /// reading the keys back out of the JSON payload it just built.
-fn render_files_md(files: &[FileRecord], layout: &str) -> String {
+fn render_files_md(files: &[verified::IndexedFileSummary], layout: &str) -> String {
     let mut md = Md::new();
     md.heading(2, "Files");
     md.field("indexed files", &files.len().to_string());

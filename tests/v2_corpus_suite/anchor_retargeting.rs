@@ -22,7 +22,7 @@ use std::process::Command;
 use tempfile::TempDir;
 use tracedecay::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_domain::research::{
-    AttributionGap, GitTruthManifest, LogSafeText, ResearchAnchorSubjectV1,
+    AttributionGap, DomainError, GitTruthManifest, LogSafeText, ResearchAnchorSubjectV1,
     ResearchAnchorTombstoneV1, ResearchBundleEnvelopeV1, ResearchBundleManifestV1,
     ResearchContextAnchorV1, RetrievalRecipeV1, SanitizationReceiptRefV1,
     SanitizationReceiptResolverV1, SanitizedTextRefV1,

@@ -4,6 +4,8 @@
 //! temp `~/.claude` fixture tree plus a seeded `sessions.db`, mirroring
 //! `git_correlation_test.rs`.
 
+#![cfg(feature = "test-transport")]
+
 use std::path::Path;
 
 use serde_json::{Value, json};

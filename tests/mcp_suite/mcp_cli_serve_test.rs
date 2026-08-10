@@ -929,7 +929,7 @@ async fn explicit_read_only_open_reports_and_guards_read_only_store() {
             .is_some_and(|actions| actions.iter().any(|a| a == "retry"))
     );
 
-    let error = match cg.index_all().await {
+    let error = match cg.open_project_store_db().await {
         Ok(_) => panic!("mutating operations should be guarded before SQLite rejects writes"),
         Err(error) => error,
     };

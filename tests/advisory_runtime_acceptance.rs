@@ -1,6 +1,7 @@
 //! Strict advisory runtime acceptance over authentic provider response captures.
 
 use std::collections::{BTreeSet, VecDeque};
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -41,21 +42,31 @@ use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadReque
 #[cfg(feature = "test-transport")]
 use tracedecay_application::now_micros;
 use tracedecay_application::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId, ResolvedScope,
+    CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, RequestAdmission, RequestContext, RequestId, ResolvedScope,
 };
+use tracedecay_code_index::graph_projection::{
+    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
 use tracedecay_domain::feedback::{
     FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCommentIdV1,
     GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
     ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId, ProviderId,
-    RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros, WorktreeId,
+    ActorId, CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
+    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, SanitizedCodeFileV1,
+    SnapshotFileDispositionV1, SourceSpan, UtcMicros, WorktreeId,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
+use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_usecases::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
+    VerifiedCodeGraphRead,
+};
 
 #[cfg(feature = "test-transport")]
 use tracedecay::application::ProjectSourceAccessSnapshot;
@@ -99,9 +110,9 @@ use tracedecay_domain::feedback::{
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CodeGenerationId,
-    ComponentVersion, LocatorDigest, ObservationId, ObservationOrderingDomainV1,
-    ObservationSourceRangeV1, SessionId, SymbolOccurrenceId,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion, LocatorDigest,
+    ObservationId, ObservationOrderingDomainV1, ObservationSourceRangeV1, SessionId,
+    SymbolOccurrenceId,
 };
 
 mod common;
@@ -154,6 +165,93 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for FixtureAnchors {
             })
         })
     }
+}
+
+#[derive(Clone)]
+struct HermeticAdvisoryCodeGraphV1 {
+    scope: ResolvedScope,
+    store: Arc<CodeGraphProjectionStore>,
+}
+
+impl CodeGraphProjectionReadPort for HermeticAdvisoryCodeGraphV1 {
+    fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+        Box::pin(async move {
+            request
+                .context
+                .validate()
+                .map_err(|error| CodeGraphReadError::InvalidRequest {
+                    detail: error.to_string(),
+                })?;
+            if request.context.scope() != &self.scope {
+                return Err(CodeGraphReadError::Denied);
+            }
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            match request.context.admission_at(request.observed_at) {
+                RequestAdmission::Admitted => {}
+                RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
+                RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
+            }
+            VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store))
+        })
+    }
+}
+
+fn hermetic_advisory_code_graph(
+    scope: &FeedbackScopeV1,
+    project_root: &Path,
+    logical_path: &str,
+) -> Arc<dyn CodeGraphProjectionReadPort> {
+    let resolved_scope = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        Some(RefId::new(scope.branch_ref.clone()).expect("fixture branch reference")),
+    )
+    .expect("fixture graph scope");
+    let bytes = std::fs::read(project_root.join(logical_path)).expect("fixture graph source");
+    let source_digest = hex::encode(Sha256::digest(&bytes));
+    let generation = CodeGenerationId::new(format!(
+        "generation.advisory.github.{}",
+        &source_digest[..16]
+    ))
+    .expect("fixture graph generation");
+    let cancellation = CancellationSignal::active("cancel.advisory.github.graph")
+        .expect("fixture graph cancellation");
+    let projection = HermeticCodeGraphProjectionStore::memory(&cancellation)
+        .expect("hermetic advisory graph projection");
+    let files = [SanitizedCodeFileV1 {
+        file_occurrence_id: FileOccurrenceId::new(format!(
+            "file.advisory.github.{}",
+            &source_digest[..16]
+        ))
+        .expect("fixture graph file identity"),
+        logical_path: logical_path.to_owned(),
+        language: None,
+        content_digest: ContentDigest::new(format!("sha256:{source_digest}"))
+            .expect("fixture graph content digest"),
+        disposition: SnapshotFileDispositionV1::Present,
+    }];
+    let symbols = GenerationSymbolIndexV1::new(generation.clone(), Vec::new())
+        .expect("fixture graph symbol index");
+    projection
+        .publish_indexed_with_cancellation(
+            &generation,
+            &[],
+            &[],
+            &files,
+            &symbols,
+            Arc::new(NeverCancelled),
+        )
+        .expect("publish fixture graph generation");
+    let store = projection
+        .verified_store(&generation)
+        .expect("verify fixture graph generation");
+    Arc::new(HermeticAdvisoryCodeGraphV1 {
+        scope: resolved_scope,
+        store: Arc::new(store),
+    })
 }
 
 #[cfg(feature = "test-transport")]
@@ -599,7 +697,9 @@ async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access()
         branch_ref: "refs/heads/github-body".to_owned(),
         head_commit_id: head.clone(),
     };
-    let authority = ProjectGitHubAnchorAuthorityV1::new(database, &project, scope.clone()).unwrap();
+    let code_graph = hermetic_advisory_code_graph(&scope, &project, "src/lib.rs");
+    let authority =
+        ProjectGitHubAnchorAuthorityV1::new(database, &project, scope.clone(), code_graph).unwrap();
     let request = GitHubReviewReadRequestV1 {
         operation: GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
         scope: scope.clone(),
@@ -1702,8 +1802,9 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         scope: scope.clone(),
         pull_request_id: fixture.github.pull_request_id.clone(),
     };
+    let code_graph = hermetic_advisory_code_graph(&scope, &project, "src/lib.rs");
     let anchors = Arc::new(
-        ProjectGitHubAnchorAuthorityV1::new(database.clone(), &project, scope.clone())
+        ProjectGitHubAnchorAuthorityV1::new(database.clone(), &project, scope.clone(), code_graph)
             .expect("production GitHub anchor authority"),
     );
     let decoder = GitHubOfficialResponseDecoderV1::new(

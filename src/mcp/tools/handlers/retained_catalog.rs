@@ -8,10 +8,7 @@ use tracedecay_application::{
 };
 use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
-use crate::application_surface::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, normalize_application_tool_args,
-    parse_application_surface_request,
-};
+use crate::application_surface::normalize_application_tool_args;
 use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
@@ -60,7 +57,20 @@ fn retained_mcp_binding(operation: RetainedSurfaceOperation) -> Result<BindingId
             "retained MCP binding resolves a different application operation",
         ));
     }
-    Ok(capability.binding_id().clone())
+    capability
+        .binding_ids()
+        .iter()
+        .find(|binding_id| {
+            composition
+                .snapshot()
+                .binding(binding_id)
+                .is_some_and(|binding| {
+                    binding.surface() == BindingSurface::Mcp
+                        && binding.operation() == &operation_name
+                })
+        })
+        .cloned()
+        .ok_or_else(|| retained_catalog_error("retained MCP binding identity is unavailable"))
 }
 
 pub(crate) fn retained_mcp_operation(
@@ -138,12 +148,6 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     protocol_cancellation: Option<tracedecay_application::CancellationSignal>,
     project_root: Option<&std::path::Path>,
 ) -> Result<ToolResult> {
-    let canonical_tool_name = format!("tracedecay_{}", operation.as_str());
-    let surface_operation = ApplicationSurfaceOperation::from_tool_name(&canonical_tool_name)
-        .filter(|operation| {
-            operation.owner_kind() == tracedecay_api::HttpApplicationOwnerKind::Retained
-        })
-        .ok_or_else(|| retained_catalog_error("retained MCP operation is not mounted"))?;
     if let Some(arguments) = args.as_object_mut() {
         if tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search" {
             arguments.remove("storage_scope");
@@ -162,18 +166,8 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     })?;
     let requested_format = normalized.requested_format;
     let typed_request =
-        match parse_application_surface_request(surface_operation, normalized.request).map_err(
-            |error| TraceDecayError::Config {
-                message: error.to_string(),
-            },
-        )? {
-            ApplicationSurfaceRequest::Retained(request) => request,
-            _ => {
-                return Err(retained_catalog_error(
-                    "retained MCP parser resolved a different application family",
-                ));
-            }
-        };
+        crate::application_surface::retained::decode_request(operation, normalized.request)
+            .ok_or_else(|| retained_catalog_error("retained MCP request is invalid"))?;
     if typed_request.operation() != operation {
         return Err(retained_catalog_error(
             "retained MCP request does not match its catalog operation",
@@ -184,8 +178,8 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
         Some(request_id) => request_id,
         None => application_surface::request_id()?,
     };
-    let (deadline, cancellation) = application_surface::complete_protocol_controls(
-        surface_operation,
+    let (deadline, cancellation) = application_surface::complete_retained_protocol_controls(
+        operation,
         &request_id,
         protocol_deadline,
         protocol_cancellation,
@@ -213,7 +207,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
     .await?;
     application_surface::render_retained_result(
         project_root,
-        surface_operation,
+        operation,
         binding_id,
         result,
         requested_format,

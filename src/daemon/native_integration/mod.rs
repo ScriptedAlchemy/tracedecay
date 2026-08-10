@@ -20,8 +20,4 @@ pub(crate) use registry::{DaemonNativeIntegrationOwner, DaemonNativeIntegrationS
 pub(crate) use stack_hook_wakeup::{
     github_stack_hook_available, register_github_stack_hook_runtime,
 };
-pub(crate) use stack_runtime::DaemonGitHubStackRuntimeV1;
-pub(crate) use worktree::{
-    DaemonAuthorizedScopeSetReader, DaemonNativeWorktreeAuthority, WorktreeHolderAdmissionFenceV1,
-    daemon_worktree_holder_admission_fence,
-};
+pub(crate) use worktree::{WorktreeHolderAdmissionFenceV1, daemon_worktree_holder_admission_fence};

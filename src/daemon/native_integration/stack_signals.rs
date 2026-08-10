@@ -163,12 +163,10 @@ mod tests {
         BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
         BranchStackSourceV1, CommitId, FrozenBranchStackSnapshotV1, GitHeadStateV1,
         GitObjectFormatV1, GitOidV1, GitOperationStateV1, MechanicalIntegrationModeV1,
-        NativeChangeSurfaceCoverageV1, NativeChangeSurfaceEvidenceV1, NativeConflictPredictionV1,
         NativeIntegrationApprovalId, NativeIntegrationDirectionV1, NativeIntegrationPhaseV1,
         NativeIntegrationPreviewId, NativeIntegrationRepositorySnapshotV1,
         NativeIntegrationTransactionId, NativeIntegrationTransactionStatusV1, ProjectId, RefId,
-        RepositoryId, ScopeSetId, ScopeSetRevision, StackNodeId, WorktreeId,
-        WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+        RepositoryId, StackNodeId, WorktreeId, WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
     };
 
     fn digest(byte: char) -> ManifestDigest {
@@ -243,10 +241,6 @@ mod tests {
         let repository_snapshot = NativeIntegrationRepositorySnapshotV1 {
             project_id: scope.project_id.clone(),
             repository_id: scope.repository_id.clone(),
-            authorized_scope_set_id: ScopeSetId::new("scope-set.stack-producer")
-                .expect("scope set"),
-            authorized_scope_set_revision: ScopeSetRevision::new(1).expect("scope revision"),
-            authorized_scope_set_digest: digest('a'),
             source_worktree_id: selection
                 .source_worktree_id()
                 .expect("source worktree")
@@ -281,10 +275,6 @@ mod tests {
             disposition,
             NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(_)
         );
-        let conflict = matches!(
-            disposition,
-            NativeIntegrationPreviewDispositionV1::NativeConflict { .. }
-        );
         let preview = NativeIntegrationPreviewV1 {
             preview_id: NativeIntegrationPreviewId::new("preview.stack-producer").expect("preview"),
             selection,
@@ -295,17 +285,6 @@ mod tests {
             test_revision_digest: digest('3'),
             schema_revision_digest: digest('4'),
             migration_revision_digest: digest('5'),
-            change_surface: NativeChangeSurfaceEvidenceV1 {
-                source_changed_files: 1,
-                destination_changed_files: 1,
-                overlapping_changed_files: u32::from(conflict),
-                prediction: if conflict {
-                    NativeConflictPredictionV1::Conflict
-                } else {
-                    NativeConflictPredictionV1::NoConflict
-                },
-                coverage: NativeChangeSurfaceCoverageV1::Complete,
-            },
             disposition,
             candidate_tree: eligible.then(|| oid('6')),
             ordered_commits: vec![oid('1')],

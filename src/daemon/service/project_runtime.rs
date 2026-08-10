@@ -1,25 +1,22 @@
 //! One typed runtime registry entry per canonical project.
 //! Publication and shutdown operate on each project's components as a unit.
 
-use std::any::{Any, TypeId};
+#[cfg(test)]
+use std::any::Any;
+use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard};
 
-use tokio::sync::{Mutex as AsyncMutex, watch};
-use tracedecay_lsp::FeedbackCycleRuntimePort;
-
 use crate::application::feedback::FeedbackCycleRuntime;
-use crate::application::feedback::concrete::FeedbackRuntime;
 use crate::application::primitives::PrimitiveProjectRuntime;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use super::invocation::{
-    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
-    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, RegisteredCallableCodeRuntime,
-    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredHookOrchestrationRuntimeV1, RegisteredRetainedRuntime, RegisteredWorkRuntime,
+    DaemonLspInvocationOwner, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
+    RegisteredFeedbackRuntime, RegisteredRetainedRuntime, RegisteredWorkRuntime,
     SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
@@ -114,7 +111,6 @@ impl<const SLOT: u8> Drop for RecordingComponent<SLOT> {
 pub(crate) struct ProjectRuntime {
     callable_code: Option<RegisteredCallableCodeRuntime>,
     feedback: Option<RegisteredFeedbackRuntime>,
-    advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
     feedback_cycle: Option<Arc<FeedbackCycleRuntime>>,
     feedback_cycle_input: Option<Arc<SwitchableFeedbackCycleRuntimeV1>>,
     primitive: Option<PrimitiveProjectRuntime>,
@@ -122,14 +118,13 @@ pub(crate) struct ProjectRuntime {
     work: Option<RegisteredWorkRuntime>,
     retained: Option<RegisteredRetainedRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
-    advisory: Option<Arc<dyn Any + Send + Sync>>,
-    advisory_hook_orchestrator: Option<RegisteredHookOrchestrationRuntimeV1>,
-    external_acquisition:
-        Option<Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>>,
+    #[cfg(test)]
+    test_marker: Option<Arc<dyn Any + Send + Sync>>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
     semantic_activation_reconciler: Option<
         Arc<crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1>,
     >,
+    observability: Option<RegisteredObservabilityProducerV1>,
     reservations: Vec<TypeId>,
     #[cfg(test)]
     test_first: Option<TestFirst>,
@@ -147,7 +142,6 @@ impl ProjectRuntime {
     fn has_components(&self) -> bool {
         self.callable_code.is_some()
             || self.feedback.is_some()
-            || self.advisory_cycle.is_some()
             || self.feedback_cycle.is_some()
             || self.feedback_cycle_input.is_some()
             || self.primitive.is_some()
@@ -155,15 +149,14 @@ impl ProjectRuntime {
             || self.work.is_some()
             || self.retained.is_some()
             || self.lsp_owner.is_some()
-            || self.advisory.is_some()
-            || self.advisory_hook_orchestrator.is_some()
-            || self.external_acquisition.is_some()
             || self.semantic.is_some()
             || self.semantic_activation_reconciler.is_some()
+            || self.observability.is_some()
             || {
                 #[cfg(test)]
                 {
-                    self.test_first.is_some()
+                    self.test_marker.is_some()
+                        || self.test_first.is_some()
                         || self.test_second.is_some()
                         || self.test_omitted.is_some()
                         || self.recording_first.is_some()
@@ -206,7 +199,6 @@ macro_rules! project_runtime_components {
 project_runtime_components!(
     RegisteredCallableCodeRuntime => callable_code,
     RegisteredFeedbackRuntime => feedback,
-    DaemonAdvisoryCycleInvocationOwner => advisory_cycle,
     Arc<FeedbackCycleRuntime> => feedback_cycle,
     Arc<SwitchableFeedbackCycleRuntimeV1> => feedback_cycle_input,
     PrimitiveProjectRuntime => primitive,
@@ -214,15 +206,14 @@ project_runtime_components!(
     RegisteredWorkRuntime => work,
     RegisteredRetainedRuntime => retained,
     DaemonLspInvocationOwner => lsp_owner,
-    Arc<dyn Any + Send + Sync> => advisory,
-    RegisteredHookOrchestrationRuntimeV1 => advisory_hook_orchestrator,
-    Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1> => external_acquisition,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
     Arc<crate::daemon::semantic_activation_reconciler::DaemonSemanticActivationReconcilerV1> => semantic_activation_reconciler,
+    RegisteredObservabilityProducerV1 => observability,
 );
 
 #[cfg(test)]
 project_runtime_components!(
+    Arc<dyn Any + Send + Sync> => test_marker,
     TestFirst => test_first,
     TestSecond => test_second,
     TestOmitted => test_omitted,
@@ -363,7 +354,6 @@ impl ProjectRuntimePublication {
                 }
                 move_component!(callable_code);
                 move_component!(feedback);
-                move_component!(advisory_cycle);
                 move_component!(feedback_cycle);
                 move_component!(feedback_cycle_input);
                 move_component!(primitive);
@@ -371,9 +361,8 @@ impl ProjectRuntimePublication {
                 move_component!(work);
                 move_component!(retained);
                 move_component!(lsp_owner);
-                move_component!(advisory);
-                move_component!(advisory_hook_orchestrator);
-                move_component!(external_acquisition);
+                #[cfg(test)]
+                move_component!(test_marker);
                 move_component!(semantic);
                 #[cfg(test)]
                 {
@@ -408,77 +397,6 @@ pub(crate) struct ProjectRuntimeAlreadyRegistered;
 pub(crate) enum ProjectRuntimeRegistryError {
     AlreadyRegistered,
     Closed,
-}
-
-#[derive(Debug)]
-pub(crate) enum FeedbackCyclePublicationError {
-    Registry(ProjectRuntimeRegistryError),
-    RouterUnavailable,
-}
-
-/// Receipt of one atomic advisory publication. Dropping it without `commit`
-/// rolls the publication back, restoring the previous feedback route and
-/// vacating the advisory slots — but only while this exact publication is
-/// still the one routed, so a successor is never clobbered.
-pub(crate) struct AdvisoryRuntimePublicationV1 {
-    registry: ProjectRuntimeRegistryV1,
-    project_root: PathBuf,
-    advisory: Arc<dyn Any + Send + Sync>,
-    advisory_cycle: Arc<dyn DaemonAdvisoryCycleInvocationPort>,
-    feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
-    previous_feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
-    active: bool,
-}
-
-impl AdvisoryRuntimePublicationV1 {
-    pub(crate) fn commit(mut self) {
-        self.active = false;
-    }
-
-    fn rollback(&mut self) {
-        let mut runtimes = self.registry.lock_runtimes();
-        let Some(runtime) = runtimes.get_mut(&self.project_root) else {
-            return;
-        };
-        let exact_publication = runtime
-            .advisory
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, &self.advisory))
-            && runtime
-                .advisory_cycle
-                .as_ref()
-                .is_some_and(|owner| Arc::ptr_eq(&owner.service, &self.advisory_cycle));
-        if !exact_publication {
-            return;
-        }
-        if let Some(router) = &runtime.feedback_cycle_input {
-            let restored = router
-                .replace_if_same(
-                    &self.feedback_input,
-                    Arc::clone(&self.previous_feedback_input),
-                )
-                .is_ok_and(|same| same);
-            if !restored {
-                return;
-            }
-        }
-        runtime.advisory.take();
-        runtime.advisory_cycle.take();
-    }
-}
-
-impl Drop for AdvisoryRuntimePublicationV1 {
-    fn drop(&mut self) {
-        if self.active {
-            self.rollback();
-        }
-    }
-}
-
-impl From<ProjectRuntimeRegistryError> for FeedbackCyclePublicationError {
-    fn from(error: ProjectRuntimeRegistryError) -> Self {
-        Self::Registry(error)
-    }
 }
 
 impl From<ProjectRuntimeAlreadyRegistered> for ProjectRuntimeRegistryError {
@@ -794,117 +712,8 @@ impl ProjectRuntimeRegistryV1 {
             .await
     }
 
-    pub(crate) async fn publish_feedback_cycle_atomically(
-        &self,
-        project_root: PathBuf,
-        runtime: Arc<FeedbackCycleRuntime>,
-        production_input: Arc<dyn FeedbackCycleRuntimePort>,
-    ) -> Result<(), FeedbackCyclePublicationError> {
-        loop {
-            let mut reservation_changed = self.reservation_changed.subscribe();
-            {
-                let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) {
-                    return Err(ProjectRuntimeRegistryError::Closed.into());
-                }
-                let incumbent = runtimes.entry(project_root.clone()).or_default();
-                let reserved = incumbent.reservations.iter().any(|type_id| {
-                    *type_id == TypeId::of::<Arc<FeedbackCycleRuntime>>()
-                        || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
-                });
-                if !reserved {
-                    if incumbent.feedback_cycle.is_some() {
-                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
-                    }
-                    if let Some(router) = &incumbent.feedback_cycle_input {
-                        router
-                            .replace(production_input)
-                            .map(|_| ())
-                            .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
-                    } else {
-                        incumbent.feedback_cycle_input = Some(Arc::new(
-                            SwitchableFeedbackCycleRuntimeV1::new(production_input),
-                        ));
-                    }
-                    incumbent.feedback_cycle = Some(runtime);
-                    return Ok(());
-                }
-            }
-            if reservation_changed.changed().await.is_err() {
-                return Err(ProjectRuntimeRegistryError::Closed.into());
-            }
-        }
-    }
-
-    /// Publishes the complete advisory capability bundle under one registry
-    /// lock. The existing switchable feedback route is updated only after all
-    /// target slots have been proved vacant, so failure exposes neither a
-    /// partial cycle nor an unreachable advisory owner.
-    pub(crate) async fn publish_advisory_atomically(
-        &self,
-        project_root: &Path,
-        advisory: Arc<dyn Any + Send + Sync>,
-        advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
-        feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
-        cancellation: &crate::application::context::CancellationToken,
-    ) -> Result<AdvisoryRuntimePublicationV1, FeedbackCyclePublicationError> {
-        loop {
-            let mut reservation_changed = self.reservation_changed.subscribe();
-            {
-                let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) {
-                    return Err(ProjectRuntimeRegistryError::Closed.into());
-                }
-                let Some(runtime) = runtimes.get_mut(project_root) else {
-                    return Err(FeedbackCyclePublicationError::RouterUnavailable);
-                };
-                let reserved = runtime.reservations.iter().any(|type_id| {
-                    *type_id == TypeId::of::<Arc<dyn Any + Send + Sync>>()
-                        || *type_id == TypeId::of::<DaemonAdvisoryCycleInvocationOwner>()
-                        || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
-                });
-                if !reserved {
-                    if cancellation.is_cancelled() {
-                        return Err(FeedbackCyclePublicationError::RouterUnavailable);
-                    }
-                    if runtime.advisory.is_some() || runtime.advisory_cycle.is_some() {
-                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
-                    }
-                    let router = runtime
-                        .feedback_cycle_input
-                        .as_ref()
-                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?;
-                    let previous_feedback_input = router
-                        .replace(Arc::clone(&feedback_input))
-                        .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
-                    let advisory_cycle_service = Arc::clone(&advisory_cycle.service);
-                    runtime.advisory = Some(Arc::clone(&advisory));
-                    runtime.advisory_cycle = Some(advisory_cycle);
-                    return Ok(AdvisoryRuntimePublicationV1 {
-                        registry: self.clone(),
-                        project_root: project_root.to_path_buf(),
-                        advisory,
-                        advisory_cycle: advisory_cycle_service,
-                        feedback_input,
-                        previous_feedback_input,
-                        active: true,
-                    });
-                }
-            }
-            tokio::select! {
-                changed = reservation_changed.changed() => {
-                    if changed.is_err() {
-                        return Err(ProjectRuntimeRegistryError::Closed.into());
-                    }
-                }
-                () = cancellation.cancelled() => {
-                    return Err(FeedbackCyclePublicationError::RouterUnavailable);
-                }
-            }
-        }
-    }
-
     /// Withdraw a component, returning it if it was there.
+    #[cfg(test)]
     pub(crate) async fn withdraw<C>(&self, project_root: &Path) -> Option<C>
     where
         C: ProjectRuntimeComponent,
@@ -939,6 +748,22 @@ impl ProjectRuntimeRegistryV1 {
     {
         let runtimes = self.lock_runtimes();
         runtimes.get(project_root).and_then(C::peek).map(read)
+    }
+
+    /// Project a value from the one registered component that matches.
+    ///
+    /// Project-id lookups have no root to disambiguate linked worktrees. An
+    /// ambiguous match therefore remains unavailable instead of attaching an
+    /// observation to whichever root happens to sort first.
+    pub(crate) fn find_current<C, T, F>(&self, mut find: F) -> Option<T>
+    where
+        C: ProjectRuntimeComponent,
+        F: FnMut(&C) -> Option<T>,
+    {
+        let runtimes = self.lock_runtimes();
+        let mut matches = runtimes.values().filter_map(C::peek).filter_map(&mut find);
+        let only = matches.next()?;
+        matches.next().is_none().then_some(only)
     }
 
     /// Register a component, or accept an incumbent the caller recognizes as

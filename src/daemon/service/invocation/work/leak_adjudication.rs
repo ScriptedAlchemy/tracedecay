@@ -10,8 +10,6 @@ pub(super) struct DaemonWorkLeakEvidenceV1 {
     pub(super) effect: Option<tracedecay_application::WorkAttemptEffectHolderV1>,
     pub(super) placement: tracedecay_application::WorkPlacementReadingV1,
     pub(super) delivery: tracedecay_global_db::WorkAttemptDeliveryCensusReadV1,
-    pub(super) source_fingerprint: ManifestDigest,
-    pub(super) scan_started_at: UtcMicros,
 }
 
 impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1 {
@@ -22,11 +20,10 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
         scan_started_at: UtcMicros,
         scan_deadline: UtcMicros,
     ) -> Result<
-        tracedecay_application::WorkLeakEvidenceInspectionV1,
+        tracedecay_application::VerifiedWorkLeakEvidenceV1,
         tracedecay_application::WorkLeakEvidenceErrorV1,
     > {
         if self.attempt.identity() != &command.attempt
-            || self.scan_started_at != scan_started_at
             || !attempt_matches_authority(&self.attempt, authority)
         {
             return Err(tracedecay_application::WorkLeakEvidenceErrorV1::Conflict);
@@ -47,7 +44,7 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
             && terminal_horizon_elapsed(
                 &self.attempt,
                 command.detection_horizon_micros,
-                self.scan_started_at,
+                scan_started_at,
             ) {
             (
                 tracedecay_domain::WorkExecutionLeakKindV1::LeaseAfterTerminal,
@@ -57,7 +54,7 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
                 "lease-after-terminal",
             )
         } else if self.effect.as_ref().is_some_and(|holder| {
-            holder.is_unknown_past_deadline(self.scan_started_at, command.detection_horizon_micros)
+            holder.is_unknown_past_deadline(scan_started_at, command.detection_horizon_micros)
         }) {
             (
                 tracedecay_domain::WorkExecutionLeakKindV1::EffectUnknownPastDeadline,
@@ -78,7 +75,7 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
             &self.delivery,
             self.attempt.identity(),
             command.detection_horizon_micros,
-            self.scan_started_at,
+            scan_started_at,
         ) {
             (
                 tracedecay_domain::WorkExecutionLeakKindV1::UnboundedDelivery,
@@ -93,7 +90,7 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
                 horizon_elapsed(
                     holder.dispatched_at(),
                     command.detection_horizon_micros,
-                    self.scan_started_at,
+                    scan_started_at,
                 )
             })
         {
@@ -171,26 +168,23 @@ impl tracedecay_application::WorkLeakEvidencePortV1 for DaemonWorkLeakEvidenceV1
                 "incomplete-attempt-evidence",
             )
         };
-        Ok(tracedecay_application::WorkLeakEvidenceInspectionV1 {
-            evidence: tracedecay_application::VerifiedWorkLeakEvidenceV1 {
-                attempt: command.attempt.clone(),
-                kind,
-                recovery,
-                owner_class,
-                coverage,
-                detection_horizon_micros: command.detection_horizon_micros,
-                scan_started_at: self.scan_started_at,
-                scan_completed_at,
-                evidence_refs: vec![opaque_leak_evidence_ref(
-                    evidence_kind,
-                    self.attempt.identity(),
-                    self.has_live_owner,
-                    &self.effect,
-                    &self.placement,
-                    &self.delivery,
-                )?],
-            },
-            source_fingerprint: self.source_fingerprint.clone(),
+        Ok(tracedecay_application::VerifiedWorkLeakEvidenceV1 {
+            attempt: command.attempt.clone(),
+            kind,
+            recovery,
+            owner_class,
+            coverage,
+            detection_horizon_micros: command.detection_horizon_micros,
+            scan_started_at,
+            scan_completed_at,
+            evidence_refs: vec![opaque_leak_evidence_ref(
+                evidence_kind,
+                self.attempt.identity(),
+                self.has_live_owner,
+                &self.effect,
+                &self.placement,
+                &self.delivery,
+            )?],
         })
     }
 }
@@ -221,37 +215,11 @@ pub(super) async fn adjudicate_leak(
         context,
         &command.attempt,
         &storage,
-        observed_at,
     )
     .await?;
     let service =
         tracedecay_application::WorkLeakAdjudicationServiceV1::new(storage.clone(), evidence);
-    let attempt_identity = command.attempt.clone();
-    match service.inspect(context, command, observed_at, scan_deadline)? {
-        tracedecay_application::WorkLeakAdjudicationInspectionOutcomeV1::Replayed(receipt) => {
-            Ok(tracedecay_application::WorkLeakAdjudicationOutcomeV1::Replayed(receipt))
-        }
-        tracedecay_application::WorkLeakAdjudicationInspectionOutcomeV1::Pending(inspection) => {
-            let reread = read_leak_evidence(
-                registered,
-                services,
-                attempt_processes,
-                context,
-                &attempt_identity,
-                &storage,
-                observed_at,
-            )
-            .await?;
-            // `record_revalidated` checks this end-of-scan fingerprint as its
-            // final operation before the receipt compare-and-swap.
-            service.record_revalidated(
-                context,
-                &inspection,
-                reread.source_fingerprint,
-                now_micros(),
-            )
-        }
-    }
+    service.adjudicate(context, command, observed_at, scan_deadline)
 }
 
 async fn read_leak_evidence(
@@ -261,7 +229,6 @@ async fn read_leak_evidence(
     context: &RequestContext,
     attempt_identity: &tracedecay_domain::WorkAttemptIdentityV1,
     storage: &tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    scan_started_at: UtcMicros,
 ) -> Result<DaemonWorkLeakEvidenceV1, ApplicationProblem> {
     let attempt = services.attempts().status(
         context,
@@ -292,37 +259,13 @@ async fn read_leak_evidence(
         .load(context, attempt.identity())?;
     let has_live_owner =
         attempt_processes.holds_attempt(&context.scope().worktree_id, attempt.identity());
-    let source_fingerprint =
-        leak_evidence_source_fingerprint(&attempt, has_live_owner, &effect, &placement, &delivery)
-            .map_err(tracedecay_application::work_leak_evidence_problem)?;
     Ok(DaemonWorkLeakEvidenceV1 {
         attempt,
         has_live_owner,
         effect,
         placement,
         delivery,
-        source_fingerprint,
-        scan_started_at,
     })
-}
-
-pub(super) fn leak_evidence_source_fingerprint(
-    attempt: &tracedecay_domain::WorkAttemptV1,
-    has_live_owner: bool,
-    effect: &Option<tracedecay_application::WorkAttemptEffectHolderV1>,
-    placement: &tracedecay_application::WorkPlacementReadingV1,
-    delivery: &tracedecay_global_db::WorkAttemptDeliveryCensusReadV1,
-) -> Result<ManifestDigest, tracedecay_application::WorkLeakEvidenceErrorV1> {
-    let delivery_digest = delivery_evidence_digest(delivery)?;
-    canonical_sha256(&(
-        "tracedecay.daemon.work-leak-source-fingerprint.v1",
-        attempt,
-        has_live_owner,
-        effect,
-        placement,
-        delivery_digest,
-    ))
-    .map_err(|_| tracedecay_application::WorkLeakEvidenceErrorV1::Unavailable)
 }
 
 fn attempt_matches_authority(

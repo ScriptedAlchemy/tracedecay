@@ -10,33 +10,36 @@ use std::sync::Arc;
 use tracedecay_application::CoverageCompleteness;
 use tracedecay_application::retrieval::grep_analysis::{
     AstGrepAuthorityV1, AstGrepHitV1, AstGrepRequestV1, AstGrepResultV1, ComplexityAuthorityV1,
-    ComplexityItemV1, ComplexityRequestV1, ComplexityResultV1, DependencyDepthAuthorityV1,
-    DependencyDepthChainV1, DependencyDepthRequestV1, DependencyDepthResultV1,
-    GrepAnalysisProblemV1, PrimitiveCoverageV1, PrimitiveFutureV1, PrimitiveOutcomeV1,
-    PrimitivePageV1, PrimitivePortContextV1,
+    ComplexityRequestV1, ComplexityResultV1, DependencyDepthAuthorityV1, DependencyDepthChainV1,
+    DependencyDepthRequestV1, DependencyDepthResultV1, GrepAnalysisProblemV1, PrimitiveCoverageV1,
+    PrimitiveFutureV1, PrimitiveOutcomeV1, PrimitivePageV1, PrimitivePortContextV1,
 };
 
 use crate::graph::health::{dependency_depth, depth_score};
 use crate::graph::queries::GraphQueryManager;
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceReadRuntime;
 use tracedecay_code_index::ast_grep_search::search_tree_scoped_with_cancel;
-use tracedecay_runtime_core::types::NodeKind;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+};
+use tracedecay_graph_db::GraphCancellation;
 
-macro_rules! graph_authority {
-    ($name:ident) => {
-        pub struct $name {
-            graph: Arc<TraceDecay>,
-        }
-
-        impl $name {
-            pub fn new(graph: Arc<TraceDecay>) -> Self {
-                Self { graph }
-            }
-        }
-    };
+pub struct TraceDecayAstGrepAuthorityV1 {
+    source_runtime: Arc<SourceReadRuntime>,
+    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
 }
 
-graph_authority!(TraceDecayAstGrepAuthorityV1);
+impl TraceDecayAstGrepAuthorityV1 {
+    pub fn new(
+        source_runtime: Arc<SourceReadRuntime>,
+        code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    ) -> Self {
+        Self {
+            source_runtime,
+            code_graph,
+        }
+    }
+}
 
 impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
     fn ast_grep<'a>(
@@ -48,7 +51,7 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
             if request.window.cursor.is_some() {
                 return unsupported_compatibility_cursor();
             }
-            let project_root = self.graph.project_root().to_path_buf();
+            let project_root = self.source_runtime.project_root().to_path_buf();
             let pattern = request.pattern.clone();
             let lang = request.lang.clone();
             let path_glob = request.path_glob.clone();
@@ -97,19 +100,55 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
                 return PrimitiveOutcomeV1::Cancelled;
             }
 
+            let graph_cancellation = crate::graph::request_graph_cancellation(context.request);
+            let verified = match self
+                .code_graph
+                .open(crate::graph::CodeGraphReadRequest::new(
+                    context.request,
+                    context.observed_at,
+                    Arc::clone(&graph_cancellation),
+                ))
+                .await
+            {
+                Ok(verified) => verified,
+                Err(error) => {
+                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                        error.to_string(),
+                    ));
+                }
+            };
+            let reader = match verified.reader_with_cancellation(
+                context.request,
+                context.observed_at,
+                Arc::clone(&graph_cancellation),
+            ) {
+                Ok(reader) => reader,
+                Err(error) => {
+                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                        error.to_string(),
+                    ));
+                }
+            };
             let files_scanned = count(search.files_scanned);
             let truncated = search.truncated;
+            let mut incomplete_symbol_evidence = false;
             let mut matches = Vec::with_capacity(search.matches.len());
             for item in search.matches {
                 if context.request.cancellation().is_cancelled() {
                     return PrimitiveOutcomeV1::Cancelled;
                 }
-                let enclosing = self
-                    .graph
-                    .node_at_location(&item.file, item.line)
-                    .await
-                    .ok()
-                    .flatten();
+                let enclosing = match symbol_at_location(
+                    &reader,
+                    Arc::clone(&graph_cancellation),
+                    &item.file,
+                    item.line,
+                ) {
+                    Ok(enclosing) => enclosing,
+                    Err(()) => {
+                        incomplete_symbol_evidence = true;
+                        None
+                    }
+                };
                 matches.push(AstGrepHitV1 {
                     file: item.file,
                     line: item.line,
@@ -117,24 +156,33 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
                     lang: item.lang,
                     matched_text: item.matched_text,
                     line_text: item.line_text,
-                    symbol: enclosing.as_ref().map(|node| node.name.clone()),
-                    node_id: enclosing.as_ref().map(|node| node.id.clone()),
-                    kind: enclosing.as_ref().map(|node| node.kind.as_str().to_owned()),
+                    symbol: enclosing
+                        .as_ref()
+                        .and_then(|node| node.metadata.as_ref())
+                        .map(|metadata| metadata.simple_name.clone()),
+                    node_id: enclosing
+                        .as_ref()
+                        .map(|node| node.occurrence.as_str().to_owned()),
+                    kind: enclosing
+                        .as_ref()
+                        .and_then(|node| node.metadata.as_ref())
+                        .map(|metadata| metadata.kind.clone()),
                 });
             }
 
             let returned = count(matches.len());
+            let partial = truncated || incomplete_symbol_evidence;
             let page = PrimitivePageV1 {
                 payload: AstGrepResultV1 {
                     matches,
                     truncated,
                     files_scanned,
                 },
-                coverage: coverage(files_scanned, returned, truncated),
+                coverage: coverage(files_scanned, returned, partial),
                 continuation: None,
                 finished_at: context.observed_at,
             };
-            if truncated {
+            if partial {
                 PrimitiveOutcomeV1::Partial(page)
             } else {
                 PrimitiveOutcomeV1::Completed(page)
@@ -143,7 +191,15 @@ impl AstGrepAuthorityV1 for TraceDecayAstGrepAuthorityV1 {
     }
 }
 
-graph_authority!(TraceDecayComplexityAuthorityV1);
+pub struct TraceDecayComplexityAuthorityV1 {
+    code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+}
+
+impl TraceDecayComplexityAuthorityV1 {
+    pub fn new(code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>) -> Self {
+        Self { code_graph }
+    }
+}
 
 impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
     fn complexity<'a>(
@@ -159,63 +215,11 @@ impl ComplexityAuthorityV1 for TraceDecayComplexityAuthorityV1 {
                 Ok(path) => path,
                 Err(problem) => return PrimitiveOutcomeV1::Failed(problem),
             };
-            let node_kind = request.node_kind.as_deref().and_then(NodeKind::from_str);
-            let rows = match self
-                .graph
-                .get_complexity_ranked(
-                    node_kind.as_ref(),
-                    path.as_deref(),
-                    request.window.limit as usize,
-                )
-                .await
-            {
-                Ok(rows) => rows,
-                Err(error) => {
-                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                        error.to_string(),
-                    ));
-                }
-            };
-            if context.request.cancellation().is_cancelled() {
-                return PrimitiveOutcomeV1::Cancelled;
-            }
-
-            let ranking = rows
-                .into_iter()
-                .map(|(node, lines, fan_out, fan_in, score)| ComplexityItemV1 {
-                    id: node.id,
-                    name: node.name,
-                    kind: node.kind.as_str().to_owned(),
-                    file: node.file_path,
-                    line: node.start_line,
-                    lines,
-                    cyclomatic_complexity: node.branches.saturating_add(1),
-                    branches: node.branches,
-                    loops: node.loops,
-                    returns: node.returns,
-                    max_nesting: node.max_nesting,
-                    unsafe_blocks: node.unsafe_blocks,
-                    unchecked_calls: node.unchecked_calls,
-                    assertions: node.assertions,
-                    fan_out,
-                    fan_in,
-                    score,
-                })
-                .collect::<Vec<_>>();
-            let returned = count(ranking.len());
-            PrimitiveOutcomeV1::Completed(PrimitivePageV1 {
-                payload: ComplexityResultV1 {
-                    formula: "lines + (fan_out × 3) + fan_in".to_owned(),
-                    note:
-                        "cyclomatic_complexity = branches + 1 (computed from AST during extraction)"
-                            .to_owned(),
-                    result_count: returned,
-                    ranking,
-                },
-                coverage: coverage(returned, returned, false),
-                continuation: None,
-                finished_at: context.observed_at,
-            })
+            let _ = (&self.code_graph, path);
+            PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                "the verified graph generation does not publish the full complexity metric contract"
+                    .to_owned(),
+            ))
         })
     }
 }
@@ -326,6 +330,46 @@ fn effective_scoped_path(
         }
         (Some(_), Some(_)) => Err(GrepAnalysisProblemV1::Denied),
     }
+}
+
+fn symbol_at_location(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn GraphCancellation>,
+    file: &str,
+    line_1based: u32,
+) -> Result<Option<CodeGraphSymbolSummaryV1>, ()> {
+    let line = line_1based.checked_sub(1).ok_or(())?;
+    let symbols = graph
+        .symbols_in_logical_file(file, 100_000, cancellation)
+        .map_err(|_| ())?;
+    let mut enclosing = symbols
+        .into_iter()
+        .filter(|symbol| {
+            symbol.metadata.as_ref().is_some_and(|metadata| {
+                metadata.line_span > 0
+                    && metadata.start_line <= line
+                    && metadata
+                        .start_line
+                        .checked_add(metadata.line_span)
+                        .is_some_and(|end_exclusive| line < end_exclusive)
+            })
+        })
+        .collect::<Vec<_>>();
+    enclosing.sort_by(|left, right| {
+        let left = left.metadata.as_ref();
+        let right = right.metadata.as_ref();
+        left.map(|metadata| metadata.line_span)
+            .cmp(&right.map(|metadata| metadata.line_span))
+            .then(
+                left.map(|metadata| metadata.start_line)
+                    .cmp(&right.map(|metadata| metadata.start_line)),
+            )
+            .then(
+                left.map(|metadata| &metadata.occurrence)
+                    .cmp(&right.map(|metadata| &metadata.occurrence)),
+            )
+    });
+    Ok(enclosing.into_iter().next())
 }
 
 fn coverage(visited: u64, returned: u64, partial: bool) -> PrimitiveCoverageV1 {

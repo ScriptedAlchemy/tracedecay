@@ -22,14 +22,28 @@ async fn direct_lifecycle_entry_points_retain_production_authority() {
         .await
         .expect("direct production init");
     initialized
-        .index_all()
+        .set_tokens_saved(41)
         .await
         .expect("returned init runtime retains write authority");
+    assert_eq!(
+        initialized
+            .get_tokens_saved()
+            .await
+            .expect("read durable state through returned init runtime"),
+        41
+    );
     initialized.close();
 
     let opened = TraceDecay::open_with_options(project, options.clone())
         .await
         .expect("direct production open");
+    assert_eq!(
+        opened
+            .get_tokens_saved()
+            .await
+            .expect("reopened production runtime reads durable state"),
+        41
+    );
     let concurrent = TraceDecay::open_with_options(project, options.clone())
         .await
         .expect("direct production authority is shared within its owning process");

@@ -4,16 +4,15 @@ use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_application::retained_surfaces::{
     CorrelationIndexV1, GitScopeV1, RetainedErrorV1, RetainedOutcomeStatusV1,
     SessionCorrelationHitV1, SessionGitRefV1, SessionGitRelationV1, SessionsForRequestV1,
-    SessionsForResultV1, WorkflowAgentV1, WorkflowCoverageV1, WorkflowIndexCoverageV1,
-    WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
+    SessionsForResultV1, WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1, WorkflowRunV1,
+    WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
     CommitEvidence, CommitRelation, CommitRelationFilter, GitCorrelationError, GitRefFilter,
     GitScopeFilter, SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind,
 };
 use tracedecay_sessions::{
-    WorkflowAgent, WorkflowGitScope, WorkflowIndexHealth, WorkflowIndexReadPort,
-    WorkflowIndexState, WorkflowIngestCoverage, WorkflowIngestReceipt, WorkflowRun,
+    WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowRun,
     WorkflowRunDetail, WorkflowRunDetailOutcome, WorkflowRunDetailRequest, WorkflowRunListOutcome,
     WorkflowRunListRequest, WorkflowRunScope, WorkflowStatus,
 };
@@ -174,15 +173,7 @@ pub(crate) async fn workflows(
         ));
     };
     let limit = limit(request.limit)?;
-    let receipt = match port
-        .health()
-        .await
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?
-    {
-        WorkflowIndexHealth::Ready(receipt) => receipt,
-        WorkflowIndexHealth::Unavailable(reason) => return Ok(workflow_unavailable(reason)),
-    };
-    let mut result = if let Some(run_id) = request
+    let result = if let Some(run_id) = request
         .run_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())
@@ -243,12 +234,6 @@ pub(crate) async fn workflows(
             WorkflowRunListOutcome::Unavailable(reason) => workflow_unavailable(reason),
         }
     };
-    if matches!(
-        result.status,
-        RetainedOutcomeStatusV1::Ok | RetainedOutcomeStatusV1::Partial
-    ) {
-        apply_receipt(&mut result, receipt);
-    }
     Ok(result)
 }
 
@@ -275,9 +260,6 @@ fn map_git_error(error: GitCorrelationError) -> RetainedSurfaceExecutionErrorV1 
     match error {
         GitCorrelationError::InvalidArgument(_) | GitCorrelationError::Contract(_) => {
             RetainedSurfaceExecutionErrorV1::InvalidRequest
-        }
-        GitCorrelationError::ProfileResetRequired { .. } => {
-            RetainedSurfaceExecutionErrorV1::ProfileResetRequired
         }
         GitCorrelationError::Corrupt(_) => RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
         GitCorrelationError::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled,
@@ -469,24 +451,10 @@ fn workflow_not_found(run_id: &str) -> WorkflowsResultV1 {
 }
 
 fn workflow_unavailable(reason: WorkflowIndexState) -> WorkflowsResultV1 {
-    let status = match &reason {
-        WorkflowIndexState::IngestionPartial(_) => RetainedOutcomeStatusV1::Stale,
-        WorkflowIndexState::IngestionFailed(_) => RetainedOutcomeStatusV1::Error,
-        WorkflowIndexState::AuthorityNotRetained
-        | WorkflowIndexState::IndexNotBuilt
-        | WorkflowIndexState::IngestionNotRun => RetainedOutcomeStatusV1::Unavailable,
-    };
-    let mut result = empty_workflows(status);
+    let mut result = empty_workflows(RetainedOutcomeStatusV1::Unavailable);
     result.message = Some(reason.message().to_owned());
     result.error = Some(RetainedErrorV1 {
-        code: match &reason {
-            WorkflowIndexState::IngestionPartial(_) => "workflow_index_stale",
-            WorkflowIndexState::IngestionFailed(_) => "workflow_index_failed",
-            WorkflowIndexState::AuthorityNotRetained
-            | WorkflowIndexState::IndexNotBuilt
-            | WorkflowIndexState::IngestionNotRun => "workflow_index_unavailable",
-        }
-        .to_owned(),
+        code: "workflow_index_unavailable".to_owned(),
         message: reason.message().to_owned(),
         kind: None,
         maximum: None,
@@ -494,9 +462,6 @@ fn workflow_unavailable(reason: WorkflowIndexState) -> WorkflowsResultV1 {
         reason: Some(reason.as_str().to_owned()),
         retryable: Some(reason.is_retryable()),
     });
-    if let Some(receipt) = reason.receipt() {
-        apply_receipt(&mut result, receipt);
-    }
     result
 }
 
@@ -514,11 +479,6 @@ fn empty_workflows(status: RetainedOutcomeStatusV1) -> WorkflowsResultV1 {
         error: None,
         found: None,
         git_filter: None,
-        index_attempted_at: None,
-        index_coverage: None,
-        index_failed_runs: None,
-        index_updated_at: None,
-        index_watermark_mtime: None,
         lookup_complete: None,
         lookup_coverage: None,
         message: None,
@@ -528,18 +488,6 @@ fn empty_workflows(status: RetainedOutcomeStatusV1) -> WorkflowsResultV1 {
         runs: None,
         session_id: None,
     }
-}
-
-fn apply_receipt(result: &mut WorkflowsResultV1, receipt: WorkflowIngestReceipt) {
-    result.index_attempted_at = Some(receipt.attempted_at);
-    result.index_coverage = Some(match receipt.coverage {
-        WorkflowIngestCoverage::Complete => WorkflowIndexCoverageV1::Complete,
-        WorkflowIngestCoverage::Partial => WorkflowIndexCoverageV1::Partial,
-        WorkflowIngestCoverage::Failed => WorkflowIndexCoverageV1::Failed,
-    });
-    result.index_failed_runs = Some(receipt.failed_runs);
-    result.index_updated_at = Some(receipt.completed_at);
-    result.index_watermark_mtime = Some(receipt.watermark_mtime);
 }
 
 fn workflow_run(run: WorkflowRun) -> WorkflowRunV1 {

@@ -3,17 +3,16 @@
 //! nextest runs every test in its own process, so per-process caches cannot
 //! amortize the fixed cost of `TraceDecay::init` (graph-DB schema creation,
 //! global-DB schema creation) that almost every test in this suite pays.
-//! This module builds a fully initialized — and, for `setup_project`, fully
-//! indexed — store **once per target directory** on disk, and every test
-//! process seeds its own isolated copy from that template instead of
-//! re-running schema creation and indexing. Schema creation is the dominant
-//! per-test fixed cost on Windows CI.
+//! This module builds a fully initialized store **once per target directory**
+//! on disk, and every test process seeds its own isolated copy from that
+//! template instead of re-running schema creation. Schema creation is the
+//! dominant per-test fixed cost on Windows CI. Code-index publication belongs
+//! to the production daemon composition and is never pre-seeded here.
 //!
 //! The graph DB only stores project-root-relative paths, so a copied store is
 //! location-independent; the two files that embed absolute paths
 //! (`config.json` `root_dir` and `store_manifest.json`) are rewritten after
-//! copying. Source-file mtimes are preserved so staleness checks see the
-//! copied project exactly as the template indexer left it.
+//! copying.
 //!
 //! Every entry point falls back to the real `TraceDecay::init` path when the
 //! template cannot be built or the seeded store cannot be opened, so tests
@@ -34,15 +33,15 @@ use crate::common::GLOBAL_DB_ENV;
 
 /// Bump when the template layout or fixture sources change, so stale
 /// templates from previous revisions in a cached target dir are ignored.
-const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v5";
+const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v6";
 
 const EMPTY_FLAVOR: &str = "empty";
-const INDEXED_FLAVOR: &str = "indexed";
 
 static TEMPLATE_ROOT: OnceCell<Option<PathBuf>> = OnceCell::const_new();
 
-/// Writes the shared `setup_project` fixture sources: cross-file calls,
+/// Writes the shared production-composition fixture sources: cross-file calls,
 /// structs, impls, a test file, and doc comments.
+#[cfg(feature = "test-transport")]
 pub fn write_indexed_fixture_sources(project: &Path) {
     fs::create_dir_all(project.join("src")).unwrap();
 
@@ -117,18 +116,6 @@ pub async fn init_project_from_template_with_options(
         return Ok(cg);
     }
     TraceDecay::init_with_options(project_root, options).await
-}
-
-/// Seeds the fully indexed `setup_project` fixture (sources + graph data)
-/// into `project_root` and opens it. Returns `None` when the template is
-/// unavailable so the caller can run the real init+index path.
-pub async fn open_indexed_project_from_template(project_root: &Path) -> Option<TraceDecay> {
-    let template = template_root().await?;
-    let targets = SeedTargets::from_env()?;
-    let flavor = template.join(INDEXED_FLAVOR);
-    copy_tree(&flavor.join("project"), project_root).ok()?;
-    seed_store(&flavor, project_root, &targets).ok()?;
-    TraceDecay::open(project_root).await.ok()
 }
 
 struct SeedTargets {
@@ -275,34 +262,26 @@ async fn build_template(dest: &Path) -> io::Result<()> {
     let scratch = tempfile::TempDir::new()?;
     let scratch_root = scratch.path().canonicalize()?;
 
-    for (flavor, indexed) in [(EMPTY_FLAVOR, false), (INDEXED_FLAVOR, true)] {
-        let root = scratch_root.join(flavor);
-        let project = root.join("project");
-        fs::create_dir_all(&project)?;
-        if indexed {
-            write_indexed_fixture_sources(&project);
-        }
+    let root = scratch_root.join(EMPTY_FLAVOR);
+    let project = root.join("project");
+    fs::create_dir_all(&project)?;
 
-        let profile_root = root.join("home/.tracedecay");
-        let global_db_path = profile_root.join("global.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile_root.clone()),
-            global_db_path: Some(global_db_path.clone()),
-        };
-        let cg = TraceDecay::init_with_options(&project, options)
-            .await
-            .map_err(io_other)?;
-        if indexed {
-            cg.index_all().await.map_err(io_other)?;
-        }
-        let sessions_db_path = cg.store_layout().sessions_db_path.clone();
-        cg.checkpoint().await.map_err(io_other)?;
-        cg.close();
+    let profile_root = root.join("home/.tracedecay");
+    let global_db_path = profile_root.join("global.db");
+    let options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(global_db_path.clone()),
+    };
+    let cg = TraceDecay::init_with_options(&project, options)
+        .await
+        .map_err(io_other)?;
+    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
+    cg.checkpoint().await.map_err(io_other)?;
+    cg.close();
 
-        purge_configuration(&sessions_db_path)?;
-        purge_global_registry(&global_db_path).await?;
-        copy_tree(&root, &dest.join(flavor))?;
-    }
+    purge_configuration(&sessions_db_path)?;
+    purge_global_registry(&global_db_path).await?;
+    copy_tree(&root, &dest.join(EMPTY_FLAVOR))?;
 
     fs::write(dest.join("READY"), b"ok")?;
     Ok(())
@@ -406,9 +385,7 @@ fn sole_subdir(dir: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// Recursively copies `src` into `dest`, preserving file mtimes so the
-/// staleness pipeline sees copied sources exactly as the template indexed
-/// them.
+/// Recursively copies `src` into `dest`, preserving file mtimes.
 fn copy_tree(src: &Path, dest: &Path) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {

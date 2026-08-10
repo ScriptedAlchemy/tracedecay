@@ -54,7 +54,6 @@ mod tests {
         runs::*,
     };
     use crate::cli::AutomationRunAction;
-    use tracedecay_agent_hosts::automation::config::AutomationConfigPatch;
 
     #[test]
     fn automation_rpc_requests_preserve_automatic_fact_receipt_and_manual_run_arguments() {
@@ -153,40 +152,12 @@ mod tests {
     }
 
     #[test]
-    fn automation_config_reconcile_is_change_sensitive() {
-        let current = AutomationConfigPatch {
-            enabled: Some(true),
-            ..AutomationConfigPatch::default()
-        };
-        assert!(!super::config::automation_config_changed(
-            Some(&current),
-            &current
-        ));
-
-        let changed = AutomationConfigPatch {
-            scheduler_tick_secs: Some(17),
-            ..current.clone()
-        };
-        assert!(super::config::automation_config_changed(
-            Some(&current),
-            &changed
-        ));
-    }
-
-    #[test]
-    fn automation_reconcile_requests_bind_project_and_profile_scopes() {
+    fn automation_reconcile_request_binds_project_scope() {
         assert_eq!(
             super::config::project_automation_reconcile_args(),
             serde_json::json!({
                 "action": "automation_reconcile",
                 "scope": "project"
-            })
-        );
-        assert_eq!(
-            super::config::profile_automation_reconcile_args(),
-            serde_json::json!({
-                "action": "automation_reconcile",
-                "scope": "profile"
             })
         );
     }

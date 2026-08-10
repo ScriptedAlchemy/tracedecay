@@ -17,7 +17,6 @@ use std::process::Command;
 use std::sync::Arc;
 #[cfg(feature = "test-transport")]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
 #[cfg(feature = "test-transport")]
@@ -26,6 +25,7 @@ use tracedecay::application::host_admission::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+#[cfg(feature = "test-transport")]
 use tracedecay::errors::TraceDecayError;
 use tracedecay::mcp::ToolResult;
 #[cfg(feature = "test-transport")]
@@ -60,6 +60,7 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
+#[cfg(feature = "test-transport")]
 pub(crate) const MCP_TEST_RESPONSE_CHAR_LIMIT: usize = 15_000;
 #[cfg(feature = "test-transport")]
 static NEXT_SOURCE_EDIT_TEST_KEY: AtomicU64 = AtomicU64::new(1);
@@ -226,6 +227,65 @@ pub(crate) async fn production_composition_fixture_with_sources(
         project_root,
         _isolation: isolation,
     }
+}
+
+/// Production-mounted source-edit fixture for projects whose exact sources are
+/// assembled by the test before the daemon composition opens them.
+#[cfg(feature = "test-transport")]
+pub(crate) struct ProductionSourceEditFixture {
+    pub(crate) harness: ProductionProjectCompositionHarnessV1,
+    pub(crate) project_root: PathBuf,
+}
+
+#[cfg(feature = "test-transport")]
+pub(crate) async fn init_production_source_edit_project(
+    project_root: &Path,
+) -> (ProductionSourceEditFixture, ()) {
+    let isolation_root = project_root
+        .parent()
+        .expect("source-edit project has an isolation parent");
+    let init = Command::new(common::git_program())
+        .args(["init", "-q"])
+        .current_dir(project_root)
+        .status()
+        .expect("git init source-edit fixture");
+    assert!(init.success(), "git init must succeed");
+    let add = Command::new(common::git_program())
+        .args(["add", "."])
+        .current_dir(project_root)
+        .status()
+        .expect("git add source-edit fixture");
+    assert!(add.success(), "git add must succeed");
+    let commit = Command::new(common::git_program())
+        .args([
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "-qm",
+            "source edit fixture",
+        ])
+        .current_dir(project_root)
+        .status()
+        .expect("git commit source-edit fixture");
+    assert!(commit.success(), "git commit must succeed");
+    let harness =
+        ProductionProjectCompositionHarnessV1::open(isolation_root, [project_root.to_path_buf()])
+            .await
+            .expect("production source-edit composition");
+    (
+        ProductionSourceEditFixture {
+            harness,
+            project_root: project_root.to_path_buf(),
+        },
+        (),
+    )
+}
+
+#[cfg(feature = "test-transport")]
+pub(crate) async fn close_production_source_edit_fixture(fixture: ProductionSourceEditFixture) {
+    fixture.harness.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -463,6 +523,72 @@ async fn handle_project_open_source_edit_tool_call(
 }
 
 #[cfg(feature = "test-transport")]
+pub(crate) async fn handle_production_source_edit_tool_call(
+    fixture: &ProductionSourceEditFixture,
+    tool_name: &str,
+    mut args: Value,
+    _server_stats: Option<Value>,
+    _scope_prefix: Option<&str>,
+) -> tracedecay::errors::Result<ToolResult> {
+    let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
+    if !owns_format && let Some(object) = args.as_object_mut() {
+        object
+            .entry("format".to_owned())
+            .or_insert_with(|| json!("json"));
+    }
+    let server = fixture.harness.server(&fixture.project_root)?;
+    if !SOURCE_EDIT_TOOL_NAMES.contains(&tool_name) {
+        return call_project_open_source_edit_server(&server, tool_name, args).await;
+    }
+
+    let dry_run = args.get("dry_run").and_then(Value::as_bool);
+    let apply = if matches!(
+        tool_name,
+        "tracedecay_move_symbol" | "tracedecay_rename_symbol"
+    ) {
+        dry_run == Some(false)
+    } else {
+        dry_run != Some(true)
+    };
+    if apply && (args.get("idempotency_key").is_none() || args.get("expected_state").is_none()) {
+        let mut preview_args = args.clone();
+        preview_args
+            .as_object_mut()
+            .expect("source edit arguments are an object")
+            .insert("dry_run".to_owned(), Value::Bool(true));
+        let preview =
+            call_project_open_source_edit_server(&server, tool_name, preview_args).await?;
+        let preview_value: Value =
+            serde_json::from_str(extract_text(&preview.value)).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("source edit preview returned invalid JSON: {error}"),
+                }
+            })?;
+        let expected_state = preview_value["expected_state"]
+            .as_str()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "source edit preview returned no expected state".to_owned(),
+            })?
+            .to_owned();
+        let object = args
+            .as_object_mut()
+            .expect("source edit arguments are an object");
+        object
+            .entry("expected_state".to_owned())
+            .or_insert(Value::String(expected_state));
+        object
+            .entry("idempotency_key".to_owned())
+            .or_insert_with(|| {
+                Value::String(format!(
+                    "mcp-test.source-edit.production.{}",
+                    NEXT_SOURCE_EDIT_TEST_KEY.fetch_add(1, Ordering::Relaxed)
+                ))
+            });
+    }
+    call_project_open_source_edit_server(&server, tool_name, args).await
+}
+
+#[cfg(feature = "test-transport")]
 async fn call_project_open_source_edit_server(
     server: &McpServer,
     tool_name: &str,
@@ -491,18 +617,6 @@ async fn call_project_open_source_edit_server(
         });
     }
     Ok(ToolResult::new(response["result"].clone(), Vec::new()))
-}
-
-pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay) {
-    for attempt in 0..20 {
-        match cg.index_all().await {
-            Ok(_) => return,
-            Err(TraceDecayError::SyncLock { .. }) if attempt < 19 => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(err) => panic!("failed to index test fixture: {err}"),
-        }
-    }
 }
 
 pub(crate) struct GlobalDbEnvGuard {
@@ -677,31 +791,6 @@ pub(crate) fn test_temp_dir() -> TestTempDir {
     TestTempDir::new()
 }
 
-pub(crate) struct TestProject {
-    pub(crate) dir: Option<TestTempDir>,
-    pub(crate) _home_guard: HomeEnvGuard,
-    pub(crate) _global_db_guard: GlobalDbEnvGuard,
-    // Field order is load-bearing: fields drop in declaration order, so the
-    // env lock must be declared last. Releasing it before the guards restore
-    // `HOME` / the global DB override would let the next waiting test install
-    // its own env, only for these guards to clobber it.
-    pub(crate) _env_lock: MutexGuard<'static, ()>,
-}
-
-impl std::ops::Deref for TestProject {
-    type Target = TempDir;
-
-    fn deref(&self) -> &Self::Target {
-        self.dir.as_ref().expect("test project dir already kept")
-    }
-}
-
-impl Drop for TestProject {
-    fn drop(&mut self) {
-        let _ = self.dir.take();
-    }
-}
-
 pub(crate) struct TestEnv {
     pub(crate) _home_guard: HomeEnvGuard,
     pub(crate) _global_db_guard: GlobalDbEnvGuard,
@@ -735,6 +824,7 @@ impl TestTraceDecay {
         }
     }
 
+    #[cfg(feature = "test-transport")]
     pub(crate) fn into_inner(mut self) -> TraceDecay {
         self.inner.take().expect("test graph already closed")
     }
@@ -796,38 +886,6 @@ pub(crate) async fn real_mcp_server(cg: TestTraceDecay) -> Arc<McpServer> {
         .expect("registered test server")
 }
 
-/// Creates a temporary Rust project with cross-file calls, structs, impls,
-/// test files, and doc comments, then initialises and indexes a `TraceDecay`.
-pub(crate) async fn setup_project() -> (TestTraceDecay, TestProject) {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let dir = test_temp_dir();
-    let project = dir.path();
-    let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
-    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-
-    // Fast path: seed the pre-indexed template store instead of paying
-    // schema creation + indexing in every test process.
-    let cg = match fixture::open_indexed_project_from_template(project).await {
-        Some(cg) => cg,
-        None => {
-            fixture::write_indexed_fixture_sources(project);
-            let cg = TraceDecay::init(project).await.unwrap();
-            index_all_retrying_sync_lock(&cg).await;
-            cg
-        }
-    };
-    (
-        TestTraceDecay::new(cg),
-        TestProject {
-            dir: Some(dir),
-            _env_lock: env_lock,
-            _home_guard: home_guard,
-            _global_db_guard: global_db_guard,
-        },
-    )
-}
-
 pub(crate) async fn close_test_graph(cg: TestTraceDecay) {
     cg.close().await;
 }
@@ -851,28 +909,6 @@ pub(crate) async fn init_test_project(project: &Path) -> (TestTraceDecay, TestEn
 pub(crate) async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempDir) {
     let dir = test_temp_dir();
     let (cg, env) = init_test_project(dir.path()).await;
-    (cg, env, dir)
-}
-
-pub(crate) async fn setup_generated_dir_project(
-    include_dist: bool,
-) -> (TestTraceDecay, TestEnv, TestTempDir) {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::create_dir_all(project.join("dist")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
-    fs::write(
-        project.join("dist/generated.js"),
-        "export function generatedOnly() {}\n",
-    )
-    .unwrap();
-
-    let (mut cg, env) = init_test_project(project).await;
-    if include_dist {
-        cg.add_include_folders(&["dist".to_string()]);
-    }
-    cg.index_all().await.unwrap();
     (cg, env, dir)
 }
 
@@ -941,32 +977,9 @@ pub(crate) async fn setup_cross_project_memory_projects()
     )
 }
 
-pub(crate) fn project_data_dir(cg: &TraceDecay) -> PathBuf {
-    cg.store_layout().data_root.clone()
-}
-
-pub(crate) fn project_graph_db(cg: &TraceDecay) -> PathBuf {
-    cg.store_layout().graph_db_path.clone()
-}
-
-/// The directory `store_response_handle` actually writes to.
-///
-/// It resolves the layout for the current profile from the project root rather
-/// than reusing the graph's cached layout, so a test that blocks or inspects
-/// handle storage has to resolve it the same way or it acts on a path the
-/// writer never touches.
-pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
-    tracedecay::storage::resolve_response_handle_root(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
-}
-
 #[cfg(feature = "test-transport")]
 pub(crate) fn lcm_payload_dir(cg: &TraceDecay) -> PathBuf {
     cg.store_layout().lcm_payload_root.clone()
-}
-
-pub(crate) fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
-    cg.store_layout().sessions_db_path.clone()
 }
 
 #[cfg(feature = "test-transport")]
@@ -985,235 +998,6 @@ pub(crate) async fn open_active_project_scoped_runtime(
 ) -> ProjectScopedTestRuntimeV1 {
     ProjectScopedTestRuntimeV1::new(open_active_project_session_db(cg).await)
         .expect("active test graph should retain a project-scoped runtime")
-}
-
-/// Creates a small Rust library with an integration-style test that calls a
-/// public entry point, which then reaches an internal helper. This exercises
-/// the calibrated depth-3 attribution path in `tracedecay_test_risk`.
-pub(crate) async fn setup_integration_test_risk_project() -> (TestTraceDecay, TestProject) {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
-    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::create_dir_all(project.join("tests")).unwrap();
-
-    fs::write(
-        project.join("Cargo.toml"),
-        r#"
-[package]
-name = "risk_fixture"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-pub mod api;
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("src/api.rs"),
-        r#"
-pub fn public_entry() -> String {
-    format_greeting("world")
-}
-
-pub fn unused_public_api() -> String {
-    "unused".to_string()
-}
-
-fn format_greeting(name: &str) -> String {
-    format!("Hello, {}!", name)
-}
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("tests/integration_api.rs"),
-        r#"
-use risk_fixture::api::public_entry;
-
-#[test]
-fn integration_public_entry() {
-    assert_eq!(public_entry(), "Hello, world!");
-}
-"#,
-    )
-    .unwrap();
-
-    let cg = fixture::init_project_from_template(project).await.unwrap();
-    cg.index_all().await.unwrap();
-    (
-        TestTraceDecay::new(cg),
-        TestProject {
-            dir: Some(dir),
-            _env_lock: env_lock,
-            _home_guard: home_guard,
-            _global_db_guard: global_db_guard,
-        },
-    )
-}
-
-/// Extends the calibrated integration-risk fixture with a build script so the
-/// test-risk denominator can prove non-`src/` functions are excluded.
-pub(crate) async fn setup_test_risk_non_src_fixture() -> (TestTraceDecay, TestProject) {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
-    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::create_dir_all(project.join("tests")).unwrap();
-
-    fs::write(
-        project.join("Cargo.toml"),
-        r#"
-[package]
-name = "risk_fixture"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-pub mod api;
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("src/api.rs"),
-        r#"
-pub fn public_entry() -> String {
-    format_greeting("world")
-}
-
-pub fn unused_public_api() -> String {
-    "unused".to_string()
-}
-
-fn format_greeting(name: &str) -> String {
-    format!("Hello, {}!", name)
-}
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("tests/integration_api.rs"),
-        r#"
-use risk_fixture::api::public_entry;
-
-#[test]
-fn integration_public_entry() {
-    assert_eq!(public_entry(), "Hello, world!");
-}
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("build.rs"),
-        r#"
-fn build_script_helper(flag: &str) -> String {
-    format!("cargo:warning={flag}")
-}
-
-fn main() {
-    println!("{}", build_script_helper("ok"));
-}
-"#,
-    )
-    .unwrap();
-
-    let cg = fixture::init_project_from_template(project).await.unwrap();
-    cg.index_all().await.unwrap();
-    (
-        TestTraceDecay::new(cg),
-        TestProject {
-            dir: Some(dir),
-            _env_lock: env_lock,
-            _home_guard: home_guard,
-            _global_db_guard: global_db_guard,
-        },
-    )
-}
-
-/// Builds a TypeScript project whose only tests are written with the
-/// `describe`/`it` framework style (no `#[test]`-style annotations). Exercises
-/// the TS test-attribution path: the `it` callback becomes an executable
-/// Function node that calls the source under test, so `tracedecay_test_risk`
-/// must attribute the source as directly unit-tested and `tracedecay_test_map`
-/// must list the `it` title as the covering test.
-pub(crate) async fn setup_ts_describe_it_project() -> (TestTraceDecay, TestProject) {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
-    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    fs::create_dir_all(project.join("src")).unwrap();
-
-    fs::write(
-        project.join("package.json"),
-        r#"{
-  "name": "ts-describe-it-fixture",
-  "version": "0.1.0"
-}
-"#,
-    )
-    .unwrap();
-
-    // Source under test.
-    fs::write(
-        project.join("src/math.ts"),
-        r#"
-export function add(a: number, b: number): number {
-    return a + b;
-}
-"#,
-    )
-    .unwrap();
-
-    // Test written in describe/it style. The it() callback directly calls add().
-    fs::write(
-        project.join("src/math.test.ts"),
-        r#"
-import { add } from "./math";
-
-describe('math', () => {
-  it('adds two numbers', () => {
-    const result = add(1, 2);
-  });
-});
-"#,
-    )
-    .unwrap();
-
-    let cg = fixture::init_project_from_template(project).await.unwrap();
-    cg.index_all().await.unwrap();
-    (
-        TestTraceDecay::new(cg),
-        TestProject {
-            dir: Some(dir),
-            _env_lock: env_lock,
-            _home_guard: home_guard,
-            _global_db_guard: global_db_guard,
-        },
-    )
 }
 
 /// Extracts the text content from a `ToolResult` value (the standard
@@ -1373,19 +1157,6 @@ pub(crate) async fn seed_project_registry(
         .await
         .unwrap();
     runtime
-}
-
-/// Searches the indexed fixture for `name` and returns its exact node id.
-pub(crate) async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
-    cg.search(name, 10)
-        .await
-        .unwrap()
-        .iter()
-        .find(|result| result.node.name == name)
-        .unwrap_or_else(|| panic!("node '{name}' not found in indexed fixture"))
-        .node
-        .id
-        .clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -2036,112 +1807,4 @@ pub(crate) async fn wipe_lcm_raw_fts_for_message(cg: &TraceDecay, message_id: &s
         .wipe_lcm_raw_fts_for_test(HostAdmissionScope::Project, Some(message_id))
         .await
         .unwrap();
-}
-
-// ---------------------------------------------------------------------------
-// Bug-report regressions: sonium-codebase issues
-// ---------------------------------------------------------------------------
-
-/// Regression for bug #1: `tracedecay_body` should prefer the `fn foo()` over
-/// a field/variant also named `foo`. Setup mirrors what sonium hit when
-/// searching for `gmres`: the codebase has both a `pub fn gmres(...)` and a
-/// struct field literally named `gmres`. The function — the body the user
-/// actually wants — must outrank the field.
-pub(crate) async fn setup_function_vs_field_collision() -> (TestTraceDecay, TestTempDir) {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-pub struct Solvers {
-    pub gmres: u32,
-}
-
-pub fn gmres(x: u32) -> u32 {
-    x + 1
-}
-"#,
-    )
-    .unwrap();
-    let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
-    (cg, dir)
-}
-
-// ---------------------------------------------------------------------------
-// Store failures must surface as tool errors, not silent empty results
-// (cross-cutting audit: silent-empty handlers). Breaking the `edges` table
-// out from under the open connection makes every edge query fail while
-// node/file queries keep working — exactly the partial-store-failure case
-// the old `unwrap_or_default()` calls papered over as "no data".
-// ---------------------------------------------------------------------------
-
-/// Renames the `edges` table so every edge query on the open connection
-/// fails while node and file queries keep working.
-pub(crate) async fn break_edges_table(cg: &TraceDecay) {
-    cg.db()
-        .execute_write(
-            "break edges table fixture",
-            "ALTER TABLE edges RENAME TO edges_broken",
-            (),
-        )
-        .await
-        .unwrap();
-}
-
-/// Builds a crate that plants a needless `unsafe { }` block inside an
-/// otherwise-safe function — mirroring the agent-adoption eval fixture's
-/// `src/audit.rs::raw_total_len` — so `tracedecay_unsafe_patterns` has a
-/// concrete, unambiguous site to surface.
-pub(crate) async fn setup_unsafe_block_fixture() -> (TestTraceDecay, TestProject) {
-    let dir = test_temp_dir();
-    let project = dir.path();
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let home = project.join("home");
-    let home_guard = HomeEnvGuard::set(&home);
-    let global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
-    fs::create_dir_all(project.join("src")).unwrap();
-
-    fs::write(
-        project.join("Cargo.toml"),
-        r#"
-[package]
-name = "unsafe_fixture"
-version = "0.1.0"
-edition = "2021"
-"#,
-    )
-    .unwrap();
-
-    fs::write(
-        project.join("src/lib.rs"),
-        r#"
-/// Reinterpret a total as a `usize` through a raw-pointer read. There is no
-/// memory-safety reason for this to be `unsafe` — exactly the needless kind a
-/// safety audit should flag.
-pub fn raw_total_len(total: u64) -> usize {
-    let ptr = &total as *const u64;
-    unsafe { *ptr as usize }
-}
-
-/// A plainly safe function with no unsafe markers at all.
-pub fn safe_add(a: u64, b: u64) -> u64 {
-    a + b
-}
-"#,
-    )
-    .unwrap();
-
-    let cg = fixture::init_project_from_template(project).await.unwrap();
-    cg.index_all().await.unwrap();
-    (
-        TestTraceDecay::new(cg),
-        TestProject {
-            dir: Some(dir),
-            _env_lock: env_lock,
-            _home_guard: home_guard,
-            _global_db_guard: global_db_guard,
-        },
-    )
 }

@@ -3,24 +3,19 @@
 //! # What this does
 //!
 //! When a project enables `sync.auto_track_pr_branches`, a daemon poll loop
-//! discovers the open pull requests on the repo's `origin` remote and tracks
-//! each PR head branch through the *existing* branch-tracking machinery so
-//! `branch_diff` / `branch_search` / `branch_list` and graph queries work against
-//! every open PR without anyone running `tracedecay branch add`. When a PR closes
-//! or merges, its branch is untracked and its per-branch store is cleaned up.
+//! discovers the open pull requests on the repo's `origin` remote. PR worktree
+//! activation requires the daemon's retained code-index scheduler authority;
+//! this module deliberately fails closed before Git or durable-state mutation
+//! until that authority is injected into the poll runtime.
 //!
 //! # Why worktrees
 //!
-//! [`crate::tracedecay::indexing`] syncs a branch DB by scanning the *working
-//! tree* at the passed project root — it does not read blobs out of a git ref.
-//! So to index a PR head accurately the head must be checked out somewhere. We
-//! therefore fetch each PR head into a deterministic local ref
+//! A code-index scheduler captures a working tree rather than reading blobs
+//! directly out of a git ref. So to index a PR head accurately the head must be
+//! checked out somewhere. The retained-authority topology therefore uses a
+//! deterministic local ref
 //! (`refs/tracedecay/pr/<N>`), check it out into a linked worktree on a local
-//! branch named `pr/<N>` under the store's `pr-worktrees/` dir (a *named* branch,
-//! not detached HEAD — the branch-drift guard in sync refuses a detached
-//! worktree), and track that worktree exactly the way the
-//! git-metadata watcher tracks any other linked worktree
-//! ([`crate::tracedecay::TraceDecay::add_branch_tracking_with_options`]). A branch
+//! branch named `pr/<N>` under the store's `pr-worktrees/` dir. A branch
 //! can only be checked out in one worktree at a time, so we never reuse the PR's
 //! real head-branch name (which the user may have checked out); instead every
 //! PR-managed entry is tracked under the synthetic label `pr/<N>`. That also keeps
@@ -42,7 +37,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::branch::{BranchAdminAction, BranchAdminOutcome};
+const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
+
+fn scheduler_unavailable(detail: &str) -> String {
+    format!("{CODE_INDEX_SCHEDULER_UNAVAILABLE}: {detail}")
+}
 
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
@@ -52,43 +51,20 @@ pub(super) use runtime::spawn_with_administration;
 pub use runtime::{PrAutotrackTask, spawn, teardown_disabled_project};
 
 #[derive(Clone, Copy)]
-struct PrStoreAdministration<'a> {
-    daemon: &'a StoreAdministration,
-    graph: Option<&'a std::sync::Arc<crate::tracedecay::TraceDecay>>,
-    command_control: &'a PrCommandControl,
-}
+struct PrStoreAdministration;
 
-impl<'a> PrStoreAdministration<'a> {
-    fn new(
-        daemon: &'a StoreAdministration,
-        graph: &'a std::sync::Arc<crate::tracedecay::TraceDecay>,
-    ) -> Self {
-        Self {
-            daemon,
-            graph: Some(graph),
-            command_control: default_pr_command_control(),
-        }
-    }
-
+impl PrStoreAdministration {
     fn with_control(
-        daemon: &'a StoreAdministration,
-        graph: &'a std::sync::Arc<crate::tracedecay::TraceDecay>,
-        command_control: &'a PrCommandControl,
+        _daemon: &StoreAdministration,
+        _graph: &std::sync::Arc<crate::tracedecay::TraceDecay>,
+        _command_control: &PrCommandControl,
     ) -> Self {
-        Self {
-            daemon,
-            graph: Some(graph),
-            command_control,
-        }
+        Self
     }
 
     #[cfg(test)]
-    fn state_only(daemon: &'a StoreAdministration) -> Self {
-        Self {
-            daemon,
-            graph: None,
-            command_control: default_pr_command_control(),
-        }
+    fn state_only(_daemon: &StoreAdministration) -> Self {
+        Self
     }
 }
 
@@ -572,24 +548,21 @@ fn log_pr_skip(repo_root: &Path, branch_label: Option<&str>, pr: Option<u64>, re
 /// PRs) are always processed. Idempotent: PRs already managed and still open are
 /// left untouched. State is persisted before returning.
 pub async fn reconcile_project(
-    graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
-    repo_root: &Path,
-    data_root: &Path,
-    discovery: &PrDiscovery,
-    cap: usize,
+    _graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    _repo_root: &Path,
+    _data_root: &Path,
+    _discovery: &PrDiscovery,
+    _cap: usize,
 ) -> ReconcileReport {
-    let administration = match StoreAdministration::for_retained_project_graph(&graph).await {
-        Ok(administration) => administration,
-        Err(error) => {
-            return ReconcileReport {
-                failures: vec![("project".to_owned(), error.to_string())],
-                ..ReconcileReport::default()
-            };
-        }
-    };
-    let administration = PrStoreAdministration::new(&administration, &graph);
-    reconcile_project_with_administration(repo_root, data_root, discovery, cap, administration)
-        .await
+    ReconcileReport {
+        failures: vec![(
+            "project".to_owned(),
+            scheduler_unavailable(
+                "code-index scheduler authority is unavailable for PR worktree activation",
+            ),
+        )],
+        ..ReconcileReport::default()
+    }
 }
 
 async fn reconcile_project_with_administration(
@@ -597,7 +570,7 @@ async fn reconcile_project_with_administration(
     data_root: &Path,
     discovery: &PrDiscovery,
     cap: usize,
-    administration: PrStoreAdministration<'_>,
+    administration: PrStoreAdministration,
 ) -> ReconcileReport {
     let mut state = load_state(data_root);
     let mut report = ReconcileReport {
@@ -784,305 +757,30 @@ async fn reconcile_project_with_administration(
     report
 }
 
-/// Fetches a PR head, checks it out into a detached linked worktree, and tracks
-/// that worktree under the `pr/<N>` label. Returns the managed record.
+/// Refuses PR activation until the daemon injects its retained code-index
+/// scheduler. The refusal precedes fetch, checkout, or durable-state mutation.
 async fn track_pr(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: &DiscoveredPr,
-    administration: PrStoreAdministration<'_>,
+    _repo_root: &Path,
+    _data_root: &Path,
+    _pr: &DiscoveredPr,
+    _administration: PrStoreAdministration,
 ) -> std::result::Result<ManagedPr, String> {
-    let label = pr_label(pr.number);
-    let tracking_ref = pr_tracking_ref(pr.number);
-    let worktree = data_root
-        .join("pr-worktrees")
-        .join(format!("pr-{}", pr.number));
-    let Some(graph) = administration.graph.map(std::sync::Arc::clone) else {
-        return Err("retained project graph is unavailable".to_string());
-    };
-
-    // Tracked metadata is the PR-store state on the single project graph
-    // store; stale entries (including legacy private-copy leftovers) are
-    // reconciled through the coordinator below before a fresh track.
-    let graph_ready =
-        crate::branch_meta::load_branch_meta(data_root).is_some_and(|meta| meta.is_tracked(&label));
-    let branch_ref = format!("refs/heads/{label}");
-    let branch_ready = ref_points_to(
-        repo_root,
-        &branch_ref,
-        &pr.head_sha,
-        administration.command_control,
-    );
-    let tracking_ref_ready = ref_points_to(
-        repo_root,
-        &tracking_ref,
-        &pr.head_sha,
-        administration.command_control,
-    );
-    let worktree_ready = ref_points_to(
-        &worktree,
-        "HEAD",
-        &pr.head_sha,
-        administration.command_control,
-    ) && crate::branch::current_branch(&worktree).as_deref()
-        == Some(label.as_str());
-    let validated_orphan =
-        branch_ready && tracking_ref_ready && (!worktree.exists() || worktree_ready);
-    if graph_ready || validated_orphan {
-        remove_pr_store(repo_root, data_root, &label, administration).await?;
-        cleanup_pr_worktree(
-            repo_root,
-            data_root,
-            pr.number,
-            &pr.head_sha,
-            true,
-            administration.command_control,
-        );
-    }
-
-    let repo = repo_root.to_path_buf();
-    let wt = worktree.clone();
-    let tref = tracking_ref.clone();
-    let label_for_prep = label.clone();
-    let expected_head = pr.head_sha.clone();
-    let command_control = administration.command_control.clone();
-    // git operations are blocking; keep them off the reactor. A failed fetch or
-    // worktree add can still have left owned artifacts behind, so reconcile its
-    // store through the coordinator before attempting Git cleanup.
-    match tokio::task::spawn_blocking(move || {
-        prepare_pr_worktree(
-            &repo,
-            &wt,
-            &tref,
-            &label_for_prep,
-            &expected_head,
-            &command_control,
-        )
-    })
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(reason)) => {
-            return cleanup_failed_track(
-                repo_root,
-                data_root,
-                pr.number,
-                &pr.head_sha,
-                &label,
-                administration,
-                &reason,
-            )
-            .await;
-        }
-        Err(error) => {
-            let reason = format!("worktree preparation join error: {error}");
-            return cleanup_failed_track(
-                repo_root,
-                data_root,
-                pr.number,
-                &pr.head_sha,
-                &label,
-                administration,
-                &reason,
-            )
-            .await;
-        }
-    }
-
-    // The branch add prepares metadata, syncs its new SQLite family, and then
-    // finalizes metadata. Construct its future only after the writer gate is
-    // acquired so a coordinator removal cannot observe a half-prepared branch.
-    match administration
-        .daemon
-        .with_writer_in(
-            crate::daemon::branch_admin::graph_writer_scope(
-                graph.as_ref(),
-                crate::daemon::branch_admin::StoreWriterClass::Owner,
-            ),
-            || async { graph.track_worktree_branch(&worktree, &label).await },
-        )
-        .await
-    {
-        Ok(crate::branch::BranchAddOutcome::Added) => Ok(ManagedPr {
-            pr: pr.number,
-            head_branch: pr.head_branch.clone(),
-            head_sha: pr.head_sha.clone(),
-            worktree,
-            tracking_ref,
-        }),
-        Ok(outcome) => {
-            // Deferred may leave branch metadata behind. AlreadyTracked can
-            // be an orphan from an interrupted prior cycle. Neither proves a
-            // completed sync, so remove its store through the coordinator
-            // before releasing the owned worktree/refs for a future retry.
-            let reason = match outcome {
-                crate::branch::BranchAddOutcome::NotIndexed => "project not indexed",
-                crate::branch::BranchAddOutcome::AlreadyTracked => {
-                    "internal PR branch was already tracked"
-                }
-                crate::branch::BranchAddOutcome::Deferred => "branch tracking deferred",
-                crate::branch::BranchAddOutcome::Added => unreachable!(),
-            };
-            cleanup_failed_track(
-                repo_root,
-                data_root,
-                pr.number,
-                &pr.head_sha,
-                &label,
-                administration,
-                reason,
-            )
-            .await
-        }
-        Err(error) => {
-            let reason = error.to_string();
-            cleanup_failed_track(
-                repo_root,
-                data_root,
-                pr.number,
-                &pr.head_sha,
-                &label,
-                administration,
-                &reason,
-            )
-            .await
-        }
-    }
+    Err(scheduler_unavailable(
+        "code-index scheduler authority is unavailable for PR worktree activation",
+    ))
 }
 
-/// Removes a store selected by its known project layout. `Remove` does not use
-/// the retention values, so zero keeps this path independent of config/layout
-/// re-resolution while retaining the coordinator's safety checks.
+/// Refuses retirement without the same retained scheduler authority. Managed
+/// state and Git artifacts remain intact for a later authoritative retry.
 async fn remove_pr_store(
-    repo_root: &Path,
-    data_root: &Path,
-    label: &str,
-    administration: PrStoreAdministration<'_>,
+    _repo_root: &Path,
+    _data_root: &Path,
+    _label: &str,
+    _administration: PrStoreAdministration,
 ) -> std::result::Result<(), String> {
-    let report = administration
-        .daemon
-        .execute_branch_admin_in_layout(
-            repo_root,
-            data_root,
-            BranchAdminAction::Remove {
-                branch: label.to_string(),
-            },
-            0,
-            0,
-        )
-        .await
-        .map_err(|error| format!("branch-store removal failed: {error}"))?;
-    match report.outcome {
-        BranchAdminOutcome::Removed
-        | BranchAdminOutcome::NotTracked
-        | BranchAdminOutcome::NoTracking => Ok(()),
-        outcome @ BranchAdminOutcome::NoChanges => Err(format!(
-            "branch-store removal returned unexpected outcome {outcome:?}"
-        )),
-    }
-}
-
-/// Rolls back a failed branch add without deleting owned Git artifacts until
-/// the coordinator proves the corresponding branch store is gone.
-async fn cleanup_failed_track(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: u64,
-    head_sha: &str,
-    label: &str,
-    administration: PrStoreAdministration<'_>,
-    original_reason: &str,
-) -> std::result::Result<ManagedPr, String> {
-    match remove_pr_store(repo_root, data_root, label, administration).await {
-        Ok(()) => {
-            cleanup_pr_worktree(
-                repo_root,
-                data_root,
-                pr,
-                head_sha,
-                true,
-                administration.command_control,
-            );
-            Err(original_reason.to_string())
-        }
-        Err(cleanup_reason) => Err(format!(
-            "{original_reason}; failed to remove incomplete branch store: {cleanup_reason}"
-        )),
-    }
-}
-
-/// Fetches `refs/pull/<N>/head` into `tracking_ref` and adds a linked worktree
-/// checked out on a local branch named `label` (`pr/<N>`) at that ref.
-///
-/// The worktree must be on a *named* branch matching the tracking label — a
-/// detached HEAD trips the branch-drift guard in sync (the DB serves `pr/<N>`
-/// but the working tree would report detached HEAD). Idempotent: a stale
-/// worktree at `worktree` is removed first, and `-B` resets the branch.
-fn prepare_pr_worktree(
-    repo_root: &Path,
-    worktree: &Path,
-    tracking_ref: &str,
-    label: &str,
-    expected_head: &str,
-    command_control: &PrCommandControl,
-) -> std::result::Result<(), String> {
-    let pr_ref_spec = {
-        // tracking_ref is refs/tracedecay/pr/<N>; derive the pull ref from it.
-        let n = tracking_ref
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        format!("+refs/pull/{n}/head:{tracking_ref}")
-    };
-    let fetch = successful_git_with_control(
-        repo_root,
-        &["fetch", "--no-tags", "origin", &pr_ref_spec],
-        command_control,
-    );
-    if fetch.is_none() {
-        return Err("fetch of PR head failed".to_string());
-    }
-    let fetched_head =
-        successful_git_with_control(repo_root, &["rev-parse", tracking_ref], command_control)
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|sha| sha.trim().to_string());
-    if fetched_head.as_deref() != Some(expected_head) {
-        return Err("PR head changed during reconciliation".to_string());
-    }
-
-    if let Some(parent) = worktree.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    // Clear any stale worktree registration/dir so `worktree add` is idempotent
-    // and frees the synthetic branch for reset.
-    remove_worktree(repo_root, worktree, command_control);
-
-    // Adopt (reset) rather than fail if the synthetic branch survived an
-    // interrupted prior cycle (daemon death between `worktree add` and
-    // `save_state`). The `tracedecay/autotrack/pr/<N>` label namespace is
-    // collision-proof by construction, so a leftover branch at a stale SHA is
-    // unambiguously ours. `-B` force-creates-or-resets it to the freshly
-    // fetched head; a plain `-b` would wedge the PR forever with
-    // "branch already exists" once the head advanced past the orphan.
-    let wt_str = worktree.to_string_lossy();
-    let add = successful_git_with_control(
-        repo_root,
-        &[
-            "worktree",
-            "add",
-            "-B",
-            label,
-            "--force",
-            &wt_str,
-            tracking_ref,
-        ],
-        command_control,
-    );
-    if add.is_none() {
-        return Err("worktree add failed".to_string());
-    }
-    Ok(())
+    Err(scheduler_unavailable(
+        "code-index scheduler authority is unavailable for PR worktree retirement",
+    ))
 }
 
 /// Untracks a managed PR: removes its branch store, its worktree, its local
@@ -1093,33 +791,21 @@ async fn untrack_pr(
     data_root: &Path,
     label: &str,
     managed: &ManagedPr,
-    administration: PrStoreAdministration<'_>,
+    administration: PrStoreAdministration,
 ) -> std::result::Result<(), String> {
     let expected_label = pr_label(managed.pr);
     let legacy_label = format!("pr/{}", managed.pr);
-    let is_legacy = label == legacy_label;
     let expected_worktree = data_root
         .join("pr-worktrees")
         .join(format!("pr-{}", managed.pr));
     let expected_ref = pr_tracking_ref(managed.pr);
-    if (label != expected_label && !is_legacy)
+    if (label != expected_label && label != legacy_label)
         || managed.worktree != expected_worktree
         || managed.tracking_ref != expected_ref
     {
         return Err("managed PR entry does not own the requested branch artifacts".to_string());
     }
-    remove_pr_store(repo_root, data_root, label, administration).await?;
-    // `pr/<N>` is the pre-namespace persisted format. Remove its owned store
-    // and worktree once, but never delete that ambiguous local branch name.
-    cleanup_pr_worktree(
-        repo_root,
-        data_root,
-        managed.pr,
-        &managed.head_sha,
-        !is_legacy,
-        administration.command_control,
-    );
-    Ok(())
+    remove_pr_store(repo_root, data_root, label, administration).await
 }
 
 /// Removes leaked PR worktrees from interrupted prior cycles.
@@ -1136,7 +822,7 @@ async fn sweep_orphan_pr_worktrees(
     data_root: &Path,
     desired: &BTreeMap<String, &DiscoveredPr>,
     state: &PrAutotrackState,
-    administration: PrStoreAdministration<'_>,
+    administration: PrStoreAdministration,
 ) {
     let worktrees_dir = data_root.join("pr-worktrees");
     let Ok(entries) = std::fs::read_dir(&worktrees_dir) else {
@@ -1159,14 +845,6 @@ async fn sweep_orphan_pr_worktrees(
         let label = pr_label(number);
         match remove_pr_store(repo_root, data_root, &label, administration).await {
             Ok(()) => {
-                cleanup_pr_worktree(
-                    repo_root,
-                    data_root,
-                    number,
-                    "",
-                    true,
-                    administration.command_control,
-                );
                 log_daemon_event(
                     "pr_autotrack",
                     &[
@@ -1179,87 +857,6 @@ async fn sweep_orphan_pr_worktrees(
             }
             Err(reason) => log_pr_skip(repo_root, Some(&label), Some(number), &reason),
         }
-    }
-}
-
-fn cleanup_pr_worktree(
-    repo_root: &Path,
-    data_root: &Path,
-    pr: u64,
-    expected_head: &str,
-    remove_synthetic_branch: bool,
-    command_control: &PrCommandControl,
-) {
-    let worktree = data_root.join("pr-worktrees").join(format!("pr-{pr}"));
-    let tracking_ref = pr_tracking_ref(pr);
-    let owned_head = if expected_head.is_empty() {
-        let ref_head = ref_sha(repo_root, &tracking_ref, command_control);
-        let worktree_head = ref_sha(&worktree, "HEAD", command_control);
-        match (ref_head, worktree_head) {
-            (Some(ref_head), Some(worktree_head)) if ref_head == worktree_head => Some(ref_head),
-            _ => None,
-        }
-    } else {
-        Some(expected_head.to_string())
-    };
-    remove_worktree(repo_root, &worktree, command_control);
-    let label = pr_label(pr);
-    let branch_ref = format!("refs/heads/{label}");
-    if let Some(owned_head) = owned_head {
-        if remove_synthetic_branch
-            && ref_points_to(repo_root, &branch_ref, &owned_head, command_control)
-        {
-            let _ =
-                successful_git_with_control(repo_root, &["branch", "-D", &label], command_control);
-        }
-        if ref_points_to(repo_root, &tracking_ref, &owned_head, command_control) {
-            let _ = successful_git_with_control(
-                repo_root,
-                &["update-ref", "-d", &tracking_ref],
-                command_control,
-            );
-        }
-    }
-}
-
-fn ref_points_to(
-    repo_root: &Path,
-    reference: &str,
-    expected_head: &str,
-    command_control: &PrCommandControl,
-) -> bool {
-    ref_sha(repo_root, reference, command_control).is_some_and(|sha| sha == expected_head)
-}
-
-fn ref_sha(
-    repo_root: &Path,
-    reference: &str,
-    command_control: &PrCommandControl,
-) -> Option<String> {
-    successful_git_with_control(repo_root, &["rev-parse", reference], command_control)
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|sha| sha.trim().to_string())
-}
-
-fn remove_worktree(repo_root: &Path, worktree: &Path, command_control: &PrCommandControl) {
-    let wt_str = worktree.to_string_lossy();
-    // `worktree remove` unregisters and deletes the checkout; prune tidies any
-    // dangling administrative entry if the dir was removed out from under git.
-    let _ = successful_git_with_control(
-        repo_root,
-        &["worktree", "remove", "--force", &wt_str],
-        command_control,
-    );
-    let _ = successful_git_with_control(repo_root, &["worktree", "prune"], command_control);
-    if command_control
-        .cancellation
-        .as_ref()
-        .is_some_and(tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled)
-    {
-        return;
-    }
-    if worktree.exists() {
-        let _ = std::fs::remove_dir_all(worktree);
     }
 }
 

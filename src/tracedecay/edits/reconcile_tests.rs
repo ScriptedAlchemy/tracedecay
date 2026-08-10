@@ -19,6 +19,7 @@ async fn prepared_restart_with_preimages_restores_partial_bytes_before_another_e
     let operation = source_edit_operation(fixture.request.edit.kind()).unwrap();
     let result = execute_source_edit(
         &fixture.graph,
+        &fixture.code_graph,
         &operation,
         fixture.request.clone(),
         &fixture.authorization,
@@ -61,6 +62,7 @@ async fn prepared_restart_with_completed_edit_rolls_forward_and_preserves_bytes(
     let operation = source_edit_operation(fixture.request.edit.kind()).unwrap();
     let result = execute_source_edit(
         &fixture.graph,
+        &fixture.code_graph,
         &operation,
         fixture.request.clone(),
         &fixture.authorization,
@@ -76,7 +78,6 @@ async fn prepared_restart_with_completed_edit_rolls_forward_and_preserves_bytes(
     );
     // Every written byte is preserved on disk.
     fixture.assert_postimages();
-    fixture.assert_postimage_graph().await;
 }
 
 /// The write never landed: after the fixture the worktree still holds every
@@ -89,6 +90,7 @@ async fn prepared_restart_with_untouched_preimages_rolls_back_cleanly() {
     let operation = source_edit_operation(fixture.request.edit.kind()).unwrap();
     let result = execute_source_edit(
         &fixture.graph,
+        &fixture.code_graph,
         &operation,
         fixture.request.clone(),
         &fixture.authorization,

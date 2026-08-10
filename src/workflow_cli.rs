@@ -186,7 +186,7 @@ pub async fn invoke_workflow_cli(
                 result_contract,
                 request_id,
                 invalid_workflow_request(),
-            )));
+            )?));
         }
     };
     let request = DaemonInvocationRequest::workflow_application(
@@ -212,7 +212,7 @@ pub async fn invoke_workflow_cli(
                 result_contract,
                 request_id,
                 error.into_application_problem(),
-            )));
+            )?));
         }
     };
     match response.outcome {
@@ -227,13 +227,13 @@ pub async fn invoke_workflow_cli(
             }))
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => {
-            Ok(Err(workflow_problem(result_contract, request_id, problem)))
+            Ok(Err(workflow_problem(result_contract, request_id, problem)?))
         }
         DaemonInvocationOutcome::Problem { problem } => Ok(Err(workflow_problem(
             result_contract,
             request_id,
             daemon_application_problem(problem),
-        ))),
+        )?)),
         _ => Ok(Err(workflow_problem(
             result_contract,
             request_id,
@@ -241,7 +241,7 @@ pub async fn invoke_workflow_cli(
                 code: "workflow_response_unavailable".to_owned(),
                 message: "The daemon returned no canonical Workflow result".to_owned(),
             }),
-        ))),
+        )?)),
     }
 }
 
@@ -273,8 +273,8 @@ fn workflow_problem(
     result_contract: ResultContractRef,
     request_id: tracedecay_application::RequestId,
     problem: ApplicationProblem,
-) -> ApplicationProblemEnvelope {
-    ApplicationProblemEnvelope::new(result_contract, request_id, problem)
+) -> Result<ApplicationProblemEnvelope> {
+    ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
 fn invalid_workflow_request() -> ApplicationProblem {

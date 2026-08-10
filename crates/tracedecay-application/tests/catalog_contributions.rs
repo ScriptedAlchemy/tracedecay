@@ -5,8 +5,11 @@ use tracedecay_application::feedback::{
 use tracedecay_application::{
     application_catalog_contributions, application_handler_descriptors,
     callable_code_catalog_contribution, feedback_surface_catalog_contribution,
-    feedback_surface_handler_descriptors, git::git_index_catalog_contribution,
-    retrieval::catalog::symbol_search_contribution,
+    feedback_surface_handler_descriptors,
+    git::git_index_catalog_contribution,
+    retrieval::catalog::{
+        primitive_read_contribution, primitive_read_operation, symbol_search_contribution,
+    },
 };
 use tracedecay_tool_catalog::BindingSurface;
 
@@ -142,5 +145,44 @@ fn application_composition_excludes_planner_and_store_owned_surfaces() {
             !use_case.contains("planner") && !use_case.contains("dispatcher"),
             "application use cases must not own {use_case}"
         );
+    }
+}
+
+#[test]
+fn verified_graph_mcp_reads_have_application_primitive_admission_identity() {
+    let contribution = primitive_read_contribution().unwrap();
+
+    for operation_name in [
+        "context",
+        "redundancy",
+        "node",
+        "callees",
+        "impact",
+        "similar",
+        "rename_preview",
+        "port_status",
+        "port_order",
+        "todos",
+    ] {
+        let operation = primitive_read_operation(operation_name)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{operation_name} primitive operation"));
+        let capability = contribution
+            .capabilities()
+            .iter()
+            .find(|capability| capability.capability_id() == operation.capability_id())
+            .unwrap_or_else(|| panic!("{operation_name} primitive capability"));
+
+        assert_eq!(capability.use_case_id(), operation.use_case_id());
+        assert!(capability.availability().is_callable());
+        assert!(contribution.bindings().iter().any(|binding| {
+            binding.capability_id() == operation.capability_id()
+                && binding.surface() == BindingSurface::Mcp
+                && binding.operation().as_str() == operation_name
+        }));
+        assert!(!contribution.bindings().iter().any(|binding| {
+            binding.capability_id() == operation.capability_id()
+                && binding.surface() == BindingSurface::Http
+        }));
     }
 }

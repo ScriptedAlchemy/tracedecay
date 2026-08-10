@@ -17,6 +17,7 @@ use super::*;
 #[derive(Clone)]
 struct DaemonHandoffOpenTargets {
     feedback: Option<Arc<FeedbackRuntime>>,
+    work: tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     observed_at: UtcMicros,
     recheck_sequence: Arc<AtomicU64>,
 }
@@ -29,7 +30,31 @@ impl HandoffOpenTargetPort for DaemonHandoffOpenTargets {
     ) -> Pin<Box<dyn Future<Output = Result<bool, HandoffOpenTargetError>> + Send + 'a>> {
         Box::pin(async move {
             match binding.target() {
-                HandoffOpenTargetV1::Task { .. } => Err(HandoffOpenTargetError::Unavailable),
+                HandoffOpenTargetV1::Task {
+                    task_id, version, ..
+                } => {
+                    let authority = WorkAuthority::new(
+                        context.scope().project_id.clone(),
+                        context.scope().repository_id.clone(),
+                        context.scope().worktree_id.clone(),
+                        context.actor().clone(),
+                        context.grant().digest.clone(),
+                    )
+                    .map_err(|_| HandoffOpenTargetError::Unavailable)?;
+                    match tracedecay_application::WorkStoragePort::projection(
+                        &self.work, &authority, task_id,
+                    ) {
+                        Ok(projection) => Ok(projection.version() == *version),
+                        Err(tracedecay_application::WorkStorageError::NotFoundOrNotAuthorized) => {
+                            Ok(false)
+                        }
+                        Err(
+                            tracedecay_application::WorkStorageError::VersionConflict
+                            | tracedecay_application::WorkStorageError::IdempotencyConflict
+                            | tracedecay_application::WorkStorageError::Unavailable,
+                        ) => Err(HandoffOpenTargetError::Unavailable),
+                    }
+                }
                 HandoffOpenTargetV1::Investigation {
                     finding_id,
                     owner_version_digest,
@@ -196,11 +221,25 @@ pub(super) async fn execute_handoff_application(
     };
     let targets = DaemonHandoffOpenTargets {
         feedback,
+        work: match registered.database.work_storage() {
+            Ok(work) => work,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            }
+        },
         observed_at,
         recheck_sequence: Arc::new(AtomicU64::new(0)),
     };
     let service = HandoffOpenService::new(authority, targets);
     let result = match request {
+        HandoffApplicationInvocationV1::IssueTaskHandoff(request) => service
+            .issue_task(&context, request, authority_snapshot, observed_at)
+            .await
+            .and_then(|grant| tracedecay_application::IssueTaskHandoffResultV1::from_grant(&grant))
+            .map(HandoffApplicationResult::IssueTask),
         HandoffApplicationInvocationV1::OpenInvestigationHandoff(request) => service
             .open_investigation(&context, request, authority_snapshot, observed_at)
             .await
@@ -309,6 +348,7 @@ fn handoff_request_context(
 }
 
 enum HandoffApplicationResult {
+    IssueTask(tracedecay_application::IssueTaskHandoffResultV1),
     Investigation(tracedecay_application::OpenInvestigationHandoffResultV1),
     Task(tracedecay_application::OpenTaskHandoffResultV1),
 }
@@ -327,6 +367,18 @@ fn complete_handoff_effect(
     deadline: Deadline,
 ) -> DaemonInvocationResponse {
     let outcome = match result {
+        HandoffApplicationResult::IssueTask(result) => handoff_effect(
+            registered,
+            context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            result,
+            observed_at,
+            deadline,
+        )
+        .map(HandoffApplicationOutcomeV1::IssueTaskHandoff),
         HandoffApplicationResult::Investigation(result) => handoff_effect(
             registered,
             context,

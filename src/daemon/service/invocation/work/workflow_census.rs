@@ -522,14 +522,31 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
             }),
         })
     }
+
+    pub(in crate::daemon::service) async fn shutdown(&self) {
+        self.inner.cancellation.cancel();
+        let task = self
+            .inner
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(task) = task
+            && let Err(error) = task.await
+        {
+            tracing::warn!(%error, "workflow census recovery shutdown failed");
+        }
+    }
 }
 
 impl Drop for WorkflowFanOutCensusObservationRecoveryInnerV1 {
     fn drop(&mut self) {
         self.cancellation.cancel();
-        if let Ok(task) = self.task.get_mut()
-            && let Some(task) = task.take()
-        {
+        let task = match self.task.get_mut() {
+            Ok(task) => task.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(task) = task {
             task.abort();
         }
     }

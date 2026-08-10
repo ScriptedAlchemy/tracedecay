@@ -10,7 +10,7 @@ use crate::db::{Database, DatabaseAccessMode};
 use crate::errors::{Result, TraceDecayError};
 use crate::storage::StoreLayout;
 
-use super::{TraceDecay, TraceDecayOpenOptions};
+use super::TraceDecay;
 
 /// Branch diagnostics are part of the downward graph-runtime port contract, so
 /// `tracedecay-usecases` owns the shape and the root engine produces exactly
@@ -37,54 +37,6 @@ impl TraceDecay {
     #[must_use]
     pub fn branch_memo(&self) -> branch::BranchMemo {
         branch::BranchMemo::new(&self.project_root)
-    }
-
-    pub(super) fn ensure_branch_writable(&self, operation: &str) -> Result<()> {
-        self.ensure_branch_writable_with(operation, &self.branch_memo())
-    }
-
-    /// [`ensure_branch_writable`](Self::ensure_branch_writable) against a
-    /// branch resolution this request already made.
-    ///
-    /// The memo is only consulted on the drift-guard branch below, so a
-    /// read-only store still returns without resolving anything.
-    pub(super) fn ensure_branch_writable_with(
-        &self,
-        operation: &str,
-        live_branch: &branch::BranchMemo,
-    ) -> Result<()> {
-        if self.read_only {
-            return Err(TraceDecayError::Config {
-                message: format!("cannot {operation}: active TraceDecay store is open read-only"),
-            });
-        }
-
-        // Branch-drift guard. A long-running MCP server resolves its branch
-        // provenance once at open time. If the working tree switched branches
-        // since then, this instance is still scoped to the *old* branch's
-        // publication epoch, and a write would seal the live branch's files
-        // under the wrong provenance. Refuse until the reopen lands.
-        //
-        // The comparison is against the open-time branch, not the serving
-        // provenance: every branch is served by the one project store, so an
-        // untracked branch that legitimately falls back to an ancestor's
-        // provenance is writable once this instance opened on it. A fallback
-        // is no longer a wrong database to write into — per-branch SQLite
-        // copies are retired and branch identity is provenance-only.
-        if self.branch_drifted_with(live_branch) {
-            let opened = self.active_branch.as_deref().unwrap_or("detached HEAD");
-            let live = live_branch.resolve_for(&self.project_root);
-            let live_name = live.as_deref().unwrap_or("detached HEAD");
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "cannot {operation}: index is open for branch '{opened}' but the working \
-                     tree is now on '{live_name}'. Reopen tracedecay so it serves '{live_name}' \
-                     (e.g. restart the MCP server)."
-                ),
-            });
-        }
-
-        Ok(())
     }
 
     /// Returns `true` when the live git branch differs from the branch this
@@ -158,10 +110,6 @@ impl TraceDecay {
 
     pub fn store_layout(&self) -> &StoreLayout {
         &self.store_layout
-    }
-
-    pub(crate) fn open_options(&self) -> TraceDecayOpenOptions {
-        self.open_options.clone()
     }
 
     #[cfg(unix)]

@@ -3,7 +3,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_agent_hosts::automation::config_error;
-use tracedecay_domain::{ObservationSourceRangeV1, SessionId, UtcMicros};
+use tracedecay_domain::{ObservationSourceRangeV1, UtcMicros};
 
 pub(super) fn hook_now() -> UtcMicros {
     UtcMicros(
@@ -28,15 +28,6 @@ pub(super) fn hook_v2_envelope(
                 .map_err(|error| config_error(format!("invalid Hook V2 envelope: {error}")))
         })?;
     Ok(envelope)
-}
-
-pub(super) fn hook_v2_native_session_id(
-    args: &Value,
-    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-) -> Option<SessionId> {
-    let session = SessionId::new(args.get("native_session_id")?.as_str()?.to_owned()).ok()?;
-    (crate::hooks::protected_native_session_id(session.as_str()) == envelope.protected_session_id)
-        .then_some(session)
 }
 
 pub(super) fn hook_v2_requires_producer_work(

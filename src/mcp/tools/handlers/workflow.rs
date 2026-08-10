@@ -16,7 +16,9 @@ use tracedecay_application::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, OperationBudgetUsage,
     OperationReceipt, OperationTermination,
 };
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::{CommitId, UtcMicros};
+use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use url::Url;
 
 use crate::application::operation_stream::{
@@ -27,10 +29,9 @@ use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::DiagnosticsQuery;
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::errors::{Result, TraceDecayError};
-use crate::redundancy::{Fingerprint, body_token_window, redundancy_match_score, round4};
+use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::{TraceDecay, is_test_file};
-use crate::types::Node;
 
 use super::super::ToolResult;
 use super::super::render;
@@ -55,22 +56,24 @@ use test_runner::{
 /// Each identity receives a separate Cargo invocation under the request's
 /// shared deadline, cancellation, and output budget.
 const MAX_TESTS_HARD_CAP: usize = 500;
-/// Cap on cached fingerprint rows the near-duplicate lookup pulls per
-/// diagnostic. A single diagnose call can resolve many diagnostics, so we
-/// bound the candidate window query — a huge fingerprint cache must not be
-/// able to blow up a diagnose call.
-const MAX_NEAR_DUP_CANDIDATES: usize = 200;
-
-/// Similarity threshold for near-duplicate cross-referencing in `diagnose`.
-/// Mirrors the `tracedecay_redundancy` tool default.
-const NEAR_DUP_THRESHOLD: f64 = 0.6;
-
 /// Maximum near-duplicate matches attached per diagnostic.
 const NEAR_DUP_MAX: usize = 3;
+
+/// Bound the canonical request-scoped redundancy result used to enrich one
+/// diagnose response. The scan itself retains its paced comparison budget.
+const DIAGNOSE_REDUNDANCY_PAIR_LIMIT: usize = 500;
 
 /// Bound concurrent reads while hashing changed files for a managed test run.
 /// Large edit sets must not serialize hundreds of awaited `fs::read` calls.
 const MANAGED_TEST_DIGEST_READ_CONCURRENCY: usize = 32;
+
+#[derive(Debug, Clone)]
+struct GraphTestSymbol {
+    id: String,
+    kind: String,
+    qualified_name: String,
+    file_path: String,
+}
 
 #[derive(Debug, Clone)]
 struct TestTarget {
@@ -85,7 +88,7 @@ impl TestTarget {
     /// the module chain the file contributes to its test binary followed by
     /// the in-file chain the extractor observed. Dropping the file's own
     /// prefix filters every test out while `cargo test` still exits `0`.
-    fn new(node: &Node) -> Self {
+    fn new(node: &GraphTestSymbol) -> Self {
         let test_identity =
             libtest_identity(&node.file_path, &node.qualified_name).unwrap_or_default();
         Self {
@@ -123,7 +126,7 @@ fn validate_test_identity(identity: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn test_target_key(node: &Node) -> String {
+fn test_target_key(node: &GraphTestSymbol) -> String {
     if node.qualified_name.is_empty() {
         node.id.clone()
     } else {
@@ -134,6 +137,7 @@ fn test_target_key(node: &Node) -> String {
 /// Handles `tracedecay_diagnose`.
 pub(super) async fn handle_diagnose(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
 ) -> Result<ToolResult> {
@@ -170,26 +174,25 @@ pub(super) async fn handle_diagnose(
 
     let mut items: Vec<Value> = Vec::with_capacity(diagnostics.len());
     let mut touched: HashSet<String> = HashSet::new();
-    // Several diagnostics commonly share one enclosing function, so memoize the
-    // near-duplicate lookup per node id across the loop — each node's cache read
-    // (or fallback scan) then runs at most once per diagnose call.
-    let mut near_dup_cache: HashMap<String, Vec<Value>> = HashMap::new();
+    // Several diagnostics commonly share one enclosing function. Build one
+    // request-scoped index from the canonical redundancy journey on first use,
+    // then reuse it for every mapped diagnostic in this response.
+    let mut near_duplicates_by_node: Option<HashMap<String, Vec<Value>>> = None;
 
     for d in &diagnostics {
         touched.insert(d.file.clone());
 
-        let node = cg.node_at_location(&d.file, d.line).await?;
-        // Cross-reference the redundancy index: if the enclosing node has a
-        // cached fingerprint, surface near-duplicate functions so a
-        // diagnostic points at code it may share logic with. Purely reads the
-        // cache — never parses/warms files inside diagnose.
+        let node = diagnostic_symbol_at_location(graph, &d.file, d.line)?;
         let near_duplicates = match &node {
             Some(n) => {
-                if !near_dup_cache.contains_key(&n.id) {
-                    let dupes = near_duplicates_for_node(cg, n).await?;
-                    near_dup_cache.insert(n.id.clone(), dupes);
+                if near_duplicates_by_node.is_none() {
+                    near_duplicates_by_node = Some(diagnose_redundancy_index(cg, graph).await?);
                 }
-                near_dup_cache.get(&n.id).cloned().unwrap_or_default()
+                near_duplicates_by_node
+                    .as_ref()
+                    .and_then(|index| index.get(n.occurrence.as_str()))
+                    .cloned()
+                    .unwrap_or_default()
             }
             None => Vec::new(),
         };
@@ -201,21 +204,26 @@ pub(super) async fn handle_diagnose(
         let callers_json = if include_callers {
             match &node {
                 Some(n) => {
-                    let callers = cg.get_callers(&n.id, 1).await?;
+                    let callers = graph.callers(
+                        std::slice::from_ref(&n.occurrence),
+                        &[RelationEdgeKindV1::Calls],
+                        5,
+                    )?;
                     let trimmed: Vec<Value> = callers
                         .into_iter()
+                        .next()
+                        .into_iter()
+                        .flatten()
                         .take(5)
-                        .map(|(caller, _)| {
-                            touched.insert(caller.file_path.clone());
-                            json!({
-                                "node_id": caller.id,
-                                "name": caller.name,
-                                "kind": caller.kind.as_str(),
-                                "file": caller.file_path,
-                                "line": caller.start_line,
+                        .map(|edge| {
+                            diagnostic_symbol_json(&edge.neighbor).map(|caller| {
+                                if let Some(file) = caller.get("file").and_then(Value::as_str) {
+                                    touched.insert(file.to_owned());
+                                }
+                                caller
                             })
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>>>()?;
                     Value::Array(trimmed)
                 }
                 None => Value::Array(vec![]),
@@ -231,14 +239,7 @@ pub(super) async fn handle_diagnose(
             "file": d.file,
             "line": d.line,
             "column": d.column,
-            "node": node.as_ref().map(|n| json!({
-                "node_id": n.id,
-                "name": n.name,
-                "kind": n.kind.as_str(),
-                "qualified_name": n.qualified_name,
-                "start_line": n.start_line,
-                "end_line": n.end_line,
-            })),
+            "node": node.as_ref().map(diagnostic_symbol_json).transpose()?,
             "callers": callers_json,
             "near_duplicates": near_duplicates,
         }));
@@ -267,6 +268,91 @@ pub(super) async fn handle_diagnose(
         touched.into_iter().collect(),
         || render::diagnostics_md(&body),
     ))
+}
+
+fn diagnostic_symbol_at_location(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    file: &str,
+    one_based_line: u32,
+) -> Result<Option<CodeGraphSymbolSummaryV1>> {
+    const MAX_FILE_SYMBOLS: usize = 50_000;
+    let mut symbols = graph.symbols_in_logical_file(file, MAX_FILE_SYMBOLS + 1)?;
+    if symbols.len() > MAX_FILE_SYMBOLS {
+        return Err(diagnostic_graph_problem(
+            "verified diagnostic location census exceeded its symbol budget",
+        ));
+    }
+    let line = one_based_line.saturating_sub(1);
+    let mut matched = Vec::new();
+    for symbol in symbols.drain(..) {
+        let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+            diagnostic_graph_problem("verified diagnostic symbol is missing extraction metadata")
+        })?;
+        let binding = symbol.binding.as_ref().ok_or_else(|| {
+            diagnostic_graph_problem("verified diagnostic symbol is missing its file binding")
+        })?;
+        let logical_path = binding.logical_path.as_deref().ok_or_else(|| {
+            diagnostic_graph_problem("verified diagnostic symbol is missing its logical path")
+        })?;
+        if logical_path != file || metadata.line_span == 0 {
+            continue;
+        }
+        let Some(end_line) = metadata
+            .start_line
+            .checked_add(metadata.line_span.saturating_sub(1))
+        else {
+            return Err(diagnostic_graph_problem(
+                "verified diagnostic symbol line span overflowed",
+            ));
+        };
+        if metadata.start_line <= line && line <= end_line {
+            matched.push(symbol);
+        }
+    }
+    matched.sort_by(|left, right| {
+        let left_metadata = left.metadata.as_ref();
+        let right_metadata = right.metadata.as_ref();
+        left_metadata
+            .map(|metadata| metadata.line_span)
+            .cmp(&right_metadata.map(|metadata| metadata.line_span))
+            .then_with(|| left.occurrence.cmp(&right.occurrence))
+    });
+    Ok(matched.into_iter().next())
+}
+
+fn diagnostic_symbol_json(symbol: &CodeGraphSymbolSummaryV1) -> Result<Value> {
+    let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+        diagnostic_graph_problem("verified diagnostic symbol is missing extraction metadata")
+    })?;
+    let binding = symbol.binding.as_ref().ok_or_else(|| {
+        diagnostic_graph_problem("verified diagnostic symbol is missing its file binding")
+    })?;
+    let file = binding.logical_path.as_deref().ok_or_else(|| {
+        diagnostic_graph_problem("verified diagnostic symbol is missing its logical path")
+    })?;
+    if metadata.line_span == 0 {
+        return Err(diagnostic_graph_problem(
+            "verified diagnostic symbol has an empty line span",
+        ));
+    }
+    let end_line = metadata
+        .start_line
+        .checked_add(metadata.line_span - 1)
+        .ok_or_else(|| diagnostic_graph_problem("verified diagnostic line span overflowed"))?;
+    Ok(json!({
+        "node_id": symbol.occurrence.as_str(),
+        "name": metadata.simple_name,
+        "kind": metadata.kind,
+        "qualified_name": metadata.qualified_name,
+        "file": file,
+        "line": metadata.start_line,
+        "start_line": metadata.start_line,
+        "end_line": end_line,
+    }))
+}
+
+fn diagnostic_graph_problem(detail: &str) -> TraceDecayError {
+    TraceDecayError::project_route("verified-diagnostic-evidence-unavailable", false, detail)
 }
 
 /// Publishes parsed compiler diagnostics into the durable managed-diagnostics
@@ -362,168 +448,55 @@ fn compiler_publication_report(
     }
 }
 
-/// Look up cached near-duplicate matches for a diagnostic's enclosing
-/// `node`, ranked and capped at [`NEAR_DUP_MAX`].
-///
-/// Consults the `redundancy_pairs` cache first (a cheap indexed lookup that
-/// returns only pairs still fresh against the current fingerprints); if a
-/// prior `tracedecay_redundancy` run left fresh pairs for this node they are
-/// served directly. Otherwise falls back to the live token-window scan: reads
-/// the fingerprint cache, pulls candidates from the ±25 % `body_tokens` window
-/// (see [`body_token_window`]) capped at [`MAX_NEAR_DUP_CANDIDATES`], scores
-/// with [`redundancy_match_score`] at [`NEAR_DUP_THRESHOLD`], and excludes the
-/// node itself. Either path reads only cached data — no files are parsed or
-/// warmed inside diagnose.
-async fn near_duplicates_for_node(cg: &TraceDecay, node: &Node) -> Result<Vec<Value>> {
-    // Fast path: fresh cached duplicate pairs from a prior redundancy run.
-    let cached_pairs = cg.db().fresh_redundancy_pairs_for_node(&node.id).await?;
-    if !cached_pairs.is_empty() {
-        return near_duplicates_from_cached_pairs(cg, node, cached_pairs).await;
-    }
-
-    let Some(stored) = cg.db().get_fingerprint(&node.id).await? else {
-        return Ok(Vec::new());
-    };
-    let self_fp: Fingerprint = stored.into();
-    let (lo, hi) = body_token_window(self_fp.body_tokens);
-    let lo = u32::try_from(lo).unwrap_or(u32::MAX);
-    let hi = u32::try_from(hi).unwrap_or(u32::MAX);
-    let candidates = cg
-        .db()
-        .fingerprints_in_token_window(lo, hi, MAX_NEAR_DUP_CANDIDATES)
-        .await?;
-
-    let cand_ids: Vec<String> = candidates
-        .iter()
-        .filter(|row| row.node_id != node.id)
-        .map(|row| row.node_id.clone())
-        .collect();
-    if cand_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let cand_nodes = cg.db().get_nodes_by_ids(&cand_ids).await?;
-    let nodes_by_id: HashMap<&str, &Node> = cand_nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-
-    let mut matches: Vec<NearDupCandidate<'_>> = Vec::new();
-    for row in &candidates {
-        if row.node_id == node.id {
-            continue;
-        }
-        let Some(cand_node) = nodes_by_id.get(row.node_id.as_str()) else {
-            continue;
-        };
-        let cand_fp: Fingerprint = row.clone().into();
-        if let Some(score) = redundancy_match_score(
-            &node.name,
-            &self_fp,
-            &cand_node.name,
-            &cand_fp,
-            NEAR_DUP_THRESHOLD,
-            false,
-        ) {
-            matches.push(NearDupCandidate {
-                ranking_score: score.ranking_score,
-                similarity: score.similarity,
-                vector_cosine: score.vector_cosine,
-                severity: score.severity,
-                overlap_kind: score.overlap_kind,
-                node: cand_node,
-            });
-        }
-    }
-
-    Ok(rank_and_emit(matches))
-}
-
-/// Resolve fresh cached duplicate pairs into the diagnose near-duplicate JSON
-/// shape, ranked and capped at [`NEAR_DUP_MAX`].
-///
-/// The pairs are already freshness-validated by the reader; this only resolves
-/// each partner node's metadata and feeds them through [`rank_and_emit`], the
-/// same rank-and-render path the live scan uses, so the fast path and the
-/// fallback produce identically ordered and shaped output.
-async fn near_duplicates_from_cached_pairs(
+/// Runs the maintained redundancy journey once and indexes its already-ranked
+/// structural pairs by both endpoint identities for diagnostic enrichment.
+async fn diagnose_redundancy_index(
     cg: &TraceDecay,
-    node: &Node,
-    pairs: Vec<crate::db::RedundancyPairRow>,
-) -> Result<Vec<Value>> {
-    let partner_ids: Vec<String> = pairs
-        .iter()
-        .map(|p| p.partner_of(&node.id).to_string())
-        .collect();
-    let partner_nodes = cg.db().get_nodes_by_ids(&partner_ids).await?;
-    let nodes_by_id: HashMap<&str, &Node> =
-        partner_nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+) -> Result<HashMap<String, Vec<Value>>> {
+    let options = RedundancyOptions {
+        path_prefix: None,
+        min_lines: 8,
+        max_pairs: DIAGNOSE_REDUNDANCY_PAIR_LIMIT,
+        threshold: 0.6,
+        include_naming: false,
+        include_generated: false,
+    };
+    let scan = redundancy_scan(cg, graph, &options).await?;
+    Ok(near_duplicate_index(&scan))
+}
 
-    let mut matches: Vec<NearDupCandidate<'_>> = Vec::new();
-    for pair in &pairs {
-        if let Some(partner) = nodes_by_id.get(pair.partner_of(&node.id)) {
-            matches.push(NearDupCandidate {
-                ranking_score: pair.ranking_score,
-                similarity: pair.similarity,
-                vector_cosine: pair.vector_cosine,
-                severity: &pair.severity,
-                overlap_kind: &pair.overlap_kind,
-                node: partner,
-            });
+fn near_duplicate_index(scan: &RedundancyScanV1) -> HashMap<String, Vec<Value>> {
+    let mut index: HashMap<String, Vec<Value>> = HashMap::new();
+    for pair in &scan.pairs {
+        let left = json!({
+            "name": pair.b.name,
+            "file": pair.b.file,
+            "line": pair.b.line,
+            "id": pair.b.id,
+            "ranking_score": pair.ranking_score,
+            "severity": pair.severity,
+            "overlap_kind": pair.overlap_kind,
+        });
+        let right = json!({
+            "name": pair.a.name,
+            "file": pair.a.file,
+            "line": pair.a.line,
+            "id": pair.a.id,
+            "ranking_score": pair.ranking_score,
+            "severity": pair.severity,
+            "overlap_kind": pair.overlap_kind,
+        });
+        let left_matches = index.entry(pair.a.id.clone()).or_default();
+        if left_matches.len() < NEAR_DUP_MAX {
+            left_matches.push(left);
+        }
+        let right_matches = index.entry(pair.b.id.clone()).or_default();
+        if right_matches.len() < NEAR_DUP_MAX {
+            right_matches.push(right);
         }
     }
-
-    Ok(rank_and_emit(matches))
-}
-
-/// One near-duplicate candidate, unified across the cached-pair fast path and
-/// the live token-window scan so both rank and emit through one code path. The
-/// cached `RedundancyPairRow` and the live `RedundancyMatchScore` both carry
-/// every field below.
-struct NearDupCandidate<'a> {
-    ranking_score: f64,
-    similarity: f64,
-    vector_cosine: f64,
-    severity: &'a str,
-    overlap_kind: &'a str,
-    node: &'a Node,
-}
-
-/// Rank unified near-duplicate candidates by the full canonical key
-/// (`ranking_score` desc, `similarity` desc, `vector_cosine` desc, then name,
-/// then id — the same total order [`find_redundant_pairs`] applies), cap at
-/// [`NEAR_DUP_MAX`], and render the diagnose JSON shape. Shared so the cached
-/// fast path and the live scan produce identically ordered, identically shaped
-/// output.
-fn rank_and_emit(mut candidates: Vec<NearDupCandidate<'_>>) -> Vec<Value> {
-    candidates.sort_by(|a, b| {
-        b.ranking_score
-            .partial_cmp(&a.ranking_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.similarity
-                    .partial_cmp(&a.similarity)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| {
-                b.vector_cosine
-                    .partial_cmp(&a.vector_cosine)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| a.node.name.cmp(&b.node.name))
-            .then_with(|| a.node.id.cmp(&b.node.id))
-    });
-    candidates
-        .into_iter()
-        .take(NEAR_DUP_MAX)
-        .map(|c| {
-            json!({
-                "name": c.node.name,
-                "file": c.node.file_path,
-                "line": c.node.start_line,
-                "id": c.node.id,
-                "ranking_score": round4(c.ranking_score),
-                "severity": c.severity,
-                "overlap_kind": c.overlap_kind,
-            })
-        })
-        .collect()
+    index
 }
 
 fn severity_string(s: Severity) -> &'static str {
@@ -538,12 +511,14 @@ fn severity_string(s: Severity) -> &'static str {
 /// Handles `tracedecay_run_affected_tests`.
 pub(super) async fn handle_run_affected_tests(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     cancellation: Option<CancellationSignal>,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
 ) -> Result<ToolResult> {
     handle_run_affected_tests_with_runner(
         cg,
+        graph,
         args,
         cancellation,
         code_index_identity,
@@ -554,6 +529,7 @@ pub(super) async fn handle_run_affected_tests(
 
 async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     cancellation: Option<CancellationSignal>,
     code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
@@ -578,7 +554,7 @@ where
         return Ok(empty_result(&args, "no changed files detected"));
     }
 
-    let test_targets = collect_affected_test_targets(cg, &changed_paths).await?;
+    let test_targets = collect_affected_test_targets(graph, &changed_paths)?;
 
     if test_targets.is_empty() {
         return Ok(empty_result(
@@ -937,8 +913,8 @@ fn resolve_changed_paths(
     }
 }
 
-async fn collect_affected_test_targets(
-    cg: &TraceDecay,
+fn collect_affected_test_targets(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     changed_paths: &[String],
 ) -> Result<HashMap<String, TestTarget>> {
     // Two paths feed into the test set:
@@ -947,31 +923,27 @@ async fn collect_affected_test_targets(
     // b) Direct changes: when a changed path is itself a test file or contains
     //    `#[test]` functions, dispatch those tests directly.
     let mut test_targets = HashMap::new();
+    let mut annotations_by_file = HashMap::new();
     for path in changed_paths {
-        let nodes = cg.get_nodes_by_file(path).await?;
-        add_direct_test_targets(cg, path, &nodes, &mut test_targets).await?;
-        add_indirect_test_targets(cg, &nodes, &mut test_targets).await?;
+        let summaries = affected_test_symbols_in_file(graph, path)?;
+        let nodes = graph_test_symbols(&summaries)?;
+        let annotated = test_annotations_in_file(graph, path, &mut annotations_by_file)?;
+        add_direct_test_targets(path, &nodes, annotated, &mut test_targets);
+        add_indirect_test_targets(graph, &nodes, &mut annotations_by_file, &mut test_targets)?;
     }
     Ok(test_targets)
 }
 
-async fn add_direct_test_targets(
-    cg: &TraceDecay,
+fn add_direct_test_targets(
     path: &str,
-    nodes: &[Node],
+    nodes: &[GraphTestSymbol],
+    test_annotated_in_file: &HashSet<String>,
     test_targets: &mut HashMap<String, TestTarget>,
-) -> Result<()> {
+) {
     let path_is_test_file = is_test_file(path);
     if !path_is_test_file && nodes.is_empty() {
-        return Ok(());
+        return;
     }
-
-    let candidate_ids: Vec<String> = nodes
-        .iter()
-        .filter(|n| is_callable(n))
-        .map(|n| n.id.clone())
-        .collect();
-    let test_annotated_in_file = cg.get_test_annotated_node_ids(&candidate_ids).await?;
 
     for node in nodes {
         if !is_callable(node) {
@@ -987,29 +959,51 @@ async fn add_direct_test_targets(
             .or_insert_with(|| TestTarget::new(node))
             .add_source(&node.id);
     }
-
-    Ok(())
 }
 
-async fn add_indirect_test_targets(
-    cg: &TraceDecay,
-    nodes: &[Node],
+fn add_indirect_test_targets(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    nodes: &[GraphTestSymbol],
+    annotations_by_file: &mut HashMap<String, HashSet<String>>,
     test_targets: &mut HashMap<String, TestTarget>,
 ) -> Result<()> {
+    const MAX_IMPACTED_SYMBOLS: usize = 20_000;
+    const MAX_RELATIONS_PER_HOP: usize = 20_000;
     for node in nodes {
         if !is_callable(node) {
             continue;
         }
-
-        let callers = cg.get_callers(&node.id, 3).await?;
-        let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
-        let test_annotated = cg.get_test_annotated_node_ids(&caller_ids).await?;
-
-        for (caller, _) in callers {
-            if !is_test_file(&caller.file_path) && !test_annotated.contains(&caller.id) {
+        let occurrence = SymbolOccurrenceId::new(node.id.clone()).map_err(|error| {
+            affected_test_graph_problem(&format!(
+                "verified affected-test occurrence is invalid: {error}"
+            ))
+        })?;
+        let impact = graph.impact(
+            std::slice::from_ref(&occurrence),
+            &[RelationEdgeKindV1::Calls],
+            3,
+            MAX_IMPACTED_SYMBOLS,
+            MAX_RELATIONS_PER_HOP,
+        )?;
+        if !impact.complete {
+            return Err(affected_test_graph_problem(
+                "verified affected-test caller expansion exceeded its budget",
+            ));
+        }
+        for impacted in impact.impacted {
+            if impacted.summary.occurrence == occurrence {
                 continue;
             }
+            let Some(caller) = graph_test_symbol(&impacted.summary)? else {
+                continue;
+            };
             if !is_callable(&caller) {
+                continue;
+            }
+            if !is_test_file(&caller.file_path)
+                && !test_annotations_in_file(graph, &caller.file_path, annotations_by_file)?
+                    .contains(&caller.id)
+            {
                 continue;
             }
             test_targets
@@ -1022,8 +1016,96 @@ async fn add_indirect_test_targets(
     Ok(())
 }
 
-fn is_callable(node: &Node) -> bool {
-    node.kind.is_callable_kind()
+fn affected_test_symbols_in_file(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    path: &str,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+    const MAX_FILE_SYMBOLS: usize = 50_000;
+    let symbols = graph.symbols_in_logical_file(path, MAX_FILE_SYMBOLS + 1)?;
+    if symbols.len() > MAX_FILE_SYMBOLS {
+        return Err(affected_test_graph_problem(
+            "verified affected-test file census exceeded its symbol budget",
+        ));
+    }
+    Ok(symbols)
+}
+
+fn graph_test_symbols(summaries: &[CodeGraphSymbolSummaryV1]) -> Result<Vec<GraphTestSymbol>> {
+    summaries
+        .iter()
+        .filter_map(|summary| graph_test_symbol(summary).transpose())
+        .collect()
+}
+
+fn graph_test_symbol(summary: &CodeGraphSymbolSummaryV1) -> Result<Option<GraphTestSymbol>> {
+    let metadata = summary.metadata.as_ref().ok_or_else(|| {
+        affected_test_graph_problem("verified affected-test symbol is missing extraction metadata")
+    })?;
+    if !matches!(metadata.kind.as_str(), "function" | "method") {
+        return Ok(None);
+    }
+    let binding = summary.binding.as_ref().ok_or_else(|| {
+        affected_test_graph_problem("verified affected-test symbol is missing its file binding")
+    })?;
+    let file_path = binding.logical_path.as_ref().ok_or_else(|| {
+        affected_test_graph_problem("verified affected-test symbol is missing its logical path")
+    })?;
+    Ok(Some(GraphTestSymbol {
+        id: summary.occurrence.as_str().to_owned(),
+        kind: metadata.kind.clone(),
+        qualified_name: metadata.qualified_name.clone(),
+        file_path: file_path.clone(),
+    }))
+}
+
+fn test_annotations_in_file<'a>(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    path: &str,
+    cache: &'a mut HashMap<String, HashSet<String>>,
+) -> Result<&'a HashSet<String>> {
+    if !cache.contains_key(path) {
+        const MAX_ANNOTATION_RELATIONS: usize = 50_000;
+        let symbols = affected_test_symbols_in_file(graph, path)?;
+        let markers = symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.metadata.as_ref().is_some_and(|metadata| {
+                    metadata.kind == "annotation_usage"
+                        && matches!(
+                            metadata.simple_name.as_str(),
+                            "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
+                        )
+                })
+            })
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<HashSet<_>>();
+        let occurrences = symbols
+            .iter()
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<Vec<_>>();
+        let annotated = graph
+            .edges_among(
+                &occurrences,
+                &[RelationEdgeKindV1::Annotates],
+                MAX_ANNOTATION_RELATIONS,
+            )?
+            .into_iter()
+            .filter(|edge| markers.contains(&edge.edge.from_occurrence))
+            .map(|edge| edge.edge.to_occurrence.as_str().to_owned())
+            .collect();
+        cache.insert(path.to_owned(), annotated);
+    }
+    cache.get(path).ok_or_else(|| {
+        affected_test_graph_problem("verified affected-test annotation cache insertion failed")
+    })
+}
+
+fn affected_test_graph_problem(detail: &str) -> TraceDecayError {
+    TraceDecayError::project_route("verified-affected-test-evidence-unavailable", false, detail)
+}
+
+fn is_callable(node: &GraphTestSymbol) -> bool {
+    matches!(node.kind.as_str(), "function" | "method")
 }
 
 fn select_test_targets(

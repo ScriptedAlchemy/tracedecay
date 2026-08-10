@@ -2,7 +2,6 @@
 
 use super::*;
 
-mod advisory_background;
 mod lsp;
 pub(crate) use lsp::DaemonLspOwnerRegistrar;
 
@@ -261,8 +260,6 @@ pub(crate) enum DaemonFeedbackRuntimeRegistrationError {
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
-    #[error("the feedback runtime must be mounted before its cycle")]
-    MissingRuntime,
     #[error("the feedback runtime could not be opened")]
     Runtime(#[from] FeedbackRuntimeError),
     #[error("the feedback cycle runtime could not be opened")]
@@ -282,15 +279,6 @@ impl From<ProjectRuntimeRegistryError> for DaemonFeedbackRuntimeRegistrationErro
         match error {
             ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
             ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
-        }
-    }
-}
-
-impl From<FeedbackCyclePublicationError> for DaemonFeedbackRuntimeRegistrationError {
-    fn from(error: FeedbackCyclePublicationError) -> Self {
-        match error {
-            FeedbackCyclePublicationError::Registry(error) => error.into(),
-            FeedbackCyclePublicationError::RouterUnavailable => Self::MissingRuntime,
         }
     }
 }
@@ -440,95 +428,6 @@ impl DaemonFeedbackRuntimeRegistrar {
                 Ok((publication, publications))
             })
             .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn open_cycle_and_register(
-        &self,
-        project_root: PathBuf,
-        database: Database,
-        runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
-        policy_context: PolicyEvaluationContextV1,
-        evidence_horizon: PolicyEvidenceHorizonV1,
-        evaluated_at: UtcMicros,
-        provider_candidates: Vec<(DiagnosticProviderIdentity, AnalyzerAdmissionInputV1)>,
-        graph: Arc<TraceDecay>,
-        affected_tests: Arc<dyn AffectedTestsRetrievalPort + Send + Sync>,
-        operation: ApplicationOperation,
-        graph_operation: ApplicationOperation,
-        tests_operation: ApplicationOperation,
-        lsp_input: FeedbackCycleLspInput,
-        proximity: Arc<dyn ProductionFeedbackCycleProximityPortV1>,
-    ) -> Result<Arc<FeedbackCycleRuntime>, DaemonFeedbackRuntimeRegistrationError> {
-        let policy = PolicyEvaluatorCompositionV1::from_application_catalog()?;
-        let correlation_state = evidence_horizon.routing_state();
-        let correlation_availability = match correlation_state {
-            TruthSourceStateV1::Fresh | TruthSourceStateV1::Partial => {
-                CapabilityAvailabilityV1::Available
-            }
-            TruthSourceStateV1::Stale => CapabilityAvailabilityV1::Stale,
-            TruthSourceStateV1::Unavailable => CapabilityAvailabilityV1::Unavailable,
-            TruthSourceStateV1::Unknown => CapabilityAvailabilityV1::Unknown,
-        };
-        // The request context is validated against its grant's scope before it
-        // reaches here (`RequestContext::validate` rejects a scope that differs
-        // from the grant's), so this route really is scope-matched. Live
-        // correlation only reads, so it requires the Read effect class.
-        let correlation_policy = operation.evaluate_local_live_policy(
-            &policy,
-            &policy_context,
-            correlation_availability,
-            ScopeMatchV1::Match,
-            correlation_state,
-            CapabilityEffectClassV1::Read,
-            TruthFreshnessRequirementV1::FreshOrPartial,
-            evidence_horizon,
-            evaluated_at,
-        )?;
-        let provider_admissions = provider_candidates
-            .into_iter()
-            .map(|(identity, input)| {
-                AnalyzerAdmittedDiagnosticProviderV1::evaluate_current_configuration_snapshot(
-                    &policy,
-                    &policy_context,
-                    identity,
-                    input,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let feedback = self
-            .service
-            .feedback_runtime(Some(&project_root))
-            .await
-            .ok_or(DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
-        let observations = feedback.observation_port();
-        let production_lsp_input = Arc::clone(&lsp_input);
-        let runtime = open_feedback_cycle_runtime(
-            database,
-            feedback,
-            runtime_state,
-            correlation_policy,
-            provider_admissions,
-            graph,
-            affected_tests,
-            observations,
-            operation,
-            graph_operation,
-            tests_operation,
-            lsp_input,
-            Some(Arc::new(self.service.code_index_schedulers.clone())),
-        )?;
-        let production_input = production_proximity_feedback_cycle_input(
-            runtime.clone(),
-            production_lsp_input,
-            proximity,
-        );
-        self.service
-            .project_runtimes
-            .publish_feedback_cycle_atomically(project_root, runtime.clone(), production_input)
-            .await
-            .map_err(DaemonFeedbackRuntimeRegistrationError::from)?;
-        Ok(runtime)
     }
 }
 
@@ -709,7 +608,7 @@ impl DaemonWorkRuntimeRegistrar {
         }
     }
 
-    pub(crate) async fn register(
+    pub(in crate::daemon) async fn register(
         &self,
         project_root: PathBuf,
         database: Arc<crate::global_db::RegisteredGlobalDb>,
@@ -823,6 +722,7 @@ impl DaemonWorkRuntimeRegistrar {
                             Arc::clone(&self.service.work_attempt_processes),
                             project_root.clone(),
                             Some(Arc::clone(&observability_producer)),
+                            self.service.worktree_holder_admission.clone(),
                         )
                         .map_err(|problem| TraceDecayError::Config {
                             message: format!(
@@ -918,150 +818,5 @@ impl DaemonRetainedRuntimeRegistrar {
                 },
             )
             .await
-    }
-}
-
-#[derive(Debug, Error)]
-pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
-    #[error("a advisory runtime is already mounted for this project")]
-    AlreadyRegistered,
-    #[error("the daemon project runtime registry is closed")]
-    RegistryClosed,
-    #[error("the shared feedback readers must be registered before the advisory runtime")]
-    MissingFeedbackRuntime,
-    #[error("the hook orchestration registry is unavailable")]
-    HookOrchestrationUnavailable,
-    #[error("the advisory production authorities could not be opened")]
-    Production(#[from] AdvisoryProductionOpenErrorV1),
-    #[error(transparent)]
-    Startup(#[from] AdvisoryDaemonStartupErrorV1),
-}
-
-impl From<ProjectRuntimeRegistryError> for DaemonAdvisoryRuntimeRegistrationError {
-    fn from(error: ProjectRuntimeRegistryError) -> Self {
-        match error {
-            ProjectRuntimeRegistryError::AlreadyRegistered => Self::AlreadyRegistered,
-            ProjectRuntimeRegistryError::Closed => Self::RegistryClosed,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct DaemonAdvisoryRuntimeRegistrar {
-    service: DaemonInvocationService,
-}
-
-impl DaemonAdvisoryRuntimeRegistrar {
-    pub(crate) fn new(service: &DaemonInvocationService) -> Self {
-        Self {
-            service: service.clone(),
-        }
-    }
-
-    pub(crate) async fn register_external_acquisition(
-        &self,
-        project_root: PathBuf,
-        runtime: Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>,
-    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
-        self.service
-            .project_runtimes
-            .register(project_root, runtime)
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)
-    }
-
-    /// Constructs the advisory startup registration without publishing it.
-    /// Publication happens separately through [`Self::publish`] so a bounded
-    /// post-open setup can stage the complete runtime and commit or roll back
-    /// atomically.
-    pub(crate) async fn build<GR, GA, CS, CE, PE, PC>(
-        &self,
-        project_root: PathBuf,
-        input: AdvisoryRuntimeOpenV1,
-        providers: AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
-        lsp_session_factory: Arc<DaemonLspSessionFactory>,
-        hook_delivery_port: Arc<
-            dyn HookFeedbackDeliveryPortV1<AdvisoryHookLookupNoticeV1> + Send + Sync,
-        >,
-    ) -> Result<
-        Arc<AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>>,
-        DaemonAdvisoryRuntimeRegistrationError,
-    >
-    where
-        GR: GitHubCurrentBranchRemapper + Send + Sync + 'static,
-        GA: GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Send + Sync + 'static,
-        CS: CiReadOnlyProviderArchiveV1 + Send + Sync + 'static,
-        CE: CiExactEvidenceAuthorityV1<CS::Record> + Send + Sync + 'static,
-        PE: CanonicalProximityEvidenceAuthorityV1 + Send + Sync + 'static,
-        PC: ConfigurationControlStore + Clone + Send + Sync + 'static,
-    {
-        let project_id = input.resolved_scope.project_id.clone();
-        let feedback_registered = self
-            .service
-            .project_runtimes
-            .read::<RegisteredFeedbackRuntime, _, _>(&project_root, |runtime| {
-                runtime.project_id == project_id
-            })
-            .await
-            .unwrap_or(false);
-        if !feedback_registered {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable);
-        }
-        let registration = Arc::new(register_advisory_daemon_startup(
-            input,
-            providers,
-            lsp_session_factory,
-            hook_delivery_port,
-        )?);
-        Ok(registration)
-    }
-
-    pub(crate) async fn build_production(
-        &self,
-        project_root: PathBuf,
-        input: AdvisoryRuntimeOpenV1,
-        production: AdvisoryProductionOpenV1,
-        lsp_session_factory: Arc<DaemonLspSessionFactory>,
-    ) -> Result<Arc<AdvisoryProductionStartupRegistrationV1>, DaemonAdvisoryRuntimeRegistrationError>
-    {
-        let authorities = open_advisory_production_authorities(production)?;
-        let (providers, hook_delivery_port) = authorities.into_registrar_parts();
-        self.build(
-            project_root,
-            input,
-            providers,
-            lsp_session_factory,
-            hook_delivery_port,
-        )
-        .await
-    }
-
-    pub(crate) async fn publish(
-        &self,
-        project_root: &Path,
-        registration: Arc<dyn Any + Send + Sync>,
-        advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
-        feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
-        cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
-    ) -> Result<
-        super::super::project_runtime::AdvisoryRuntimePublicationV1,
-        DaemonAdvisoryRuntimeRegistrationError,
-    > {
-        self.service
-            .project_runtimes
-            .publish_advisory_atomically(
-                project_root,
-                registration,
-                advisory_cycle,
-                feedback_input,
-                cancellation,
-            )
-            .await
-            .map_err(|error| match error {
-                FeedbackCyclePublicationError::Registry(error) => error.into(),
-                FeedbackCyclePublicationError::RouterUnavailable => {
-                    DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime
-                }
-            })
     }
 }

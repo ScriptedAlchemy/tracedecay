@@ -4,7 +4,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
 
 const JOURNAL_VERSION: u8 = 1;
@@ -38,7 +38,7 @@ use verify::config_error;
 /// Apply callers must echo this digest; the executor independently repeats the
 /// preview and recaptures state under its edit lock.
 pub async fn preview_source_edit_expected_state(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
     context: &tracedecay_application::RequestContext,
     observed_at: tracedecay_domain::UtcMicros,
@@ -62,7 +62,7 @@ pub async fn preview_source_edit_expected_state(
 }
 
 pub async fn execute_source_edit<A>(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
@@ -75,7 +75,7 @@ where
 }
 
 pub async fn execute_source_edit_with_control<A>(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
@@ -97,7 +97,7 @@ where
 }
 
 pub async fn execute_source_edit_rollback<A>(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     operation: &ApplicationOperation,
     request: tracedecay_application::SourceEditRollbackRequestV1,
     authorization: &A,
@@ -109,7 +109,7 @@ where
 }
 
 pub async fn execute_source_edit_rollback_with_control<A>(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     operation: &ApplicationOperation,
     request: tracedecay_application::SourceEditRollbackRequestV1,
     authorization: &A,
@@ -126,7 +126,7 @@ where
 /// explicitly proves either the exact committed state or the exact rollback
 /// state. A mismatch retains the journal and its uncertainty.
 pub async fn reconcile_source_edit_effect_unknown_with_control<A>(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     request: SourceEditReconciliationRequestV1,
     authorization: &A,
     control: &SourceEditEffectControlV1,

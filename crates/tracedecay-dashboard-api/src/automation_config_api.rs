@@ -10,9 +10,8 @@ use axum::extract::State;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_api::configuration::{
-    DashboardConfigurationRouteErrorV1, configuration_application_problem_error,
-    configuration_authority_unavailable_error, configuration_revision_conflict_error,
-    settings_validation_error,
+    DashboardConfigurationRouteErrorV1, configuration_authority_unavailable_error,
+    configuration_revision_conflict_error, settings_validation_error,
 };
 use tracedecay_application::ApplicationOutcome;
 use tracedecay_domain::ProjectId;
@@ -28,6 +27,8 @@ use tracedecay_agent_hosts::automation::backend;
 use tracedecay_agent_hosts::automation::config::{
     AutomationConfig, AutomationConfigPatch, effective_config, from_configuration_snapshot,
 };
+
+use crate::application_surface::configuration_apply_error;
 
 type ApiResult = std::result::Result<Json<Value>, DashboardConfigurationRouteErrorV1>;
 
@@ -116,7 +117,7 @@ pub async fn patch_config(
                 idempotency_key,
             )
             .await
-            .map_err(configuration_application_problem_error)?;
+            .map_err(configuration_apply_error)?;
         state.reconcile_automation_scheduler();
         Some(outcome)
     };

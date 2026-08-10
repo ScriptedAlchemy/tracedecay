@@ -8,10 +8,10 @@ use tracedecay_application::retained_surfaces::{
     LcmDoctorHealthV1, LcmDoctorRequestV1, LcmDoctorResultV1, LcmExpandQueryRequestV1,
     LcmExpandRequestV1, LcmGrepRequestV1, LcmLifecycleStatusV1, LcmLoadSessionRequestV1,
     LcmPayloadCoverageStateV1, LcmPayloadCoverageV1, LcmPayloadGcStatusV1, LcmPayloadStatusV1,
-    LcmPrivacyRemediationPhaseV1, LcmPrivacyRemediationStatusV1, LcmRedactionStatusV1, LcmRoleV1,
-    LcmStatusRequestV1, LcmStatusResultV1, LcmStatusV1, LcmStoreStatusV1, LcmStoreTokenCoverageV1,
-    LcmTemporalModeV1, MessageRelationshipScopeV1, MessageTypeFilterV1, RetainedOutcomeStatusV1,
-    RetainedSurfaceOperation, RetainedSurfaceResultV1, RetainedTimeFilterV1,
+    LcmRedactionStatusV1, LcmRoleV1, LcmStatusRequestV1, LcmStatusResultV1, LcmStatusV1,
+    LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmTemporalModeV1, MessageRelationshipScopeV1,
+    MessageTypeFilterV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
+    RetainedSurfaceResultV1, RetainedTimeFilterV1,
 };
 use tracedecay_application::{
     ApplicationOutcome, CancellationSignal, RequestContext, RetainedLcmExecutionPortV1,
@@ -22,10 +22,8 @@ use tracedecay_domain::{SessionId, TemporalModeV1, UtcMicros};
 use tracedecay_global_db::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
+use tracedecay_sessions::runtime::lcm::LcmStatus;
 use tracedecay_sessions::runtime::lcm::types::LcmPayloadCoverageState;
-use tracedecay_sessions::runtime::lcm::{
-    LcmPrivacyRemediationPhaseV1 as RuntimePrivacyPhase, LcmStatus,
-};
 use tracedecay_sessions::runtime::{SessionMessageType, SessionSearchScope};
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOperation, LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest,
@@ -397,8 +395,7 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                     deep: request.deep.unwrap_or(false),
                 }),
             )
-            .await
-            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+            .await;
         validate_receipt(context, &response, LcmAuthorityOperation::Status)?;
         let authority_outcome = lcm_authority_outcome(response.outcome.clone());
         let status = match (response.outcome, response.payload) {
@@ -434,14 +431,15 @@ impl<'a> DirectRetainedLcmPortV1<'a> {
                 context.cancellation_signal,
                 LcmAuthorityRequest::Doctor(LcmDoctorQuery),
             )
-            .await
-            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+            .await;
         validate_receipt(context, &response, LcmAuthorityOperation::Doctor)?;
         let authority_outcome = lcm_authority_outcome(response.outcome.clone());
         let report = match (response.outcome, response.payload) {
             (LcmAuthorityOutcome::Ready, Some(LcmAuthorityPayload::Doctor(report))) => report,
             (outcome, _) => return Err(execution_error(outcome)),
         };
+        let report = serde_json::from_value(report)
+            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
         let health = lcm_doctor_health(report);
         let status = match health.status {
             LcmDoctorHealthStatusV1::Complete => RetainedOutcomeStatusV1::Complete,
@@ -656,26 +654,6 @@ fn lcm_status(value: LcmStatus) -> LcmStatusV1 {
             lossy_records: value.redaction.lossy_records,
             legacy_truncated_count: value.redaction.legacy_truncated_count,
         },
-        privacy: LcmPrivacyRemediationStatusV1 {
-            privacy_revision: value.privacy.privacy_revision,
-            phase: match value.privacy.phase {
-                RuntimePrivacyPhase::ScanPending => LcmPrivacyRemediationPhaseV1::ScanPending,
-                RuntimePrivacyPhase::Scanning => LcmPrivacyRemediationPhaseV1::Scanning,
-                RuntimePrivacyPhase::RebuildPending => LcmPrivacyRemediationPhaseV1::RebuildPending,
-                RuntimePrivacyPhase::Rebuilding => LcmPrivacyRemediationPhaseV1::Rebuilding,
-                RuntimePrivacyPhase::Complete => LcmPrivacyRemediationPhaseV1::Complete,
-                RuntimePrivacyPhase::ResetRequired => LcmPrivacyRemediationPhaseV1::ResetRequired,
-                RuntimePrivacyPhase::Failed => LcmPrivacyRemediationPhaseV1::Failed,
-            },
-            after_store_id: value.privacy.after_store_id,
-            scanned_rows: value.privacy.scanned_rows,
-            redacted_rows: value.privacy.redacted_rows,
-            quarantined_rows: value.privacy.quarantined_rows,
-            rebuild_after_store_id: value.privacy.rebuild_after_store_id,
-            rebuilt_rows: value.privacy.rebuilt_rows,
-            pending_derivative_rows: value.privacy.pending_derivative_rows,
-            failure_code: value.privacy.failure_code,
-        },
     }
 }
 
@@ -732,20 +710,8 @@ const fn lcm_doctor_finding_kind(
         SessionTemporalHealthFindingKind::StuckProgress => LcmDoctorFindingKindV1::StuckProgress,
         SessionTemporalHealthFindingKind::StuckReceipt => LcmDoctorFindingKindV1::StuckReceipt,
         SessionTemporalHealthFindingKind::MigrationGap => LcmDoctorFindingKindV1::MigrationGap,
-        SessionTemporalHealthFindingKind::PrivacyScanIncomplete => {
-            LcmDoctorFindingKindV1::PrivacyScanIncomplete
-        }
-        SessionTemporalHealthFindingKind::PrivacyQuarantine => {
-            LcmDoctorFindingKindV1::PrivacyQuarantine
-        }
-        SessionTemporalHealthFindingKind::PrivacyRebuildPending => {
-            LcmDoctorFindingKindV1::PrivacyRebuildPending
-        }
-        SessionTemporalHealthFindingKind::PrivacyResetRequired => {
-            LcmDoctorFindingKindV1::PrivacyResetRequired
-        }
-        SessionTemporalHealthFindingKind::PrivacyRemediationFailed => {
-            LcmDoctorFindingKindV1::PrivacyRemediationFailed
+        SessionTemporalHealthFindingKind::CompatibilityDrift => {
+            LcmDoctorFindingKindV1::CompatibilityDrift
         }
         SessionTemporalHealthFindingKind::RelationGraphUnavailable => {
             LcmDoctorFindingKindV1::RelationGraphUnavailable

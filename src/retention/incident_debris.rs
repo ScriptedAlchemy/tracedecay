@@ -784,7 +784,9 @@ mod tests {
     use tracedecay_application::storage::IncidentDebrisKindV1;
 
     use super::*;
-    use crate::retention::orphan_stores::StoreCensusEntry;
+    use crate::retention::orphan_stores::{
+        StoreCensusEntry, StoreContentFence, StoreDirectoryFence,
+    };
 
     const NOW: i64 = 1_800_000_000;
     const DAY: i64 = 24 * 60 * 60;
@@ -806,6 +808,8 @@ mod tests {
             expected_created_at: 0,
             expected_last_write_at: None,
             expected_payload_mtime_secs: NOW,
+            expected_data_root_fence: StoreDirectoryFence::Missing,
+            expected_content_fence: StoreContentFence::Missing,
             expected_manifest_bytes: None,
             graph_scope_relpaths: Vec::new(),
         }

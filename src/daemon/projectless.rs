@@ -33,11 +33,12 @@ fn admit_projectless_connection(
                 .to_owned(),
         });
     }
-    let profile_session_root = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
-        .and_then(|root| root.with_profile_runtime_shard(profile_identity))
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "projectless profile session authority is unavailable".to_owned(),
-        })?;
+    let profile_session_root =
+        crate::daemon::session_retrieval::DaemonSessionRetrievalRoot::profile()
+            .and_then(|root| root.with_profile_runtime_shard(profile_identity))
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "projectless profile session authority is unavailable".to_owned(),
+            })?;
     let profile_authority = crate::daemon::retained_owner::profile_retained_connection_authority(
         profile_identity,
         profile_session_root.identity(),

@@ -3,8 +3,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+#[cfg(test)]
+use tracedecay_application::retained_surfaces::RetainedSurfaceOperation;
 use tracedecay_application::retained_surfaces::{
-    RetainedSurfaceOperation, RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
+    RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
 };
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope,
@@ -84,8 +86,8 @@ impl ProfileRetainedConnectionAuthorityV1 {
             PROFILE_RETAINED_REQUEST_GRANT_DOMAIN_V1,
             &self.brain_id,
             &self.user_profile_id,
-            self.session_identity.store_id(),
-            self.session_identity.root_id(),
+            self.session_identity.store_id().as_str(),
+            self.session_identity.root_id().as_str(),
             &scope,
             &self.actor,
             &self.configuration_digest,
@@ -143,8 +145,8 @@ fn profile_retained_configuration_digest(
         "tracedecay.daemon.profile-retained.configuration.v1",
         brain_id,
         user_profile_id,
-        session_identity.store_id(),
-        session_identity.root_id(),
+        session_identity.store_id().as_str(),
+        session_identity.root_id().as_str(),
     ))
     .map_err(|error| TraceDecayError::Config {
         message: format!("profile retained configuration digest failed: {error}"),
@@ -227,23 +229,23 @@ pub(crate) async fn execute_profile_retained_application(
             message: error.to_string(),
         })?;
     if deadline.is_elapsed_at(observed_at) {
-        return Ok(Err(ApplicationProblemEnvelope::new(
+        return Ok(Err(application_problem_envelope(
             operation.result_contract().clone(),
             request_id,
             ApplicationProblem::timed_out_before_admission(),
-        )));
+        )?));
     }
     if connection.user_profile_id.as_str() != authorities.session_identity.profile_id().as_str()
         || connection.session_identity != authorities.session_identity
     {
-        return Ok(Err(ApplicationProblemEnvelope::new(
+        return Ok(Err(application_problem_envelope(
             operation.result_contract().clone(),
             request_id,
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        )));
+        )?));
     }
     if connection.configuration_digest != authorities.configuration_digest {
-        return Ok(Err(ApplicationProblemEnvelope::new(
+        return Ok(Err(application_problem_envelope(
             operation.result_contract().clone(),
             request_id,
             ApplicationProblem::stale(SafeDiagnostic {
@@ -251,7 +253,7 @@ pub(crate) async fn execute_profile_retained_application(
                 message: "The retained profile authority changed after connection admission."
                     .to_owned(),
             }),
-        )));
+        )?));
     }
     let context = connection.admit_request(
         &operation,
@@ -273,13 +275,25 @@ pub(crate) async fn execute_profile_retained_application(
                 scope,
                 outcome,
             }),
-            Err(problem) => Err(ApplicationProblemEnvelope::new(
+            Err(problem) => Err(application_problem_envelope(
                 operation.result_contract().clone(),
                 request_id,
                 problem,
-            )),
+            )?),
         },
     )
+}
+
+fn application_problem_envelope(
+    contract: tracedecay_application::ResultContractRef,
+    request_id: RequestId,
+    problem: ApplicationProblem,
+) -> Result<ApplicationProblemEnvelope, TraceDecayError> {
+    ApplicationProblemEnvelope::new(contract, request_id, problem).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("profile retained problem envelope is invalid: {error}"),
+        }
+    })
 }
 
 fn profile_retained_surface_ports<'a>(

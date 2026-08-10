@@ -77,11 +77,28 @@ pub(super) fn source_edit_authority_error() -> TraceDecayError {
     }
 }
 
+pub(super) fn source_edit_surface_result(
+    result: crate::application::edit::SourceEditApplicationResult,
+) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
+    let replayed = result.replayed;
+    let mut value = result.value();
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "source edit result did not serialize to its canonical object contract"
+                .to_owned(),
+        })?;
+    object.insert("replayed".to_owned(), serde_json::Value::Bool(replayed));
+    serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
+        message: format!("source edit result violated its canonical surface contract: {error}"),
+    })
+}
+
 pub(super) async fn invoke_project_open_source_edit_rollback(
     graph: Arc<crate::tracedecay::TraceDecay>,
     authorization: ProjectOpenSourceEditAuthorizationV1,
     invocation: crate::mcp::server::SourceEditRollbackInvocationV1,
-) -> Result<crate::application::edit::SourceEditApplicationResult> {
+) -> Result<tracedecay_application::source_edit::SourceEditSurfaceResultV1> {
     let observed_at = now_micros();
     let effect_control = crate::application::edit::SourceEditEffectControlV1::new(
         invocation.deadline.clone(),
@@ -124,6 +141,7 @@ pub(super) async fn invoke_project_open_source_edit_rollback(
         &effect_control,
     )
     .await
+    .and_then(source_edit_surface_result)
 }
 
 pub(super) fn install_project_open_source_edit_rollback_owner(

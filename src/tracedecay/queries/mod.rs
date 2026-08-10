@@ -1,8 +1,5 @@
-//! Read-side query surface: search ranking plus thin delegation to the
-//! graph query/traversal layers.
+//! Read-side query surface for admitted graph projections and retained
+//! project metadata.
 
 pub(crate) mod graph;
 mod meta;
-mod search;
-mod source;
-mod traits;

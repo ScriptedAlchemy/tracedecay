@@ -1,4 +1,9 @@
 use crate::support::*;
+use crate::support::{
+    close_production_source_edit_fixture as close_test_graph,
+    handle_production_source_edit_tool_call as handle_tool_call,
+    init_production_source_edit_project as init_test_project,
+};
 use serde_json::{Value, json};
 use std::fs;
 #[cfg(unix)]
@@ -23,13 +28,13 @@ fn extract_edit_json(value: &Value) -> Value {
 #[tokio::test]
 async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     let initial = b"fn old_name() {}\r\n// exact \xE2\x98\x83\n";
     let applied = b"fn new_name() {}\r\n// exact \xE2\x98\x83\n";
     fs::write(project.join("src/main.rs"), initial).unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let preview = handle_tool_call(
         &cg,
@@ -138,7 +143,8 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
 #[tokio::test]
 async fn test_str_replace_success() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
@@ -148,7 +154,6 @@ async fn test_str_replace_success() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -188,7 +193,6 @@ async fn path_containment_config_rejects_parent_traversal_before_serving_config(
     .unwrap();
 
     let (cg, _env) = init_test_project(&project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -215,7 +219,6 @@ async fn path_containment_read_rejects_parent_traversal_before_serving_file() {
     fs::write(dir.path().join("outside.rs"), "fn leaked() {}\n").unwrap();
 
     let (cg, _env) = init_test_project(&project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -244,7 +247,6 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
     unix_fs::symlink(&external, project.join("src")).unwrap();
 
     let (cg, _env) = init_test_project(&project).await;
-    cg.index_all().await.unwrap();
 
     let read = handle_tool_call(
         &cg,
@@ -293,12 +295,15 @@ async fn read_and_outline_preserve_symlink_indexed_file_key() {
 }
 
 #[tokio::test]
-async fn outline_preserves_db_payload_and_adds_ast_grep_outline_when_available() {
+async fn outline_preserves_generation_payload_and_adds_ast_grep_outline_when_available() {
     if !tracedecay::mcp::tools::ast_grep_outline_available() {
         return;
     }
 
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let project = dir.path().join("project");
+    crate::fixture::write_indexed_fixture_sources(&project);
+    let (cg, _env) = init_test_project(&project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_outline",
@@ -317,7 +322,7 @@ async fn outline_preserves_db_payload_and_adds_ast_grep_outline_when_available()
         payload["symbols"]
             .as_array()
             .is_some_and(|symbols| symbols.iter().any(|symbol| symbol["name"] == "helper")),
-        "DB-backed symbols should still be present: {payload}"
+        "generation-backed symbols should still be present: {payload}"
     );
     assert!(
         payload["ast_grep_outline"]
@@ -327,6 +332,7 @@ async fn outline_preserves_db_payload_and_adds_ast_grep_outline_when_available()
                 .is_some_and(|items| items.iter().any(|item| item["name"] == "helper")))),
         "ast-grep outline should be attached under ast_grep_outline: {payload}"
     );
+    close_test_graph(cg).await;
 }
 
 #[tokio::test]
@@ -335,7 +341,10 @@ async fn outline_markdown_uses_context_style_bullets_not_table() {
         return;
     }
 
-    let (cg, _dir) = setup_project().await;
+    let dir = test_temp_dir();
+    let project = dir.path().join("project");
+    crate::fixture::write_indexed_fixture_sources(&project);
+    let (cg, _env) = init_test_project(&project).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_outline",
@@ -350,6 +359,7 @@ async fn outline_markdown_uses_context_style_bullets_not_table() {
     assert!(text.contains("## Outline"));
     assert!(text.contains("- **helper**"));
     assert!(!text.contains("| symbol | kind |"));
+    close_test_graph(cg).await;
 }
 
 #[cfg(unix)]
@@ -369,7 +379,6 @@ async fn path_containment_config_rejects_symlink_escape_before_serving_config() 
     unix_fs::symlink(&outside_dir, project.join("escape")).unwrap();
 
     let (cg, _env) = init_test_project(&project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -409,13 +418,13 @@ async fn project_selector_is_rejected_before_write_tool_parsing() {
 #[tokio::test]
 async fn test_str_replace_not_found() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(project.join("src/main.rs"), "fn hello() {}\n").unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -440,13 +449,13 @@ async fn test_str_replace_not_found() {
 #[tokio::test]
 async fn test_str_replace_multiple_matches_fails() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn foo() {}\n").unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -476,7 +485,8 @@ async fn test_str_replace_multiple_matches_fails() {
 #[tokio::test]
 async fn test_multi_str_replace_success() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
@@ -486,7 +496,6 @@ async fn test_multi_str_replace_success() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -518,13 +527,13 @@ async fn test_multi_str_replace_success() {
 #[tokio::test]
 async fn test_multi_str_replace_atomic_failure() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(project.join("src/main.rs"), "fn foo() {}\nfn baz() {}\n").unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -561,14 +570,14 @@ async fn test_multi_str_replace_atomic_failure() {
 #[tokio::test]
 async fn test_multi_str_replace_unicode_preview_does_not_panic() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     let original = "fn main() {}\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let missing_old = format!("{}é", "a".repeat(19));
     let result = handle_tool_call(
@@ -607,7 +616,8 @@ async fn test_multi_str_replace_earlier_insertion_collision_lands_correctly() {
     // the original and splicing once makes each replacement land where the
     // caller meant.
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
@@ -617,7 +627,6 @@ async fn test_multi_str_replace_earlier_insertion_collision_lands_correctly() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -654,14 +663,14 @@ async fn test_multi_str_replace_overlapping_ranges_error() {
     // Two replacements whose matched ranges overlap cannot both be applied
     // coherently; the edit must be refused rather than silently dropping one.
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     let original = "abcdef\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -700,7 +709,8 @@ async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
     // a documented fn with new_source that carries its own doc yields exactly
     // one doc comment — not the old one orphaned above the new one.
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     // A leading item keeps `foo` off row 0 so its extracted attrs_start_line is
@@ -713,7 +723,6 @@ async fn test_replace_symbol_documented_fn_keeps_single_doc_comment() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -751,7 +760,8 @@ async fn test_insert_at_symbol_before_lands_above_attribute() {
     // `position=before` must insert above the item's leading doc/attribute
     // block, not between the docs and the item.
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     // A leading item keeps `foo` off row 0 so its extracted attrs_start_line is
@@ -763,7 +773,6 @@ async fn test_insert_at_symbol_before_lands_above_attribute() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -797,12 +806,12 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
     // Regression: editing unsupported types (e.g. .css) previously wrote the
     // file then returned a reindex error, silently mutating the file.
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
 
     fs::write(project.join("style.css"), ".foo {\n\tfont-size: 14px;\n}\n").unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -835,12 +844,12 @@ async fn ast_grep_rewrite_has_literal_fallback_when_binary_missing() {
         return;
     }
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn old_name() {}\n").unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
         "tracedecay_ast_grep_rewrite",
@@ -867,7 +876,8 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
         return;
     }
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/lib.rs"),
@@ -876,7 +886,6 @@ async fn ast_grep_rewrite_uses_current_cli_update_flag() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
         "tracedecay_ast_grep_rewrite",
@@ -914,12 +923,12 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
         return;
     }
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn foo() {}\n").unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
     let result = handle_tool_call(
         &cg,
         "tracedecay_ast_grep_rewrite",
@@ -951,7 +960,8 @@ async fn ast_grep_rewrite_surfaces_useful_error_on_empty_stderr() {
 #[tokio::test]
 async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
 
     fs::write(
         project.join("style.css"),
@@ -960,7 +970,6 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -997,7 +1006,8 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
 #[tokio::test]
 async fn test_insert_at_string_anchor_before() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
@@ -1007,7 +1017,6 @@ async fn test_insert_at_string_anchor_before() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -1043,7 +1052,8 @@ async fn test_insert_at_string_anchor_before() {
 #[tokio::test]
 async fn test_insert_at_line_number() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
@@ -1053,7 +1063,6 @@ async fn test_insert_at_line_number() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -1090,13 +1099,13 @@ async fn test_insert_at_line_number() {
 #[tokio::test]
 async fn test_insert_at_anchor_not_found() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(project.join("src/main.rs"), "line one\nline two\n").unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -1122,14 +1131,14 @@ async fn test_insert_at_anchor_not_found() {
 #[tokio::test]
 async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     let original = "line one\nline two\n";
     fs::write(project.join("src/main.rs"), original).unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let long_anchor = format!("{}é", "a".repeat(99));
     let result = handle_tool_call(
@@ -1159,7 +1168,8 @@ async fn test_insert_at_unicode_anchor_prefix_does_not_panic() {
 #[tokio::test]
 async fn test_insert_at_ambiguous_anchor() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     fs::write(
@@ -1169,7 +1179,6 @@ async fn test_insert_at_ambiguous_anchor() {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -1201,14 +1210,14 @@ async fn test_insert_at_ambiguous_anchor() {
 #[tokio::test]
 async fn test_insert_at_preserves_trailing_newline() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
 
     let original = "fn hello() {}\n\nfn world() {}\n";
     fs::write(project.join("src/lib.rs"), original).unwrap();
 
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,

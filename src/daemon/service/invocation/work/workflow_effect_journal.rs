@@ -363,7 +363,8 @@ pub(super) fn workflow_effect_problem(problem: DaemonInvocationProblem) -> Workf
         DaemonInvocationProblem::InvalidRequest
         | DaemonInvocationProblem::UnsupportedRevision
         | DaemonInvocationProblem::ResetRequired => WorkflowEffectProblemV1::InvalidRequest,
-        DaemonInvocationProblem::Unavailable => WorkflowEffectProblemV1::Conflict,
+        DaemonInvocationProblem::ApplicationContractViolation
+        | DaemonInvocationProblem::Unavailable => WorkflowEffectProblemV1::Conflict,
     }
 }
 

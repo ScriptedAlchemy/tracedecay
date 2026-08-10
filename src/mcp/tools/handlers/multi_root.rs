@@ -229,10 +229,15 @@ fn problem_result(
     request_id: RequestId,
     problem: ApplicationProblem,
 ) -> Result<ToolResult> {
+    let application =
+        ApplicationProblemEnvelope::new(result_contract(operation)?, request_id, problem)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("multi-root application problem contract is invalid: {error}"),
+            })?
+            .with_owning_layer(ProblemOwningLayer::Runtime);
     let payload = json!({
         "binding_id": binding_id(operation)?,
-        "application": ApplicationProblemEnvelope::new(result_contract(operation)?, request_id, problem)
-            .with_owning_layer(ProblemOwningLayer::Runtime),
+        "application": application,
     });
     Ok(json_result(&payload).with_semantic_error(true))
 }

@@ -6,10 +6,10 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, CancellationContext, CancellationSignal,
-    CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest, RequestContext, RequestId,
-    ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
+    ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope, CancellationContext,
+    CancellationSignal, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest,
+    RequestContext, RequestId, ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_domain::{
@@ -597,7 +597,7 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
                 request.body.clone(),
             ));
             async move {
-                tracedecay_api::CanonicalInvocationResult::new(
+                Ok::<_, ApplicationContractError>(tracedecay_api::CanonicalInvocationResult::new(
                     BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
                         .expect("binding"),
                     Err(ApplicationProblemEnvelope::new(
@@ -614,8 +614,9 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
                             )
                             .expect("diagnostic"),
                         ),
-                    )),
-                )
+                    )
+                    .expect("canonical Git fixture problem")),
+                ))
             }
         },
     );

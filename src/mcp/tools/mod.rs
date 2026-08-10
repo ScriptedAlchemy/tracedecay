@@ -36,23 +36,13 @@ pub(crate) use handlers::hook_runtime::structured_hook_error_data;
 pub(crate) use handlers::retained_catalog::{
     execute_profile_retained_mcp_tool, retained_mcp_operation,
 };
-pub(crate) use handlers::session::message_search::SessionRetrievalOmissionView;
 pub(crate) use handlers::{
-    LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
-    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
     ProjectRegistryReadPort, ProjectRegistrySelector, SessionRefreshAction, SessionRefreshCommand,
     SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshProgressView,
     SessionRefreshReceiptView, SessionRefreshServiceOutcome, SessionRefreshServicePort,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionRetrievalSweepFuture, SessionRetrievalSweepOutcome,
-    SessionRetrievalSweepPort, SessionRetrievalSweepRootView, SessionRetrievalSweepSkipReason,
-    SessionRetrievalSweepSkipView, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
-    SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
-    SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
     handle_projectless_admin_cli, handle_projectless_hook_runtime,
     replay_projectless_hermes_host_admission, utc_micros_value,
 };

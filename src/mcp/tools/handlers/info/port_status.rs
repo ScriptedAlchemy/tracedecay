@@ -54,22 +54,26 @@ fn port_kind_has_parent(kind: &str) -> bool {
 /// generic parameters so `Biquad<T>::new` and `Biquad::new` share the same
 /// parent. Returns `None` for kinds where the parent qualifier is not the
 /// containing type (e.g. top-level structs whose parent is the file path).
-fn port_parent_qualifier(node: &crate::types::Node) -> Option<String> {
-    if !port_kind_has_parent(node.kind.as_str()) {
+fn port_parent_qualifier(kind: &str, qualified_name: &str) -> Option<String> {
+    if !port_kind_has_parent(kind) {
         return None;
     }
-    let parts: Vec<&str> = node.qualified_name.split("::").collect();
+    let parts: Vec<&str> = qualified_name.split("::").collect();
     if parts.len() < 2 {
         return None;
     }
-    let parent = parts[parts.len() - 2];
+    let parent = parts.get(parts.len() - 2)?;
     // Strip generic parameters: `Biquad<T>` -> `Biquad`.
-    let parent_no_generics = parent.split('<').next().unwrap_or(parent);
+    let parent_no_generics = parent.split('<').next()?;
     Some(parent_no_generics.trim().to_string())
 }
 
 /// Handles `tracedecay_port_status` tool calls.
-pub(crate) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_port_status(
+    cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_port_status")?;
 
     let source_dir = args
@@ -114,68 +118,74 @@ pub(crate) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
         ));
     }
 
-    let source_nodes = cg.get_nodes_by_dir(source_dir, &kinds).await?;
-    let target_nodes = cg.get_nodes_by_dir(target_dir, &kinds).await?;
+    let source_nodes = symbols_in_dir(graph, source_dir, &kinds)?;
+    let target_nodes = symbols_in_dir(graph, target_dir, &kinds)?;
 
     // Match key includes the parent qualifier (e.g. enclosing struct/class) for
     // kinds that have one, so `Biquad::new` does NOT collide with `Adaa::new`.
     // Top-level kinds (struct, function, …) keep using name-only matching.
-    let mut target_map: HashMap<PortKey, Vec<&crate::types::Node>> = HashMap::new();
+    let mut target_map = HashMap::<PortKey, Vec<_>>::new();
     for node in &target_nodes {
+        let metadata = required_metadata(node)?;
         let key: PortKey = (
-            node.name.to_lowercase(),
-            port_parent_qualifier(node).map(|s| s.to_lowercase()),
-            kind_compat_group(node.kind.as_str()),
+            metadata.simple_name.to_lowercase(),
+            port_parent_qualifier(&metadata.kind, &metadata.qualified_name)
+                .map(|value| value.to_lowercase()),
+            kind_compat_group(&metadata.kind),
         );
         target_map.entry(key).or_default().push(node);
     }
 
     let mut matched_symbols: Vec<Value> = Vec::new();
-    let mut matched_target_ids: HashSet<String> = HashSet::new();
+    let mut matched_target_ids = HashSet::new();
     let mut unmatched_by_file: HashMap<String, Vec<Value>> = HashMap::new();
 
     for src_node in &source_nodes {
+        let (source_metadata, source_file) = required_symbol_parts(src_node)?;
         let key: PortKey = (
-            src_node.name.to_lowercase(),
-            port_parent_qualifier(src_node).map(|s| s.to_lowercase()),
-            kind_compat_group(src_node.kind.as_str()),
+            source_metadata.simple_name.to_lowercase(),
+            port_parent_qualifier(&source_metadata.kind, &source_metadata.qualified_name)
+                .map(|value| value.to_lowercase()),
+            kind_compat_group(&source_metadata.kind),
         );
         if let Some(targets) = target_map.get(&key) {
             // Take the first match
             let tgt = targets[0];
+            let (target_metadata, target_file) = required_symbol_parts(tgt)?;
             matched_symbols.push(json!({
-                "name": src_node.name,
-                "source_kind": src_node.kind.as_str(),
-                "target_kind": tgt.kind.as_str(),
-                "source_file": src_node.file_path,
-                "target_file": tgt.file_path,
+                "name": source_metadata.simple_name,
+                "source_kind": source_metadata.kind,
+                "target_kind": target_metadata.kind,
+                "source_file": source_file,
+                "target_file": target_file,
             }));
-            matched_target_ids.insert(tgt.id.clone());
+            matched_target_ids.insert(tgt.occurrence.clone());
         } else {
             unmatched_by_file
-                .entry(src_node.file_path.clone())
+                .entry(source_file.to_owned())
                 .or_default()
                 .push(json!({
-                    "name": src_node.name,
-                    "kind": src_node.kind.as_str(),
-                    "line": src_node.start_line,
+                    "name": source_metadata.simple_name,
+                    "kind": source_metadata.kind,
+                    "line": source_metadata.start_line.saturating_add(1),
                 }));
         }
     }
 
     // Target-only symbols (in target but no source match)
-    let target_only: Vec<Value> = target_nodes
-        .iter()
-        .filter(|n| !matched_target_ids.contains(&n.id))
-        .map(|n| {
-            json!({
-                "name": n.name,
-                "kind": n.kind.as_str(),
-                "file": n.file_path,
-                "line": n.start_line,
-            })
-        })
-        .collect();
+    let mut target_only = Vec::new();
+    for node in &target_nodes {
+        if matched_target_ids.contains(&node.occurrence) {
+            continue;
+        }
+        let (metadata, file) = required_symbol_parts(node)?;
+        target_only.push(json!({
+            "name": metadata.simple_name,
+            "kind": metadata.kind,
+            "file": file,
+            "line": metadata.start_line.saturating_add(1),
+        }));
+    }
 
     let source_count = source_nodes.len();
     let matched_count = matched_symbols.len();
@@ -186,12 +196,12 @@ pub(crate) async fn handle_port_status(cg: &TraceDecay, args: Value) -> Result<T
         0.0
     };
 
-    let touched_files = unique_file_paths(
-        source_nodes
-            .iter()
-            .chain(target_nodes.iter())
-            .map(|n| n.file_path.as_str()),
-    );
+    let touched_paths = source_nodes
+        .iter()
+        .chain(target_nodes.iter())
+        .map(required_file_path)
+        .collect::<Result<Vec<_>>>()?;
+    let touched_files = unique_file_paths(touched_paths.into_iter());
 
     let result = json!({
         "source_dir": source_dir,

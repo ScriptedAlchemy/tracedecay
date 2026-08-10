@@ -1,6 +1,3 @@
-/// Graph traversal algorithms for the code graph.
-pub mod traversal;
-
 /// Query operations for analyzing the code graph.
 pub mod queries;
 
@@ -17,4 +14,3 @@ pub mod git;
 pub mod redundancy_scan;
 
 pub use queries::GraphQueryManager;
-pub use traversal::GraphTraverser;

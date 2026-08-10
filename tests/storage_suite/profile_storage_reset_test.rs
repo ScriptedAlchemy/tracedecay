@@ -10,7 +10,7 @@ use tracedecay::storage::{
 };
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-use crate::support::HOME_ENV_LOCK;
+use crate::home_env_lock::HOME_ENV_LOCK;
 
 struct HomeEnvGuard {
     previous_home: Option<OsString>,

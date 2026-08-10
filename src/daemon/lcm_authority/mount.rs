@@ -35,6 +35,8 @@ const LCM_MAX_WORK_UNITS: u64 = 1_000_000;
 
 pub(crate) type MountedLcmFuture<'a> =
     Pin<Box<dyn Future<Output = Option<LcmAuthorityResponse>> + Send + 'a>>;
+pub(crate) type MountedAdmittedLcmFuture<'a> =
+    Pin<Box<dyn Future<Output = LcmAuthorityResponse> + Send + 'a>>;
 
 /// Daemon-minted invocation boundary. Transport and host adapters can select
 /// an operation but cannot supply scope, grants, deadlines, cancellation
@@ -47,7 +49,7 @@ pub(crate) trait MountedLcmAuthorityPort: Send + Sync {
         context: &'a RequestContext,
         cancellation: &'a CancellationSignal,
         request: LcmAuthorityRequest,
-    ) -> MountedLcmFuture<'a>;
+    ) -> MountedAdmittedLcmFuture<'a>;
 }
 
 struct MountedLcmAuthority {
@@ -208,7 +210,7 @@ impl MountedLcmAuthorityPort for MountedLcmAuthority {
         context: &'a RequestContext,
         cancellation: &'a CancellationSignal,
         request: LcmAuthorityRequest,
-    ) -> MountedLcmFuture<'a> {
+    ) -> MountedAdmittedLcmFuture<'a> {
         Box::pin(
             self.authority
                 .execute_retained_read(context, cancellation, request),

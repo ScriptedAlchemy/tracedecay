@@ -94,12 +94,12 @@ impl DaemonInvocationService {
         let Some(project_root) = project_root else {
             return Ok(None);
         };
-        self.project_runtimes
+        Ok(self
+            .project_runtimes
             .read::<RegisteredObservabilityProducerV1, _, _>(project_root, |registered| {
                 registered.delivery_settlement_authority()
             })
-            .await
-            .transpose()
+            .await)
     }
 
     pub(crate) async fn delivery_settlement_recorder(

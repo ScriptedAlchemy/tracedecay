@@ -2,6 +2,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::fs;
+use tracedecay_domain::research::{FrozenWatermarkResolutionV1, ShardId};
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorResolutionStateV2, AnchorSourceGenerationV2,
     AuthorizedAnchorResolutionV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,

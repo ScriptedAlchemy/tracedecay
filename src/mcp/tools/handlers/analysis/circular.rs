@@ -47,7 +47,7 @@ pub(crate) async fn handle_circular(
             (limit as usize).clamp(1, CIRCULAR_MAX_MEMBER_LIMIT)
         });
 
-    let all_cycles = cg.find_circular_dependencies(graph).await?;
+    let all_cycles = graph.find_circular_dependencies().await?;
     let cycle_count = all_cycles.len();
     let (cycles, omitted) = bound_cycles(all_cycles, limit, member_limit);
 

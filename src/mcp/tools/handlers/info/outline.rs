@@ -4,7 +4,11 @@ use super::*;
 
 /// Handles `tracedecay_outline` — flat symbol map for a file with optional
 /// `kinds` filter.
-pub(crate) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_outline(
+    cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     use crate::context::read_modes::render_map;
 
     let file =
@@ -20,10 +24,20 @@ pub(crate) async fn handle_outline(cg: &TraceDecay, args: Value) -> Result<ToolR
             .collect()
     });
 
-    let (abs_path, display_file) = resolve_indexed_source_file(cg, file).await?;
+    let (abs_path, display_file) = resolve_indexed_source_file(
+        cg.project_root(),
+        graph.reader(),
+        graph.cancellation(),
+        file,
+    )?;
 
     let kinds_slice: Option<&[String]> = kinds.as_deref();
-    let mut value = render_map(cg.db(), &display_file, kinds_slice).await?;
+    let mut value = render_map(
+        graph.reader(),
+        graph.cancellation(),
+        &display_file,
+        kinds_slice,
+    )?;
     match ast_grep_outline(&abs_path) {
         Ok(outline) => {
             value["ast_grep_outline"] = outline;

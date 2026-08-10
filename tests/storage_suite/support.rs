@@ -1,7 +1,6 @@
 //! Shared fixtures for the consolidated storage suite.
 //!
-//! The template-database cache generalizes the pattern db_query_test used:
-//! building a schema from scratch is a large fixed cost per test (especially
+//! Building a schema from scratch is a large fixed cost per test (especially
 //! on Windows), so the first test process to need a given fixture builds it
 //! once under the system temp dir and every other test — including tests in
 //! other processes, since nextest runs one process per test — copies the
@@ -12,12 +11,6 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
-
-/// Serializes tests across suite modules that mutate the process-wide
-/// HOME/USERPROFILE/profile-dir environment variables. Only plain
-/// `cargo test` shares one process between tests; nextest gives every test
-/// its own process, where this lock is uncontended.
-pub static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// FNV-1a hash of everything that can change a template's contents: the
 /// schema-defining sources, the template name, and any builder-specific
@@ -145,37 +138,4 @@ pub async fn seed_latest_graph_db(dest: &Path) {
         fs::create_dir_all(parent).expect("failed to create test database directory");
     }
     fs::copy(&template, dest).expect("failed to seed database from template");
-}
-
-/// A function node with reasonable defaults, shared by the suite modules that
-/// need graph rows to query against. `db_test`, `db_query_test`, and
-/// `corruption_test` each carried a byte-identical copy of this struct
-/// literal, so the fixtures could drift apart silently; one definition keeps
-/// every module asserting against the same shape.
-pub fn sample_node(id: &str, name: &str, file_path: &str) -> tracedecay::types::Node {
-    tracedecay::types::Node {
-        id: id.to_string(),
-        kind: tracedecay::types::NodeKind::Function,
-        name: name.to_string(),
-        qualified_name: format!("crate::{name}"),
-        file_path: file_path.to_string(),
-        start_line: 1,
-        attrs_start_line: 1,
-        end_line: 10,
-        start_column: 0,
-        end_column: 1,
-        signature: Some(format!("fn {name}()")),
-        docstring: Some(format!("Documentation for {name}")),
-        visibility: tracedecay::types::Visibility::Pub,
-        is_async: false,
-        branches: 0,
-        loops: 0,
-        returns: 0,
-        max_nesting: 0,
-        unsafe_blocks: 0,
-        unchecked_calls: 0,
-        assertions: 0,
-        updated_at: 1000,
-        parent_id: None,
-    }
 }

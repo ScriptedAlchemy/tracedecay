@@ -23,15 +23,14 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
-use super::SessionRetrievalServicePort;
 use super::dashboard_lcm::DashboardLcmReadAdapter;
 use super::support::generic_tool_result;
 
 use crate::dashboard::{
     AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
-    DashboardApplicationRuntime, DashboardAutomationWriter, DashboardConfigurationApplyFuture,
-    DashboardStateCompositionV1, bind_dashboard, build_state_with_automation_reconciler, router,
-    validate_dashboard_host,
+    DashboardApplicationRuntime, DashboardAutomationWriter, DashboardConfigurationApplyError,
+    DashboardConfigurationApplyFuture, DashboardStateCompositionV1, bind_dashboard,
+    build_state_with_automation_reconciler, router, validate_dashboard_host,
 };
 
 struct DashboardInvocationExecutorAdapter {
@@ -134,11 +133,21 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
             )
             .await
             {
-                Ok(result) => result.result.map(|envelope| envelope.outcome),
-                Err(_) => Err(dashboard_configuration_unavailable(
+                Ok(result) => result
+                    .result
+                    .map(|envelope| envelope.outcome)
+                    .map_err(DashboardConfigurationApplyError::ApplicationProblem),
+                Err(_) => match dashboard_configuration_unavailable(
                     configuration_batch_contract,
                     error_request_id,
-                )),
+                ) {
+                    Ok(problem) => Err(DashboardConfigurationApplyError::ApplicationProblem(
+                        problem,
+                    )),
+                    Err(error) => {
+                        Err(DashboardConfigurationApplyError::ApplicationContractViolation(error))
+                    }
+                },
             }
         })
     }
@@ -179,7 +188,8 @@ fn append_direct_configuration_mutations(
 fn dashboard_configuration_unavailable(
     contract: tracedecay_application::ResultContractRef,
     request_id: RequestId,
-) -> ApplicationProblemEnvelope {
+) -> std::result::Result<ApplicationProblemEnvelope, tracedecay_application::ApplicationContractError>
+{
     ApplicationProblemEnvelope::new(
         contract,
         request_id,
@@ -322,7 +332,10 @@ pub(super) async fn handle_dashboard(
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
     daemon_user_profile_id: Option<UserProfileId>,
     daemon_profile_root: Option<PathBuf>,
-    lcm_retrieval: Option<Arc<dyn SessionRetrievalServicePort>>,
+    session_retrieval: Option<
+        Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>,
+    >,
+    session_identity: Option<tracedecay_usecases::context::ResolvedSessionIdentity>,
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
@@ -457,11 +470,11 @@ pub(super) async fn handle_dashboard(
                         .map(|adapter| Arc::new(adapter) as Arc<dyn DashboardApplicationRuntime>)
                 })
                 .transpose()?;
-            let lcm_read_authority = lcm_retrieval
-                .zip(retained_cg.store_layout().identity.project_id.clone())
-                .map(|(retrieval, project_id)| {
-                    Arc::new(DashboardLcmReadAdapter::new(retrieval, project_id))
-                        as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
+            let lcm_read_authority = session_retrieval
+                .zip(session_identity)
+                .and_then(|(retrieval, identity)| DashboardLcmReadAdapter::new(retrieval, identity))
+                .map(|adapter| {
+                    Arc::new(adapter) as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
                 });
             // The verified graph read authority requires the registered
             // project-sessions store with its bound project graph runtime;

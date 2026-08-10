@@ -20,7 +20,6 @@ use crate::storage::{self, StoreLayout};
 use crate::support::weak_registry::WeakRegistry;
 #[cfg(any(test, feature = "test-transport"))]
 use tokio::sync::Mutex as AsyncMutex;
-use tracedecay_code_extraction::LanguageRegistry;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
 use tracedecay_usecases::config::{
@@ -34,8 +33,6 @@ mod branches;
 mod identity;
 mod recovery;
 mod registry;
-
-use recovery::{OpenHealthOutcome, active_graph_layout};
 
 pub(crate) use recovery::is_fts_only_corruption;
 pub(crate) use registry::git_remote_url;
@@ -203,7 +200,7 @@ impl TraceDecay {
                 maintenance.lifecycle(),
             )
             .await?;
-            graph.standalone_maintenance_scope = Some(maintenance);
+            graph._standalone_maintenance_scope = Some(maintenance);
             Ok(graph)
         }
     }
@@ -332,7 +329,6 @@ impl TraceDecay {
         )?;
         let configuration_runtime = Arc::new(configuration_runtime);
         let config = materialize_root_runtime_configuration(&configuration)?;
-        let active_graph_layout = active_graph_layout(&store_layout.graph_db_path);
         if store_layout.storage_mode == storage::StorageMode::ProfileSharded {
             storage::write_store_manifest(&store_layout)?;
         }
@@ -354,19 +350,16 @@ impl TraceDecay {
             configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
-            active_graph_layout,
             open_options,
-            registry: LanguageRegistry::new(),
             active_branch,
             serving_branch,
             fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
-            standalone_maintenance_scope: None,
+            _standalone_maintenance_scope: None,
         };
         // First-touch parity with the registered open path: daemon warm-up
         // refuses to advertise an identity-bearing project whose Context
@@ -390,36 +383,6 @@ impl TraceDecay {
         }
         ts.register_project_store_in_global_registry().await?;
         Ok(ts)
-    }
-
-    pub async fn init_and_index_with_options(
-        project_root: &Path,
-        open_options: TraceDecayOpenOptions,
-    ) -> Result<Self> {
-        let cg = Self::init_with_options(project_root, open_options).await?;
-        cg.index_all().await?;
-        Ok(cg)
-    }
-
-    pub(crate) async fn init_and_index_with_registered_configuration(
-        project_root: &Path,
-        open_options: TraceDecayOpenOptions,
-        store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
-        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    ) -> Result<Self> {
-        let cg = Self::init_with_registered_configuration(
-            project_root,
-            open_options,
-            store_layout,
-            configuration_database,
-            profile_database,
-            runtime_registry,
-        )
-        .await?;
-        cg.index_all().await?;
-        Ok(cg)
     }
 
     /// Returns a reference to the underlying database.
@@ -478,12 +441,10 @@ impl TraceDecay {
 
     /// Opens an existing `TraceDecay` project at the given root.
     ///
-    /// If branch metadata exists, resolves the current git branch, auto-adds
-    /// it to branch tracking when needed, and opens the corresponding DB.
-    /// Falls back to the nearest tracked ancestor DB with a warning only when
-    /// the live branch cannot be auto-tracked, such as detached HEAD.
-    /// If the previous operation was interrupted (dirty sentinel exists),
-    /// the database is integrity-checked before any writable open.
+    /// If branch metadata exists, resolves the current git branch's published
+    /// provenance. Registered open admits only the exact final relational
+    /// schema; code-index activation and reconciliation happen after open
+    /// through the daemon-owned scheduler.
     pub async fn open(project_root: &Path) -> Result<Self> {
         Self::open_with_options(project_root, TraceDecayOpenOptions::default()).await
     }
@@ -512,7 +473,7 @@ impl TraceDecay {
                 maintenance.lifecycle(),
             )
             .await?;
-            graph.standalone_maintenance_scope = Some(maintenance);
+            graph._standalone_maintenance_scope = Some(maintenance);
             Ok(graph)
         }
     }
@@ -570,52 +531,10 @@ impl TraceDecay {
         profile_database: Arc<RegisteredGlobalDb>,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        Self::open_with_registered_configuration_inner(
-            project_root,
-            open_options,
-            store_layout,
-            configuration_database,
-            profile_database,
-            runtime_registry,
-            false,
-        )
-        .await
-    }
-
-    pub(crate) async fn open_with_registered_configuration_deferred_post_open_health(
-        project_root: &Path,
-        open_options: TraceDecayOpenOptions,
-        store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
-        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    ) -> Result<Self> {
-        Self::open_with_registered_configuration_inner(
-            project_root,
-            open_options,
-            store_layout,
-            configuration_database,
-            profile_database,
-            runtime_registry,
-            true,
-        )
-        .await
-    }
-
-    pub(super) async fn open_with_registered_configuration_inner(
-        project_root: &Path,
-        open_options: TraceDecayOpenOptions,
-        store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
-        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-        defer_post_open_health: bool,
-    ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
         let db_path = store_layout.graph_db_path.clone();
         let (serving_branch, fallback_warning) =
             Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
-        let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -626,22 +545,17 @@ impl TraceDecay {
             });
         }
 
-        // A structured marker owned by a live process describes work in
-        // flight, not a crash. Only abandoned, legacy, or malformed dirty
-        // markers enter recovery and contend for the writer's lock.
-        let db = match Self::run_open_health_recovery(
+        // Registered mounts perform the exact final-schema admission. Project
+        // open never repairs, rebuilds, or indexes the graph inline; retained
+        // code-index activation is owned by the daemon after publication.
+        let db = Self::mount_project_graph(
+            runtime_registry.as_ref(),
             project_root,
             &store_layout,
-            &db_path,
-            &active_graph_layout,
-            defer_post_open_health,
-            Arc::clone(&runtime_registry),
+            "open project store",
+            DatabaseAccessMode::ReadWrite,
         )
-        .await?
-        {
-            OpenHealthOutcome::Ready { db } => db,
-            OpenHealthOutcome::Recovered(result) => return *result,
-        };
+        .await?;
 
         install_usecase_runtime_configuration_authority()?;
         let (configuration_runtime, configuration) = ProjectConfigurationRuntime::open(
@@ -662,19 +576,16 @@ impl TraceDecay {
             configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
-            active_graph_layout,
             open_options,
-            registry: LanguageRegistry::new(),
             active_branch,
             serving_branch,
             fallback_warning,
             read_only: false,
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
-            standalone_maintenance_scope: None,
+            _standalone_maintenance_scope: None,
         };
 
         crate::hooks::publish_hook_bindings(&ts.store_layout)?;
@@ -696,7 +607,6 @@ impl TraceDecay {
         }
 
         ts.register_project_store_in_global_registry().await?;
-        ts.schedule_graph_rebuild_if_needed().await?;
         Ok(ts)
     }
 
@@ -765,7 +675,7 @@ impl TraceDecay {
                 maintenance.lifecycle(),
             )
             .await?;
-            graph.standalone_maintenance_scope = Some(maintenance);
+            graph._standalone_maintenance_scope = Some(maintenance);
             Ok(graph)
         }
     }
@@ -827,7 +737,6 @@ impl TraceDecay {
         let db_path = store_layout.graph_db_path.clone();
         let (serving_branch, fallback_warning) =
             Self::resolve_branch_provenance(project_root, &store_layout, &active_branch);
-        let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -868,19 +777,16 @@ impl TraceDecay {
             configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
-            active_graph_layout,
             open_options,
-            registry: LanguageRegistry::new(),
             active_branch,
             serving_branch,
             fallback_warning,
             read_only: true,
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
-            standalone_maintenance_scope: None,
+            _standalone_maintenance_scope: None,
         })
     }
 }

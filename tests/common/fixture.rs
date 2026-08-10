@@ -10,7 +10,7 @@
 //! ```ignore
 //! let profile = TestProfile::acquire().await;              // isolated HOME, one profile
 //! let repo = GitFixture::primary(profile.path("project")); // template-seeded checkout
-//! let project = profile.enroll_indexed(repo.root()).await; // registered + enrolled
+//! let project = profile.enroll(repo.root()).await;         // registered + enrolled
 //! let data_root = project.data_root();                     // taken from the opened graph
 //! ```
 //!
@@ -153,15 +153,10 @@ impl TestProfile {
 
     /// Registers, enrolls, and initializes `project_root` in this profile.
     pub async fn enroll(&self, project_root: &Path) -> RegisteredProject {
-        self.enroll_inner(project_root, false).await
+        self.enroll_inner(project_root).await
     }
 
-    /// [`Self::enroll`] followed by a full index.
-    pub async fn enroll_indexed(&self, project_root: &Path) -> RegisteredProject {
-        self.enroll_inner(project_root, true).await
-    }
-
-    async fn enroll_inner(&self, project_root: &Path, index: bool) -> RegisteredProject {
+    async fn enroll_inner(&self, project_root: &Path) -> RegisteredProject {
         let project_root = project_root.canonicalize().unwrap_or_else(|err| {
             panic!(
                 "fixture project root '{}' must exist to be enrolled: {err}",
@@ -208,18 +203,9 @@ impl TestProfile {
                 project_root.display()
             )
         });
-        if index {
-            graph.index_all().await.unwrap_or_else(|err| {
-                panic!(
-                    "failed to index fixture graph '{}': {err}",
-                    project_root.display()
-                )
-            });
-        }
-
         // The layout comes from the graph that just created the store. Resolving
         // one independently can name a different shard than the one this project
-        // was indexed into, and later seeding then writes into a store no reader
+        // was initialized in, and later seeding then writes into a store no reader
         // opens.
         let layout = graph.store_layout().clone();
         assert_eq!(

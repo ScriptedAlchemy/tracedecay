@@ -120,7 +120,8 @@ mod tests {
             .unwrap(),
             RequestId::new("request.cli.work.7").unwrap(),
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        )
+        .expect("construct canonical work problem fixture"));
 
         let rendered = work_json_line(&outcome).expect("work JSON line");
         let problem: serde_json::Value =

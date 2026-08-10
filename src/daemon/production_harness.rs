@@ -63,13 +63,30 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
     ) -> Result<Self> {
         let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
-        Self::open_with_live_profile_root(isolation_root, project_roots, live_profile_root).await
+        Self::open_with_live_profile_root(isolation_root, project_roots, live_profile_root, None)
+            .await
+    }
+
+    pub async fn open_with_scope_prefix(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+        scope_prefix: impl Into<String>,
+    ) -> Result<Self> {
+        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        Self::open_with_live_profile_root(
+            isolation_root,
+            project_roots,
+            live_profile_root,
+            Some(scope_prefix.into()),
+        )
+        .await
     }
 
     async fn open_with_live_profile_root(
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
         live_profile_root: Option<PathBuf>,
+        scope_prefix: Option<String>,
     ) -> Result<Self> {
         std::fs::create_dir_all(isolation_root.as_ref()).map_err(|error| {
             TraceDecayError::Config {
@@ -177,7 +194,7 @@ impl ProductionProjectCompositionHarnessV1 {
                 client_version: binary_version().to_owned(),
                 client_instance_id: format!("production-composition-harness-{index}"),
                 client_identity: client_identity.clone(),
-                scope_prefix: None,
+                scope_prefix: scope_prefix.clone(),
                 project_path: Some(project_root.clone()),
                 timings: false,
                 allow_init: true,
@@ -242,8 +259,13 @@ impl ProductionProjectCompositionHarnessV1 {
         project_roots: impl IntoIterator<Item = PathBuf>,
         live_profile_root: PathBuf,
     ) -> Result<Self> {
-        Self::open_with_live_profile_root(isolation_root, project_roots, Some(live_profile_root))
-            .await
+        Self::open_with_live_profile_root(
+            isolation_root,
+            project_roots,
+            Some(live_profile_root),
+            None,
+        )
+        .await
     }
 
     pub fn isolation_root(&self) -> &Path {
@@ -277,6 +299,30 @@ impl ProductionProjectCompositionHarnessV1 {
             .map_err(|message| TraceDecayError::Database {
                 message,
                 operation: "read retained production profile analytics".to_owned(),
+            })
+    }
+
+    /// Seeds exact retained analytics rows through the mounted profile
+    /// database authority for production-composition transport tests.
+    pub async fn append_profile_analytics_events_for_test(
+        &self,
+        events: &[crate::global_db::AnalyticsEventInsert],
+    ) -> Result<Vec<i64>> {
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        resources
+            .store_administration
+            .registered_profile_database()
+            .await?
+            .append_analytics_events(events)
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                message,
+                operation: "seed retained production profile analytics".to_owned(),
             })
     }
 
@@ -361,11 +407,79 @@ impl ProductionProjectCompositionHarnessV1 {
         worktree_root: impl AsRef<Path>,
         branch: &str,
     ) -> Result<crate::branch::BranchAddOutcome> {
-        self.server(project_root)?
-            .cg()
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        let canonical_project_root =
+            std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "failed to canonicalize production-composition project '{}': {error}",
+                        project_root.as_ref().display()
+                    ),
+                }
+            })?;
+        let canonical_worktree_root =
+            std::fs::canonicalize(worktree_root.as_ref()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "failed to canonicalize branch worktree '{}': {error}",
+                        worktree_root.as_ref().display()
+                    ),
+                }
+            })?;
+        if !resources
+            .invocation
+            .code_index_schedulers
+            .is_worktree_mounted(&canonical_worktree_root)
             .await
-            .track_worktree_branch(worktree_root.as_ref(), branch)
+        {
+            return Err(TraceDecayError::project_route(
+                "code_index_scheduler_unavailable",
+                true,
+                format!(
+                    "code-index scheduler authority is unavailable for branch worktree '{}' in project '{}'",
+                    canonical_worktree_root.display(),
+                    canonical_project_root.display()
+                ),
+            ));
+        }
+        let serving = resources
+            .invocation
+            .code_index_schedulers
+            .serving_code_scope(&canonical_worktree_root)
             .await
+            .and_then(|scope| scope.serving_generation)
+            .ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "code_index_activation_unavailable",
+                    true,
+                    format!(
+                        "code-index activation is unavailable for branch worktree '{}'",
+                        canonical_worktree_root.display()
+                    ),
+                )
+            })?;
+        let requested_reference = format!("refs/heads/{branch}");
+        if serving
+            .snapshot()
+            .reference
+            .as_ref()
+            .map(tracedecay_domain::RefId::as_str)
+            != Some(requested_reference.as_str())
+        {
+            return Err(TraceDecayError::project_route(
+                "code_index_scheduler_identity_mismatch",
+                true,
+                format!(
+                    "mounted code-index scheduler is bound to a different branch than '{branch}'; dynamic worktree activation is unavailable"
+                ),
+            ));
+        }
+        Ok(crate::branch::BranchAddOutcome::AlreadyTracked)
     }
 
     pub async fn sync_tracked_worktree_branch(
@@ -375,15 +489,140 @@ impl ProductionProjectCompositionHarnessV1 {
         branch: &str,
         query: &str,
     ) -> Result<(Option<String>, Option<String>, bool, bool)> {
-        let graph = self.server(project_root)?.cg().await;
-        let branch_graph = graph
-            .sync_retained_worktree_branch(worktree_root.as_ref(), branch)
-            .await?;
-        let contains_query = !branch_graph.search(query, 10).await?.is_empty();
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        let canonical_project_root =
+            std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "failed to canonicalize production-composition project '{}': {error}",
+                        project_root.as_ref().display()
+                    ),
+                }
+            })?;
+        let canonical_worktree_root =
+            std::fs::canonicalize(worktree_root.as_ref()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!(
+                        "failed to canonicalize branch worktree '{}': {error}",
+                        worktree_root.as_ref().display()
+                    ),
+                }
+            })?;
+        let schedulers = &resources.invocation.code_index_schedulers;
+        if !schedulers
+            .is_worktree_mounted(&canonical_worktree_root)
+            .await
+        {
+            return Err(TraceDecayError::project_route(
+                "code_index_scheduler_unavailable",
+                true,
+                format!(
+                    "code-index scheduler authority is unavailable for branch worktree '{}' in project '{}'",
+                    canonical_worktree_root.display(),
+                    canonical_project_root.display()
+                ),
+            ));
+        }
+        let requested_reference = format!("refs/heads/{branch}");
+        let serving_generation = schedulers
+            .serving_code_scope(&canonical_worktree_root)
+            .await
+            .and_then(|scope| scope.serving_generation)
+            .ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "code_index_activation_unavailable",
+                    true,
+                    format!(
+                        "code-index activation is unavailable for branch worktree '{}'",
+                        canonical_worktree_root.display()
+                    ),
+                )
+            })?;
+        let serving_reference = serving_generation.snapshot().reference.clone();
+        if serving_reference
+            .as_ref()
+            .map(tracedecay_domain::RefId::as_str)
+            != Some(requested_reference.as_str())
+        {
+            return Err(TraceDecayError::project_route(
+                "code_index_scheduler_identity_mismatch",
+                true,
+                format!(
+                    "mounted code-index scheduler is bound to a different branch than '{branch}'; dynamic worktree activation is unavailable"
+                ),
+            ));
+        }
+        if !schedulers
+            .notify_hook_overflow(&canonical_worktree_root)
+            .await
+        {
+            return Err(TraceDecayError::project_route(
+                "code_index_scheduler_unavailable",
+                true,
+                format!(
+                    "code-index scheduler rejected refresh for branch worktree '{}'",
+                    canonical_worktree_root.display()
+                ),
+            ));
+        }
+        let prior_generation_id = serving_generation.manifest().generation_id.clone();
+        let prior_contains_query = serving_generation.symbols().symbols.iter().any(|symbol| {
+            symbol.simple_name.contains(query) || symbol.qualified_name.contains(query)
+        });
+        let generation = timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(generation) = schedulers
+                    .latest_complete_fresh(&canonical_worktree_root)
+                    .await
+                    .filter(|generation| {
+                        generation
+                            .generation()
+                            .snapshot()
+                            .reference
+                            .as_ref()
+                            .map(tracedecay_domain::RefId::as_str)
+                            == Some(requested_reference.as_str())
+                            && (prior_contains_query
+                                || generation.generation().manifest().generation_id
+                                    != prior_generation_id)
+                    })
+                {
+                    return generation;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            TraceDecayError::project_route(
+                "code_index_activation_unavailable",
+                true,
+                format!(
+                    "code-index scheduler did not publish branch '{branch}' for '{}'",
+                    canonical_worktree_root.display()
+                ),
+            )
+        })?;
+        let contains_query = generation
+            .generation()
+            .symbols()
+            .symbols
+            .iter()
+            .any(|symbol| {
+                symbol.simple_name.contains(query) || symbol.qualified_name.contains(query)
+            });
         Ok((
-            branch_graph.active_branch().map(str::to_owned),
-            branch_graph.serving_branch().map(str::to_owned),
-            branch_graph.is_fallback(),
+            crate::branch::current_branch(&canonical_worktree_root),
+            serving_reference
+                .as_ref()
+                .and_then(|reference| reference.as_str().strip_prefix("refs/heads/"))
+                .map(str::to_owned),
+            false,
             contains_query,
         ))
     }
@@ -501,6 +740,3 @@ mod configuration_idempotency_journey_test;
 
 #[cfg(test)]
 mod semantic_activation_journey_test;
-
-#[cfg(test)]
-mod source_edit_transaction_test;

@@ -120,9 +120,6 @@ const UNUSED_IMPORTS_MAX_LIMIT: usize = 500;
 /// cursor rather than reporting a short list as the whole truth.
 const UNUSED_IMPORTS_FILE_BUDGET: usize = 400;
 
-/// Files fetched from the graph per keyset page while walking candidates.
-const UNUSED_IMPORTS_FILE_PAGE: usize = 64;
-
 /// The line span in which an identifier occurs within one masked file.
 ///
 /// An identifier is referenced outside a `use` statement's own line range
@@ -180,6 +177,7 @@ fn identifiers_in_line(line: &str) -> Vec<String> {
 /// covers the whole scope.
 pub(crate) async fn handle_unused_imports(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -189,7 +187,7 @@ pub(crate) async fn handle_unused_imports(
         .map_or(UNUSED_IMPORTS_DEFAULT_LIMIT, |limit| {
             (limit as usize).clamp(1, UNUSED_IMPORTS_MAX_LIMIT)
         });
-    let mut after_path = args
+    let after_path = args
         .get("cursor")
         .and_then(Value::as_str)
         .map(str::to_owned);
@@ -204,39 +202,40 @@ pub(crate) async fn handle_unused_imports(
     let mut last_scanned: Option<String> = None;
     let mut partial_reason: Option<&str> = None;
 
-    'walk: loop {
-        let files = cg
-            .file_paths_with_nodes_of_kind(
-                NodeKind::Use,
-                after_path.as_deref(),
-                UNUSED_IMPORTS_FILE_PAGE,
-            )
-            .await?;
-        if files.is_empty() {
+    let mut use_symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
+    for symbol in verified_analysis_symbols(graph, scope_prefix)? {
+        if symbol.metadata.kind == "use" {
+            use_symbols_by_file
+                .entry(symbol.path.clone())
+                .or_default()
+                .push(symbol);
+        }
+    }
+    let mut files = use_symbols_by_file.keys().cloned().collect::<Vec<_>>();
+    files.sort();
+    for file_path in files
+        .into_iter()
+        .filter(|path| after_path.as_ref().is_none_or(|after| path > after))
+    {
+        if scanned_files >= UNUSED_IMPORTS_FILE_BUDGET {
+            partial_reason = Some("file_budget_exhausted");
             break;
         }
-        for file_path in files {
-            if !path_matches_optional_scope(&file_path, scope_prefix) {
-                after_path = Some(file_path);
-                continue;
-            }
-            if scanned_files >= UNUSED_IMPORTS_FILE_BUDGET {
-                partial_reason = Some("file_budget_exhausted");
-                break 'walk;
-            }
-            scanned_files += 1;
-            let file_unused = unused_imports_in_file(cg, project_root, &file_path).await?;
-            if !file_unused.is_empty() {
-                touched.push(file_path.clone());
-            }
-            unused.extend(file_unused);
-            after_path = Some(file_path.clone());
-            last_scanned = Some(file_path);
-            if unused.len() >= limit {
-                unused.truncate(limit);
-                partial_reason = Some("limit_reached");
-                break 'walk;
-            }
+        scanned_files += 1;
+        let use_symbols = use_symbols_by_file
+            .get(&file_path)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let file_unused = unused_imports_in_file(project_root, &file_path, use_symbols)?;
+        if !file_unused.is_empty() {
+            touched.push(file_path.clone());
+        }
+        unused.extend(file_unused);
+        last_scanned = Some(file_path);
+        if unused.len() >= limit {
+            unused.truncate(limit);
+            partial_reason = Some("limit_reached");
+            break;
         }
     }
     // A partial answer without a resumable cursor would be a dead end, so a
@@ -277,19 +276,16 @@ pub(crate) async fn handle_unused_imports(
 /// std/foreign-crate imports.
 ///
 /// `pub use` re-exports are intentional public aliases and are never reported.
-async fn unused_imports_in_file(
-    cg: &TraceDecay,
+fn unused_imports_in_file(
     project_root: &Path,
     file_path: &str,
+    use_nodes: &[VerifiedAnalysisSymbol],
 ) -> Result<Vec<Value>> {
-    let use_nodes: Vec<crate::types::Node> = cg
-        .get_nodes_by_file(file_path)
-        .await?
-        .into_iter()
-        .filter(|node| node.kind == NodeKind::Use)
-        .filter(|node| node.visibility != crate::types::Visibility::Pub)
-        .collect();
-    if use_nodes.is_empty() {
+    let private_use_nodes = use_nodes
+        .iter()
+        .filter(|node| node.metadata.visibility != "public")
+        .collect::<Vec<_>>();
+    if private_use_nodes.is_empty() {
         return Ok(Vec::new());
     }
     let Ok(source) = std::fs::read_to_string(project_root.join(file_path)) else {
@@ -299,7 +295,7 @@ async fn unused_imports_in_file(
         identifier_spans(&tracedecay_code_extraction::source_mask::masked_rust_source(&source));
 
     let mut unused = Vec::new();
-    for use_node in use_nodes {
+    for use_node in private_use_nodes {
         // The Use node's `name` is the full import path as written. Three
         // shapes show up in real Rust code:
         //   - `foo::bar`           → single identifier `bar`
@@ -308,17 +304,18 @@ async fn unused_imports_in_file(
         // Grouped imports must expand, otherwise an unused member inside a
         // partially-used group is missed and the literal `{a, b as c}` is
         // treated as one identifier that matches nothing.
-        for identifier in identifiers_from_use_path(&use_node.name) {
+        for identifier in identifiers_from_use_path(&use_node.metadata.simple_name) {
             let referenced = spans.get(&identifier).is_some_and(|span| {
-                span.first_line < use_node.start_line || span.last_line > use_node.end_line
+                span.first_line < use_node.metadata.start_line
+                    || span.last_line > use_node.end_line()
             });
             if !referenced {
                 unused.push(json!({
-                    "id": use_node.id,
-                    "name": use_node.name,
+                    "id": use_node.occurrence.as_str(),
+                    "name": use_node.metadata.simple_name,
                     "unused": identifier,
                     "file": file_path,
-                    "line": use_node.start_line,
+                    "line": use_node.metadata.start_line,
                 }));
             }
         }

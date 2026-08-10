@@ -31,7 +31,7 @@ use tracedecay_domain::{
 #[cfg(feature = "semantic-fastembed")]
 use crate::application::semantic_runtime::{
     ProductionSemanticRuntimeV1, RetainedSemanticVectorGraphV1, SemanticRuntimeFuture,
-    SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1, current_query_factory,
+    SemanticVectorGraphErrorV1, SemanticVectorGraphProviderV1,
 };
 #[cfg(feature = "semantic-fastembed")]
 use crate::config::SemanticResourceCeilings;
@@ -3825,7 +3825,15 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
     .await
     .expect("Jina projection became atomically current");
     let current = handle.current().expect("current semantic pointer");
-    assert!(current_query_factory(&handle).is_some());
+    assert!(
+        handle
+            .query_factory(
+                &current.source_generation,
+                &current.generation,
+                &current.projection_key,
+            )
+            .is_some()
+    );
 
     let restarted_handle =
         DaemonSemanticRuntimeHandleV1::new(1, 64, 2 << 30).expect("restarted handle");
@@ -3851,8 +3859,16 @@ async fn configured_jina_lifecycle_publishes_and_restores_semantic_generation() 
             .await
             .expect("restore current generation")
     );
-    assert_eq!(restarted_handle.current(), Some(current));
-    assert!(current_query_factory(&restarted_handle).is_some());
+    assert_eq!(restarted_handle.current(), Some(current.clone()));
+    assert!(
+        restarted_handle
+            .query_factory(
+                &current.source_generation,
+                &current.generation,
+                &current.projection_key,
+            )
+            .is_some()
+    );
 }
 
 #[tokio::test]

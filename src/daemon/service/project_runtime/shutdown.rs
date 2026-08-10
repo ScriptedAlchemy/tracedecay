@@ -45,9 +45,10 @@ impl ProjectRuntimeRegistryV1 {
             })
             .await;
         match retired {
-            Ok(runtimes) => {
+            Ok(mut runtimes) => {
+                let clean = shut_down_observability(&mut runtimes).await;
                 shut_down_runtimes(runtimes);
-                true
+                clean
             }
             Err(_) => false,
         }
@@ -64,24 +65,6 @@ impl ProjectRuntimeRegistryV1 {
     /// are joined, and process-wide semantic handles are unregistered.
     pub(crate) async fn shut_down_all(&self) {
         self.begin_shutdown();
-        // Cancel and join every retained post-open advisory setup before the
-        // drain: any staged runtime publication must commit or roll back
-        // before its project runtime is torn down underneath it.
-        let advisory_setups = {
-            let runtimes = self.lock_runtimes();
-            runtimes
-                .values()
-                .filter_map(|runtime| {
-                    runtime
-                        .advisory_hook_orchestrator
-                        .as_ref()
-                        .map(RegisteredHookOrchestrationRuntimeV1::runtime)
-                })
-                .collect::<Vec<_>>()
-        };
-        for setup in advisory_setups {
-            setup.cancel_and_join().await;
-        }
         let mut shutdown_complete = self.shutdown_complete.subscribe();
         let mut shutdown_task = self.shutdown_task.lock().await;
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
@@ -205,6 +188,7 @@ impl ProjectRuntimeRegistryV1 {
                 clean &= semantic.cancel_and_join_until(deadline).await.is_clean();
             }
         }
+        clean &= shut_down_observability(&mut runtimes).await;
         if !clean {
             self.lock_runtimes().extend(runtimes);
             return false;
@@ -212,6 +196,31 @@ impl ProjectRuntimeRegistryV1 {
         shut_down_runtimes(runtimes);
         clean
     }
+}
+
+/// Stop Work recovery producers, then close and flush each project producer
+/// before its registered database and dependent runtime owners are dropped. A
+/// failed flush is terminal: the producer has entered shutdown and is removed
+/// rather than being republished as a live component on a retry.
+async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime>) -> bool {
+    let mut clean = true;
+    for (project_root, runtime) in runtimes.iter_mut() {
+        if let Some(work) = runtime.work.as_ref() {
+            work.shut_down_background_recovery().await;
+        }
+        let Some(observability) = runtime.observability.take() else {
+            continue;
+        };
+        if let Err(error) = observability.shutdown().await {
+            tracing::warn!(
+                project = %project_root.display(),
+                %error,
+                "project observability shutdown was incomplete"
+            );
+            clean = false;
+        }
+    }
+    clean
 }
 
 /// Terminal teardown for a set of drained runtimes. Shared by full daemon
@@ -230,9 +239,6 @@ fn shut_down_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
     }
 
     for (project_root, runtime) in runtimes {
-        if let Some(external_acquisition) = runtime.external_acquisition {
-            external_acquisition.cancel();
-        }
         if let Some(semantic) = runtime.semantic {
             crate::application::semantic_runtime::unregister_project_semantic_runtime(
                 &project_root,

@@ -4,6 +4,7 @@ use crate::support::*;
 use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
 use std::time::SystemTime;
+#[cfg(feature = "test-transport")]
 use tracedecay::application::host_admission::{HostAdmissionScope, LcmLineageFaultForTest};
 use tracedecay::mcp::get_tool_definitions;
 #[cfg(feature = "test-transport")]
@@ -533,7 +534,7 @@ async fn lcm_status_reports_lifecycle_fields_from_active_project() {
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn lcm_describe_supports_summary_node_and_external_payload_targets() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let source_projection = seed_temporal_lcm_session_message(
         &cg,
         "lcm-describe-targets",
@@ -1199,7 +1200,7 @@ async fn lcm_expand_query_oversized_prompt_preserves_synthesis_contract() {
 async fn lcm_status_cli_bridge_accepts_json_args() {
     use std::time::Duration;
 
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let home = _dir.path().join("home");
     let outside_cwd = test_temp_dir();
     let project_arg = cg.project_root().display().to_string();
@@ -2437,7 +2438,6 @@ async fn lcm_read_only_tools_return_not_ingested_without_creating_sessions_db() 
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let db_path = cg.store_layout().sessions_db_path.clone();
     assert!(
@@ -2511,7 +2511,6 @@ async fn lcm_load_session_missing_store_uses_typed_empty_messages_without_creati
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let db_path = cg.store_layout().sessions_db_path.clone();
     assert!(
@@ -2573,10 +2572,10 @@ async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
     let project = dir.path();
     std::fs::write(project.join("lib.rs"), "fn f() {}").unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
-    // With no sessions.db the tool returns not_ingested — that is fine here;
-    // we just verify the argument parsing does not panic or error.
+    // With no retained transcript the tool returns a typed empty or unavailable
+    // outcome. This test only verifies that the independent budgets pass
+    // argument validation without requiring code indexing.
     let result = handle_tool_call(
         &cg,
         "tracedecay_lcm_expand_query",
@@ -2597,11 +2596,15 @@ async fn lcm_expand_query_context_max_tokens_is_independent_of_max_tokens() {
     let payload: Value =
         serde_json::from_str(text).expect("expand_query result must be valid JSON");
 
-    // Either not_ingested (no sessions.db) or ok — both are valid here.
     // The important thing: it must NOT return a Config/argument error about
-    // max_tokens or context_max_tokens.
+    // max_tokens or context_max_tokens. The exact empty outcome depends on
+    // whether the canonical retained-session service is mounted by the test
+    // harness.
     assert!(
-        payload["status"] == "not_ingested" || payload["status"] == "ok",
+        matches!(
+            payload["status"].as_str(),
+            Some("not_ingested" | "ok" | "unavailable" | "complete_zero" | "deleted")
+        ),
         "unexpected status in expand_query response: {payload}"
     );
 }

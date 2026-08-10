@@ -1,18 +1,16 @@
 //! The AST-level functional-duplicate scan: candidate selection, fingerprint
-//! caching, pairwise ranking, and the structured payload built from them.
+//! computation, pairwise ranking, and the structured payload built from them.
 //!
 //! This lives below the MCP handler tree. The `tracedecay_redundancy` handler
-//! renders it, and the root engine's `GraphRuntimePort` decodes the same
-//! payload typed — neither layer depends on the other.
+//! supplies an admitted verified graph and renders the typed scan payload.
 //!
 //! Pipeline:
 //!
 //! 1. Pull all `Function` / `Method` nodes (optionally path-filtered).
 //! 2. Group by file. Open each file once, parse with tree-sitter,
 //!    locate every target node via its `(start_line, end_line)`, and
-//!    compute a [`Fingerprint`](crate::redundancy::Fingerprint). Cache
-//!    the result keyed on `(node_id, body source hash)` so we don't pay
-//!    re-parse cost on subsequent calls when the file hasn't changed.
+//!    compute a [`Fingerprint`](crate::redundancy::Fingerprint). Fingerprints
+//!    remain request-owned; the code-index authority owns durable graph state.
 //! 3. Bucket the resulting fingerprints by `body_tokens` (±25 % window).
 //!    Within each bucket, score every pair via
 //!    [`redundancy_match_score`](crate::redundancy::redundancy_match_score),
@@ -24,23 +22,218 @@
 //!    the top N pairs plus their connected duplicate groups.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
-use std::future::Future;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::application::semantic_runtime::{
     SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
 };
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::redundancy::{
-    Fingerprint, RedundancyPairScan, RedundantPair, compute_fingerprint, connected_node_groups,
-    find_node_at_lines, parse_file, round4,
+    Fingerprint, RedundancyMatchScore, body_token_window, compute_fingerprint, parse_file,
+    redundancy_match_score, round4,
 };
 use crate::tracedecay::TraceDecay;
-use crate::types::{Node, NodeKind};
+use tracedecay_domain::SourceSpan;
+
+/// Extraction-attested symbol evidence consumed by redundancy scoring.
+///
+/// This intentionally is not the legacy runtime-core `Node`: the verified
+/// graph projection does not publish unrelated mutable graph fields, and the
+/// redundancy journey must not synthesize them merely to satisfy an old DTO.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RedundancyCandidate {
+    id: String,
+    name: String,
+    qualified_name: String,
+    file_path: String,
+    start_line: u32,
+    end_line: u32,
+    source_span: SourceSpan,
+}
+
+struct RedundantPair<'a> {
+    score: RedundancyMatchScore,
+    node_a: &'a RedundancyCandidate,
+    node_b: &'a RedundancyCandidate,
+    fp_a: &'a Fingerprint,
+    fp_b: &'a Fingerprint,
+}
+
+struct RedundancyPairScan<'a> {
+    scoped: Vec<(&'a RedundancyCandidate, &'a Fingerprint)>,
+    threshold: f64,
+    include_naming: bool,
+    max_pairs: usize,
+    outer: usize,
+    inner: usize,
+    found: Vec<RedundantPair<'a>>,
+}
+
+impl<'a> RedundancyPairScan<'a> {
+    fn new(
+        mut scoped: Vec<(&'a RedundancyCandidate, &'a Fingerprint)>,
+        threshold: f64,
+        include_naming: bool,
+        max_pairs: usize,
+    ) -> Self {
+        scoped.sort_by(|(left_node, left_fp), (right_node, right_fp)| {
+            left_fp
+                .body_tokens
+                .cmp(&right_fp.body_tokens)
+                .then_with(|| left_node.id.cmp(&right_node.id))
+        });
+        Self {
+            scoped,
+            threshold,
+            include_naming,
+            max_pairs,
+            outer: 0,
+            inner: 0,
+            found: Vec::new(),
+        }
+    }
+
+    fn advance(&mut self, budget: usize) -> bool {
+        let mut spent = 0usize;
+        while self.outer < self.scoped.len() {
+            let (node_a, fp_a) = self.scoped[self.outer];
+            let (low, high) = body_token_window(fp_a.body_tokens);
+            if self.inner == 0 {
+                self.inner = self.outer + 1;
+            }
+            while self.inner < self.scoped.len() {
+                let (node_b, fp_b) = self.scoped[self.inner];
+                if fp_b.body_tokens > high {
+                    break;
+                }
+                if fp_b.body_tokens >= low
+                    && let Some(pair) = redundant_pair(
+                        node_a,
+                        fp_a,
+                        node_b,
+                        fp_b,
+                        self.threshold,
+                        self.include_naming,
+                    )
+                {
+                    self.found.push(pair);
+                }
+                self.inner += 1;
+                spent += 1;
+                if spent >= budget {
+                    return true;
+                }
+            }
+            self.outer += 1;
+            self.inner = 0;
+        }
+        false
+    }
+
+    fn finish(self) -> Vec<RedundantPair<'a>> {
+        let mut found = self.found;
+        found.sort_by(|left, right| {
+            right
+                .score
+                .ranking_score
+                .total_cmp(&left.score.ranking_score)
+                .then_with(|| right.score.similarity.total_cmp(&left.score.similarity))
+                .then_with(|| {
+                    right
+                        .score
+                        .vector_cosine
+                        .total_cmp(&left.score.vector_cosine)
+                })
+                .then_with(|| left.node_a.name.cmp(&right.node_a.name))
+                .then_with(|| left.node_b.name.cmp(&right.node_b.name))
+                .then_with(|| left.node_a.id.cmp(&right.node_a.id))
+                .then_with(|| left.node_b.id.cmp(&right.node_b.id))
+        });
+        found.truncate(self.max_pairs);
+        found
+    }
+}
+
+fn redundant_pair<'a>(
+    node_a: &'a RedundancyCandidate,
+    fp_a: &'a Fingerprint,
+    node_b: &'a RedundancyCandidate,
+    fp_b: &'a Fingerprint,
+    threshold: f64,
+    include_naming: bool,
+) -> Option<RedundantPair<'a>> {
+    let score = redundancy_match_score(
+        &node_a.name,
+        fp_a,
+        &node_b.name,
+        fp_b,
+        threshold,
+        include_naming,
+    )?;
+    let left_key = (&node_a.file_path, node_a.start_line, &node_a.id);
+    let right_key = (&node_b.file_path, node_b.start_line, &node_b.id);
+    let (node_a, fp_a, node_b, fp_b) = if left_key <= right_key {
+        (node_a, fp_a, node_b, fp_b)
+    } else {
+        (node_b, fp_b, node_a, fp_a)
+    };
+    Some(RedundantPair {
+        score,
+        node_a,
+        node_b,
+        fp_a,
+        fp_b,
+    })
+}
+
+#[cfg(test)]
+fn find_redundant_pairs<'a>(
+    scoped: Vec<(&'a RedundancyCandidate, &'a Fingerprint)>,
+    threshold: f64,
+    include_naming: bool,
+    max_pairs: usize,
+) -> Vec<RedundantPair<'a>> {
+    let mut scan = RedundancyPairScan::new(scoped, threshold, include_naming, max_pairs);
+    while scan.advance(usize::MAX) {}
+    scan.finish()
+}
+
+fn connected_node_groups<'a>(pairs: &'a [RedundantPair<'a>]) -> Vec<Vec<&'a RedundancyCandidate>> {
+    let mut groups: Vec<Vec<&RedundancyCandidate>> = Vec::new();
+    for pair in pairs {
+        let matching = groups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, group)| {
+                group
+                    .iter()
+                    .any(|node| node.id == pair.node_a.id || node.id == pair.node_b.id)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            groups.push(vec![pair.node_a, pair.node_b]);
+            continue;
+        }
+        let first = matching[0];
+        for node in [pair.node_a, pair.node_b] {
+            if !groups[first].iter().any(|existing| existing.id == node.id) {
+                groups[first].push(node);
+            }
+        }
+        for index in matching.into_iter().skip(1).rev() {
+            let merged = groups.remove(index);
+            for node in merged {
+                if !groups[first].iter().any(|existing| existing.id == node.id) {
+                    groups[first].push(node);
+                }
+            }
+        }
+    }
+    groups
+}
 
 /// The knobs a redundancy scan runs with, already resolved from whatever
 /// surface requested it (MCP tool arguments or a typed port request).
@@ -55,7 +248,17 @@ pub(crate) struct RedundancyOptions<'a> {
 
 /// One ranked structural pair, projected into owned values so the markdown
 /// renderer in the handler layer does not have to borrow the scan's interior.
+#[derive(Clone)]
+pub(crate) struct RedundancyNodeViewV1 {
+    pub(crate) name: String,
+    pub(crate) file: String,
+    pub(crate) line: u32,
+    pub(crate) id: String,
+}
+
 pub(crate) struct RedundancyPairViewV1 {
+    pub(crate) a: RedundancyNodeViewV1,
+    pub(crate) b: RedundancyNodeViewV1,
     pub(crate) label_a: String,
     pub(crate) label_b: String,
     pub(crate) id_a: String,
@@ -98,20 +301,20 @@ const REDUNDANCY_PAIR_SLICE: usize = 2048;
 /// Run the full redundancy pipeline for `options`.
 pub(crate) async fn redundancy_scan(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     options: &RedundancyOptions<'_>,
 ) -> Result<RedundancyScanV1> {
     // 1. Collect candidate function nodes.
     let nodes = collect_candidates(
-        cg,
+        graph,
         options.path_prefix,
         options.min_lines,
         options.include_generated,
-    )
-    .await?;
+    )?;
     let total_candidates = nodes.len();
 
-    // 2. Ensure each has a fresh fingerprint in memory (cache by source hash).
-    // File I/O and tree-sitter parsing stay outside the database writer lane.
+    // 2. Compute fresh, request-owned fingerprints. The final graph authority
+    // intentionally has no parallel SQLite fingerprint or pair cache.
     let fingerprints = ensure_fingerprints(cg, &nodes).await?;
     let scanned = fingerprints.len();
 
@@ -132,12 +335,6 @@ pub(crate) async fn redundancy_scan(
         tokio::task::yield_now().await;
     }
     let pairs = scan.finish();
-
-    // Persist the ranked pairs as a freshness-validated cache so other
-    // surfaces (diagnose near-duplicate enrichment, the dashboard, future
-    // tools) can read the last-known duplicates without recomputing. Best
-    // effort: a write failure never fails the query.
-    persist_redundancy_cache(cg, &fingerprints, &pairs).await;
 
     // Connected components are the shared source of truth for the JSON `groups`
     // array and the markdown Groups section; compute them once and thread the
@@ -165,14 +362,26 @@ pub(crate) async fn redundancy_scan(
 }
 
 /// `name (file:line)` locator that chains into `tracedecay_body` / `_callers`.
-fn node_label(node: &Node) -> String {
+fn node_label(node: &RedundancyCandidate) -> String {
     format!("{} ({}:{})", node.name, node.file_path, node.start_line)
 }
 
-pub(crate) fn pair_views(pairs: &[RedundantPair<'_>]) -> Vec<RedundancyPairViewV1> {
+fn pair_views(pairs: &[RedundantPair<'_>]) -> Vec<RedundancyPairViewV1> {
     pairs
         .iter()
         .map(|pair| RedundancyPairViewV1 {
+            a: RedundancyNodeViewV1 {
+                name: pair.node_a.name.clone(),
+                file: pair.node_a.file_path.clone(),
+                line: pair.node_a.start_line,
+                id: pair.node_a.id.clone(),
+            },
+            b: RedundancyNodeViewV1 {
+                name: pair.node_b.name.clone(),
+                file: pair.node_b.file_path.clone(),
+                line: pair.node_b.start_line,
+                id: pair.node_b.id.clone(),
+            },
             label_a: node_label(pair.node_a),
             label_b: node_label(pair.node_b),
             id_a: pair.node_a.id.clone(),
@@ -188,7 +397,7 @@ pub(crate) fn pair_views(pairs: &[RedundantPair<'_>]) -> Vec<RedundancyPairViewV
         .collect()
 }
 
-pub(crate) fn group_views(groups: &[Vec<&Node>]) -> Vec<Vec<String>> {
+fn group_views(groups: &[Vec<&RedundancyCandidate>]) -> Vec<Vec<String>> {
     groups
         .iter()
         .map(|group| group.iter().map(|node| node_label(node)).collect())
@@ -197,8 +406,8 @@ pub(crate) fn group_views(groups: &[Vec<&Node>]) -> Vec<Vec<String>> {
 
 #[derive(Clone, Copy)]
 struct SemanticPair<'a> {
-    node_a: &'a Node,
-    node_b: &'a Node,
+    node_a: &'a RedundancyCandidate,
+    node_b: &'a RedundancyCandidate,
     cosine: f64,
     distance_micros: i64,
 }
@@ -207,9 +416,9 @@ fn augment_redundancy_output(
     options: &RedundancyOptions<'_>,
     total_candidates: usize,
     scanned: usize,
-    nodes: &[Node],
+    nodes: &[RedundancyCandidate],
     pairs: &[RedundantPair<'_>],
-    groups: &[Vec<&Node>],
+    groups: &[Vec<&RedundancyCandidate>],
     semantic: Option<&SemanticRedundancyGenerationV1>,
 ) -> Value {
     let Some(semantic) = semantic else {
@@ -293,7 +502,7 @@ struct SemanticEntry<'a> {
     /// Normalized first coordinate (`values[0] / ‖values‖`); the sort/window
     /// key. Any accepted pair differs by at most one window on this coordinate.
     key: f64,
-    node: &'a Node,
+    node: &'a RedundancyCandidate,
 }
 
 /// Reduce a raw embedding vector to the normalized first coordinate used as the
@@ -314,7 +523,7 @@ fn normalized_projection(values: &[f32]) -> Option<f64> {
 }
 
 fn semantic_pairs<'a>(
-    nodes: &'a [Node],
+    nodes: &'a [RedundancyCandidate],
     structural: &[RedundantPair<'_>],
     semantic: &SemanticRedundancyGenerationV1,
 ) -> Vec<SemanticPair<'a>> {
@@ -477,7 +686,7 @@ fn canonical_pair_ids<'a>(left: &'a str, right: &'a str) -> (&'a str, &'a str) {
     }
 }
 
-fn nodes_overlap(left: &Node, right: &Node) -> bool {
+fn nodes_overlap(left: &RedundancyCandidate, right: &RedundancyCandidate) -> bool {
     left.file_path == right.file_path
         && left.start_line <= right.end_line
         && right.start_line <= left.end_line
@@ -506,7 +715,10 @@ fn semantic_pair_json(pair: &SemanticPair<'_>) -> Value {
     })
 }
 
-fn connected_rendered_groups<'a>(pairs: &[Value], nodes: &'a [Node]) -> Vec<Vec<&'a Node>> {
+fn connected_rendered_groups<'a>(
+    pairs: &[Value],
+    nodes: &'a [RedundancyCandidate],
+) -> Vec<Vec<&'a RedundancyCandidate>> {
     let by_id = nodes
         .iter()
         .map(|node| (node.id.as_str(), node))
@@ -554,7 +766,7 @@ fn redundancy_output(
     total_candidates: usize,
     scanned: usize,
     pairs: &[RedundantPair<'_>],
-    groups: &[Vec<&Node>],
+    groups: &[Vec<&RedundancyCandidate>],
 ) -> Value {
     let rendered_pairs: Vec<Value> = pairs.iter().map(redundant_pair_json).collect();
     json!({
@@ -580,16 +792,47 @@ fn redundancy_output(
 // 1. Candidate selection
 // ---------------------------------------------------------------------------
 
-async fn collect_candidates(
-    cg: &TraceDecay,
+fn collect_candidates(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     path_prefix: Option<&str>,
     min_lines: u32,
     include_generated: bool,
-) -> Result<Vec<Node>> {
-    let all = cg.get_all_nodes().await?;
-    Ok(all
+) -> Result<Vec<RedundancyCandidate>> {
+    const SYMBOL_PAGE_SIZE: usize = 10_000;
+    const MAX_SYMBOLS_EXAMINED: usize = 500_000;
+
+    let mut after = None;
+    let mut examined = 0usize;
+    let mut candidates = Vec::new();
+    loop {
+        let page = graph.symbols_page(after.as_ref(), SYMBOL_PAGE_SIZE)?;
+        if page.symbols.is_empty() {
+            if page.has_more {
+                return Err(redundancy_graph_problem(
+                    "verified redundancy census returned an empty continuation page",
+                ));
+            }
+            break;
+        }
+        examined = examined.saturating_add(page.symbols.len());
+        if examined > MAX_SYMBOLS_EXAMINED {
+            return Err(redundancy_graph_problem(
+                "verified redundancy census exceeded its symbol budget",
+            ));
+        }
+        after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
+        for symbol in page.symbols {
+            if let Some(node) = redundancy_node(symbol)? {
+                candidates.push(node);
+            }
+        }
+        if !page.has_more {
+            break;
+        }
+    }
+
+    Ok(candidates
         .into_iter()
-        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
         .filter(|n| n.end_line.saturating_sub(n.start_line) + 1 >= min_lines)
         .filter(|n| include_generated || !is_generated_path(&n.file_path))
         .filter(|n| {
@@ -603,6 +846,48 @@ async fn collect_candidates(
             })
         })
         .collect())
+}
+
+fn redundancy_node(
+    symbol: tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1,
+) -> Result<Option<RedundancyCandidate>> {
+    let metadata = symbol.metadata.ok_or_else(|| {
+        redundancy_graph_problem("verified redundancy symbol is missing extraction metadata")
+    })?;
+    if !matches!(metadata.kind.as_str(), "function" | "method") {
+        return Ok(None);
+    }
+    let binding = symbol.binding.ok_or_else(|| {
+        redundancy_graph_problem("verified redundancy symbol is missing its file binding")
+    })?;
+    let file_path = binding.logical_path.ok_or_else(|| {
+        redundancy_graph_problem("verified redundancy symbol is missing its logical path")
+    })?;
+    let source_span = binding.source_span.ok_or_else(|| {
+        redundancy_graph_problem("verified redundancy symbol is missing its source span")
+    })?;
+    if metadata.line_span == 0 {
+        return Err(redundancy_graph_problem(
+            "verified redundancy symbol has an empty line span",
+        ));
+    }
+    let end_line = metadata
+        .start_line
+        .checked_add(metadata.line_span - 1)
+        .ok_or_else(|| redundancy_graph_problem("verified redundancy line span overflowed"))?;
+    Ok(Some(RedundancyCandidate {
+        id: symbol.occurrence.as_str().to_owned(),
+        name: metadata.simple_name,
+        qualified_name: metadata.qualified_name,
+        file_path,
+        start_line: metadata.start_line,
+        end_line,
+        source_span,
+    }))
+}
+
+fn redundancy_graph_problem(detail: &str) -> TraceDecayError {
+    TraceDecayError::project_route("verified-redundancy-evidence-unavailable", false, detail)
 }
 
 /// Build outputs, vendored code, and worktree mirrors duplicate real sources
@@ -624,121 +909,121 @@ fn is_generated_path(path: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Fingerprint computation + caching
+// 2. Fingerprint computation
 // ---------------------------------------------------------------------------
 
-/// Returns a map from `node_id` to its fingerprint. Reuses any cached row
-/// whose stored `source_hash` matches the live file content for that
-/// node's body; otherwise re-parses the file once, computes fingerprints
-/// for all candidate nodes in that file, and persists them.
+/// Returns a request-owned map from `node_id` to its current fingerprint.
+/// Each supported source file is opened and parsed at most once per scan.
 async fn ensure_fingerprints(
     cg: &TraceDecay,
-    candidates: &[Node],
+    candidates: &[RedundancyCandidate],
 ) -> Result<HashMap<String, Fingerprint>> {
-    let project_root = cg.project_root().to_path_buf();
-    let load = ensure_fingerprints_with_loader(&project_root, candidates, |node_ids| async move {
-        cg.db().get_fingerprints(&node_ids).await
-    })
-    .await?;
-    Ok(load.fingerprints)
+    Ok(compute_fingerprints(cg.project_root(), candidates)?.fingerprints)
 }
 
+#[derive(Debug)]
 struct FingerprintLoad {
     fingerprints: HashMap<String, Fingerprint>,
-    // Plan 33 item 4 acceptance instrumentation: read by cfg(test)
-    // cold/partial/warm call-count parity assertions.
-    #[allow(dead_code)]
+    #[cfg(test)]
     parsed_files: usize,
-    #[allow(dead_code)]
+    #[cfg(test)]
     computed_fingerprints: usize,
 }
 
-async fn ensure_fingerprints_with_loader<Load, LoadFuture>(
+fn compute_fingerprints(
     project_root: &Path,
-    candidates: &[Node],
-    load_cached: Load,
-) -> Result<FingerprintLoad>
-where
-    Load: FnOnce(Vec<String>) -> LoadFuture,
-    LoadFuture: Future<Output = Result<Vec<crate::db::StoredFingerprint>>>,
-{
+    candidates: &[RedundancyCandidate],
+) -> Result<FingerprintLoad> {
     let registry = tracedecay_code_extraction::LanguageRegistry::new();
-    let node_ids = candidates.iter().map(|node| node.id.clone()).collect();
-    let mut cached_by_id: HashMap<String, Fingerprint> = load_cached(node_ids)
-        .await?
-        .into_iter()
-        .map(|stored| (stored.node_id.clone(), stored.into()))
-        .collect();
 
     // Group candidates by file so we parse each file at most once.
-    let mut by_file: HashMap<String, Vec<&Node>> = HashMap::new();
+    let mut by_file: HashMap<String, Vec<&RedundancyCandidate>> = HashMap::new();
     for n in candidates {
         by_file.entry(n.file_path.clone()).or_default().push(n);
     }
 
     let mut out: HashMap<String, Fingerprint> = HashMap::new();
+    #[cfg(test)]
     let mut parsed_files = 0usize;
+    #[cfg(test)]
     let mut computed_fingerprints = 0usize;
 
     for (file_path, file_nodes) in by_file {
         // Figure out which tree-sitter language this file maps to.
         let Some(extractor) = registry.extractor_for_file(&file_path) else {
-            continue;
+            return Err(redundancy_graph_problem(
+                "verified redundancy symbol has no registered extractor",
+            ));
         };
         let lang_key = extractor_to_language_key(extractor.language_name());
         let Some(lang_key) = lang_key else {
-            continue;
+            return Err(redundancy_graph_problem(
+                "verified redundancy symbol has no fingerprint language mapping",
+            ));
         };
 
-        // Read the file contents. Silently skip on read failure (the file
-        // may have been deleted between sync and this call).
+        // Read the exact source generation attested by the graph. A missing or
+        // changed file is a typed stale-evidence failure, never an empty scan.
         let abs = project_root.join(&file_path);
-        let Ok(source) = std::fs::read_to_string(&abs) else {
-            continue;
-        };
+        let source = std::fs::read_to_string(&abs).map_err(|error| {
+            redundancy_graph_problem(&format!(
+                "verified redundancy source `{file_path}` is unavailable: {error}"
+            ))
+        })?;
 
-        // Cheap path: every cached fingerprint whose source_hash matches
-        // the current body content is reusable without re-parsing.
-        let mut misses = Vec::new();
-        for node in &file_nodes {
-            let body = node_body_slice(&source, node);
-            let expected_hash = quick_body_hash(body);
-            match cached_by_id.remove(&node.id) {
-                Some(cached) if cached.source_hash == expected_hash => {
-                    out.insert(node.id.clone(), cached);
-                }
-                _ => misses.push(*node),
+        let language =
+            tracedecay_code_extraction::ts_provider::language(lang_key).map_err(|error| {
+                redundancy_graph_problem(&format!(
+                    "verified redundancy grammar `{lang_key}` is unavailable: {error}"
+                ))
+            })?;
+        let tree = parse_file(&source, &language).ok_or_else(|| {
+            redundancy_graph_problem(&format!(
+                "verified redundancy source `{file_path}` could not be parsed"
+            ))
+        })?;
+        #[cfg(test)]
+        {
+            parsed_files += 1;
+        }
+
+        for node in file_nodes {
+            let Ok(start_byte) = usize::try_from(node.source_span.start_byte) else {
+                return Err(redundancy_graph_problem(
+                    "verified redundancy source span start is not addressable",
+                ));
+            };
+            let Ok(end_byte) = usize::try_from(node.source_span.end_byte) else {
+                return Err(redundancy_graph_problem(
+                    "verified redundancy source span end is not addressable",
+                ));
+            };
+            if start_byte >= end_byte || end_byte > source.len() {
+                return Err(redundancy_graph_problem(
+                    "verified redundancy source span is stale against the source file",
+                ));
             }
-        }
-
-        if misses.is_empty() {
-            continue;
-        }
-
-        // At least one node in this file needs a fresh fingerprint —
-        // parse once and compute for every miss.
-        let Ok(language) = tracedecay_code_extraction::ts_provider::language(lang_key) else {
-            continue;
-        };
-        let Some(tree) = parse_file(&source, &language) else {
-            continue;
-        };
-        parsed_files += 1;
-
-        for node in misses {
-            // Node.start_line / end_line are stored as raw tree-sitter
-            // row indices (0-based) — see info::extract_lines docs.
-            let Some(ts_node) = find_node_at_lines(&tree, node.start_line, node.end_line) else {
-                continue;
+            let Some(ts_node) = tree
+                .root_node()
+                .descendant_for_byte_range(start_byte, end_byte)
+            else {
+                return Err(redundancy_graph_problem(
+                    "verified redundancy source span does not resolve to a syntax node",
+                ));
             };
             out.insert(node.id.clone(), compute_fingerprint(&source, ts_node));
-            computed_fingerprints += 1;
+            #[cfg(test)]
+            {
+                computed_fingerprints += 1;
+            }
         }
     }
 
     Ok(FingerprintLoad {
         fingerprints: out,
+        #[cfg(test)]
         parsed_files,
+        #[cfg(test)]
         computed_fingerprints,
     })
 }
@@ -782,130 +1067,20 @@ fn extractor_to_language_key(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Extract the inclusive 0-indexed line range from `source` as a borrowed
-/// slice. Node `start_line` / `end_line` are stored as raw tree-sitter
-/// row indices (see `info::extract_lines`).
-fn body_slice(source: &str, start_line: u32, end_line: u32) -> &str {
-    line_byte_range(source, start_line, end_line).map_or("", |range| &source[range])
-}
-
-/// Extract the exact tree-sitter node byte span, using its 0-indexed rows and
-/// byte columns. Unlike [`body_slice`], this excludes indentation before the
-/// node and the newline after it, matching the bytes hashed by
-/// [`compute_fingerprint`].
-fn node_body_slice<'a>(source: &'a str, node: &Node) -> &'a str {
-    let lines = body_slice(source, node.start_line, node.end_line);
-    if lines.is_empty() {
-        return "";
-    }
-    let start = node.start_column as usize;
-    let line_span = node.end_line.saturating_sub(node.start_line) as usize;
-    let end_line_start = if line_span == 0 {
-        0
-    } else {
-        let Some((offset, _)) = lines.match_indices('\n').nth(line_span - 1) else {
-            return "";
-        };
-        offset + 1
-    };
-    let end = end_line_start.saturating_add(node.end_column as usize);
-    lines.get(start..end).unwrap_or("")
-}
-
-fn line_byte_range(source: &str, start_line: u32, end_line: u32) -> Option<std::ops::Range<usize>> {
-    let start = start_line as usize;
-    let end = (end_line as usize).saturating_add(1);
-    let mut offset = 0usize;
-    let mut start_byte: Option<usize> = None;
-    let mut end_byte: usize = source.len();
-    for (i, line) in source.split_inclusive('\n').enumerate() {
-        if i == start {
-            start_byte = Some(offset);
-        }
-        if i + 1 == end {
-            end_byte = offset + line.len();
-            break;
-        }
-        offset += line.len();
-    }
-    let s = start_byte?;
-    if end_byte <= s || end_byte > source.len() {
-        return None;
-    }
-    Some(s..end_byte)
-}
-
-/// Cheap body hash used for cache invalidation. Matches the format used
-/// by `compute_fingerprint` (first 8 bytes of SHA-256, hex-encoded).
-fn quick_body_hash(body: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(body.as_bytes());
-    let d = h.finalize();
-    let mut s = String::with_capacity(16);
-    for b in d.iter().take(8) {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
-}
-
 // ---------------------------------------------------------------------------
 // 3. Pairwise comparison + ranking
 // ---------------------------------------------------------------------------
 
-type ScopedFingerprint<'a> = (&'a Node, &'a Fingerprint);
+type ScopedFingerprint<'a> = (&'a RedundancyCandidate, &'a Fingerprint);
 
 fn scoped_fingerprints<'a>(
-    nodes: &'a [Node],
+    nodes: &'a [RedundancyCandidate],
     fingerprints: &'a HashMap<String, Fingerprint>,
 ) -> Vec<ScopedFingerprint<'a>> {
     nodes
         .iter()
         .filter_map(|n| fingerprints.get(&n.id).map(|fp| (n, fp)))
         .collect()
-}
-
-/// Upsert the returned duplicate pairs into the `redundancy_pairs` cache.
-///
-/// Each pair is stored in its canonical `(node_a, node_b)` orientation with
-/// both `source_hash`es so a reader can validate freshness against the live
-/// fingerprint cache. Errors are logged but never fatal — the redundancy query
-/// still returns results even if the cache write fails. Node-id orphan cleanup
-/// is handled by the table's `ON DELETE CASCADE`, so full-project runs need no
-/// explicit deletion pass here.
-async fn persist_redundancy_cache(
-    cg: &TraceDecay,
-    fingerprints: &HashMap<String, Fingerprint>,
-    pairs: &[RedundantPair<'_>],
-) {
-    let mut fingerprint_rows: Vec<_> = fingerprints
-        .iter()
-        .map(|(node_id, fingerprint)| (node_id.as_str(), fingerprint))
-        .collect();
-    fingerprint_rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
-    let computed_at = crate::tracedecay::current_timestamp();
-    let rows: Vec<crate::db::RedundancyPairWrite<'_>> = pairs
-        .iter()
-        .map(|pair| crate::db::RedundancyPairWrite {
-            node_a_id: pair.node_a.id.as_str(),
-            node_b_id: pair.node_b.id.as_str(),
-            source_hash_a: pair.fp_a.source_hash.as_str(),
-            source_hash_b: pair.fp_b.source_hash.as_str(),
-            ranking_score: pair.score.ranking_score,
-            similarity: pair.score.similarity,
-            vector_cosine: pair.score.vector_cosine,
-            overlap_kind: pair.score.overlap_kind,
-            severity: pair.score.severity,
-            generic_helper_downranked: pair.score.generic_helper_downranked,
-            computed_at,
-        })
-        .collect();
-    if let Err(e) = cg
-        .db()
-        .publish_redundancy_cache(&fingerprint_rows, &rows)
-        .await
-    {
-        tracing::warn!(error = %e, "atomic redundancy cache publication failed");
-    }
 }
 
 fn redundant_pair_json(pair: &RedundantPair<'_>) -> Value {
@@ -928,7 +1103,7 @@ fn redundant_pair_json(pair: &RedundantPair<'_>) -> Value {
     })
 }
 
-fn node_json(node: &Node) -> Value {
+fn node_json(node: &RedundancyCandidate) -> Value {
     json!({
         "file": node.file_path,
         "line": node.start_line,
@@ -937,7 +1112,7 @@ fn node_json(node: &Node) -> Value {
     })
 }
 
-fn duplicate_groups(groups: &[Vec<&Node>]) -> Vec<Value> {
+fn duplicate_groups(groups: &[Vec<&RedundancyCandidate>]) -> Vec<Value> {
     groups
         .iter()
         .map(|nodes| {
@@ -952,25 +1127,19 @@ fn duplicate_groups(groups: &[Vec<&Node>]) -> Vec<Value> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use serde_json::Value;
 
     use super::{
-        RedundancyOptions, SemanticPair, augment_redundancy_output, body_slice, canonical_pair_ids,
-        ensure_fingerprints_with_loader, is_generated_path, node_body_slice, nodes_overlap,
-        redundancy_output, scoped_fingerprints, semantic_cosine, semantic_pairs,
+        RedundancyCandidate, RedundancyOptions, RedundancyPairScan, RedundantPair, SemanticPair,
+        augment_redundancy_output, canonical_pair_ids, compute_fingerprints, connected_node_groups,
+        find_redundant_pairs, is_generated_path, nodes_overlap, redundancy_output, semantic_cosine,
+        semantic_pairs,
     };
     use crate::application::semantic_runtime::{
         SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
     };
-    use crate::db::StoredFingerprint;
-    use crate::redundancy::{
-        Fingerprint, RedundancyMatchScore, RedundancyPairScan, RedundantPair,
-        connected_node_groups, find_redundant_pairs,
-    };
-    use crate::types::{Node, NodeKind, Visibility};
+    use crate::redundancy::{Fingerprint, RedundancyMatchScore};
+    use tracedecay_domain::SourceSpan;
 
     #[test]
     fn generated_paths_are_excluded_from_candidates_by_default() {
@@ -1016,31 +1185,18 @@ mod tests {
         }
     }
 
-    pub(super) fn test_node(id: &str, name: &str, line: u32) -> Node {
-        Node {
+    pub(super) fn test_node(id: &str, name: &str, line: u32) -> RedundancyCandidate {
+        RedundancyCandidate {
             id: id.to_string(),
-            kind: NodeKind::Function,
             name: name.to_string(),
             qualified_name: name.to_string(),
             file_path: "src/lib.rs".to_string(),
             start_line: line,
-            attrs_start_line: line,
             end_line: line + 10,
-            start_column: 0,
-            end_column: 0,
-            signature: None,
-            docstring: None,
-            visibility: Visibility::default(),
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: 0,
-            parent_id: None,
+            source_span: SourceSpan {
+                start_byte: 0,
+                end_byte: 1,
+            },
         }
     }
 
@@ -1284,7 +1440,7 @@ mod tests {
     /// canonically-oriented `(id_a, id_b, distance)` triples, sorted so set
     /// equality is a plain vector comparison.
     fn brute_force_semantic_pairs(
-        nodes: &[Node],
+        nodes: &[RedundancyCandidate],
         structural: &[RedundantPair<'_>],
         semantic: &SemanticRedundancyGenerationV1,
     ) -> Vec<(String, String, i64)> {
@@ -1459,47 +1615,10 @@ mod tests {
         assert!(!brute.is_empty(), "fixture must exercise accepted pairs");
     }
 
-    #[test]
-    fn body_slice_extracts_single_line_zero_indexed() {
-        let src = "alpha\nbeta\ngamma\n";
-        // row 1 (0-indexed) == "beta"
-        assert_eq!(body_slice(src, 1, 1), "beta\n");
-    }
-
-    #[test]
-    fn body_slice_extracts_multi_line_inclusive() {
-        let src = "alpha\nbeta\ngamma\ndelta\n";
-        // rows 1..=2 (0-indexed) == "beta", "gamma"
-        assert_eq!(body_slice(src, 1, 2), "beta\ngamma\n");
-    }
-
-    #[test]
-    fn body_slice_handles_out_of_bounds() {
-        let src = "alpha\nbeta\n";
-        assert_eq!(body_slice(src, 5, 9), "");
-    }
-
-    #[test]
-    fn node_body_slice_uses_tree_sitter_columns_and_excludes_trailing_newline() {
-        let src = "impl Demo {\n    fn value() {\n        work();\n    }\n}\n";
-        let node = candidate_node("value", "value", "src/lib.rs", 3);
-        let node = Node {
-            start_line: 1,
-            start_column: 4,
-            end_column: 5,
-            ..node
-        };
-
-        assert_eq!(
-            node_body_slice(src, &node),
-            "fn value() {\n        work();\n    }"
-        );
-    }
-
     /// Synthetic candidates spread across overlapping `body_tokens` windows so
     /// the pairwise scan visits partial windows, full windows, rejected pairs
     /// and accepted pairs — the shapes a slice boundary could disturb.
-    fn paced_scan_candidates() -> (Vec<Node>, Vec<Fingerprint>) {
+    fn paced_scan_candidates() -> (Vec<RedundancyCandidate>, Vec<Fingerprint>) {
         let mut nodes = Vec::new();
         let mut fingerprints = Vec::new();
         for index in 0..40u32 {
@@ -1527,9 +1646,9 @@ mod tests {
     }
 
     fn paced_scan_scoped<'a>(
-        nodes: &'a [Node],
+        nodes: &'a [RedundancyCandidate],
         fingerprints: &'a [Fingerprint],
-    ) -> Vec<(&'a Node, &'a Fingerprint)> {
+    ) -> Vec<(&'a RedundancyCandidate, &'a Fingerprint)> {
         nodes.iter().zip(fingerprints.iter()).collect()
     }
 
@@ -1598,62 +1717,15 @@ mod tests {
         assert_eq!(single_shot.len(), 5);
     }
 
-    fn candidate_node(id: &str, name: &str, file_path: &str, end_line: u32) -> Node {
+    fn candidate_node(id: &str, name: &str, file_path: &str, end_line: u32) -> RedundancyCandidate {
         let mut node = test_node(id, name, 0);
         node.file_path = file_path.to_string();
         node.end_line = end_line;
-        node.end_column = 1;
         node
     }
 
-    fn stored_fingerprints(
-        nodes: &[Node],
-        fingerprints: &std::collections::HashMap<String, Fingerprint>,
-    ) -> Vec<StoredFingerprint> {
-        nodes
-            .iter()
-            .map(|node| {
-                let fingerprint = fingerprints.get(&node.id).unwrap();
-                StoredFingerprint {
-                    node_id: node.id.clone(),
-                    ast_hash: fingerprint.ast_hash.clone(),
-                    cfg_hash: fingerprint.cfg_hash.clone(),
-                    call_seq_hash: fingerprint.call_seq_hash.clone(),
-                    shingles: fingerprint.shingles.clone(),
-                    body_tokens: u32::try_from(fingerprint.body_tokens).unwrap(),
-                    source_hash: fingerprint.source_hash.clone(),
-                }
-            })
-            .collect()
-    }
-
-    fn result_bytes(
-        nodes: &[Node],
-        fingerprints: &std::collections::HashMap<String, Fingerprint>,
-    ) -> Vec<u8> {
-        let scoped = scoped_fingerprints(nodes, fingerprints);
-        let pairs = find_redundant_pairs(scoped, 0.6, false, 20);
-        let groups = connected_node_groups(&pairs);
-        let options = RedundancyOptions {
-            path_prefix: None,
-            min_lines: 8,
-            max_pairs: 20,
-            threshold: 0.6,
-            include_naming: false,
-            include_generated: false,
-        };
-        serde_json::to_vec(&redundancy_output(
-            &options,
-            nodes.len(),
-            fingerprints.len(),
-            &pairs,
-            &groups,
-        ))
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn cold_and_warm_cache_paths_each_issue_one_bulk_read_with_identical_results() {
+    #[test]
+    fn fresh_fingerprint_scan_parses_each_file_once() {
         if tracedecay_code_extraction::ts_provider::language("rust").is_err() {
             return;
         }
@@ -1664,90 +1736,30 @@ mod tests {
         let beta = "fn beta(input: i32) -> i32 {\n    let mut total = input;\n    for value in 0..4 {\n        if value % 2 == 0 {\n            total += value;\n        }\n    }\n    total\n}\n";
         std::fs::write(src_dir.join("alpha.rs"), alpha).unwrap();
         std::fs::write(src_dir.join("beta.rs"), beta).unwrap();
-        let nodes = vec![
+        let mut nodes = vec![
             candidate_node("alpha-id", "alpha", "src/alpha.rs", 8),
             candidate_node("beta-id", "beta", "src/beta.rs", 8),
         ];
+        nodes[0].source_span.end_byte = alpha.trim_end().len() as u64;
+        nodes[1].source_span.end_byte = beta.trim_end().len() as u64;
 
-        let cold_calls = Arc::new(AtomicUsize::new(0));
-        let cold_counter = Arc::clone(&cold_calls);
-        let cold = ensure_fingerprints_with_loader(temp.path(), &nodes, move |node_ids| {
-            cold_counter.fetch_add(1, Ordering::Relaxed);
-            assert_eq!(node_ids, vec!["alpha-id", "beta-id"]);
-            std::future::ready(Ok(Vec::new()))
-        })
-        .await
-        .unwrap();
-        assert_eq!(cold_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(cold.parsed_files, 2);
-        assert_eq!(cold.computed_fingerprints, 2);
-
-        let warm_rows = stored_fingerprints(&nodes, &cold.fingerprints);
-        let partial_calls = Arc::new(AtomicUsize::new(0));
-        let partial_counter = Arc::clone(&partial_calls);
-        let partial_rows = vec![warm_rows[0].clone()];
-        let partial = ensure_fingerprints_with_loader(temp.path(), &nodes, move |node_ids| {
-            partial_counter.fetch_add(1, Ordering::Relaxed);
-            assert_eq!(node_ids, vec!["alpha-id", "beta-id"]);
-            std::future::ready(Ok(partial_rows))
-        })
-        .await
-        .unwrap();
-        assert_eq!(partial_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(partial.parsed_files, 1);
-        assert_eq!(partial.computed_fingerprints, 1);
-        assert_eq!(
-            result_bytes(&nodes, &cold.fingerprints),
-            result_bytes(&nodes, &partial.fingerprints)
-        );
-
-        let warm_calls = Arc::new(AtomicUsize::new(0));
-        let warm_counter = Arc::clone(&warm_calls);
-        let warm = ensure_fingerprints_with_loader(temp.path(), &nodes, move |node_ids| {
-            warm_counter.fetch_add(1, Ordering::Relaxed);
-            assert_eq!(node_ids, vec!["alpha-id", "beta-id"]);
-            std::future::ready(Ok(warm_rows))
-        })
-        .await
-        .unwrap();
-        assert_eq!(warm_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(warm.parsed_files, 0);
-        assert_eq!(warm.computed_fingerprints, 0);
-        assert_eq!(
-            result_bytes(&nodes, &cold.fingerprints),
-            result_bytes(&nodes, &warm.fingerprints)
-        );
+        let load = compute_fingerprints(temp.path(), &nodes).unwrap();
+        assert_eq!(load.parsed_files, 2);
+        assert_eq!(load.computed_fingerprints, 2);
+        assert_eq!(load.fingerprints.len(), 2);
+        assert_eq!(load.fingerprints["alpha-id"].source_hash.len(), 16);
+        assert_eq!(load.fingerprints["beta-id"].source_hash.len(), 16);
     }
 
-    #[tokio::test]
-    async fn bulk_read_work_proxy_stays_one_call_for_1024_candidates() {
-        let nodes: Vec<Node> = (0..1024)
-            .map(|index| {
-                candidate_node(
-                    &format!("node-{index}"),
-                    "candidate",
-                    &format!("src/file-{index}.unsupported"),
-                    8,
-                )
-            })
-            .collect();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&calls);
-        let load = ensure_fingerprints_with_loader(
-            std::path::Path::new("/unused"),
-            &nodes,
-            move |node_ids| {
-                counter.fetch_add(1, Ordering::Relaxed);
-                assert_eq!(node_ids.len(), 1024);
-                std::future::ready(Ok(Vec::new()))
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-        assert!(load.fingerprints.is_empty());
-        assert_eq!(load.parsed_files, 0);
-        assert_eq!(load.computed_fingerprints, 0);
+    #[test]
+    fn unsupported_candidates_fail_with_typed_unavailable_state() {
+        let nodes = vec![candidate_node(
+            "node-id",
+            "candidate",
+            "src/file.unsupported",
+            8,
+        )];
+        let error = compute_fingerprints(std::path::Path::new("/unused"), &nodes).unwrap_err();
+        assert!(error.to_string().contains("no registered extractor"));
     }
 }

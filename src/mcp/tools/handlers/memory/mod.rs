@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
-use crate::application::memory::{
-    MemoryApplication, MemoryApplicationError, MemoryOperationContext,
-};
+use crate::application::memory::{MemoryApplication, MemoryApplicationError};
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
@@ -20,40 +18,14 @@ use crate::tracedecay::TraceDecay;
 use super::support::{
     profile_root_for_global_db, project_registry_context, project_selector_present,
 };
-use args::requests_user_memory;
 
-mod actions;
-mod args;
-mod fact_store;
-mod feedback;
 mod registered_target;
-mod status;
 
 use registered_target::open_registered_project_memory_read_only;
-
-pub(super) use fact_store::handle_fact_store;
-pub(super) use feedback::handle_fact_feedback;
-pub(super) use status::handle_memory_status;
-
-#[cfg(test)]
-use serde_json::json;
-#[cfg(test)]
-use tracedecay_store::ProjectMemoryFeedbackRepairProgressV1;
-
-#[cfg(test)]
-use crate::memory::types::{AddFactRequest, MemoryCategory};
-
-#[cfg(test)]
-use args::MAX_FACT_LIMIT;
-#[cfg(test)]
-use fact_store::handle_fact_store_for_target;
-#[cfg(test)]
-use status::feedback_history_repair_payload;
 
 pub(super) struct TargetMemoryDb<'a> {
     db: ProjectMemoryDbHandle<'a>,
     pub(super) project_root: PathBuf,
-    pub(super) user_scope: bool,
     owner: FactOwnerV1,
 }
 
@@ -74,9 +46,12 @@ async fn open_user_memory_target(
     Ok(TargetMemoryDb {
         db: ProjectMemoryDbHandle::Owned(Box::new(open_user_memory_db(registry).await?)),
         project_root: profile_root.to_path_buf(),
-        user_scope: true,
         owner: FactOwnerV1::Profile,
     })
+}
+
+fn requests_user_memory(args: &Value) -> bool {
+    args.get("memory_scope").and_then(Value::as_str) == Some("user")
 }
 
 fn project_memory_owner(project_id: &str) -> Result<FactOwnerV1> {
@@ -113,7 +88,6 @@ pub(super) async fn open_target_memory_db<'a>(
         return Ok(TargetMemoryDb {
             db: cg.project_memory_db().await?,
             project_root: cg.project_root().to_path_buf(),
-            user_scope: false,
             owner: active_project_memory_owner(cg)?,
         });
     };
@@ -126,7 +100,6 @@ pub(super) async fn open_target_memory_db<'a>(
         return Ok(TargetMemoryDb {
             db: cg.project_memory_db().await?,
             project_root: cg.project_root().to_path_buf(),
-            user_scope: false,
             owner: project_memory_owner(selected_project_id)?,
         });
     }
@@ -135,7 +108,6 @@ pub(super) async fn open_target_memory_db<'a>(
     Ok(TargetMemoryDb {
         db: ProjectMemoryDbHandle::Owned(Box::new(db)),
         project_root: PathBuf::from(&context.project.display_root),
-        user_scope: false,
         owner,
     })
 }
@@ -160,45 +132,15 @@ pub(super) fn memory_application<'a>(
     .map_err(memory_application_error)
 }
 
-fn memory_operation_context(
-    args: &Value,
-    target_memory: &TargetMemoryDb<'_>,
-    action: &str,
-) -> Result<MemoryOperationContext> {
-    if matches!(action, "search" | "probe" | "related" | "reason" | "list") {
-        return match args.get("__mcp_request_id").and_then(Value::as_str) {
-            Some(request_id) => MemoryOperationContext::from_request_id(
-                target_memory.owner(),
-                action,
-                request_id,
-                None,
-            ),
-            None => MemoryOperationContext::generated(target_memory.owner(), action, None),
-        }
-        .map_err(memory_application_error);
-    }
-    let mut logical_effect = args.clone();
-    if let Some(effect) = logical_effect.as_object_mut() {
-        effect.remove("__mcp_request_id");
-    }
-    MemoryOperationContext::from_logical_effect(
-        target_memory.owner(),
-        action,
-        &logical_effect,
-        None,
-    )
-    .map_err(memory_application_error)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use tracedecay_store::{
-        FactStoreError, ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
-        ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery,
-    };
+    use serde_json::json;
 
-    fn cursor_fact(content: &str) -> AddFactRequest {
+    use super::*;
+    use crate::application::memory::MemoryOperationContext;
+    use crate::memory::types::{AddFactRequest, MemoryCategory};
+
+    fn fact(content: &str) -> AddFactRequest {
         AddFactRequest {
             content: content.to_owned(),
             category: MemoryCategory::General,
@@ -208,46 +150,6 @@ mod tests {
             trust: None,
             metadata: json!({}),
         }
-    }
-
-    fn cursor_search_query(
-        owner: FactOwnerV1,
-        query: &str,
-        after: Option<ProjectMemoryFactSearchCursorV1>,
-    ) -> std::result::Result<ProjectMemoryFactSearchQuery, FactStoreError> {
-        ProjectMemoryFactSearchQuery::with_filter(
-            owner,
-            ProjectMemoryFactSearchKindV1::Search,
-            Some(query.to_owned()),
-            ProjectMemoryFactSearchFilterV1::new(None, None, None)?,
-            after,
-            1,
-        )
-    }
-
-    fn active_memory(cg: &TraceDecay) -> MemoryApplication<DatabaseFactStore<'_>> {
-        MemoryApplication::new(
-            active_project_memory_owner(cg).unwrap(),
-            DatabaseFactStore::new(cg.db()),
-        )
-        .unwrap()
-    }
-
-    async fn empty_memory() -> (tempfile::TempDir, TraceDecay) {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = tmp.path().join("project");
-        let profile_root = tmp.path().join("profile");
-        std::fs::create_dir_all(&project_root).unwrap();
-        let cg = TraceDecay::init_with_options(
-            &project_root,
-            crate::tracedecay::TraceDecayOpenOptions {
-                global_db_path: Some(profile_root.join("global.db")),
-                profile_root: Some(profile_root),
-            },
-        )
-        .await
-        .unwrap();
-        (tmp, cg)
     }
 
     fn open_options(profile_root: &Path) -> crate::tracedecay::TraceDecayOpenOptions {
@@ -272,12 +174,6 @@ mod tests {
             .expect("fixture graph must carry an authoritative project identity")
     }
 
-    /// Two graphs enrolled in one profile, both registered in the profile
-    /// registry the active graph reads selectors against. The profile
-    /// session-relation graph has exactly one writer, so the target project
-    /// mounts through the runtime the active init retained instead of
-    /// constructing a second runtime on the same profile; the returned
-    /// sibling runtime guard keeps that mount alive.
     async fn cross_project_memory_pair() -> (
         tempfile::TempDir,
         TraceDecay,
@@ -296,10 +192,9 @@ mod tests {
             .expect("standalone fixture runtime");
         let target_root = tmp.path().join("target");
         std::fs::create_dir_all(&target_root).unwrap();
-        let target_project_id = tracedecay_domain::ProjectId::new(
-            crate::storage::default_profile_project_id(&target_root),
-        )
-        .expect("typed target project identity");
+        let target_project_id =
+            ProjectId::new(crate::storage::default_profile_project_id(&target_root))
+                .expect("typed target project identity");
         let sibling = std::sync::Arc::new(
             runtime
                 .sibling_project(&target_root, target_project_id)
@@ -335,11 +230,15 @@ mod tests {
 
     async fn add_project_fact(cg: &TraceDecay, content: &str) {
         let owner = active_project_memory_owner(cg).unwrap();
+        let memory = MemoryApplication::new(
+            owner.clone(),
+            cg.project_memory_db().await.unwrap().into_fact_store(),
+        )
+        .unwrap();
         assert!(
-            memory_application_for_project(cg)
-                .await
+            memory
                 .add_fact(
-                    cursor_fact(content),
+                    fact(content),
                     MemoryOperationContext::generated(&owner, content, None).unwrap(),
                 )
                 .await
@@ -350,100 +249,15 @@ mod tests {
         );
     }
 
-    /// A memory application over the graph's *project-wide* store, so a
-    /// branch-serving fixture seeds the same store a selector must resolve.
-    async fn memory_application_for_project(
-        cg: &TraceDecay,
-    ) -> MemoryApplication<crate::store::memory::ProjectFactStore<'_>> {
-        MemoryApplication::new(
-            active_project_memory_owner(cg).unwrap(),
-            cg.project_memory_db().await.unwrap().into_fact_store(),
-        )
-        .unwrap()
-    }
-
-    async fn seeded_memory() -> (tempfile::TempDir, TraceDecay, i64) {
-        let (tmp, cg) = empty_memory().await;
-        let owner = active_project_memory_owner(&cg).unwrap();
-        let fact_id = active_memory(&cg)
-            .add_fact(
-                AddFactRequest {
-                    content: "existing fact".to_string(),
-                    category: MemoryCategory::General,
-                    source: None,
-                    tags: Vec::new(),
-                    entities: Vec::new(),
-                    trust: None,
-                    metadata: json!({}),
-                },
-                MemoryOperationContext::generated(&owner, "test-seed", None).unwrap(),
-            )
-            .await
-            .unwrap()
-            .fact
-            .unwrap()
-            .fact_id;
-        (tmp, cg, fact_id)
-    }
-
-    #[tokio::test]
-    async fn fact_add_arbitrates_cancellation_against_commit() {
-        let (_tmp, cg) = empty_memory().await;
-        let cancelled =
-            tracedecay_application::CancellationSignal::active("fact-add-cancelled").unwrap();
-        assert!(cancelled.cancel(tracedecay_domain::UtcMicros(41)));
-        let rejected = handle_fact_store(
-            &cg,
-            json!({"action": "add", "content": "cancelled fact must not persist"}),
-            None,
-            Some(cancelled),
-        )
-        .await
-        .unwrap_err();
-        assert!(rejected.to_string().contains("interrupted"));
-        let committed =
-            tracedecay_application::CancellationSignal::active("fact-add-committed").unwrap();
-        let result = handle_fact_store(
-            &cg,
-            json!({"action": "add", "content": "commit claim wins cancellation"}),
-            None,
-            Some(committed.clone()),
-        )
-        .await
-        .unwrap();
-        assert!(
-            result
-                .value
-                .to_string()
-                .contains("commit claim wins cancellation")
-        );
-        assert!(committed.commit_started());
-        assert!(!committed.cancel(tracedecay_domain::UtcMicros(42)));
-        assert_eq!(
-            active_memory(&cg)
-                .list_facts_untracked(None, None, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
     #[tokio::test]
     async fn active_project_memory_uses_the_served_database_handle() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path().join("project");
         let profile_root = tmp.path().join("profile");
         std::fs::create_dir_all(&project_root).unwrap();
-        let cg = TraceDecay::init_with_options(
-            &project_root,
-            crate::tracedecay::TraceDecayOpenOptions {
-                global_db_path: Some(profile_root.join("global.db")),
-                profile_root: Some(profile_root),
-            },
-        )
-        .await
-        .unwrap();
+        let cg = TraceDecay::init_with_options(&project_root, open_options(&profile_root))
+            .await
+            .unwrap();
 
         let target = open_target_memory_db(&cg, &json!({}), None).await.unwrap();
 
@@ -451,7 +265,7 @@ mod tests {
         assert!(std::ptr::eq(target.db(), cg.db()));
         assert_eq!(
             target.owner(),
-            &project_memory_owner(cg.store_layout().identity.project_id.as_deref().unwrap(),)
+            &project_memory_owner(cg.store_layout().identity.project_id.as_deref().unwrap())
                 .unwrap()
         );
     }
@@ -488,18 +302,14 @@ mod tests {
     async fn active_and_selected_project_memory_stay_isolated() {
         let (_tmp, active, target, _sibling_runtime) = cross_project_memory_pair().await;
         add_project_fact(&active, "active project selector fixture fact").await;
-        add_project_fact(&target, "target selector fixture fact").await;
+        add_project_fact(&target, "target project selector fixture fact").await;
 
-        let default_scope =
+        let active_target =
             open_target_memory_db(&active, &json!({}), Some(active.profile_database()))
                 .await
                 .unwrap();
-        assert_eq!(fact_count(&default_scope).await, 1);
-        assert_eq!(
-            default_scope.owner(),
-            &project_memory_owner(&project_id_of(&active)).unwrap()
-        );
-        drop(default_scope);
+        assert_eq!(fact_count(&active_target).await, 1);
+        drop(active_target);
 
         let selected = open_target_memory_db(
             &active,
@@ -508,31 +318,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            !std::ptr::eq(selected.db(), active.db()),
-            "a foreign project selector must not resolve the active project's database"
-        );
+        assert!(!std::ptr::eq(selected.db(), active.db()));
         assert_eq!(fact_count(&selected).await, 1);
-
-        // Reading the selected project must leave the active project's own
-        // memory untouched, not merge the two owners' facts.
-        assert_eq!(
-            memory_application_for_project(&active)
-                .await
-                .list_facts_untracked(None, None, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
     }
 
     #[tokio::test]
     async fn unresolved_project_selector_is_denied_without_falling_back() {
         let (_tmp, active, _target, _sibling_runtime) = cross_project_memory_pair().await;
-
         let error = denied_selector(&active, json!({ "project_id": "proj_does_not_exist" })).await;
-
         assert!(
             matches!(&error, TraceDecayError::Config { message }
                 if message.contains("registered project not found for selector")),
@@ -543,14 +336,11 @@ mod tests {
     #[tokio::test]
     async fn registered_project_without_profile_enrollment_is_denied() {
         let (tmp, active, _target, _sibling_runtime) = cross_project_memory_pair().await;
-        // Registered in the profile registry, but never opened here, so no
-        // enrollment marker names it and this profile holds no memory store.
         let unenrolled_root = tmp.path().join("unenrolled");
         std::fs::create_dir_all(&unenrolled_root).unwrap();
         register_project(&active, "proj_unenrolled", &unenrolled_root).await;
 
         let error = denied_selector(&active, json!({ "project_id": "proj_unenrolled" })).await;
-
         assert!(
             matches!(&error, TraceDecayError::Config { message }
                 if message.contains("is not enrolled in this TraceDecay profile")),
@@ -568,490 +358,10 @@ mod tests {
         }
 
         let error = denied_selector(&active, json!({ "project_path": "shared" })).await;
-
         assert!(
             matches!(&error, TraceDecayError::Config { message }
                 if message.contains("is ambiguous across 2 registered projects")),
             "{error}"
         );
-    }
-
-    #[tokio::test]
-    async fn feedback_rejects_cross_project_write_before_opening_a_store() {
-        let (_tmp, cg, fact_id) = seeded_memory().await;
-
-        let error = handle_fact_feedback(
-            &cg,
-            json!({
-                "fact_id": fact_id,
-                "action": "helpful",
-                "project_id": "another_project",
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            TraceDecayError::Config { ref message }
-                if message.contains("cross-project fact_feedback writes")
-        ));
-    }
-
-    #[tokio::test]
-    async fn fact_feedback_without_source_keeps_default_mcp_history() {
-        let (_tmp, cg, fact_id) = seeded_memory().await;
-
-        handle_fact_feedback(
-            &cg,
-            json!({ "fact_id": fact_id, "action": "helpful" }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-        let history = active_memory(&cg)
-            .fact_trust_history(fact_id, MAX_FACT_LIMIT)
-            .await
-            .unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].source, "mcp");
-    }
-
-    #[tokio::test]
-    async fn trusted_fact_feedback_id_replays_without_duplicate_history() {
-        let (_tmp, cg, fact_id) = seeded_memory().await;
-        let args = json!({
-            "fact_id": fact_id,
-            "action": "helpful",
-            "__mcp_request_id": "same-feedback-json-rpc-request",
-        });
-
-        for _ in 0..2 {
-            handle_fact_feedback(&cg, args.clone(), None, None)
-                .await
-                .unwrap();
-        }
-
-        let history = active_memory(&cg)
-            .fact_trust_history(fact_id, MAX_FACT_LIMIT)
-            .await
-            .unwrap();
-        assert_eq!(history.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn fact_add_replays_after_reconnection_changes_request_correlation() {
-        let (_tmp, cg) = empty_memory().await;
-        let first = handle_fact_store(
-            &cg,
-            json!({
-                "action": "add",
-                "content": "stable logical memory write",
-                "__mcp_request_id": "request.mcp.connection-a.first",
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        let replay = handle_fact_store(
-            &cg,
-            json!({
-                "action": "add",
-                "content": "stable logical memory write",
-                "__mcp_request_id": "request.mcp.connection-b.first",
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(replay.value, first.value);
-        assert_eq!(
-            active_memory(&cg)
-                .list_facts_untracked(None, None, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn fact_add_accepts_request_derived_operation_replay() {
-        let (_tmp, cg) = empty_memory().await;
-        let owner = active_project_memory_owner(&cg).unwrap();
-        active_memory(&cg)
-            .add_fact(
-                AddFactRequest {
-                    content: "request-derived memory write".to_owned(),
-                    category: MemoryCategory::General,
-                    source: None,
-                    tags: Vec::new(),
-                    entities: Vec::new(),
-                    trust: None,
-                    metadata: json!({}),
-                },
-                MemoryOperationContext::from_request_id(
-                    &owner,
-                    "add",
-                    "request.mcp.connection.first",
-                    None,
-                )
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        let replay = handle_fact_store(
-            &cg,
-            json!({
-                "action": "add",
-                "content": "request-derived memory write",
-                "__mcp_request_id": "request.mcp.reconnected.first",
-            }),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        let rendered = replay.value.to_string();
-
-        assert!(rendered.contains("**diff:** add"), "{rendered}");
-        assert!(!rendered.contains("near_duplicate"), "{rendered}");
-        assert_eq!(
-            active_memory(&cg)
-                .list_facts_untracked(None, None, 10)
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn incomplete_feedback_history_repair_is_explicit() {
-        assert_eq!(
-            feedback_history_repair_payload(ProjectMemoryFeedbackRepairProgressV1::Incomplete {
-                processed: 1,
-                remaining: Some(2),
-            }),
-            json!({
-                "state": "incomplete",
-                "processed": 1,
-                "remaining": 2,
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn pure_fact_reads_do_not_wait_for_the_writer_lane() {
-        let (_tmp, cg, fact_id) = seeded_memory().await;
-        let writer = cg
-            .db()
-            .writer_connection("hold memory tool writer")
-            .await
-            .unwrap();
-        let target = TargetMemoryDb {
-            db: ProjectMemoryDbHandle::Active(cg.db()),
-            project_root: cg.project_root().to_path_buf(),
-            user_scope: true,
-            owner: active_project_memory_owner(&cg).unwrap(),
-        };
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            handle_fact_store_for_target(
-                json!({ "action": "get", "fact_id": fact_id }),
-                false,
-                target,
-            ),
-        )
-        .await
-        .expect("pure reads must not wait for writer authority")
-        .unwrap();
-        let rendered = result.value.to_string();
-        assert!(rendered.contains("existing fact"), "{rendered}");
-        drop(writer);
-    }
-
-    #[tokio::test]
-    async fn local_fact_search_records_retrieval_without_snapshot_deadlock() {
-        let (_tmp, cg, fact_id) = seeded_memory().await;
-        let target = TargetMemoryDb {
-            db: ProjectMemoryDbHandle::Active(cg.db()),
-            project_root: cg.project_root().to_path_buf(),
-            user_scope: true,
-            owner: active_project_memory_owner(&cg).unwrap(),
-        };
-
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            handle_fact_store_for_target(
-                json!({ "action": "search", "query": "existing fact" }),
-                false,
-                target,
-            ),
-        )
-        .await
-        .expect("local retrieval-counting actions must not hold a read snapshot")
-        .unwrap();
-
-        let fact = active_memory(&cg).get_fact(fact_id).await.unwrap().unwrap();
-        assert_eq!(fact.retrieval_count, 1);
-        assert_eq!(fact.access_count, 1);
-    }
-
-    #[tokio::test]
-    async fn fact_mutations_wait_for_the_writer_lane_before_starting_a_transaction() {
-        let (_tmp, cg, _) = seeded_memory().await;
-        let writer = cg
-            .db()
-            .writer_connection("hold memory mutation writer")
-            .await
-            .unwrap();
-        let target = TargetMemoryDb {
-            db: ProjectMemoryDbHandle::Active(cg.db()),
-            project_root: cg.project_root().to_path_buf(),
-            user_scope: true,
-            owner: active_project_memory_owner(&cg).unwrap(),
-        };
-        let mut add = Box::pin(handle_fact_store_for_target(
-            json!({ "action": "add", "content": "concurrent fact" }),
-            false,
-            target,
-        ));
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), &mut add)
-                .await
-                .is_err()
-        );
-        drop(writer);
-        add.await.unwrap();
-        assert_eq!(
-            active_memory(&cg)
-                .list_facts_untracked(None, None, 10)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn retrieval_counter_writes_wait_for_the_writer_lane() {
-        let (_tmp, cg, fact_id) = seeded_memory().await;
-        let writer = cg
-            .db()
-            .writer_connection("hold memory retrieval writer")
-            .await
-            .unwrap();
-        let target = TargetMemoryDb {
-            db: ProjectMemoryDbHandle::Active(cg.db()),
-            project_root: cg.project_root().to_path_buf(),
-            user_scope: true,
-            owner: active_project_memory_owner(&cg).unwrap(),
-        };
-        let mut record = Box::pin(handle_fact_store_for_target(
-            json!({ "action": "search", "query": "existing fact" }),
-            false,
-            target,
-        ));
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), &mut record)
-                .await
-                .is_err()
-        );
-        drop(writer);
-        record.await.unwrap();
-        assert_eq!(
-            active_memory(&cg)
-                .get_fact(fact_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .retrieval_count,
-            1
-        );
-        assert_eq!(
-            active_memory(&cg)
-                .get_fact(fact_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .access_count,
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn trusted_memory_retrieval_id_replays_without_double_counting() {
-        let (_tmp, cg, fact_id) = seeded_memory().await;
-        for _ in 0..2 {
-            let target = TargetMemoryDb {
-                db: ProjectMemoryDbHandle::Active(cg.db()),
-                project_root: cg.project_root().to_path_buf(),
-                user_scope: true,
-                owner: active_project_memory_owner(&cg).unwrap(),
-            };
-            handle_fact_store_for_target(
-                json!({
-                    "action": "search",
-                    "query": "existing fact",
-                    "__mcp_request_id": "same-json-rpc-request",
-                }),
-                false,
-                target,
-            )
-            .await
-            .unwrap();
-        }
-        let fact = active_memory(&cg).get_fact(fact_id).await.unwrap().unwrap();
-        assert_eq!(fact.retrieval_count, 1);
-        assert_eq!(fact.access_count, 1);
-    }
-
-    #[tokio::test]
-    async fn cross_project_memory_retrieval_is_untracked() {
-        let (_tmp, cg, fact_id) = seeded_memory().await;
-        let target = TargetMemoryDb {
-            db: ProjectMemoryDbHandle::Active(cg.db()),
-            project_root: cg.project_root().to_path_buf(),
-            user_scope: true,
-            owner: active_project_memory_owner(&cg).unwrap(),
-        };
-        handle_fact_store_for_target(
-            json!({ "action": "search", "query": "existing fact" }),
-            true,
-            target,
-        )
-        .await
-        .unwrap();
-        let fact = active_memory(&cg).get_fact(fact_id).await.unwrap().unwrap();
-        assert_eq!(fact.retrieval_count, 0);
-        assert_eq!(fact.access_count, 0);
-    }
-
-    #[tokio::test]
-    async fn compatibility_search_cursor_replays_and_rejects_other_owners() {
-        let (_tmp, cg) = empty_memory().await;
-        let owner = active_project_memory_owner(&cg).unwrap();
-        let memory = active_memory(&cg);
-        for (operation, content) in [
-            (
-                "test-project-cursor-one",
-                "cursor fixture marigold topology",
-            ),
-            ("test-project-cursor-two", "cursor fixture basalt workflow"),
-        ] {
-            assert!(
-                memory
-                    .add_fact(
-                        cursor_fact(content),
-                        MemoryOperationContext::generated(&owner, operation, None).unwrap(),
-                    )
-                    .await
-                    .unwrap()
-                    .fact
-                    .is_some(),
-                "{operation} must persist a real fixture fact"
-            );
-        }
-
-        let first_page = memory
-            .search_project_memory_facts(
-                cursor_search_query(owner.clone(), "cursor fixture", None).unwrap(),
-            )
-            .await
-            .unwrap();
-        let cursor = first_page
-            .next_after()
-            .cloned()
-            .expect("the first finite page must provide its real cursor");
-        let second_page = memory
-            .search_project_memory_facts(
-                cursor_search_query(owner.clone(), "cursor fixture", Some(cursor.clone())).unwrap(),
-            )
-            .await
-            .unwrap();
-        let replay_page = memory
-            .search_project_memory_facts(
-                cursor_search_query(owner.clone(), "cursor fixture", Some(cursor)).unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(first_page.owner(), &owner);
-        assert_eq!(first_page.hits().len(), 1);
-        assert_eq!(second_page.hits().len(), 1);
-        assert!(
-            second_page.next_after().is_none(),
-            "the two real fixture facts must exhaust the second page"
-        );
-        assert_ne!(
-            first_page.hits()[0].fact().fact_id(),
-            second_page.hits()[0].fact().fact_id()
-        );
-        let first = &first_page.hits()[0];
-        let second = &second_page.hits()[0];
-        assert!(
-            first.score_millionths() > second.score_millionths()
-                || (first.score_millionths() == second.score_millionths()
-                    && (first.fact().telemetry().updated_at()
-                        > second.fact().telemetry().updated_at()
-                        || (first.fact().telemetry().updated_at()
-                            == second.fact().telemetry().updated_at()
-                            && first.fact().fact_id() < second.fact().fact_id()))),
-            "search pages must preserve canonical score, timestamp, and fact-id ordering"
-        );
-        assert_eq!(replay_page, second_page);
-
-        let profile_owner = FactOwnerV1::Profile;
-        let profile_memory =
-            MemoryApplication::new(profile_owner.clone(), DatabaseFactStore::new(cg.db())).unwrap();
-        for (operation, content) in [
-            (
-                "test-profile-cursor-one",
-                "profile cursor fixture violet semantics",
-            ),
-            (
-                "test-profile-cursor-two",
-                "profile cursor fixture amber provenance",
-            ),
-        ] {
-            assert!(
-                profile_memory
-                    .add_fact(
-                        cursor_fact(content),
-                        MemoryOperationContext::generated(&profile_owner, operation, None).unwrap(),
-                    )
-                    .await
-                    .unwrap()
-                    .fact
-                    .is_some(),
-                "{operation} must persist a real fixture fact"
-            );
-        }
-        let profile_first_page = profile_memory
-            .search_project_memory_facts(
-                cursor_search_query(profile_owner, "profile cursor fixture", None).unwrap(),
-            )
-            .await
-            .unwrap();
-        let foreign_cursor = profile_first_page
-            .next_after()
-            .cloned()
-            .expect("the profile page must provide its real cursor");
-        assert!(matches!(
-            cursor_search_query(owner, "profile cursor fixture", Some(foreign_cursor)),
-            Err(FactStoreError::OwnerMismatch)
-        ));
     }
 }

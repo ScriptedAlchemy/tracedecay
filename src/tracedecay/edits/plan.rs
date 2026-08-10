@@ -29,83 +29,37 @@ impl TraceDecay {
         &self,
         files: &[PlannedSourceEditFile],
     ) -> Result<()> {
-        rollback_planned_source_edit_files(&self.project_root, files)?;
-        self.sync().await?;
-        Ok(())
+        rollback_planned_source_edit_files(&self.project_root, files)
     }
 
     pub(crate) async fn recover_source_edit_preimages(
         &self,
         files: &[PlannedSourceEditFile],
     ) -> Result<()> {
-        rollback_planned_source_edit_files(&self.project_root, files)?;
-        // A missing preimage means the edit created the file, so recovery
-        // removed it: there is nothing to reindex and the graph must be
-        // resynchronized instead of silently skipping the candidate.
-        if files.iter().any(|file| file.expected.is_none()) {
-            self.sync().await?;
-            return Ok(());
-        }
-        let mutation = self
-            .begin_branch_graph_mutation("source edit preimage recovery")
-            .await?;
-        for file in files {
-            let expected = file
-                .expected
-                .as_ref()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "source edit recovery lost a required preimage".to_owned(),
-                })?;
-            let authority =
-                SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
-            self.reindex_file_within_graph_mutation(
-                &mutation,
-                &file.relative_path,
-                expected,
-                &authority,
-            )
-            .await?;
-        }
-        self.commit_branch_graph_mutation(mutation).await?;
-        self.sync().await?;
-        Ok(())
+        rollback_planned_source_edit_files(&self.project_root, files)
     }
 
-    /// Reconcile the graph after a completed source edit whose durable journal
-    /// did not advance before restart. Source bytes are already final; this
-    /// operation only republishes their indexed representation.
+    /// Confirm that a completed source edit still has every exact postimage.
+    ///
+    /// Code-index generations are immutable and refreshed by the daemon-owned
+    /// scheduler. Crash reconciliation therefore verifies the transaction's
+    /// byte authority here instead of mutating the retired root graph store.
     pub(crate) async fn commit_source_edit_postimages(
         &self,
         files: &[PlannedSourceEditFile],
     ) -> Result<()> {
-        // A missing postimage means the edit removed the file; the same
-        // resynchronization argument as the preimage path applies.
-        if files.iter().any(|file| file.intended.is_none()) {
-            self.sync().await?;
-            return Ok(());
-        }
-        let mutation = self
-            .begin_branch_graph_mutation("source edit postimage recovery")
-            .await?;
         for file in files {
-            let intended = file
-                .intended
-                .as_ref()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "source edit recovery lost a required postimage".to_owned(),
-                })?;
-            let authority =
-                SourceEditFileAuthority::open(&self.project_root, Path::new(&file.relative_path))?;
-            self.reindex_file_within_graph_mutation(
-                &mutation,
-                &file.relative_path,
-                intended,
-                &authority,
-            )
-            .await?;
+            let current =
+                read_source_edit_candidate(&self.project_root, Path::new(&file.relative_path))?;
+            if current.as_deref() != file.intended.as_deref().map(str::as_bytes) {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "source edit postimage changed before reconciliation in {}",
+                        file.relative_path
+                    ),
+                });
+            }
         }
-        self.commit_branch_graph_mutation(mutation).await?;
-        self.sync().await?;
         Ok(())
     }
 }

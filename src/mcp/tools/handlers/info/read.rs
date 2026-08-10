@@ -3,7 +3,11 @@
 use super::*;
 
 /// Handles `tracedecay_read` — mode-aware file read with cross-session cache.
-pub(crate) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_read(
+    cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     let file =
         args.get("file")
             .and_then(|v| v.as_str())
@@ -39,7 +43,11 @@ pub(crate) async fn handle_read(cg: &TraceDecay, args: Value) -> Result<ToolResu
 
     let project_id = cg.project_root().to_string_lossy();
     let output = read_source(
-        cg,
+        cg.project_root(),
+        cg.db(),
+        cg.is_read_only(),
+        graph.reader(),
+        graph.cancellation(),
         SourceReadRequest {
             file,
             mode,

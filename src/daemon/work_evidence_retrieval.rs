@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use tracedecay_application::{
     OpaqueCursor, RequestContext, ResolvedScope, WorkAnchorHydrationFuture,
-    WorkAnchorHydrationPortV1, WorkAnchorHydrationRequestV1, WorkAnchorHydrationV1,
-    WorkEvidenceCoverageStateV1, WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1,
-    WorkTaskSessionContinuationV1, WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1,
-    WorkTaskSessionFuture, WorkTaskSessionHydrationStateV1, WorkTaskSessionHydrationV1,
-    WorkTaskSessionPortV1, WorkTaskSessionRankContributionV1, WorkTaskSessionRankedAnchorV1,
+    WorkAnchorHydrationPortV1, WorkAnchorHydrationRequestV1, WorkEvidenceCoverageStateV1,
+    WorkEvidenceFreshnessV1, WorkEvidenceHydrationErrorV1, WorkTaskSessionContinuationV1,
+    WorkTaskSessionCoverageV1, WorkTaskSessionEvidenceV1, WorkTaskSessionFuture,
+    WorkTaskSessionHydrationStateV1, WorkTaskSessionHydrationV1, WorkTaskSessionPortV1,
+    WorkTaskSessionRankContributionV1, WorkTaskSessionRankedAnchorV1,
     WorkTaskSessionReauthorizationErrorV1, WorkTaskSessionReauthorizationPortV1,
     WorkTaskSessionRequestV1,
 };
@@ -386,6 +386,9 @@ fn task_session_evidence(
         }
         TaskSessionRetrievalOutcomeV1::Cancelled => {
             return Err(WorkEvidenceHydrationErrorV1::Cancelled);
+        }
+        TaskSessionRetrievalOutcomeV1::ResetRequired => {
+            return Err(WorkEvidenceHydrationErrorV1::ResetRequired);
         }
         TaskSessionRetrievalOutcomeV1::Unavailable
         | TaskSessionRetrievalOutcomeV1::BudgetExhausted => {

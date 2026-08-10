@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use crate::context::RequestContext;
 use crate::handlers::ApplicationOperation;
 use crate::result::RetrievalEvidence;
@@ -87,12 +90,30 @@ pub trait AffectedTestsRetrievalPort {
 
 pub use AffectedTestsRetrievalPort as TestRetrievalPort;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemporalRetrievalFailure {
+    Unavailable,
+    ResetRequired,
+}
+
+pub type TemporalRetrievalFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    RetrievalPortOutcome<SessionLookupResult>,
+                    TemporalRetrievalFailure,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
 pub trait TemporalRetrievalPort {
-    fn session_lookup(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &SessionLookupRequest,
-    ) -> RetrievalPortOutcome<SessionLookupResult>;
+    fn session_lookup<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a SessionLookupRequest,
+    ) -> TemporalRetrievalFuture<'a>;
 }
 
 pub trait AnchorHydrationPort {

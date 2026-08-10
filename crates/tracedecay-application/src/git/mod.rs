@@ -77,10 +77,11 @@ pub use worktree::{
     WorktreeCleanupConfirmRequestV1, WorktreeCleanupConfirmationV1,
     WorktreeCleanupInspectRequestV1, WorktreeCleanupReconcileRequestV1,
     WorktreeCleanupReconciliationV1, WorktreeCleanupRemovalV1, WorktreeCleanupRemoveRequestV1,
-    WorktreeContractError, WorktreeCoverageV1, WorktreeInspectionOutcomeV1, WorktreeInspectionV1,
-    WorktreeInventoryEntryV1, WorktreeInventoryOutcomeV1, WorktreeInventoryRequestV1,
-    WorktreeInventorySnapshotV1, WorktreeKindV1, WorktreeObservationV1, WorktreePresenceV1,
-    worktree_confirmation_digest, worktree_inspection_digest,
+    WorktreeConfirmationOutcomeV1, WorktreeContractError, WorktreeCoverageV1,
+    WorktreeInspectionOutcomeV1, WorktreeInspectionV1, WorktreeInventoryEntryV1,
+    WorktreeInventoryOutcomeV1, WorktreeInventoryRequestV1, WorktreeInventorySnapshotV1,
+    WorktreeKindV1, WorktreeObservationV1, WorktreePresenceV1, worktree_confirmation_digest,
+    worktree_inspection_digest,
 };
 
 #[cfg(test)]

@@ -27,7 +27,7 @@ use tracedecay_domain::{
     ActorId, ObservationScopeV1, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
     TemporalModeV1, UtcMicros, WorktreeId,
 };
-use tracedecay_store::{SessionRefreshCompletionRequestV1, SessionRefreshProgressV1};
+use tracedecay_store::SessionRefreshCompletionRequestV1;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
@@ -239,7 +239,6 @@ struct PreparedRepetition {
     binding: SessionRequestBinding,
     complete_request: SessionRefreshCompletionRequestV1,
     rebuild_activate_ns: u64,
-    durable_progress: SessionRefreshProgressV1,
     root_record_count: usize,
     _daemon_scope: tracedecay_runtime_core::db::DaemonDatabaseScope,
     _env: IsolatedBenchmarkEnv,
@@ -821,6 +820,18 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     )
     .await?;
     let rebuild_activate_ns = elapsed_ns(started);
+    if root_fixture
+        .anchor_durable_progress
+        .frontier()
+        .observed_through()
+        != root_fixture
+            .anchor_durable_progress
+            .frontier()
+            .committed_through()
+        || root_fixture.anchor_durable_progress.committed_records() == 0
+    {
+        return Err("root refresh did not persist a complete durable frontier".to_owned());
+    }
 
     Ok(PreparedRepetition {
         registered,
@@ -830,7 +841,6 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         binding,
         complete_request: root_fixture.anchor_complete_request,
         rebuild_activate_ns,
-        durable_progress: root_fixture.anchor_durable_progress,
         root_record_count: root_fixture.record_count,
         _daemon_scope,
         _env: env,
@@ -1526,11 +1536,6 @@ mod tests {
         let prepared = prepare_repetition(0)
             .await
             .expect("production fixture refresh must persist durable progress");
-        assert_eq!(
-            prepared.durable_progress.frontier().observed_through(),
-            prepared.durable_progress.frontier().committed_through()
-        );
-        assert!(prepared.durable_progress.committed_records() > 0);
         assert_eq!(
             prepared.root_sessions.len(),
             root_relation_fixture::ROOT_RELATION_PARTICIPANT_COUNT

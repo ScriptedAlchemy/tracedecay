@@ -581,6 +581,7 @@ fn map_port_error(error: TemporalPortError) -> TemporalKernelError {
         | TemporalPortError::ZeroGeneration
         | TemporalPortError::UnauthorizedSnapshot
         | TemporalPortError::ZeroVersion { .. }
+        | TemporalPortError::ResetRequired { .. }
         | TemporalPortError::Read { .. } => TemporalKernelError::Port(error),
     }
 }
@@ -599,9 +600,9 @@ fn map_hydration_error(error: HydrationError) -> TemporalKernelError {
     match error {
         HydrationError::Interrupted(error) => map_port_error(error),
         HydrationError::BudgetExceeded { .. } => TemporalKernelError::BudgetExceeded,
-        HydrationError::Unavailable | HydrationError::InvalidDenial => {
-            TemporalKernelError::Hydration(error)
-        }
+        HydrationError::Unavailable
+        | HydrationError::ResetRequired { .. }
+        | HydrationError::InvalidDenial => TemporalKernelError::Hydration(error),
     }
 }
 

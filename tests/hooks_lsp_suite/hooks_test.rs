@@ -1,4 +1,4 @@
-use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, lock_global_db_env, lock_recovering_poison};
+use crate::common::{EnvVarGuard, lock_global_db_env, lock_recovering_poison};
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::hooks::{
@@ -53,16 +53,6 @@ fn enroll_profile_project(project_root: &Path, project_id: &str) {
         },
     )
     .unwrap();
-}
-
-fn hook_profile_env(project_root: &Path, profile_root: &Path) -> [EnvVarGuard; 4] {
-    let home = project_root.join("home");
-    [
-        EnvVarGuard::set(USER_DATA_DIR_ENV, profile_root),
-        EnvVarGuard::set(GLOBAL_DB_ENV, profile_root.join("global.db")),
-        EnvVarGuard::set("HOME", &home),
-        EnvVarGuard::set("USERPROFILE", &home),
-    ]
 }
 
 #[test]

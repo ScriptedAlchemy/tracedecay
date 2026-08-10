@@ -1,16 +1,13 @@
 //! Dry-run preview rendering shared by every edit primitive: a bounded
 //! single-hunk diff of the changed region, the success-message wrapper that
-//! marks dry runs, the leading-doc/attr heuristic `replace_symbol` uses to
-//! decide whether to warn about dropped documentation, and the single line
-//! classifier that heuristic shares with `move_symbol`'s header scanner and
-//! its inner-doc skip loop.
+//! marks dry runs, and the line classifier shared by `move_symbol`'s header
+//! scanner and inner-doc skip loop.
 
 /// What a single source line looks like when scanning a file's leading
 /// region. One classifier shared by every place that used to hand-roll its
-/// own prefix checks: [`leading_doc_or_attr`] (is the first non-blank line
-/// documentation?), `move_symbol`'s import-insertion header scanner (which
-/// leading lines belong to the header vs. the first item), and its `//!`
-/// skip loop (never let a moved span start on an inner module doc).
+/// own prefix checks in `move_symbol`'s import-insertion header scanner (which
+/// leading lines belong to the header vs. the first item) and its `//!` skip
+/// loop (never let a moved span start on an inner module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::tracedecay) enum LeadingKind {
     /// Empty (after trimming leading whitespace).
@@ -55,27 +52,6 @@ pub(in crate::tracedecay) fn classify_leading_line(line: &str) -> LeadingKind {
     } else {
         LeadingKind::Code
     }
-}
-
-/// Cheap heuristic: does `source`'s first non-blank line look like a leading
-/// doc-comment (`//`, `///`, `//!`), block comment (`/*`), or attribute
-/// (`#[`, `#!`)? Used only to decide whether a `replace_symbol` note should
-/// warn that the replacement text may have dropped the item's docs/attrs.
-pub(in crate::tracedecay) fn leading_doc_or_attr(source: &str) -> bool {
-    source
-        .lines()
-        .map(classify_leading_line)
-        .find(|kind| *kind != LeadingKind::Blank)
-        .is_some_and(|kind| {
-            matches!(
-                kind,
-                LeadingKind::InnerDoc
-                    | LeadingKind::OuterDoc
-                    | LeadingKind::LineComment
-                    | LeadingKind::BlockComment
-                    | LeadingKind::Attribute
-            )
-        })
 }
 
 /// Unchanged context lines shown on each side of the changed region in a
@@ -168,10 +144,7 @@ pub(in crate::tracedecay) fn bounded_region_diff(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LeadingKind, bounded_region_diff, classify_leading_line, edit_success_message,
-        leading_doc_or_attr,
-    };
+    use super::{LeadingKind, bounded_region_diff, classify_leading_line, edit_success_message};
 
     #[test]
     fn classify_leading_line_covers_every_kind() {
@@ -208,33 +181,6 @@ mod tests {
         assert_eq!(classify_leading_line("fn f() {}"), LeadingKind::Code);
         // Leading whitespace never changes the classification.
         assert_eq!(classify_leading_line("   //! inner"), LeadingKind::InnerDoc);
-    }
-
-    #[test]
-    fn leading_doc_or_attr_detects_doc_comment() {
-        assert!(leading_doc_or_attr("/// docs\nfn f() {}"));
-        assert!(leading_doc_or_attr("//! module doc\nfn f() {}"));
-        assert!(leading_doc_or_attr("// plain\nfn f() {}"));
-    }
-
-    #[test]
-    fn leading_doc_or_attr_detects_attribute_and_block_comment() {
-        assert!(leading_doc_or_attr("#[inline]\nfn f() {}"));
-        assert!(leading_doc_or_attr("#![allow(dead_code)]"));
-        assert!(leading_doc_or_attr("/* block */\nfn f() {}"));
-    }
-
-    #[test]
-    fn leading_doc_or_attr_skips_leading_blank_lines() {
-        assert!(leading_doc_or_attr("\n\n   /// docs\nfn f() {}"));
-        assert!(!leading_doc_or_attr("\n\nfn f() {}"));
-    }
-
-    #[test]
-    fn leading_doc_or_attr_false_for_bare_code() {
-        assert!(!leading_doc_or_attr("fn f() {}"));
-        assert!(!leading_doc_or_attr(""));
-        assert!(!leading_doc_or_attr("pub struct S;"));
     }
 
     #[test]

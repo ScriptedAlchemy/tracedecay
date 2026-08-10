@@ -1,33 +1,23 @@
 //! Daemon-owned session retrieval service: retrieval-root
 //! resolution, scope authorization, request-context construction, LCM
-//! describe/expand execution, and result filtering for the
-//! `SessionRetrievalServicePort` implementation.
+//! describe/expand execution, and result filtering for application-admitted
+//! retrieval.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tracedecay_application::{
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId,
-};
+use tracedecay_application::RequestContext;
 use tracedecay_domain::{
-    ActorId, HydrationStateV1, PayloadReferenceV1, ProjectId, RetrievalAnchorId, RetrievalGrainV1,
-    SessionId, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
+    ActorId, HydrationStateV1, ProjectId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
+    TemporalModeV1,
 };
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_domain::{RepositoryId, WorktreeId};
-use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_store::StoreShardIdV1;
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::context::{
-    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
-    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
-    application_observed_at, session_application_grant_digest,
+    BranchId, ProfileId, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
 };
 use tracedecay_usecases::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
@@ -40,53 +30,39 @@ use tracedecay_usecases::session::{
 use crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake;
 use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
 use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
-use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::TraceDecay;
 use tracedecay_sessions::runtime::{SessionMessageSearchResult, SessionRecord};
-use tracedecay_temporal_query::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
+use tracedecay_temporal_query::context::{TokenPolicy, VersionedTokenEstimator};
 use tracedecay_temporal_query::ports::TemporalExecutionSnapshot;
-use tracedecay_temporal_query::ranking::{DiversityLimits, RankedCandidate};
+use tracedecay_temporal_query::ranking::RankedCandidate;
 use tracedecay_temporal_query::{TemporalHydratedResult, TemporalKernelResult};
 
-const MESSAGE_SEARCH_ACTOR_ID: &str = "mcp.message-search";
-#[cfg(test)]
-pub(crate) const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.root";
 const MESSAGE_SEARCH_PROFILE_ID: &str = "profile.primary";
 const MESSAGE_SEARCH_SCHEMA_VERSION: u32 = 1;
 const MESSAGE_SEARCH_RANKING_VERSION: u32 = 1;
 
 mod serving_status;
-const MESSAGE_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
-const MESSAGE_SEARCH_MAX_RESULTS: u64 = 1_024;
 const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
-const MESSAGE_SEARCH_MAX_WORK_UNITS: u64 = 100_000;
 
 mod admitted;
 mod contract;
-pub(crate) use admitted::{
-    SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
-    TaskSessionApplicationRetrievalFutureV1,
-};
+mod primitive;
+pub(crate) use admitted::{SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1};
 pub(crate) use contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalFilters,
-    SessionRetrievalNextActionView, SessionRetrievalOmissionView, SessionRetrievalPageView,
-    SessionRetrievalProjectSelector, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
-    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalSweepFuture,
-    SessionRetrievalSweepOutcome, SessionRetrievalSweepPort, SessionRetrievalSweepRootView,
-    SessionRetrievalSweepSkipReason, SessionRetrievalSweepSkipView, SessionRetrievalUnavailable,
-    SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
-    SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
+    SessionRetrievalOmissionView, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
+    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
     SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
+pub(crate) use primitive::DaemonSessionLookupPrimitiveV1;
 
 #[derive(Clone)]
 pub(crate) struct DaemonSessionRetrievalRoot {
     store_scope: SessionRetrievalStoreScope,
     identity: ResolvedSessionIdentity,
     project_id: Option<String>,
-    project_paths: HashSet<PathBuf>,
     authorized_root: Option<String>,
     expected_runtime_shard: Option<StoreShardIdV1>,
 }
@@ -151,18 +127,10 @@ impl DaemonSessionRetrievalRoot {
             SessionRootId::new(graph_scope_id.clone()).ok()?,
             ResolvedGitRoute::new(repository_id, worktree_id, BranchId::new(branch_name).ok()?),
         );
-        let mut project_paths = context
-            .aliases
-            .iter()
-            .map(|alias| PathBuf::from(&alias.alias_path))
-            .collect::<HashSet<_>>();
-        project_paths.insert(PathBuf::from(&context.project.canonical_root));
-        project_paths.insert(PathBuf::from(&context.project.display_root));
         Some(Self {
             store_scope: SessionRetrievalStoreScope::Project,
             identity,
             project_id: Some(context.project.project_id),
-            project_paths,
             authorized_root: Some(context.project.display_root),
             expected_runtime_shard: None,
         })
@@ -198,7 +166,6 @@ impl DaemonSessionRetrievalRoot {
             store_scope: SessionRetrievalStoreScope::Project,
             identity,
             project_id,
-            project_paths: HashSet::from([project_root.clone()]),
             authorized_root: Some(project_key_value),
             expected_runtime_shard: None,
         }
@@ -213,7 +180,6 @@ impl DaemonSessionRetrievalRoot {
                 SessionRootId::new("root.profile.primary").ok()?,
             ),
             project_id: None,
-            project_paths: HashSet::new(),
             authorized_root: None,
             expected_runtime_shard: None,
         })
@@ -278,26 +244,6 @@ impl DaemonSessionRetrievalRoot {
         );
         self.expected_runtime_shard = Some(StoreShardIdV1::profile_sessions(brain_id, profile_id));
         Some(self)
-    }
-
-    fn owns(&self, command: &SessionRetrievalCommand) -> bool {
-        if command.store_scope() != self.store_scope {
-            return false;
-        }
-        let Some(selector) = command.project_selector() else {
-            return true;
-        };
-        if self.store_scope != SessionRetrievalStoreScope::Project {
-            return false;
-        }
-        selector
-            .project_id
-            .as_deref()
-            .is_none_or(|id| self.project_id.as_deref() == Some(id))
-            && selector
-                .project_path
-                .as_deref()
-                .is_none_or(|path| self.project_paths.contains(Path::new(path)))
     }
 }
 
@@ -426,78 +372,6 @@ impl DaemonSessionRetrievalService {
         ))
     }
 
-    fn request_context(
-        &self,
-        provider: Option<&str>,
-    ) -> Option<(RequestContext, SessionRequestBinding)> {
-        let request_id = mint_global_request_id(GlobalRequestSurface::McpSessionRetrieval).ok()?;
-        let request_id = RequestId::new(request_id.as_str()).ok()?;
-        let actor = ActorId::new(MESSAGE_SEARCH_ACTOR_ID).ok()?;
-        let scope = self.root.identity.session_request_scope().ok()?;
-        let capability = message_search_digest(
-            b"tracedecay.mcp.message-search.capability.v1\0",
-            &self.root.identity,
-            provider,
-        );
-        let policy = message_search_policy_digest()?;
-        let configuration = message_search_digest(
-            b"tracedecay.mcp.message-search.configuration.v1\0",
-            &self.root.identity,
-            None,
-        );
-        let capability = CapabilityDigest::new(capability);
-        let policy = PolicyDigest::new(policy);
-        let configuration = ConfigurationDigest::new(configuration);
-        let cancellation = CancellationToken::for_application_request(request_id.as_str());
-        let budgets = RequestBudgets::new(
-            MESSAGE_SEARCH_MAX_RESULTS,
-            MESSAGE_SEARCH_MAX_BYTES,
-            MESSAGE_SEARCH_MAX_WORK_UNITS,
-        )
-        .ok()?;
-        let observed_at = application_observed_at();
-        let timeout_micros = i64::try_from(MESSAGE_SEARCH_TIMEOUT.as_micros()).unwrap_or(i64::MAX);
-        let expires_at = UtcMicros(observed_at.0.saturating_add(timeout_micros));
-        let grant = CapabilityGrantSnapshot::new(
-            CapabilityGrantId::new("grant.mcp.message-search").ok()?,
-            1,
-            session_application_grant_digest(
-                capability,
-                policy,
-                configuration,
-                &cancellation,
-                budgets,
-            )
-            .ok()?,
-            actor.clone(),
-            observed_at,
-            expires_at,
-            scope.clone(),
-            BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval").ok()?]),
-            BTreeSet::from([UseCaseId::new("use-case.mcp.message-search").ok()?]),
-            DisclosureClass::Evidence,
-        )
-        .ok()?;
-        let context = RequestContext::new(
-            actor,
-            scope,
-            grant,
-            request_id,
-            Deadline::new(expires_at).ok()?,
-            CancellationContext::active(cancellation.application_token_id()?).ok()?,
-        )
-        .ok()?;
-        let binding = SessionRequestBinding::new(
-            self.root.identity.clone(),
-            capability,
-            policy,
-            configuration,
-            cancellation,
-            budgets,
-        );
-        Some((context, binding))
-    }
-
     async fn execute_temporal_query_with_context(
         &self,
         context: &RequestContext,
@@ -526,37 +400,6 @@ impl DaemonSessionRetrievalService {
         )
         .retrieve(context, binding, query)
         .await
-    }
-
-    async fn execute_temporal_query(
-        &self,
-        query: SessionTemporalQuery,
-    ) -> SessionRetrievalOutcome<TemporalKernelResult> {
-        let Some((context, binding)) = self.request_context(query.provider()) else {
-            return SessionRetrievalOutcome::Unavailable;
-        };
-        let grant_id = match self.root.store_scope {
-            SessionRetrievalStoreScope::Project => "grant.mcp.message-search.project",
-            SessionRetrievalStoreScope::Profile => "grant.mcp.message-search.profile",
-        };
-        self.execute_temporal_query_with_context(&context, &binding, query, grant_id)
-            .await
-    }
-
-    async fn execute_command(
-        &self,
-        command: SessionRetrievalCommand,
-    ) -> SessionRetrievalServiceOutcome {
-        if requires_refresh_worker(command.query().freshness_policy())
-            && let Some(unavailable) = self.refresh_not_current()
-        {
-            return SessionRetrievalServiceOutcome::Unavailable(unavailable);
-        }
-        if !self.root.owns(&command) {
-            return SessionRetrievalServiceOutcome::WrongScope;
-        }
-        let outcome = self.execute_temporal_query(command.query().clone()).await;
-        self.public_outcome(outcome).await
     }
 
     async fn public_outcome(
@@ -595,6 +438,11 @@ impl DaemonSessionRetrievalService {
             SessionRetrievalOutcome::Redacted => SessionRetrievalServiceOutcome::Redacted,
             SessionRetrievalOutcome::Deleted => SessionRetrievalServiceOutcome::Deleted,
             SessionRetrievalOutcome::Denied => SessionRetrievalServiceOutcome::Denied,
+            SessionRetrievalOutcome::ResetRequired => {
+                SessionRetrievalServiceOutcome::ResetRequired {
+                    store_scope: self.root.store_scope,
+                }
+            }
             SessionRetrievalOutcome::Unavailable => SessionRetrievalServiceOutcome::Unavailable(
                 SessionRetrievalUnavailable::without_worker(
                     SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
@@ -835,24 +683,6 @@ fn message_search_digest(
     digest.finalize().into()
 }
 
-/// Message-search policy digest.
-///
-/// The digested value is a pair of compile-time constants, so it is the same
-/// bytes for every request. It is derived once and reused instead of running a
-/// canonical encode plus SHA-256 on each message-search request.
-fn message_search_policy_digest() -> Option<[u8; 32]> {
-    static POLICY_DIGEST: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
-    *POLICY_DIGEST.get_or_init(|| {
-        let encoded = PayloadReferenceV1::for_payload(&json!({
-            "domain": "tracedecay.observation-anchor.authorization.v1",
-            "authority": "observation-capture.v1",
-        }))
-        .ok()?;
-        let digest = encoded.digest().as_str().strip_prefix("sha256:")?;
-        hex::decode(digest).ok()?.try_into().ok()
-    })
-}
-
 fn complete_page_outcome(
     page: SessionRetrievalPageView,
     freshness: SessionDataFreshness,
@@ -972,10 +802,6 @@ async fn registered_session(
         parent_tool_use_id: row.get(12).ok(),
     })
 }
-
-mod sweep;
-
-pub(crate) use sweep::DaemonSessionRetrievalSweep;
 
 #[cfg(test)]
 mod tests;

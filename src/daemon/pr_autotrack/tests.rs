@@ -199,7 +199,7 @@ fn state_round_trips_and_defaults_when_absent() {
 // ---- Reconcile: removal + idempotency (no index required) -------------------
 
 #[tokio::test]
-async fn reconcile_untracks_closed_pr_and_cleans_store() {
+async fn reconcile_preserves_closed_pr_when_scheduler_retirement_is_unavailable() {
     use crate::branch_meta::{BranchMeta, load_branch_meta, save_branch_meta};
 
     let data_root = tempfile::tempdir().unwrap();
@@ -229,7 +229,9 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
     );
     save_state(data_root.path(), &state).unwrap();
 
-    // Empty discovery => PR 5 is closed/merged => must be untracked.
+    // Empty discovery means PR 5 closed, but no scheduler retirement authority
+    // is injected into this state-only fixture. Reconciliation must fail closed
+    // without deleting its durable state or Git-adjacent artifacts.
     let identity = crate::daemon::profile_identity::load_or_create(data_root.path()).unwrap();
     let _database_scope = crate::db::enter_daemon_database_scope(
         identity.profile_root(),
@@ -248,12 +250,52 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
     )
     .await;
 
-    assert_eq!(report.untracked, vec!["pr/5".to_string()]);
+    assert!(report.untracked.is_empty());
     assert!(report.tracked.is_empty());
-    assert!(load_state(data_root.path()).managed.is_empty());
+    assert_eq!(report.failures.len(), 1);
+    assert!(
+        report.failures[0]
+            .1
+            .starts_with("code_index_scheduler_unavailable:")
+    );
+    assert!(load_state(data_root.path()).managed.contains_key("pr/5"));
     let reloaded = load_branch_meta(data_root.path()).unwrap();
-    assert!(!reloaded.is_tracked("pr/5"));
-    assert!(!data_root.path().join("branches/pr_5.db").exists());
+    assert!(reloaded.is_tracked("pr/5"));
+    assert!(data_root.path().join("branches/pr_5.db").exists());
+}
+
+#[tokio::test]
+async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
+    let data_root = tempfile::tempdir().unwrap();
+    let repo_root = tempfile::tempdir().unwrap();
+    let discovery = PrDiscovery {
+        open: vec![DiscoveredPr {
+            number: 9,
+            head_branch: "feature-9".to_owned(),
+            head_sha: "sha-9".to_owned(),
+        }],
+        ..Default::default()
+    };
+    let daemon_administration = StoreAdministration::default();
+
+    let report = reconcile_project_with_administration(
+        repo_root.path(),
+        data_root.path(),
+        &discovery,
+        10,
+        PrStoreAdministration::state_only(&daemon_administration),
+    )
+    .await;
+
+    assert!(report.tracked.is_empty());
+    assert_eq!(report.failures.len(), 1);
+    assert!(
+        report.failures[0]
+            .1
+            .starts_with("code_index_scheduler_unavailable:")
+    );
+    assert!(load_state(data_root.path()).managed.is_empty());
+    assert!(!data_root.path().join("pr-worktrees").exists());
 }
 
 #[tokio::test]

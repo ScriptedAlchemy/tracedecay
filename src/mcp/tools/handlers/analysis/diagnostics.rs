@@ -37,23 +37,33 @@ fn required_diagnostics_scope_value(args: &Value, scope: &str, name: &str) -> Re
         .map(str::to_string)
 }
 
-async fn enclosing_diagnostic_node(
-    cg: &TraceDecay,
+fn enclosing_diagnostic_node(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     spans_by_file: &mut HashMap<String, Vec<NodeSpan>>,
     file: &str,
     line_start: u32,
 ) -> Result<Option<String>> {
     if !spans_by_file.contains_key(file) {
-        let spans = cg
-            .get_nodes_by_file(file)
-            .await?
+        let spans = graph
+            .symbols_in_logical_file(file, ANALYSIS_SYMBOL_BUDGET)?
             .into_iter()
-            .map(|n| NodeSpan {
-                start_line: n.start_line,
-                end_line: n.end_line,
-                qualified_name: n.qualified_name,
+            .map(|symbol| {
+                let metadata = symbol.metadata.ok_or_else(|| {
+                    TraceDecayError::project_route(
+                        "code-graph-corrupt",
+                        false,
+                        "diagnostic symbol is missing extraction-attested metadata",
+                    )
+                })?;
+                Ok(NodeSpan {
+                    start_line: metadata.start_line,
+                    end_line: metadata
+                        .start_line
+                        .saturating_add(metadata.line_span.saturating_sub(1)),
+                    qualified_name: metadata.qualified_name,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         spans_by_file.insert(file.to_string(), spans);
     }
 
@@ -137,6 +147,7 @@ async fn session_correlation_health_json(
 
 pub(crate) async fn handle_diagnostics(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     diagnostics_cache: Option<&crate::diagnostics::DiagnosticsCache>,
     diagnostics_lsp: Option<&tokio::sync::Mutex<DiagnosticBroker>>,
@@ -185,7 +196,7 @@ pub(crate) async fn handle_diagnostics(
         }
 
         let enclosing =
-            enclosing_diagnostic_node(cg, &mut spans_by_file, &diag.file, diag.line_start).await?;
+            enclosing_diagnostic_node(graph, &mut spans_by_file, &diag.file, diag.line_start)?;
 
         entries.push(json!({
             "file": diag.file,

@@ -4,7 +4,6 @@
 use super::dispatch_settlement::{DispatchControl, PreparedDispatchControl};
 use super::*;
 use crate::mcp::ToolResult;
-use tracedecay_sessions::WorkflowIndexReadPort;
 
 struct PreparedToolCall {
     tool_name: String,
@@ -535,13 +534,7 @@ impl McpServer {
 
     /// Handles the `tools/list` method, returning all available tool definitions.
     pub(crate) async fn handle_tools_list(&self, id: Value) -> JsonRpcResponse {
-        let node_count = self
-            .cg_snapshot()
-            .await
-            .get_stats()
-            .await
-            .map_or(0, |s| s.node_count);
-        let budget = explore_call_budget(node_count);
+        let budget = explore_call_budget(0);
         let profile_id = match tracedecay_tool_catalog::ProfileId::new(
             tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
         ) {
@@ -564,8 +557,7 @@ impl McpServer {
                 );
             }
         };
-        match get_catalog_filtered_tool_definitions_with_budget(
-            node_count,
+        match crate::mcp::tools::get_catalog_filtered_tool_definitions_with_warming_budget(
             budget,
             &profile_id,
             &authority,
@@ -639,102 +631,54 @@ impl McpServer {
         Self::resource_contents(id, "tracedecay://schema", "text/markdown", SCHEMA_MARKDOWN)
     }
 
-    /// Returns graph statistics as a JSON resource.
+    /// Returns project identity and typed graph-statistics availability.
     pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
         let cg = self.reopen_if_branch_drifted().await;
-        match cg.get_stats().await {
-            Ok(stats) => {
-                let mut output = serde_json::to_value(&stats).unwrap_or(json!({}));
-                output["branch_diagnostics"] =
-                    serde_json::to_value(cg.branch_diagnostics()).unwrap_or(json!({}));
-                let text = serde_json::to_string_pretty(&output).unwrap_or_default();
+        let output = json!({
+            "project_root": cg.project_root(),
+            "branch_diagnostics": cg.branch_diagnostics(),
+            "graph_statistics": {
+                "status": "unavailable",
+                "reason": "sealed_generation_statistics_not_published",
+            },
+        });
+        match serde_json::to_string_pretty(&output) {
+            Ok(text) => {
                 Self::resource_contents(id, "tracedecay://status", "application/json", &text)
             }
-            Err(e) => JsonRpcResponse::error(
+            Err(error) => JsonRpcResponse::error(
                 id,
                 ErrorCode::InternalError,
-                format!("failed to read graph stats: {e}"),
+                format!("failed to serialize project status: {error}"),
             ),
         }
     }
 
-    /// Returns the file list as a text resource (grouped by directory).
+    /// Returns typed file-inventory availability for the active project.
+    ///
+    /// MCP resources do not carry the application operation, request identity,
+    /// deadline, and cancellation proof required to open the verified code
+    /// graph. Until that resource-specific admission exists, exposing files
+    /// from another store would make an unverified or stale inventory look
+    /// authoritative.
     pub(crate) async fn read_resource_files(&self, id: Value) -> JsonRpcResponse {
-        match self.cg_snapshot().await.get_all_files().await {
-            Ok(mut files) => {
-                files.sort_by(|a, b| a.path.cmp(&b.path));
-                let mut groups: std::collections::BTreeMap<String, Vec<String>> =
-                    std::collections::BTreeMap::new();
-                for f in &files {
-                    let dir = f.path.rfind('/').map_or(".", |i| &f.path[..i]).to_string();
-                    let name = f
-                        .path
-                        .rfind('/')
-                        .map_or(f.path.as_str(), |i| &f.path[i + 1..]);
-                    groups
-                        .entry(dir)
-                        .or_default()
-                        .push(format!("{} ({} symbols)", name, f.node_count));
-                }
-                let mut lines = Vec::new();
-                lines.push(format!("{} indexed files", files.len()));
-                for (dir, entries) in &groups {
-                    lines.push(format!("\n{}/ ({} files)", dir, entries.len()));
-                    for entry in entries {
-                        lines.push(format!("  {entry}"));
-                    }
-                }
-                let text = lines.join("\n");
-                Self::resource_contents(id, "tracedecay://files", "text/plain", &text)
-            }
-            Err(e) => JsonRpcResponse::error(
-                id,
-                ErrorCode::InternalError,
-                format!("failed to read file list: {e}"),
-            ),
-        }
+        Self::resource_contents(
+            id,
+            "tracedecay://files",
+            "text/plain",
+            "status: unavailable\nreason: verified_generation_file_inventory_not_admitted",
+        )
     }
 
     /// Returns a high-level project overview as a text resource.
     pub(crate) async fn read_resource_overview(&self, id: Value) -> JsonRpcResponse {
         let cg = self.cg_snapshot().await;
-        let stats = match cg.get_stats().await {
-            Ok(s) => s,
-            Err(e) => {
-                return JsonRpcResponse::error(
-                    id,
-                    ErrorCode::InternalError,
-                    format!("failed to read graph stats: {e}"),
-                );
-            }
-        };
-
         let mut lines = Vec::new();
         lines.push(format!("Project: {}", cg.project_root().display()));
-        lines.push(format!(
-            "Graph: {} nodes, {} edges, {} files",
-            stats.node_count, stats.edge_count, stats.file_count
-        ));
-
-        // Language distribution
-        if !stats.files_by_language.is_empty() {
-            lines.push("\nLanguages:".to_string());
-            let mut langs: Vec<_> = stats.files_by_language.iter().collect();
-            langs.sort_by(|a, b| b.1.cmp(a.1));
-            for (lang, count) in &langs {
-                lines.push(format!("  {lang} ({count} files)"));
-            }
-        }
-
-        // Node kind distribution (top 10)
-        if !stats.nodes_by_kind.is_empty() {
-            lines.push("\nSymbol kinds:".to_string());
-            let mut kinds: Vec<_> = stats.nodes_by_kind.iter().collect();
-            kinds.sort_by(|a, b| b.1.cmp(a.1));
-            for (kind, count) in kinds.iter().take(10) {
-                lines.push(format!("  {kind} ({count})"));
-            }
-        }
+        lines.push(
+            "Graph statistics: unavailable (sealed generation statistics are not published)"
+                .to_owned(),
+        );
 
         let text = lines.join("\n");
         Self::resource_contents(id, "tracedecay://overview", "text/plain", &text)
@@ -871,10 +815,6 @@ impl McpServer {
         application_cancellation: Option<tracedecay_application::CancellationSignal>,
     ) -> Result<ToolResult> {
         let engine_identity = cg.db_path();
-        let workflow_index_reads = self
-            .registered_session_db
-            .as_ref()
-            .map(|database| DaemonWorkflowIndexReadService::new(Arc::clone(database)));
         let read_flight = tool_allows_identical_read_coalescing(tool_name).then(|| {
             self.identical_read_coalescer.claim(
                 engine_identity.to_string_lossy().as_ref(),
@@ -898,13 +838,15 @@ impl McpServer {
             ToolCallRegistryOptions {
                 global_db: self.registry_db.as_ref(),
                 project_registry_reads: self.project_registry_reads.as_deref(),
-                workflow_index_reads: workflow_index_reads
-                    .as_ref()
-                    .map(|service| service as &dyn WorkflowIndexReadPort),
                 accounting_db: self.accounting_db.as_deref(),
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
-                dashboard_lcm_retrieval_service: self.project_session_retrieval_service.clone(),
+                dashboard_session_retrieval_service: self
+                    .project_application_retrieval_service
+                    .clone(),
+                dashboard_session_retrieval_identity: self
+                    .project_application_retrieval_identity
+                    .clone(),
                 daemon_user_profile_id: self
                     .profile_identity
                     .as_ref()
@@ -929,6 +871,7 @@ impl McpServer {
                 application_deadline,
                 application_cancellation,
                 code_index_publication_identity: self.code_index_publication_identity.clone(),
+                code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
                 code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
                 source_edit_executor: self.source_edit_executor.get().cloned(),
@@ -956,15 +899,6 @@ impl McpServer {
                     self.registered_session_db.as_ref(),
                     self.registered_user_session_db.as_ref(),
                 )
-                .with_refresh_services(
-                    self.project_session_refresh_service.as_deref(),
-                    self.user_session_refresh_service.as_deref(),
-                )
-                .with_retrieval_services(
-                    self.project_session_retrieval_service.as_deref(),
-                    self.user_session_retrieval_service.as_deref(),
-                )
-                .with_retrieval_sweep(self.session_retrieval_sweep.as_deref())
                 .with_lcm_authorities(
                     self.project_lcm_authority.as_deref(),
                     self.user_lcm_authority.as_deref(),
@@ -1386,53 +1320,6 @@ impl McpServer {
         }
     }
 
-    async fn append_per_file_staleness_notice(&self, cg: &TraceDecay, result: &mut ToolResult) {
-        // Per-file staleness banner (#428 design): files this response
-        // referenced that are still pending after the in-line sync
-        // attempt get a focused banner naming them with edit ages,
-        // telling the agent to Read THOSE files directly while
-        // treating the rest of the response as authoritative.
-        // Replaces the previous all-or-nothing "STALE INDEX"
-        // warning that made agents distrust the entire answer.
-        if result.touched_files.is_empty() {
-            return;
-        }
-
-        let stale_files = cg.check_file_staleness(&result.touched_files).await;
-        if stale_files.is_empty() {
-            return;
-        }
-
-        let still_stale = match cg.sync_if_stale(&stale_files).await {
-            Ok(false) => false,        // sync completed; files now fresh
-            Ok(true) | Err(_) => true, // still stale (lock contention / sync error)
-        };
-        if !still_stale {
-            return;
-        }
-
-        let banner = format_per_file_staleness_banner(cg.project_root(), &stale_files);
-        // Machine-readable marker. Same shape as before
-        // so existing scrapers keep working.
-        let stale_json = serde_json::to_string(&stale_files).unwrap_or_else(|_| "[]".to_string());
-        let marker = format!("\ntracedecay_graph_stale: {stale_json}");
-        debug_assert!(
-            result.value.is_object(),
-            "tool result must be a JSON object so graph_stale can be attached"
-        );
-        if let Some(obj) = result.value.as_object_mut() {
-            obj.insert("graph_stale".to_string(), json!(stale_files));
-        }
-        if let Some(content) = result
-            .value
-            .get_mut("content")
-            .and_then(|c| c.as_array_mut())
-        {
-            content.insert(0, json!({"type": "text", "text": &banner}));
-            content.push(json!({"type": "text", "text": marker}));
-        }
-    }
-
     async fn prepend_index_warnings(
         &self,
         cg: &TraceDecay,
@@ -1448,54 +1335,6 @@ impl McpServer {
                 .and_then(|c| c.as_array_mut())
             {
                 content.insert(0, json!({"type": "text", "text": &warning}));
-            }
-        }
-
-        // Check overall index age (warn if older than 1 hour).
-        // Uses `last_sync_timestamp` (sync execution time) not the
-        // max file `indexed_at` — a no-change sync still updates the
-        // sync metadata even though no file gets a fresh `indexed_at`,
-        // so a per-file fallback fires the warning forever on quiet
-        // repos (#86).
-        //
-        // D7 staleness-warning UX: with auto-sync on (the normal
-        // case), a stale index self-heals — the D4 background refresh
-        // above was already kicked for this read. So instead of the
-        // old "Run `tracedecay sync`" nag, we emit an informational
-        // "refresh in progress" note (or nothing at all if a refresh
-        // just completed). The manual-sync instruction is reserved
-        // for the cases where auto-repair genuinely can't help:
-        //   - serving a read-only fallback/ancestor store, or
-        //   - the user disabled both auto_watch and read_refresh.
-        let last_time = cg.last_sync_timestamp().await;
-        let now = crate::tracedecay::current_timestamp();
-        if let Some(last_time) = last_time
-            && now.saturating_sub(last_time) > 3600
-        {
-            let age_secs = now.saturating_sub(last_time);
-            let refreshed_recently = {
-                let done = self.last_background_refresh_done_at.load(Ordering::Acquire);
-                done > 0 && now.saturating_sub(done) < self.sync_config.read_cooldown_secs as i64
-            };
-            let banner = staleness_banner(StalenessBannerInputs {
-                age_secs,
-                // Auto-sync is "on" when either the daemon watcher
-                // or sync-on-read can repair this.
-                auto_sync_on: self.sync_config.auto_watch || self.sync_config.read_refresh,
-                // A read-only fallback store can never be written,
-                // so no background refresh can heal it.
-                fallback_store: cg.fallback_warning().is_some(),
-                refresh_running: self.background_refresh_running.load(Ordering::Acquire),
-                refreshed_recently,
-            });
-
-            if let Some(banner) = banner
-                && let Some(content) = result
-                    .value
-                    .get_mut("content")
-                    .and_then(|c| c.as_array_mut())
-            {
-                content.insert(0, json!({"type": "text", "text": &banner}));
             }
         }
 
@@ -1577,8 +1416,6 @@ impl McpServer {
                     .await;
                 }
                 self.append_version_notice(&mut result).await;
-                self.append_per_file_staleness_notice(&cg, &mut result)
-                    .await;
                 self.prepend_index_warnings(&cg, selected_owner.is_none(), &mut result)
                     .await;
                 JsonRpcResponse::success(id, result.value)

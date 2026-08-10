@@ -93,6 +93,21 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
             }),
         })
     }
+
+    pub(in crate::daemon::service) async fn shutdown(&self) {
+        self.inner.cancellation.cancel();
+        let task = self
+            .inner
+            .task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(task) = task
+            && let Err(error) = task.await
+        {
+            tracing::warn!(%error, "Work blocked-interval recovery shutdown failed");
+        }
+    }
 }
 
 impl Drop for WorkBlockedIntervalObservationRecoveryInnerV1 {

@@ -7,12 +7,11 @@ use tracedecay_application::retained_surfaces::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
     FactStoreGetRequestV1, FactStoreListRequestV1, FactStoreProbeRequestV1,
     FactStoreReasonRequestV1, FactStoreRelatedRequestV1, FactStoreRemoveRequestV1,
-    FactStoreRequestV1, FactStoreSearchRequestV1, FactStoreUpdateRequestV1, LcmDescribeRequestV1,
-    LcmDoctorRequestV1, LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmGrepRequestV1,
-    LcmLoadSessionRequestV1, LcmStatusRequestV1, MemoryStatusRequestV1, MessageSearchRequestV1,
-    RetainedSurfaceOperation, RetainedSurfaceRequestV1, RetainedSurfaceResultV1,
-    SessionRefreshActionRequestV1, SessionRefreshActionV1, SessionRefreshRequestV1,
-    SessionsForRequestV1, WorkflowsRequestV1,
+    FactStoreSearchRequestV1, FactStoreUpdateRequestV1, LcmDescribeRequestV1, LcmDoctorRequestV1,
+    LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmGrepRequestV1, LcmLoadSessionRequestV1,
+    LcmStatusRequestV1, MemoryStatusRequestV1, MessageSearchRequestV1, RetainedSurfaceOperation,
+    RetainedSurfaceRequestV1, RetainedSurfaceResultV1, SessionRefreshActionRequestV1,
+    SessionRefreshActionV1, SessionRefreshRequestV1, SessionsForRequestV1, WorkflowsRequestV1,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -129,7 +128,7 @@ async fn invoke_operation(
     .await
 }
 
-pub(super) fn decode_request(
+pub(crate) fn decode_request(
     operation: RetainedSurfaceOperation,
     body: serde_json::Value,
 ) -> Option<RetainedSurfaceRequestV1> {
@@ -137,8 +136,7 @@ pub(super) fn decode_request(
         ($request:ty, $variant:ident) => {
             serde_json::from_value::<$request>(body)
                 .ok()
-                .map(FactStoreRequestV1::$variant)
-                .map(RetainedSurfaceRequestV1::FactStore)
+                .map(RetainedSurfaceRequestV1::$variant)
         };
     }
     macro_rules! decode {
@@ -149,28 +147,36 @@ pub(super) fn decode_request(
         };
     }
     match operation {
-        RetainedSurfaceOperation::FactStoreAdd => decode_fact!(FactStoreAddRequestV1, Add),
-        RetainedSurfaceOperation::FactStoreSearch => {
-            decode_fact!(FactStoreSearchRequestV1, Search)
+        RetainedSurfaceOperation::FactStoreAdd => {
+            decode_fact!(FactStoreAddRequestV1, FactStoreAdd)
         }
-        RetainedSurfaceOperation::FactStoreProbe => decode_fact!(FactStoreProbeRequestV1, Probe),
+        RetainedSurfaceOperation::FactStoreSearch => {
+            decode_fact!(FactStoreSearchRequestV1, FactStoreSearch)
+        }
+        RetainedSurfaceOperation::FactStoreProbe => {
+            decode_fact!(FactStoreProbeRequestV1, FactStoreProbe)
+        }
         RetainedSurfaceOperation::FactStoreRelated => {
-            decode_fact!(FactStoreRelatedRequestV1, Related)
+            decode_fact!(FactStoreRelatedRequestV1, FactStoreRelated)
         }
         RetainedSurfaceOperation::FactStoreReason => {
-            decode_fact!(FactStoreReasonRequestV1, Reason)
+            decode_fact!(FactStoreReasonRequestV1, FactStoreReason)
         }
         RetainedSurfaceOperation::FactStoreContradict => {
-            decode_fact!(FactStoreContradictRequestV1, Contradict)
+            decode_fact!(FactStoreContradictRequestV1, FactStoreContradict)
         }
-        RetainedSurfaceOperation::FactStoreGet => decode_fact!(FactStoreGetRequestV1, Get),
+        RetainedSurfaceOperation::FactStoreGet => {
+            decode_fact!(FactStoreGetRequestV1, FactStoreGet)
+        }
         RetainedSurfaceOperation::FactStoreUpdate => {
-            decode_fact!(FactStoreUpdateRequestV1, Update)
+            decode_fact!(FactStoreUpdateRequestV1, FactStoreUpdate)
         }
         RetainedSurfaceOperation::FactStoreRemove => {
-            decode_fact!(FactStoreRemoveRequestV1, Remove)
+            decode_fact!(FactStoreRemoveRequestV1, FactStoreRemove)
         }
-        RetainedSurfaceOperation::FactStoreList => decode_fact!(FactStoreListRequestV1, List),
+        RetainedSurfaceOperation::FactStoreList => {
+            decode_fact!(FactStoreListRequestV1, FactStoreList)
+        }
         RetainedSurfaceOperation::FactFeedback => decode!(FactFeedbackRequestV1, FactFeedback),
         RetainedSurfaceOperation::MemoryStatus => decode!(MemoryStatusRequestV1, MemoryStatus),
         RetainedSurfaceOperation::SessionRefreshStatus => {

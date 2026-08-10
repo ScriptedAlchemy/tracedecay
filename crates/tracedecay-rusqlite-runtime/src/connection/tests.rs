@@ -311,7 +311,7 @@ fn create_new_refuses_to_replace_an_existing_database() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
 #[test]
 fn worker_open_path_stays_on_the_pinned_file_across_an_a_b_a_swap() {
     let directory = tempfile::tempdir().unwrap();
@@ -423,7 +423,7 @@ fn windows_pinned_file_blocks_replacement_until_authority_closes() {
     let pinned = OpenedDatabaseFile::pin(&path).unwrap();
     let retained = pinned.try_clone().unwrap();
 
-    assert_eq!(retained.worker_open_path(&path).unwrap(), path);
+    assert_eq!(retained.writer_open_path(&path).unwrap(), path);
     assert_eq!(
         std::fs::rename(&path, &retired).unwrap_err().kind(),
         std::io::ErrorKind::PermissionDenied

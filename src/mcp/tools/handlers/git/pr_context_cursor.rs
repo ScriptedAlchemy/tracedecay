@@ -1,9 +1,10 @@
 use super::*;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256};
+use tracedecay_domain::{
+    RetrievalGrainV1, SessionId, SymbolOccurrenceId, TemporalModeV1, canonical_sha256,
+};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
-use tracedecay_runtime_core::db::NodesByFilesPageKey;
 use tracedecay_temporal_query::cursor::{StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
@@ -27,16 +28,16 @@ pub(super) struct PrContextCursorBinding<'a> {
 
 #[derive(Serialize, Deserialize)]
 struct PrContextCursorKey<'a> {
-    file_path: &'a str,
+    symbol_occurrence_id: &'a str,
     impact_nodes_admitted: usize,
-    impact_edges_admitted: usize,
+    direct_call_edges_admitted: usize,
     impact_bytes_admitted: usize,
 }
 
 pub(super) struct PrContextCursorPosition {
-    pub page_key: NodesByFilesPageKey,
+    pub after: SymbolOccurrenceId,
     pub impact_nodes_admitted: usize,
-    pub impact_edges_admitted: usize,
+    pub direct_call_edges_admitted: usize,
     pub impact_bytes_admitted: usize,
 }
 
@@ -127,43 +128,34 @@ pub(super) fn decode_pr_context_cursor(
             message: format!("invalid or stale PR context cursor: {error}"),
         }
     })?;
-    if sort_key.knowledge_at_micros < 0 {
-        return Err(TraceDecayError::Config {
-            message: "invalid PR context cursor sort key".to_owned(),
-        });
-    }
     let key: PrContextCursorKey<'_> =
         serde_json::from_str(&sort_key.stable_id).map_err(|_| TraceDecayError::Config {
             message: "invalid PR context cursor key".to_owned(),
         })?;
     Ok(PrContextCursorPosition {
-        page_key: NodesByFilesPageKey {
-            file_path: key.file_path.to_owned(),
-            start_line: u32::try_from(sort_key.normalized_score_micros).map_err(|_| {
-                TraceDecayError::Config {
-                    message: "invalid PR context cursor line".to_owned(),
-                }
-            })?,
-            rowid: sort_key.knowledge_at_micros,
-        },
+        after: SymbolOccurrenceId::new(key.symbol_occurrence_id.to_owned()).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("invalid PR context symbol cursor: {error}"),
+            }
+        })?,
         impact_nodes_admitted: key.impact_nodes_admitted,
-        impact_edges_admitted: key.impact_edges_admitted,
+        direct_call_edges_admitted: key.direct_call_edges_admitted,
         impact_bytes_admitted: key.impact_bytes_admitted,
     })
 }
 
 pub(super) fn encode_pr_context_cursor(
-    key: &NodesByFilesPageKey,
+    after: &SymbolOccurrenceId,
     impact_nodes_admitted: usize,
-    impact_edges_admitted: usize,
+    direct_call_edges_admitted: usize,
     impact_bytes_admitted: usize,
     snapshot: &TemporalExecutionSnapshot,
     authenticator: &GlobalDbCursorKeyProvider,
 ) -> Result<String> {
     let stable_id = serde_json::to_string(&PrContextCursorKey {
-        file_path: &key.file_path,
+        symbol_occurrence_id: after.as_str(),
         impact_nodes_admitted,
-        impact_edges_admitted,
+        direct_call_edges_admitted,
         impact_bytes_admitted,
     })
     .map_err(|error| TraceDecayError::Config {
@@ -172,8 +164,8 @@ pub(super) fn encode_pr_context_cursor(
     encode_cursor(
         snapshot,
         &StableSortKey {
-            normalized_score_micros: u64::from(key.start_line),
-            knowledge_at_micros: key.rowid,
+            normalized_score_micros: 0,
+            knowledge_at_micros: 0,
             stable_id,
         },
         authenticator,

@@ -17,6 +17,7 @@ use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 use crate::errors::{Result, TraceDecayError};
 
 const MAX_RENAME_SYMBOLS: usize = 10_000;
+const MAX_RENAME_FILES: usize = 100_000;
 const MAX_RENAME_RELATIONS: usize = 100_000;
 const RENAME_REFERENCE_RELATIONS: &[RelationEdgeKindV1] = &[
     RelationEdgeKindV1::Calls,
@@ -37,9 +38,7 @@ pub(super) struct RenameGraphFileV1 {
 #[derive(Clone)]
 pub(super) struct RenameGraphSiteV1 {
     pub(super) file: String,
-    pub(super) evidence_span: Option<SourceSpan>,
-    pub(super) line: u32,
-    pub(super) column: u32,
+    pub(super) evidence_span: SourceSpan,
     pub(super) source_occurrence: String,
     pub(super) source_qualified_name: String,
     pub(super) declaration_kind: Option<RenameSiteKindV1>,
@@ -101,6 +100,20 @@ fn path_for<'a>(
     })
 }
 
+fn source_span(summary: &CodeGraphSymbolSummaryV1) -> Result<SourceSpan> {
+    summary
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.source_span)
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "code-graph-projection-incomplete",
+                false,
+                "rename evidence requires an extraction-attested source span",
+            )
+        })
+}
+
 fn declaration_site(
     summary: &CodeGraphSymbolSummaryV1,
     paths: &BTreeMap<tracedecay_domain::FileOccurrenceId, String>,
@@ -108,15 +121,13 @@ fn declaration_site(
     let metadata = metadata(summary)?;
     Ok(RenameGraphSiteV1 {
         file: path_for(summary, paths)?.to_owned(),
-        evidence_span: None,
-        line: metadata.presentation.start_line,
-        column: metadata.presentation.start_column,
+        evidence_span: source_span(summary)?,
         source_occurrence: summary.occurrence.as_str().to_owned(),
         source_qualified_name: metadata.qualified_name.clone(),
         declaration_kind: Some(declaration_kind(
             &metadata.kind,
             path_for(summary, paths)?,
-            &metadata.presentation.name,
+            &metadata.simple_name,
         )),
         relation_kind: None,
         apply_grade: true,
@@ -130,9 +141,7 @@ fn reference_site(
     let metadata = metadata(&edge.neighbor)?;
     Ok(RenameGraphSiteV1 {
         file: path_for(&edge.neighbor, paths)?.to_owned(),
-        evidence_span: Some(edge.edge.evidence_span),
-        line: metadata.presentation.start_line,
-        column: metadata.presentation.start_column,
+        evidence_span: edge.edge.evidence_span,
         source_occurrence: edge.neighbor.occurrence.as_str().to_owned(),
         source_qualified_name: metadata.qualified_name.clone(),
         declaration_kind: None,
@@ -247,7 +256,7 @@ pub(super) fn load(
     let cancellation = graph.cancellation();
     let files = graph
         .reader()
-        .files(Arc::clone(&cancellation))
+        .files(MAX_RENAME_FILES, Arc::clone(&cancellation))
         .map_err(projection_error)?;
     let mut paths = BTreeMap::new();
     for file in &files {
@@ -277,7 +286,7 @@ pub(super) fn load(
     };
     let target_metadata = metadata(&target)?;
     let target_path = path_for(&target, &paths)?;
-    if target_metadata.presentation.name != binding.old_name
+    if target_metadata.simple_name != binding.old_name
         || target_metadata.qualified_name != binding.qualified_name
         || target_metadata.kind != binding.kind
         || target_path != binding.file
@@ -302,7 +311,7 @@ pub(super) fn load(
             candidate
                 .metadata
                 .as_ref()
-                .is_some_and(|metadata| metadata.presentation.name == binding.old_name)
+                .is_some_and(|metadata| metadata.simple_name == binding.old_name)
         })
         .collect::<Vec<_>>();
     if same_name.len() > MAX_RENAME_SYMBOLS {
@@ -366,7 +375,7 @@ pub(super) fn load(
                 if edge.edge.kind == RelationEdgeKindV1::Calls {
                     callers.insert(source_metadata.qualified_name.clone());
                 }
-                if looks_like_test(&site.file, &source_metadata.presentation.name) {
+                if looks_like_test(&site.file, &source_metadata.simple_name) {
                     affected_tests.insert(site.file.clone());
                 }
                 target_sites.push(site);
@@ -377,7 +386,7 @@ pub(super) fn load(
             all_revision_edges.push(edge);
         }
     }
-    if looks_like_test(target_path, &target_metadata.presentation.name) {
+    if looks_like_test(target_path, &target_metadata.simple_name) {
         affected_tests.insert(target_path.to_owned());
     }
     all_revision_edges.sort_by(|left, right| {

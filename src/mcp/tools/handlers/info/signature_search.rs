@@ -6,6 +6,7 @@ use super::*;
 /// cached `signature` column on every Function/Method node.
 pub(crate) async fn handle_signature_search(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -32,26 +33,30 @@ pub(crate) async fn handle_signature_search(
                 .to_string(),
         });
     }
-
-    let function_nodes = cg.db().get_nodes_by_kind(NodeKind::Function).await?;
-    let method_nodes = cg.db().get_nodes_by_kind(NodeKind::Method).await?;
+    if want_async.is_some() {
+        return Err(info_graph_error(
+            "verified-signature-async-state-unavailable",
+            "the verified code generation does not publish async-state metadata",
+        ));
+    }
 
     let mut entries: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
-    for node in function_nodes.iter().chain(method_nodes.iter()) {
+    for node in all_symbols(graph)? {
+        let (metadata, file_path) = required_symbol_parts(&node)?;
+        if !matches!(
+            NodeKind::from_str(&metadata.kind),
+            Some(NodeKind::Function | NodeKind::Method)
+        ) {
+            continue;
+        }
         if let Some(prefix) = path_filter
-            && !crate::path_scope::path_matches_scope(&node.file_path, Some(prefix))
+            && !crate::path_scope::path_matches_scope(file_path, Some(prefix))
         {
             continue;
         }
 
-        if let Some(want) = want_async
-            && node.is_async != want
-        {
-            continue;
-        }
-
-        let Some(sig) = node.signature.as_deref() else {
+        let Some(sig) = metadata.signature.as_deref() else {
             continue;
         };
 
@@ -68,17 +73,18 @@ pub(crate) async fn handle_signature_search(
             }
         }
 
-        if !touched.contains(&node.file_path) {
-            touched.push(node.file_path.clone());
+        if !touched.iter().any(|path| path == file_path) {
+            touched.push(file_path.to_owned());
         }
         entries.push(json!({
-            "name": node.name,
-            "qualified_name": node.qualified_name,
-            "kind": node.kind.as_str(),
-            "file": node.file_path,
-            "line": node.start_line,
-            "is_async": node.is_async,
+            "id": node.occurrence.as_str(),
+            "name": metadata.simple_name,
+            "qualified_name": metadata.qualified_name,
+            "kind": metadata.kind,
+            "file": file_path,
+            "line": metadata.start_line.saturating_add(1),
             "signature": sig,
+            "unavailable_fields": ["is_async"],
         }));
         if entries.len() >= limit {
             break;

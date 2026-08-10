@@ -25,8 +25,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
-    WorkExecutableBindingV1, WorkExecutableCapabilityV1,
+    ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey, TopologyConcurrencyPolicyV1,
+    WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
 };
 
 use crate::config::registry::ConfigurationRegistry;
@@ -34,20 +34,23 @@ use crate::config::resolver::{ConfigurationLayerV1, resolve_configuration};
 use crate::config::{PinnedRuntimeConfiguration, RuntimeConfigurationTarget};
 
 use tracedecay_application::{
-    AcceptProposalCommand, AdmitExecutionCommand, CancelWorkAttemptCommand, CancellationContext,
-    CapabilityGrantSnapshot, CreateWorkCommand, Deadline, DisclosureClass, GenerateProposalRequest,
-    RequestId, ResolvedScope, ReviewProposalCommand, StartWorkAttemptCommand, WorkAppendOutcome,
-    WorkAppendRequest, WorkAttemptAdmissionKind, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
+    CancelWorkAttemptCommand, CancellationContext, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
+    WorkAttemptCapacityVerdictV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
     WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkService, WorkStorageError, WorkStoragePort,
+    WorkAttemptStoragePort,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId, ProviderId,
-    RefId, RepositoryId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptStateV1, WorkAuthority,
-    WorkEffectStateV1, WorkEgressPolicy, WorkEvent, WorkExecutableReference, WorkExecutionLimits,
-    WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkProjection, WorkProviderRouteId, WorkProviderRouteV1, WorkSandboxPolicy,
-    WorkVersion, WorkflowOperationRef, WorktreeId,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
+    OperationActivationOutcomeV1, OperationStageV1, ProjectId, ProposalId, ProviderId, RefId,
+    RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1,
+    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
+    WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkGraphVersionV1, WorkLeaseFenceV1, WorkLeaseId, WorkProductEventSequenceV1,
+    WorkProductSourceWatermarkV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
+    WorkSandboxPolicy, WorkflowOperationRef, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -59,7 +62,7 @@ const CLAUDE_STREAM_JSON_ARGV: [&str; 4] =
 const CODEX_EXEC_JSON_ARGV: [&str; 3] = ["exec", "--json", "-"];
 
 // ---------------------------------------------------------------------------
-// In-memory Work + attempt authority
+// In-memory attempt authority
 // ---------------------------------------------------------------------------
 
 fn id<T>(value: &str) -> T
@@ -78,87 +81,12 @@ fn sha256_digest(bytes: &[u8]) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap()
 }
 
-type WorkHistoryKey = (WorkAuthority, TaskId);
-
-#[derive(Clone, Default)]
-struct WorkEventStore {
-    histories: Arc<Mutex<BTreeMap<WorkHistoryKey, Vec<WorkEvent>>>>,
-}
-
-fn rebuild(history: &[WorkEvent]) -> Result<WorkProjection, WorkStorageError> {
-    WorkProjection::rebuild(history).map_err(|_| WorkStorageError::Unavailable)
-}
-
-impl WorkStoragePort for WorkEventStore {
-    fn load(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<Vec<WorkEvent>, WorkStorageError> {
-        self.histories
-            .lock()
-            .unwrap()
-            .get(&(authority.clone(), task_id.clone()))
-            .cloned()
-            .ok_or(WorkStorageError::NotFoundOrNotAuthorized)
-    }
-
-    fn projection(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<WorkProjection, WorkStorageError> {
-        rebuild(&self.load(authority, task_id)?)
-    }
-
-    fn append(&self, request: &WorkAppendRequest) -> Result<WorkAppendOutcome, WorkStorageError> {
-        let mut histories = self.histories.lock().unwrap();
-        let key = (
-            request.event.authority().clone(),
-            request.event.task_id().clone(),
-        );
-        let existing = histories.get(&key).cloned().unwrap_or_default();
-        if let Some(prior) = existing
-            .iter()
-            .find(|event| event.command_id() == request.event.command_id())
-        {
-            return if prior.input_digest() == request.event.input_digest() {
-                Ok(WorkAppendOutcome::Replayed(rebuild(&existing)?))
-            } else {
-                Err(WorkStorageError::IdempotencyConflict)
-            };
-        }
-        let current = existing.last().map(WorkEvent::version);
-        if current.is_none() && request.expected_version.is_some() {
-            return Err(WorkStorageError::NotFoundOrNotAuthorized);
-        }
-        if current != request.expected_version {
-            return Err(WorkStorageError::VersionConflict);
-        }
-        let history = histories.entry(key).or_default();
-        history.push(request.event.clone());
-        Ok(WorkAppendOutcome::Appended(rebuild(history)?))
-    }
-
-    /// This double holds Work history only and declares no routing state, so
-    /// the honest answer for a task it holds is the empty snapshot, and a task
-    /// it does not hold is refused exactly the way `load` refuses it.
-    fn routing_snapshot(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-    ) -> Result<tracedecay_application::WorkRoutingSnapshotV1, WorkStorageError> {
-        self.load(authority, task_id)?;
-        Ok(tracedecay_application::WorkRoutingSnapshotV1::default())
-    }
-}
-
 type AttemptKey = (WorkAuthority, String);
 
 fn attempt_key(authority: &WorkAuthority, identity: &WorkAttemptIdentityV1) -> AttemptKey {
     (
         authority.clone(),
-        WorkAttemptProcessRegistryV1::key(identity),
+        WorkAttemptProcessRegistryV1::key(None, identity),
     )
 }
 
@@ -197,6 +125,40 @@ impl AttemptStore {
     }
 }
 
+fn attempt_capacity(
+    rows: &AttemptRows,
+    authority: &WorkAuthority,
+    task_id: &TaskId,
+    concurrency: &TopologyConcurrencyPolicyV1,
+) -> Result<WorkAttemptCapacityV1, WorkAttemptStorageError> {
+    let mut global_active = 0_u64;
+    let mut repository_active = 0_u64;
+    let mut task_active = 0_u64;
+    for ((row_authority, _), payload) in &rows.rows {
+        if row_authority.project_id() != authority.project_id() {
+            continue;
+        }
+        let attempt: WorkAttemptV1 =
+            serde_json::from_str(payload).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        if attempt.is_terminal() {
+            continue;
+        }
+        global_active += 1;
+        if row_authority.repository_id() == authority.repository_id() {
+            repository_active += 1;
+            if attempt.identity().task_id() == task_id {
+                task_active += 1;
+            }
+        }
+    }
+    Ok(WorkAttemptCapacityV1::new(
+        global_active,
+        repository_active,
+        task_active,
+        concurrency.clone(),
+    ))
+}
+
 impl WorkAttemptStoragePort for AttemptStore {
     fn next_fence_epoch(&self, authority: &WorkAuthority) -> Result<u64, WorkAttemptStorageError> {
         let mut inner = self.inner.lock().unwrap();
@@ -232,10 +194,48 @@ impl WorkAttemptStoragePort for AttemptStore {
         &self,
         authority: &WorkAuthority,
         attempt: &WorkAttemptV1,
-        _maximum_active_per_repository: std::num::NonZeroU16,
-        _maximum_parallel_per_task: std::num::NonZeroU16,
+        concurrency: &TopologyConcurrencyPolicyV1,
     ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError> {
-        self.insert(authority, attempt)
+        let payload =
+            serde_json::to_string(attempt).map_err(|_| WorkAttemptStorageError::Unavailable)?;
+        let mut inner = self.inner.lock().unwrap();
+        let key = attempt_key(authority, attempt.identity());
+        if let Some(existing) = inner.rows.get(&key) {
+            return if *existing == payload {
+                serde_json::from_str(existing)
+                    .map(WorkAttemptInsertOutcome::Replayed)
+                    .map_err(|_| WorkAttemptStorageError::Unavailable)
+            } else {
+                Err(WorkAttemptStorageError::AttemptConflict)
+            };
+        }
+        if matches!(
+            attempt_capacity(&inner, authority, attempt.identity().task_id(), concurrency,)?
+                .verdict(),
+            WorkAttemptCapacityVerdictV1::Exhausted(_)
+        ) {
+            return Err(WorkAttemptStorageError::CapacityExceeded);
+        }
+        inner.rows.insert(key, payload);
+        inner.observed_states.push(attempt.state());
+        Ok(WorkAttemptInsertOutcome::Inserted)
+    }
+
+    fn admission_capacities(
+        &self,
+        authority: &WorkAuthority,
+        task_ids: &[TaskId],
+        concurrency: &TopologyConcurrencyPolicyV1,
+    ) -> Result<BTreeMap<TaskId, WorkAttemptCapacityV1>, WorkAttemptStorageError> {
+        let inner = self.inner.lock().unwrap();
+        task_ids
+            .iter()
+            .cloned()
+            .map(|task_id| {
+                attempt_capacity(&inner, authority, &task_id, concurrency)
+                    .map(|capacity| (task_id, capacity))
+            })
+            .collect()
     }
 
     fn load(
@@ -506,83 +506,14 @@ impl Fixture {
     }
 }
 
-/// Admits one Work task and leases exactly one attempt against it, leaving the
-/// attempt in `Leased` — the state the live execution path is handed.
+/// Persists one canonically bound attempt in `Leased`, the state handed to the
+/// live provider path. Proposal selection is deliberately explicit here: this
+/// provider-runtime fixture does not invent routing evidence through a Work
+/// event-store double.
 fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShape) -> Fixture {
-    let store = WorkEventStore::default();
     let rows = AttemptStore::default();
-    let work = WorkService::new(store.clone());
     let attempts = WorkAttemptService::new(rows.clone());
     let context = request_context();
-
-    let task_id = id::<TaskId>(TASK);
-    work.create(
-        &context,
-        CreateWorkCommand {
-            task_id: task_id.clone(),
-            title: "Work attempt execution fixture".to_owned(),
-            dependencies: BTreeSet::new(),
-            command_id: id("command.work-attempt-exec.create"),
-            occurred_at: UtcMicros(10),
-        },
-    )
-    .unwrap();
-    let proposal = work
-        .generate_proposal(
-            &context,
-            digest('b'),
-            GenerateProposalRequest {
-                task_id: task_id.clone(),
-                proposal_id: id("proposal.work-attempt-exec"),
-                live_git_evidence: None,
-                occurred_at: UtcMicros(15),
-            },
-        )
-        .unwrap();
-    work.accept_proposal(
-        &context,
-        AcceptProposalCommand {
-            review: ReviewProposalCommand {
-                task_id: task_id.clone(),
-                proposal_id: proposal.proposal_id,
-                proposal_digest: proposal.proposal_digest,
-                expected_version: WorkVersion::initial(),
-                command_id: id("command.work-attempt-exec.accept"),
-                occurred_at: UtcMicros(20),
-            },
-        },
-    )
-    .unwrap();
-    work.admit_execution(
-        &context,
-        AdmitExecutionCommand {
-            task_id: task_id.clone(),
-            expected_version: WorkVersion::new(2).unwrap(),
-            command_id: id("command.work-attempt-exec.admit"),
-            occurred_at: UtcMicros(30),
-        },
-    )
-    .unwrap();
-
-    let attempt = attempts
-        .start(
-            &context,
-            StartWorkAttemptCommand {
-                task_id,
-                run_id: id(RUN),
-                attempt_id: id("attempt.1"),
-                operation: id::<WorkflowOperationRef>("operation.work-attempt-exec"),
-                execution_snapshot: execution_snapshot(shape),
-                worktree_root: worktree_root.to_string_lossy().into_owned(),
-                reference: Some(id::<RefId>("refs/heads/work-attempt-exec")),
-                commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
-                instructions: instructions.to_owned(),
-                effect_state: WorkEffectStateV1::Observational,
-                occurred_at: UtcMicros(40),
-            },
-        )
-        .unwrap();
-    assert_eq!(attempt.state(), WorkAttemptStateV1::Leased);
     let authority = WorkAuthority::new(
         context.scope().project_id.clone(),
         context.scope().repository_id.clone(),
@@ -591,6 +522,61 @@ fn leased_attempt(worktree_root: &Path, instructions: &str, shape: &SnapshotShap
         context.grant().digest.clone(),
     )
     .unwrap();
+    let identity = WorkAttemptIdentityV1::new(
+        id::<TaskId>(TASK),
+        id::<RunId>(RUN),
+        id::<AttemptId>("attempt.1"),
+    )
+    .unwrap();
+    let projection_binding = WorkAttemptProjectionBindingV1::new(
+        WorkGraphVersionV1::new(1).unwrap(),
+        WorkProductEventSequenceV1::new(1).unwrap(),
+        WorkProductSourceWatermarkV1::new(BTreeMap::new()).unwrap(),
+        digest('f'),
+        id::<ProposalId>("proposal.work-attempt-exec"),
+    )
+    .unwrap();
+    let snapshot = execution_snapshot(shape);
+    let requested_route = snapshot.route().clone();
+    let execution = WorkExecutionEnvelopeV1::new(
+        identity.clone(),
+        projection_binding.clone(),
+        id::<WorkflowOperationRef>("operation.work-attempt-exec"),
+        snapshot,
+        context.scope().project_id.clone(),
+        context.scope().repository_id.clone(),
+        context.scope().worktree_id.clone(),
+        worktree_root.to_string_lossy().into_owned(),
+        Some(id::<RefId>("refs/heads/work-attempt-exec")),
+        id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
+        instructions.to_owned(),
+        1,
+        WorkEffectStateV1::Observational,
+    )
+    .unwrap();
+    let attempt = WorkAttemptV1::new(
+        identity,
+        projection_binding,
+        execution,
+        WorkLeaseFenceV1::new(
+            id::<WorkLeaseId>("lease.work-attempt-exec"),
+            WorkFenceEpochV1::new(rows.next_fence_epoch(&authority).unwrap()).unwrap(),
+        )
+        .unwrap(),
+        WorkAttemptStateV1::Leased,
+        None,
+        Vec::new(),
+        WorkCancellationStateV1::None,
+        WorkRecoveryStateV1::Fresh,
+        requested_route,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        rows.insert(&authority, &attempt).unwrap(),
+        WorkAttemptInsertOutcome::Inserted
+    );
     Fixture {
         attempts,
         rows,
@@ -1688,7 +1674,7 @@ async fn the_process_registry_admits_one_live_owner_per_attempt() {
     // The registered channel really reaches the live owner.
     let waiter = tokio::spawn(async move { cancel.notified().await });
     while !waiter.is_finished() {
-        registry.signal_cancellation(fixture.identity());
+        registry.signal_test_cancellation(fixture.identity());
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     waiter.await.unwrap();
@@ -1696,9 +1682,40 @@ async fn the_process_registry_admits_one_live_owner_per_attempt() {
     // Releasing returns the attempt to the unowned pool, and signalling an
     // attempt this daemon no longer owns is a silent no-op, not a panic.
     registry.release(fixture.identity());
-    registry.signal_cancellation(fixture.identity());
+    registry.signal_test_cancellation(fixture.identity());
     assert!(
         registry.register(fixture.identity()).is_some(),
         "release must return the attempt to the unowned pool"
     );
+}
+
+#[test]
+fn the_process_registry_isolates_equal_attempt_ids_by_worktree() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let fixture = leased_attempt(
+        directory.path(),
+        "Registry scope.",
+        &SnapshotShape::default(),
+    );
+    let first_worktree: WorktreeId = id("worktree.registry.first");
+    let second_worktree: WorktreeId = id("worktree.registry.second");
+    let registry = WorkAttemptProcessRegistryV1::default();
+
+    assert!(
+        registry
+            .register_for_worktree(fixture.identity(), &first_worktree)
+            .is_some()
+    );
+    assert!(
+        registry
+            .register_for_worktree(fixture.identity(), &second_worktree)
+            .is_some(),
+        "another worktree owns a distinct scoped attempt identity"
+    );
+    assert!(registry.holds_attempt(&first_worktree, fixture.identity()));
+    assert!(registry.holds_attempt(&second_worktree, fixture.identity()));
+
+    registry.release_for_worktree(fixture.identity(), &first_worktree);
+    assert!(!registry.holds_attempt(&first_worktree, fixture.identity()));
+    assert!(registry.holds_attempt(&second_worktree, fixture.identity()));
 }

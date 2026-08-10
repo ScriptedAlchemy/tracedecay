@@ -43,7 +43,7 @@ async fn enrolled_layout_comes_from_the_opened_graph() {
     std::fs::write(repo.root().join("lib.rs"), "pub fn seeded() {}\n").unwrap();
     repo.commit_all("seed");
 
-    let project = profile.enroll_indexed(repo.root()).await;
+    let project = profile.enroll(repo.root()).await;
 
     assert!(
         project.graph_db_path().is_file(),
@@ -61,10 +61,6 @@ async fn enrolled_layout_comes_from_the_opened_graph() {
         marker.project_id,
         project.project_id(),
         "the marker, the registered identity, and the graph must name one project"
-    );
-    assert!(
-        !project.search("seeded", 10).await.unwrap().is_empty(),
-        "enroll_indexed must leave the seeded symbol searchable"
     );
 }
 
@@ -125,7 +121,7 @@ async fn unenrolled_root_stays_unenrolled() {
 async fn project_server_arrives_with_its_session_authority() {
     let profile = TestProfile::acquire().await;
     let repo = GitFixture::primary(profile.path("project"));
-    let project = profile.enroll_indexed(repo.root()).await;
+    let project = profile.enroll(repo.root()).await;
 
     let server = project.mcp_server().await;
 

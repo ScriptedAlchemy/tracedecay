@@ -40,16 +40,17 @@ use fence::{
 };
 #[cfg(test)]
 use quarantine::quarantine_store_for_verified_collection;
+#[cfg(test)]
+pub(crate) use quarantine::read_pending_quarantine_receipts;
 use quarantine::{
-    PendingQuarantineActionV1, PendingQuarantineOutcomeV1, QuarantineFinalizeOutcome,
-    QuarantineKindV1, QuarantineRecoveryOutcome, QuarantineRegistryFenceV1, QuarantineStoreOutcome,
-    QuarantinedStore, quarantine_store_for_verified_collection_controlled,
-    reconcile_pending_quarantine, recover_existing_store_quarantine,
+    QuarantineFinalizeOutcome, QuarantineKindV1, QuarantineRecoveryOutcome,
+    QuarantineRegistryFenceV1, QuarantineStoreOutcome, QuarantinedStore,
+    quarantine_store_for_verified_collection_controlled, recover_existing_store_quarantine,
 };
-pub(crate) use quarantine::{PendingQuarantineReceiptV1, read_pending_quarantine_receipts};
+pub(crate) use unregistered_page::UnregisteredSweepCompletionV1;
 pub(crate) use unregistered_page::{
     DEFAULT_UNREGISTERED_STORE_PAGE_LIMIT, UnregisteredStoreSweepReport,
-    UnregisteredStoreSweepRequestV1, UnregisteredSweepCompletionV1, sweep_unregistered_store_page,
+    UnregisteredStoreSweepRequestV1, sweep_unregistered_store_page,
 };
 
 /// One profile-sharded store observed on disk, paired with the registry
@@ -745,182 +746,6 @@ fn reconcile_existing_quarantine(
             false
         }
     }
-}
-
-/// Restart reconciliation for every journal-backed quarantine. The journal is
-/// the durable coordinator between an SQL commit and filesystem removal: an
-/// unchanged registered row restores its bytes, a new identity retains them
-/// for inspection, and only a proven-retired/absent identity advances to the
-/// irreversible delete phase.
-pub(crate) async fn reconcile_pending_quarantine_receipts(
-    db: &RegisteredGlobalDb,
-    profile_root: &Path,
-    control: CollectionControl<'_>,
-) -> CollectionOutcome {
-    let mut outcome = CollectionOutcome::default();
-    let receipts =
-        match quarantine::read_pending_quarantine_receipts_controlled(profile_root, control) {
-            Ok(receipts) => receipts,
-            Err(kind) => {
-                if let Some(completion) = control.completion() {
-                    outcome.completion = completion;
-                }
-                outcome.errors.push(CollectionFailure {
-                    store_id: "retention-quarantine-reader".to_owned(),
-                    kind,
-                });
-                return outcome;
-            }
-        };
-    for receipt in receipts {
-        if let Some(completion) = control.completion() {
-            outcome.completion = completion;
-            break;
-        }
-        let action = if receipt.retirement_committed {
-            PendingQuarantineActionV1::Finalize
-        } else {
-            let project_exists = match control
-                .race(db.code_project_exists(&receipt.project_id))
-                .await
-            {
-                Ok(Ok(exists)) => exists,
-                Ok(Err(_)) => {
-                    outcome.errors.push(CollectionFailure {
-                        store_id: receipt.store_id.clone(),
-                        kind: CollectionFailureKind::InspectFailed,
-                    });
-                    continue;
-                }
-                Err(completion) => {
-                    outcome.completion = completion;
-                    break;
-                }
-            };
-            match receipt.kind {
-                QuarantineKindV1::Unregistered => {
-                    if project_exists {
-                        PendingQuarantineActionV1::Retain
-                    } else {
-                        PendingQuarantineActionV1::Finalize
-                    }
-                }
-                QuarantineKindV1::Registered => {
-                    let exact_store_exists = match control
-                        .race(db.try_list_store_instances_for_project(&receipt.project_id))
-                        .await
-                    {
-                        Ok(Ok(stores)) => receipt.registry_fence.as_ref().is_some_and(|fence| {
-                            stores.into_iter().any(|store| {
-                                store.store_id == receipt.store_id
-                                    && store.store_relpath == fence.store_relpath
-                                    && store.created_at == fence.created_at
-                                    && store.last_write_at == fence.last_write_at
-                            })
-                        }),
-                        Ok(Err(_)) => {
-                            outcome.errors.push(CollectionFailure {
-                                store_id: receipt.store_id.clone(),
-                                kind: CollectionFailureKind::InspectFailed,
-                            });
-                            continue;
-                        }
-                        Err(completion) => {
-                            outcome.completion = completion;
-                            break;
-                        }
-                    };
-                    if exact_store_exists {
-                        PendingQuarantineActionV1::Restore
-                    } else if project_exists {
-                        PendingQuarantineActionV1::Retain
-                    } else {
-                        PendingQuarantineActionV1::Finalize
-                    }
-                }
-            }
-        };
-        match reconcile_pending_quarantine(profile_root, &receipt, action, control) {
-            Ok(PendingQuarantineOutcomeV1::IntentCleared { journal_pending }) => {
-                if journal_pending {
-                    outcome.recovery_receipts.push(CollectionRecoveryReceipt {
-                        store_id: receipt.store_id.clone(),
-                        original_path: receipt.original_path,
-                        quarantine_path: receipt.quarantine_path,
-                        actual_path: receipt.actual_path,
-                        action: CollectionRecoveryAction::RetainedForRecovery,
-                    });
-                }
-            }
-            Ok(PendingQuarantineOutcomeV1::Restored {
-                restored_path,
-                journal_pending,
-            }) => {
-                outcome.recovery_receipts.push(CollectionRecoveryReceipt {
-                    store_id: receipt.store_id.clone(),
-                    original_path: receipt.original_path,
-                    quarantine_path: receipt.quarantine_path,
-                    actual_path: restored_path,
-                    action: if journal_pending {
-                        CollectionRecoveryAction::RetainedForRecovery
-                    } else {
-                        CollectionRecoveryAction::Restored
-                    },
-                });
-            }
-            Ok(PendingQuarantineOutcomeV1::Finalized { journal_pending }) => {
-                if journal_pending {
-                    outcome.recovery_receipts.push(CollectionRecoveryReceipt {
-                        store_id: receipt.store_id.clone(),
-                        original_path: receipt.original_path,
-                        quarantine_path: receipt.quarantine_path.clone(),
-                        actual_path: receipt.quarantine_path,
-                        action: CollectionRecoveryAction::DeleteUnconfirmed,
-                    });
-                }
-            }
-            Ok(PendingQuarantineOutcomeV1::DeleteUnconfirmed { quarantine_path }) => {
-                outcome.recovery_receipts.push(CollectionRecoveryReceipt {
-                    store_id: receipt.store_id.clone(),
-                    original_path: receipt.original_path,
-                    actual_path: quarantine_path.clone(),
-                    quarantine_path,
-                    action: CollectionRecoveryAction::DeleteUnconfirmed,
-                });
-                outcome.errors.push(CollectionFailure {
-                    store_id: receipt.store_id,
-                    kind: CollectionFailureKind::RemoveFailed,
-                });
-            }
-            Ok(PendingQuarantineOutcomeV1::Interrupted { quarantine_path }) => {
-                if let Some(completion) = control.completion() {
-                    outcome.completion = completion;
-                }
-                outcome.recovery_receipts.push(CollectionRecoveryReceipt {
-                    store_id: receipt.store_id,
-                    original_path: receipt.original_path,
-                    actual_path: quarantine_path.clone(),
-                    quarantine_path,
-                    action: CollectionRecoveryAction::RetainedForRecovery,
-                });
-                break;
-            }
-            Ok(PendingQuarantineOutcomeV1::Retained { quarantine_path }) => {
-                outcome.recovery_receipts.push(CollectionRecoveryReceipt {
-                    store_id: receipt.store_id.clone(),
-                    original_path: receipt.original_path,
-                    actual_path: receipt.actual_path,
-                    quarantine_path,
-                    action: CollectionRecoveryAction::RetainedForRecovery,
-                });
-            }
-            Err(kind) => outcome.errors.push(CollectionFailure {
-                store_id: receipt.store_id,
-                kind,
-            }),
-        }
-    }
-    outcome
 }
 
 /// Executes registered collection in two phases: expensive inspection and a
@@ -1988,43 +1813,6 @@ pub(crate) async fn build_store_census_page(
     })
 }
 
-/// Bounded maintenance census. Returning `None` means cancellation/deadline
-/// interrupted a recursive inventory before this page became an apply plan.
-pub(crate) async fn build_store_census_page_controlled(
-    db: &RegisteredGlobalDb,
-    profile_root: &Path,
-    after_project_id: Option<&str>,
-    limit: usize,
-    control: CollectionControl<'_>,
-) -> crate::errors::Result<Option<StoreCensusPageV1>> {
-    if control.completion().is_some() {
-        return Ok(None);
-    }
-    let limit = limit.clamp(1, 64);
-    let mut projects = match control
-        .race(db.list_code_projects_after(after_project_id, limit.saturating_add(1)))
-        .await
-    {
-        Ok(Ok(projects)) => projects,
-        Ok(Err(error)) => return Err(error),
-        Err(_) => return Ok(None),
-    };
-    let has_more = projects.len() > limit;
-    projects.truncate(limit);
-    let next_cursor = has_more
-        .then(|| projects.last().map(|project| project.project_id.clone()))
-        .flatten();
-    let Some(entries) =
-        build_store_census_for_projects(db, profile_root, &projects, Some(control)).await?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(StoreCensusPageV1 {
-        entries,
-        next_cursor,
-    }))
-}
-
 async fn build_store_census_for_projects(
     db: &RegisteredGlobalDb,
     profile_root: &Path,
@@ -2353,6 +2141,7 @@ pub fn plan_unregistered_collection(
 /// Deletes unregistered directories through the same two-phase boundary:
 /// content/durable inspection and quarantine first, then a short final
 /// still-unregistered confirmation before the irreversible phase.
+#[cfg(test)]
 pub(crate) async fn execute_unregistered_collection(
     db: &RegisteredGlobalDb,
     plan: &UnregisteredCollectionPlan,
@@ -2781,7 +2570,7 @@ pub(crate) async fn sweep_unregistered_stores(
     apply: bool,
 ) -> crate::errors::Result<UnregisteredStoreSweepReport> {
     let cancellation = CancellationToken::new();
-    sweep_unregistered_store_page(
+    let report = sweep_unregistered_store_page(
         db,
         profile_root,
         UnregisteredStoreSweepRequestV1 {
@@ -2796,7 +2585,17 @@ pub(crate) async fn sweep_unregistered_stores(
             ),
         },
     )
-    .await
+    .await?;
+    let completion_is_terminal = report.completion == UnregisteredSweepCompletionV1::Complete;
+    let receipt_is_consistent = (!report.applied || apply && completion_is_terminal)
+        && (completion_is_terminal || report.next_cursor.is_none())
+        && (apply || report.outcome.collected.is_empty());
+    if !receipt_is_consistent {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: "unregistered-store page returned an inconsistent receipt".to_owned(),
+        });
+    }
+    Ok(report)
 }
 
 #[cfg(test)]

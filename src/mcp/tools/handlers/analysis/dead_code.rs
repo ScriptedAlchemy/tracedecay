@@ -26,9 +26,7 @@ pub(crate) async fn handle_dead_code(
         .get("limit")
         .and_then(Value::as_u64)
         .map_or(100, |value| value.clamp(1, 1_000) as usize);
-    let dead = cg
-        .find_dead_code_bounded(graph, &kinds, include_public, limit)
-        .await?;
+    let dead = graph.find_dead_code(&kinds, include_public, limit).await?;
     let mut items = Vec::with_capacity(dead.len());
     let mut files = Vec::with_capacity(dead.len());
     for symbol in dead {

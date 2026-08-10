@@ -1,6 +1,7 @@
 //! Mandatory daemon journey over production startup authorities.
 
 use std::collections::BTreeSet;
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay::agents::context_scout_v2::{
@@ -12,7 +13,7 @@ use tracedecay::agents::context_scout_v2::{
 use tracedecay::agents::host_bundle_v2::{
     HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
 };
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::tracedecay::TraceDecay;
 use tracedecay_application::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
     EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope, RetrieverContributionState,
@@ -266,33 +267,59 @@ async fn authentic_callback_to_all_delivery_surfaces() {
 async fn exact_search_does_not_wait_for_semantic_projection() {
     const STARTUP_DEADLINE: Duration = Duration::from_secs(5);
 
-    let (_environment, project) = common::IsolatedEnv::acquire().await;
+    let (environment, project) = common::IsolatedEnv::acquire().await;
     std::fs::create_dir_all(project.join("src")).unwrap();
     std::fs::write(
         project.join("src/lib.rs"),
         "pub fn semantic_startup_probe() -> &'static str { \"exact\" }\n",
     )
     .unwrap();
-    let initialized =
-        TraceDecay::init_and_index_with_options(&project, TraceDecayOpenOptions::default())
-            .await
-            .expect("production project initialization and exact indexing");
-    initialized.close();
-
-    let runtime = tokio::time::timeout(STARTUP_DEADLINE, TraceDecay::open(&project))
-        .await
-        .expect("project-open readiness must not wait for semantic model loading")
-        .expect("production project-open startup");
-    let exact = tokio::time::timeout(
-        STARTUP_DEADLINE,
-        runtime.search("semantic_startup_probe", 8),
-    )
-    .await
-    .expect("exact search must not wait for semantic projection")
-    .expect("exact search remains healthy");
+    let git = std::process::Command::new(common::git_program())
+        .args(["init", "--quiet", "--initial-branch=main"])
+        .current_dir(&project)
+        .output()
+        .expect("initialize Git worktree");
     assert!(
-        exact
-            .iter()
-            .any(|result| result.node.name == "semantic_startup_probe")
+        git.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&git.stderr)
     );
+    let _daemon = common::spawn_tracedecay_daemon(environment.home());
+    let initialized = common::tracedecay_command_with_home(environment.home())
+        .args(["init", "--quiet"])
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .output()
+        .expect("initialize production project");
+    assert!(
+        initialized.status.success(),
+        "project initialization failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&initialized.stdout),
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    let deadline = std::time::Instant::now() + STARTUP_DEADLINE;
+    loop {
+        let output = common::tracedecay_command_with_home(environment.home())
+            .args([
+                "tool",
+                "search",
+                "--args",
+                r#"{"query":"semantic_startup_probe","limit":8}"#,
+            ])
+            .current_dir(&project)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run exact search through daemon");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if output.status.success() && stdout.contains("semantic_startup_probe") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exact search did not become ready before the semantic-independent startup deadline:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }

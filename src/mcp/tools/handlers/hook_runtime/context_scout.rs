@@ -15,36 +15,15 @@ use tracedecay_domain::{
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    ProviderId, RetentionClass, SessionId, UtcMicros,
+    ProviderId, RetentionClass, UtcMicros,
 };
 use tracedecay_store::{ObservationPersistOutcome, StoreShardScopeV1};
 
 use super::admission::{
     HookV2BindingAdmission, hook_v2_binding_admission, hook_v2_catchup_response,
 };
-use super::envelope::{hook_now, hook_v2_envelope, hook_v2_native_session_id};
+use super::envelope::{hook_now, hook_v2_envelope};
 use super::required_value;
-
-async fn hook_v2_context_scout_lifecycle(
-    args: &Value,
-    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
-    hook_v2_context_scout_lifecycle_for_session(envelope, hook_v2_native_session_id(args, envelope))
-        .await
-}
-
-pub(super) async fn hook_v2_context_scout_lifecycle_for_session(
-    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    session_id: Option<SessionId>,
-) -> Option<crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1> {
-    let session_id = session_id?;
-    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
-        envelope.project_id,
-        envelope.worktree_id,
-        &session_id,
-    )
-    .await
-}
 
 pub(super) fn hook_v2_native_context_scout_lifecycle(
     args: &Value,
@@ -256,17 +235,9 @@ pub(super) async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Resu
             return Ok(hook_v2_catchup_response("hook_v2_scout_prepare"));
         }
     };
-    let lifecycle = hook_v2_context_scout_lifecycle(args, &envelope).await;
     Ok(orchestration_response(
         "hook_v2_scout_prepare",
-        crate::daemon::admit_registered_hook_orchestration(
-            envelope.clone(),
-            snapshot.binding,
-            lifecycle,
-            snapshot.revision,
-            true,
-            None,
-        ),
+        crate::daemon::admit_hook_orchestration(envelope.clone(), snapshot.binding, true),
     ))
 }
 
@@ -276,13 +247,6 @@ fn orchestration_response(
 ) -> Value {
     use crate::daemon::HookOrchestrationAdmissionV1 as Admission;
     match outcome {
-        Admission::Enqueued => json!({ "action": action, "status": "accepted" }),
-        Admission::Warming => json!({
-            "action": action,
-            "status": "warming",
-            "reason": "orchestration_warming",
-        }),
-        Admission::Backpressured => json!({ "action": action, "status": "deferred" }),
         Admission::UnsupportedTrigger => json!({ "action": action, "status": "unsupported" }),
         Admission::Unavailable => json!({
             "action": action,
@@ -434,75 +398,16 @@ pub(super) async fn hook_v2_scout_read(
     args: &Value,
     action: &str,
 ) -> Result<Value> {
-    let surface = ContextScoutReadSurfaceV1::from_action(action)
+    ContextScoutReadSurfaceV1::from_action(action)
         .ok_or_else(|| config_error("unknown Context Scout read surface"))?;
     let envelope = hook_v2_envelope(args, action)?;
-    let observed_at = hook_now();
-    let snapshot = match hook_v2_binding_admission(cg, &envelope, observed_at) {
-        HookV2BindingAdmission::Bound(snapshot) => snapshot,
-        HookV2BindingAdmission::Unavailable => {
-            return Ok(json!({ "action": action, "status": "unavailable" }));
+    match hook_v2_binding_admission(cg, &envelope, hook_now()) {
+        HookV2BindingAdmission::Bound(_) | HookV2BindingAdmission::Unavailable => {
+            Ok(json!({ "action": action, "status": "unavailable" }))
         }
-        HookV2BindingAdmission::CatchupRequired => {
-            return Ok(hook_v2_catchup_response(action));
-        }
-    };
-    let Some(lifecycle) = hook_v2_context_scout_lifecycle(args, &envelope).await else {
-        return Ok(json!({ "action": action, "status": "unavailable" }));
-    };
-    let Some(hook) = crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
-        envelope,
-        &snapshot.binding,
-    ) else {
-        return Ok(json!({ "action": action, "status": "unavailable" }));
-    };
-    let Some((address, _)) = cg
-        .resolve_current_context_scout_claim_authority(&hook, &lifecycle, observed_at)
-        .await
-    else {
-        return Ok(json!({ "action": action, "status": "unavailable" }));
-    };
-    let Some(owner) = cg.context_scout_owner() else {
-        return Ok(json!({ "action": action, "status": "unavailable" }));
-    };
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .and_then(|limit| usize::try_from(limit).ok())
-        .unwrap_or(8);
-    let value = match surface {
-        ContextScoutReadSurfaceV1::Recent => {
-            owner.recent_exact(address, limit).await.and_then(|recent| {
-                serde_json::to_value(recent).map_err(|_| {
-                    crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
-                })
-            })
-        }
-        ContextScoutReadSurfaceV1::Explain => {
-            owner
-                .explain_exact(address, limit)
-                .await
-                .and_then(|explanation| {
-                    serde_json::to_value(explanation).map_err(|_| {
-                        crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits
-                    })
-                })
-        }
-        ContextScoutReadSurfaceV1::Capability => owner.capability().await.and_then(|capability| {
-            serde_json::to_value(capability)
-                .map_err(|_| crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits)
-        }),
-        ContextScoutReadSurfaceV1::Budget => owner.budget().await.and_then(|budget| {
-            serde_json::to_value(budget)
-                .map_err(|_| crate::agents::context_scout_v2::ContextScoutErrorV1::InvalidLimits)
-        }),
-    };
-    match value {
-        Ok(value) => Ok(json!({ "action": action, "status": "ready", "value": value })),
-        Err(_) => Ok(json!({ "action": action, "status": "unavailable" })),
+        HookV2BindingAdmission::CatchupRequired => Ok(hook_v2_catchup_response(action)),
     }
 }
-
 fn scout_store_outcome(
     outcome: crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1,
 ) -> &'static str {

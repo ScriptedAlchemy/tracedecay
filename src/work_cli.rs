@@ -401,7 +401,7 @@ pub async fn invoke_work_cli_with_delivery(
                 result_contract,
                 request_id,
                 invalid_work_request(),
-            ))));
+            )?)));
         }
     };
     let request = DaemonInvocationRequest::work_application(
@@ -428,7 +428,7 @@ pub async fn invoke_work_cli_with_delivery(
                 result_contract,
                 request_id,
                 error.into_application_problem(),
-            ))));
+            )?)));
         }
     };
     let delivery_eligible = match &response.outcome {
@@ -452,13 +452,13 @@ pub async fn invoke_work_cli_with_delivery(
             })
         }
         DaemonInvocationOutcome::ApplicationProblem { problem } => {
-            Err(work_problem(result_contract, request_id.clone(), problem))
+            Err(work_problem(result_contract, request_id.clone(), problem)?)
         }
         DaemonInvocationOutcome::Problem { problem } => Err(work_problem(
             result_contract,
             request_id.clone(),
             daemon_application_problem(problem),
-        )),
+        )?),
         _ => Err(work_problem(
             result_contract,
             request_id.clone(),
@@ -466,7 +466,7 @@ pub async fn invoke_work_cli_with_delivery(
                 code: "work_response_unavailable".to_owned(),
                 message: "The daemon returned no canonical Work result".to_owned(),
             }),
-        )),
+        )?),
     };
     Ok(WorkCliResponse {
         outcome,
@@ -553,8 +553,8 @@ fn work_problem(
     result_contract: ResultContractRef,
     request_id: tracedecay_application::RequestId,
     problem: ApplicationProblem,
-) -> ApplicationProblemEnvelope {
-    ApplicationProblemEnvelope::new(result_contract, request_id, problem)
+) -> Result<ApplicationProblemEnvelope> {
+    ApplicationProblemEnvelope::new(result_contract, request_id, problem).map_err(config_error)
 }
 
 fn invalid_work_request() -> ApplicationProblem {
@@ -708,6 +708,9 @@ mod tests {
         };
         assert_eq!(diagnostic.code, "work_authority_reset_required");
         assert_eq!(retry, tracedecay_application::RetryDirective::Never);
-        assert_eq!(legal_actions, vec![tracedecay_application::LegalAction::Reset]);
+        assert_eq!(
+            legal_actions,
+            vec![tracedecay_application::LegalAction::Reset]
+        );
     }
 }

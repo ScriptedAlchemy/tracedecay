@@ -11,7 +11,6 @@ mod context;
 mod pr_context_cursor;
 mod shell;
 
-pub(crate) use affected::collect_affected_test_files;
 pub(super) use affected::handle_affected;
 pub(super) use branch::{handle_branch_diff, handle_branch_list, handle_branch_search};
 pub(super) use context::{

@@ -1,12 +1,9 @@
 //! Scope-specific MCP servers routed through one canonical physical DB owner.
 //!
 //! `Database` performs the actual same-process handle sharing; this registry
-//! keeps daemon cache aliases and branch-drift rekeys consistent with it, and
-//! settles the post-open FTS health a deferred open handed to publication.
+//! keeps daemon cache aliases and branch-drift rekeys consistent with it.
 //!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
+//! `use super::*` reuses the parent module's routing keys and path helpers.
 
 use super::*;
 
@@ -25,7 +22,6 @@ pub(super) struct DatabaseOwnerEntry<Server> {
 pub(super) struct DatabaseOwnerRegistry<Server = Arc<crate::mcp::McpServer>> {
     pub(super) servers: HashMap<ProjectServerKey, DatabaseOwnerEntry<Server>>,
     pub(super) aliases: HashMap<ProjectRouteKey, ProjectServerKey>,
-    synchronous_health: HashSet<StoreOwnerKey>,
 }
 
 impl<Server> Default for DatabaseOwnerRegistry<Server> {
@@ -33,7 +29,6 @@ impl<Server> Default for DatabaseOwnerRegistry<Server> {
         Self {
             servers: HashMap::new(),
             aliases: HashMap::new(),
-            synchronous_health: HashSet::new(),
         }
     }
 }
@@ -188,19 +183,6 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         removed
     }
 
-    pub(super) fn quarantine_and_remove_owner(&mut self, owner: &StoreOwnerKey) -> Vec<Server> {
-        self.synchronous_health.insert(owner.clone());
-        self.remove_owner(owner)
-    }
-
-    pub(super) fn requires_synchronous_health(&self, owner: &StoreOwnerKey) -> bool {
-        self.synchronous_health.contains(owner)
-    }
-
-    pub(super) fn clear_synchronous_health(&mut self, owner: &StoreOwnerKey) {
-        self.synchronous_health.remove(owner);
-    }
-
     pub(super) fn bind_route(&mut self, route: ProjectRouteKey, key: ProjectServerKey) {
         debug_assert!(self.servers.contains_key(&key));
         if let Some(entry) = self.servers.get_mut(&key) {
@@ -318,54 +300,4 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     pub(super) fn values(&self) -> impl Iterator<Item = &Server> {
         self.servers.values().map(|entry| &entry.server)
     }
-}
-
-/// Post-open FTS health for one project publication.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum PostOpenHealthOutcome {
-    /// The open owed publication nothing. It either applied its own post-open
-    /// policy — including the crash preflight's skip, which proved the store
-    /// healthy under both recovery locks and must not be re-spent on a second
-    /// full `quick_check` — or opened read-only, where FTS damage cannot be
-    /// repaired in place.
-    SettledDuringOpen,
-    /// The deferred check ran and found the retained handle intact.
-    Intact,
-    /// The deferred check rebuilt proven FTS-only damage. The report is the
-    /// evidence publication has to make daemon-visible.
-    Repaired(String),
-}
-
-fn repaired_post_open_health_log_fields(
-    project_path: &Path,
-    problem: &str,
-) -> Vec<(&'static str, String)> {
-    vec![
-        ("project", project_path.display().to_string()),
-        ("outcome", "fts_repaired".to_owned()),
-        ("problem", problem.to_owned()),
-    ]
-}
-
-/// Settles the post-open FTS health a deferred open handed to publication.
-///
-/// A deferred open publishes the core before its retained-handle check runs, so
-/// publication owns what is left. `health` is absent exactly when the open owed
-/// nothing. Repaired corruption is real evidence — an operator has to be able
-/// to see that a store was rebuilt — so it is logged rather than discarded.
-pub(super) async fn settle_deferred_post_open_health(
-    project_path: &Path,
-    health: Option<impl std::future::Future<Output = Result<Option<String>>>>,
-) -> Result<PostOpenHealthOutcome> {
-    let Some(health) = health else {
-        return Ok(PostOpenHealthOutcome::SettledDuringOpen);
-    };
-    let Some(problem) = health.await? else {
-        return Ok(PostOpenHealthOutcome::Intact);
-    };
-    log_daemon_event(
-        "project_open_health",
-        &repaired_post_open_health_log_fields(project_path, &problem),
-    );
-    Ok(PostOpenHealthOutcome::Repaired(problem))
 }

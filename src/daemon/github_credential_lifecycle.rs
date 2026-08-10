@@ -11,16 +11,13 @@ use zeroize::Zeroizing;
 use crate::application::advisory::github_runtime::{
     GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialAuthorityV1,
     GitHubReadOnlyCredentialSecretV1, GitHubReadPermissionV1,
-    ProfileGitHubReadOnlyCredentialMountOutcomeV1,
-    mount_profile_github_read_only_credential_authority_v1,
     register_profile_github_public_repository_v1,
     register_profile_github_read_only_credential_authority_v1,
-    unmount_profile_github_read_only_credential_authority_v1,
     unregister_profile_github_public_repository_v1,
     unregister_profile_github_read_only_credential_authority_v1,
 };
 
-type ProfileRepositoryCredentialMountV1 = (UserProfileId, String, String);
+type ProfileRepositoryCredentialKeyV1 = (UserProfileId, String, String);
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -231,20 +228,19 @@ impl GitHubReadOnlyCredentialAuthorityV1 for OsKeyringGitHubReadOnlyCredentialAu
 }
 
 enum ProfileRepositoryCredentialRegistrationV1 {
-    Public(ProfileRepositoryCredentialMountV1),
+    Public(ProfileRepositoryCredentialKeyV1),
     Private {
-        key: ProfileRepositoryCredentialMountV1,
+        key: ProfileRepositoryCredentialKeyV1,
         authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
     },
 }
 
-/// Owns application credential mounts for one daemon generation.
+/// Owns profile-scoped credential registrations for one daemon generation.
 ///
 /// Injected authorities remain outside this owner. Only exact profile and
 /// repository identities are retained; no credential bytes cross this seam.
 #[derive(Clone, Default)]
 pub(super) struct DaemonGitHubReadOnlyCredentialLifecycleV1 {
-    mounts: Arc<Mutex<BTreeSet<ProfileRepositoryCredentialMountV1>>>,
     registrations: Arc<Mutex<Vec<ProfileRepositoryCredentialRegistrationV1>>>,
 }
 
@@ -336,42 +332,7 @@ impl DaemonGitHubReadOnlyCredentialLifecycleV1 {
         }
     }
 
-    pub(super) fn mount(
-        &self,
-        profile_id: &UserProfileId,
-        repository_owner: &str,
-        repository_name: &str,
-    ) -> ProfileGitHubReadOnlyCredentialMountOutcomeV1 {
-        let Ok(mut mounts) = self.mounts.lock() else {
-            return ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected;
-        };
-        let outcome = mount_profile_github_read_only_credential_authority_v1(
-            profile_id,
-            repository_owner,
-            repository_name,
-        );
-        if outcome == ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted {
-            mounts.insert((
-                profile_id.clone(),
-                repository_owner.to_owned(),
-                repository_name.to_owned(),
-            ));
-        }
-        outcome
-    }
-
     pub(super) fn shutdown(&self) {
-        let mounts = match self.mounts.lock() {
-            Ok(mut mounts) => std::mem::take(&mut *mounts),
-            Err(_) => return,
-        };
-        for (profile_id, repository_owner, repository_name) in mounts {
-            let _ = unmount_profile_github_read_only_credential_authority_v1(
-                &profile_id,
-                &repository_owner,
-                &repository_name,
-            );
-        }
         let registrations = match self.registrations.lock() {
             Ok(mut registrations) => std::mem::take(&mut *registrations),
             Err(_) => return,
@@ -416,20 +377,17 @@ fn valid_locator(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::Arc;
 
     use crate::application::advisory::github_runtime::{
-        GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialAuthorityV1,
-        GitHubReadOnlyCredentialSecretV1, GitHubReadPermissionV1,
-        ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
-        register_profile_github_read_only_credential_authority_v1,
+        GitHubReadPermissionV1, ProfileGitHubReadOnlyCredentialMountOutcomeV1,
+        RegisteredGitHubReadOnlyCredentialV1,
+        mount_profile_github_read_only_credential_authority_v1,
         resolve_registered_github_read_only_credential_v1,
-        unregister_profile_github_read_only_credential_authority_v1,
     };
-    use tracedecay_domain::UserProfileId;
     use zeroize::Zeroizing;
 
     struct FakeOsSecrets {
@@ -444,96 +402,6 @@ mod tests {
         ) -> Result<Option<Zeroizing<String>>, ()> {
             Ok(self.by_account.get(account).cloned().map(Zeroizing::new))
         }
-    }
-
-    struct ExactRepositoryCredential;
-
-    impl GitHubReadOnlyCredentialAuthorityV1 for ExactRepositoryCredential {
-        fn resolve(
-            &self,
-            repository_owner: &str,
-            repository_name: &str,
-        ) -> GitHubReadOnlyCredentialAuthorityOutcomeV1 {
-            if repository_owner != "ScriptedAlchemy"
-                || repository_name != "daemon-lifecycle-private"
-            {
-                return GitHubReadOnlyCredentialAuthorityOutcomeV1::Indeterminate;
-            }
-            GitHubReadOnlyCredentialAuthorityOutcomeV1::Verified {
-                secret: GitHubReadOnlyCredentialSecretV1::new(
-                    "github_pat_daemon_lifecycle_fixture",
-                )
-                .expect("fixture secret"),
-                exact_permissions: BTreeSet::from([GitHubReadPermissionV1::PullRequests]),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn daemon_lifecycle_mounts_exact_profile_credential_and_revokes_it_on_shutdown() {
-        let exact_profile =
-            UserProfileId::new("profile.github.daemon-lifecycle").expect("exact profile");
-        let other_profile =
-            UserProfileId::new("profile.github.daemon-lifecycle-other").expect("other profile");
-        let authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1> =
-            Arc::new(ExactRepositoryCredential);
-        assert!(register_profile_github_read_only_credential_authority_v1(
-            exact_profile.clone(),
-            "ScriptedAlchemy",
-            "daemon-lifecycle-private",
-            &authority,
-        ));
-
-        let invocation = super::super::DaemonInvocationState::default();
-        assert_eq!(
-            invocation.mount_github_read_only_credential_authority_for_project(
-                &other_profile,
-                "ScriptedAlchemy",
-                "daemon-lifecycle-private",
-            ),
-            ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
-        );
-        assert!(matches!(
-            resolve_registered_github_read_only_credential_v1(
-                "ScriptedAlchemy",
-                "daemon-lifecycle-private",
-            ),
-            RegisteredGitHubReadOnlyCredentialV1::Missing
-        ));
-        assert_eq!(
-            invocation.mount_github_read_only_credential_authority_for_project(
-                &exact_profile,
-                "ScriptedAlchemy",
-                "daemon-lifecycle-private",
-            ),
-            ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted
-        );
-        let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) =
-            resolve_registered_github_read_only_credential_v1(
-                "ScriptedAlchemy",
-                "daemon-lifecycle-private",
-            )
-        else {
-            panic!("daemon lifecycle must mount exact-profile credential");
-        };
-        assert!(credential.permits(GitHubReadPermissionV1::PullRequests));
-        assert!(!credential.permits(GitHubReadPermissionV1::Actions));
-        assert!(!credential.permits(GitHubReadPermissionV1::Checks));
-
-        invocation.shutdown().await;
-        assert!(matches!(
-            resolve_registered_github_read_only_credential_v1(
-                "ScriptedAlchemy",
-                "daemon-lifecycle-private",
-            ),
-            RegisteredGitHubReadOnlyCredentialV1::Missing
-        ));
-        assert!(unregister_profile_github_read_only_credential_authority_v1(
-            &exact_profile,
-            "ScriptedAlchemy",
-            "daemon-lifecycle-private",
-            &authority,
-        ));
     }
 
     #[tokio::test]
@@ -662,7 +530,7 @@ keyring_account = "read"
                 super::GitHubProviderPermissionVerifierV1::local(format!("http://{address}")),
             );
         assert_eq!(
-            invocation.mount_github_read_only_credential_authority_for_project(
+            mount_profile_github_read_only_credential_authority_v1(
                 identity.profile_id(),
                 "ScriptedAlchemy",
                 "keyring-read",
@@ -684,7 +552,7 @@ keyring_account = "read"
             "keyring-missing",
         ] {
             assert_eq!(
-                invocation.mount_github_read_only_credential_authority_for_project(
+                mount_profile_github_read_only_credential_authority_v1(
                     identity.profile_id(),
                     "ScriptedAlchemy",
                     repository,
@@ -697,7 +565,7 @@ keyring_account = "read"
             ));
         }
         assert_eq!(
-            invocation.mount_github_read_only_credential_authority_for_project(
+            mount_profile_github_read_only_credential_authority_v1(
                 identity.profile_id(),
                 "ScriptedAlchemy",
                 "explicit-public",
@@ -705,7 +573,7 @@ keyring_account = "read"
             ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public
         );
         assert_eq!(
-            invocation.mount_github_read_only_credential_authority_for_project(
+            mount_profile_github_read_only_credential_authority_v1(
                 identity.profile_id(),
                 "ScriptedAlchemy",
                 "unconfigured-public",
@@ -713,7 +581,7 @@ keyring_account = "read"
             ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
         );
         assert_eq!(
-            invocation.mount_github_read_only_credential_authority_for_project(
+            mount_profile_github_read_only_credential_authority_v1(
                 identity.profile_id(),
                 "ScriptedAlchemy",
                 "duplicate",
@@ -728,7 +596,7 @@ keyring_account = "read"
             RegisteredGitHubReadOnlyCredentialV1::Missing
         ));
         assert_eq!(
-            invocation.mount_github_read_only_credential_authority_for_project(
+            mount_profile_github_read_only_credential_authority_v1(
                 identity.profile_id(),
                 "ScriptedAlchemy",
                 "explicit-public",

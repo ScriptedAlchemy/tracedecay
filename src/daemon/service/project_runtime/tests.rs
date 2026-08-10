@@ -1,13 +1,9 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tracedecay_lsp::{
-    DiagnosticTrigger, FeedbackCycleRequest, LspRuntimeFailure, LspRuntimeFuture,
-};
-
 use super::*;
 
-/// Any component exercises the registry the same way, so these use the one
-/// component that is cheap to construct rather than a test-only slot.
+/// Any component exercises the registry the same way, so this test-only marker
+/// keeps generic registry checks independent of a production capability slot.
 type Component = Arc<dyn Any + Send + Sync>;
 
 fn component(mark: u32) -> Component {
@@ -939,104 +935,4 @@ async fn retiring_exact_roots_fences_republication_without_closing_other_project
         .publish(retained.clone(), component(5))
         .await
         .expect("unrelated project remains open");
-}
-
-struct CountingFeedbackCycle(Arc<AtomicUsize>);
-
-impl FeedbackCycleRuntimePort for CountingFeedbackCycle {
-    fn execute(
-        &self,
-        _request: FeedbackCycleRequest,
-    ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
-        let calls = Arc::clone(&self.0);
-        Box::pin(async move {
-            calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-    }
-}
-
-struct PendingAdvisoryCycle;
-
-impl crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationPort
-    for PendingAdvisoryCycle
-{
-    fn invoke(
-        &self,
-        _request: crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationRequest,
-    ) -> crate::daemon::service::invocation::DaemonAdvisoryCycleInvocationFuture<'_> {
-        Box::pin(std::future::pending())
-    }
-}
-
-#[tokio::test]
-async fn advisory_publication_cancellation_and_rollback_leave_no_partial_runtime() {
-    let registry = ProjectRuntimeRegistryV1::default();
-    let project = root("advisory-atomic-publication");
-    let incumbent_calls = Arc::new(AtomicUsize::new(0));
-    let advisory_calls = Arc::new(AtomicUsize::new(0));
-    let router = Arc::new(SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
-        CountingFeedbackCycle(Arc::clone(&incumbent_calls)),
-    )));
-    registry
-        .publish(project.clone(), Arc::clone(&router))
-        .await
-        .unwrap();
-    let owner = || {
-        DaemonAdvisoryCycleInvocationOwner::new(
-            tracedecay_domain::ProjectId::new("project.advisory-atomic-publication").unwrap(),
-            Arc::new(PendingAdvisoryCycle),
-        )
-    };
-
-    let cancellation = crate::application::context::CancellationToken::new();
-    cancellation.cancel();
-    assert!(matches!(
-        registry
-            .publish_advisory_atomically(
-                &project,
-                component(1),
-                owner(),
-                Arc::new(CountingFeedbackCycle(Arc::clone(&advisory_calls))),
-                &cancellation,
-            )
-            .await,
-        Err(FeedbackCyclePublicationError::RouterUnavailable)
-    ));
-    assert!(registry.get::<Component>(&project).await.is_none());
-    assert!(
-        registry
-            .get::<DaemonAdvisoryCycleInvocationOwner>(&project)
-            .await
-            .is_none()
-    );
-
-    let publication = registry
-        .publish_advisory_atomically(
-            &project,
-            component(2),
-            owner(),
-            Arc::new(CountingFeedbackCycle(Arc::clone(&advisory_calls))),
-            &crate::application::context::CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    drop(publication);
-    assert!(registry.get::<Component>(&project).await.is_none());
-    assert!(
-        registry
-            .get::<DaemonAdvisoryCycleInvocationOwner>(&project)
-            .await
-            .is_none()
-    );
-    router
-        .execute(FeedbackCycleRequest {
-            root_uri: "file:///project".to_owned(),
-            document_uri: "file:///project/src/lib.rs".to_owned(),
-            trigger: DiagnosticTrigger::DocumentSave,
-        })
-        .await
-        .unwrap();
-    assert_eq!(incumbent_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(advisory_calls.load(Ordering::SeqCst), 0);
 }

@@ -194,14 +194,26 @@ pub trait GraphRuntimePort: Send + Sync {
         path_prefix: Option<&'a str>,
         limit: usize,
     ) -> GraphFuture<'a, Vec<ComplexityRankedNode>>;
-    fn run_diagnostics<'a>(&'a self, file: &'a str) -> GraphFuture<'a, Vec<EditDiagnosticRecord>>;
     fn redundancy<'a>(
         &'a self,
         request: &'a RedundancyRequestV1,
         scope_prefix: Option<&'a str>,
     ) -> GraphFuture<'a, RedundancyResultV1>;
+}
+
+/// Narrow root-owned mutation authority used by the source-edit application.
+///
+/// Graph evidence is supplied separately as one admitted, generation-pinned
+/// [`SourceEditGraphReadV1`]. This port owns only filesystem publication,
+/// durable edit recovery, and optional post-edit diagnostics; it must not grow
+/// legacy graph-query methods.
+pub trait SourceEditRuntimePort: Send + Sync {
+    fn project_root(&self) -> &Path;
+    fn store_layout(&self) -> &StoreLayout;
+    fn run_diagnostics<'a>(&'a self, file: &'a str) -> GraphFuture<'a, Vec<EditDiagnosticRecord>>;
     fn replace_symbol<'a>(
         &'a self,
+        graph: SourceEditGraphReadV1,
         symbol: &'a str,
         new_source: &'a str,
         dry_run: bool,
@@ -229,6 +241,7 @@ pub trait GraphRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, InsertResult>;
     fn insert_at_symbol<'a>(
         &'a self,
+        graph: SourceEditGraphReadV1,
         symbol: &'a str,
         content: &'a str,
         position: &'a str,
@@ -243,6 +256,7 @@ pub trait GraphRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, AstGrepResult>;
     fn move_symbol<'a>(
         &'a self,
+        graph: SourceEditGraphReadV1,
         symbol: &'a str,
         dest_file: &'a str,
         dry_run: bool,
@@ -263,17 +277,28 @@ pub trait GraphRuntimePort: Send + Sync {
         &'a self,
         files: &'a [PlannedSourceEditFile],
     ) -> GraphFuture<'a, ()>;
-    /// Reindex every candidate to its intended post-edit content when crash
-    /// recovery rolls a completed-but-unfinalized edit forward. The bytes are
-    /// already on disk; this only reconciles the graph index, which a crash
-    /// between the atomic publish and the reindex may have left at the preimage.
+    /// Verifies every retained candidate still has its intended postimage
+    /// before crash recovery rolls the completed edit forward.
     fn commit_source_edit_postimages<'a>(
         &'a self,
         files: &'a [PlannedSourceEditFile],
     ) -> GraphFuture<'a, ()>;
 }
 
+/// Narrow root-owned filesystem authority used by source retrieval.
+///
+/// Generation-pinned symbol evidence is supplied independently through the
+/// code-graph projection port. This boundary intentionally exposes only the
+/// source decoder's real filesystem and cache dependencies.
+pub trait SourceReadRuntimePort: Send + Sync {
+    fn project_root(&self) -> &Path;
+    fn db(&self) -> &Database;
+    fn is_read_only(&self) -> bool;
+}
+
 pub type TraceDecay = dyn GraphRuntimePort;
+pub type SourceEditRuntime = dyn SourceEditRuntimePort;
+pub type SourceReadRuntime = dyn SourceReadRuntimePort;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

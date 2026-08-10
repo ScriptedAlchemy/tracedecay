@@ -173,47 +173,13 @@ pub(super) async fn production_project_server(
     if let Some(attempts) = project_open_attempts {
         attempts.fetch_add(1, Ordering::Relaxed);
     }
-    let (initial_cg, initial_deferred_post_open_health) =
-        Box::pin(open_project_for_handshake_with_health_mode(
-            canonical_project_path,
-            handshake,
-            store_administration,
-            true,
-        ))
-        .await?;
-    let initial_key = ProjectServerKey::from_open_project(&initial_cg, handshake)?;
-    let synchronous_post_open_health = store_administration
-        .project_servers()
-        .lock()
-        .await
-        .requires_synchronous_health(&initial_key.owner);
-    let (cg, deferred_post_open_health, key) = if synchronous_post_open_health {
-        drop(initial_deferred_post_open_health);
-        initial_cg.close();
-        let (validated_cg, validated_deferred_post_open_health) =
-            Box::pin(open_project_for_handshake_with_health_mode(
-                canonical_project_path,
-                handshake,
-                store_administration,
-                false,
-            ))
-            .await?;
-        let validated_key = ProjectServerKey::from_open_project(&validated_cg, handshake)?;
-        if validated_key.owner == initial_key.owner {
-            store_administration
-                .project_servers()
-                .lock()
-                .await
-                .clear_synchronous_health(&validated_key.owner);
-        }
-        (
-            validated_cg,
-            validated_deferred_post_open_health,
-            validated_key,
-        )
-    } else {
-        (initial_cg, initial_deferred_post_open_health, initial_key)
-    };
+    let cg = Box::pin(open_project_for_handshake(
+        canonical_project_path,
+        handshake,
+        store_administration,
+    ))
+    .await?;
+    let key = ProjectServerKey::from_open_project(&cg, handshake)?;
     let cg = Arc::new(cg);
     log_daemon_event(
         "project_open_phase",
@@ -539,6 +505,12 @@ pub(super) async fn production_project_server(
             let activation = Arc::clone(&hook_activation);
             Box::pin(async move { activation.notify_hook_paths(&root, rel_paths).await })
         });
+    let reconcile_activation = Arc::clone(&code_index_activation);
+    let code_index_reconcile_sink: crate::mcp::server::CodeIndexReconcileSink =
+        Arc::new(move |root: PathBuf| {
+            let activation = Arc::clone(&reconcile_activation);
+            Box::pin(async move { activation.notify_hook_overflow(&root).await })
+        });
     // The daemon mounts the same broker the MCP server and the directly
     // served dashboard open: persisted analyzer settings (with a recorded
     // degradation for an unreadable file) plus the home-level OpenCode
@@ -597,6 +569,7 @@ pub(super) async fn production_project_server(
     .with_dashboard_feedback_status_reader(Arc::clone(&dashboard_feedback_status_reader))
     .with_diagnostics_lsp(Arc::clone(&diagnostic_broker))
     .with_code_index_hook_sink(Arc::clone(&code_index_hook_sink))
+    .with_code_index_reconcile_sink(Arc::clone(&code_index_reconcile_sink))
     .with_code_index_publication_identity(Arc::clone(&code_index_publication_identity))
     .with_code_index_search_executor(Arc::clone(&code_index_search_executor))
     .with_code_index_branch_diff_executor(Arc::clone(&code_index_branch_diff_executor))
@@ -721,24 +694,14 @@ pub(super) async fn production_project_server(
                 ],
             );
         });
-        let quarantine_on_upgrade_failure = AtomicBool::new(false);
         let session_capabilities_published = AtomicBool::new(false);
         let mut published_full_candidate = None;
         let full_upgrade: Result<Arc<crate::mcp::McpServer>> = async {
             // The core is reachable from here on, so every step below leaves
             // this block with an error instead of returning behind a published
-            // route: the funnel around it owns retiring the owner.
-            if let Err(error) = settle_deferred_post_open_health(
-                canonical_project_path,
-                deferred_post_open_health
-                    .as_ref()
-                    .map(crate::db::Database::repair_fts_after_open),
-            )
-            .await
-            {
-                quarantine_on_upgrade_failure.store(true, Ordering::Release);
-                return Err(error);
-            }
+            // route: the funnel around it owns retiring the owner. Retired
+            // relational graph repair is deliberately absent; the bounded
+            // code-index activation below owns background indexing.
             if *current_key.lock().await != key {
                 return Err(TraceDecayError::Config {
                     message: "project changed branch during core capability admission".to_owned(),
@@ -917,6 +880,7 @@ pub(super) async fn production_project_server(
                 Arc::clone(&session_db),
                 profile_identity.profile_root().to_path_buf(),
                 transcript_source_home.clone(),
+                tracedecay_application::RemoteOperationalReadV1::Unavailable,
                 cg.get_config().sync.retention.clone(),
                 invocation.code_index_schedulers.clone(),
                 Arc::clone(&diagnostic_broker),
@@ -974,6 +938,7 @@ pub(super) async fn production_project_server(
             .with_dashboard_feedback_status_reader(dashboard_feedback_status_reader)
             .with_diagnostics_lsp(diagnostic_broker)
             .with_code_index_hook_sink(code_index_hook_sink)
+            .with_code_index_reconcile_sink(code_index_reconcile_sink)
             .with_code_index_publication_identity(code_index_publication_identity)
             .with_code_index_search_executor(code_index_search_executor)
             .with_code_index_branch_diff_executor(code_index_branch_diff_executor)
@@ -1146,11 +1111,21 @@ pub(super) async fn production_project_server(
             )
             .await;
             full_candidate.publish_doctor_report();
+            let indexing_requested = code_index_activation.activate();
             log_daemon_event(
                 "project_open_phase",
                 &[
                     ("project", canonical_project_path.display().to_string()),
                     ("phase", "full_published".to_owned()),
+                    (
+                        "code_index",
+                        if indexing_requested {
+                            "warming"
+                        } else {
+                            "unavailable"
+                        }
+                        .to_owned(),
+                    ),
                     (
                         "elapsed_ms",
                         project_open_started.elapsed().as_millis().to_string(),
@@ -1164,9 +1139,7 @@ pub(super) async fn production_project_server(
             Ok(full_server) => resolved = full_server,
             Err(error) => {
                 let failed_key = current_key.lock().await.clone();
-                let retain_core = !quarantine_on_upgrade_failure.load(Ordering::Acquire)
-                    && !cancellation.is_cancelled()
-                    && failed_key == key;
+                let retain_core = !cancellation.is_cancelled() && failed_key == key;
                 let (core_retained, failed_full_server) = if retain_core {
                     let mut servers = store_administration.project_servers().lock().await;
                     match published_full_candidate.as_ref() {
@@ -1218,14 +1191,11 @@ pub(super) async fn production_project_server(
                         ],
                     );
                 } else {
-                    let mut removed = {
-                        let mut servers = store_administration.project_servers().lock().await;
-                        if quarantine_on_upgrade_failure.load(Ordering::Acquire) {
-                            servers.quarantine_and_remove_owner(&failed_key.owner)
-                        } else {
-                            servers.remove_owner(&failed_key.owner)
-                        }
-                    };
+                    let mut removed = store_administration
+                        .project_servers()
+                        .lock()
+                        .await
+                        .remove_owner(&failed_key.owner);
                     if session_capabilities_published.load(Ordering::Acquire)
                         && removed.iter().all(|server| !Arc::ptr_eq(server, &resolved))
                     {

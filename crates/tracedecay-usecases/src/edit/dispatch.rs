@@ -7,7 +7,7 @@ use tracedecay_graph_db::GraphCancellation;
 use crate::graph::{
     CodeGraphProjectionReadPort, CodeGraphReadRequest, map_code_graph_read_runtime_error,
 };
-use crate::tracedecay::{SourceEditGraphReadV1, TraceDecay};
+use crate::tracedecay::{SourceEditGraphReadV1, SourceEditRuntime};
 use tracedecay_runtime_core::errors::Result;
 
 use super::control::SourceEditEffectControlV1;
@@ -46,7 +46,7 @@ async fn admitted_graph(
 }
 
 pub(super) async fn run_source_edit(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     graph_read: SourceEditGraphReadAuthorityV1<'_>,
     request: SourceEditRequest,
     _control: Option<&SourceEditEffectControlV1>,
@@ -107,7 +107,16 @@ pub(super) async fn run_source_edit(
             new_source,
             dry_run,
             ..
-        } => SourceEditOutcome::Edit(graph.replace_symbol(&symbol, &new_source, dry_run).await?),
+        } => SourceEditOutcome::Edit(
+            graph
+                .replace_symbol(
+                    admitted_graph(&graph_read).await?,
+                    &symbol,
+                    &new_source,
+                    dry_run,
+                )
+                .await?,
+        ),
         SourceEditRequest::InsertAtSymbol {
             symbol,
             content,
@@ -116,7 +125,13 @@ pub(super) async fn run_source_edit(
             ..
         } => SourceEditOutcome::Insert(
             graph
-                .insert_at_symbol(&symbol, &content, &position, dry_run)
+                .insert_at_symbol(
+                    admitted_graph(&graph_read).await?,
+                    &symbol,
+                    &content,
+                    &position,
+                    dry_run,
+                )
                 .await?,
         ),
         SourceEditRequest::MoveSymbol {
@@ -126,7 +141,13 @@ pub(super) async fn run_source_edit(
             update_references,
         } => SourceEditOutcome::Move(
             graph
-                .move_symbol(&symbol, &dest_file, dry_run, update_references)
+                .move_symbol(
+                    admitted_graph(&graph_read).await?,
+                    &symbol,
+                    &dest_file,
+                    dry_run,
+                    update_references,
+                )
                 .await?,
         ),
         SourceEditRequest::RenameSymbol {

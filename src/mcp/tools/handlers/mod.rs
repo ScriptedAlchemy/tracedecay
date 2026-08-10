@@ -47,7 +47,7 @@ pub mod memory;
 mod multi_root;
 mod project_registry;
 pub mod redundancy;
-mod retained_catalog;
+pub(crate) mod retained_catalog;
 pub mod session;
 mod session_authorities;
 pub mod skills;
@@ -56,25 +56,11 @@ mod tool_call_support;
 mod work;
 pub mod workflow;
 mod workflow_family;
-mod workflow_index;
-pub mod workflow_query;
 pub(crate) use project_registry::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
     ProjectRegistryContextView, ProjectRegistryListingCommand, ProjectRegistryListingFuture,
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryListingView,
     ProjectRegistryReadPort, ProjectRegistrySelector,
-};
-pub(crate) use session::message_search::{
-    LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
-    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalFilters,
-    SessionRetrievalPageView, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
-    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalSweepFuture,
-    SessionRetrievalSweepOutcome, SessionRetrievalSweepPort, SessionRetrievalSweepRootView,
-    SessionRetrievalSweepSkipReason, SessionRetrievalSweepSkipView, SessionRetrievalUnavailable,
-    SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
-    SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
-    SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 pub(crate) use session::{
     SessionRefreshAction, SessionRefreshCommand, SessionRefreshCoverageView,
@@ -144,21 +130,17 @@ use tracedecay_tool_catalog::BindingSurface;
 #[cfg(test)]
 use tracedecay_tool_catalog::{ProfileId, SurfaceOperationName};
 
+use super::binding::{
+    McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
+    tool_dispatches_registered_project_reader,
+};
+use super::{LegacyToolCompatibilityOwner, ToolResult};
 #[cfg(test)]
 use crate::application_surface::APPLICATION_SURFACE_OPERATIONS;
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
-#[cfg(test)]
-use retained_catalog::retained_mcp_composition;
-use tracedecay_sessions::WorkflowIndexReadPort;
-
-use super::binding::{
-    McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
-    tool_dispatches_registered_project_reader,
-};
-use super::{LegacyToolCompatibilityOwner, ToolResult};
 pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
@@ -168,6 +150,8 @@ use dispatch_groups::{
 };
 use multi_root::handle_multi_root;
 use retained_catalog::dispatch_profile_retained_application_tool;
+#[cfg(test)]
+use retained_catalog::retained_mcp_composition;
 pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
 use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 use work::handle_work;
@@ -228,13 +212,13 @@ pub struct ToolCallRegistryOptions<'a> {
     /// Daemon-owned project-registry reads. `None` is the typed
     /// missing-registry state, not an empty registry.
     pub(crate) project_registry_reads: Option<&'a dyn ProjectRegistryReadPort>,
-    /// Daemon-owned workflow-index reads. `None` is an unavailable retained
-    /// project-session authority, not a successful empty index.
-    pub workflow_index_reads: Option<&'a dyn WorkflowIndexReadPort>,
     pub(crate) accounting_db: Option<&'a crate::global_db::RegisteredGlobalDb>,
     pub(crate) registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub(crate) registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
-    pub(crate) dashboard_lcm_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
+    pub(crate) dashboard_session_retrieval_service:
+        Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
+    pub(crate) dashboard_session_retrieval_identity:
+        Option<tracedecay_usecases::context::ResolvedSessionIdentity>,
     /// The canonical profile identity bound by the daemon handshake. A
     /// dashboard profile write resolves its configuration layer through this
     /// identity, so it must not be derived from the project-session store —
@@ -266,6 +250,7 @@ pub struct ToolCallRegistryOptions<'a> {
     /// The code-index generation authority producers resolve identity through.
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
+    pub(crate) code_index_reconcile_sink: Option<crate::mcp::server::CodeIndexReconcileSink>,
     pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor:
         Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
@@ -298,11 +283,11 @@ impl Default for ToolCallRegistryOptions<'_> {
         Self {
             global_db: None,
             project_registry_reads: None,
-            workflow_index_reads: None,
             accounting_db: None,
             registered_project_session_db: None,
             registered_savings_db: None,
-            dashboard_lcm_retrieval_service: None,
+            dashboard_session_retrieval_service: None,
+            dashboard_session_retrieval_identity: None,
             daemon_user_profile_id: None,
             profile_root: None,
             implicit_project_path: None,
@@ -322,6 +307,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_cancellation: None,
             application_invocation_target: tracedecay_application::InvocationTarget::CurrentProject,
             code_index_publication_identity: None,
+            code_index_reconcile_sink: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
             source_edit_executor: None,
@@ -480,9 +466,6 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 .or(options.session_authorities.project)
         })
         .flatten();
-        let active_lcm_context =
-            session::LcmHandlerContext::active(cg, options.session_authorities.project_retrieval)
-                .with_lcm_authority(options.session_authorities.project_lcm);
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
         // `tracedecay_diagnostics` without an executor falls through to the
@@ -591,10 +574,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         cg,
                         args,
                         selected_scope_prefix,
-                        options.code_index_search_executor.as_ref(),
-                        options.code_index_search_authority.as_ref(),
-                        options.application_deadline.clone(),
-                        options.application_cancellation.clone(),
+                        options.clone(),
                     ))
                     .await
                 }
@@ -649,7 +629,6 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         args,
                         scope_prefix,
                         active_project_session_db,
-                        active_lcm_context,
                         options.clone(),
                     ))
                     .await

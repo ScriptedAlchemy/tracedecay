@@ -29,7 +29,8 @@ mod tests {
             ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
             RequestId::new("request.test").unwrap(),
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ));
+        )
+        .expect("canonical JSON problem fixture"));
         let rendered = json_line(&result).unwrap();
 
         assert!(rendered.ends_with('\n'));

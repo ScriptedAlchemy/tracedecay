@@ -1,8 +1,8 @@
 use serde_json::json;
 
-use super::application_schema::{closed_object_schema, required_object_schema};
+use super::application_schema::closed_object_schema;
 
-use super::{def, def_always_load, def_rw, string_property};
+use super::{def, def_always_load, def_rw, required_object_schema, string_property};
 use crate::mcp::tools::ToolDefinition;
 
 fn page_request_schema() -> serde_json::Value {

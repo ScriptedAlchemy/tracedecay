@@ -1,6 +1,5 @@
 use super::{
-    DatabaseOwnerReconciler, McpServer, McpServerConstructionContext, StalenessBannerInputs,
-    format_index_age_phrase, staleness_banner, tool_error_response,
+    DatabaseOwnerReconciler, McpServer, McpServerConstructionContext, tool_error_response,
 };
 use crate::config::PinnedUserDataDir;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
@@ -78,7 +77,6 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority)
         TraceDecay::init_test_fixture_with_registered_runtime(root, "project.mcp-freshness")
             .await
             .expect("init");
-    cg.index_all().await.expect("index");
     (
         cg,
         dir,
@@ -158,84 +156,6 @@ async fn branch_drift_serves_the_old_snapshot_until_the_swap_lands() {
     assert_eq!(fresh.serving_branch(), Some("feature"));
     assert_eq!(observed.lock().unwrap().as_slice(), &[fresh.db_path()]);
     server.shutdown().await;
-}
-
-// ---- D7 pure-logic banner tests (test c) --------------------------
-
-#[test]
-fn format_index_age_phrase_preserves_shape() {
-    // 2h 5m
-    assert_eq!(format_index_age_phrase(2 * 3600 + 5 * 60), "2h 5m");
-    // 1d 3h
-    assert_eq!(format_index_age_phrase(27 * 3600), "1d 3h");
-}
-
-#[test]
-fn banner_says_refresh_in_progress_when_auto_sync_on() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: false,
-        refresh_running: true,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.contains("refresh in progress"), "{banner}");
-    assert!(!banner.contains("tracedecay sync"), "{banner}");
-    assert!(!banner.starts_with("WARNING"), "{banner}");
-}
-
-#[test]
-fn banner_says_scheduled_when_auto_sync_on_and_idle() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.contains("refresh scheduled"), "{banner}");
-    assert!(!banner.contains("tracedecay sync"), "{banner}");
-}
-
-#[test]
-fn banner_suppressed_shortly_after_refresh() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: true,
-    });
-    assert!(banner.is_none(), "expected no banner, got {banner:?}");
-}
-
-#[test]
-fn banner_instructs_manual_sync_only_on_fallback_store() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: true,
-        refresh_running: true,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.starts_with("WARNING"), "{banner}");
-    assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
-}
-
-#[test]
-fn banner_instructs_manual_sync_when_auto_sync_disabled() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: false,
-        fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
 }
 
 // ---- D1: startup catch-up runs exactly once (test b) --------------

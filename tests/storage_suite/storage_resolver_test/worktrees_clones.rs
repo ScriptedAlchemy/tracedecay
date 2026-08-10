@@ -9,7 +9,6 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
     let project = dir.path().join("repo");
     let worktree = dir.path().join("repo-wt");
     let home = test_home(&dir);
-    let profile_root = home.join(".tracedecay");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
@@ -17,19 +16,9 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
     init_repo_with_commit(&project);
 
     let main = init_with_maintenance(&project).await.unwrap();
-    let lifecycle = acquire_fixture_maintenance();
-    let database_scope = tracedecay::db::enter_maintenance_database_scope(
-        &lifecycle,
-        &profile_root,
-        "seed linked worktree store",
-    )
-    .unwrap();
-    main.index_all().await.unwrap();
     let main_store = main.store_layout().data_root.clone();
     let main_database = main.store_layout().graph_db_path.clone();
     main.close();
-    drop(database_scope);
-    drop(lifecycle);
 
     git(
         &project,
@@ -82,7 +71,6 @@ async fn detached_linked_worktree_uses_repository_identity_and_exact_route() {
     let project = dir.path().join("repo");
     let worktree = dir.path().join("repo-detached");
     let home = test_home(&dir);
-    let profile_root = home.join(".tracedecay");
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     let _home_guard = HomeGuard::set(&home);
@@ -90,14 +78,6 @@ async fn detached_linked_worktree_uses_repository_identity_and_exact_route() {
     init_repo_with_commit(&project);
 
     let main = init_with_maintenance(&project).await.unwrap();
-    let lifecycle = acquire_fixture_maintenance();
-    let database_scope = tracedecay::db::enter_maintenance_database_scope(
-        &lifecycle,
-        &profile_root,
-        "seed detached worktree store",
-    )
-    .unwrap();
-    main.index_all().await.unwrap();
     let main_project_id = main
         .store_layout()
         .identity
@@ -107,8 +87,6 @@ async fn detached_linked_worktree_uses_repository_identity_and_exact_route() {
     let main_store = main.store_layout().data_root.clone();
     let main_database = main.store_layout().graph_db_path.clone();
     main.close();
-    drop(database_scope);
-    drop(lifecycle);
 
     git(
         &project,
@@ -227,19 +205,9 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
     init_repo_with_commit(&project);
 
     let main = init_with_maintenance(&project).await.unwrap();
-    let lifecycle = acquire_fixture_maintenance();
-    let database_scope = tracedecay::db::enter_maintenance_database_scope(
-        &lifecycle,
-        &profile_root,
-        "seed registered worktree store",
-    )
-    .unwrap();
-    main.index_all().await.unwrap();
     let main_project_id = main.store_layout().identity.project_id.clone().unwrap();
     let main_data_root = main.store_layout().data_root.clone();
     main.close();
-    drop(database_scope);
-    drop(lifecycle);
 
     for (branch, worktree) in [
         ("feature/registered-sibling-one", first_worktree.as_path()),
@@ -428,60 +396,6 @@ async fn renamed_checkout_session_db_follows_registered_store() {
             .clone();
         assert_path_eq(via_alias, registered_session_db);
     }
-}
-
-#[tokio::test]
-async fn parent_index_excludes_nested_linked_worktree_sources() {
-    let _guard = HOME_ENV_LOCK.lock().await;
-    let dir = TempDir::new().unwrap();
-    let project = dir.path().join("repo");
-    let nested_worktree = project.join(".worktrees/feature");
-    let home = test_home(&dir);
-    let profile_root = home.join(".tracedecay");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn parent_only() {}\n").unwrap();
-    let _home_guard = HomeGuard::set(&home);
-    init_repo_with_commit(&project);
-
-    git(
-        &project,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            "feature/nested-index",
-            nested_worktree.to_str().unwrap(),
-        ],
-    );
-    fs::write(
-        nested_worktree.join("src/lib.rs"),
-        "pub fn parent_only() {}\npub fn nested_worktree_only() {}\n",
-    )
-    .unwrap();
-
-    let mut parent = init_with_maintenance(&project).await.unwrap();
-    let lifecycle = acquire_fixture_maintenance();
-    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
-        &lifecycle,
-        &profile_root,
-        "index parent worktree fixture",
-    )
-    .unwrap();
-    parent.add_include_folders(&[".worktrees".to_string()]);
-    parent.index_all().await.unwrap();
-
-    assert!(
-        !parent.search("parent_only", 10).await.unwrap().is_empty(),
-        "the parent checkout must remain indexed"
-    );
-    assert!(
-        parent
-            .search("nested_worktree_only", 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "a nested linked worktree must be a separate project view, not duplicate parent source"
-    );
 }
 
 #[tokio::test]

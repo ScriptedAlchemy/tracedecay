@@ -968,7 +968,7 @@ async fn project_tokens_saved_schema_and_queries_still_work() {
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
     assert_eq!(db.global_tokens_saved().await, Some(55));
     assert_eq!(
-        db.try_list_project_paths()
+        db.project_ledger_paths_for_test()
             .await
             .expect("project ledger path listing should succeed"),
         vec![project_one, project_two]
@@ -1051,7 +1051,7 @@ async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authorit
         "a missing root must not discard authority for a retained store"
     );
     assert!(
-        db.try_list_project_paths()
+        db.project_ledger_paths_for_test()
             .await
             .expect("project ledger path listing should succeed")
             .is_empty(),

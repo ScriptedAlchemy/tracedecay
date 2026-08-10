@@ -844,7 +844,7 @@ impl SessionSyncProjectContext {
     }
 }
 
-fn git_sync_with_topology_result(
+pub(super) fn git_sync_with_topology_result(
     work: SessionSyncWorkResult,
     topology_result: Result<(), super::git_topology::GitTopologySyncFailure>,
 ) -> SessionSyncWorkResult {

@@ -51,6 +51,7 @@ pub(super) fn feedback_observation_operation(
         DaemonInvocationOperation::PrimitiveTestResults => {
             FeedbackOperationV1::PrimitiveTestResults
         }
+        DaemonInvocationOperation::GitHubStackSignalExpand => FeedbackOperationV1::GitHubReview,
         DaemonInvocationOperation::LspOpen
         | DaemonInvocationOperation::LspFrame
         | DaemonInvocationOperation::LspPoll
@@ -71,6 +72,7 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::Configuration
         | DaemonInvocationOperation::ContextScout
         | DaemonInvocationOperation::ObservatoryRead
+        | DaemonInvocationOperation::RetainedApplication
         | DaemonInvocationOperation::MultiRootScopeSetRead
         | DaemonInvocationOperation::MultiRootScopeSetCompareAndSwap
         | DaemonInvocationOperation::MultiRootExecute
@@ -90,7 +92,14 @@ pub(super) fn feedback_observation_operation(
         | DaemonInvocationOperation::NativeIntegrationApprove
         | DaemonInvocationOperation::NativeIntegrationApply
         | DaemonInvocationOperation::NativeIntegrationStatus
-        | DaemonInvocationOperation::NativeIntegrationCancel => FeedbackOperationV1::FeedbackCycle,
+        | DaemonInvocationOperation::NativeIntegrationCancel
+        | DaemonInvocationOperation::NativeIntegrationWorktreeInventory
+        | DaemonInvocationOperation::NativeIntegrationWorktreeInspect
+        | DaemonInvocationOperation::NativeIntegrationWorktreeConfirm
+        | DaemonInvocationOperation::NativeIntegrationWorktreeRemove
+        | DaemonInvocationOperation::NativeIntegrationWorktreeReconcile => {
+            FeedbackOperationV1::FeedbackCycle
+        }
     }
 }
 
@@ -105,7 +114,9 @@ pub(super) fn emit_invocation_observation(
     }
 }
 
-fn invocation_response_outcome(response: &DaemonInvocationResponse) -> FeedbackOutcomeV1 {
+pub(super) fn invocation_response_outcome(
+    response: &DaemonInvocationResponse,
+) -> FeedbackOutcomeV1 {
     match &response.outcome {
         DaemonInvocationOutcome::GitRead { .. }
         | DaemonInvocationOutcome::GitPreview { .. }
@@ -113,6 +124,8 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> FeedbackO
         | DaemonInvocationOutcome::NativeIntegration { .. }
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
+        | DaemonInvocationOutcome::RetainedApplication { .. }
+        | DaemonInvocationOutcome::GitHubStackSignalExpand { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetRead { .. }
         | DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap { .. }
         | DaemonInvocationOutcome::MultiRootQueryPage { .. }
@@ -166,6 +179,8 @@ fn invocation_response_outcome(response: &DaemonInvocationResponse) -> FeedbackO
             ApplicationProblemKind::Saturated => FeedbackOutcomeV1::AtCapacity,
             ApplicationProblemKind::Cancelled => FeedbackOutcomeV1::Cancelled,
             ApplicationProblemKind::TimedOut => FeedbackOutcomeV1::TimedOut,
+            ApplicationProblemKind::PartialEffect => FeedbackOutcomeV1::Partial,
+            ApplicationProblemKind::ResetRequired => FeedbackOutcomeV1::Unavailable,
         },
         DaemonInvocationOutcome::Problem { problem } => match problem {
             DaemonInvocationProblem::InvalidRequest

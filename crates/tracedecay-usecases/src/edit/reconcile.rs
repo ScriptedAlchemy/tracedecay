@@ -8,7 +8,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
 
 use super::JOURNAL_VERSION;
@@ -25,7 +25,7 @@ use super::records::{
 use super::verify::{application_contract_error, application_problem, config_error};
 
 pub(super) async fn reconcile_source_edit_effect_unknown_inner<A>(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     request: SourceEditReconciliationRequestV1,
     authorization: &A,
     control: Option<&SourceEditEffectControlV1>,
@@ -326,7 +326,7 @@ fn reconcile_prepared_source_edit_controlled(
 
 pub(super) async fn recover_source_edit_transaction(
     durability: &SourceEditDurability,
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     scope: &tracedecay_application::ResolvedScope,
 ) -> Result<()> {
     let Some(journal) = durability.load_journal()? else {

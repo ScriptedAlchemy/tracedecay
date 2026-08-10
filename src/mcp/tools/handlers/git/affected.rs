@@ -12,8 +12,24 @@ pub(crate) trait AffectedTestDependents: Sync {
 }
 
 struct VerifiedAffectedTestDependents<'a> {
-    graph: &'a TraceDecay,
     query: &'a crate::tracedecay::queries::graph::VerifiedGraphQuery,
+}
+
+pub(super) async fn collect_verified_affected_test_files(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    files: &[String],
+    max_depth: usize,
+    custom_glob: Option<&glob::Pattern>,
+    files_with_inline_tests: &HashSet<String>,
+) -> Result<AffectedTestTraversal> {
+    collect_affected_test_files(
+        &VerifiedAffectedTestDependents { query: graph },
+        files,
+        max_depth,
+        custom_glob,
+        files_with_inline_tests,
+    )
+    .await
 }
 
 impl AffectedTestDependents for VerifiedAffectedTestDependents<'_> {
@@ -26,7 +42,7 @@ impl AffectedTestDependents for VerifiedAffectedTestDependents<'_> {
             for file in files {
                 dependents.insert(
                     file.clone(),
-                    self.graph.get_file_dependents(self.query, file).await?,
+                    self.query.manager().get_file_dependents(file).await?,
                 );
             }
             Ok(dependents)
@@ -137,11 +153,8 @@ pub(crate) async fn handle_affected(
     let custom_filter = args.get("filter").and_then(|v| v.as_str());
     let custom_glob = custom_filter.and_then(|p| glob::Pattern::new(p).ok());
 
-    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
-    let dependents = VerifiedAffectedTestDependents {
-        graph: cg,
-        query: graph,
-    };
+    let files_with_inline_tests = graph.test_annotated_logical_files(None, 500_000, 2_000_000)?;
+    let dependents = VerifiedAffectedTestDependents { query: graph };
     let traversal = collect_affected_test_files(
         &dependents,
         &files,

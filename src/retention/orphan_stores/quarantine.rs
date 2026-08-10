@@ -51,27 +51,16 @@ struct QuarantineJournalV1 {
     registry_fence: Option<QuarantineRegistryFenceV1>,
 }
 
-/// A readable on-disk recovery record. It is deliberately independent of an
-/// in-memory collection result, so a SIGKILL after the SQL commit remains
-/// owner-visible and restart-reconcilable.
+/// Test projection of a readable on-disk recovery record.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub(crate) struct PendingQuarantineReceiptV1 {
-    pub(crate) kind: QuarantineKindV1,
-    pub(crate) project_id: String,
-    pub(crate) store_id: String,
-    pub(crate) original_path: PathBuf,
     pub(crate) quarantine_path: PathBuf,
     /// The live filesystem location observed when the receipt was read. A
     /// rename can succeed before its parent-directory sync fails, leaving the
     /// bytes at `original_path` while the journal remains pending.
     pub(crate) actual_path: PathBuf,
-    pub(crate) journal_path: PathBuf,
-    /// The same-parent rename completed and its parent directory was synced.
-    /// An absent marker means the journal was only an intent or that the
-    /// process stopped during the rename boundary.
-    pub(crate) rename_committed: bool,
     pub(crate) retirement_committed: bool,
-    pub(super) registry_fence: Option<QuarantineRegistryFenceV1>,
 }
 
 /// The result of moving one exact store leaf out of its live name and proving
@@ -106,35 +95,6 @@ pub(super) enum QuarantineFinalizeOutcome {
     Removed { journal_pending: bool },
     Interrupted { quarantine_path: PathBuf },
     DeleteUnconfirmed { quarantine_path: PathBuf },
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum PendingQuarantineActionV1 {
-    Restore,
-    Finalize,
-    Retain,
-}
-
-pub(super) enum PendingQuarantineOutcomeV1 {
-    IntentCleared {
-        journal_pending: bool,
-    },
-    Restored {
-        restored_path: PathBuf,
-        journal_pending: bool,
-    },
-    Finalized {
-        journal_pending: bool,
-    },
-    DeleteUnconfirmed {
-        quarantine_path: PathBuf,
-    },
-    Interrupted {
-        quarantine_path: PathBuf,
-    },
-    Retained {
-        quarantine_path: PathBuf,
-    },
 }
 
 /// A verified moved directory plus its immutable, sibling journal. The
@@ -579,18 +539,16 @@ pub(super) fn recover_named_store_quarantine(
     }
 }
 
-/// Read pending journal receipts from the two canonical V2 store parents. The
-/// reader is mounted by Doctor and maintenance; it does not mutate or infer a
-/// successful recovery from a missing in-memory outcome.
+/// Test helper for asserting that a crash boundary left a readable durable
+/// journal. Production recovery is mounted at each store's next admission.
+#[cfg(test)]
 pub(crate) fn read_pending_quarantine_receipts(
     profile_root: &Path,
 ) -> Result<Vec<PendingQuarantineReceiptV1>, CollectionFailureKind> {
     read_pending_quarantine_receipts_controlled(profile_root, super::unbounded_collection_control())
 }
 
-/// The bounded maintenance reader checks request control before every lazy
-/// directory advancement and journal read. Doctor has no request-scoped
-/// budget, so it continues to use [`read_pending_quarantine_receipts`].
+#[cfg(test)]
 pub(super) fn read_pending_quarantine_receipts_controlled(
     profile_root: &Path,
     control: CollectionControl<'_>,
@@ -664,7 +622,6 @@ pub(super) fn read_pending_quarantine_receipts_controlled(
             {
                 return Err(CollectionFailureKind::InspectFailed);
             }
-            let journal_name = journal_name(quarantine_name);
             let original_path = parent.join(&journal.original_name);
             let quarantine_path = parent.join(quarantine_name);
             if control.completion().is_some() {
@@ -674,38 +631,20 @@ pub(super) fn read_pending_quarantine_receipts_controlled(
             if control.completion().is_some() {
                 return Err(CollectionFailureKind::Cancelled);
             }
-            let rename_committed =
-                marker_is_regular_file(&parent.join(renamed_marker_name(&journal_name)));
-            if control.completion().is_some() {
-                return Err(CollectionFailureKind::Cancelled);
-            }
-            let retirement_committed =
-                marker_is_regular_file(&parent.join(retired_marker_name(&journal_name)));
             receipts.push(PendingQuarantineReceiptV1 {
-                kind: journal.kind,
-                project_id: journal.project_id,
-                store_id: journal.store_id,
                 actual_path,
-                original_path,
                 quarantine_path,
-                journal_path: parent.join(&journal_name),
-                rename_committed,
-                retirement_committed,
-                registry_fence: journal.registry_fence,
+                retirement_committed: parent.join(retired_marker_name(name)).is_file(),
             });
         }
     }
     Ok(receipts)
 }
 
-fn marker_is_regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .is_ok_and(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
-}
-
 /// Prefer the quarantined path while it is still a regular directory. Once a
 /// restore rename has succeeded, even if its parent sync or journal cleanup
 /// failed, expose the original path as the bytes' actual observed location.
+#[cfg(test)]
 fn receipt_actual_path(original_path: &Path, quarantine_path: &Path) -> PathBuf {
     let quarantine_is_directory = std::fs::symlink_metadata(quarantine_path)
         .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
@@ -719,122 +658,6 @@ fn receipt_actual_path(original_path: &Path, quarantine_path: &Path) -> PathBuf 
         } else {
             quarantine_path.to_path_buf()
         }
-    }
-}
-
-/// Reconcile one journal selected by the database-aware retention owner. The
-/// operation never makes its own liveness inference: a `Retain` decision is a
-/// no-op, while `Restore` and `Finalize` each retain the journal on any
-/// ambiguity so the next admission can try again with fresh registry state.
-pub(super) fn reconcile_pending_quarantine(
-    profile_root: &Path,
-    receipt: &PendingQuarantineReceiptV1,
-    action: PendingQuarantineActionV1,
-    control: CollectionControl<'_>,
-) -> Result<PendingQuarantineOutcomeV1, CollectionFailureKind> {
-    if control.completion().is_some() {
-        return Ok(PendingQuarantineOutcomeV1::Interrupted {
-            quarantine_path: receipt.actual_path.clone(),
-        });
-    }
-    let capability = open_store_parent_nofollow(profile_root, &receipt.original_path)?;
-    let journal_name = receipt
-        .journal_path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or(CollectionFailureKind::InspectFailed)?;
-    let quarantine_name = receipt
-        .quarantine_path
-        .file_name()
-        .ok_or(CollectionFailureKind::InspectFailed)?;
-    let root = match capability.parent.open_dir_nofollow(quarantine_name) {
-        Ok(root) => Some(root),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => {
-            return Ok(PendingQuarantineOutcomeV1::Retained {
-                quarantine_path: receipt.quarantine_path.clone(),
-            });
-        }
-    };
-    // An intent journal is fsynced before the live name is renamed. If the
-    // process stopped before that rename, the original path remains the live
-    // store and clearing only the journal cannot lose bytes. This closes the
-    // former journal-less crash gap without treating a post-rename recovery
-    // (which has the rename marker) as completed.
-    if !receipt.rename_committed && root.is_none() && receipt.actual_path == receipt.original_path {
-        return Ok(PendingQuarantineOutcomeV1::IntentCleared {
-            journal_pending: clear_journal(&capability.parent, journal_name).is_err(),
-        });
-    }
-    if matches!(action, PendingQuarantineActionV1::Retain) {
-        return Ok(PendingQuarantineOutcomeV1::Retained {
-            quarantine_path: receipt.quarantine_path.clone(),
-        });
-    }
-    match action {
-        PendingQuarantineActionV1::Restore => {
-            drop(root);
-            if rename_noreplace(&capability.parent, quarantine_name, &capability.leaf_name).is_ok()
-            {
-                // Do not erase the journal after a failed parent sync: the
-                // bytes are at their original name, but durability remains
-                // uncertain and must stay owner-visible.
-                let journal_pending = sync_directory(&capability.parent).is_err()
-                    || clear_journal(&capability.parent, journal_name).is_err();
-                Ok(PendingQuarantineOutcomeV1::Restored {
-                    restored_path: receipt.original_path.clone(),
-                    journal_pending,
-                })
-            } else {
-                Ok(PendingQuarantineOutcomeV1::Retained {
-                    quarantine_path: receipt.quarantine_path.clone(),
-                })
-            }
-        }
-        PendingQuarantineActionV1::Finalize => {
-            if control.completion().is_some() {
-                return Ok(PendingQuarantineOutcomeV1::Interrupted {
-                    quarantine_path: receipt.actual_path.clone(),
-                });
-            }
-            if !receipt.retirement_committed
-                && write_empty_marker(&capability.parent, &retired_marker_name(journal_name))
-                    .is_err()
-            {
-                return Ok(PendingQuarantineOutcomeV1::Retained {
-                    quarantine_path: receipt.quarantine_path.clone(),
-                });
-            }
-            if let Some(root) = root {
-                match remove_open_dir_all_controlled(root, control) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                        return Ok(PendingQuarantineOutcomeV1::Interrupted {
-                            quarantine_path: receipt.quarantine_path.clone(),
-                        });
-                    }
-                    Err(_) => {
-                        return Ok(PendingQuarantineOutcomeV1::DeleteUnconfirmed {
-                            quarantine_path: receipt.quarantine_path.clone(),
-                        });
-                    }
-                }
-                if sync_directory(&capability.parent).is_err() {
-                    return Ok(PendingQuarantineOutcomeV1::DeleteUnconfirmed {
-                        quarantine_path: receipt.quarantine_path.clone(),
-                    });
-                }
-            } else if sync_directory(&capability.parent).is_err() {
-                return Ok(PendingQuarantineOutcomeV1::DeleteUnconfirmed {
-                    quarantine_path: receipt.quarantine_path.clone(),
-                });
-            }
-            let journal_pending = clear_journal(&capability.parent, journal_name).is_err();
-            Ok(PendingQuarantineOutcomeV1::Finalized { journal_pending })
-        }
-        PendingQuarantineActionV1::Retain => Ok(PendingQuarantineOutcomeV1::Retained {
-            quarantine_path: receipt.quarantine_path.clone(),
-        }),
     }
 }
 

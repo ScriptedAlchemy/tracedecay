@@ -392,22 +392,9 @@ async fn drain_all_hosts(
         for envelope in hook_v2_pending_work_envelopes(data_root, *host, now) {
             let _ = admit_replayed_envelope_with_authoritative_session(
                 envelope,
-                |project_id, worktree_id, protected_session_id| async move {
-                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
-                        project_id,
-                        worktree_id,
-                        protected_session_id,
-                    )
-                    .await
-                },
-                |envelope, native_session_id| async move {
-                    admit_hook_v2_envelope(
-                        graph,
-                        &envelope,
-                        native_session_id,
-                        hook_replay_now(),
-                    )
-                    .await
+                |_, _, _| async move { None },
+                |envelope, _| async move {
+                    admit_hook_v2_envelope(graph, &envelope, hook_replay_now()).await
                 },
             )
             .await;
@@ -415,22 +402,9 @@ async fn drain_all_hosts(
         let report = drain_host_spool_once(data_root, *host, now, |envelope| async move {
             admit_replayed_envelope_with_authoritative_session(
                 envelope,
-                |project_id, worktree_id, protected_session_id| async move {
-                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
-                        project_id,
-                        worktree_id,
-                        protected_session_id,
-                    )
-                    .await
-                },
-                |envelope, native_session_id| async move {
-                    admit_hook_v2_envelope(
-                        graph,
-                        &envelope,
-                        native_session_id,
-                        hook_replay_now(),
-                    )
-                    .await
+                |_, _, _| async move { None },
+                |envelope, _| async move {
+                    admit_hook_v2_envelope(graph, &envelope, hook_replay_now()).await
                 },
             )
             .await
@@ -699,6 +673,7 @@ mod tests {
             orchestration: crate::daemon::HookOrchestrationAdmissionV1::Unavailable,
             ready_guidance: serde_json::Value::Null,
             feedback_notice: serde_json::Value::Null,
+            github_stack_signal_available: false,
         }
     }
 
@@ -890,71 +865,6 @@ mod tests {
 
         assert!(report.binding_unavailable);
         assert_eq!(pending_records(root.path(), now), 1);
-    }
-
-    #[tokio::test]
-    async fn live_failure_spools_then_replay_preserves_lifecycle_for_suggestion() {
-        let root = TestRoot::new("lifecycle-suggestion");
-        let now = UtcMicros(1_000);
-        let binding = binding(7);
-        publish_binding(root.path(), &binding, now);
-        let mut edit = envelope(9, &binding);
-        edit.protected_session_id =
-            crate::hooks::protected_native_session_id("session.native.replay");
-        edit.event = HookEventV2::SavedEdit {
-            file_id: [8; 16],
-            changed_range_count: 1,
-        };
-        // The synchronous admission failed, so the host retained only the
-        // validated, payload-free envelope for daemon replay.
-        spool_envelopes(root.path(), &binding, &[edit], now);
-        let suggestions = Arc::new(StdMutex::new(Vec::new()));
-        let captured = Arc::clone(&suggestions);
-
-        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
-            let captured = Arc::clone(&captured);
-            async move {
-                admit_replayed_envelope_with_authoritative_session(
-                    envelope,
-                    |project_id, worktree_id, protected_session_id| async move {
-                        assert_eq!(project_id, [1; 16]);
-                        assert_eq!(worktree_id, [3; 16]);
-                        assert_eq!(
-                            protected_session_id,
-                            crate::hooks::protected_native_session_id("session.native.replay")
-                        );
-                        Some(SessionId::new("session.native.replay".to_owned()).unwrap())
-                    },
-                    |_, native_session_id| async move {
-                        if native_session_id.as_ref().map(SessionId::as_str)
-                            == Some("session.native.replay")
-                        {
-                            captured
-                                .lock()
-                                .unwrap()
-                                .push("replayed lifecycle suggestion");
-                        }
-                        HookV2AdmissionOutcomeV1::Admitted {
-                            orchestration: crate::daemon::HookOrchestrationAdmissionV1::Enqueued,
-                            ready_guidance: serde_json::json!({
-                                "suggestion": "replayed lifecycle suggestion"
-                            }),
-                            feedback_notice: serde_json::Value::Null,
-                        }
-                    },
-                )
-                .await
-            }
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(report.committed, 1);
-        assert_eq!(
-            suggestions.lock().unwrap().as_slice(),
-            ["replayed lifecycle suggestion"]
-        );
-        assert_eq!(pending_records(root.path(), now), 0);
     }
 
     #[tokio::test]

@@ -86,20 +86,17 @@ impl Drop for BranchReopenCompletion {
 enum BranchReopenTrigger {
     /// A request observed the served branch diverge from the live one.
     Drift,
-    /// A branch was newly tracked, so the live branch now has a DB of its own.
-    TrackingAdded,
 }
 
 impl BranchReopenTrigger {
     fn reason(self) -> &'static str {
         match self {
             Self::Drift => "branch_drift",
-            Self::TrackingAdded => "branch_tracking_added",
         }
     }
 }
 
-/// Retained startup index-sync task, joined or aborted before the code graph
+/// Retained startup reconciliation-admission task, joined or aborted before the code graph
 /// authority is released.
 #[derive(Default)]
 pub(crate) struct StartupCatchUpTasksV1 {
@@ -120,9 +117,9 @@ pub(crate) enum StartupCatchUpStateV1 {
     /// construction path that opts out). Terminal, and *ready*: waiters must
     /// not block on work that will never run.
     NotStarted,
-    /// The synchronous index sync is running.
+    /// Reconciliation admission is running.
     Syncing { tasks: StartupCatchUpTasksV1 },
-    /// The index sync finished, including failure paths.
+    /// Reconciliation admission settled, including failure paths.
     Settled { tasks: StartupCatchUpTasksV1 },
     /// Shutdown tore the machine down.
     Cancelled,
@@ -145,7 +142,7 @@ impl StartupCatchUpStateV1 {
     }
 }
 
-/// Owns the startup index catch-up state.
+/// Owns the startup reconciliation-admission state.
 ///
 /// Held behind an `Arc` on the server so the spawned sync task can signal
 /// completion through the same lock the waiters read.
@@ -213,7 +210,7 @@ impl StartupCatchUpMachineV1 {
         *state = StartupCatchUpStateV1::Syncing { tasks };
     }
 
-    /// The index-sync phase is done.
+    /// The reconciliation-admission phase is done.
     fn settle(&self) {
         let mut state = self.state();
         if matches!(*state, StartupCatchUpStateV1::Cancelled) {
@@ -394,15 +391,14 @@ impl McpServer {
     /// reopen. `reopen_for_current_branch` is a full DB open plus a sealed
     /// restore — O(store), seconds to minutes on a large index — and it used to
     /// run inline on the request that happened to notice the checkout, with
-    /// every other caller either blocked behind the reopen lock or (worse, in
-    /// [`Self::reopen_after_branch_tracking_added`]) queued on it with no
-    /// bound. Now the reopen is retained and single-flighted, and every caller
+    /// every other caller blocked behind the reopen lock. Now the reopen is
+    /// retained and single-flighted, and every caller
     /// — the one that noticed the drift included — serves the last complete
     /// snapshot until the swap lands.
     ///
-    /// If reopening fails the previous instance is kept — the drift guards in
-    /// [`TraceDecay::ensure_branch_writable`] and [`Self::maybe_sync_if_stale`]
-    /// still protect writes, exactly as before this hot-swap existed.
+    /// If reopening fails the previous instance is kept — the effect-time
+    /// branch identity check in the hook writer and
+    /// [`Self::maybe_sync_if_stale`] still protect writes.
     pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
         self.reopen_if_branch_drifted_memoized().await.0
     }
@@ -425,15 +421,6 @@ impl McpServer {
         (current, live_branch)
     }
 
-    /// Kicks a reopen after a branch was newly tracked.
-    ///
-    /// Never blocks: this used to take `branch_reopen.lock().await`, so every
-    /// caller arriving during an in-flight reopen queued behind a full DB open.
-    /// It now try-locks and submits to the retained owner like the drift path.
-    pub(crate) async fn reopen_after_branch_tracking_added(&self) {
-        self.spawn_branch_reopen(BranchReopenTrigger::TrackingAdded);
-    }
-
     /// Single-flights and retains one reopen onto the live branch.
     ///
     /// The `branch_reopen` guard is *moved into* the spawned task, so it is
@@ -446,7 +433,6 @@ impl McpServer {
             return;
         };
         let cg_cell = Arc::clone(&self.cg);
-        let token_map = Arc::clone(&self.file_token_map);
         let completion = BranchReopenCompletion(Arc::clone(&self.branch_reopen_completions));
         let reconcile = self.database_owner_reconciler.clone();
         let reason = trigger.reason();
@@ -454,13 +440,10 @@ impl McpServer {
             let _completion = completion;
             let _reopen_guard = reopen_guard;
             let current = cg_cell.read().await.clone();
-            // Drift-triggered reopens re-check against a *fresh snapshot*: a
-            // concurrent reopen may already have swapped the served instance
-            // onto this same live branch. A tracking-added reopen has no drift
-            // to re-check — the served branch is already the live one; what
-            // changed is that it now has a DB of its own — so it always runs,
-            // exactly as the blocking version did.
-            if trigger == BranchReopenTrigger::Drift && !current.branch_drifted() {
+            // Re-check against a *fresh snapshot*: a concurrent reopen may
+            // already have swapped the served instance onto this same live
+            // branch.
+            if !current.branch_drifted() {
                 return;
             }
             match current.reopen_for_current_branch().await {
@@ -482,11 +465,6 @@ impl McpServer {
                     // the snapshot it held.
                     if let Some(reconcile) = &reconcile {
                         reconcile(Arc::clone(&fresh)).await;
-                    }
-                    // New branch DB ⇒ new file set; refresh the token
-                    // accounting map.
-                    if let Ok(refreshed) = fresh.get_file_token_map().await {
-                        *crate::mcp::server::requests::recover_lock(&token_map) = refreshed;
                     }
                 }
                 Err(e) => {
@@ -524,13 +502,13 @@ impl McpServer {
         self.branch_reopen_completions.load(Ordering::Acquire)
     }
 
-    /// Catch-up sync helper for tests and explicit callers. Bypasses the 30 s
+    /// Catch-up helper for tests and explicit callers. Bypasses the 30 s
     /// cooldown in [`Self::maybe_sync_if_stale`] so changes made while the
     /// server was down — a terminal `git pull`, IDE edits before the agent
-    /// launched, files touched by another tool — can be reconciled before
-    /// assertions or source-editing work. The staleness-check stamp is updated
-    /// on the way out so the next lazy sync doesn't immediately re-walk the
-    /// tree.
+    /// launched, files touched by another tool — are admitted for authoritative
+    /// reconciliation. This method waits only for scheduler admission, never
+    /// for indexing. The staleness-check stamp is updated on the way out so the
+    /// next lazy request does not immediately enqueue duplicate work.
     ///
     /// The machine is advanced on every exit path (including errors) so
     /// [`Self::wait_for_startup_catch_up`] never hangs.
@@ -542,7 +520,7 @@ impl McpServer {
         let request = BackgroundRefreshRequest {
             graph: Arc::clone(&cg),
             project_root: cg.project_root().to_path_buf(),
-            full_sync_escalation_files: self.sync_config.full_sync_escalation_files,
+            reconcile_sink: self.code_index_reconcile_sink.clone(),
         };
         match refresh(request).await {
             Ok(Some(fresh)) => {
@@ -550,7 +528,7 @@ impl McpServer {
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::warn!(error = %e, "startup catch-up sync failed");
+                tracing::warn!(error = %e, "startup catch-up admission failed");
                 self.startup_catch_up.settle();
                 return;
             }
@@ -564,12 +542,12 @@ impl McpServer {
         self.startup_catch_up.settle();
     }
 
-    /// Returns `true` once the startup file-tree walk and index sync finished.
+    /// Returns `true` once startup reconciliation admission has settled.
     pub fn startup_catch_up_done(&self) -> bool {
         self.startup_catch_up.settled()
     }
 
-    /// Polls until the startup index catch-up completes or `timeout` elapses.
+    /// Polls until startup reconciliation admission settles or `timeout` elapses.
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while !self.startup_catch_up_done() {
@@ -581,27 +559,26 @@ impl McpServer {
         true
     }
 
-    /// Claim the lazy-sync window for edit-shaped tools and kick the sync in
-    /// the background — but only if at least 30 s have passed since the last
-    /// successful sync. The cooldown is the gate: while it holds, this returns
+    /// Claim the lazy-reconciliation window for edit-shaped tools and enqueue it
+    /// in the background — but only if at least 30 s have passed since the last
+    /// successful admission. The cooldown is the gate: while it holds, this returns
     /// immediately, so dropping it into every `tools/call` handler is cheap.
     ///
-    /// **Never blocks.** This used to run `find_stale_files` (a full project
-    /// tree walk) and then reindex the entire stale set inline, on the request
+    /// **Never blocks.** This used to perform a full project tree walk and then
+    /// reindex the entire stale set inline, on the request
     /// path, with no bound: one `git pull` ahead of an edit tool turned that
     /// call into an O(store) reindex the client waited on. The claim is still
     /// made here — so the cooldown and single-flight semantics are unchanged —
-    /// but the work is retained through the same mechanism read tools already
-    /// use ([`Self::spawn_read_refresh_task`]), and the caller serves
-    /// immediately on the current snapshot. The *next* call observes the
-    /// freshly synced index.
+    /// but the bounded request is retained through the same mechanism read tools
+    /// already use ([`Self::spawn_read_refresh_task`]), and the caller serves
+    /// immediately on the current snapshot. Freshness is reported separately by
+    /// the code-index authority after reconciliation completes.
     ///
     /// Concurrent callers are serialized via
     /// [`Self::last_staleness_check_at`]: the first caller stamps `now`
     /// into the field with `compare_exchange`; later callers within the
-    /// same window see the stamp and bail. If the actual sync work
-    /// fails, the stamp still advances — failure to walk the tree
-    /// should not cause every subsequent tool call to retry.
+    /// same window see the stamp and bail. If admission fails, the stamp still
+    /// advances so every subsequent tool call does not retry immediately.
     pub async fn maybe_sync_if_stale(&self) {
         let cg = self.cg_snapshot().await;
         let now = std::time::SystemTime::now()
@@ -609,8 +586,7 @@ impl McpServer {
             .unwrap_or_default()
             .as_secs() as i64;
         let previous = self.last_staleness_check_at.load(Ordering::Acquire);
-        let last_sync = cg.last_sync_timestamp().await;
-        if previous != 0 && now.saturating_sub(last_sync) < 30 {
+        if previous != 0 && now.saturating_sub(previous) < 30 {
             return;
         }
 
@@ -620,8 +596,8 @@ impl McpServer {
 
         // Branch-drift guard (#2): if the working tree switched branches since
         // this snapshot opened, the cached DB belongs to the old branch. Skip
-        // the lazy sync — `find_stale_files` would diff the new branch's files
-        // against the old branch's DB, and `ensure_branch_writable` would
+        // lazy reconciliation: a tree diff would compare the new branch's files
+        // against the old branch's DB, and the writer fence would
         // reject the write anyway. `tools/call` reopens onto the live branch
         // via [`Self::reopen_if_branch_drifted`] *before* invoking this, so
         // the guard only fires on a checkout racing the current call.
@@ -645,24 +621,21 @@ impl McpServer {
         {
             return;
         }
-        // The retained task refreshes `file_token_map` from the synced graph on
-        // every success — including the case where nothing was stale, because a
-        // sibling MCP peer may have synced the DB between our cooldown windows.
-        self.spawn_read_refresh_task(&cg, self.sync_config.full_sync_escalation_files);
+        // The retained task submits one bounded authoritative reconcile request.
+        self.spawn_read_refresh_task(&cg);
     }
 
-    /// D4: sync-on-read entry point for read (non-edit) tools. NEVER blocks.
+    /// D4: reconciliation-on-read entry point for read (non-edit) tools. NEVER blocks.
     ///
     /// If read-refresh is enabled and the read cooldown has elapsed since the
     /// last background spawn, this `compare_exchange`s
     /// [`background_refresh_running`](Self::background_refresh_running) to
     /// `true` and spawns a retained refresh, then returns immediately so the
-    /// caller serves the current answer with zero added latency. The *next*
-    /// read observes the freshly synced index.
+    /// caller serves the current answer with zero added latency. Completion and
+    /// freshness remain owned by the code-index scheduler.
     ///
-    /// Single-flighted three ways: the `read_cooldown_secs` stamp, the
-    /// `background_refresh_running` flag, and the underlying cross-process
-    /// sync lock. At most one refresh runs at a time.
+    /// Single-flighted by the `read_cooldown_secs` stamp and the
+    /// `background_refresh_running` flag. At most one admission runs at a time.
     ///
     /// R4: this runs before any cooldown claim, so it is on the hot path of
     /// every read tool call. It takes the caller's request-scoped branch memo
@@ -704,18 +677,17 @@ impl McpServer {
             return;
         }
 
-        self.spawn_read_refresh_task(cg, self.sync_config.full_sync_escalation_files);
+        self.spawn_read_refresh_task(cg);
     }
 
     /// Spawns the retained D4 refresh task. The task owns cheap `Arc` clones
-    /// of the background-refresh flag, the completion stamp, and the shared
-    /// file-token map, so no `Arc<Self>` receiver is needed. Prefers diff-
-    /// scoping off `last_synced_commit`; falls back to the full tree walk
-    /// when no base commit is stamped or the diff escalates past the limit.
+    /// of the background-refresh flag and the admission-completion stamp, so no
+    /// `Arc<Self>` receiver is needed. The scheduler owns worktree traversal,
+    /// coalescing, and publication after accepting the request.
     ///
     /// The caller MUST have already set `background_refresh_running` to
     /// `true`; this task clears it on completion.
-    pub(crate) fn spawn_read_refresh_task(&self, cg: &Arc<TraceDecay>, escalation: usize) {
+    pub(crate) fn spawn_read_refresh_task(&self, cg: &Arc<TraceDecay>) {
         let running = Arc::clone(&self.background_refresh_running);
         let running_guard = ReadRefreshRunningGuard(Arc::clone(&running));
         let done_at = Arc::clone(&self.last_background_refresh_done_at);
@@ -724,7 +696,7 @@ impl McpServer {
         let request = BackgroundRefreshRequest {
             graph: Arc::clone(cg),
             project_root: cg.project_root().to_path_buf(),
-            full_sync_escalation_files: escalation,
+            reconcile_sink: self.code_index_reconcile_sink.clone(),
         };
         let _admitted = self.background_tasks.spawn(async move {
             let _running = running_guard;
@@ -738,7 +710,7 @@ impl McpServer {
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
-                        "background read refresh could not reopen project"
+                        "background read reconciliation was not admitted"
                     );
                 }
             }

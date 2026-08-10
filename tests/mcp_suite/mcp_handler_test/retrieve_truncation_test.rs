@@ -1,7 +1,34 @@
 use crate::support::*;
 use serde_json::{Value, json};
+#[cfg(feature = "test-transport")]
 use std::fmt::Write as _;
 use std::fs;
+#[cfg(feature = "test-transport")]
+use tracedecay::mcp::ToolResult;
+
+#[cfg(feature = "test-transport")]
+async fn call_production_tool(
+    fixture: &ProductionCompositionFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> ToolResult {
+    let response = fixture
+        .harness
+        .call_tool(&fixture.project_root, tool_name, arguments)
+        .await
+        .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
+    assert!(
+        response.error.is_none(),
+        "{tool_name} returned a production MCP error: {:?}",
+        response.error.as_ref().map(|error| &error.message)
+    );
+    ToolResult::new(
+        response
+            .result
+            .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result")),
+        Vec::new(),
+    )
+}
 
 #[tokio::test]
 async fn retrieve_tool_returns_full_stored_response() {
@@ -275,29 +302,29 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
     const LINE_PADDING: &str =
         "PAD_FOR_MCP_RESPONSE_TRUNCATION_HANDLE_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789_";
 
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    let (cg, _env) = init_test_project(project).await;
-    let padding = LINE_PADDING.repeat(2);
-    for file_idx in 0..FILE_COUNT {
-        let mut source = String::new();
-        for i in 0..MARKERS_PER_FILE {
-            let marker = file_idx * MARKERS_PER_FILE + i;
-            let _ = writeln!(
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        let padding = LINE_PADDING.repeat(2);
+        for file_idx in 0..FILE_COUNT {
+            let mut source = String::new();
+            for i in 0..MARKERS_PER_FILE {
+                let marker = file_idx * MARKERS_PER_FILE + i;
+                let _ = writeln!(
+                    source,
+                    "pub fn reversible_search_marker_{marker:03}() -> &'static str {{ \"marker-{marker:03}-{padding}\" }}"
+                );
+            }
+            fs::write(
+                project.join(format!("src/large_search_{file_idx:02}.rs")),
                 source,
-                "pub fn reversible_search_marker_{marker:03}() -> &'static str {{ \"marker-{marker:03}-{padding}\" }}"
-            );
+            )
+            .unwrap();
         }
-        fs::write(
-            project.join(format!("src/large_search_{file_idx:02}.rs")),
-            source,
-        )
-        .unwrap();
-    }
+    })
+    .await;
 
-    let result = handle_tool_call(
-        &cg,
+    let result = call_production_tool(
+        &fixture,
         "tracedecay_grep",
         json!({
             "pattern": "reversible_search_marker_",
@@ -305,11 +332,8 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
             "context_lines": 0,
             "format": "json",
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let text = extract_text(&result.value);
     let envelope: Value = serde_json::from_str(text).expect("large grep response envelope");
     assert_eq!(
@@ -330,15 +354,8 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
         "stored original must exceed the truncated wire payload"
     );
 
-    let retrieved = handle_tool_call(
-        &cg,
-        "tracedecay_retrieve",
-        json!({ "handle": handle }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let retrieved =
+        call_production_tool(&fixture, "tracedecay_retrieve", json!({ "handle": handle })).await;
     let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
     assert_eq!(retrieved_payload["expired"], false);
     let full_json = retrieved_payload["content"]
@@ -368,40 +385,40 @@ async fn search_large_response_uses_retrievable_truncation_handle() {
         }),
         "every retrieved hit should carry a marker line"
     );
+    fixture.harness.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn context_memory_large_markdown_uses_reversible_lane_preview() {
-    let (cg, _dir) = setup_project().await;
+    use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project MCP server");
+    let cg = server.cg().await;
     let tail = "MEMORY_TAIL_MARKER";
     let long_content = format!("Large reversible memory fact {}{tail}", "x".repeat(20_000));
-    handle_tool_call(
-        &cg,
-        "tracedecay_fact_store",
-        json!({
-            "action": "add",
-            "content": long_content,
-            "category": "decision",
-            "entity": "large reversible memory fact",
-            "tags": ["context-memory-lane-preview"],
-            "trust": 0.95,
-            "source": "mcp-context-test"
-        }),
-        None,
-        None,
-    )
+    cg.add_fact(AddFactRequest {
+        content: long_content,
+        category: MemoryCategory::Decision,
+        source: Some("mcp-context-test".to_owned()),
+        tags: vec!["context-memory-lane-preview".to_owned()],
+        entities: vec!["large reversible memory fact".to_owned()],
+        trust: Some(0.95),
+        metadata: Value::Null,
+    })
     .await
     .unwrap();
 
-    let markdown = handle_tool_call(
-        &cg,
+    let markdown = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({"task": "large reversible memory fact", "memory_limit": 1}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
 
     let text = extract_text(&markdown.value);
     assert!(text.starts_with("# Truncated Response"), "got: {text}");
@@ -410,36 +427,34 @@ async fn context_memory_large_markdown_uses_reversible_lane_preview() {
     assert!(text.contains("lane truncated"), "got: {text}");
     assert!(text.contains("tracedecay_retrieve"), "got: {text}");
     assert!(!text.contains(tail), "preview should omit tail: {text}");
+    fixture.harness.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn diff_context_large_response_uses_retrievable_truncation_handle() {
     const LARGE_RESPONSE_MARKER_COUNT: usize = 260;
     const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
 
-    let dir = test_temp_dir();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
-    let (cg, _env) = init_test_project(project).await;
-    let mut source = String::new();
-    for i in 0..LARGE_RESPONSE_MARKER_COUNT {
-        let _ = writeln!(
-            source,
-            "pub fn reversible_diff_context_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
-        );
-    }
-    fs::write(project.join("src/large_diff.rs"), source).unwrap();
-    index_all_retrying_sync_lock(&cg).await;
+    let fixture = production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        let mut source = String::new();
+        for i in 0..LARGE_RESPONSE_MARKER_COUNT {
+            let _ = writeln!(
+                source,
+                "pub fn reversible_diff_context_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
+            );
+        }
+        fs::write(project.join("src/large_diff.rs"), source).unwrap();
+    })
+    .await;
 
-    let result = handle_tool_call(
-        &cg,
+    let result = call_production_tool(
+        &fixture,
         "tracedecay_diff_context",
         json!({"files": ["src/large_diff.rs"], "depth": 1}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let envelope: Value =
         serde_json::from_str(extract_text(&result.value)).expect("large diff_context envelope");
     assert_eq!(envelope["truncated"], true);
@@ -448,15 +463,8 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
         .as_str()
         .expect("large diff_context response should include a handle");
 
-    let retrieved = handle_tool_call(
-        &cg,
-        "tracedecay_retrieve",
-        json!({ "handle": handle }),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    let retrieved =
+        call_production_tool(&fixture, "tracedecay_retrieve", json!({ "handle": handle })).await;
     let retrieved_payload: Value = serde_json::from_str(extract_text(&retrieved.value)).unwrap();
     assert_eq!(retrieved_payload["expired"], false);
     let full_json = retrieved_payload["content"]
@@ -468,4 +476,5 @@ async fn diff_context_large_response_uses_retrievable_truncation_handle() {
         )),
         "retrieved diff_context response should include the tail result"
     );
+    fixture.harness.shutdown().await;
 }

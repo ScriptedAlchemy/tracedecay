@@ -260,7 +260,7 @@ pub enum HttpAdapterError {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use axum::body::Body;
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -270,8 +270,9 @@ mod tests {
         HttpApplicationOwnerKind, HttpSseEvent, application_router,
     };
     use tracedecay_application::{
-        ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal, Deadline, RequestId,
-        ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
+        ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
+        CancellationSignal, Deadline, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+        StreamEvent, StreamEventKind,
     };
     use tracedecay_domain::UtcMicros;
     use tracedecay_tool_catalog::{BindingId, SchemaId};
@@ -337,10 +338,10 @@ mod tests {
                 ),
             )
             .expect("test application problem envelope");
-            CanonicalInvocationResult::<serde_json::Value>::new(
+            Ok::<_, ApplicationContractError>(CanonicalInvocationResult::<serde_json::Value>::new(
                 BindingId::new("binding.http.test.v1").expect("binding"),
                 Err(problem),
-            )
+            ))
         });
 
         for path in [
@@ -359,6 +360,39 @@ mod tests {
                 .expect("router response");
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn application_contract_failure_is_an_empty_internal_server_error() {
+        let app = application_router(|_: super::HttpApplicationRequest| async move {
+            Err::<CanonicalInvocationResult<serde_json::Value>, _>(
+                ApplicationContractError::Inconsistent {
+                    field: "application_problem_envelope",
+                },
+            )
+        });
+        let mut request = Request::post("/feedback/list")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("HTTP request");
+        request
+            .extensions_mut()
+            .insert(RequestId::new("request.http.contract-error").expect("request id"));
+        request.extensions_mut().insert(HttpApplicationControls {
+            deadline: Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            cancellation: CancellationSignal::active("cancel.http.contract-error")
+                .expect("cancellation"),
+        });
+
+        let response = app.oneshot(request).await.expect("router response");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            to_bytes(response.into_body(), 1024)
+                .await
+                .expect("HTTP body")
+                .is_empty(),
+            "a contract failure must not fabricate an application problem envelope"
+        );
     }
 
     #[tokio::test]
@@ -381,10 +415,12 @@ mod tests {
                     ),
                 )
                 .expect("test application problem envelope");
-                CanonicalInvocationResult::<serde_json::Value>::new(
-                    BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
-                        .expect("binding"),
-                    Err(problem),
+                Ok::<_, ApplicationContractError>(
+                    CanonicalInvocationResult::<serde_json::Value>::new(
+                        BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
+                            .expect("binding"),
+                        Err(problem),
+                    ),
                 )
             }
         });
@@ -451,10 +487,12 @@ mod tests {
                     ),
                 )
                 .expect("test application problem envelope");
-                CanonicalInvocationResult::<serde_json::Value>::new(
-                    BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
-                        .expect("binding"),
-                    Err(problem),
+                Ok::<_, ApplicationContractError>(
+                    CanonicalInvocationResult::<serde_json::Value>::new(
+                        BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
+                            .expect("binding"),
+                        Err(problem),
+                    ),
                 )
             }
         });

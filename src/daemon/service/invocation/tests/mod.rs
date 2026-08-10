@@ -21,9 +21,7 @@ impl crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1
         _context: &'a RequestContext,
         _query: tracedecay_usecases::session::SessionTemporalQuery,
     ) -> crate::daemon::session_retrieval::SessionApplicationRetrievalFutureV1<'a> {
-        Box::pin(async {
-            crate::daemon::session_retrieval::SessionRetrievalServiceOutcome::Denied
-        })
+        Box::pin(async { crate::daemon::session_retrieval::SessionRetrievalServiceOutcome::Denied })
     }
 }
 
@@ -56,13 +54,8 @@ pub(in crate::daemon) fn empty_work_proposal_routing(
     )
     .expect("empty Work routing snapshot");
     let digest = snapshot.effective_behavior_digest.clone();
-    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(
-        scope,
-        revision,
-        &snapshot,
-        &digest,
-    )
-    .expect("empty Work proposal routing");
+    let routing = DaemonWorkProposalRoutingAuthorityV1::mount(scope, revision, &snapshot, &digest)
+        .expect("empty Work proposal routing");
     (routing, digest)
 }
 
@@ -139,21 +132,6 @@ fn unavailable_lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
     ))
 }
 
-struct CountingFeedbackCycle(Arc<std::sync::atomic::AtomicUsize>);
-
-impl FeedbackCycleRuntimePort for CountingFeedbackCycle {
-    fn execute(
-        &self,
-        _request: FeedbackCycleRequest,
-    ) -> LspRuntimeFuture<Result<(), LspRuntimeFailure>> {
-        let calls = Arc::clone(&self.0);
-        Box::pin(async move {
-            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        })
-    }
-}
-
 fn unavailable_feedback_cycle(
     observations: Arc<RecordingFeedbackCycleObservations>,
 ) -> UnavailableFeedbackCycleRuntimeV1 {
@@ -161,64 +139,6 @@ fn unavailable_feedback_cycle(
         ProjectId::new("project.feedback-cycle-unavailable").expect("project"),
         observations,
     )
-}
-
-fn hook_envelope(event: HookEventV2) -> HookEventEnvelopeV2 {
-    HookEventEnvelopeV2 {
-        schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
-        event_id: [1; 16],
-        producer: tracedecay_hooks::HookHostV1::Codex,
-        protected_session_id: [2; 32],
-        project_id: [3; 16],
-        repository_id: [4; 16],
-        worktree_id: [5; 16],
-        worktree_epoch: 1,
-        binding_token: [6; 32],
-        ordering: tracedecay_hooks::HookOrderingV1::Unknown,
-        observed_at: UtcMicros(1),
-        event,
-    }
-}
-
-fn hook_binding() -> HookScopeBindingV1 {
-    HookScopeBindingV1 {
-        host: tracedecay_hooks::HookHostV1::Codex,
-        project_id: [3; 16],
-        repository_id: [4; 16],
-        worktree_id: [5; 16],
-        worktree_epoch: 1,
-        binding_token: [6; 32],
-        capabilities: [
-            tracedecay_hooks::HookEventFamily::SessionBoundary,
-            tracedecay_hooks::HookEventFamily::PromptBoundary,
-            tracedecay_hooks::HookEventFamily::ToolLifecycle,
-            tracedecay_hooks::HookEventFamily::SavedEdit,
-            tracedecay_hooks::HookEventFamily::TestLifecycle,
-        ]
-        .into_iter()
-        .map(|family| tracedecay_hooks::HookCapabilityV1 {
-            family,
-            support: tracedecay_hooks::stock_event_support(
-                tracedecay_hooks::HookHostV1::Codex,
-                family,
-            ),
-        })
-        .collect(),
-    }
-}
-
-fn hook_lifecycle() -> ContextScoutLifecycleAddressV1 {
-    ContextScoutLifecycleAddressV1 {
-        profile_id: tracedecay_domain::UserProfileId::new("profile.advisory-hook").unwrap(),
-        provider_id: tracedecay_domain::ProviderId::new("codex").unwrap(),
-        project_id: ProjectId::new("project.advisory-hook").unwrap(),
-        worktree_id: tracedecay_domain::WorktreeId::new("worktree.advisory-hook").unwrap(),
-        session_id: tracedecay_domain::SessionId::new("session.advisory-hook").unwrap(),
-        thread_id: tracedecay_domain::ThreadId::new("thread.advisory-hook").unwrap(),
-        turn_id: tracedecay_domain::TurnId::new("turn.advisory-hook").unwrap(),
-        agent_id: tracedecay_domain::AgentInstanceId::new("agent.advisory-hook").unwrap(),
-        logical_message_id: tracedecay_domain::MessageId::new("message.advisory-hook").unwrap(),
-    }
 }
 
 mod configuration_registrars_tests;

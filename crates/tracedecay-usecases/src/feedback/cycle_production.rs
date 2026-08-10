@@ -484,7 +484,7 @@ pub async fn resolve_production_feedback_cycle_parts(
         provider_candidates,
         affected_tests: Arc::new(
             crate::primitives::TraceDecayAffectedTestsPortV1::with_generation_attribution(
-                Arc::clone(&input.graph),
+                input.scope.project_id.clone(),
                 provider_seed.generation_id.clone(),
                 input.test_attribution,
             ),

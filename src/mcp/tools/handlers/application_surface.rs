@@ -1,10 +1,10 @@
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, InvocationTarget,
-    RequestId,
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationProblemKind, ApplicationResult, CancellationSignal,
+    Deadline, InvocationTarget, RequestId, RetainedSurfaceOperation,
 };
 use tracedecay_domain::UtcMicros;
-use tracedecay_tool_catalog::BindingId;
+use tracedecay_tool_catalog::{BindingId, BindingSurface, ProfileId, SurfaceOperationName};
 
 use crate::application_output::view::CanonicalHumanView;
 use crate::application_surface::{
@@ -33,11 +33,74 @@ pub(super) fn complete_protocol_controls(
     cancellation: Option<CancellationSignal>,
 ) -> Result<Option<(Deadline, CancellationSignal)>> {
     let tool_name = format!("tracedecay_{}", operation.as_str());
-    let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(&tool_name).map_err(
+    complete_protocol_controls_for_tool(&tool_name, request_id, deadline, cancellation)
+}
+
+pub(super) fn complete_retained_protocol_controls(
+    operation: RetainedSurfaceOperation,
+    request_id: &RequestId,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
+) -> Result<Option<(Deadline, CancellationSignal)>> {
+    let application_operation = tracedecay_application::retained_surface_application_operation(
+        operation,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("could not resolve retained application deadline: {error}"),
+    })?;
+    let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("could not resolve retained application profile: {error}"),
+        }
+    })?;
+    let operation_name =
+        SurfaceOperationName::new(operation.as_str()).map_err(|error| TraceDecayError::Config {
+            message: format!("could not resolve retained application operation: {error}"),
+        })?;
+    let capability = super::retained_catalog::retained_mcp_composition()?
+        .snapshot()
+        .resolve_binding(
+            &profile_id,
+            BindingSurface::Mcp,
+            &operation_name,
+            1,
+            &std::collections::BTreeSet::new(),
+        )
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "retained MCP application deadline authority is unavailable".to_owned(),
+        })?;
+    if capability.capability_id() != application_operation.capability_id()
+        || capability.use_case_id() != application_operation.use_case_id()
+    {
+        return Err(TraceDecayError::Config {
+            message: "retained MCP deadline authority resolved a different application operation"
+                .to_owned(),
+        });
+    }
+    let ceiling = std::time::Duration::from_millis(capability.deadline().maximum_millis());
+    complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
+}
+
+fn complete_protocol_controls_for_tool(
+    tool_name: &str,
+    request_id: &RequestId,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
+) -> Result<Option<(Deadline, CancellationSignal)>> {
+    let ceiling = crate::mcp::tools::binding::canonical_tool_dispatch_ceiling(tool_name).map_err(
         |error| TraceDecayError::Config {
             message: format!("could not resolve application surface deadline: {error}"),
         },
     )?;
+    complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
+}
+
+fn complete_protocol_controls_with_ceiling(
+    ceiling: std::time::Duration,
+    request_id: &RequestId,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
+) -> Result<Option<(Deadline, CancellationSignal)>> {
     let ceiling_micros =
         i64::try_from(ceiling.as_micros()).map_err(|_| TraceDecayError::Config {
             message: "application surface deadline exceeds the domain clock".to_owned(),
@@ -169,7 +232,23 @@ fn render_result_for_root(
     project_root: Option<&std::path::Path>,
     result: ApplicationSurfaceInvocationResult,
 ) -> Result<crate::mcp::tools::ToolResult> {
-    let (value, failure_message) = match &result.result {
+    render_result_parts(
+        project_root,
+        result.operation.as_str(),
+        &result.binding_id,
+        &result.result,
+        result.requested_format,
+    )
+}
+
+fn render_result_parts(
+    project_root: Option<&std::path::Path>,
+    operation: &str,
+    binding_id: &BindingId,
+    result: &ApplicationResult<Value>,
+    requested_format: RequestedOutputFormat,
+) -> Result<crate::mcp::tools::ToolResult> {
+    let (value, failure_message) = match result {
         Ok(application) => (serde_json::to_value(application)?, None),
         Err(problem) => {
             let failure_message = match problem.problem.kind() {
@@ -182,22 +261,18 @@ fn render_result_for_root(
             (serde_json::to_value(problem)?, Some(failure_message))
         }
     };
-    let markdown = match result.requested_format {
+    let markdown = match requested_format {
         RequestedOutputFormat::Json => None,
-        RequestedOutputFormat::Markdown => Some(render_canonical_markdown(
-            result.operation.as_str(),
-            &result.binding_id,
-            &result.result,
-        )?),
+        RequestedOutputFormat::Markdown => {
+            Some(render_canonical_markdown(operation, binding_id, result)?)
+        }
     };
-    let text = super::super::render::finalize_with_format(
-        project_root,
-        result.requested_format,
-        &value,
-        || markdown.unwrap_or_default(),
-    );
+    let text =
+        super::super::render::finalize_with_format(project_root, requested_format, &value, || {
+            markdown.unwrap_or_default()
+        });
     let mut rendered = super::text_tool_result(&text);
-    if let Err(problem) = &result.result {
+    if let Err(problem) = result {
         // Keep the typed problem machine-readable in every presentation
         // format: markdown rendering alone would strand the kind/code in
         // prose that clients cannot classify.
@@ -221,7 +296,7 @@ fn render_result_for_root(
 
 pub(super) fn render_retained_result(
     project_root: Option<&std::path::Path>,
-    operation: ApplicationSurfaceOperation,
+    operation: RetainedSurfaceOperation,
     binding_id: BindingId,
     result: ApplicationResult<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>,
     requested_format: RequestedOutputFormat,
@@ -231,14 +306,12 @@ pub(super) fn render_retained_result(
             message: format!("invalid retained application result: {error}"),
         }
     })?;
-    render_result_for_root(
+    render_result_parts(
         project_root,
-        ApplicationSurfaceInvocationResult {
-            operation,
-            binding_id,
-            result,
-            requested_format,
-        },
+        operation.as_str(),
+        &binding_id,
+        &result,
+        requested_format,
     )
 }
 
@@ -342,7 +415,8 @@ mod tests {
                 )
                 .unwrap(),
             ),
-        ));
+        )
+        .expect("canonical problem fixture"));
 
         let rendered = render_canonical_markdown(
             "feedback_list",

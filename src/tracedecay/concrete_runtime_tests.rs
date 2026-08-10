@@ -8,29 +8,58 @@ use tracedecay_application::retrieval::{
     SourceReadPortOutcome, SourceReadPrimitivePort, SourceReadPrimitiveRequest,
 };
 use tracedecay_application::{
-    ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-    Deadline, DisclosureClass, PageRequest, RequestContext, RequestId, ResolvedScope,
-    ResultContractRef, ResultProjection,
+    ApplicationOperation, CancellationContext, CancellationSignal, CapabilityGrantId,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, PageRequest, RequestAdmission,
+    RequestContext, RequestId, ResolvedScope, ResultContractRef, ResultProjection,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
+    ActorId, CodeGenerationId, ContentDigest, FileOccurrenceId, LanguageId, ManifestDigest,
+    ProjectId, RefId, RepositoryId, SanitizedCodeFileV1, SnapshotFileDispositionV1, UtcMicros,
+    WorktreeId,
 };
+use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
+use tracedecay_usecases::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
+    VerifiedCodeGraphRead,
+};
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 use crate::application::primitives::SourceReadAdapter;
 
 const NOW: UtcMicros = UtcMicros(1_000);
 
+#[derive(Clone)]
+struct FixtureCodeGraphProjection {
+    scope: ResolvedScope,
+    store: Arc<tracedecay_code_index::graph_projection::CodeGraphProjectionStore>,
+}
+
+impl CodeGraphProjectionReadPort for FixtureCodeGraphProjection {
+    fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+        Box::pin(async move {
+            if request.context.scope() != &self.scope {
+                return Err(CodeGraphReadError::Denied);
+            }
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            match request.context.admission_at(request.observed_at) {
+                RequestAdmission::Admitted => {}
+                RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
+                RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
+            }
+            VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store))
+        })
+    }
+}
+
 #[tokio::test]
 async fn source_reads_reuse_the_cross_session_cache() {
     let root = TempDir::new().expect("temporary project");
     fs::create_dir_all(root.path().join("src")).expect("source directory");
-    fs::write(
-        root.path().join("src/lib.rs"),
-        "pub fn first() {}\npub fn second() {}\n",
-    )
-    .expect("fixture source");
+    let source = "pub fn first() {}\npub fn second() {}\n";
+    fs::write(root.path().join("src/lib.rs"), source).expect("fixture source");
     let profile_root = root.path().join(".tracedecay-test-profile");
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
@@ -53,7 +82,43 @@ async fn source_reads_reuse_the_cross_session_cache() {
             .expect("initialize graph"),
     );
     let (scope, context, operation) = application_context("source-read");
-    let adapter = SourceReadAdapter::new(graph, scope).expect("source adapter");
+    let generation = CodeGenerationId::new("generation.source-read-cache.1").unwrap();
+    let cancellation = CancellationSignal::active("cancel.source-read-cache-fixture").unwrap();
+    let store = tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore::memory(
+        &cancellation,
+    )
+    .expect("hermetic graph projection");
+    let files = [SanitizedCodeFileV1 {
+        file_occurrence_id: FileOccurrenceId::try_from("file:src/lib.rs".to_owned()).unwrap(),
+        logical_path: "src/lib.rs".to_owned(),
+        language: Some(LanguageId::new("rust").unwrap()),
+        content_digest: ContentDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        disposition: SnapshotFileDispositionV1::Present,
+    }];
+    let symbols = tracedecay_code_index::lineage::GenerationSymbolIndexV1::new(
+        generation.clone(),
+        Vec::new(),
+    )
+    .expect("empty symbol index");
+    store
+        .publish_indexed_with_cancellation(
+            &generation,
+            &[],
+            &[],
+            &files,
+            &symbols,
+            Arc::new(NeverCancelled),
+        )
+        .expect("publish source-read fixture generation");
+    let code_graph = Arc::new(FixtureCodeGraphProjection {
+        scope: scope.clone(),
+        store: Arc::new(
+            store
+                .verified_store(&generation)
+                .expect("verified source-read fixture generation"),
+        ),
+    });
+    let adapter = SourceReadAdapter::new(graph, code_graph, scope).expect("source adapter");
     let request = SourceReadPrimitiveRequest {
         file: "src/lib.rs".to_owned(),
         mode: SourceReadModeV1::Lines,

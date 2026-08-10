@@ -7,9 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use tracedecay::agents::host_component_registration::{
-    CatalogHostComponentRegistrationAuthority, project_local_registration_path,
-};
+use tracedecay::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay::user_config::UserConfig;
 
 mod automation;
@@ -899,103 +897,18 @@ fn load_host_lifecycle_user_config() -> tracedecay::errors::Result<UserConfig> {
     })
 }
 
-fn apply_project_local_component_set(
-    agent_id: &str,
-    operation: HostBundleCliOperation,
-    project_path: &Path,
-    home: &Path,
+pub(crate) async fn handle_project_local_lifecycle_command(
+    _agent_id: String,
+    _operation: HostBundleCliOperation,
 ) -> tracedecay::errors::Result<()> {
-    if project_local_registration_path(agent_id, home, project_path).is_none() {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("agent {agent_id:?} has no atomic project-local lifecycle route"),
-        });
-    }
-    let host = host_kind_for_agent(agent_id)?;
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
-            message: "system clock is before the Unix epoch".to_string(),
-        })?
-        .as_secs();
-    let component_set =
-        tracedecay::agents::host_bundle_registry::verified_embedded_project_host_component_set(
-            host, agent_id, now_unix,
-        )
-        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-            message: format!("project-local {agent_id:?} component set is unavailable: {error}"),
-        })?;
-    let lifecycle_root = project_path.join(".tracedecay/host-lifecycle");
-    let request = component_set_request(&component_set, operation, true)?;
-    let mut writer =
-        tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
-            project_path,
-            &lifecycle_root,
-        )
-        .map_err(host_bundle_error)?;
-    recover_pending_component_set_journal(
-        agent_id,
-        component_set.component_set.host,
-        &mut writer,
-        |operation| {
-            CatalogHostComponentRegistrationAuthority::new_project_local(
-                agent_id,
-                home,
-                project_path,
-                &lifecycle_root,
-                operation,
-            )
-        },
-    )?;
-    let mut registration = CatalogHostComponentRegistrationAuthority::new_project_local(
-        agent_id,
-        home,
-        project_path,
-        &lifecycle_root,
-        request.lifecycle.operation,
-    )?;
-    let mut transaction =
-        tracedecay::agents::host_bundle_v2::HostComponentSetTransactionV1::new(&mut writer);
-    let preview = transaction
-        .preview(
-            &component_set.component_set,
-            &request,
-            &component_set,
-            &mut registration,
-        )
-        .map_err(host_bundle_error)?;
-    let receipt = transaction
-        .execute_confirmed(
-            &component_set.component_set,
-            &request,
-            &preview,
-            &component_set,
-            &mut registration,
-        )
-        .map_err(host_bundle_error)?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m {} {:?} project-local: {} component(s), receipt {}",
-        agent_id,
-        request.lifecycle.operation,
-        receipt.component_receipts.len(),
-        hex::encode(receipt.operation_id)
-    );
-    Ok(())
+    Err(project_local_host_lifecycle_unavailable())
 }
 
-pub(crate) async fn handle_project_local_lifecycle_command(
-    agent_id: String,
-    operation: HostBundleCliOperation,
-) -> tracedecay::errors::Result<()> {
-    let home = tracedecay::agents::home_dir().ok_or_else(|| {
-        tracedecay::errors::TraceDecayError::Config {
-            message: "could not determine home directory".to_string(),
-        }
-    })?;
-    let project_path =
-        std::env::current_dir().map_err(|error| tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not determine current project directory: {error}"),
-        })?;
-    apply_project_local_component_set(&agent_id, operation, &project_path, &home)
+fn project_local_host_lifecycle_unavailable() -> tracedecay::errors::TraceDecayError {
+    tracedecay::errors::TraceDecayError::Config {
+        message: "project-local host lifecycle is unavailable; install the canonical user-level host component set instead"
+            .to_string(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2845,6 +2758,9 @@ pub(crate) async fn handle_install_command(
     automation: Option<CodexAutomationInstall>,
 ) -> tracedecay::errors::Result<()> {
     validate_codex_automation_flags(agent.as_deref(), automation)?;
+    if local {
+        return Err(project_local_host_lifecycle_unavailable());
+    }
     let home = tracedecay::agents::home_dir().ok_or_else(|| {
         tracedecay::errors::TraceDecayError::Config {
             message: "could not determine home directory".to_string(),
@@ -2857,58 +2773,6 @@ pub(crate) async fn handle_install_command(
                 .to_string(),
         }
     })?;
-    if local {
-        let project_path =
-            std::env::current_dir().map_err(|e| tracedecay::errors::TraceDecayError::Config {
-                message: format!("could not determine current project directory: {e}"),
-            })?;
-        let mut installed_names: Vec<String> = Vec::new();
-
-        if let Some(id) = agent {
-            let ag = tracedecay::agents::get_integration(&id)?;
-            apply_project_local_component_set(
-                &id,
-                HostBundleCliOperation::Install,
-                &project_path,
-                &home,
-            )?;
-            if let Some(options) = automation.filter(|_| id == "codex") {
-                let scoped_project_path = validate_codex_automation_project_path()?;
-                install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
-            }
-            installed_names.push(ag.name().to_string());
-        } else {
-            let (to_install, _) = tracedecay::agents::pick_integrations_interactive(&home, &[])?;
-            for id in &to_install {
-                let ag = tracedecay::agents::get_integration(id)?;
-                if ag.supports_local_install() {
-                    apply_project_local_component_set(
-                        id,
-                        HostBundleCliOperation::Install,
-                        &project_path,
-                        &home,
-                    )?;
-                    installed_names.push(ag.name().to_string());
-                } else {
-                    eprintln!(
-                        "Skipping {}: project-local install is not supported",
-                        ag.name()
-                    );
-                }
-            }
-        }
-
-        eprintln!();
-        if installed_names.is_empty() {
-            eprintln!("No local changes.");
-        } else {
-            for name in &installed_names {
-                eprintln!("\x1b[32m+\x1b[0m {name} (local)");
-            }
-        }
-        return Ok(());
-    }
-
     let mut user_cfg = load_host_lifecycle_user_config()?;
 
     let mut installed_names: Vec<String> = Vec::new();

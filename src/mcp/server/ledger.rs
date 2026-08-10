@@ -203,18 +203,6 @@ impl McpServer {
         self.spawn_observed_ledger_write(std::future::pending::<()>());
     }
 
-    /// Re-read the file-to-token-count map from the DB and swap it into the
-    /// cached `file_token_map`. Called after each lazy sync triggered by
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so the accounting
-    /// tracks newly indexed / removed files.
-    pub async fn refresh_file_token_map(&self) {
-        // best-effort; leave stale map in place if the DB read fails
-        let Ok(fresh) = self.cg_snapshot().await.get_file_token_map().await else {
-            return;
-        };
-        *crate::mcp::server::requests::recover_lock(&self.file_token_map) = fresh;
-    }
-
     /// Internal: snapshot of the current `file_token_map`. Exposed for
     /// integration tests only; not part of the stable public API.
     #[doc(hidden)]

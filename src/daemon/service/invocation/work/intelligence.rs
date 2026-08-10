@@ -45,7 +45,9 @@ pub(super) fn generate_proposal(
         .database
         .work_intelligence_service(binding)
         .map_err(|_| {
-            tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable
+            work_product_problem(
+                tracedecay_application::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+            )
         })?
         .generate_proposal(
             context,

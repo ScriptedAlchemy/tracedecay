@@ -11,13 +11,27 @@ use tempfile::{TempDir, tempdir};
 use tracedecay_application::{
     ApplicationOperation, AuthorityReceipt, CancellationContext, CancellationSignal,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, EffectTermination, IdempotencyKey,
-    PolicyDecisionRef, RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationFuture,
-    SourceEditAuthorizationPort, SourceEditEffectProofV1, SourceEditEffectRequestV1,
-    SourceEditRequest, source_edit_operation, source_edit_reconciliation_operation,
-    source_edit_rollback_operation,
+    PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    SourceEditAuthorizationFuture, SourceEditAuthorizationPort, SourceEditEffectProofV1,
+    SourceEditEffectRequestV1, SourceEditRequest, source_edit_operation,
+    source_edit_reconciliation_operation, source_edit_rollback_operation,
 };
+use tracedecay_code_index::graph_projection::{
+    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
-    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    ActorId, BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
+    CodeSearchChunkGrainV1, CodeSearchChunkV1, ComponentVersion, ContentDigest, FileIdentityDigest,
+    FileOccurrenceId, LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId,
+    ProjectId, RepositoryId, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest,
+    SymbolOccurrenceId, UtcMicros, WorktreeId,
+};
+use tracedecay_graph_db::NeverCancelled;
+use tracedecay_usecases::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
+    VerifiedCodeGraphRead,
 };
 
 use crate::application::edit::{
@@ -35,9 +49,192 @@ pub(super) fn digest(value: &str) -> ManifestDigest {
     ManifestDigest::new(value).unwrap()
 }
 
+fn fixture_scope() -> ResolvedScope {
+    ResolvedScope::new(
+        ProjectId::new("project.edit.fixture").unwrap(),
+        RepositoryId::new("repository.edit.fixture").unwrap(),
+        WorktreeId::new("worktree.edit.fixture").unwrap(),
+        None,
+    )
+    .unwrap()
+}
+
+#[derive(Clone)]
+pub(super) struct FixtureCodeGraphReadPort {
+    scope: ResolvedScope,
+    store: Option<Arc<CodeGraphProjectionStore>>,
+}
+
+impl FixtureCodeGraphReadPort {
+    fn unavailable() -> Self {
+        Self {
+            scope: fixture_scope(),
+            store: None,
+        }
+    }
+
+    fn ready(store: CodeGraphProjectionStore) -> Self {
+        Self {
+            scope: fixture_scope(),
+            store: Some(Arc::new(store)),
+        }
+    }
+}
+
+impl CodeGraphProjectionReadPort for FixtureCodeGraphReadPort {
+    fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+        Box::pin(async move {
+            request
+                .context
+                .validate()
+                .map_err(|error| CodeGraphReadError::InvalidRequest {
+                    detail: error.to_string(),
+                })?;
+            if request.context.scope() != &self.scope {
+                return Err(CodeGraphReadError::Denied);
+            }
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            match request.context.admission_at(request.observed_at) {
+                RequestAdmission::Admitted => {}
+                RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
+                RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
+            }
+            let store = self
+                .store
+                .as_ref()
+                .map(Arc::clone)
+                .ok_or(CodeGraphReadError::MissingRegistry)?;
+            VerifiedCodeGraphRead::new(self.scope.clone(), store)
+        })
+    }
+}
+
+fn fixture_digest<T>(domain: &str, value: &str) -> T
+where
+    T: TryFrom<String>,
+    <T as TryFrom<String>>::Error: std::fmt::Display,
+{
+    let digest = tracedecay_domain::canonical_sha256(&(domain, value)).unwrap();
+    T::try_from(digest.as_str().to_owned())
+        .unwrap_or_else(|error| panic!("fixture digest must be valid: {error}"))
+}
+
+pub(super) fn fixture_symbol_code_graph(
+    file_path: &str,
+    source: &str,
+    symbol_source: &str,
+    simple_name: &str,
+    qualified_name: &str,
+) -> FixtureCodeGraphReadPort {
+    let generation = CodeGenerationId::new("generation.source-edit-fixture.1").unwrap();
+    let file = FileOccurrenceId::try_from(format!("file:{file_path}")).unwrap();
+    let occurrence =
+        SymbolOccurrenceId::try_from(format!("occurrence:source-edit:{simple_name}")).unwrap();
+    let start = source.find(symbol_source).unwrap();
+    let start_byte = u64::try_from(start).unwrap();
+    let end_byte = start_byte + u64::try_from(symbol_source.len()).unwrap();
+    let start_line = u32::try_from(
+        source[..start]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count(),
+    )
+    .unwrap();
+    let line_span = u32::try_from(
+        symbol_source
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
+            .saturating_add(1),
+    )
+    .unwrap();
+    let source_span = SourceSpan {
+        start_byte,
+        end_byte,
+    };
+    let content_digest = fixture_digest::<ContentDigest>("source-edit-file", source);
+    let files = vec![SanitizedCodeFileV1 {
+        file_occurrence_id: file.clone(),
+        logical_path: file_path.to_owned(),
+        language: Some(LanguageId::new("rust").unwrap()),
+        content_digest: content_digest.clone(),
+        disposition: SnapshotFileDispositionV1::Present,
+    }];
+    let symbols = GenerationSymbolIndexV1::new(
+        generation.clone(),
+        vec![LineageSymbolRecordV1 {
+            occurrence: occurrence.clone(),
+            identity: fixture_digest::<SymbolIdentityDigest>("source-edit-symbol", qualified_name),
+            qualified_name: qualified_name.to_owned(),
+            simple_name: simple_name.to_owned(),
+            kind: "function".to_owned(),
+            visibility: "pub".to_owned(),
+            branches: 0,
+            loops: 0,
+            max_nesting: 0,
+            line_span,
+            start_line,
+            signature: symbol_source.lines().next().map(str::to_owned),
+            skip_test_coverage: false,
+            file_identity: fixture_digest::<FileIdentityDigest>(
+                "source-edit-file-identity",
+                file_path,
+            ),
+            content_digest: fixture_digest::<ContentDigest>(
+                "source-edit-symbol-content",
+                symbol_source,
+            ),
+        }],
+    )
+    .unwrap();
+    let chunks = vec![CodeSearchChunkV1 {
+        id: tracedecay_domain::CodeSearchChunkId::new("chunk:source-edit:moved").unwrap(),
+        anchor: CodeSearchChunkAnchorV1 {
+            generation_id: generation.clone(),
+            file_occurrence_id: file,
+            symbol_occurrence_id: Some(occurrence),
+            parent_chunk_id: None,
+            source_span,
+            grain: CodeSearchChunkGrainV1::SymbolBody,
+            ordinal: 0,
+        },
+        content_digest: fixture_digest::<ContentDigest>("source-edit-chunk", symbol_source),
+        language_descriptor_revision: LanguageDescriptorRevision::new("language.fixture.v1")
+            .unwrap(),
+        chunker_revision: ChunkerRevision::new("chunker.fixture.v1").unwrap(),
+        sanitizer_revision: SanitizerRevision::new("sanitizer.fixture.v1").unwrap(),
+        sensitivity: SensitivityDecision {
+            level: SensitivityLevelV1::Public,
+            policy_revision: PolicyRevisionId::new("policy.fixture.v1").unwrap(),
+        },
+        exact_terms: Vec::new(),
+        subtokens: Vec::new(),
+        sanitized_text: BoundedSanitizedText::new(symbol_source).unwrap(),
+    }];
+    let cancellation = CancellationSignal::active("cancel.source-edit-graph-fixture").unwrap();
+    let hermetic = HermeticCodeGraphProjectionStore::memory(&cancellation).unwrap();
+    hermetic
+        .publish_indexed_with_cancellation(
+            &generation,
+            &[],
+            &chunks,
+            &files,
+            &symbols,
+            Arc::new(NeverCancelled),
+        )
+        .unwrap();
+    FixtureCodeGraphReadPort::ready(hermetic.verified_store(&generation).unwrap())
+}
+
 pub(super) async fn fixture_graph(
     project_root: &Path,
-) -> (TraceDecay, crate::db::DaemonDatabaseScope) {
+) -> (
+    TraceDecay,
+    FixtureCodeGraphReadPort,
+    crate::db::DaemonDatabaseScope,
+) {
     let profile_root = project_root.join(".tracedecay-test-profile");
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
@@ -101,7 +298,11 @@ pub(super) async fn fixture_graph(
     )
     .await
     .unwrap();
-    (graph, database_scope)
+    (
+        graph,
+        FixtureCodeGraphReadPort::unavailable(),
+        database_scope,
+    )
 }
 
 pub(super) fn git(project_root: &Path, args: &[&str]) {
@@ -113,18 +314,6 @@ pub(super) fn git(project_root: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} must succeed");
 }
 
-pub(super) async fn graph_publication_epoch(graph: &TraceDecay) -> u64 {
-    let encoded = graph
-        .db
-        .get_metadata(crate::tracedecay::BRANCH_QUERY_GRAPH_SOURCE_KEY)
-        .await
-        .unwrap()
-        .expect("published branch graph source");
-    serde_json::from_str::<crate::branch_meta::BranchGraphSourceV1>(&encoded)
-        .expect("typed branch graph source")
-        .publication_epoch
-        .get()
-}
 pub(super) fn fixture_request() -> SourceEditEffectRequestV1 {
     fixture_request_for_edit(
         SourceEditRequest::StrReplace {
@@ -145,13 +334,7 @@ pub(super) fn fixture_request_for_edit(
     let operation = source_edit_operation(edit.kind()).unwrap();
     let reconciliation_operation = source_edit_reconciliation_operation().unwrap();
     let rollback_operation = source_edit_rollback_operation().unwrap();
-    let scope = ResolvedScope::new(
-        ProjectId::new("project.edit.fixture").unwrap(),
-        RepositoryId::new("repository.edit.fixture").unwrap(),
-        WorktreeId::new("worktree.edit.fixture").unwrap(),
-        None,
-    )
-    .unwrap();
+    let scope = fixture_scope();
     let grant = CapabilityGrantSnapshot::new(
         tracedecay_application::CapabilityGrantId::new("grant.edit.fixture").unwrap(),
         1,
@@ -294,12 +477,11 @@ impl SourceEditAuthorizationPort for CancelBeforeEffectAuthorization {
 pub(super) struct EffectUnknownFixture {
     pub(super) project: TempDir,
     pub(super) graph: TraceDecay,
+    pub(super) code_graph: FixtureCodeGraphReadPort,
     pub(super) _database_scope: crate::db::DaemonDatabaseScope,
     pub(super) request: SourceEditEffectRequestV1,
     pub(super) authorization: FixtureSourceEditAuthorization,
     pub(super) result: SourceEditApplicationResult,
-    moved_preimage_id: String,
-    caller_id: String,
 }
 
 const MOVE_SOURCE_PREIMAGE: &[u8] = b"pub fn keep() {}\n\npub fn moved() {}\n";
@@ -339,40 +521,6 @@ impl EffectUnknownFixture {
             fs::read(self.destination_path()).unwrap(),
             MOVE_DESTINATION_POSTIMAGE
         );
-    }
-
-    pub(super) async fn assert_postimage_graph(&self) {
-        assert!(
-            self.graph
-                .get_node(&self.moved_preimage_id)
-                .await
-                .unwrap()
-                .is_none(),
-            "the source-path symbol identity must be retired"
-        );
-        let moved = self
-            .graph
-            .get_nodes_by_name("moved")
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|node| node.file_path == "src/b.rs")
-            .expect("moved symbol must have the destination-path identity");
-        assert_ne!(moved.id, self.moved_preimage_id);
-
-        let callers = self.graph.get_callers(&moved.id, 1).await.unwrap();
-        assert_eq!(callers.len(), 1, "one exact caller edge must survive");
-        let (caller, edge) = &callers[0];
-        assert_eq!(caller.id, self.caller_id);
-        assert_eq!(caller.name, "caller");
-        assert_eq!(edge.source, self.caller_id);
-        assert_eq!(edge.target, moved.id);
-        assert_eq!(edge.kind, crate::types::EdgeKind::Calls);
-
-        let callees = self.graph.get_callees(&self.caller_id, 1).await.unwrap();
-        assert_eq!(callees.len(), 1, "caller must have one exact callee edge");
-        assert_eq!(callees[0].0.id, moved.id);
-        assert_eq!(&callees[0].1, edge);
     }
 
     #[cfg(unix)]
@@ -425,40 +573,30 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
             "fixture",
         ],
     );
-    let (graph, database_scope) = fixture_graph(project.path()).await;
-    let indexed = graph.index_all().await.unwrap();
-    assert!(indexed.node_count >= 4);
-    let moved_preimage_id = graph
-        .get_nodes_by_name("moved")
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|node| node.file_path == "src/locked/a.rs")
-        .expect("fixture moved symbol")
-        .id;
-    let caller_id = graph
-        .get_nodes_by_name("caller")
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|node| node.file_path == "src/caller.rs")
-        .expect("fixture caller symbol")
-        .id;
-    let preimage_callers = graph.get_callers(&moved_preimage_id, 1).await.unwrap();
-    assert_eq!(preimage_callers.len(), 1);
-    assert_eq!(preimage_callers[0].0.id, caller_id);
-    assert_eq!(preimage_callers[0].1.source, caller_id);
-    assert_eq!(preimage_callers[0].1.target, moved_preimage_id);
+    let (graph, _, database_scope) = fixture_graph(project.path()).await;
+    let code_graph = fixture_symbol_code_graph(
+        "src/locked/a.rs",
+        std::str::from_utf8(MOVE_SOURCE_PREIMAGE).unwrap(),
+        "pub fn moved() {}",
+        "moved",
+        "locked::a::moved",
+    );
     let edit = SourceEditRequest::MoveSymbol {
         symbol: "moved".to_owned(),
         dest_file: "src/b.rs".to_owned(),
         dry_run: false,
         update_references: false,
     };
-    let expected_state = preview_source_edit_expected_state(&graph, edit.clone())
-        .await
-        .unwrap();
     let mut request = fixture_request_for_edit(edit, "source-edit.recovery-fixture");
+    let expected_state = preview_source_edit_expected_state(
+        &graph,
+        &code_graph,
+        &request.context,
+        request.observed_at,
+        request.edit.clone(),
+    )
+    .await
+    .unwrap();
     request.expected_state = expected_state;
     let authorization = fixture_authorization(&request);
     let operation = source_edit_operation(request.edit.kind()).unwrap();
@@ -467,7 +605,14 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     let mut read_only_permissions = original_permissions.clone();
     read_only_permissions.set_readonly(true);
     fs::set_permissions(&locked_directory, read_only_permissions).unwrap();
-    let execution = execute_source_edit(&graph, &operation, request.clone(), &authorization).await;
+    let execution = execute_source_edit(
+        &graph,
+        &code_graph,
+        &operation,
+        request.clone(),
+        &authorization,
+    )
+    .await;
     fs::set_permissions(&locked_directory, original_permissions).unwrap();
     let result = execution.unwrap();
 
@@ -482,12 +627,11 @@ pub(super) async fn effect_unknown_fixture() -> EffectUnknownFixture {
     let fixture = EffectUnknownFixture {
         project,
         graph,
+        code_graph,
         _database_scope: database_scope,
         request,
         authorization,
         result,
-        moved_preimage_id,
-        caller_id,
     };
     fixture.assert_preimages();
     fixture

@@ -1,9 +1,8 @@
 //! Content-search tool handler: `tracedecay_grep`.
 //!
 //! Literal/regex search over UTF-8 text sources in the project working tree
-//! (respecting `.gitignore`), graph-enriched: each hit resolves the enclosing
-//! symbol from the code graph so the natural follow-up is `tracedecay_body`.
-//! This closes the gap that made agents fall back to raw `rg` —
+//! (respecting `.gitignore`). This closes the gap that made agents fall back
+//! to raw `rg` —
 //! `tracedecay_search` only matches symbol *names*, not file *content*.
 
 use std::fmt::Write as _;
@@ -31,16 +30,13 @@ const MAX_RESULTS_CAP: usize = 200;
 const DEFAULT_MAX_RESULTS: usize = 50;
 /// Hard cap on `context_lines`.
 const MAX_CONTEXT_LINES: usize = 3;
-/// A single content-search hit, enriched with the enclosing graph symbol.
+/// A single bounded content-search hit.
 struct GrepHit {
     file: String,
     line: u32,
     text: String,
     before: Vec<String>,
     after: Vec<String>,
-    symbol_name: Option<String>,
-    symbol_id: Option<String>,
-    symbol_kind: Option<String>,
 }
 
 impl From<GrepSearchHit> for GrepHit {
@@ -51,9 +47,6 @@ impl From<GrepSearchHit> for GrepHit {
             text: hit.text,
             before: hit.before,
             after: hit.after,
-            symbol_name: None,
-            symbol_id: None,
-            symbol_kind: None,
         }
     }
 }
@@ -135,15 +128,6 @@ pub(super) async fn handle_grep(
     let truncated = scan.truncated || hits.len() > max_results;
     hits.truncate(max_results);
 
-    // Enrich each hit with the smallest graph node that contains it.
-    for hit in &mut hits {
-        if let Ok(Some(node)) = cg.node_at_location(&hit.file, hit.line).await {
-            hit.symbol_name = Some(node.name);
-            hit.symbol_id = Some(node.id);
-            hit.symbol_kind = Some(node.kind.as_str().to_string());
-        }
-    }
-
     let touched_files = unique_file_paths(hits.iter().map(|hit| hit.file.as_str()));
     let output_value = build_output_value(
         &hits,
@@ -223,15 +207,6 @@ fn build_output_value(
                 "line": hit.line,
                 "text": hit.text,
             });
-            if let Some(name) = &hit.symbol_name {
-                item["symbol"] = json!(name);
-            }
-            if let Some(id) = &hit.symbol_id {
-                item["node_id"] = json!(id);
-            }
-            if let Some(kind) = &hit.symbol_kind {
-                item["kind"] = json!(kind);
-            }
             if !hit.before.is_empty() {
                 item["before"] = json!(hit.before);
             }
@@ -270,12 +245,7 @@ fn render_grep_md(
     }
 
     for hit in hits {
-        let location = match (&hit.symbol_name, &hit.symbol_kind) {
-            (Some(name), Some(kind)) => {
-                format!("{}:{} — **{name}** ({kind})", hit.file, hit.line)
-            }
-            _ => format!("{}:{}", hit.file, hit.line),
-        };
+        let location = format!("{}:{}", hit.file, hit.line);
         md.bullet(&location);
         for line in &hit.before {
             md.line(&format!("    {line}"));
@@ -283,11 +253,6 @@ fn render_grep_md(
         md.line(&format!("  > {}", hit.text));
         for line in &hit.after {
             md.line(&format!("    {line}"));
-        }
-        if let Some(id) = &hit.symbol_id {
-            md.line(&format!(
-                "  `{id}` · call `tracedecay_body` to read the symbol"
-            ));
         }
     }
 

@@ -555,6 +555,7 @@ pub enum SessionRetrievalOutcome<T> {
     Deleted,
     Denied,
     Unavailable,
+    ResetRequired,
     CursorManifestLimitExceeded {
         kind: CursorManifestLimitKindV1,
         observed: usize,
@@ -1404,7 +1405,7 @@ mod tests {
 
     #[test]
     fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 12] = [
+        let states: [SessionRetrievalOutcome<()>; 13] = [
             SessionRetrievalOutcome::CompleteZero {
                 freshness: SessionDataFreshness::Fresh,
             },
@@ -1422,6 +1423,7 @@ mod tests {
             SessionRetrievalOutcome::Deleted,
             SessionRetrievalOutcome::Denied,
             SessionRetrievalOutcome::Unavailable,
+            SessionRetrievalOutcome::ResetRequired,
             SessionRetrievalOutcome::CursorManifestLimitExceeded {
                 kind: CursorManifestLimitKindV1::Participants,
                 observed: 257,

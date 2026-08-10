@@ -19,12 +19,10 @@ use tracedecay_usecases::session::{
 };
 
 use super::contract::{
-    LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
-    LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,
-    SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalOmissionView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalUnavailable, SessionRetrievalUnavailableReason, SessionTemporalMetadataView,
-    SessionTemporalWatermarksView,
+    LcmDescribeServiceCommand, LcmDescribeServiceOutcome, LcmExpandServiceCommand,
+    LcmExpandServiceOutcome, SessionRetrievalExplanationView, SessionRetrievalOmissionView,
+    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
+    SessionTemporalMetadataView, SessionTemporalWatermarksView,
 };
 use super::{DaemonSessionRetrievalService, MESSAGE_SEARCH_MAX_BYTES, message_search_digest};
 
@@ -147,35 +145,24 @@ impl DaemonSessionRetrievalService {
         })
     }
 
-    async fn execute_lcm_describe(
-        &self,
-        command: LcmDescribeServiceCommand,
-    ) -> LcmDescribeServiceOutcome {
-        self.execute_lcm_describe_with_admission(command, None)
-            .await
-    }
-
     pub(super) async fn execute_lcm_describe_admitted(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,
         command: LcmDescribeServiceCommand,
     ) -> LcmDescribeServiceOutcome {
-        self.execute_lcm_describe_with_admission(command, Some((context, binding)))
-            .await
-    }
-
-    async fn execute_lcm_describe_with_admission(
-        &self,
-        command: LcmDescribeServiceCommand,
-        admission: Option<(&RequestContext, &SessionRequestBinding)>,
-    ) -> LcmDescribeServiceOutcome {
         if command.store_scope() != self.root.store_scope {
             return LcmDescribeServiceOutcome::WrongScope;
         }
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
-            Err(error) => return describe_execution_error(error, self.empty_temporal()),
+            Err(error) => {
+                return describe_execution_error(
+                    error,
+                    self.empty_temporal(),
+                    self.root.store_scope,
+                );
+            }
         };
         let target = command.target().clone();
         let direct_result = executor
@@ -183,9 +170,15 @@ impl DaemonSessionRetrievalService {
             .await;
         let direct = match direct_result {
             Ok(direct) => direct,
-            Err(error) => return describe_execution_error(error, self.empty_temporal()),
+            Err(error) => {
+                return describe_execution_error(
+                    error,
+                    self.empty_temporal(),
+                    self.root.store_scope,
+                );
+            }
         };
-        let binding = self.lcm_binding(
+        let retrieval_binding = self.lcm_binding(
             "describe",
             command.provider(),
             command.session_id(),
@@ -206,22 +199,18 @@ impl DaemonSessionRetrievalService {
             temporal_mode,
             SessionRetrievalScope::Session(command.session_id().clone()),
             direct.as_ref().map(|direct| direct.anchor_id.clone()),
-            binding,
+            retrieval_binding,
         ) else {
             return LcmDescribeServiceOutcome::Denied;
         };
-        let outcome = match admission {
-            Some((context, binding)) => {
-                self.execute_temporal_query_with_context(
-                    context,
-                    binding,
-                    query,
-                    "grant.application.lcm-describe",
-                )
-                .await
-            }
-            None => self.execute_temporal_query(query).await,
-        };
+        let outcome = self
+            .execute_temporal_query_with_context(
+                context,
+                binding,
+                query,
+                "grant.application.lcm-describe",
+            )
+            .await;
         let (result, retrieval) = match outcome {
             SessionRetrievalOutcome::Complete {
                 mut items,
@@ -268,6 +257,7 @@ impl DaemonSessionRetrievalService {
                     terminal,
                     command.grain(),
                     self.empty_temporal(),
+                    self.root.store_scope,
                 );
             }
         };
@@ -301,7 +291,13 @@ impl DaemonSessionRetrievalService {
             .await;
         let description = match rendered {
             Ok(description) => description,
-            Err(error) => return describe_execution_error(error, self.empty_temporal()),
+            Err(error) => {
+                return describe_execution_error(
+                    error,
+                    self.empty_temporal(),
+                    self.root.store_scope,
+                );
+            }
         };
         let temporal = result.as_ref().map_or_else(
             || self.empty_temporal(),
@@ -342,34 +338,20 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    async fn execute_lcm_expand(
-        &self,
-        command: LcmExpandServiceCommand,
-    ) -> LcmExpandServiceOutcome {
-        self.execute_lcm_expand_with_admission(command, None).await
-    }
-
     pub(super) async fn execute_lcm_expand_admitted(
         &self,
         context: &RequestContext,
         binding: &SessionRequestBinding,
         command: LcmExpandServiceCommand,
     ) -> LcmExpandServiceOutcome {
-        self.execute_lcm_expand_with_admission(command, Some((context, binding)))
-            .await
-    }
-
-    async fn execute_lcm_expand_with_admission(
-        &self,
-        command: LcmExpandServiceCommand,
-        admission: Option<(&RequestContext, &SessionRequestBinding)>,
-    ) -> LcmExpandServiceOutcome {
         if command.store_scope() != self.root.store_scope {
             return LcmExpandServiceOutcome::WrongScope;
         }
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
-            Err(error) => return expand_execution_error(error, self.empty_temporal()),
+            Err(error) => {
+                return expand_execution_error(error, self.empty_temporal(), self.root.store_scope);
+            }
         };
         let target = command.target().clone();
         let direct_result = executor
@@ -380,9 +362,11 @@ impl DaemonSessionRetrievalService {
             Err(SessionTemporalExecutionError::Deleted) if command.cursor().is_some() => {
                 return LcmExpandServiceOutcome::Denied;
             }
-            Err(error) => return expand_execution_error(error, self.empty_temporal()),
+            Err(error) => {
+                return expand_execution_error(error, self.empty_temporal(), self.root.store_scope);
+            }
         };
-        let binding = self.lcm_binding(
+        let retrieval_binding = self.lcm_binding(
             "expand",
             command.provider(),
             command.session_id(),
@@ -405,22 +389,18 @@ impl DaemonSessionRetrievalService {
             TemporalModeV1::Current,
             retrieval_scope,
             Some(direct.anchor_id.clone()),
-            binding.clone(),
+            retrieval_binding.clone(),
         ) else {
             return LcmExpandServiceOutcome::Denied;
         };
-        let outcome = match admission {
-            Some((context, binding)) => {
-                self.execute_temporal_query_with_context(
-                    context,
-                    binding,
-                    query,
-                    "grant.application.lcm-expand",
-                )
-                .await
-            }
-            None => self.execute_temporal_query(query).await,
-        };
+        let outcome = self
+            .execute_temporal_query_with_context(
+                context,
+                binding,
+                query,
+                "grant.application.lcm-expand",
+            )
+            .await;
         let (result, retrieval) = match outcome {
             SessionRetrievalOutcome::Complete {
                 mut items,
@@ -454,7 +434,12 @@ impl DaemonSessionRetrievalService {
                 return LcmExpandServiceOutcome::Deleted;
             }
             terminal => {
-                return expand_retrieval_outcome(terminal, command.grain(), self.empty_temporal());
+                return expand_retrieval_outcome(
+                    terminal,
+                    command.grain(),
+                    self.empty_temporal(),
+                    self.root.store_scope,
+                );
             }
         };
         let external_content = if let LcmExpandTarget::ExternalPayload { payload_ref } = &target {
@@ -478,7 +463,11 @@ impl DaemonSessionRetrievalService {
             {
                 Ok(content) => Some(content),
                 Err(error) => {
-                    return expand_execution_error(error, self.lcm_temporal_view(&result));
+                    return expand_execution_error(
+                        error,
+                        self.lcm_temporal_view(&result),
+                        self.root.store_scope,
+                    );
                 }
             }
         } else {
@@ -507,11 +496,17 @@ impl DaemonSessionRetrievalService {
         };
         let source_offset = match command.cursor() {
             Some(cursor) => match executor
-                .decode_lcm_source_cursor(&result.snapshot, &binding, cursor)
+                .decode_lcm_source_cursor(&result.snapshot, &retrieval_binding, cursor)
                 .await
             {
                 Ok(offset) => offset,
-                Err(error) => return expand_execution_error(error, self.empty_temporal()),
+                Err(error) => {
+                    return expand_execution_error(
+                        error,
+                        self.empty_temporal(),
+                        self.root.store_scope,
+                    );
+                }
             },
             None => 0,
         };
@@ -532,7 +527,9 @@ impl DaemonSessionRetrievalService {
             .await;
         let mut expansion = match rendered {
             Ok(expansion) => expansion,
-            Err(error) => return expand_execution_error(error, self.empty_temporal()),
+            Err(error) => {
+                return expand_execution_error(error, self.empty_temporal(), self.root.store_scope);
+            }
         };
         if let Err(error) = executor
             .hydrate_lcm_summary_sources(
@@ -544,7 +541,7 @@ impl DaemonSessionRetrievalService {
             )
             .await
         {
-            return expand_execution_error(error, self.empty_temporal());
+            return expand_execution_error(error, self.empty_temporal(), self.root.store_scope);
         }
         let mut temporal = self.lcm_temporal_view(&result);
         if let Some(offset) = expansion
@@ -553,11 +550,17 @@ impl DaemonSessionRetrievalService {
             .and_then(|pagination| pagination.next_source_offset)
         {
             match executor
-                .encode_lcm_source_cursor(&result.snapshot, &binding, offset)
+                .encode_lcm_source_cursor(&result.snapshot, &retrieval_binding, offset)
                 .await
             {
                 Ok(cursor) => temporal.cursor = Some(cursor),
-                Err(error) => return expand_execution_error(error, self.empty_temporal()),
+                Err(error) => {
+                    return expand_execution_error(
+                        error,
+                        self.empty_temporal(),
+                        self.root.store_scope,
+                    );
+                }
             }
         }
         let summary_source_omitted = u64::try_from(
@@ -598,20 +601,6 @@ impl DaemonSessionRetrievalService {
                 retrieval,
             },
         }
-    }
-}
-
-impl SessionRetrievalServicePort for DaemonSessionRetrievalService {
-    fn execute(&self, command: SessionRetrievalCommand) -> SessionRetrievalServiceFuture<'_> {
-        Box::pin(async move { self.execute_command(command).await })
-    }
-
-    fn describe_lcm(&self, command: LcmDescribeServiceCommand) -> LcmDescribeServiceFuture<'_> {
-        Box::pin(async move { self.execute_lcm_describe(command).await })
-    }
-
-    fn expand_lcm(&self, command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'_> {
-        Box::pin(async move { self.execute_lcm_expand(command).await })
     }
 }
 
@@ -685,6 +674,7 @@ fn expand_hydration_state(state: HydrationStateV1) -> LcmExpandServiceOutcome {
 fn describe_execution_error(
     error: SessionTemporalExecutionError,
     temporal: SessionTemporalMetadataView,
+    store_scope: SessionRetrievalStoreScope,
 ) -> LcmDescribeServiceOutcome {
     match error {
         SessionTemporalExecutionError::Locked => LcmDescribeServiceOutcome::Locked,
@@ -692,6 +682,9 @@ fn describe_execution_error(
         SessionTemporalExecutionError::Deleted => LcmDescribeServiceOutcome::Deleted,
         SessionTemporalExecutionError::WrongScope => LcmDescribeServiceOutcome::WrongScope,
         SessionTemporalExecutionError::Denied => LcmDescribeServiceOutcome::Denied,
+        SessionTemporalExecutionError::ResetRequired => {
+            LcmDescribeServiceOutcome::ResetRequired { store_scope }
+        }
         SessionTemporalExecutionError::BudgetExhausted => {
             LcmDescribeServiceOutcome::BudgetExhausted
         }
@@ -715,6 +708,7 @@ fn describe_execution_error(
 fn expand_execution_error(
     error: SessionTemporalExecutionError,
     temporal: SessionTemporalMetadataView,
+    store_scope: SessionRetrievalStoreScope,
 ) -> LcmExpandServiceOutcome {
     match error {
         SessionTemporalExecutionError::Locked => LcmExpandServiceOutcome::Locked,
@@ -722,6 +716,9 @@ fn expand_execution_error(
         SessionTemporalExecutionError::Deleted => LcmExpandServiceOutcome::Deleted,
         SessionTemporalExecutionError::WrongScope => LcmExpandServiceOutcome::WrongScope,
         SessionTemporalExecutionError::Denied => LcmExpandServiceOutcome::Denied,
+        SessionTemporalExecutionError::ResetRequired => {
+            LcmExpandServiceOutcome::ResetRequired { store_scope }
+        }
         SessionTemporalExecutionError::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => LcmExpandServiceOutcome::Cancelled,
         SessionTemporalExecutionError::Stale { generation_lag } => LcmExpandServiceOutcome::Stale {
@@ -742,6 +739,7 @@ pub(super) fn describe_retrieval_outcome(
     outcome: SessionRetrievalOutcome<TemporalKernelResult>,
     grain: RetrievalGrainV1,
     temporal: SessionTemporalMetadataView,
+    store_scope: SessionRetrievalStoreScope,
 ) -> LcmDescribeServiceOutcome {
     match outcome {
         SessionRetrievalOutcome::WrongScope => LcmDescribeServiceOutcome::WrongScope,
@@ -749,6 +747,9 @@ pub(super) fn describe_retrieval_outcome(
         SessionRetrievalOutcome::Redacted => LcmDescribeServiceOutcome::Redacted,
         SessionRetrievalOutcome::Deleted => LcmDescribeServiceOutcome::Deleted,
         SessionRetrievalOutcome::Denied => LcmDescribeServiceOutcome::Denied,
+        SessionRetrievalOutcome::ResetRequired => {
+            LcmDescribeServiceOutcome::ResetRequired { store_scope }
+        }
         SessionRetrievalOutcome::BudgetExhausted => LcmDescribeServiceOutcome::BudgetExhausted,
         SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
             LcmDescribeServiceOutcome::BudgetExhausted
@@ -782,6 +783,7 @@ pub(super) fn expand_retrieval_outcome(
     outcome: SessionRetrievalOutcome<TemporalKernelResult>,
     grain: RetrievalGrainV1,
     temporal: SessionTemporalMetadataView,
+    store_scope: SessionRetrievalStoreScope,
 ) -> LcmExpandServiceOutcome {
     match outcome {
         SessionRetrievalOutcome::WrongScope => LcmExpandServiceOutcome::WrongScope,
@@ -789,6 +791,9 @@ pub(super) fn expand_retrieval_outcome(
         SessionRetrievalOutcome::Redacted => LcmExpandServiceOutcome::Redacted,
         SessionRetrievalOutcome::Deleted => LcmExpandServiceOutcome::Deleted,
         SessionRetrievalOutcome::Denied => LcmExpandServiceOutcome::Denied,
+        SessionRetrievalOutcome::ResetRequired => {
+            LcmExpandServiceOutcome::ResetRequired { store_scope }
+        }
         SessionRetrievalOutcome::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
         SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
             LcmExpandServiceOutcome::BudgetExhausted

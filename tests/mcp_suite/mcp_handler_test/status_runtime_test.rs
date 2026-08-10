@@ -271,7 +271,7 @@ async fn test_status_no_scope_prefix() {
 /// without leaving the chat session.
 #[tokio::test]
 async fn test_runtime_snapshot_exposes_process_and_db_signals() {
-    let (cg, _dir) = setup_project().await;
+    let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(&cg, "tracedecay_runtime", json!({}), None, None)
         .await
         .unwrap();
@@ -304,9 +304,10 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
         db["db_size_bytes"].as_u64().unwrap_or(0) > 0,
         "DB file should have non-zero size"
     );
-    assert!(
-        db["node_count"].as_u64().unwrap_or(0) > 0,
-        "fixture indexed > 0 nodes"
+    assert_eq!(
+        db["node_count"].as_u64(),
+        Some(0),
+        "an opened but unindexed project must report zero nodes"
     );
     // journal_mode should remain visible through the canonical database status surface.
     assert!(db["journal_mode"].is_string() || db["journal_mode"].is_null());

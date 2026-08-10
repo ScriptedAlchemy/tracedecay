@@ -374,14 +374,34 @@ fn map_relation_error(
         },
         SessionRelationError::Cancelled => TemporalPortError::Cancelled,
         SessionRelationError::DeadlineExceeded => TemporalPortError::DeadlineExceeded,
+        SessionRelationError::ResetRequired => TemporalPortError::ResetRequired {
+            resource: "session relation projection",
+        },
         SessionRelationError::Invalid
         | SessionRelationError::Cycle
         | SessionRelationError::NotFound
         | SessionRelationError::Unavailable
         | SessionRelationError::Conflict
-        | SessionRelationError::ResetRequired
         | SessionRelationError::DurabilityUncertain
         | SessionRelationError::Corrupt
         | SessionRelationError::Storage(_) => read_error(RECORD_OPERATION, error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_relation_reset_remains_typed() {
+        assert_eq!(
+            map_relation_error(
+                SessionRelationError::ResetRequired,
+                &ExecutionControl::default(),
+            ),
+            TemporalPortError::ResetRequired {
+                resource: "session relation projection",
+            }
+        );
     }
 }

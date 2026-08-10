@@ -1630,11 +1630,12 @@ impl CodeIndexSchedulerRegistryV1 {
                         repository_id,
                         worktree_id,
                         source_reference,
+                        source_revision,
                         generation_id,
                         content_identity,
                         sealed,
                     ) = latest.as_ref().map_or(
-                        (None, None, None, None, None, None),
+                        (None, None, None, None, None, None, None),
                         |latest| {
                             let generation = &latest.generation;
                             let snapshot = generation.snapshot();
@@ -1648,6 +1649,10 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .reference
                                     .as_ref()
                                     .map(|reference| reference.as_str().to_owned()),
+                                snapshot
+                                    .source_revision
+                                    .as_ref()
+                                    .map(|revision| revision.as_str().to_owned()),
                                 Some(generation.manifest().generation_id.as_str().to_owned()),
                                 Some(snapshot.content_identity.as_str().to_owned()),
                                 Some(generation.manifest().seal.sealed_at.0),
@@ -1659,6 +1664,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         repository_id,
                         worktree_id,
                         source_reference,
+                        source_revision,
                         latest_generation_id: generation_id,
                         snapshot_content_identity: content_identity,
                         sealed_at_micros: sealed,
@@ -1687,12 +1693,13 @@ impl CodeIndexSchedulerRegistryV1 {
                 repository_id,
                 worktree_id,
                 source_reference,
+                source_revision,
                 generation_id,
                 content_identity,
                 sealed,
             ) = latest
                 .as_ref()
-                .map_or((None, None, None, None, None, None), |latest| {
+                .map_or((None, None, None, None, None, None, None), |latest| {
                     let generation = &latest.generation;
                     let snapshot = generation.snapshot();
                     (
@@ -1705,6 +1712,10 @@ impl CodeIndexSchedulerRegistryV1 {
                             .reference
                             .as_ref()
                             .map(|reference| reference.as_str().to_owned()),
+                        snapshot
+                            .source_revision
+                            .as_ref()
+                            .map(|revision| revision.as_str().to_owned()),
                         Some(generation.manifest().generation_id.as_str().to_owned()),
                         Some(snapshot.content_identity.as_str().to_owned()),
                         Some(generation.manifest().seal.sealed_at.0),
@@ -1732,6 +1743,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 repository_id,
                 worktree_id,
                 source_reference,
+                source_revision,
                 latest_generation_id: generation_id,
                 snapshot_content_identity: content_identity,
                 sealed_at_micros: sealed,

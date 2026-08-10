@@ -425,8 +425,14 @@ pub(crate) fn callable_code_request_context(
 fn callable_code_response<T: Serialize>(
     wire_request_id: String,
     registered_scope: &ResolvedScope,
-    result: ApplicationResult<T>,
+    result: Result<ApplicationResult<T>, ApplicationContractError>,
 ) -> DaemonInvocationResponse {
+    let Ok(result) = result else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::ApplicationContractViolation,
+        );
+    };
     match feedback_invocation_result(result) {
         Ok(result) if &result.scope == registered_scope => DaemonInvocationResponse::with_outcome(
             wire_request_id,

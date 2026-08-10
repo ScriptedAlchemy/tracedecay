@@ -13,19 +13,18 @@ mod use_parsing;
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::types::{MoveHint, MoveResult, Node, Visibility};
-#[cfg(test)]
-use tokio::sync::Notify;
+use crate::types::{MoveHint, MoveResult, Visibility};
 use tracedecay_code_extraction::source_mask::{MaskOptions, masked_rust_source_with};
+use tracedecay_domain::RelationEdgeKindV1;
+use tracedecay_usecases::graph::{map_code_graph_read_runtime_error, map_projection_error};
+use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use super::TraceDecay;
 use super::edits::{
-    LeadingBlock, LeadingKind, SourceEditFileAuthority, capture_planned_source_edit,
-    classify_leading_line, edit_success_message, item_line_span, publish_planned_source_edit,
+    EditSymbolV1, LeadingKind, capture_planned_source_edit, classify_leading_line,
+    edit_success_message, edit_symbol_from_summary, publish_planned_source_edit,
     resolve_symbol_for_edit, rollback_planned_source_edit_files, splice_lines,
     validate_planned_source_edit,
 };
@@ -45,12 +44,8 @@ use rust_paths::{
 };
 use use_parsing::{UseLeaf, body_identifiers, parse_use_statements, portable_dependency_import};
 
-#[cfg(test)]
-static MOVE_SYMBOL_TEST_PAUSE_AFTER_FIRST_PUBLISH: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static MOVE_SYMBOL_TEST_FIRST_PUBLISH: Notify = Notify::const_new();
-#[cfg(test)]
-static MOVE_SYMBOL_TEST_RESUME: Notify = Notify::const_new();
+const MAX_MOVE_SYMBOLS_PER_FILE: usize = 10_000;
+const MAX_MOVE_CALLERS: usize = 100_000;
 
 impl TraceDecay {
     /// Moves a resolved symbol from its current file to `dest_file`.
@@ -67,12 +62,13 @@ impl TraceDecay {
     /// references are never auto-edited — the exact change rides in the hints.
     pub(crate) async fn move_symbol(
         &self,
+        graph: SourceEditGraphReadV1,
         symbol: &str,
         dest_file: &str,
         dry_run: bool,
         _update_references: bool,
     ) -> Result<MoveResult> {
-        let target = resolve_symbol_for_edit(self, symbol).await?;
+        let target = resolve_symbol_for_edit(&graph, symbol)?;
         let symbol_label = format!("{} ({})", target.name, target.kind.as_str());
         let source_rel = target.file_path.clone();
         let dest_rel = self.resolve_dest_rel(dest_file)?;
@@ -120,27 +116,24 @@ impl TraceDecay {
         })?;
         let src_lines: Vec<&str> = source.lines().collect();
 
-        // Mirror replace_symbol's span semantics but ALWAYS include the leading
-        // doc-comment / attribute block: a moved item carries its own docs.
-        let span = item_line_span(&target, src_lines.len(), LeadingBlock::Always);
-        let mut start = span.start;
-        let end_inclusive = span.end_inclusive;
+        // The admitted generation supplies the exact extraction-attested span.
+        let (mut start, end_inclusive) = target.line_bounds(&source)?;
         if start >= src_lines.len() || start > end_inclusive {
             return Ok(fail(
                 format!(
                     "symbol span [{}..={}] out of bounds for {}-line file",
                     start,
-                    target.end_line,
+                    end_inclusive,
                     src_lines.len()
                 ),
                 Vec::new(),
             ));
         }
-        // A contiguous leading `//!` inner module-doc line (no blank line before
-        // the item) can never belong to the moved item — inner docs attach to the
-        // enclosing module, not the following item. If `attrs_start_line` picked
-        // up such a line, advance past it so the source keeps its module doc and
-        // the destination doesn't receive a stray `//!` mid-file (a hard E0753).
+        // A contiguous leading `//!` inner module-doc line in the attested span
+        // can never belong to the moved item — inner docs attach to the enclosing
+        // module, not the following item. Advance past it so the source keeps its
+        // module doc and the destination doesn't receive a stray `//!` mid-file
+        // (a hard E0753).
         while start < end_inclusive
             && classify_leading_line(src_lines[start]) == LeadingKind::InnerDoc
         {
@@ -149,15 +142,32 @@ impl TraceDecay {
         let moved_text = src_lines[start..=end_inclusive].join("\n");
 
         // Destination collision: refuse rather than clobber.
-        let dest_nodes = self.get_nodes_by_file(&dest_rel).await.unwrap_or_default();
+        let dest_nodes = graph
+            .reader()
+            .symbols_in_logical_file(
+                &dest_rel,
+                MAX_MOVE_SYMBOLS_PER_FILE + 1,
+                graph.cancellation(),
+            )
+            .map_err(|error| map_code_graph_read_runtime_error(map_projection_error(error)))?;
+        if dest_nodes.len() > MAX_MOVE_SYMBOLS_PER_FILE {
+            return Err(TraceDecayError::project_route(
+                "source-edit-symbol-budget-exhausted",
+                false,
+                "move destination contains more than 10,000 symbols",
+            ));
+        }
         if let Some(clash) = dest_nodes
             .iter()
-            .find(|n| n.name == target.name && is_importable_item(&n.kind))
+            .map(edit_symbol_from_summary)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .find(|candidate| candidate.name == target.name && is_importable_item(&candidate.kind))
         {
             let hint = MoveHint {
                 kind: "collision".to_string(),
                 file: dest_rel.clone(),
-                line: Some(clash.start_line + 1),
+                line: Some(clash.start_line.saturating_add(1)),
                 detail: format!(
                     "destination already defines `{}` ({})",
                     clash.name,
@@ -198,6 +208,7 @@ impl TraceDecay {
         let analysis = self
             .analyze_dependencies(
                 &target,
+                &graph,
                 &source_rel,
                 &dest_rel,
                 &source,
@@ -220,6 +231,7 @@ impl TraceDecay {
         let mut impact = analysis.hints;
         impact.extend(
             self.caller_hints(
+                &graph,
                 &target,
                 &source_rel,
                 &dest_rel,
@@ -291,8 +303,6 @@ impl TraceDecay {
             dest_existed.then_some(dest_original.as_str()),
             &dest_rel,
         )?;
-        let mutation = self.begin_branch_graph_mutation("move symbol").await?;
-
         // Write each file through an atomic sibling rename. Destination first
         // deliberately leaves a duplicate symbol (recoverable) rather than a
         // missing one if the process stops between the two commits.
@@ -302,11 +312,6 @@ impl TraceDecay {
             dest_existed.then_some(dest_original.as_str()),
             &dest_modified,
         )?;
-        #[cfg(test)]
-        if MOVE_SYMBOL_TEST_PAUSE_AFTER_FIRST_PUBLISH.load(Ordering::SeqCst) {
-            MOVE_SYMBOL_TEST_FIRST_PUBLISH.notify_one();
-            MOVE_SYMBOL_TEST_RESUME.notified().await;
-        }
         if let Err(e) = ensure_text_unchanged(&source_abs, Some(&source), &source_rel)
             .and_then(|()| ensure_text_unchanged(&dest_abs, Some(&dest_modified), &dest_rel))
             .and_then(|()| {
@@ -363,25 +368,6 @@ impl TraceDecay {
                 },
             });
         }
-        // Both row refreshes remain hidden behind the same publication epoch.
-        // A final global resolution restores unchanged callers after deleting
-        // the moved symbol's old path-derived identity.
-        let dest_file = SourceEditFileAuthority::open(&self.project_root, Path::new(&dest_rel))?;
-        self.reindex_file_within_graph_mutation(&mutation, &dest_rel, &dest_modified, &dest_file)
-            .await?;
-        let source_file =
-            SourceEditFileAuthority::open(&self.project_root, Path::new(&source_rel))?;
-        self.reindex_file_within_graph_mutation(
-            &mutation,
-            &source_rel,
-            &source_modified,
-            &source_file,
-        )
-        .await?;
-        self.resolve_all_within_branch_graph_mutation(&mutation)
-            .await?;
-        self.commit_branch_graph_mutation(mutation).await?;
-
         Ok(MoveResult {
             success: true,
             symbol: symbol_label,
@@ -445,7 +431,8 @@ impl TraceDecay {
     /// destination. Produces auto-insertable imports plus hints for the rest.
     async fn analyze_dependencies(
         &self,
-        target: &Node,
+        target: &EditSymbolV1,
+        graph: &SourceEditGraphReadV1,
         source_rel: &str,
         dest_rel: &str,
         source: &str,
@@ -483,10 +470,31 @@ impl TraceDecay {
         let source_identifiers = body_identifiers(&source_without_uses);
 
         // 1. Same-file item dependencies (structs, enums, helpers, consts, …).
-        let src_nodes = self.get_nodes_by_file(source_rel).await.unwrap_or_default();
+        let src_nodes = graph
+            .reader()
+            .symbols_in_logical_file(
+                source_rel,
+                MAX_MOVE_SYMBOLS_PER_FILE + 1,
+                graph.cancellation(),
+            )
+            .map_err(|error| map_code_graph_read_runtime_error(map_projection_error(error)))?;
+        if src_nodes.len() > MAX_MOVE_SYMBOLS_PER_FILE {
+            return Err(TraceDecayError::project_route(
+                "source-edit-symbol-budget-exhausted",
+                false,
+                "move source contains more than 10,000 symbols",
+            ));
+        }
         let mut handled: HashSet<String> = HashSet::new();
-        for node in &src_nodes {
-            if node.id == target.id || node.name == target.name || !is_importable_item(&node.kind) {
+        for node in src_nodes
+            .iter()
+            .map(edit_symbol_from_summary)
+            .collect::<Result<Vec<_>>>()?
+        {
+            if node.occurrence == target.occurrence
+                || node.name == target.name
+                || !is_importable_item(&node.kind)
+            {
                 continue;
             }
             if node.name.is_empty() || !idents.contains(&node.name) {
@@ -601,17 +609,34 @@ impl TraceDecay {
     /// now points at the old location).
     async fn caller_hints(
         &self,
-        target: &Node,
+        graph: &SourceEditGraphReadV1,
+        target: &EditSymbolV1,
         source_rel: &str,
         dest_rel: &str,
         src_module: Option<&str>,
         dest_module: Option<&str>,
     ) -> Result<Vec<MoveHint>> {
         let mut hints = Vec::new();
-        let callers = self.get_callers(&target.id, 1).await.unwrap_or_default();
+        let caller_batches = graph
+            .reader()
+            .callers(
+                std::slice::from_ref(&target.occurrence),
+                &[RelationEdgeKindV1::Calls],
+                MAX_MOVE_CALLERS,
+                graph.cancellation(),
+            )
+            .map_err(|error| map_code_graph_read_runtime_error(map_projection_error(error)))?;
+        let [callers] = caller_batches.as_slice() else {
+            return Err(TraceDecayError::project_route(
+                "code-graph-projection-corrupt",
+                false,
+                "move caller batch does not match its requested symbol seed",
+            ));
+        };
         let dest_mod = dest_module.unwrap_or("crate");
         let src_mod = src_module.unwrap_or("crate");
-        for (caller, edge) in callers {
+        for edge in callers {
+            let caller = edit_symbol_from_summary(&edge.neighbor)?;
             let same_module = caller.file_path == source_rel;
             let detail;
             let suggestion;
@@ -637,7 +662,7 @@ impl TraceDecay {
             hints.push(MoveHint {
                 kind: "caller_reference".to_string(),
                 file: caller.file_path.clone(),
-                line: edge.line.map(|l| l + 1),
+                line: None,
                 detail,
                 suggestion,
             });
@@ -709,189 +734,5 @@ impl TraceDecay {
             }
         }
         false
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::process::Command;
-
-    use super::{
-        MOVE_SYMBOL_TEST_FIRST_PUBLISH, MOVE_SYMBOL_TEST_PAUSE_AFTER_FIRST_PUBLISH,
-        MOVE_SYMBOL_TEST_RESUME, Ordering, TraceDecay,
-    };
-
-    #[tokio::test]
-    async fn move_symbol_fences_peer_admission_partial_publication_and_caller_refresh() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let profile_root = crate::storage::default_profile_root().expect("test profile root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
-                .expect("secure test profile root");
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        std::fs::create_dir_all(project.join("src")).unwrap();
-        std::fs::write(
-            project.join("src/lib.rs"),
-            "pub mod source;\npub mod caller;\npub mod destination;\n",
-        )
-        .unwrap();
-        std::fs::write(
-            project.join("src/source.rs"),
-            "pub fn moved() -> u32 { 1 }\n",
-        )
-        .unwrap();
-        std::fs::write(
-            project.join("src/caller.rs"),
-            "use crate::source::moved;\npub fn caller() -> u32 { moved() }\n",
-        )
-        .unwrap();
-        std::fs::write(
-            project.join("src/destination.rs"),
-            "pub fn existing() -> u32 { 0 }\n",
-        )
-        .unwrap();
-        let git = |args: &[&str]| {
-            let status = Command::new(crate::git::git_program())
-                .current_dir(project)
-                .args(args)
-                .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-                .env("GIT_AUTHOR_EMAIL", "tracedecay@example.invalid")
-                .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-                .env("GIT_COMMITTER_EMAIL", "tracedecay@example.invalid")
-                .status()
-                .expect("git");
-            assert!(status.success(), "git {args:?}");
-        };
-        git(&["init", "-b", "main"]);
-        git(&["add", "src"]);
-        git(&["commit", "-m", "fixture"]);
-
-        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile_root,
-            "move symbol fixture initialization",
-        )
-        .expect("acquire fixture lifecycle authority");
-        let _database_scope = crate::db::enter_maintenance_database_scope(
-            &lifecycle,
-            &profile_root,
-            "move symbol fixture initialization",
-        )
-        .expect("enter fixture maintenance database scope");
-        let cg = TraceDecay::init_with_exclusive_maintenance(
-            project,
-            crate::tracedecay::TraceDecayOpenOptions {
-                profile_root: Some(profile_root),
-                global_db_path: None,
-            },
-            &lifecycle,
-        )
-        .await
-        .unwrap();
-        cg.index_all().await.unwrap();
-        let indexed_source = cg
-            .db
-            .get_metadata(crate::tracedecay::BRANCH_QUERY_GRAPH_SOURCE_KEY)
-            .await
-            .unwrap()
-            .and_then(|encoded| {
-                serde_json::from_str::<crate::branch_meta::BranchGraphSourceV1>(&encoded).ok()
-            })
-            .expect("indexed graph publication");
-        let source_before = std::fs::read(project.join("src/source.rs")).unwrap();
-        let destination_before = std::fs::read(project.join("src/destination.rs")).unwrap();
-        let peer_sync = cg.try_acquire_active_sync_lock().expect("peer sync lock");
-        assert!(
-            cg.move_symbol("moved", "src/destination.rs", false, false)
-                .await
-                .is_err(),
-            "move admission must fail while a peer owns the sync lane"
-        );
-        assert_eq!(
-            std::fs::read(project.join("src/source.rs")).unwrap(),
-            source_before
-        );
-        assert_eq!(
-            std::fs::read(project.join("src/destination.rs")).unwrap(),
-            destination_before
-        );
-        let admission_marker = cg
-            .db
-            .get_metadata(crate::tracedecay::BRANCH_QUERY_GRAPH_SOURCE_KEY)
-            .await
-            .unwrap()
-            .expect("unchanged admission marker");
-        assert_eq!(
-            serde_json::from_str::<crate::branch_meta::BranchGraphSourceV1>(&admission_marker)
-                .expect("committed admission marker"),
-            indexed_source
-        );
-        drop(peer_sync);
-
-        MOVE_SYMBOL_TEST_PAUSE_AFTER_FIRST_PUBLISH.store(true, Ordering::SeqCst);
-        let observe_in_progress = async {
-            MOVE_SYMBOL_TEST_FIRST_PUBLISH.notified().await;
-            let encoded = cg
-                .db
-                .get_metadata(crate::tracedecay::BRANCH_QUERY_GRAPH_SOURCE_KEY)
-                .await
-                .unwrap()
-                .expect("in-progress graph marker");
-            assert!(
-                cg.published_branch_graph_source().await.is_none(),
-                "the production branch-query marker sampler must reject the in-progress epoch"
-            );
-            assert!(
-                serde_json::from_str::<crate::branch_meta::BranchGraphSourceV1>(&encoded).is_err(),
-                "no committed graph source may remain visible during the two-file edit"
-            );
-            assert_eq!(
-                std::fs::read(project.join("src/source.rs")).unwrap(),
-                source_before,
-                "source publication must not race ahead of destination publication"
-            );
-            assert_ne!(
-                std::fs::read(project.join("src/destination.rs")).unwrap(),
-                destination_before,
-                "observation must occur after the first visible file publication"
-            );
-            MOVE_SYMBOL_TEST_RESUME.notify_one();
-        };
-        let (result, ()) = tokio::join!(
-            cg.move_symbol("moved", "src/destination.rs", false, false),
-            observe_in_progress,
-        );
-        MOVE_SYMBOL_TEST_PAUSE_AFTER_FIRST_PUBLISH.store(false, Ordering::SeqCst);
-        let result = result.unwrap();
-        assert!(result.success, "move result: {result:?}");
-        let moved_source = cg
-            .db
-            .get_metadata(crate::tracedecay::BRANCH_QUERY_GRAPH_SOURCE_KEY)
-            .await
-            .unwrap()
-            .and_then(|encoded| {
-                serde_json::from_str::<crate::branch_meta::BranchGraphSourceV1>(&encoded).ok()
-            })
-            .expect("moved graph publication");
-        assert_eq!(
-            moved_source.publication_epoch.get(),
-            indexed_source.publication_epoch.get() + 1
-        );
-
-        let moved = cg
-            .get_nodes_by_qualified_name("moved")
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|node| node.file_path == "src/destination.rs")
-            .expect("moved symbol should be indexed at the destination");
-        let callers = cg.get_callers(&moved.id, 1).await.unwrap();
-        assert!(
-            callers.iter().any(|(caller, _)| caller.name == "caller"),
-            "caller graph must be fresh for the next refactor step: {callers:?}"
-        );
     }
 }

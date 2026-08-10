@@ -1,4 +1,4 @@
-//! Production application primitive owners over `TraceDecay` graph/query authorities.
+//! Production application primitive owners over admitted graph and store authorities.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
@@ -13,11 +13,11 @@ use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1,
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, HealthDeltaRequest,
     HealthDeltaResult, HealthReadRequest, HealthReadResult, OperationalRetrievalPort,
-    RankedAffectedTestV1, RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest,
-    SessionLookupResult, SourceLinesRequest, SourceLinesResult, SourceReference,
-    SourceRetrievalPort, SymbolPrimitiveRecord, TemporalRetrievalPort, TestMapCoverageV1,
-    TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext,
-    TestPrimitivePortFuture, TestPrimitivePortOutcome, TestReferenceV1, UncoveredSourceV1,
+    RankedAffectedTestV1, RetrievalPortContext, RetrievalPortOutcome, SourceLinesRequest,
+    SourceLinesResult, SourceReference, SourceRetrievalPort, SymbolPrimitiveRecord,
+    TemporalRetrievalPort, TestMapCoverageV1, TestMapPrimitiveRequest, TestMapPrimitiveResultV1,
+    TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
+    TestReferenceV1, UncoveredSourceV1,
 };
 use tracedecay_application::{
     ApplicationContractError, ApplicationResult, CoverageCompleteness, CoverageDomainState,
@@ -64,7 +64,10 @@ use crate::graph::{
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use crate::operation_stream::OperationEventAuthority;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceReadRuntime;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
+};
 use tracedecay_code_index::grep_search::{
     GrepSearchQuery, search_tree_with_cancel as lexical_search_tree_with_cancel,
 };
@@ -77,7 +80,7 @@ use tracedecay_code_index::test_attribution::{
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::types::{Node, Visibility};
+use tracedecay_runtime_core::types::NodeKind;
 use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
 };
@@ -433,13 +436,158 @@ fn now_observed() -> UtcMicros {
     UtcMicros(micros)
 }
 
+async fn open_code_graph(
+    port: &dyn CodeGraphProjectionReadPort,
+    context: &RequestContext,
+    observed_at: UtcMicros,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Result<CodeGraphInteractiveReader, CodeGraphReadError> {
+    port.open(CodeGraphReadRequest::new(
+        context,
+        observed_at,
+        Arc::clone(&cancellation),
+    ))
+    .await?
+    .reader_with_cancellation(context, observed_at, cancellation)
+}
+
+fn all_code_graph_symbols(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
+    const MAX_SYMBOLS: usize = 500_000;
+    const PAGE_SIZE: usize = 4_096;
+    let mut after = None;
+    let mut symbols = Vec::new();
+    loop {
+        let page = graph
+            .symbols_page(after.as_ref(), PAGE_SIZE, Arc::clone(&cancellation))
+            .map_err(|_| ())?;
+        if symbols.len().saturating_add(page.symbols.len()) > MAX_SYMBOLS {
+            return Err(());
+        }
+        after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
+        symbols.extend(page.symbols);
+        if !page.has_more {
+            return Ok(symbols);
+        }
+    }
+}
+
+fn symbol_at_location(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    file: &str,
+    line_1based: u32,
+) -> Result<Option<CodeGraphSymbolSummaryV1>, ()> {
+    let line = line_1based.checked_sub(1).ok_or(())?;
+    let mut enclosing = graph
+        .symbols_in_logical_file(file, 100_000, cancellation)
+        .map_err(|_| ())?
+        .into_iter()
+        .filter(|symbol| {
+            symbol.metadata.as_ref().is_some_and(|metadata| {
+                metadata.line_span > 0
+                    && metadata.start_line <= line
+                    && metadata
+                        .start_line
+                        .checked_add(metadata.line_span)
+                        .is_some_and(|end| line < end)
+            })
+        })
+        .collect::<Vec<_>>();
+    enclosing.sort_by(|left, right| {
+        left.metadata
+            .as_ref()
+            .map(|metadata| metadata.line_span)
+            .cmp(&right.metadata.as_ref().map(|metadata| metadata.line_span))
+            .then(left.occurrence.cmp(&right.occurrence))
+    });
+    Ok(enclosing.into_iter().next())
+}
+
+fn test_annotation_evidence(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Result<std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>, ()> {
+    let symbols = all_code_graph_symbols(graph, Arc::clone(&cancellation))?;
+    let occurrences = symbols
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    let markers = symbols
+        .iter()
+        .filter(|symbol| {
+            symbol.metadata.as_ref().is_some_and(|metadata| {
+                metadata.kind == "annotation_usage"
+                    && matches!(
+                        metadata.simple_name.as_str(),
+                        "test" | "wasm_bindgen_test" | "rstest" | "parameterized"
+                    )
+            })
+        })
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let edges = graph
+        .edges_among(
+            &occurrences,
+            &[tracedecay_domain::RelationEdgeKindV1::Annotates],
+            2_000_000,
+            cancellation,
+        )
+        .map_err(|_| ())?;
+    Ok(edges
+        .into_iter()
+        .filter(|edge| markers.contains(&edge.edge.from_occurrence))
+        .map(|edge| edge.edge.to_occurrence)
+        .collect())
+}
+
+fn files_for_occurrences(
+    graph: &CodeGraphInteractiveReader,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+    occurrences: &std::collections::HashSet<tracedecay_domain::SymbolOccurrenceId>,
+) -> Result<std::collections::HashSet<String>, ()> {
+    occurrences
+        .iter()
+        .map(|occurrence| {
+            graph
+                .symbol_summary(occurrence, Arc::clone(&cancellation))
+                .map_err(|_| ())?
+                .and_then(|symbol| symbol.binding?.logical_path)
+                .ok_or(())
+        })
+        .collect()
+}
+
+fn relation_kind_name(kind: tracedecay_domain::RelationEdgeKindV1) -> &'static str {
+    match kind {
+        tracedecay_domain::RelationEdgeKindV1::Calls => "calls",
+        tracedecay_domain::RelationEdgeKindV1::Uses => "uses",
+        tracedecay_domain::RelationEdgeKindV1::TypeOf => "type_of",
+        tracedecay_domain::RelationEdgeKindV1::Contains => "contains",
+        tracedecay_domain::RelationEdgeKindV1::Implements => "implements",
+        tracedecay_domain::RelationEdgeKindV1::Extends => "extends",
+        tracedecay_domain::RelationEdgeKindV1::Annotates => "annotates",
+        tracedecay_domain::RelationEdgeKindV1::Returns => "returns",
+        tracedecay_domain::RelationEdgeKindV1::Receives => "receives",
+    }
+}
+
 pub struct TraceDecayLexicalGrepAuthorityV1 {
-    graph: Arc<TraceDecay>,
+    source_runtime: Arc<SourceReadRuntime>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
 }
 
 impl TraceDecayLexicalGrepAuthorityV1 {
-    pub fn new(graph: Arc<TraceDecay>) -> Self {
-        Self { graph }
+    pub fn new(
+        source_runtime: Arc<SourceReadRuntime>,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
+    ) -> Self {
+        Self {
+            source_runtime,
+            code_graph,
+        }
     }
 }
 
@@ -455,7 +603,7 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                     "compatibility cursor unsupported".to_owned(),
                 ));
             }
-            let project_root = self.graph.project_root().to_path_buf();
+            let project_root = self.source_runtime.project_root().to_path_buf();
             let query = GrepSearchQuery {
                 pattern: request.pattern.clone(),
                 fixed_strings: request.fixed_strings,
@@ -493,6 +641,22 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
             };
             let files_scanned = scan.files_scanned;
             let truncated = scan.truncated;
+            let graph_cancellation = request_graph_cancellation(context.request);
+            let reader = match open_code_graph(
+                self.code_graph.as_ref(),
+                context.request,
+                context.observed_at,
+                Arc::clone(&graph_cancellation),
+            )
+            .await
+            {
+                Ok(reader) => reader,
+                Err(_) => {
+                    return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                        "lexical grep symbol projection unavailable".to_owned(),
+                    ));
+                }
+            };
             let mut matches = Vec::with_capacity(scan.hits.len());
             // A graph read that fails cannot distinguish "this line is in no
             // symbol" from "the enclosing symbol could not be read", so the
@@ -503,7 +667,12 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 if context.request.cancellation().is_cancelled() {
                     return PrimitiveOutcomeV1::Cancelled;
                 }
-                let enclosing = match self.graph.node_at_location(&hit.file, hit.line).await {
+                let enclosing = match symbol_at_location(
+                    &reader,
+                    Arc::clone(&graph_cancellation),
+                    &hit.file,
+                    hit.line,
+                ) {
                     Ok(enclosing) => enclosing,
                     Err(_) => {
                         unread_enclosing_symbols = true;
@@ -516,9 +685,17 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                     text: hit.text,
                     before: hit.before,
                     after: hit.after,
-                    symbol: enclosing.as_ref().map(|node| node.name.clone()),
-                    node_id: enclosing.as_ref().map(|node| node.id.clone()),
-                    kind: enclosing.as_ref().map(|node| node.kind.as_str().to_owned()),
+                    symbol: enclosing
+                        .as_ref()
+                        .and_then(|node| node.metadata.as_ref())
+                        .map(|metadata| metadata.simple_name.clone()),
+                    node_id: enclosing
+                        .as_ref()
+                        .map(|node| node.occurrence.as_str().to_owned()),
+                    kind: enclosing
+                        .as_ref()
+                        .and_then(|node| node.metadata.as_ref())
+                        .map(|metadata| metadata.kind.clone()),
                 });
             }
             let returned = matches.len() as u64;
@@ -543,12 +720,12 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
 }
 
 pub struct TraceDecayRedundancyAuthorityV1 {
-    graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
 }
 
 impl TraceDecayRedundancyAuthorityV1 {
-    pub fn new(graph: Arc<TraceDecay>) -> Self {
-        Self { graph }
+    pub fn new(code_graph: Arc<dyn CodeGraphProjectionReadPort>) -> Self {
+        Self { code_graph }
     }
 }
 
@@ -564,35 +741,21 @@ impl RedundancyAuthorityV1 for TraceDecayRedundancyAuthorityV1 {
                     "compatibility cursor unsupported".to_owned(),
                 ));
             }
-            let Ok(result) = self.graph.redundancy(request, context.scope_prefix).await else {
-                return PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
-                    "redundancy authority failed".to_owned(),
-                ));
-            };
-            if context.request.cancellation().is_cancelled() {
-                return PrimitiveOutcomeV1::Cancelled;
-            }
-            let returned = result.pair_count;
-            let scanned = result.scanned;
-            let page = PrimitivePageV1 {
-                payload: result,
-                coverage: coverage(scanned, returned, false),
-                continuation: None,
-                finished_at: context.observed_at,
-            };
-            PrimitiveOutcomeV1::Completed(page)
+            let _ = (&self.code_graph, request, context.scope_prefix);
+            PrimitiveOutcomeV1::Failed(GrepAnalysisProblemV1::AuthorityFailed(
+                "the verified graph generation does not publish redundancy fingerprints".to_owned(),
+            ))
         })
     }
 }
 
 pub struct TraceDecayTestPrimitivePortV1 {
-    graph: Arc<TraceDecay>,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
 }
 
 impl TraceDecayTestPrimitivePortV1 {
-    pub fn new(graph: Arc<TraceDecay>, code_graph: Arc<dyn CodeGraphProjectionReadPort>) -> Self {
-        Self { graph, code_graph }
+    pub fn new(code_graph: Arc<dyn CodeGraphProjectionReadPort>) -> Self {
+        Self { code_graph }
     }
 }
 
@@ -603,17 +766,38 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
         request: &'a TestMapPrimitiveRequest,
     ) -> TestPrimitivePortFuture<'a, TestMapPrimitiveResultV1> {
         Box::pin(async move {
+            let cancellation = request_graph_cancellation(context.request);
+            let Ok(reader) = open_code_graph(
+                self.code_graph.as_ref(),
+                context.request,
+                context.observed_at,
+                Arc::clone(&cancellation),
+            )
+            .await
+            else {
+                return test_primitive_failed(context);
+            };
             let source_nodes = if let Some(file) = request.file.as_deref() {
-                let Ok(nodes) = self.graph.get_nodes_by_file(file).await else {
+                let Ok(nodes) =
+                    reader.symbols_in_logical_file(file, 100_000, Arc::clone(&cancellation))
+                else {
                     return test_primitive_failed(context);
                 };
                 nodes
             } else if let Some(node_id) = request.node_id.as_deref() {
-                let Ok(node) = self.graph.get_node(node_id).await else {
+                let Ok(occurrence) = tracedecay_domain::SymbolOccurrenceId::new(node_id.to_owned())
+                else {
+                    return test_primitive_failed(context);
+                };
+                let Ok(node) = reader.symbol_summary(&occurrence, Arc::clone(&cancellation)) else {
                     return test_primitive_failed(context);
                 };
                 node.into_iter().collect::<Vec<_>>()
             } else {
+                return test_primitive_failed(context);
+            };
+            let Ok(test_evidence) = test_annotation_evidence(&reader, Arc::clone(&cancellation))
+            else {
                 return test_primitive_failed(context);
             };
             let mut coverage_map = Vec::new();
@@ -621,51 +805,76 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             let mut test_files = std::collections::BTreeSet::new();
             let mut unread_symbols = false;
             for node in source_nodes {
-                if !node.kind.is_callable_kind() {
+                let Some(metadata) = node.metadata.as_ref() else {
+                    unread_symbols = true;
+                    continue;
+                };
+                let Some(file_path) = node
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.logical_path.as_deref())
+                else {
+                    unread_symbols = true;
+                    continue;
+                };
+                if !NodeKind::from_str(&metadata.kind).is_some_and(|kind| kind.is_callable_kind()) {
                     continue;
                 }
                 // A caller or annotation read that fails leaves this symbol
                 // unmeasured. Listing it as uncovered would report a tested
                 // function as untested, so it is omitted and the page reports
                 // itself partial.
-                let Ok(callers) = self.graph.get_callers(&node.id, 3).await else {
+                let Ok(callers) = reader.impact(
+                    std::slice::from_ref(&node.occurrence),
+                    &[tracedecay_domain::RelationEdgeKindV1::Calls],
+                    3,
+                    50_000,
+                    200_000,
+                    Arc::clone(&cancellation),
+                ) else {
                     unread_symbols = true;
                     continue;
                 };
-                let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
-                let Ok(test_annotated) = self.graph.get_test_annotated_node_ids(&caller_ids).await
-                else {
+                if !callers.complete {
                     unread_symbols = true;
                     continue;
-                };
+                }
                 let tests: Vec<TestReferenceV1> = callers
+                    .impacted
                     .into_iter()
-                    .filter(|(n, _)| {
-                        tracedecay_code_index::is_test_file(&n.file_path)
-                            || test_annotated.contains(&n.id)
+                    .filter_map(|caller| {
+                        let caller_metadata = caller.summary.metadata.as_ref()?.clone();
+                        let caller_file = caller
+                            .summary
+                            .binding
+                            .as_ref()
+                            .and_then(|binding| binding.logical_path.clone())?;
+                        (tracedecay_code_index::is_test_file(&caller_file)
+                            || test_evidence.contains(&caller.summary.occurrence))
+                        .then_some((caller_metadata, caller_file))
                     })
-                    .map(|(n, _)| {
-                        test_files.insert(n.file_path.clone());
+                    .map(|(metadata, caller_file)| {
+                        test_files.insert(caller_file.clone());
                         TestReferenceV1 {
-                            test_name: n.name,
-                            test_file: n.file_path,
-                            test_line: n.start_line as usize,
+                            test_name: metadata.simple_name,
+                            test_file: caller_file,
+                            test_line: metadata.start_line as usize,
                         }
                     })
                     .collect();
                 if tests.is_empty() {
                     uncovered.push(UncoveredSourceV1 {
-                        id: node.id,
-                        name: node.name,
-                        file: node.file_path,
-                        line: node.start_line as usize,
+                        id: node.occurrence.as_str().to_owned(),
+                        name: metadata.simple_name.clone(),
+                        file: file_path.to_owned(),
+                        line: metadata.start_line as usize,
                     });
                 } else {
                     coverage_map.push(TestMapCoverageV1 {
-                        source_name: node.name,
-                        source_id: node.id,
-                        source_file: node.file_path,
-                        source_line: node.start_line as usize,
+                        source_name: metadata.simple_name.clone(),
+                        source_id: node.occurrence.as_str().to_owned(),
+                        source_file: file_path.to_owned(),
+                        source_line: metadata.start_line as usize,
                         tests,
                     });
                 }
@@ -709,10 +918,6 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                 .filter
                 .as_deref()
                 .and_then(|pattern| glob::Pattern::new(pattern).ok());
-            let Ok(files_with_inline_tests) = self.graph.get_files_with_test_annotations().await
-            else {
-                return test_primitive_failed(context);
-            };
             let cancellation = request_graph_cancellation(context.request);
             let Ok(verified) = self
                 .code_graph
@@ -730,6 +935,15 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                 context.observed_at,
                 Arc::clone(&cancellation),
             ) else {
+                return test_primitive_failed(context);
+            };
+            let Ok(test_annotations) = test_annotation_evidence(&reader, Arc::clone(&cancellation))
+            else {
+                return test_primitive_failed(context);
+            };
+            let Ok(files_with_inline_tests) =
+                files_for_occurrences(&reader, Arc::clone(&cancellation), &test_annotations)
+            else {
                 return test_primitive_failed(context);
             };
             let graph = GraphQueryManager::new(&reader, cancellation);
@@ -780,12 +994,12 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
 }
 
 pub struct TraceDecaySourceLinesPortV1 {
-    graph: Arc<TraceDecay>,
+    source_runtime: Arc<SourceReadRuntime>,
 }
 
 impl TraceDecaySourceLinesPortV1 {
-    pub fn new(graph: Arc<TraceDecay>) -> Self {
-        Self { graph }
+    pub fn new(source_runtime: Arc<SourceReadRuntime>) -> Self {
+        Self { source_runtime }
     }
 }
 
@@ -801,7 +1015,7 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
             return failed(EvidenceDomain::Source, finished_at);
         }
         let relative = request.file.as_str();
-        let path = self.graph.project_root().join(relative);
+        let path = self.source_runtime.project_root().join(relative);
         let Ok(bytes) = std::fs::read(&path) else {
             return failed(EvidenceDomain::Source, finished_at);
         };
@@ -838,44 +1052,13 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
     }
 }
 
-pub(crate) struct TraceDecayTemporalPortV1 {
-    session_db: Arc<RegisteredGlobalDb>,
-}
-
-impl TraceDecayTemporalPortV1 {
-    pub(crate) fn new(session_db: Arc<RegisteredGlobalDb>) -> Self {
-        Self { session_db }
-    }
-}
-
-impl TemporalRetrievalPort for TraceDecayTemporalPortV1 {
-    fn session_lookup(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        request: &SessionLookupRequest,
-    ) -> RetrievalPortOutcome<SessionLookupResult> {
-        let _ = (context, &self.session_db, request);
-        let finished_at = now_observed();
-        // Session temporal anchors are owned by the session-temporal kernel; when no exact
-        // session handle is supplied on this compatibility port, return an
-        // authoritative empty page rather than inventing anchors.
-        completed(
-            SessionLookupResult {
-                anchors: Vec::new(),
-            },
-            EvidenceDomain::Temporal,
-            finished_at,
-        )
-    }
-}
-
 pub struct TraceDecayHealthPortV1 {
-    graph: Arc<TraceDecay>,
+    source_runtime: Arc<SourceReadRuntime>,
 }
 
 impl TraceDecayHealthPortV1 {
-    pub fn new(graph: Arc<TraceDecay>) -> Self {
-        Self { graph }
+    pub fn new(source_runtime: Arc<SourceReadRuntime>) -> Self {
+        Self { source_runtime }
     }
 }
 
@@ -885,10 +1068,10 @@ impl OperationalRetrievalPort for TraceDecayHealthPortV1 {
         _context: &RetrievalPortContext<'_>,
         _request: &HealthReadRequest,
     ) -> RetrievalPortOutcome<HealthReadResult> {
-        let branch = self.graph.branch_diagnostics();
-        let status = if branch.serving_db_exists && !self.graph.is_read_only() {
-            if branch.is_fallback { "degraded" } else { "ok" }
-        } else if branch.serving_db_exists {
+        let serving_db_exists = self.source_runtime.db().canonical_database_path().is_file();
+        let status = if serving_db_exists && !self.source_runtime.is_read_only() {
+            "ok"
+        } else if serving_db_exists {
             "read_only"
         } else {
             "degraded"
@@ -903,23 +1086,46 @@ impl OperationalRetrievalPort for TraceDecayHealthPortV1 {
     }
 }
 
-fn public_module_symbols(nodes: Vec<Node>, path: &str) -> Vec<SymbolPrimitiveRecord> {
+fn public_module_symbols(
+    nodes: Vec<CodeGraphSymbolSummaryV1>,
+    path: &str,
+) -> Result<Vec<SymbolPrimitiveRecord>, ()> {
     let prefix = if path.ends_with('/') {
         path.to_owned()
     } else {
         format!("{path}/")
     };
-    let mut pub_nodes: Vec<Node> = nodes
+    let mut pub_nodes: Vec<CodeGraphSymbolSummaryV1> = nodes
         .into_iter()
         .filter(|node| {
-            node.visibility == Visibility::Pub
-                && (node.file_path == path || node.file_path.starts_with(&prefix))
+            let Some(metadata) = node.metadata.as_ref() else {
+                return false;
+            };
+            let Some(file_path) = node
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.logical_path.as_deref())
+            else {
+                return false;
+            };
+            metadata.visibility == "public" && (file_path == path || file_path.starts_with(&prefix))
         })
         .collect();
     pub_nodes.sort_by(|left, right| {
-        left.file_path
-            .cmp(&right.file_path)
-            .then(left.start_line.cmp(&right.start_line))
+        let left_path = left
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref());
+        let right_path = right
+            .binding
+            .as_ref()
+            .and_then(|binding| binding.logical_path.as_deref());
+        left_path.cmp(&right_path).then(
+            left.metadata
+                .as_ref()
+                .map(|metadata| metadata.start_line)
+                .cmp(&right.metadata.as_ref().map(|metadata| metadata.start_line)),
+        )
     });
     pub_nodes
         .into_iter()
@@ -928,7 +1134,7 @@ fn public_module_symbols(nodes: Vec<Node>, path: &str) -> Vec<SymbolPrimitiveRec
 }
 
 pub struct TraceDecayExtendedPrimitivePortV1 {
-    graph: Arc<TraceDecay>,
+    source_runtime: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     database: Database,
     observation_database: Arc<RegisteredGlobalDb>,
@@ -939,7 +1145,7 @@ pub struct TraceDecayExtendedPrimitivePortV1 {
 
 impl TraceDecayExtendedPrimitivePortV1 {
     fn new(
-        graph: Arc<TraceDecay>,
+        source_runtime: Arc<SourceReadRuntime>,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         database: Database,
         observation_database: Arc<RegisteredGlobalDb>,
@@ -948,7 +1154,7 @@ impl TraceDecayExtendedPrimitivePortV1 {
         diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
     ) -> Self {
         Self {
-            graph,
+            source_runtime,
             code_graph,
             database,
             observation_database,
@@ -1080,18 +1286,16 @@ fn update_storage_status_history(
 /// dashboard projection. History is durable and scope-bound, so growth does
 /// not reset when the daemon or dashboard restarts.
 pub(crate) async fn canonical_storage_status(
-    graph: &TraceDecay,
+    database: &Database,
+    source_runtime: &SourceReadRuntime,
+    project_id: &ProjectId,
     include_details: bool,
 ) -> StorageStatusPrimitiveResult {
-    let branch = graph.branch_diagnostics();
-    let read_only = graph.is_read_only();
-    let store_path = graph.db_path().display().to_string();
-    let file_bytes = graph
-        .db_path()
-        .metadata()
-        .ok()
-        .map(|metadata| metadata.len());
-    let page_counts = graph.storage_page_counts().await.ok();
+    let read_only = source_runtime.is_read_only();
+    let database_path = database.canonical_database_path();
+    let store_path = database_path.display().to_string();
+    let file_bytes = database_path.metadata().ok().map(|metadata| metadata.len());
+    let page_counts = database.storage_page_counts().await.ok();
     let page_size_bytes = page_counts.and_then(|(page_size, _, _)| u32::try_from(page_size).ok());
     let page_count = page_counts.map(|(_, page_count, _)| page_count);
     let freelist_pages = page_counts.map(|(_, _, freelist_pages)| freelist_pages);
@@ -1099,21 +1303,19 @@ pub(crate) async fn canonical_storage_status(
         .zip(page_count)
         .map(|(page_size, pages)| u64::from(page_size).saturating_mul(pages))
         .or(file_bytes);
-    let project_id = graph.store_layout().identity.project_id.clone();
-    let status = if branch.serving_db_exists {
-        if branch.is_fallback { "degraded" } else { "ok" }
+    let project_id = Some(project_id.as_str().to_owned());
+    let status = if database_path.is_file() {
+        if read_only { "read_only" } else { "ok" }
     } else {
         "missing_graph_db"
     };
-    let mut details = Vec::new();
-    if include_details {
-        details.extend(branch.warnings);
-        if let Some(warning) = branch.fallback_warning {
-            details.push(warning);
-        }
-    }
+    let details = if include_details && page_counts.is_none() {
+        vec!["project store page telemetry unavailable".to_owned()]
+    } else {
+        Vec::new()
+    };
     let history_path = storage_status_history_path(
-        &graph.store_layout().data_root,
+        database_path.parent().unwrap_or_else(|| Path::new(".")),
         project_id.as_deref(),
         &store_path,
     );
@@ -1147,21 +1349,33 @@ pub(crate) async fn canonical_storage_status(
 impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
     fn qualified_name<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
+        context: RetrievalPortContext<'a>,
         request: &'a QualifiedNamePrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult> {
         Box::pin(async move {
-            let Ok(nodes) = self
-                .graph
-                .get_nodes_by_qualified_name(&request.qualified_name)
-                .await
+            let cancellation = request_graph_cancellation(context.request);
+            let Ok(reader) = open_code_graph(
+                self.code_graph.as_ref(),
+                context.request,
+                now_observed(),
+                Arc::clone(&cancellation),
+            )
+            .await
             else {
                 return failed(EvidenceDomain::Symbol, now_observed());
             };
-            let symbols: Vec<_> = nodes
+            let Ok(nodes) =
+                reader.resolve_qualified_name(&request.qualified_name, None, 10_000, cancellation)
+            else {
+                return failed(EvidenceDomain::Symbol, now_observed());
+            };
+            let symbols = nodes
                 .into_iter()
                 .map(|node| symbol_record(node, None))
-                .collect();
+                .collect::<Result<Vec<_>, _>>();
+            let Ok(symbols) = symbols else {
+                return failed(EvidenceDomain::Symbol, now_observed());
+            };
             let total = symbols.len() as u64;
             completed(
                 QualifiedNamePrimitiveResult {
@@ -1177,32 +1391,58 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn call_chain<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
+        context: RetrievalPortContext<'a>,
         request: &'a CallChainPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult> {
         Box::pin(async move {
-            let Ok(path) = self
-                .graph
-                .get_call_chain(
-                    &request.from_node_id,
-                    &request.to_node_id,
-                    request.maximum_depth as usize,
-                )
-                .await
+            let cancellation = request_graph_cancellation(context.request);
+            let Ok(reader) = open_code_graph(
+                self.code_graph.as_ref(),
+                context.request,
+                now_observed(),
+                Arc::clone(&cancellation),
+            )
+            .await
             else {
                 return failed(EvidenceDomain::Graph, now_observed());
             };
-            // A traversal that completes without finding a route is an
-            // authoritative empty chain; only the failed read is withheld.
-            let path = path.unwrap_or_default();
-            let mut node_ids = Vec::new();
-            let mut edge_kinds = Vec::new();
-            for (node, edge) in path {
-                node_ids.push(node.id);
-                if let Some(edge) = edge {
-                    edge_kinds.push(edge.kind.as_str().to_owned());
-                }
+            let Ok(from) = tracedecay_domain::SymbolOccurrenceId::new(request.from_node_id.clone())
+            else {
+                return failed(EvidenceDomain::Graph, now_observed());
+            };
+            let Ok(to) = tracedecay_domain::SymbolOccurrenceId::new(request.to_node_id.clone())
+            else {
+                return failed(EvidenceDomain::Graph, now_observed());
+            };
+            let Ok(path) = reader.shortest_path(
+                &from,
+                &to,
+                &[tracedecay_domain::RelationEdgeKindV1::Calls],
+                request.maximum_depth,
+                100_000,
+                cancellation,
+            ) else {
+                return failed(EvidenceDomain::Graph, now_observed());
+            };
+            if !path.complete {
+                return evidence_unavailable(
+                    EvidenceDomain::Graph,
+                    now_observed(),
+                    OmissionReason::Unavailable,
+                    0,
+                );
             }
+            let edges = path.path.unwrap_or_default();
+            let mut node_ids = vec![from.as_str().to_owned()];
+            node_ids.extend(
+                edges
+                    .iter()
+                    .map(|edge| edge.to_occurrence.as_str().to_owned()),
+            );
+            let edge_kinds = edges
+                .into_iter()
+                .map(|edge| relation_kind_name(edge.kind).to_owned())
+                .collect();
             completed(
                 CallChainPrimitiveResult {
                     node_ids,
@@ -1268,19 +1508,47 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn source_body<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
+        context: RetrievalPortContext<'a>,
         request: &'a SourceBodyPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, SourceBodyPrimitiveResult> {
         Box::pin(async move {
-            let Some(node) = self.graph.get_node(&request.node_id).await.ok().flatten() else {
+            let cancellation = request_graph_cancellation(context.request);
+            let Ok(reader) = open_code_graph(
+                self.code_graph.as_ref(),
+                context.request,
+                now_observed(),
+                Arc::clone(&cancellation),
+            )
+            .await
+            else {
                 return failed(EvidenceDomain::Source, now_observed());
             };
-            let path = self.graph.project_root().join(&node.file_path);
+            let Ok(occurrence) =
+                tracedecay_domain::SymbolOccurrenceId::new(request.node_id.clone())
+            else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
+            let Ok(Some(node)) = reader.symbol_summary(&occurrence, cancellation) else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
+            let Some(metadata) = node.metadata else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
+            let Some(file) = node.binding.and_then(|binding| binding.logical_path) else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
+            let Some(line_span) = metadata.line_span.checked_sub(1) else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
+            let Some(end_line) = metadata.start_line.checked_add(line_span) else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
+            let path = self.source_runtime.project_root().join(&file);
             let Ok(content) = tokio::fs::read_to_string(&path).await else {
                 return failed(EvidenceDomain::Source, now_observed());
             };
-            let start = node.start_line as usize;
-            let end = node.end_line as usize;
+            let start = metadata.start_line as usize;
+            let end = end_line as usize;
             let body = content
                 .lines()
                 .skip(start)
@@ -1289,10 +1557,10 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 .join("\n");
             completed(
                 SourceBodyPrimitiveResult {
-                    node_id: node.id,
-                    file: node.file_path,
-                    start_line: node.start_line.saturating_add(1),
-                    end_line: node.end_line.saturating_add(1),
+                    node_id: occurrence.as_str().to_owned(),
+                    file,
+                    start_line: metadata.start_line.saturating_add(1),
+                    end_line: end_line.saturating_add(1),
                     body,
                 },
                 EvidenceDomain::Source,
@@ -1303,20 +1571,36 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn source_outline<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
+        context: RetrievalPortContext<'a>,
         request: &'a SourceOutlinePrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult> {
         Box::pin(async move {
-            let Ok(nodes) = self.graph.get_nodes_by_file(&request.file).await else {
+            let cancellation = request_graph_cancellation(context.request);
+            let Ok(reader) = open_code_graph(
+                self.code_graph.as_ref(),
+                context.request,
+                now_observed(),
+                Arc::clone(&cancellation),
+            )
+            .await
+            else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
+            let Ok(nodes) = reader.symbols_in_logical_file(&request.file, 100_000, cancellation)
+            else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
+            let symbols = nodes
+                .into_iter()
+                .map(|node| symbol_record(node, None))
+                .collect::<Result<Vec<_>, _>>();
+            let Ok(symbols) = symbols else {
                 return failed(EvidenceDomain::Source, now_observed());
             };
             completed(
                 SourceOutlinePrimitiveResult {
                     file: request.file.clone(),
-                    symbols: nodes
-                        .into_iter()
-                        .map(|node| symbol_record(node, None))
-                        .collect(),
+                    symbols,
                 },
                 EvidenceDomain::Source,
                 now_observed(),
@@ -1326,17 +1610,31 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn module_api<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
+        context: RetrievalPortContext<'a>,
         request: &'a ModuleApiPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult> {
         Box::pin(async move {
-            let Ok(nodes) = self.graph.get_all_nodes().await else {
+            let cancellation = request_graph_cancellation(context.request);
+            let Ok(reader) = open_code_graph(
+                self.code_graph.as_ref(),
+                context.request,
+                now_observed(),
+                Arc::clone(&cancellation),
+            )
+            .await
+            else {
+                return failed(EvidenceDomain::Symbol, now_observed());
+            };
+            let Ok(nodes) = all_code_graph_symbols(&reader, cancellation) else {
+                return failed(EvidenceDomain::Symbol, now_observed());
+            };
+            let Ok(symbols) = public_module_symbols(nodes, &request.path) else {
                 return failed(EvidenceDomain::Symbol, now_observed());
             };
             completed(
                 ModuleApiPrimitiveResult {
                     path: request.path.clone(),
-                    symbols: public_module_symbols(nodes, &request.path),
+                    symbols,
                 },
                 EvidenceDomain::Symbol,
                 now_observed(),
@@ -1352,7 +1650,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(async move {
             let mut files = Vec::new();
             for file in &request.files {
-                let path = self.graph.project_root().join(file);
+                let path = self.source_runtime.project_root().join(file);
                 let meta = tokio::fs::metadata(&path).await.ok();
                 files.push(FileMetadataRecord {
                     file: file.clone(),
@@ -1424,12 +1722,18 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn storage_status<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
+        context: RetrievalPortContext<'a>,
         request: &'a StorageStatusPrimitiveRequest,
     ) -> ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
         Box::pin(async move {
             completed(
-                canonical_storage_status(self.graph.as_ref(), request.include_details).await,
+                canonical_storage_status(
+                    &self.database,
+                    self.source_runtime.as_ref(),
+                    &context.request.scope().project_id,
+                    request.include_details,
+                )
+                .await,
                 EvidenceDomain::Operational,
                 now_observed(),
             )
@@ -1448,7 +1752,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
             }
             let Some(identity) = self
                 .diagnostic_identity
-                .resolve(self.graph.project_root().to_path_buf())
+                .resolve(self.source_runtime.project_root().to_path_buf())
                 .await
             else {
                 return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
@@ -1464,7 +1768,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 super::runtime::DiagnosticsPrimitiveScope::Workspace => None,
                 super::runtime::DiagnosticsPrimitiveScope::File(path) => {
                     let Some(path) = crate::diagnostics_publication::code_index_logical_path(
-                        self.graph.project_root(),
+                        self.source_runtime.project_root(),
                         path,
                     ) else {
                         return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
@@ -1481,7 +1785,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
             let current_index = match self
                 .code_index
                 .current_identity(
-                    self.graph.project_root().to_path_buf(),
+                    self.source_runtime.project_root().to_path_buf(),
                     document_path.clone(),
                 )
                 .await
@@ -1604,12 +1908,12 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 }
 
 pub struct TraceDecayOperationalPrimitivePortV1 {
-    graph: Arc<TraceDecay>,
+    source_runtime: Arc<SourceReadRuntime>,
 }
 
 impl TraceDecayOperationalPrimitivePortV1 {
-    pub fn new(graph: Arc<TraceDecay>) -> Self {
-        Self { graph }
+    pub fn new(source_runtime: Arc<SourceReadRuntime>) -> Self {
+        Self { source_runtime }
     }
 }
 
@@ -1628,15 +1932,19 @@ impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                 PolicyDecisionRef, TemporalState,
             };
             use tracedecay_domain::ComponentVersion;
-            let branch = self.graph.branch_diagnostics();
+            let serving_db_exists = self.source_runtime.db().canonical_database_path().is_file();
             let status = match request.operation {
                 OperationalPrimitive::Project
                 | OperationalPrimitive::Status
                 | OperationalPrimitive::Files
                 | OperationalPrimitive::Configuration
                 | OperationalPrimitive::RuntimeStatus => {
-                    if branch.serving_db_exists {
-                        if branch.is_fallback { "degraded" } else { "ok" }
+                    if serving_db_exists {
+                        if self.source_runtime.is_read_only() {
+                            "read_only"
+                        } else {
+                            "ok"
+                        }
                     } else {
                         "degraded"
                     }
@@ -1645,9 +1953,8 @@ impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
             let payload = serde_json::json!({
                 "status": status,
                 "observed_at": observed_at.0,
-                "read_only": self.graph.is_read_only(),
-                "serving_db_exists": branch.serving_db_exists,
-                "is_fallback": branch.is_fallback,
+                "read_only": self.source_runtime.is_read_only(),
+                "serving_db_exists": serving_db_exists,
             });
             let policy = match PolicyDecisionRef::new(
                 "route.application.retrieval.operational",
@@ -1883,20 +2190,16 @@ pub struct TraceDecayAffectedTestsPortV1 {
 }
 
 impl TraceDecayAffectedTestsPortV1 {
-    pub fn new(graph: Arc<TraceDecay>, generation: CodeGenerationId) -> Self {
-        Self::from_binding(project_id_for_graph(graph.as_ref()), generation, None)
+    pub fn new(project_id: ProjectId, generation: CodeGenerationId) -> Self {
+        Self::from_binding(Some(project_id), generation, None)
     }
 
     pub fn with_generation_attribution(
-        graph: Arc<TraceDecay>,
+        project_id: ProjectId,
         generation: CodeGenerationId,
         attribution: Arc<dyn GenerationTestAttributionJoinReadPort + Send + Sync>,
     ) -> Self {
-        Self::from_binding(
-            project_id_for_graph(graph.as_ref()),
-            generation,
-            Some(attribution),
-        )
+        Self::from_binding(Some(project_id), generation, Some(attribution))
     }
 
     fn from_binding(
@@ -1981,15 +2284,6 @@ fn largest_table_details(
         details.push(format!("{remainder} smaller tables not listed"));
     }
     details
-}
-
-fn project_id_for_graph(graph: &TraceDecay) -> Option<ProjectId> {
-    graph
-        .store_layout()
-        .identity
-        .project_id
-        .as_ref()
-        .and_then(|project_id| ProjectId::new(project_id.clone()).ok())
 }
 
 fn attributed_tests_outcome(
@@ -2308,9 +2602,10 @@ fn operational_problem(
 /// application primitive runtime.
 pub struct ProductionPrimitiveOpenRequestV1 {
     database: Database,
-    graph: Arc<TraceDecay>,
+    source_runtime: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     session_db: Arc<RegisteredGlobalDb>,
+    temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     project_root: PathBuf,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
@@ -2323,24 +2618,26 @@ pub struct ProductionPrimitiveOpenRequestV1 {
 
 impl ProductionPrimitiveOpenRequestV1 {
     pub fn new(
-        graph: Arc<TraceDecay>,
+        source_runtime: Arc<SourceReadRuntime>,
         code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
         session_db: Arc<RegisteredGlobalDb>,
+        temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
         access: ProjectSourceAccessSnapshot,
         admitted_root_uri: String,
         operation_events: OperationEventAuthority,
     ) -> Self {
-        let database = graph.db().clone();
-        let project_root = graph.project_root().to_path_buf();
+        let database = source_runtime.db().clone();
+        let project_root = source_runtime.project_root().to_path_buf();
         let scope = access.scope.clone();
         let configuration_digest = access.configuration_digest.clone();
         Self {
             database,
-            graph,
+            source_runtime,
             code_graph,
             session_db,
+            temporal,
             project_root,
             code_index,
             diagnostic_identity,
@@ -2359,9 +2656,10 @@ pub async fn open_production_primitive_runtime(
 ) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
     let ProductionPrimitiveOpenRequestV1 {
         database,
-        graph,
+        source_runtime,
         code_graph,
         session_db,
+        temporal,
         project_root,
         code_index,
         diagnostic_identity,
@@ -2412,7 +2710,7 @@ pub async fn open_production_primitive_runtime(
             Arc::clone(&code_index),
         ));
     let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
-        Arc::clone(&graph),
+        Arc::clone(&source_runtime),
         Arc::clone(&code_graph),
         database.clone(),
         Arc::clone(&session_db),
@@ -2426,20 +2724,24 @@ pub async fn open_production_primitive_runtime(
     ));
     open_primitive_project_runtime(
         database,
-        Arc::clone(&graph),
+        Arc::clone(&source_runtime),
         Arc::clone(&code_graph),
         cursors,
-        Arc::new(TraceDecayTestPrimitivePortV1::new(
-            Arc::clone(&graph),
+        Arc::new(TraceDecayTestPrimitivePortV1::new(Arc::clone(&code_graph))),
+        Arc::new(TraceDecayLexicalGrepAuthorityV1::new(
+            Arc::clone(&source_runtime),
             Arc::clone(&code_graph),
         )),
-        Arc::new(TraceDecayLexicalGrepAuthorityV1::new(Arc::clone(&graph))),
-        Arc::new(TraceDecayRedundancyAuthorityV1::new(Arc::clone(&graph))),
-        Arc::new(TraceDecayTemporalPortV1::new(session_db)),
-        Arc::new(TraceDecaySourceLinesPortV1::new(Arc::clone(&graph))),
-        Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&graph))),
+        Arc::new(TraceDecayRedundancyAuthorityV1::new(Arc::clone(
+            &code_graph,
+        ))),
+        temporal,
+        Arc::new(TraceDecaySourceLinesPortV1::new(Arc::clone(
+            &source_runtime,
+        ))),
+        Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&source_runtime))),
         extended,
-        Arc::new(TraceDecayOperationalPrimitivePortV1::new(graph)),
+        Arc::new(TraceDecayOperationalPrimitivePortV1::new(source_runtime)),
         scope,
         access,
         admitted_root_uri,

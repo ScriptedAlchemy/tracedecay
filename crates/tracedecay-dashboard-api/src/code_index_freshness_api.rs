@@ -36,6 +36,8 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub worktree_id: Option<String>,
     /// Exact source reference captured by the sealed generation.
     pub source_reference: Option<String>,
+    /// Exact source revision captured by the sealed generation.
+    pub source_revision: Option<String>,
     /// Latest sealed generation identity, when a complete generation exists.
     pub latest_generation_id: Option<String>,
     /// Content identity of the complete source snapshot.
@@ -178,6 +180,7 @@ mod tests {
                     repository_id: Some("repository.fixture".to_owned()),
                     worktree_id: Some("worktree.fixture".to_owned()),
                     source_reference: Some("refs/heads/main".to_owned()),
+                    source_revision: Some("commit.fixture".to_owned()),
                     latest_generation_id: Some("generation.fixture".to_owned()),
                     snapshot_content_identity: Some("sha256:fixture".to_owned()),
                     sealed_at_micros: Some(41),
@@ -214,6 +217,7 @@ mod tests {
                     repository_id: None,
                     worktree_id: None,
                     source_reference: None,
+                    source_revision: None,
                     latest_generation_id: None,
                     snapshot_content_identity: None,
                     sealed_at_micros: None,

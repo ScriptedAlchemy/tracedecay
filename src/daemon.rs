@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -150,7 +150,6 @@ use code_index_executor::{code_index_search_display_binding, mcp_search_request_
 use code_index_task_support::{code_index_scope_unavailable, code_index_search_hydration_budget};
 pub(crate) mod code_index_scheduler;
 mod connection_serving;
-pub(crate) mod context_scout_lifecycle;
 #[cfg(unix)]
 use connection_serving::serve_authenticated_socket_client_with_class;
 #[cfg(all(unix, test))]
@@ -178,9 +177,9 @@ mod core_lifecycle;
 mod core_logging;
 mod core_proxy;
 mod database_owner_registry;
-use database_owner_registry::{DatabaseOwnerRegistry, settle_deferred_post_open_health};
-pub(crate) mod doctor_kernel;
+use database_owner_registry::DatabaseOwnerRegistry;
 pub(crate) mod dashboard_automation;
+pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
 pub(crate) mod project_open_owners;
 pub(crate) mod query_authority_provider;
@@ -203,16 +202,11 @@ mod git_transactions;
 mod git_watch;
 mod github_credential_lifecycle;
 mod graph_resolution;
-mod native_integration;
+pub(crate) mod native_integration;
 use graph_resolution::retained_project_graph_resolver;
-pub(crate) use native_integration::daemon_worktree_holder_admission_fence;
 mod http_application;
 mod http_application_router;
-mod remote_https;
-#[cfg(test)]
-mod remote_https_tests;
 mod remote_protocol;
-pub use remote_https::RemoteHttpsListenerConfigV1;
 mod remote_query;
 mod remote_replay_transaction;
 pub(crate) mod retained_owner;
@@ -237,7 +231,6 @@ use invocation_executor::{
     invocation_is_native_integration_operation, multi_root_family_allows,
     unavailable_root_generation,
 };
-mod external_acquisition;
 mod invocation_state;
 use invocation_state::DaemonInvocationState;
 pub(crate) mod lcm_authority;
@@ -278,7 +271,6 @@ mod project_delivery_mount;
 use project_composition::daemon_transcript_source_home;
 use project_composition::{ProductionProjectCompositionRuntime, production_project_server};
 mod project_open_admission;
-mod project_open_advisory;
 #[cfg(test)]
 use project_open_admission::project_open_retry_backoff;
 #[cfg(unix)]
@@ -294,11 +286,8 @@ use project_open_admission::{
 mod project_open_handshake;
 #[cfg(test)]
 use project_open_handshake::is_missing_index_error;
-#[cfg(all(unix, test))]
-use project_open_handshake::open_project_for_handshake;
 use project_open_handshake::{
-    open_project_for_handshake_with_health_mode, project_open_error_response,
-    write_project_open_error,
+    open_project_for_handshake, project_open_error_response, write_project_open_error,
 };
 mod project_open_orchestration;
 mod project_routing;
@@ -367,19 +356,15 @@ pub(crate) use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
     parse_daemon_invocation_request,
 };
-pub use bootstrap::{run_foreground, run_foreground_with_remote_https};
+pub use bootstrap::run_foreground;
 pub(crate) use service::invocation::{
-    BoundedHookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
-    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
-    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrar,
     DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrationError, DaemonInvocationService, DaemonLspOwnerRegistrar,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
-    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, HookOrchestrationRequestV1,
-    HookOrchestrationTriggerV1, admit_registered_hook_orchestration,
-    advisory_cycle_invocation_result, daemon_operation_event_authority,
+    DaemonWorkRuntimeRegistrar, HookOrchestrationAdmissionV1, admit_hook_orchestration,
+    daemon_operation_event_authority,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
@@ -388,8 +373,8 @@ pub use service::{
     quiesce_installed_service_before_lease, refresh_installed_service,
     refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,
     refresh_service, restore_installed_service_after_update, restore_scoop_package_service,
-    service_spec, service_spec_for_installed_refresh, service_status, socket_path_or_default,
-    start_service, stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
+    service_spec, service_status, socket_path_or_default, start_service, stop_service,
+    uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };

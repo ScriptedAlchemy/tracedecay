@@ -2,6 +2,8 @@
 //! query surface, driven through the real `handle_tool_call` dispatch against a
 //! temp project with a linked git worktree and a seeded `sessions.db`.
 
+#![cfg(feature = "test-transport")]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

@@ -133,7 +133,7 @@ async fn invoke_configuration_surface(
     })
 }
 
-pub(super) async fn current_configuration_revision(
+pub(crate) async fn current_configuration_revision(
     project_path: &Path,
 ) -> tracedecay::errors::Result<ConfigurationRevisionId> {
     let envelope = invoke_configuration_surface(
@@ -168,7 +168,7 @@ pub(super) async fn current_configuration_revision(
     Ok(revision)
 }
 
-pub(super) async fn current_project_setting(
+pub(crate) async fn current_project_setting(
     project_path: &Path,
     key: &str,
 ) -> tracedecay::errors::Result<ConfigurationValueV1> {
@@ -204,7 +204,7 @@ pub(crate) async fn canonical_upload_enabled(
     }
 }
 
-pub(super) async fn mutate_project_configuration(
+pub(crate) async fn mutate_project_configuration(
     project_path: &Path,
     project_id: &ProjectId,
     expected_revision: ConfigurationRevisionId,
@@ -295,7 +295,7 @@ fn configuration_effect_receipt(
     Ok(effect.receipt)
 }
 
-pub(super) fn project_configuration_set(
+pub(crate) fn project_configuration_set(
     project_id: &ProjectId,
     key: &str,
     value: ConfigurationValueV1,
@@ -309,7 +309,7 @@ pub(super) fn project_configuration_set(
     })
 }
 
-pub(super) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
+pub(crate) fn report_configuration_receipt(receipt: Option<&EffectReceipt>) {
     if let Some(receipt) = receipt {
         eprintln!("Receipt: {}", receipt.request_id.as_str());
     }

@@ -3,7 +3,7 @@ use tracedecay::bench::{BenchOptions, OutputFormat, run_bench};
 use tracedecay::tracedecay::TraceDecay;
 
 #[tokio::test]
-async fn bench_runs_and_returns_report() {
+async fn bench_fails_closed_until_admitted_graph_authority_is_mounted() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(
         tmp.path().join("a.rs"),
@@ -27,7 +27,7 @@ task = "what does world do"
     )
     .unwrap();
 
-    let report = run_bench(
+    let error = run_bench(
         &cg,
         &queries_path,
         BenchOptions {
@@ -36,15 +36,18 @@ task = "what does world do"
         },
     )
     .await
-    .expect("bench run");
+    .expect_err("bench must not bypass admitted graph authority");
 
-    assert_eq!(report.results.len(), 2);
-    assert_eq!(report.aggregate.queries, 2);
-    for r in &report.results {
-        assert!(
-            r.baseline_tokens > 0,
-            "baseline must be > 0 for query: {}",
-            r.task
-        );
+    match error {
+        tracedecay::errors::TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable,
+            detail,
+        } => {
+            assert_eq!(reason_code, "verified-code-context-benchmark-unavailable");
+            assert!(!retryable);
+            assert!(detail.contains("admitted code-graph authority"));
+        }
+        other => panic!("unexpected error: {other}"),
     }
 }

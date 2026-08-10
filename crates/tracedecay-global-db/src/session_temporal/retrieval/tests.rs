@@ -15,15 +15,29 @@ use tracedecay_runtime_core::db::engine::{
 };
 use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, PageRequest, TemporalAuthorizedRoot, TemporalExecutionSnapshot,
-    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
-    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
-    TemporalWatermarks,
+    BindingDigest, ExecutionControl, KernelVersions, PageRequest, TemporalAuthorizedRoot,
+    TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
+    TemporalParticipantManifest, TemporalPortError, TemporalRecord, TemporalRetrievalScope,
+    TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
 
 mod relation_graph_tests;
+
+#[test]
+fn relation_reset_remains_a_typed_temporal_reset() {
+    assert_eq!(
+        temporal_relation_error(
+            SessionRelationError::ResetRequired,
+            &ExecutionControl::default(),
+            "relation query",
+        ),
+        TemporalPortError::ResetRequired {
+            resource: "session relation projection",
+        }
+    );
+}
 
 fn normalize_plan_detail(detail: &str) -> String {
     detail

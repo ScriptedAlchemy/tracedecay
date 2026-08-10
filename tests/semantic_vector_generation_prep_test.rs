@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 

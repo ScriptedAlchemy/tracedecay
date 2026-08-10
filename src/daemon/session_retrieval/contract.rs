@@ -32,21 +32,6 @@ pub(crate) enum SessionRetrievalStoreScope {
     Profile,
 }
 
-impl SessionRetrievalStoreScope {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Project => "project",
-            Self::Profile => "profile",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SessionRetrievalProjectSelector {
-    pub(crate) project_id: Option<String>,
-    pub(crate) project_path: Option<String>,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionRetrievalFilters {
     pub(crate) project_key: Option<String>,
@@ -64,12 +49,6 @@ pub(crate) struct SessionRetrievalFilters {
 #[derive(Clone, Debug)]
 pub(crate) struct SessionRetrievalCommand {
     query: SessionTemporalQuery,
-    #[cfg(test)]
-    filters: SessionRetrievalFilters,
-    #[cfg(test)]
-    goals: bool,
-    store_scope: SessionRetrievalStoreScope,
-    project_selector: Option<SessionRetrievalProjectSelector>,
 }
 
 impl SessionRetrievalCommand {
@@ -77,52 +56,15 @@ impl SessionRetrievalCommand {
         query: SessionTemporalQuery,
         filters: SessionRetrievalFilters,
         goals: bool,
-        store_scope: SessionRetrievalStoreScope,
     ) -> Self {
-        #[cfg(test)]
-        let test_filters = filters.clone();
         let query = query
             .with_compatibility_filter_digest(compatibility_filter_digest(&filters, goals))
             .with_semantic_filter(temporal_candidate_filter(&filters, goals));
-        Self {
-            query,
-            #[cfg(test)]
-            filters: test_filters,
-            #[cfg(test)]
-            goals,
-            store_scope,
-            project_selector: None,
-        }
+        Self { query }
     }
 
     pub(crate) fn query(&self) -> &SessionTemporalQuery {
         &self.query
-    }
-
-    #[cfg(test)]
-    pub(crate) fn filters(&self) -> &SessionRetrievalFilters {
-        &self.filters
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn goals(&self) -> bool {
-        self.goals
-    }
-
-    pub(crate) const fn store_scope(&self) -> SessionRetrievalStoreScope {
-        self.store_scope
-    }
-
-    pub(crate) fn project_selector(&self) -> Option<&SessionRetrievalProjectSelector> {
-        self.project_selector.as_ref()
-    }
-
-    pub(crate) fn with_project_selector(
-        mut self,
-        project_selector: Option<SessionRetrievalProjectSelector>,
-    ) -> Self {
-        self.project_selector = project_selector;
-        self
     }
 }
 
@@ -188,9 +130,6 @@ fn compatibility_filter_digest(filters: &SessionRetrievalFilters, goals: bool) -
     .to_string();
     format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())))
 }
-
-pub(crate) type SessionRetrievalServiceFuture<'a> =
-    Pin<Box<dyn Future<Output = SessionRetrievalServiceOutcome> + Send + 'a>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LcmDescribeServiceCommand {
@@ -313,33 +252,6 @@ pub(crate) type LcmDescribeServiceFuture<'a> =
 pub(crate) type LcmExpandServiceFuture<'a> =
     Pin<Box<dyn Future<Output = LcmExpandServiceOutcome> + Send + 'a>>;
 
-pub(crate) trait SessionRetrievalServicePort: Send + Sync {
-    #[allow(clippy::elidable_lifetime_names)]
-    fn execute<'a>(&'a self, command: SessionRetrievalCommand)
-    -> SessionRetrievalServiceFuture<'a>;
-
-    #[allow(clippy::elidable_lifetime_names)]
-    fn describe_lcm<'a>(
-        &'a self,
-        _command: LcmDescribeServiceCommand,
-    ) -> LcmDescribeServiceFuture<'a> {
-        Box::pin(async {
-            LcmDescribeServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::service_not_configured(),
-            )
-        })
-    }
-
-    #[allow(clippy::elidable_lifetime_names)]
-    fn expand_lcm<'a>(&'a self, _command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'a> {
-        Box::pin(async {
-            LcmExpandServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::service_not_configured(),
-            )
-        })
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct SessionRetrievalExplanationView {
     pub(crate) anchor: RetrievalAnchorId,
@@ -351,14 +263,6 @@ pub(crate) struct SessionRetrievalOmissionView {
     pub(crate) rank: u32,
     pub(crate) anchor: RetrievalAnchorId,
     pub(crate) reason: HydrationStateV1,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct SessionRetrievalNextActionView {
-    pub(crate) kind: &'static str,
-    pub(crate) tool: &'static str,
-    pub(crate) action: &'static str,
-    pub(crate) reason: &'static str,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
@@ -398,37 +302,6 @@ pub(crate) enum SessionRetrievalUnavailableReason {
     HydrationUnavailable,
 }
 
-impl SessionRetrievalUnavailableReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ServiceNotConfigured => "service_not_configured",
-            Self::RefreshWorkerMissing => "refresh_worker_missing",
-            Self::RefreshWorkerRecovering => "refresh_worker_recovering",
-            Self::RefreshWorkerStalled => "refresh_worker_stalled",
-            Self::RefreshWorkerStopped => "refresh_worker_stopped",
-            Self::HistoricalConvergence => "historical_convergence",
-            Self::HistoricalRetry => "historical_retry",
-            Self::HistoricalBlocked => "historical_blocked",
-            Self::TemporalStoreUnavailable => "temporal_store_unavailable",
-            Self::HydrationUnavailable => "hydration_unavailable",
-        }
-    }
-
-    pub(crate) const fn is_retryable(self) -> bool {
-        matches!(
-            self,
-            Self::RefreshWorkerMissing
-                | Self::RefreshWorkerRecovering
-                | Self::RefreshWorkerStalled
-                | Self::RefreshWorkerStopped
-                | Self::HistoricalConvergence
-                | Self::HistoricalRetry
-                | Self::TemporalStoreUnavailable
-                | Self::HydrationUnavailable
-        )
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SessionRetrievalWorkerBlocker {
@@ -440,35 +313,12 @@ pub(crate) enum SessionRetrievalWorkerBlocker {
     Deadline,
 }
 
-impl SessionRetrievalWorkerBlocker {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::WorkerMissing => "worker_missing",
-            Self::WorkerPanicked => "worker_panicked",
-            Self::WorkerStopped => "worker_stopped",
-            Self::Storage => "storage",
-            Self::Projector => "projector",
-            Self::Deadline => "deadline",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SessionRetrievalWorkerRetryClass {
     Storage,
     Projector,
     Deadline,
-}
-
-impl SessionRetrievalWorkerRetryClass {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Storage => "storage",
-            Self::Projector => "projector",
-            Self::Deadline => "deadline",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -529,6 +379,9 @@ pub(crate) enum LcmDescribeServiceOutcome {
     Redacted,
     Deleted,
     Denied,
+    ResetRequired {
+        store_scope: SessionRetrievalStoreScope,
+    },
     Unavailable(SessionRetrievalUnavailable),
     BudgetExhausted,
     Cancelled,
@@ -560,6 +413,9 @@ pub(crate) enum LcmExpandServiceOutcome {
     Redacted,
     Deleted,
     Denied,
+    ResetRequired {
+        store_scope: SessionRetrievalStoreScope,
+    },
     Unavailable(SessionRetrievalUnavailable),
     BudgetExhausted,
     Cancelled,
@@ -569,66 +425,6 @@ pub(crate) enum LcmExpandServiceOutcome {
 pub(crate) struct SessionRetrievalPageView {
     pub(crate) results: Vec<SessionMessageSearchResult>,
     pub(crate) temporal: SessionTemporalMetadataView,
-}
-
-/// One registered project root served by the sweep, with the provenance the
-/// merged page must preserve.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SessionRetrievalSweepRootView {
-    pub(crate) project_id: String,
-    pub(crate) root: String,
-    pub(crate) outcome: SessionRetrievalServiceOutcome,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum SessionRetrievalSweepSkipReason {
-    RegistryContextMissing,
-    StoreIdentityMissing,
-    StoreIdentityAmbiguous,
-    StoreIdentityMismatch,
-    StoreMountFailed,
-}
-
-/// A registered project the sweep could not serve, with the typed reason.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct SessionRetrievalSweepSkipView {
-    pub(crate) project_id: String,
-    pub(crate) reason: SessionRetrievalSweepSkipReason,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SessionRetrievalSweepOutcome {
-    /// Every registered project was either served (with its own typed
-    /// per-root outcome) or skipped with a typed reason.
-    Complete {
-        roots: Vec<SessionRetrievalSweepRootView>,
-        skipped: Vec<SessionRetrievalSweepSkipView>,
-        /// True when the registry holds more projects than one bounded sweep
-        /// serves; the extra projects were not searched.
-        registry_truncated: bool,
-    },
-    /// The sweep command was not a selector-free project-store command.
-    WrongScope,
-    /// The project registry authority is unavailable; this is a typed
-    /// absence, never an empty success.
-    RegistryUnavailable,
-}
-
-pub(crate) type SessionRetrievalSweepFuture<'a> =
-    Pin<Box<dyn Future<Output = SessionRetrievalSweepOutcome> + Send + 'a>>;
-
-/// Authorized fanout over every registered project's durable session store.
-///
-/// Implementations open each selected project's store with exact
-/// project/profile/store identity through the daemon session registry; they
-/// never alias the active project's session store onto another project.
-pub(crate) trait SessionRetrievalSweepPort: Send + Sync {
-    #[allow(clippy::elidable_lifetime_names)]
-    fn execute_registered<'a>(
-        &'a self,
-        command: SessionRetrievalCommand,
-    ) -> SessionRetrievalSweepFuture<'a>;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -655,6 +451,9 @@ pub(crate) enum SessionRetrievalServiceOutcome {
     Redacted,
     Deleted,
     Denied,
+    ResetRequired {
+        store_scope: SessionRetrievalStoreScope,
+    },
     Unavailable(SessionRetrievalUnavailable),
     CursorManifestLimitExceeded {
         kind: CursorManifestLimitKindV1,

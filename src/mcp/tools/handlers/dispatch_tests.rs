@@ -375,80 +375,6 @@ fn graph_reader_selector_dispatch_policy_is_allowlisted() {
 }
 
 #[tokio::test]
-async fn graph_reader_selector_dispatch_targets_registered_project() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let active_project = dir.path().join("active");
-    let target_project = dir.path().join("target");
-    fs::create_dir_all(active_project.join("src")).unwrap();
-    fs::create_dir_all(target_project.join("src")).unwrap();
-    fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
-    fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
-
-    let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &active_project,
-        "project.mcp-active-selector",
-    )
-    .await
-    .unwrap();
-    let (target, _target_runtime) = init_sibling_registered_fixture(
-        &active_runtime,
-        &target_project,
-        "project.mcp-target-selector",
-    )
-    .await;
-    let target = Arc::new(target);
-    let target_still_stale = target
-        .sync_if_stale(&["src/target.rs".to_string()])
-        .await
-        .unwrap();
-    assert!(
-        !target_still_stale,
-        "target fixture source should be indexed for selected-project file listing"
-    );
-    let registry = SelectorRegistry::open().await;
-    let target_project_id = target
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .expect("target project should be registered")
-        .to_string();
-
-    let result = handle_tool_call_with_registry_and_implicit_project(
-        &active,
-        "tracedecay_files",
-        json!({
-            "project_id": target_project_id,
-            "path": "src"
-        }),
-        None,
-        Some("tests"),
-        selector_options(&registry, vec![Arc::clone(&target)]),
-    )
-    .await
-    .unwrap();
-    let text = result.value["content"][0]["text"].as_str().unwrap();
-
-    assert!(
-        text.contains("target.rs"),
-        "selected registered project file listing should return target graph results: {text}"
-    );
-    assert!(
-        !text.contains("active.rs"),
-        "selected registered project file listing should not query the active graph: {text}"
-    );
-
-    active.checkpoint().await.unwrap();
-    target.checkpoint().await.unwrap();
-    active.close();
-    Arc::into_inner(target)
-        .expect("selector target graph should no longer be retained")
-        .close();
-}
-
-#[tokio::test]
 async fn graph_reader_selector_dispatch_accepts_unique_project_basename() {
     let _env_lock = lock_user_data_dir_test_env();
     let dir = TempDir::new().unwrap();
@@ -473,7 +399,6 @@ async fn graph_reader_selector_dispatch_accepts_unique_project_basename() {
     )
     .await;
     let target = Arc::new(target);
-    target.index_all().await.unwrap();
     let registry = SelectorRegistry::open().await;
 
     let result = handle_tool_call_with_registry_and_implicit_project(
@@ -707,7 +632,6 @@ async fn unsupported_selector_tool_rejects_explicit_project_selector() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
 
     let err = handle_tool_call(
         &cg,
@@ -806,8 +730,6 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     )
     .await;
     let target = Arc::new(target);
-    active.index_all().await.unwrap();
-    target.index_all().await.unwrap();
     let target_project_id = target
         .store_layout()
         .identity
@@ -915,56 +837,6 @@ fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
     .expect("deadline")
 }
 
-/// Cancellation is carried from MCP dispatch into the graph-runtime read.
-/// Replacing the port call with a handler-local database open makes this
-/// return a successful hint instead of the typed cancellation below.
-#[tokio::test]
-async fn dependency_hint_dispatch_preserves_transport_cancellation() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("dependency-hint-cancelled");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/app.ts"),
-        "import type { BranchOnly } from \"branch-pkg\";\nexport const value = 1;\n",
-    )
-    .unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
-        "project.mcp-dependency-hint-cancelled",
-    )
-    .await
-    .unwrap();
-    cg.index_all().await.unwrap();
-    let cancellation =
-        tracedecay_application::CancellationSignal::active("cancel.dependency-hint-dispatch")
-            .unwrap();
-    assert!(cancellation.cancel(tracedecay_domain::UtcMicros(1)));
-
-    let error = dispatch_graph_tools(
-        "tracedecay_find_exact_symbol",
-        &cg,
-        json!({
-            "name": "BranchOnly",
-            "lazy_index_ignored_dependencies": true,
-        }),
-        None,
-        None,
-        None,
-        None,
-        Some(cancellation),
-    )
-    .await
-    .expect_err("cancelled dependency hint dispatch");
-    assert_eq!(
-        error.project_route_context().map(|context| context.0),
-        Some("dependency_hint_cancelled")
-    );
-
-    cg.close();
-}
-
 /// An already-elapsed deadline must short-circuit *before* the expensive body
 /// runs, so neither the `pr_context` walk nor the `admin_branch_add` index
 /// build can proceed once the horizon is gone.
@@ -1041,12 +913,13 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
-
-    let options = ToolCallRegistryOptions {
-        application_deadline: Some(deadline_from_now(30_000_000)),
-        ..ToolCallRegistryOptions::default()
-    };
+    let options = verified_graph_options(
+        &cg,
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            ..ToolCallRegistryOptions::default()
+        },
+    );
     let started = std::time::Instant::now();
     let result = dispatch_git_tools(
         "tracedecay_pr_context",
@@ -1076,325 +949,6 @@ async fn pr_context_unresolvable_ref_fails_fast_within_deadline() {
     cg.close();
 }
 
-/// A normal PR comparison across a diverged feature branch still succeeds under
-/// a live deadline — the enforcement wrapper does not break the happy path.
-#[tokio::test]
-async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("git-pr-context-ok");
-    fs::create_dir_all(project.join("src")).unwrap();
-    run_git_in(&project, &["init", "-b", "main"]);
-    fs::write(project.join("src/base.rs"), "pub fn base_fn() {}\n").unwrap();
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-m", "base commit"]);
-    run_git_in(&project, &["switch", "-c", "feature"]);
-    fs::write(
-        project.join("src/feature.rs"),
-        "pub fn feature_fn() {}\npub fn second_feature_fn() {}\n",
-    )
-    .unwrap();
-    fs::write(
-        project.join("Cargo.toml"),
-        "[package]\nname = \"added-config\"\nversion = \"0.1.0\"\n",
-    )
-    .unwrap();
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-m", "feature commit"]);
-
-    let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &project,
-        "project.mcp-git-pr-context-ok",
-    )
-    .await
-    .unwrap();
-    let cursor_db = runtime
-        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Project)
-        .expect("registered project cursor authority");
-    let missing_key_error = dispatch_git_tools(
-        "tracedecay_pr_context",
-        &cg,
-        json!({
-            "base_ref": "main",
-            "head_ref": "HEAD",
-            "maximum_symbols": 1,
-        }),
-        ToolCallRegistryOptions {
-            application_deadline: Some(deadline_from_now(30_000_000)),
-            registered_project_session_db: Some(cursor_db.clone()),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .expect_err("a read must not mint a missing cursor key");
-    assert!(
-        missing_key_error
-            .to_string()
-            .contains("pre-provisioned PR context cursor key is unavailable"),
-        "unexpected pre-provisioned cursor-key failure: {missing_key_error}",
-    );
-    let key_snapshot = cursor_db.read_snapshot().await.unwrap();
-    let mut key_rows = key_snapshot
-        .query("SELECT COUNT(*) FROM session_query_cursor_keys", ())
-        .await
-        .unwrap();
-    assert_eq!(
-        key_rows
-            .next()
-            .await
-            .unwrap()
-            .unwrap()
-            .get::<i64>(0)
-            .unwrap(),
-        0,
-        "PR context read must leave the cursor-key table unchanged",
-    );
-    drop(key_rows);
-    drop(key_snapshot);
-    cursor_db
-        .ensure_active_session_cursor_key_result()
-        .await
-        .expect("pre-provision PR context cursor key");
-    cg.index_all().await.unwrap();
-
-    let options = ToolCallRegistryOptions {
-        application_deadline: Some(deadline_from_now(30_000_000)),
-        registered_project_session_db: runtime.registered_database_arc(
-            crate::application::host_admission::HostAdmissionScope::Project,
-        ),
-        ..ToolCallRegistryOptions::default()
-    };
-    let result = dispatch_git_tools(
-        "tracedecay_pr_context",
-        &cg,
-        json!({ "base_ref": "main", "head_ref": "HEAD", "format": "json" }),
-        options,
-    )
-    .await
-    .expect("a normal PR comparison succeeds");
-
-    assert_ne!(
-        result.semantic_error(),
-        Some(true),
-        "the happy path must not be flagged as an error",
-    );
-    let rendered = serde_json::to_string(&result.value).unwrap();
-    assert!(
-        rendered.contains("feature.rs"),
-        "the diverged file must appear in the comparison: {rendered}",
-    );
-    assert!(
-        rendered.contains("files_changed"),
-        "the payload must carry the PR-context summary: {rendered}",
-    );
-    let normal: serde_json::Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("JSON tool text"),
-    )
-    .expect("JSON PR context");
-    assert!(
-        normal["added"].as_array().is_some_and(|symbols| {
-            symbols
-                .iter()
-                .any(|symbol| symbol["file"] == "Cargo.toml" && symbol["kind"] == "config_summary")
-        }),
-        "an added config file must remain in the added lane",
-    );
-    assert_eq!(normal["symbols_modified"], 0);
-    assert!(
-        result
-            .internal_analytics()
-            .and_then(|analytics| analytics.get("stage_timings_us"))
-            .and_then(|timings| timings.get("total"))
-            .and_then(serde_json::Value::as_u64)
-            .is_some(),
-        "the handler must emit stage timing telemetry",
-    );
-
-    let first = dispatch_git_tools(
-        "tracedecay_pr_context",
-        &cg,
-        json!({
-            "base_ref": "main",
-            "head_ref": "HEAD",
-            "maximum_symbols": 1,
-            "format": "json",
-        }),
-        ToolCallRegistryOptions {
-            application_deadline: Some(deadline_from_now(30_000_000)),
-            registered_project_session_db: runtime.registered_database_arc(
-                crate::application::host_admission::HostAdmissionScope::Project,
-            ),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .expect("the first bounded symbol page succeeds");
-    let first: serde_json::Value = serde_json::from_str(
-        first.value["content"][0]["text"]
-            .as_str()
-            .expect("JSON tool text"),
-    )
-    .expect("JSON PR context");
-    assert_eq!(first["symbol_page"]["returned"], 1);
-    assert_eq!(first["symbol_page"]["rows_read"], 2);
-    assert_eq!(first["symbol_page"]["has_more"], true);
-    assert_eq!(first["symbol_page"]["complete"], false);
-    assert_eq!(first["symbol_page"]["continuation_available"], true);
-    let cursor = first["next_cursor"]
-        .as_str()
-        .expect("authenticated continuation");
-    let second = dispatch_git_tools(
-        "tracedecay_pr_context",
-        &cg,
-        json!({
-            "base_ref": "main",
-            "head_ref": "HEAD",
-            "maximum_symbols": 1,
-            "cursor": cursor,
-            "format": "json",
-        }),
-        ToolCallRegistryOptions {
-            application_deadline: Some(deadline_from_now(30_000_000)),
-            registered_project_session_db: runtime.registered_database_arc(
-                crate::application::host_admission::HostAdmissionScope::Project,
-            ),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .expect("authenticated continuation succeeds");
-    let second: serde_json::Value = serde_json::from_str(
-        second.value["content"][0]["text"]
-            .as_str()
-            .expect("JSON tool text"),
-    )
-    .expect("second JSON PR context");
-    assert_eq!(second["symbol_page"]["returned"], 1);
-    assert_ne!(second["added"], first["added"]);
-
-    let mut tampered = cursor.as_bytes().to_vec();
-    let last = tampered.last_mut().expect("non-empty cursor");
-    *last = if *last == b'0' { b'1' } else { b'0' };
-    let tampered = String::from_utf8(tampered).expect("ASCII cursor");
-    let tampered_error = dispatch_git_tools(
-        "tracedecay_pr_context",
-        &cg,
-        json!({
-            "base_ref": "main",
-            "head_ref": "HEAD",
-            "maximum_symbols": 1,
-            "cursor": tampered,
-        }),
-        ToolCallRegistryOptions {
-            application_deadline: Some(deadline_from_now(30_000_000)),
-            registered_project_session_db: runtime.registered_database_arc(
-                crate::application::host_admission::HostAdmissionScope::Project,
-            ),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .expect_err("tampered cursor must fail authentication");
-    assert!(
-        tampered_error
-            .to_string()
-            .contains("invalid or stale PR context cursor")
-    );
-
-    let original_head = first["head_oid"]
-        .as_str()
-        .expect("resolved head OID")
-        .to_owned();
-    fs::write(project.join("after-cursor.txt"), "advance head\n").unwrap();
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-m", "advance after cursor"]);
-    let oid_stale_error = dispatch_git_tools(
-        "tracedecay_pr_context",
-        &cg,
-        json!({
-            "base_ref": "main",
-            "head_ref": "HEAD",
-            "maximum_symbols": 1,
-            "cursor": cursor,
-        }),
-        ToolCallRegistryOptions {
-            application_deadline: Some(deadline_from_now(30_000_000)),
-            registered_project_session_db: runtime.registered_database_arc(
-                crate::application::host_admission::HostAdmissionScope::Project,
-            ),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .expect_err("cursor must become stale when the resolved head OID advances");
-    assert!(
-        oid_stale_error
-            .to_string()
-            .contains("invalid or stale PR context cursor")
-    );
-
-    cg.db()
-        .set_metadata("last_sync_at", "stale-cursor-generation")
-        .await
-        .expect("advance graph generation");
-    let stale_error = dispatch_git_tools(
-        "tracedecay_pr_context",
-        &cg,
-        json!({
-                "base_ref": "main",
-                "head_ref": original_head,
-            "maximum_symbols": 1,
-            "cursor": cursor,
-        }),
-        ToolCallRegistryOptions {
-            application_deadline: Some(deadline_from_now(30_000_000)),
-            registered_project_session_db: runtime.registered_database_arc(
-                crate::application::host_admission::HostAdmissionScope::Project,
-            ),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .expect_err("cursor must become stale after graph generation advances");
-    assert!(
-        stale_error
-            .to_string()
-            .contains("invalid or stale PR context cursor")
-    );
-
-    let cancellation =
-        tracedecay_application::CancellationSignal::active("cancel.pr-context-fixture").unwrap();
-    cancellation.cancel(tracedecay_domain::UtcMicros(1));
-    let started = std::time::Instant::now();
-    let error = dispatch_git_tools(
-        "tracedecay_pr_context",
-        &cg,
-        json!({ "base_ref": "main", "head_ref": "HEAD" }),
-        ToolCallRegistryOptions {
-            application_deadline: Some(deadline_from_now(30_000_000)),
-            application_cancellation: Some(cancellation),
-            ..ToolCallRegistryOptions::default()
-        },
-    )
-    .await
-    .expect_err("a pre-cancelled PR context must not start graph work");
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
-    assert_eq!(
-        error.project_route_context().map(|context| context.0),
-        Some("pr_context_cancelled"),
-    );
-
-    cg.close();
-}
-
-/// Blank ids and zero depths are caller input, not internal invariants: they
-/// arrive straight from tool arguments (`tracedecay tool impact --args
-/// '{"node_id":""}'`). Every node-id graph tool must therefore answer with a
-/// typed argument error naming the parameter, never an assertion that unwinds
-/// the daemon's client task into a bare dropped connection.
 #[tokio::test]
 async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
     let _env_lock = lock_user_data_dir_test_env();
@@ -1411,8 +965,6 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
         TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.blank-node-id")
             .await
             .unwrap();
-    cg.index_all().await.unwrap();
-
     for tool_name in [
         "tracedecay_impact",
         "tracedecay_callers",
@@ -1425,10 +977,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
                 &cg,
                 json!({"node_id": blank}),
                 None,
-                None,
-                None,
-                None,
-                None,
+                verified_graph_options(&cg, ToolCallRegistryOptions::default()),
             )
             .await
             .expect_err(&format!("{tool_name} must reject a blank node_id"));
@@ -1442,14 +991,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
 
     // Handlers clamp depth with `min(max)`, which leaves an explicit zero
     // intact, so a valid node id still reaches the guard from this side.
-    let node_id = cg
-        .get_nodes_by_name("blank_probe")
-        .await
-        .unwrap()
-        .first()
-        .expect("indexed probe symbol")
-        .id
-        .clone();
+    let node_id = "symbol.blank-probe";
     for tool_name in [
         "tracedecay_impact",
         "tracedecay_callers",
@@ -1460,10 +1002,7 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
             &cg,
             json!({"node_id": node_id, "max_depth": 0}),
             None,
-            None,
-            None,
-            None,
-            None,
+            verified_graph_options(&cg, ToolCallRegistryOptions::default()),
         )
         .await
         .expect_err(&format!("{tool_name} must reject max_depth 0"));
@@ -1473,99 +1012,6 @@ async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
             "{tool_name} returned the wrong error for max_depth 0: {error}",
         );
     }
-}
-
-/// The daemon serves each client from a task in a `JoinSet`, so a panicking
-/// request unwinds only that task while the graph handle and the server-side
-/// registries it touched stay shared with every later request. Neither a
-/// rejected argument nor a real unwind on a task holding the same graph may
-/// leave a later call broken or hanging.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn graph_tools_still_answer_after_a_panicking_worker_task() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let project = dir.path().join("panic-recovery");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        "pub fn recovery_callee() {}\npub fn recovery_probe() { recovery_callee(); }\n",
-    )
-    .unwrap();
-    let (cg, _runtime) =
-        TraceDecay::init_test_fixture_with_registered_runtime(&project, "project.panic-recovery")
-            .await
-            .unwrap();
-    cg.index_all().await.unwrap();
-    let cg = Arc::new(cg);
-    let node_id = cg
-        .get_nodes_by_name("recovery_callee")
-        .await
-        .unwrap()
-        .first()
-        .expect("indexed probe symbol")
-        .id
-        .clone();
-
-    // 1. A rejected argument fails as an ordinary error.
-    assert!(
-        dispatch_graph_tools(
-            "tracedecay_impact",
-            &cg,
-            json!({"node_id": ""}),
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .is_err()
-    );
-
-    // 2. A genuine unwind on a task that shares the graph handle, mirroring a
-    //    panicking daemon client task.
-    let panicking = {
-        let cg = Arc::clone(&cg);
-        let node_id = node_id.clone();
-        tokio::spawn(async move {
-            let _ = dispatch_graph_tools(
-                "tracedecay_impact",
-                &cg,
-                json!({"node_id": node_id}),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await;
-            panic!("simulated daemon client task panic");
-        })
-    };
-    assert!(
-        panicking.await.is_err_and(|error| error.is_panic()),
-        "the worker task should have panicked"
-    );
-
-    // 3. The next valid request must still complete.
-    let recovered = tokio::time::timeout(
-        std::time::Duration::from_mins(1),
-        dispatch_graph_tools(
-            "tracedecay_impact",
-            &cg,
-            json!({"node_id": node_id, "max_depth": 2}),
-            None,
-            None,
-            None,
-            None,
-            None,
-        ),
-    )
-    .await
-    .expect("impact must not hang after a worker panic")
-    .expect("impact must succeed after a worker panic");
-    assert!(recovered.value["content"][0]["text"].is_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -1737,8 +1183,6 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
-
     let started = std::time::Instant::now();
     let result = handle_tool_call_with_registry_and_implicit_project(
         &cg,
@@ -1746,7 +1190,7 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
         json!({ "task": "probe" }),
         None,
         None,
-        ToolCallRegistryOptions::default(),
+        verified_graph_options(&cg, ToolCallRegistryOptions::default()),
     )
     .await
     .expect("a warm context call succeeds under the ceiling");

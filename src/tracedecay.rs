@@ -1,12 +1,12 @@
 // Rust guideline compliant 2025-10-17
-//! Central orchestrator for the code graph.
+//! Central orchestrator for registered TraceDecay project storage.
 //!
 //! This module root holds the [`TraceDecay`] struct and its shared result
 //! types; the behavior is implemented in focused submodules:
-//! [`lifecycle`] (init/open/branch tracking), [`indexing`] (index/sync),
-//! [`scan`] (file walking), [`edits`] (anchored source edits), [`queries`]
+//! [`lifecycle`] (init/open/branch provenance), [`edits`] (anchored source
+//! edits), [`queries`]
 //! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
-//! (session memory), and [`locking`] (dirty sentinel + sync lock).
+//! (session memory), and source-edit orchestration.
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -14,32 +14,19 @@ use crate::config::TraceDecayConfig;
 use crate::db::Database;
 use crate::errors::Result;
 use crate::storage::{self, StoreLayout};
-use tracedecay_code_extraction::LanguageRegistry;
 
 #[cfg(test)]
 mod concrete_runtime_tests;
 mod diagnostics;
 mod edits;
 pub(crate) mod facts;
-mod graph_runtime_port;
-mod indexing;
 mod lifecycle;
-mod locking;
 mod move_symbol;
 mod project_runtime_port;
 pub(crate) mod queries;
-mod scan;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
-// Consumed only by cfg(test) code in edits::test_support and move_symbol;
-// the gate keeps `cargo check --lib` honest about the production surface.
-#[cfg(test)]
-pub(crate) use indexing::BRANCH_QUERY_GRAPH_SOURCE_KEY;
-pub use indexing::{GraphRebuildAvailabilityV1, GraphRebuildStatusV1};
 pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
-
-#[doc(hidden)]
-pub use locking::{SyncLockGuard, try_acquire_sync_lock, try_acquire_sync_lock_at};
 
 /// Central orchestrator that coordinates all subsystems of the code graph.
 ///
@@ -54,9 +41,7 @@ pub struct TraceDecay {
     configuration_runtime: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
     store_layout: StoreLayout,
-    active_graph_layout: ActiveGraphLayout,
     open_options: TraceDecayOpenOptions,
-    registry: LanguageRegistry,
     /// The active git branch (None if detached HEAD or not a git repo).
     active_branch: Option<String>,
     /// The branch whose DB is actually being served (may differ from `active_branch` on fallback).
@@ -67,28 +52,14 @@ pub struct TraceDecay {
     /// Memoized result of [`diagnostics::TraceDecay::db_path`]. All inputs
     /// (`project_root`, `store_layout.data_root`, `serving_branch`) are
     /// immutable for the lifetime of an instance — branch changes produce a
-    /// new `TraceDecay` rather than mutating an existing one (see
-    /// `sync_retained_worktree_branch`) — so the resolved path is safe to
-    /// cache for the instance's lifetime.
+    /// new `TraceDecay` rather than mutating an existing one, so the resolved
+    /// path is safe to cache for the instance's lifetime.
     db_path_cache: OnceLock<PathBuf>,
     context_scout_owner:
         Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
-    context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
     test_runtime_guard: Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
-    standalone_maintenance_scope: Option<Arc<crate::db::OwnedMaintenanceDatabaseScope>>,
-}
-
-const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
-
-#[derive(Clone)]
-struct MountedContextScoutClaimAuthorityV1 {
-    registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
-    pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-    context: tracedecay_application::RequestContext,
-    lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-    address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    input_watermark: [u8; 32],
+    _standalone_maintenance_scope: Option<Arc<crate::db::OwnedMaintenanceDatabaseScope>>,
 }
 
 impl TraceDecay {
@@ -135,118 +106,6 @@ impl TraceDecay {
     ) -> Option<&Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>> {
         self.context_scout_owner.as_ref()
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn mount_current_context_scout_claim_authority(
-        &self,
-        registry: Arc<crate::agents::context_scout_ports::ProjectContextScoutAddressRegistryV1>,
-        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
-        pin: crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-        context: tracedecay_application::RequestContext,
-        lifecycle: crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-        address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-        input_watermark: [u8; 32],
-        observed_at: tracedecay_domain::UtcMicros,
-    ) -> bool {
-        if input_watermark == [0; 32]
-            || !self.context_scout_configuration_is_current(&pin).await
-            || registry
-                .resolve_current_exact(hook, &pin, &lifecycle, &context, observed_at)
-                .await
-                != crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                    address,
-                )
-        {
-            return false;
-        }
-        let mounted = MountedContextScoutClaimAuthorityV1 {
-            registry,
-            pin,
-            context,
-            lifecycle,
-            address,
-            input_watermark,
-        };
-        let mut authorities = self.context_scout_claim_authorities.write().await;
-        if let Some(existing) = authorities
-            .iter_mut()
-            .find(|existing| existing.lifecycle == mounted.lifecycle)
-        {
-            *existing = mounted;
-            return true;
-        }
-        if authorities.len() == MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES {
-            authorities.remove(0);
-        }
-        authorities.push(mounted);
-        true
-    }
-
-    pub(crate) async fn resolve_current_context_scout_claim_authority(
-        &self,
-        hook: &crate::agents::context_scout_ports::AdmittedContextScoutHookV1,
-        lifecycle: &crate::agents::context_scout_ports::ContextScoutLifecycleAddressV1,
-        observed_at: tracedecay_domain::UtcMicros,
-    ) -> Option<(
-        crate::agents::context_scout_v2::ContextScoutAddressV1,
-        [u8; 32],
-    )> {
-        let mounted = self
-            .context_scout_claim_authorities
-            .read()
-            .await
-            .iter()
-            .find(|mounted| mounted.lifecycle == *lifecycle)
-            .cloned()?;
-        if !self
-            .context_scout_configuration_is_current(&mounted.pin)
-            .await
-        {
-            return None;
-        }
-        let resolved = mounted
-            .registry
-            .resolve_current_exact(hook, &mounted.pin, lifecycle, &mounted.context, observed_at)
-            .await;
-        let resolved = (resolved
-            == crate::agents::context_scout_ports::ContextScoutAddressResolveOutcomeV1::Resolved(
-                mounted.address,
-            ))
-        .then_some((mounted.address, mounted.input_watermark));
-        if resolved.is_some()
-            && self
-                .context_scout_configuration_is_current(&mounted.pin)
-                .await
-        {
-            resolved
-        } else {
-            None
-        }
-    }
-
-    async fn context_scout_configuration_is_current(
-        &self,
-        pin: &crate::agents::context_scout_ports::ContextScoutAuthorityPinV1,
-    ) -> bool {
-        self.configuration_runtime
-            .client()
-            .current()
-            .await
-            .ok()
-            .map(
-                |pinned| crate::application::configuration::ConfigurationCurrentStateV1 {
-                    revision_id: pinned.revision_id,
-                    snapshot: pinned.snapshot,
-                },
-            )
-            .is_some_and(|current| pin.configuration().matches_current(&current))
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ActiveGraphLayout {
-    dirty_path: PathBuf,
-    sync_lock_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -269,39 +128,6 @@ impl TraceDecayOpenOptions {
         }
         storage::default_profile_root()
     }
-}
-
-/// Result of a full indexing operation.
-pub struct IndexResult {
-    /// Number of files scanned and indexed.
-    pub file_count: usize,
-    /// Total number of nodes extracted.
-    pub node_count: usize,
-    /// Total number of edges (extracted + resolved).
-    pub edge_count: usize,
-    /// Time taken in milliseconds.
-    pub duration_ms: u64,
-}
-
-/// Result of an incremental sync operation.
-#[derive(Debug)]
-pub struct SyncResult {
-    /// Number of newly added files.
-    pub files_added: usize,
-    /// Number of modified (re-indexed) files.
-    pub files_modified: usize,
-    /// Number of removed files.
-    pub files_removed: usize,
-    /// Time taken in milliseconds.
-    pub duration_ms: u64,
-    /// Paths of added files (populated only when doctor mode is requested).
-    pub added_paths: Vec<String>,
-    /// Paths of modified files (populated only when doctor mode is requested).
-    pub modified_paths: Vec<String>,
-    /// Paths of removed files (populated only when doctor mode is requested).
-    pub removed_paths: Vec<String>,
-    /// Files that were found on disk but could not be read (path, error message).
-    pub skipped_paths: Vec<(String, String)>,
 }
 
 /// Returns the current UNIX timestamp in seconds.

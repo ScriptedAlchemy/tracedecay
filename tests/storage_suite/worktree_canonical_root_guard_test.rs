@@ -20,7 +20,7 @@ use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
-use crate::support::HOME_ENV_LOCK;
+use crate::home_env_lock::HOME_ENV_LOCK;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
@@ -121,10 +121,6 @@ async fn init_primary(fx: &Fixture) -> String {
     let primary = TraceDecay::init_with_options(&fx.main, fx.open_options.clone())
         .await
         .expect("primary init should succeed");
-    primary
-        .index_all()
-        .await
-        .expect("primary index should succeed");
     primary.db().checkpoint().await.expect("primary checkpoint");
     let project_id = primary
         .store_layout()

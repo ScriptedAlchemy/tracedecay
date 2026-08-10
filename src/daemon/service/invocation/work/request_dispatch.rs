@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracedecay_application::{ApplicationProblem, CancellationContext, Deadline, SafeDiagnostic};
+use tracedecay_application::{CancellationContext, Deadline};
 use tracedecay_domain::{UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::CapabilityId;
 
@@ -226,7 +226,7 @@ pub(super) async fn dispatch_work_application(
                     observability_producer.as_deref(),
                     &proposal_ref,
                     &command_ref,
-                    Some(disposition),
+                    disposition,
                     occurred_at,
                 );
             }
@@ -613,7 +613,6 @@ pub(super) async fn dispatch_work_application(
         }
         WorkApplicationInvocationV1::PrepareDuplicateAdjudication(request) => {
             let prepared = preparation::prepare_duplicate_adjudication(
-                &registered,
                 &services,
                 &context,
                 request,

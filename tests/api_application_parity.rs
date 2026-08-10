@@ -21,8 +21,8 @@ use tracedecay_api::{
     HttpApplicationRequest, HttpSseEvent, application_router,
 };
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, CancellationSignal, Deadline, IdempotencyKey, RequestId,
-    ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, CancellationSignal, Deadline,
+    IdempotencyKey, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
@@ -78,7 +78,7 @@ fn unpinned_operations(fixture: &serde_json::Value) -> BTreeSet<String> {
 #[tokio::test]
 async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner() {
     let owner = |request: HttpApplicationRequest| async move {
-        CanonicalInvocationResult::<serde_json::Value>::new(
+        Ok::<_, ApplicationContractError>(CanonicalInvocationResult::<serde_json::Value>::new(
             tracedecay_tool_catalog::BindingId::new(format!(
                 "binding.http.{}.v1",
                 request.operation.as_str()
@@ -95,8 +95,9 @@ async fn catalog_advertised_specialized_http_routes_invoke_the_application_owner
                     SafeDiagnostic::new("feedback.test_unavailable", "Feedback is unavailable")
                         .expect("diagnostic"),
                 ),
-            )),
-        )
+            )
+            .expect("canonical feedback fixture problem")),
+        ))
     };
     let router = application_router(owner)
         .layer(Extension(
@@ -607,7 +608,8 @@ fn http_concealment_omits_binding_identity() {
         tracedecay_application::ApplicationProblem::not_found_or_not_authorized(
             RetryDirective::Never,
         ),
-    ));
+    )
+    .expect("canonical concealment fixture problem"));
     let value = serde_json::to_value(
         CanonicalInvocationResult::<serde_json::Value>::new(
             tracedecay_tool_catalog::BindingId::new(

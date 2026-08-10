@@ -4,17 +4,17 @@
 
 #[cfg(feature = "test-transport")]
 use serde_json::Value;
+#[cfg(feature = "test-transport")]
 use serde_json::json;
 
 #[cfg(feature = "test-transport")]
-use crate::support::{handle_real_server_tool_call, open_active_project_scoped_runtime};
+use crate::support::{
+    handle_real_server_tool_call, handle_real_server_tool_call_raw, production_composition_fixture,
+};
 #[cfg(feature = "test-transport")]
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 #[cfg(feature = "test-transport")]
 use tracedecay::global_db::AnalyticsEventInsert;
-#[cfg(feature = "test-transport")]
-use tracedecay::mcp::McpServer;
-use tracedecay::mcp::handle_tool_call;
 #[cfg(feature = "test-transport")]
 use tracedecay::tracedecay::current_timestamp;
 
@@ -85,24 +85,27 @@ fn hint_event(
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
-    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
-    let now = current_timestamp();
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
-    let runtime = open_active_project_scoped_runtime(&cg).await;
-    runtime
-        .append_profile_analytics_events_for_test(&[
-            tool_call_event(&project_id, "tracedecay_grep", "ok", now - 60),
-            tool_call_event(&project_id, "tracedecay_grep", "ok", now - 50),
-            tool_call_event(&project_id, "tracedecay_grep", "error", now - 40),
-            tool_call_event(&project_id, "tracedecay_fact_store", "ok", now - 30),
-        ])
-        .await
-        .expect("seeding analytics events should succeed");
-    let server =
-        McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
-            .await
-            .expect("registered test server");
+    for _ in 0..2 {
+        handle_real_server_tool_call(
+            &server,
+            "tracedecay_grep",
+            json!({"pattern": "helper", "fixed_strings": true}),
+        )
+        .await;
+    }
+    let failed_grep = handle_real_server_tool_call_raw(&server, "tracedecay_grep", json!({})).await;
+    assert!(
+        failed_grep["error"].is_object(),
+        "missing grep pattern must fail over production MCP: {failed_grep}"
+    );
+    handle_real_server_tool_call(&server, "tracedecay_fact_store", json!({"action": "list"})).await;
+    server.ledger_writes_settled().await;
 
     // JSON response carries the same data in the typed shape the markdown
     // was rendered from.
@@ -192,13 +195,18 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
         text.contains("Zero-Call Defined Tools"),
         "missing zero-call section: {text}"
     );
+    drop(server);
+    fixture.harness.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_section_filter_returns_only_the_requested_section() {
-    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
-    let server = crate::support::real_mcp_server(cg).await;
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
     let res = handle_real_server_tool_call(
         &server,
@@ -220,43 +228,52 @@ async fn analytics_section_filter_returns_only_the_requested_section() {
         payload.get("automation").is_none(),
         "automation section should be omitted"
     );
+    drop(server);
+    fixture.harness.shutdown().await;
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_rejects_unknown_scope_and_section() {
-    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
-    let err = handle_tool_call(
-        &cg,
+    let response = handle_real_server_tool_call_raw(
+        &server,
         "tracedecay_analytics",
         json!({"scope": "bogus"}),
-        None,
-        None,
     )
-    .await
-    .expect_err("unknown scope should be rejected");
-    assert!(err.to_string().contains("scope"), "unexpected error: {err}");
+    .await;
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("unknown scope must return a JSON-RPC error message");
+    assert!(message.contains("scope"), "unexpected error: {response}");
 
-    let err = handle_tool_call(
-        &cg,
+    let response = handle_real_server_tool_call_raw(
+        &server,
         "tracedecay_analytics",
         json!({"section": "bogus"}),
-        None,
-        None,
     )
-    .await
-    .expect_err("unknown section should be rejected");
-    assert!(
-        err.to_string().contains("section"),
-        "unexpected error: {err}"
-    );
+    .await;
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("unknown section must return a JSON-RPC error message");
+    assert!(message.contains("section"), "unexpected error: {response}");
+    drop(server);
+    fixture.harness.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_degrades_gracefully_for_a_zero_data_project() {
-    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
-    let server = crate::support::real_mcp_server(cg).await;
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
     let res =
         handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
@@ -287,9 +304,13 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     assert_eq!(payload["automation"]["records_in_window"].as_i64(), Some(0));
 
     drop(server);
-    drop(_env);
-    let (markdown_cg, _markdown_env) = crate::mcp_handler_test::setup_project().await;
-    let markdown_server = crate::support::real_mcp_server(markdown_cg).await;
+    fixture.harness.shutdown().await;
+
+    let markdown_fixture = production_composition_fixture().await;
+    let markdown_server = markdown_fixture
+        .harness
+        .server(&markdown_fixture.project_root)
+        .expect("production project server");
     let md_res = handle_real_server_tool_call(
         &markdown_server,
         "tracedecay_analytics",
@@ -301,15 +322,16 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
         text.contains("No MCP tool calls recorded"),
         "expected an empty-state note in markdown: {text}"
     );
+    drop(markdown_server);
+    markdown_fixture.harness.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn analytics_aggregates_sections_before_any_event_sample_cap() {
-    let (cg, _env) = crate::mcp_handler_test::setup_project().await;
-    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
+    let fixture = production_composition_fixture().await;
+    let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
     let timestamp = current_timestamp() - 60;
-    let runtime = open_active_project_scoped_runtime(&cg).await;
 
     let events = vec![
         hint_event(&project_id, "hint_emitted", None, timestamp),
@@ -317,7 +339,8 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
         hint_event(&project_id, "suppressed_duplicate", None, timestamp),
         tool_call_event(&project_id, "tracedecay_grep", "ok", timestamp),
     ];
-    runtime
+    fixture
+        .harness
         .append_profile_analytics_events_for_test(&events)
         .await
         .expect("seeding a busy analytics window should succeed");
@@ -336,14 +359,15 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
         outcome: Some("observed".to_string()),
         metadata_json: None,
     };
-    runtime
+    fixture
+        .harness
         .append_profile_analytics_events_for_test(&vec![unrelated_event; 10_001])
         .await
         .expect("seed more than ten thousand unrelated newer events");
-    let server =
-        McpServer::new_with_host_admission_test_runtime_for_test(cg.into_inner(), None, runtime)
-            .await
-            .expect("registered test server");
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
     let response =
         handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
@@ -367,4 +391,6 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
         "tracedecay_grep"
     );
     assert_eq!(payload["tools"]["top_tools"][0]["calls"].as_i64(), Some(1));
+    drop(server);
+    fixture.harness.shutdown().await;
 }

@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 struct ObservedWrite {
     root: PathBuf,
     branch: String,
-    incremental_sync_agent: Option<HookAgent>,
 }
 
 fn recording_writer(
@@ -31,7 +30,6 @@ fn recording_writer(
                 .push(ObservedWrite {
                     root: request.root,
                     branch: request.branch,
-                    incremental_sync_agent: request.incremental_sync_agent,
                 });
             Ok(result)
         })
@@ -48,7 +46,6 @@ fn failing_writer(observed: Arc<Mutex<Vec<ObservedWrite>>>) -> HookBranchWriter 
                 .push(ObservedWrite {
                     root: request.root,
                     branch: request.branch,
-                    incremental_sync_agent: request.incremental_sync_agent,
                 });
             Err(TraceDecayError::Config {
                 message: "injected writer failure".to_string(),
@@ -99,7 +96,6 @@ async fn add_branch_plan_uses_injected_writer_without_direct_fallback() {
         &[ObservedWrite {
             root: root.clone(),
             branch: branch.to_string(),
-            incremental_sync_agent: None,
         }]
     );
     assert_branch_not_tracked(&snapshot, branch);
@@ -143,7 +139,6 @@ async fn add_branch_at_plan_delegates_open_and_sync_without_direct_fallback() {
         &[ObservedWrite {
             root: root.clone(),
             branch: branch.to_string(),
-            incremental_sync_agent: Some(HookAgent::Codex),
         }]
     );
     assert_branch_not_tracked(&snapshot, branch);
@@ -183,11 +178,7 @@ async fn sync_current_branch_deferred_writer_does_not_fall_back_to_direct_sync()
 
     assert_eq!(
         observed.lock().expect("recording lock").as_slice(),
-        &[ObservedWrite {
-            root,
-            branch,
-            incremental_sync_agent: Some(HookAgent::Codex),
-        }]
+        &[ObservedWrite { root, branch }]
     );
     assert!(
         !marker.exists(),
@@ -223,11 +214,7 @@ async fn sync_current_branch_writer_error_does_not_fall_back_to_direct_sync() {
 
     assert_eq!(
         observed.lock().expect("recording lock").as_slice(),
-        &[ObservedWrite {
-            root,
-            branch,
-            incremental_sync_agent: Some(HookAgent::Codex),
-        }]
+        &[ObservedWrite { root, branch }]
     );
     assert!(
         !marker.exists(),

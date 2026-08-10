@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use schemars::JsonSchema;
@@ -26,7 +26,7 @@ use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
-use super::{DashboardState, graph_service, memory_service};
+use super::{DashboardHttpRequestControlV1, DashboardState, graph_service, memory_service};
 use crate::application::context::CancellationToken;
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 
@@ -374,6 +374,7 @@ fn find_run(state: &DashboardState, run_id: &str) -> Option<StoredExplorerRun> {
 
 pub async fn create_query(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     Json(mut request): Json<ExplorerQueryRequestV1>,
 ) -> Response {
     if let Err(message) = validate_query(&mut request) {
@@ -383,6 +384,13 @@ pub async fn create_query(
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"detail": "exact registered project scope is unavailable"})),
+        )
+            .into_response();
+    };
+    let Some(Extension(control)) = control else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail": "dashboard HTTP request admission is unavailable"})),
         )
             .into_response();
     };
@@ -408,6 +416,7 @@ pub async fn create_query(
         request,
         Arc::clone(&run),
         cancellation,
+        control,
     ));
     (StatusCode::ACCEPTED, Json(response)).into_response()
 }
@@ -452,6 +461,7 @@ async fn execute_query(
     request: ExplorerQueryRequestV1,
     run: Arc<RwLock<ExplorerQueryRunV1>>,
     cancellation: CancellationToken,
+    control: DashboardHttpRequestControlV1,
 ) {
     {
         let mut current = run.write().await;
@@ -464,7 +474,13 @@ async fn execute_query(
     for source_id in SOURCE_IDS {
         let state = state.clone();
         let request = request.clone();
-        tasks.spawn(async move { (source_id, execute_source(state, request, source_id).await) });
+        let control = control.clone();
+        tasks.spawn(async move {
+            (
+                source_id,
+                execute_source(state, request, source_id, control).await,
+            )
+        });
     }
 
     let mut completed = 0;
@@ -566,10 +582,11 @@ async fn execute_source(
     state: DashboardState,
     request: ExplorerQueryRequestV1,
     source_id: ExplorerSourceIdV1,
+    control: DashboardHttpRequestControlV1,
 ) -> ExplorerSourceProgressV1 {
     match source_id {
         ExplorerSourceIdV1::CodeGraph => code_source(&state, &request).await,
-        ExplorerSourceIdV1::Sessions => session_source(&state, &request).await,
+        ExplorerSourceIdV1::Sessions => session_source(&state, &request, control).await,
         ExplorerSourceIdV1::Knowledge => knowledge_source(&state, &request).await,
     }
 }
@@ -681,6 +698,7 @@ fn code_graph_error(
 async fn session_source(
     state: &DashboardState,
     request: &ExplorerQueryRequestV1,
+    control: DashboardHttpRequestControlV1,
 ) -> ExplorerSourceProgressV1 {
     let Some(authority) = state.lcm_read_authority.as_ref() else {
         return ExplorerSourceProgressV1::unavailable(
@@ -700,6 +718,7 @@ async fn session_source(
     }
     match authority
         .read(
+            control,
             state.project_id.as_deref(),
             DashboardLcmReadRequestV1::Search {
                 query: request.query.clone(),
@@ -868,9 +887,17 @@ pub(super) struct ExplorerReadContextV1 {
 
 pub async fn session_size(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     Path(session_id): Path<String>,
 ) -> Response {
-    let outcome = read_session_page(&state, &session_id, 500, None).await;
+    let Some(Extension(control)) = control else {
+        return explorer_session_not_ready::<ExplorerSessionSizeV1>(
+            &state,
+            DashboardLcmReadStateV1::Unavailable,
+            "dashboard_request_admission_unavailable".to_owned(),
+        );
+    };
+    let outcome = read_session_page(&state, control, &session_id, 500, None).await;
     match outcome {
         DashboardLcmReadOutcomeV1::Ready(page) => {
             let payload = ExplorerSessionSizeV1 {
@@ -911,10 +938,18 @@ pub async fn session_size(
 
 pub async fn read_context(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     Path(session_id): Path<String>,
     Query(params): Query<ReadContextParams>,
 ) -> Response {
     let limit = params.limit.unwrap_or(100).clamp(1, 500);
+    let Some(Extension(control)) = control else {
+        return explorer_session_not_ready::<ExplorerReadContextV1>(
+            &state,
+            DashboardLcmReadStateV1::Unavailable,
+            "dashboard_request_admission_unavailable".to_owned(),
+        );
+    };
     let offset = params.offset.unwrap_or(0).max(0);
     let order = if params.order.as_deref() == Some("desc") {
         "desc"
@@ -943,7 +978,8 @@ pub async fn read_context(
     let mut cursor: Option<String> = None;
     let mut has_more_messages = false;
     for _ in 0..READ_CONTEXT_FILL_PAGES {
-        let outcome = read_session_page(&state, &session_id, limit, cursor.take()).await;
+        let outcome =
+            read_session_page(&state, control.clone(), &session_id, limit, cursor.take()).await;
         let (mut page, page_partial, page_omitted) = match outcome {
             DashboardLcmReadOutcomeV1::Ready(page) => (page, false, 0),
             DashboardLcmReadOutcomeV1::Partial { page, omitted } => (page, true, omitted),
@@ -1017,6 +1053,7 @@ pub async fn read_context(
 
 async fn read_session_page(
     state: &DashboardState,
+    control: DashboardHttpRequestControlV1,
     session_id: &str,
     limit: i64,
     cursor: Option<String>,
@@ -1029,6 +1066,7 @@ async fn read_session_page(
     };
     authority
         .read(
+            control,
             state.project_id.as_deref(),
             DashboardLcmReadRequestV1::Session {
                 session_id: session_id.to_owned(),

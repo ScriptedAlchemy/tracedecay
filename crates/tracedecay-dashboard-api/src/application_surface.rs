@@ -4,8 +4,13 @@ use std::future::Future;
 use std::pin::Pin;
 
 use axum::Router;
+use axum::extract::Json;
+use axum::http::StatusCode;
 use serde_json::Value;
-use tracedecay_application::{ApplicationOutcome, ApplicationProblemEnvelope, RequestId};
+use serde_json::json;
+use tracedecay_application::{
+    ApplicationContractError, ApplicationOutcome, ApplicationProblemEnvelope, RequestId,
+};
 use tracedecay_domain::ProjectId;
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
@@ -22,11 +27,49 @@ pub struct DashboardApplicationRouters {
 pub type DashboardConfigurationApplyFuture<'a> = Pin<
     Box<
         dyn Future<
-                Output = std::result::Result<ApplicationOutcome<Value>, ApplicationProblemEnvelope>,
+                Output = std::result::Result<
+                    ApplicationOutcome<Value>,
+                    DashboardConfigurationApplyError,
+                >,
             > + Send
             + 'a,
     >,
 >;
+
+#[derive(Debug)]
+pub enum DashboardConfigurationApplyError {
+    ApplicationProblem(ApplicationProblemEnvelope),
+    ApplicationContractViolation(ApplicationContractError),
+}
+
+impl From<ApplicationProblemEnvelope> for DashboardConfigurationApplyError {
+    fn from(problem: ApplicationProblemEnvelope) -> Self {
+        Self::ApplicationProblem(problem)
+    }
+}
+
+impl From<ApplicationContractError> for DashboardConfigurationApplyError {
+    fn from(error: ApplicationContractError) -> Self {
+        Self::ApplicationContractViolation(error)
+    }
+}
+
+pub(crate) fn configuration_apply_error(
+    error: DashboardConfigurationApplyError,
+) -> tracedecay_api::configuration::DashboardConfigurationRouteErrorV1 {
+    match error {
+        DashboardConfigurationApplyError::ApplicationProblem(problem) => {
+            tracedecay_api::configuration::configuration_application_problem_error(problem)
+        }
+        DashboardConfigurationApplyError::ApplicationContractViolation(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "code": "application_contract_violation",
+                "detail": "the configuration application result violated its contract",
+            })),
+        ),
+    }
+}
 
 pub trait DashboardApplicationRuntime: Send + Sync {
     /// Exact profile bound by the daemon handshake. A dashboard mounted

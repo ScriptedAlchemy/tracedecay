@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use super::session;
 use crate::global_db::RegisteredGlobalDb;
 
 /// Database authorities retained by the owning MCP server for its lifetime.
@@ -16,14 +15,6 @@ pub struct SessionAuthorities<'a> {
         Option<&'a crate::daemon::retained_owner::ProfileRetainedConnectionAuthorityV1>,
     pub(crate) project_registered: Option<&'a Arc<RegisteredGlobalDb>>,
     pub(crate) profile_registered: Option<&'a Arc<RegisteredGlobalDb>>,
-    project_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
-    profile_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
-    pub(super) project_retrieval:
-        Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
-    pub(super) profile_retrieval:
-        Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
-    pub(super) project_retrieval_sweep:
-        Option<&'a dyn session::message_search::SessionRetrievalSweepPort>,
     pub(crate) project_lcm: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
     pub(crate) profile_lcm: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
 }
@@ -40,11 +31,6 @@ impl<'a> SessionAuthorities<'a> {
             profile_retained_authority: None,
             project_registered: None,
             profile_registered: None,
-            project_refresh: None,
-            profile_refresh: None,
-            project_retrieval: None,
-            profile_retrieval: None,
-            project_retrieval_sweep: None,
             project_lcm: None,
             profile_lcm: None,
         }
@@ -78,34 +64,6 @@ impl<'a> SessionAuthorities<'a> {
         self
     }
 
-    pub(crate) const fn with_refresh_services(
-        mut self,
-        project: Option<&'a dyn session::SessionRefreshServicePort>,
-        profile: Option<&'a dyn session::SessionRefreshServicePort>,
-    ) -> Self {
-        self.project_refresh = project;
-        self.profile_refresh = profile;
-        self
-    }
-
-    pub(crate) const fn with_retrieval_services(
-        mut self,
-        project: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
-        profile: Option<&'a dyn session::message_search::SessionRetrievalServicePort>,
-    ) -> Self {
-        self.project_retrieval = project;
-        self.profile_retrieval = profile;
-        self
-    }
-
-    pub(crate) const fn with_retrieval_sweep(
-        mut self,
-        sweep: Option<&'a dyn session::message_search::SessionRetrievalSweepPort>,
-    ) -> Self {
-        self.project_retrieval_sweep = sweep;
-        self
-    }
-
     pub(crate) const fn with_lcm_authorities(
         mut self,
         project: Option<&'a dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>,
@@ -114,9 +72,5 @@ impl<'a> SessionAuthorities<'a> {
         self.project_lcm = project;
         self.profile_lcm = profile;
         self
-    }
-
-    pub(super) const fn refresh_services(self) -> session::SessionRefreshServices<'a> {
-        session::SessionRefreshServices::new(self.project_refresh, self.profile_refresh)
     }
 }

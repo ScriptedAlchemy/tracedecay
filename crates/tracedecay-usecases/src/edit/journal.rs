@@ -9,7 +9,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
 
 use super::JOURNAL_VERSION;
@@ -159,7 +159,7 @@ pub(super) struct ResolvedSourceEditPreview {
 }
 
 impl SourceEditDurability {
-    pub(super) fn for_graph(graph: &TraceDecay) -> Self {
+    pub(super) fn for_graph(graph: &SourceEditRuntime) -> Self {
         Self {
             root: graph
                 .store_layout()

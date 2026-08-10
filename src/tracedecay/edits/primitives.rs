@@ -6,79 +6,22 @@
 //! preview gate shared by every primitive (including `ast_grep_rewrite` in
 //! the sibling `ast_grep` module).
 
-use std::collections::HashSet;
 use std::path::Path;
 
 use same_file::Handle;
+use tracedecay_usecases::tracedecay::SourceEditGraphReadV1;
 
 use crate::errors::{Result, TraceDecayError};
-use crate::sync;
 use crate::types::*;
 
-use super::super::indexing::{accumulate_symbol_scope, safe_extract};
-use super::super::{TraceDecay, current_timestamp};
+use super::super::TraceDecay;
 
 use super::file_authority::{SourceEditFileAuthority, normalize_source_edit_relative_path};
 use super::plan::{capture_planned_source_edit, validate_planned_source_edit};
 use super::preview::{
     MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff, edit_success_message,
-    leading_doc_or_attr,
 };
 use super::symbols::resolve_symbol_for_edit;
-
-/// Which of a node's leading doc-comment / attribute lines
-/// [`item_line_span`] should fold into the returned span, alongside its
-/// `start_line`..`end_line` body.
-pub(in crate::tracedecay) enum LeadingBlock {
-    /// Always start at `attrs_start_line`: a moved item always carries its
-    /// own docs with it (`move_symbol`).
-    Always,
-    /// Start at `attrs_start_line` only when the item actually has a leading
-    /// block *and* the caller wants it kept; otherwise start at
-    /// `start_line` (`replace_symbol`: only swap the docs in when
-    /// `new_source` brings its own).
-    WhenPresentAnd(bool),
-}
-
-/// A node's edit span in 0-indexed, inclusive line numbers, re-derived from
-/// its `attrs_start_line`/`start_line`/`end_line` per `leading` and clamped
-/// to how many lines the file (`line_count`) actually has.
-///
-/// `end_inclusive` is clamped so it never runs past EOF (a node's recorded
-/// `end_line` can be stale relative to the file on disk); `start` is left
-/// unclamped so callers can build their own out-of-bounds message — the
-/// wording differs per call site — when it doesn't fit.
-pub(in crate::tracedecay) struct ItemLineSpan {
-    pub(in crate::tracedecay) start: usize,
-    pub(in crate::tracedecay) end_inclusive: usize,
-}
-
-/// Re-derives the line span an edit touching `node`'s leading block through
-/// its body will need, given how many lines the file has. Used by
-/// `replace_symbol`, `insert_at_symbol`, and `move_symbol`'s span
-/// computation — three sites that used to each redo this
-/// attrs-start/end-clamp arithmetic independently.
-pub(in crate::tracedecay) fn item_line_span(
-    node: &Node,
-    line_count: usize,
-    leading: LeadingBlock,
-) -> ItemLineSpan {
-    let attrs_start = node.attrs_start_line as usize;
-    let item_start = node.start_line as usize;
-    let start = match leading {
-        // The `.min()` guards against inconsistent rows: `attrs_start_line`
-        // is documented to never exceed `start_line`, but a moved/replaced
-        // item always wants whichever of the two is earliest.
-        LeadingBlock::Always => attrs_start.min(item_start),
-        LeadingBlock::WhenPresentAnd(keep) if keep && attrs_start < item_start => attrs_start,
-        LeadingBlock::WhenPresentAnd(_) => item_start,
-    };
-    let end_inclusive = (node.end_line as usize).min(line_count.saturating_sub(1));
-    ItemLineSpan {
-        start,
-        end_inclusive,
-    }
-}
 
 /// Joins `lines` back into a single string with `\n` separators, re-adding
 /// the trailing newline the original source had (skipped when the result is
@@ -117,83 +60,10 @@ impl TraceDecay {
             .map(|path| path.to_string_lossy().replace('\\', "/"))
     }
 
-    /// Re-indexes one file inside a caller-owned graph mutation epoch.
-    ///
-    /// Multi-file edit authorities use this to keep the graph unavailable
-    /// until the entire file family, including any rollback, is coherent.
-    pub(in crate::tracedecay) async fn reindex_file_within_graph_mutation(
-        &self,
-        _mutation: &super::super::indexing::BranchGraphMutationV1,
-        file_path: &str,
-        source: &str,
-        file: &SourceEditFileAuthority,
-    ) -> Result<()> {
-        let Some(extractor) = self.registry.extractor_for_file(file_path) else {
-            return Ok(());
-        };
-
-        let mut result =
-            safe_extract(extractor, file_path, source).ok_or_else(|| TraceDecayError::Config {
-                message: format!("extraction panicked for {file_path}"),
-            })?;
-        result.sanitize();
-
-        let hash = sync::content_hash(source);
-        let size = source.len() as u64;
-        let mtime = file
-            .metadata()
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| {
-                modified
-                    .into_std()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|duration| duration.as_secs() as i64)
-            })
-            .unwrap_or_else(current_timestamp);
-
-        let transaction = self.db.begin_write_transaction("reindex file").await?;
-        self.db
-            .delete_nodes_by_file_unguarded(&transaction, file_path)
-            .await?;
-        self.db
-            .insert_nodes_unguarded(&transaction, &result.nodes)
-            .await?;
-        self.db
-            .insert_edges_unguarded(&transaction, &result.edges)
-            .await?;
-        if !result.unresolved_refs.is_empty() {
-            self.db
-                .insert_unresolved_refs_unguarded(&transaction, &result.unresolved_refs)
-                .await?;
-        }
-
-        let file_record = FileRecord {
-            path: file_path.to_string(),
-            content_hash: hash,
-            size,
-            modified_at: mtime,
-            indexed_at: current_timestamp(),
-            node_count: result.nodes.len() as u32,
-        };
-        self.db
-            .upsert_file_unguarded(&transaction, &file_record)
-            .await?;
-        transaction.commit().await?;
-        let mut short = HashSet::new();
-        let mut keys = HashSet::new();
-        accumulate_symbol_scope(&result.nodes, &mut short, &mut keys);
-        self.reresolve_after_reindex(&[file_path.to_string()], &short, &keys)
-            .await?;
-
-        Ok(())
-    }
-
     /// Write-or-preview gate shared by every edit primitive. On a real run this
-    /// writes `modified` to `abs_path` and reindexes the file, returning `None`.
-    /// On a dry run it writes nothing and reindexes nothing, instead returning a
-    /// bounded preview diff of the changed region (the would-be change) so
+    /// publishes `modified` through the descriptor-scoped file authority and
+    /// leaves generation refresh to the daemon-owned code-index scheduler. On
+    /// a dry run it writes nothing, instead returning a bounded preview diff so
     /// callers can review before committing. Centralizing the write here keeps
     /// the dry-run gate in one place around each primitive's own validation and
     /// span logic.
@@ -216,7 +86,6 @@ impl TraceDecay {
             )));
         }
         validate_planned_source_edit(rel_path, Some(original), Some(modified))?;
-        let mutation = self.begin_branch_graph_mutation("source edit").await?;
         file.publish(
             rel_path,
             Some(original),
@@ -224,9 +93,6 @@ impl TraceDecay {
             modified,
             || {},
         )?;
-        self.reindex_file_within_graph_mutation(&mutation, rel_path, modified, file)
-            .await?;
-        self.commit_branch_graph_mutation(mutation).await?;
         Ok(None)
     }
 
@@ -541,33 +407,17 @@ impl TraceDecay {
     /// the wrong site.
     pub(crate) async fn replace_symbol(
         &self,
+        graph: SourceEditGraphReadV1,
         symbol: &str,
         new_source: &str,
         dry_run: bool,
     ) -> Result<EditResult> {
-        let target = resolve_symbol_for_edit(self, symbol).await?;
+        let target = resolve_symbol_for_edit(&graph, symbol)?;
         let rel_path = target.file_path.clone();
         let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
         let (source, source_identity) = file.read_to_string(&rel_path)?;
         let lines: Vec<&str> = source.lines().collect();
-        // Honor the leading doc-comment / attribute block adaptively. The
-        // extractor only sets `attrs_start_line` below `start_line` for an
-        // item that actually has such a block. When `new_source` carries its
-        // own leading docs/attrs, the whole span (docs included) is swapped so
-        // documentation is never duplicated; when it does not, the existing
-        // block is preserved above the replacement so replacing a symbol's
-        // body never silently deletes its documentation.
-        let has_leading_block = (target.attrs_start_line as usize) < target.start_line as usize;
-        let replacement_brings_block = leading_doc_or_attr(new_source);
-        let span = item_line_span(
-            &target,
-            lines.len(),
-            LeadingBlock::WhenPresentAnd(replacement_brings_block),
-        );
-        let ItemLineSpan {
-            start,
-            end_inclusive,
-        } = span;
+        let (start, end_inclusive) = target.line_bounds(&source)?;
         if start >= lines.len() || start > end_inclusive {
             return Ok(EditResult {
                 success: false,
@@ -580,7 +430,7 @@ impl TraceDecay {
                 message: format!(
                     "symbol range [{}..={}] out of bounds for {}-line file",
                     start,
-                    target.end_line,
+                    end_inclusive,
                     lines.len()
                 ),
             });
@@ -601,23 +451,13 @@ impl TraceDecay {
                 dry_run,
             )
             .await?;
-        // If the old span carried leading docs/attrs but the replacement text
-        // does not appear to, surface a note so the caller can recover them
-        // from `replaced_span` rather than silently losing documentation.
         let base = format!(
             "replaced {}:{}-{}",
             target.file_path,
             start + 1,
             end_inclusive + 1
         );
-        let mut message = edit_success_message(dry_run, &base);
-        if has_leading_block && !replacement_brings_block {
-            message.push_str(
-                "; note: the item's leading docs/attrs were preserved above the \
-                 replacement — include a leading doc/attr block in new_source to \
-                 replace them",
-            );
-        }
+        let message = edit_success_message(dry_run, &base);
         Ok(EditResult {
             success: true,
             file_path: rel_path,
@@ -635,6 +475,7 @@ impl TraceDecay {
     /// `replace_symbol`.
     pub(crate) async fn insert_at_symbol(
         &self,
+        graph: SourceEditGraphReadV1,
         symbol: &str,
         content: &str,
         position: &str,
@@ -649,22 +490,16 @@ impl TraceDecay {
                 });
             }
         };
-        let target = resolve_symbol_for_edit(self, symbol).await?;
+        let target = resolve_symbol_for_edit(&graph, symbol)?;
         let rel_path = target.file_path.clone();
         let file = SourceEditFileAuthority::open(&self.project_root, Path::new(&rel_path))?;
         let (source, source_identity) = file.read_to_string(&rel_path)?;
         let lines: Vec<&str> = source.lines().collect();
-        // `before` inserts above the item's leading doc-comment / attribute
-        // block (when the extractor recorded one) so new content lands above the
-        // docs rather than splitting them from their item; `after` is unaffected.
+        let (symbol_start, symbol_end) = target.line_bounds(&source)?;
         let anchor_line = if before {
-            // Anchor above the item's leading doc-comment / attribute block so
-            // "before" never splits docs from the item they document. For items
-            // with no leading block, attrs_start_line == start_line and this is
-            // the item line itself.
-            item_line_span(&target, lines.len(), LeadingBlock::Always).start
+            symbol_start
         } else {
-            (target.end_line as usize).saturating_add(1)
+            symbol_end.saturating_add(1)
         };
         if anchor_line > lines.len() {
             return Ok(InsertResult {

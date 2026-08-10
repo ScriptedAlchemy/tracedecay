@@ -1,4 +1,4 @@
-//! Behavioral retained-memory evals over exact FactId/FactRecordV1 tools.
+//! Behavioral retained-memory evals over the exact retained-memory tools.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -10,19 +10,16 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_application::retained_surfaces::{
-    FactCollectionEntryV1, FactRecordV1, FactSearchHitV1, FactStoreAddResultV1,
-    FactStoreGetResultV1, FactStoreListResultV1, FactStoreSearchResultV1, MemoryStatusResultV1,
+    FactCollectionEntryV1, FactSearchHitV1, FactStoreAddResultV1, FactStoreGetResultV1,
+    FactStoreListResultV1, FactStoreSearchResultV1, FactV1, MemoryStatusResultV1,
 };
-use tracedecay_domain::FactId;
 
 use crate::common;
 
 #[path = "memory_eval/assertions.rs"]
 mod assertions;
 
-use assertions::{
-    Assertion, AssertionOutcome, AssertionPhase, CompareOp, Phase, should_skip_assertion,
-};
+use assertions::{Assertion, AssertionOutcome, CompareOp, Phase, should_skip_assertion};
 
 #[derive(Deserialize)]
 struct Scenario {
@@ -90,7 +87,7 @@ enum Step {
     Curate { apply: bool },
 }
 
-type FactIndex = BTreeMap<String, Vec<FactId>>;
+type FactIndex = BTreeMap<String, Vec<i64>>;
 
 struct Fixture {
     /// Declared first so the daemon is terminated before temporary directories
@@ -279,7 +276,7 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) -> FactIndex {
         index
             .entry(seed.source.clone())
             .or_default()
-            .push(fact.fact_id.clone());
+            .push(fact.fact_id);
 
         if seed.preload_searches == 0 {
             continue;
@@ -295,7 +292,7 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) -> FactIndex {
             assert!(
                 hits.iter().any(|hit| hit.fact.fact_id == fact.fact_id),
                 "preload search `{query}` did not return the requested FactId {}",
-                fact.fact_id.as_str()
+                fact.fact_id
             );
         }
     }
@@ -347,8 +344,8 @@ fn build_fixture(setup: &Setup) -> (Fixture, FactIndex) {
 
 fn resolve_fact_references(value: &mut Value, facts: &FactIndex) {
     match value {
-        Value::String(value) => {
-            let Some(source) = value.strip_prefix("$fact:") else {
+        Value::String(reference) => {
+            let Some(source) = reference.strip_prefix("$fact:") else {
                 return;
             };
             let ids = facts
@@ -357,7 +354,8 @@ fn resolve_fact_references(value: &mut Value, facts: &FactIndex) {
             let [fact_id] = ids.as_slice() else {
                 panic!("FactId source reference `{source}` is ambiguous");
             };
-            *value = fact_id.as_str().to_owned();
+            let fact_id = *fact_id;
+            *value = Value::from(fact_id);
         }
         Value::Array(values) => {
             for entry in values {
@@ -454,7 +452,7 @@ fn op_symbol(op: CompareOp) -> &'static str {
     }
 }
 
-fn current_facts(fixture: &Fixture) -> Vec<FactRecordV1> {
+fn current_facts(fixture: &Fixture) -> Vec<FactV1> {
     let listed: FactStoreListResultV1 =
         run_exact(fixture, "tracedecay_fact_store_list", json!({"limit": 200}));
     listed
@@ -462,7 +460,7 @@ fn current_facts(fixture: &Fixture) -> Vec<FactRecordV1> {
         .into_iter()
         .map(|entry| match entry {
             FactCollectionEntryV1::Fact(fact) => fact,
-            other => panic!("fact-store list returned non-FactRecordV1 entry: {other:?}"),
+            other => panic!("fact-store list returned non-fact entry: {other:?}"),
         })
         .collect()
 }
@@ -483,7 +481,7 @@ fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<FactSearchHit
         .collect()
 }
 
-fn curate_delete_ids(report: &Value) -> HashSet<String> {
+fn curate_delete_ids(report: &Value) -> HashSet<i64> {
     let mut ids = HashSet::new();
     for action in report
         .get("actions")
@@ -492,8 +490,8 @@ fn curate_delete_ids(report: &Value) -> HashSet<String> {
         .flatten()
     {
         if action.get("op").and_then(Value::as_str) == Some("delete") {
-            if let Some(fact_id) = action.get("fact_id").and_then(Value::as_str) {
-                ids.insert(fact_id.to_owned());
+            if let Some(fact_id) = action.get("fact_id").and_then(Value::as_i64) {
+                ids.insert(fact_id);
             }
         }
     }
@@ -511,8 +509,8 @@ fn curate_delete_ids(report: &Value) -> HashSet<String> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             if deletes && reviewed {
-                if let Some(fact_id) = candidate.get("fact_id").and_then(Value::as_str) {
-                    ids.insert(fact_id.to_owned());
+                if let Some(fact_id) = candidate.get("fact_id").and_then(Value::as_i64) {
+                    ids.insert(fact_id);
                 }
             }
         }
@@ -520,14 +518,14 @@ fn curate_delete_ids(report: &Value) -> HashSet<String> {
     ids
 }
 
-fn source_fact_id(facts: &FactIndex, source: &str) -> FactId {
+fn source_fact_id(facts: &FactIndex, source: &str) -> i64 {
     let ids = facts
         .get(source)
         .unwrap_or_else(|| panic!("missing seeded source `{source}`"));
     let [fact_id] = ids.as_slice() else {
         panic!("seeded source `{source}` does not identify one FactId");
     };
-    fact_id.clone()
+    *fact_id
 }
 
 fn format_search_results(results: &[FactSearchHitV1]) -> String {
@@ -542,7 +540,7 @@ fn format_search_results(results: &[FactSearchHitV1]) -> String {
                 "#{} source=`{}` fact_id={} score={:.6} content=`{}` why={:?}",
                 index + 1,
                 hit.fact.source.as_deref().unwrap_or("<none>"),
-                hit.fact.fact_id.as_str(),
+                hit.fact.fact_id,
                 hit.score,
                 hit.fact.content,
                 hit.why
@@ -695,7 +693,7 @@ fn evaluate_assertions(
                 let result: FactStoreGetResultV1 = run_exact(
                     fixture,
                     "tracedecay_fact_store_get",
-                    json!({"fact_id": fact_id.as_str()}),
+                    json!({"fact_id": fact_id}),
                 );
                 let actual = result
                     .trust_history
@@ -730,7 +728,7 @@ fn evaluate_assertions(
                 let source_ids = facts.get(source).cloned().unwrap_or_default();
                 let any_deleted = source_ids
                     .iter()
-                    .any(|fact_id| delete_ids.contains(fact_id.as_str()));
+                    .any(|fact_id| delete_ids.contains(fact_id));
                 outcomes.push(AssertionOutcome {
                     name: name.clone(),
                     passed: any_deleted == *expected,
@@ -954,7 +952,7 @@ fn eval_memory_ranking_feedback_promotes() {
 }
 
 /// Every scenario file must have a matching test so an unwired JSON scenario
-/// cannot silently stop exercising the production FactRecordV1 path.
+/// cannot silently stop exercising the production retained-memory path.
 #[test]
 fn every_scenario_file_is_wired() {
     let wired: HashSet<&str> = [

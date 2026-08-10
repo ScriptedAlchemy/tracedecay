@@ -109,6 +109,7 @@ fn path_looks_like_test(path: &str) -> bool {
 
 pub(crate) async fn handle_unsafe_patterns(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -134,20 +135,25 @@ pub(crate) async fn handle_unsafe_patterns(
         .map_or(200, |v| v.min(2000) as usize);
 
     let project_root = cg.project_root();
-    let files = cg.get_all_files().await?;
+    let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
+    for symbol in verified_analysis_symbols(graph, path)? {
+        symbols_by_file
+            .entry(symbol.path.clone())
+            .or_default()
+            .push(symbol);
+    }
+    let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
+    files.sort();
     let mut matches: Vec<Value> = Vec::new();
     let mut by_kind: HashMap<String, u64> = HashMap::new();
     let mut touched: Vec<String> = Vec::new();
 
     'outer: for file in &files {
-        if !path_matches_optional_scope(&file.path, path) {
-            continue;
-        }
-        let in_test = path_looks_like_test(&file.path);
+        let in_test = path_looks_like_test(file);
         if exclude_tests && in_test {
             continue;
         }
-        let abs_path = project_root.join(&file.path);
+        let abs_path = project_root.join(file);
         let Ok(source) = crate::sync::read_source_file(&abs_path) else {
             continue;
         };
@@ -167,7 +173,7 @@ pub(crate) async fn handle_unsafe_patterns(
         // reported as a real risk site. Detection runs on the masked copy;
         // the original line is kept for the emitted snippet. Non-Rust files are
         // scanned raw (the Rust grammar would mis-tokenise them).
-        let masked = if path_is_rust(&file.path) {
+        let masked = if path_is_rust(file) {
             tracedecay_code_extraction::source_mask::masked_rust_source_with(
                 &source,
                 tracedecay_code_extraction::source_mask::MaskOptions::CODE_SCAN,
@@ -178,32 +184,27 @@ pub(crate) async fn handle_unsafe_patterns(
         // Masking can erase every raw hit (all of them in comments or string
         // literals), so the file's nodes are fetched only once a real match
         // survives.
-        let mut nodes: Option<Vec<crate::types::Node>> = None;
-
         for (idx, (line, masked_line)) in source.lines().zip(masked.lines()).enumerate() {
             let line_no = (idx as u32) + 1;
             for kind in &kinds {
                 if line_matches_unsafe_kind(masked_line, kind) {
-                    let nodes = match nodes {
-                        Some(ref nodes) => nodes,
-                        None => nodes.insert(cg.get_nodes_by_file(&file.path).await?),
-                    };
+                    let nodes = symbols_by_file.get(file).map(Vec::as_slice).unwrap_or(&[]);
                     let enclosing = nodes
                         .iter()
-                        .filter(|n| n.start_line <= line_no && line_no <= n.end_line)
-                        .min_by_key(|n| n.end_line.saturating_sub(n.start_line))
-                        .map(|n| n.qualified_name.clone());
+                        .filter(|n| n.metadata.start_line <= line_no && line_no <= n.end_line())
+                        .min_by_key(|n| n.metadata.line_span)
+                        .map(|n| n.metadata.qualified_name.clone());
                     *by_kind.entry(kind.clone()).or_insert(0) += 1;
                     matches.push(json!({
                         "kind": kind,
-                        "file": file.path,
+                        "file": file,
                         "line": line_no,
                         "snippet": line.trim(),
                         "enclosing": enclosing,
                         "in_test": in_test,
                     }));
-                    if !touched.contains(&file.path) {
-                        touched.push(file.path.clone());
+                    if !touched.contains(file) {
+                        touched.push(file.clone());
                     }
                     if matches.len() >= limit {
                         break 'outer;

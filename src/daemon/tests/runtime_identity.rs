@@ -171,17 +171,18 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             .exists(),
         "a stale worktree-local marker must never create or open a second project store"
     );
-    let branch_store_exists = std::fs::read_dir(layout.data_root.join("branches"))
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(std::result::Result::ok)
-        .any(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|extension| extension == "db")
-        });
+    let branch_store_exists =
+        std::fs::read_dir(primary_graph.store_layout().data_root.join("branches"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "db")
+            });
     assert!(
         !branch_store_exists,
         "opening a linked worktree must not create a branch database"

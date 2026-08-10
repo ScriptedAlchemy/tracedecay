@@ -20,15 +20,6 @@ pub(super) const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path
        branches, loops, returns, max_nesting, unsafe_blocks,
        unchecked_calls, assertions, updated_at, parent_id";
 
-/// `NODE_COLUMNS` qualified with the `n.` alias for joined queries
-/// (`edges e JOIN nodes n ...`), where bare `id`/`kind` would be ambiguous
-/// between the two tables.
-pub(super) const NODE_COLUMNS_N: &str = "n.id, n.kind, n.name, n.qualified_name, n.file_path,
-       n.start_line, n.end_line, n.start_column, n.end_column, n.attrs_start_line,
-       n.docstring AS doc, n.signature, n.visibility, n.is_async,
-       n.branches, n.loops, n.returns, n.max_nesting, n.unsafe_blocks,
-       n.unchecked_calls, n.assertions, n.updated_at, n.parent_id";
-
 const ALL_DEGREE_UNION_SQL: &str = "SELECT source AS node_id FROM edges
              UNION ALL
              SELECT target AS node_id FROM edges";
@@ -295,28 +286,6 @@ pub(super) async fn degree_pool_rows(
              LIMIT ?1"
         ),
         params![limit],
-    )
-    .await
-}
-
-pub(super) async fn top_connected_rows(
-    conn: &(impl QueryExecutor + ?Sized),
-) -> GraphReadResult<Vec<Value>> {
-    query_rows(
-        conn,
-        &format!(
-            "SELECT {NODE_COLUMNS_N}, d.degree
-             FROM (
-                 SELECT node_id, COUNT(*) AS degree
-                 FROM ({ALL_DEGREE_UNION_SQL})
-                 GROUP BY node_id
-                 ORDER BY degree DESC
-                 LIMIT 12
-             ) d
-             JOIN nodes n ON n.id = d.node_id
-             ORDER BY d.degree DESC, n.qualified_name ASC"
-        ),
-        (),
     )
     .await
 }

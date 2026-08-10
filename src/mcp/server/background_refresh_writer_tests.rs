@@ -28,15 +28,7 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
         .expect("open modified source")
         .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
         .expect("advance source mtime");
-    assert!(
-        cg.find_stale_files()
-            .await
-            .iter()
-            .any(|path| path == "src/a.rs"),
-        "fixture must be stale before refresh"
-    );
-
-    let observed = Arc::new(Mutex::new(Vec::<(PathBuf, usize)>::new()));
+    let observed = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
     let refresh_writer: BackgroundRefreshWriter = {
         let observed = Arc::clone(&observed);
         Arc::new(move |request: BackgroundRefreshRequest| {
@@ -45,7 +37,7 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
                 observed
                     .lock()
                     .expect("recording lock")
-                    .push((request.project_root, request.full_sync_escalation_files));
+                    .push(request.project_root);
                 Ok(Some(HashMap::from([("injected.rs".to_string(), 41)])))
             })
         })
@@ -67,7 +59,7 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
         .background_refresh_running
         .store(true, Ordering::Release);
 
-    server.spawn_read_refresh_task(&snapshot, 17);
+    server.spawn_read_refresh_task(&snapshot);
 
     tokio::time::timeout(Duration::from_secs(5), async {
         while server.background_refresh_running.load(Ordering::Acquire) {
@@ -77,21 +69,10 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
     .await
     .expect("injected refresh settles");
 
-    assert_eq!(
-        observed.lock().expect("recording lock").as_slice(),
-        &[(root, 17)]
-    );
+    assert_eq!(observed.lock().expect("recording lock").as_slice(), &[root]);
     assert_eq!(
         server.file_token_map_snapshot(),
         HashMap::from([("injected.rs".to_string(), 41)])
-    );
-    assert!(
-        snapshot
-            .find_stale_files()
-            .await
-            .iter()
-            .any(|path| path == "src/a.rs"),
-        "injected refresh must not execute the direct open/sync fallback"
     );
     assert_ne!(
         server
@@ -183,45 +164,6 @@ async fn lazy_stale_sync_is_detached_from_the_request() {
     assert_eq!(
         server.file_token_map_snapshot(),
         HashMap::from([("detached.rs".to_string(), 7)])
-    );
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn startup_catchup_uses_configured_full_sync_escalation() {
-    let (cg, _dir, _authority) = init_indexed_repo().await;
-    let configured_escalation = cg.get_config().sync.full_sync_escalation_files;
-    assert_ne!(
-        configured_escalation, 0,
-        "production startup catch-up must retain commit-diff scoping"
-    );
-
-    let observed = Arc::new(Mutex::new(Vec::<usize>::new()));
-    let refresh_writer: BackgroundRefreshWriter = {
-        let observed = Arc::clone(&observed);
-        Arc::new(move |request: BackgroundRefreshRequest| {
-            observed
-                .lock()
-                .expect("recording lock")
-                .push(request.full_sync_escalation_files);
-            Box::pin(async { Ok(Some(HashMap::new())) })
-        })
-    };
-    let server = McpServer::new_with_context(
-        McpServerConstructionContext::direct(cg, None)
-            .with_background_refresh_writer(refresh_writer),
-    )
-    .await;
-
-    assert!(
-        server
-            .wait_for_startup_catch_up(Duration::from_secs(5))
-            .await,
-        "startup catch-up must settle"
-    );
-    assert_eq!(
-        observed.lock().expect("recording lock").as_slice(),
-        &[configured_escalation]
     );
     server.shutdown().await;
 }

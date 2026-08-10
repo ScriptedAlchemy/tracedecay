@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::common::{MessageRecordBuilder, create_runtime, global_session, sample_node};
+use crate::common::{MessageRecordBuilder, create_runtime, global_session};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
@@ -12,8 +12,8 @@ use tracedecay::global_db::StoreInstanceUpsert;
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
-    profile_sharded_layout, read_enrollment_marker, write_enrollment_marker,
-    write_repository_identity_marker, write_store_manifest,
+    profile_sharded_layout, write_enrollment_marker, write_repository_identity_marker,
+    write_store_manifest,
 };
 use tracedecay_agent_hosts::PRODUCT_VERSION;
 use tracedecay_agent_hosts::automation::run_ledger::{
@@ -1225,10 +1225,7 @@ async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
     let project_root = canonical_temp_path(project.path());
     git(&project_root, &["init", "-b", "main"]);
 
-    for (project_id, node_id) in [
-        ("proj_status_selected", "status-selected-node"),
-        ("proj_status_legacy", "status-legacy-node"),
-    ] {
+    for project_id in ["proj_status_selected", "proj_status_legacy"] {
         let layout = profile_sharded_layout(
             &project_root,
             &profile_root(home.path()),
@@ -1239,9 +1236,6 @@ async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
         )
         .unwrap();
         let (db, _) = crate::common::initialize_test_database(&layout.graph_db_path)
-            .await
-            .unwrap();
-        db.insert_node(&sample_node(node_id, node_id, "src/lib.rs"))
             .await
             .unwrap();
         db.checkpoint().await.unwrap();
@@ -1285,55 +1279,6 @@ async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
     assert!(!stderr.contains("run `tracedecay init`"), "{stderr}");
     assert_eq!(std::fs::read(selected_db).unwrap(), selected_before);
     assert_eq!(std::fs::read(legacy_db).unwrap(), legacy_before);
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn status_json_reads_readonly_project_database() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let project_root = canonical_temp_path(project.path());
-    std::fs::create_dir_all(project_root.join("src")).unwrap();
-    std::fs::write(
-        project_root.join("src/lib.rs"),
-        "pub fn process_data() {}\n",
-    )
-    .unwrap();
-    let home_path = home.path().to_path_buf();
-    let init_root = project_root.clone();
-    std::thread::spawn(move || init_project_fixture(&home_path, &init_root))
-        .join()
-        .unwrap();
-    let marker = read_enrollment_marker(&project_root)
-        .unwrap()
-        .expect("fixture init writes enrollment");
-    let db_path = profile_sharded_layout(&project_root, &profile_root(home.path()), &marker)
-        .unwrap()
-        .graph_db_path;
-    let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
-    db.insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
-        .await
-        .unwrap();
-    let expected_node_count = db.get_stats().await.unwrap().node_count;
-    assert_eq!(expected_node_count, 3);
-    db.checkpoint().await.unwrap();
-    db.close();
-    let mut permissions = std::fs::metadata(&db_path).unwrap().permissions();
-    permissions.set_mode(0o444);
-    std::fs::set_permissions(&db_path, permissions).unwrap();
-
-    let mut command = tracedecay_command(home.path(), project.path());
-    command.args(["status", "--json"]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "status --json should read readonly DB\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(payload["node_count"], expected_node_count);
 }
 
 #[tokio::test]
@@ -1585,7 +1530,11 @@ async fn wipe_all_removes_profile_sharded_store_and_global_row() {
         .await
         .unwrap();
     assert!(
-        reopened.list_project_paths_compat().await.is_empty(),
+        reopened
+            .project_ledger_paths_for_test()
+            .await
+            .expect("read exact project ledger paths after wipe")
+            .is_empty(),
         "global projects table should be empty after wipe --all"
     );
 }

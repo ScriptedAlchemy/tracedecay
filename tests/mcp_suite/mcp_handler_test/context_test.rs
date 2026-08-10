@@ -1,16 +1,110 @@
+#![cfg(feature = "test-transport")]
+
 use crate::support::*;
 use serde_json::{Value, json};
+use std::fs;
+use std::process::Command;
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
+use tracedecay::mcp::ToolResult;
+
+struct ScopedProductionContextFixture {
+    harness: ProductionProjectCompositionHarnessV1,
+    project_root: std::path::PathBuf,
+    _isolation: TestTempDir,
+}
+
+async fn setup_production_project() -> ProductionCompositionFixture {
+    production_composition_fixture().await
+}
+
+async fn setup_production_generated_dir_project() -> ProductionCompositionFixture {
+    production_composition_fixture_with_sources(|project| {
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::create_dir_all(project.join("dist")).unwrap();
+        fs::write(project.join("src/lib.rs"), "pub fn kept() {}\n").unwrap();
+        fs::write(
+            project.join("dist/generated.js"),
+            "export function generatedOnly() {}\n",
+        )
+        .unwrap();
+    })
+    .await
+}
+
+async fn setup_scoped_production_project(scope_prefix: &str) -> ScopedProductionContextFixture {
+    let isolation = test_temp_dir();
+    let project_root = isolation.path().join("project");
+    fs::create_dir_all(&project_root).unwrap();
+    crate::fixture::write_indexed_fixture_sources(&project_root);
+    let init = Command::new(crate::common::git_program())
+        .args(["init", "-q"])
+        .current_dir(&project_root)
+        .status()
+        .unwrap();
+    assert!(init.success(), "git init must succeed");
+    let add = Command::new(crate::common::git_program())
+        .args(["add", "."])
+        .current_dir(&project_root)
+        .status()
+        .unwrap();
+    assert!(add.success(), "git add must succeed");
+    let commit = Command::new(crate::common::git_program())
+        .args([
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "-qm",
+            "scoped production context fixture",
+        ])
+        .current_dir(&project_root)
+        .status()
+        .unwrap();
+    assert!(commit.success(), "git commit must succeed");
+    let harness = ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
+        isolation.path(),
+        [project_root.clone()],
+        scope_prefix,
+    )
+    .await
+    .unwrap();
+    ScopedProductionContextFixture {
+        harness,
+        project_root,
+        _isolation: isolation,
+    }
+}
+
+async fn call_production_tool(
+    fixture: &ProductionCompositionFixture,
+    tool_name: &str,
+    arguments: Value,
+) -> TraceDecayResult<ToolResult> {
+    let response = fixture
+        .harness
+        .call_tool(&fixture.project_root, tool_name, arguments)
+        .await?;
+    if let Some(error) = response.error {
+        return Err(TraceDecayError::Config {
+            message: format!("{tool_name} failed over production MCP: {}", error.message),
+        });
+    }
+    let value = response.result.ok_or_else(|| TraceDecayError::Config {
+        message: format!("{tool_name} returned no production MCP result"),
+    })?;
+    Ok(ToolResult::new(value, Vec::new()))
+}
 
 #[tokio::test]
 async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
-    let (cg, _env, _dir) = setup_generated_dir_project(false).await;
+    let fixture = setup_production_generated_dir_project().await;
 
-    let result = handle_tool_call(
-        &cg,
+    let result = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({"task": "generatedOnly", "max_nodes": 5}),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -23,6 +117,7 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
         text.contains("tracedecay sync --include-folder dist"),
         "hint should include opt-in command, got: {text}"
     );
+    fixture.harness.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -31,18 +126,17 @@ async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
 
 #[tokio::test]
 async fn test_context() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
+    let fixture = setup_production_project().await;
+    let result = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({"task": "understand the helper function"}),
-        None,
-        None,
     )
     .await
     .unwrap();
     let text = extract_text(&result.value);
     assert!(!text.is_empty());
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -121,10 +215,10 @@ async fn context_includes_matching_memory_facts() {
 
 #[tokio::test]
 async fn context_memory_controls_filter_disable_and_preserve_markdown() {
-    let (cg, _dir) = setup_project().await;
+    let fixture = setup_production_project().await;
     let long_content = format!("Long memory control fact {}", "x".repeat(320));
-    handle_tool_call(
-        &cg,
+    call_production_tool(
+        &fixture,
         "tracedecay_fact_store",
         json!({
             "action": "add",
@@ -135,13 +229,11 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
             "trust": 0.92,
             "source": "mcp-context-test"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
-    handle_tool_call(
-        &cg,
+    call_production_tool(
+        &fixture,
         "tracedecay_fact_store",
         json!({
             "action": "add",
@@ -152,22 +244,18 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
             "trust": 0.2,
             "source": "mcp-context-test"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
 
-    let disabled = handle_tool_call(
-        &cg,
+    let disabled = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({
             "task": "long memory control fact",
             "format": "json",
             "include_memory": false
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -177,16 +265,14 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
         Some(0)
     );
 
-    let filtered = handle_tool_call(
-        &cg,
+    let filtered = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({
             "task": "low trust memory control fact",
             "format": "json",
             "memory_min_trust": 0.9
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -201,12 +287,10 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
                 .is_some_and(|content| content.contains("Low trust memory control")))
     );
 
-    let markdown = handle_tool_call(
-        &cg,
+    let markdown = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({"task": "long memory control fact", "memory_limit": 1}),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -214,6 +298,7 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     assert!(text.contains("Long memory control fact"));
     assert!(text.contains(&"x".repeat(300)));
     assert!(!text.contains("..."));
+    fixture.harness.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,20 +314,32 @@ async fn test_context_missing_task() {
 
 #[tokio::test]
 async fn test_context_scope_prefix_filters() {
-    let (cg, _dir) = setup_project().await;
-    // Context scoped to "tests" should return results (even if limited to test files)
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_context",
-        json!({"task": "understand helper"}),
-        None,
-        Some("tests"),
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
+    let fixture = setup_scoped_production_project("tests").await;
+    let response = fixture
+        .harness
+        .call_tool(
+            &fixture.project_root,
+            "tracedecay_context",
+            json!({"task": "test helper", "format": "json"}),
+        )
+        .await
+        .unwrap();
     assert!(
-        !text.is_empty(),
-        "context should return results even when scoped"
+        response.error.is_none(),
+        "scoped context failed: {response:?}"
     );
+    let result = response.result.expect("scoped context MCP result");
+    let payload: Value = serde_json::from_str(extract_text(&result)).unwrap();
+    let symbols = payload["symbols"].as_array().expect("context symbols");
+    assert!(
+        !symbols.is_empty(),
+        "context should retain matching symbols inside the configured scope: {payload}"
+    );
+    assert!(
+        symbols.iter().all(|symbol| symbol["file"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("tests/"))),
+        "context entry points must honor the production handshake scope: {payload}"
+    );
+    fixture.harness.shutdown().await;
 }

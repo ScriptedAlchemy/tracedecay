@@ -1,18 +1,20 @@
 //! Dashboard-facing graph and memory runtime seams.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_agent_hosts::ports::project_runtime::ProjectRuntime;
 pub use tracedecay_code_index::is_test_file;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::Result;
+use tracedecay_runtime_core::storage::StoreLayout;
 use tracedecay_usecases::configuration::UserSettingsDaemonClient;
-pub use tracedecay_usecases::tracedecay::GraphRuntimePort;
 
 use crate::config::RetentionConfig;
 
-pub trait DashboardProjectRuntime: GraphRuntimePort {
+pub trait DashboardProjectRuntime: Send + Sync {
+    fn project_root(&self) -> &Path;
+    fn store_layout(&self) -> &StoreLayout;
     fn automation_runtime(&self) -> &(dyn ProjectRuntime + 'static);
     fn dashboard_db_path(&self) -> PathBuf;
     fn dashboard_database_guard(&self) -> Arc<Database>;

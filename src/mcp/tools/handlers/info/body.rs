@@ -19,10 +19,9 @@ pub(crate) fn extract_lines(source: &str, start_line: u32, end_line: u32) -> Str
 /// Handles `tracedecay_body` tool calls.
 pub(crate) async fn handle_body(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     let symbol =
         args.get("symbol")
@@ -35,17 +34,14 @@ pub(crate) async fn handle_body(
         .get("limit")
         .and_then(serde_json::Value::as_u64)
         .map_or(3, |v| v.clamp(1, 20) as usize);
+    if super::super::dependency_hints::lazy_indexing_requested(&args) {
+        return Err(info_graph_error(
+            "verified-body-lazy-indexing-unavailable",
+            "lazy dependency indexing cannot mutate the generation pinned for this body request",
+        ));
+    }
 
-    let chosen = body_candidates(
-        cg,
-        symbol,
-        limit,
-        scope_prefix,
-        dependency_hints::lazy_indexing_requested(&args),
-        deadline,
-        cancellation,
-    )
-    .await?;
+    let chosen = body_candidates(graph, symbol, limit, scope_prefix)?;
 
     if chosen.is_empty() {
         return Ok(ToolResult::new(
@@ -61,23 +57,23 @@ pub(crate) async fn handle_body(
     let mut touched: Vec<String> = Vec::new();
 
     for result in &chosen {
-        let n = &result.node;
+        let (metadata, file_path) = required_symbol_parts(result)?;
         let body = source_body_for_node(
             project_root,
-            &n.file_path,
-            n.start_line,
-            n.end_line,
+            file_path,
+            metadata.start_line,
+            end_line(metadata)?,
             &mut touched,
-        );
+        )?;
         matches.push(json!({
-            "id": n.id,
-            "name": n.name,
-            "qualified_name": n.qualified_name,
-            "kind": n.kind.as_str(),
-            "file": n.file_path,
-            "start_line": n.start_line.saturating_add(1),
-            "end_line": n.end_line.saturating_add(1),
-            "signature": n.signature,
+            "id": result.occurrence.as_str(),
+            "name": metadata.simple_name,
+            "qualified_name": metadata.qualified_name,
+            "kind": metadata.kind,
+            "file": file_path,
+            "start_line": metadata.start_line.saturating_add(1),
+            "end_line": end_line(metadata)?.saturating_add(1),
+            "signature": metadata.signature,
             "body": body,
         }));
     }
@@ -133,57 +129,32 @@ fn render_body_md(value: &Value) -> String {
     md.render()
 }
 
-async fn body_candidates(
-    cg: &TraceDecay,
+fn body_candidates(
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     symbol: &str,
     limit: usize,
     scope_prefix: Option<&str>,
-    lazy_index_ignored_dependencies: bool,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
-) -> Result<Vec<crate::types::SearchResult>> {
-    // First try an exact-name lookup against the DB — this avoids the BM25
-    // ranker's tendency to bury a definition under unrelated noise when the
-    // bare name is common (e.g. `gmres` exists as both a `pub fn` and a
-    // struct field). Falls back to suffix / name matching.
-    let exact_nodes = cg.get_nodes_by_qualified_name(symbol).await?;
-    let mut exact_nodes = filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
-    if exact_nodes.is_empty() && lazy_index_ignored_dependencies {
-        let indexed = dependency_hints::lazy_index_ignored_dependency_candidates(
-            cg,
-            symbol,
-            limit,
-            scope_prefix,
-            deadline,
-            cancellation,
-        )
-        .await?;
-        if !indexed.is_empty() {
-            exact_nodes = filter_by_scope(
-                cg.get_nodes_by_qualified_name(symbol).await?,
-                scope_prefix,
-                |n| &n.file_path,
-            );
+) -> Result<Vec<tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1>> {
+    let mut candidates = graph.resolve_qualified_name(symbol, None, 1_000)?;
+    if candidates.is_empty() {
+        candidates = graph.resolve_simple_name(symbol, None, 1_000)?;
+    }
+    let mut scoped = Vec::new();
+    for candidate in candidates {
+        let path = required_file_path(&candidate)?;
+        let metadata = required_metadata(&candidate)?;
+        if scope_prefix.is_none_or(|scope| crate::path_scope::path_matches_scope(path, Some(scope)))
+        {
+            let preference = NodeKind::from_str(&metadata.kind)
+                .map_or(u8::MAX, |kind| body_kind_preference(&kind));
+            scoped.push((preference, candidate));
         }
     }
-
-    // Wrap as SearchResult so the existing scoring/rendering path works.
-    let mut candidates: Vec<crate::types::SearchResult> = exact_nodes
+    scoped.sort_by_key(|(preference, _)| *preference);
+    let mut candidates = scoped
         .into_iter()
-        .map(|node| crate::types::SearchResult { node, score: 0.0 })
-        .collect();
-
-    // If exact lookup returned nothing, fall back to BM25 search.
-    if candidates.is_empty() {
-        let raw = cg.search(symbol, (limit * 4).max(20)).await?;
-        candidates = filter_by_scope(raw, scope_prefix, |r| &r.node.file_path);
-    }
-
-    // Whether the matches came from the exact lookup or the search fallback,
-    // sort by `body_kind_preference` so callable / type definitions surface
-    // above fields, variants, uses, etc. This is the bug-#1 fix: when both a
-    // function and a same-named field exist, the function wins.
-    candidates.sort_by_key(|r| body_kind_preference(&r.node.kind));
+        .map(|(_, candidate)| candidate)
+        .collect::<Vec<_>>();
     candidates.truncate(limit);
     Ok(candidates)
 }
@@ -194,7 +165,7 @@ fn source_body_for_node(
     start_line: u32,
     end_line: u32,
     touched: &mut Vec<String>,
-) -> String {
+) -> Result<String> {
     let project_path = ProjectPath::resolve(project_root, Path::new(file_path));
     match project_path {
         Ok(ref path) => match crate::sync::read_source_file(&path.absolute_path()) {
@@ -202,11 +173,13 @@ fn source_body_for_node(
                 if !touched.iter().any(|path| path == file_path) {
                     touched.push(file_path.to_string());
                 }
-                extract_lines(&source, start_line, end_line)
+                Ok(extract_lines(&source, start_line, end_line))
             }
-            Err(_) => String::from("<file unreadable>"),
+            Err(error) => Err(TraceDecayError::Config {
+                message: format!("cannot read indexed source body '{file_path}': {error}"),
+            }),
         },
-        Err(_) => String::from("<file path outside project>"),
+        Err(error) => Err(error),
     }
 }
 

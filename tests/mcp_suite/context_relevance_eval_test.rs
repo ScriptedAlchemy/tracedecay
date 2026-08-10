@@ -22,23 +22,30 @@
 //! without failing the test, same convention as the redundancy eval's
 //! reject cases.
 
+#![cfg(feature = "test-transport")]
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::support::{extract_json, handle_tool_call, setup_empty_project};
+use crate::support::{
+    extract_real_server_text, handle_real_server_tool_call,
+    production_composition_fixture_with_sources, warm_code_index_search,
+};
 
 const TOP_K: usize = 5;
 const ANCHOR_K: usize = 3;
 
 #[tokio::test]
 async fn context_eval_fixture_scores_real_queries() {
-    let (cg, _env, dir) = setup_empty_project().await;
-    let project = dir.path();
-    copy_fixture_project(project);
-    cg.index_all().await.unwrap();
+    let production = production_composition_fixture_with_sources(copy_fixture_project).await;
+    let server = production
+        .harness
+        .server(&production.project_root)
+        .expect("production project server");
+    warm_code_index_search(&server, "authenticate").await;
 
     let fixture: Value =
         serde_json::from_str(include_str!("../fixtures/context_eval_labeled.json"))
@@ -77,16 +84,16 @@ async fn context_eval_fixture_scores_real_queries() {
         );
         let expected_current_failure = case["expected_current_failure"].as_bool().unwrap_or(false);
 
-        let result = handle_tool_call(
-            &cg,
+        let result = handle_real_server_tool_call(
+            &server,
             "tracedecay_context",
             json!({"task": task, "format": "json"}),
-            None,
-            None,
         )
-        .await
-        .unwrap_or_else(|err| panic!("case {id}: tracedecay_context call failed: {err}"));
-        let payload = extract_json(&result.value);
+        .await;
+        let payload: Value = serde_json::from_str(extract_real_server_text(&result))
+            .unwrap_or_else(|err| {
+                panic!("case {id}: tracedecay_context returned invalid JSON: {err}")
+            });
         let entry_points = payload["entry_points"]
             .as_array()
             .unwrap_or_else(|| panic!("case {id}: missing entry_points array in {payload}"));
@@ -140,6 +147,7 @@ async fn context_eval_fixture_scores_real_queries() {
         (anchor_hit_rate - expected_anchor_rate).abs() < 1e-9,
         "anchor_hit_rate: computed {anchor_hit_rate}, fixture expects {expected_anchor_rate}"
     );
+    production.harness.shutdown().await;
 }
 
 /// `recall@k` for a single query: the fraction of the labeled `relevant`

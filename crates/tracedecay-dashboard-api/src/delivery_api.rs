@@ -233,8 +233,10 @@ pub async fn overview(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<DeliveryOverviewV1>> {
     let (changes, commits) = read_git_projections(&state).await;
-    let indexed_commit = match &state.project_graph {
-        Some(graph) => graph.last_synced_commit().await,
+    let indexed_commit = match &state.code_index_freshness_reader {
+        Some(reader) => reader(state.project_root.clone())
+            .await
+            .and_then(|freshness| freshness.source_revision),
         None => None,
     };
     let generation_freshness = generation_projection(&changes, indexed_commit);
@@ -415,7 +417,7 @@ fn generation_projection(
 ) -> DeliveryProjectionV1<DeliveryGenerationFreshnessV1> {
     let Some(indexed_commit) = indexed_commit else {
         return DeliveryProjectionV1::unavailable(
-            "TraceDecay::last_synced_commit from the mounted project graph",
+            "daemon code-index generation freshness authority",
             "no complete indexed generation identity is retained",
         );
     };

@@ -406,7 +406,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             .entries()
             .last()
             .expect("current product graph entry")
-            .verified_graph_version(),
+            .verified_version(),
         accepted_task.verified_graph_version(),
         "the view must expose the exact version that accepted the task"
     );

@@ -22,6 +22,6 @@ mod session_search_test;
 mod skills_automation_test;
 mod status_runtime_test;
 
-// Backwards-compatible paths for sibling suite modules that import
-// helpers via `crate::mcp_handler_test::…`.
-pub(crate) use crate::support::{GLOBAL_DB_ENV_LOCK, setup_project};
+// Shared lock used by sibling transport suites.
+#[cfg(feature = "test-transport")]
+pub(crate) use crate::support::GLOBAL_DB_ENV_LOCK;

@@ -6,12 +6,27 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn search_call_writes_savings_ledger_row() {
-    let fixture = setup_accounted_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
+    server.ledger_writes_settled().await;
+    let project_path = fixture
+        .project_root
+        .canonicalize()
+        .expect("project path canonicalizes")
+        .to_string_lossy()
+        .to_string();
+    let baseline = fixture
+        .harness
+        .sum_profile_savings(Some(&project_path), 0)
+        .await
+        .expect("baseline settled savings");
 
     let responses = run_server_with_messages(
-        server,
+        Arc::clone(&server),
         vec![jsonrpc_request(
             json!(9001),
             "tools/call",
@@ -31,7 +46,14 @@ async fn search_call_writes_savings_ledger_row() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    settled_ledger_total(&server_handle, db_path, proj_tmp.path(), 1).await;
+    server.ledger_writes_settled().await;
+    let total = fixture
+        .harness
+        .sum_profile_savings(Some(&project_path), 0)
+        .await
+        .expect("settled savings after the accounted call");
+    assert_eq!(total.calls, baseline.calls + 1);
+    fixture.harness.shutdown().await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -323,16 +345,18 @@ async fn semantic_tool_failure_writes_error_mcp_runtime_analytics_event() {
 
 #[tokio::test]
 async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
-    let fixture = setup_accounted_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let db_path = &fixture.global_db_path;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
 
     // An anchor mismatch (str_replace's `old_str` not present in the file) is
     // a structural failure the handler already knows about via
     // `EditResult::success == false` — the resulting analytics event should
     // carry that exact message, not a generic "tool_dispatch_error" marker.
     let resp = call_tool(
-        server,
+        Arc::clone(&server),
         9005,
         "tracedecay_str_replace",
         json!({
@@ -348,9 +372,9 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
     assert!(resp["error"].is_null(), "semantic failures are MCP results");
     assert_eq!(resp["result"]["isError"], true);
 
-    server_handle.ledger_writes_settled().await;
-    let event = expect_mcp_runtime_event(
-        db_path,
+    server.ledger_writes_settled().await;
+    let event = expect_harness_mcp_runtime_event(
+        &fixture.harness,
         "tracedecay_str_replace",
         "mcp-session-9005",
         "durable structural-failure MCP runtime analytics event",
@@ -366,6 +390,7 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
         failure_reason.contains("old_str not found"),
         "failure_reason should carry the anchor-mismatch message, got: {failure_reason}"
     );
+    fixture.harness.shutdown().await;
 }
 
 /// Regression test for the empty-ledger bug: the savings ledger must record
@@ -383,12 +408,27 @@ async fn ledger_records_by_default_without_env_opt_in() {
     let _disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
     assert!(tracedecay::global_db::global_accounting_enabled());
 
-    let fixture = setup_accounted_server().await;
-    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
-    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
+    server.ledger_writes_settled().await;
+    let project_path = fixture
+        .project_root
+        .canonicalize()
+        .expect("project path canonicalizes")
+        .to_string_lossy()
+        .to_string();
+    let baseline = fixture
+        .harness
+        .sum_profile_savings(Some(&project_path), 0)
+        .await
+        .expect("baseline settled savings");
 
     let responses = run_server_with_messages(
-        server,
+        Arc::clone(&server),
         vec![jsonrpc_request(
             json!(9103),
             "tools/call",
@@ -407,7 +447,14 @@ async fn ledger_records_by_default_without_env_opt_in() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    settled_ledger_total(&server_handle, db_path, proj_tmp.path(), 1).await;
+    server.ledger_writes_settled().await;
+    let total = fixture
+        .harness
+        .sum_profile_savings(Some(&project_path), 0)
+        .await
+        .expect("settled savings after default-accounting call");
+    assert_eq!(total.calls, baseline.calls + 1);
+    fixture.harness.shutdown().await;
 }
 
 /// The explicit opt-outs must still work: a falsy

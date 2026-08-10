@@ -1,5 +1,6 @@
 //! `tracedecay_diff_context`, `tracedecay_changelog`, `tracedecay_commit_context`, and `tracedecay_pr_context`.
 
+use super::affected::collect_verified_affected_test_files;
 use super::pr_context_cursor::{
     PrContextCursorBinding, decode_pr_context_cursor, encode_pr_context_cursor,
     pr_context_cursor_authority,
@@ -9,11 +10,87 @@ use super::shell::{
     git_pr_comparison_controlled, git_recent_commits,
 };
 use super::*;
-use crate::types::{Edge, EdgeKind, Node};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
+use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, NodesByFilesPageKey};
+
+const VERIFIED_GRAPH_MAX_SYMBOLS: usize = 500_000;
+const VERIFIED_GRAPH_MAX_RELATIONS: usize = 2_000_000;
+
+type VerifiedGraphQuery = crate::tracedecay::queries::graph::VerifiedGraphQuery;
+
+fn symbol_path(symbol: &CodeGraphSymbolSummaryV1) -> Result<&str> {
+    symbol
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.logical_path.as_deref())
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "verified-code-graph-symbol-binding-incomplete",
+                false,
+                format!(
+                    "symbol {} has no admitted logical file binding",
+                    symbol.occurrence.as_str()
+                ),
+            )
+        })
+}
+
+fn symbol_metadata(
+    symbol: &CodeGraphSymbolSummaryV1,
+) -> Result<&tracedecay_code_index::lineage::LineageSymbolRecordV1> {
+    symbol.metadata.as_ref().ok_or_else(|| {
+        TraceDecayError::project_route(
+            "verified-code-graph-symbol-metadata-incomplete",
+            false,
+            format!(
+                "symbol {} has no admitted lineage metadata",
+                symbol.occurrence.as_str()
+            ),
+        )
+    })
+}
+
+fn symbol_value(symbol: &CodeGraphSymbolSummaryV1, include_signature: bool) -> Result<Value> {
+    let metadata = symbol_metadata(symbol)?;
+    let path = symbol_path(symbol)?;
+    let mut value = json!({
+        "id": symbol.occurrence.as_str(),
+        "name": metadata.simple_name.as_str(),
+        "kind": metadata.kind.as_str(),
+        "file": path,
+        "line": metadata.start_line,
+    });
+    if include_signature {
+        value["signature"] = json!(metadata.signature.as_deref());
+    }
+    Ok(value)
+}
+
+fn all_symbols_in_files(
+    graph: &VerifiedGraphQuery,
+    files: &HashSet<String>,
+) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let page = graph.symbols_in_logical_files_page(
+        files,
+        None,
+        VERIFIED_GRAPH_MAX_SYMBOLS,
+        VERIFIED_GRAPH_MAX_SYMBOLS,
+    )?;
+    if page.has_more {
+        return Err(TraceDecayError::project_route(
+            "verified-code-graph-symbol-budget-exhausted",
+            false,
+            "the requested Git context exceeds the verified graph symbol budget",
+        ));
+    }
+    Ok(page.symbols)
+}
 
 /// Runs one synchronous gix span on the blocking pool.
 ///
@@ -146,7 +223,11 @@ where
 }
 
 /// Handles `tracedecay_diff_context` tool calls.
-pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_diff_context(
+    cg: &TraceDecay,
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_diff_context")?;
     let files = require_string_array_arg(&args, "files")?;
     let depth = clamped_depth_arg(&args, "depth", 2, 10);
@@ -163,64 +244,70 @@ pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
     // the same node N times for the same path.
     let files = unique_file_paths(files.iter().map(std::string::String::as_str));
 
-    // Pre-compute files containing inline test modules.
-    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
-    let has_tests = |path: &str| {
-        crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
-    };
+    let requested_paths = files.iter().cloned().collect::<HashSet<_>>();
+    let requested_symbols = all_symbols_in_files(graph, &requested_paths)?;
 
     // First pass: gather all modified symbols.
-    let mut modified_ids: Vec<String> = Vec::new();
-    for file in &files {
-        let nodes = cg.get_nodes_by_file(file).await?;
-        for node in &nodes {
-            all_touched_files.push(node.file_path.clone());
-            // Dedup by node id: `get_nodes_by_file` can return the same node
-            // twice if the index contains duplicates from re-extraction, and
-            // even when it doesn't, callers may legitimately want one entry
-            // per node — never one entry per (file, node) pair.
-            if !modified_seen.insert(node.id.clone()) {
-                continue;
-            }
-            modified_symbols.push(json!({
-                "id": node.id,
-                "name": node.name,
-                "kind": node.kind.as_str(),
-                "file": node.file_path,
-                "line": node.start_line,
-            }));
-            modified_ids.push(node.id.clone());
+    let mut modified_ids: Vec<SymbolOccurrenceId> = Vec::new();
+    for symbol in &requested_symbols {
+        let path = symbol_path(symbol)?;
+        all_touched_files.push(path.to_owned());
+        // The occurrence identity is the generation-pinned deduplication key.
+        if !modified_seen.insert(symbol.occurrence.as_str().to_owned()) {
+            continue;
         }
+        modified_symbols.push(symbol_value(symbol, false)?);
+        modified_ids.push(symbol.occurrence.clone());
     }
 
     // Single multi-source BFS over the union of impact radii. Sharing a
     // `visited` set means each downstream node is walked at most once, even
     // when many modified symbols reach it through diamond dependencies — the
     // old per-symbol loop re-traversed the same subtree N times.
-    let impacted = cg.get_impact_radius_multi(&modified_ids, depth).await?;
-    for impacted_node in &impacted {
+    let impacted = if modified_ids.is_empty() {
+        tracedecay_code_index::graph_projection::CodeGraphImpactBatchV1 {
+            impacted: Vec::new(),
+            complete: true,
+        }
+    } else {
+        graph.impact(
+            &modified_ids,
+            &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+            u32::try_from(depth).map_err(|error| TraceDecayError::Config {
+                message: format!("invalid diff context impact depth: {error}"),
+            })?,
+            PR_CONTEXT_MAX_IMPACT_NODES,
+            PR_CONTEXT_MAX_IMPACT_EDGES,
+        )?
+    };
+    let files_with_inline_tests = graph.test_annotated_logical_files(
+        None,
+        VERIFIED_GRAPH_MAX_SYMBOLS,
+        VERIFIED_GRAPH_MAX_RELATIONS,
+    )?;
+    let has_tests = |path: &str| {
+        crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
+    };
+    for impacted_symbol in &impacted.impacted {
+        let impacted_node = &impacted_symbol.summary;
         // Drop seeds: callers want impacted symbols distinct from the
         // modified ones, mirroring the old per-node `if impacted.id == node.id`.
-        if modified_seen.contains(&impacted_node.id) {
+        if modified_seen.contains(impacted_node.occurrence.as_str()) {
             continue;
         }
-        if !impacted_seen.insert(impacted_node.id.clone()) {
+        if !impacted_seen.insert(impacted_node.occurrence.as_str().to_owned()) {
             continue;
         }
-        impacted_symbols.push(json!({
-            "id": impacted_node.id,
-            "name": impacted_node.name,
-            "kind": impacted_node.kind.as_str(),
-            "file": impacted_node.file_path,
-            "line": impacted_node.start_line,
-        }));
-        if has_tests(&impacted_node.file_path) {
-            affected_tests.insert(impacted_node.file_path.clone());
+        impacted_symbols.push(symbol_value(impacted_node, false)?);
+        let path = symbol_path(impacted_node)?;
+        if has_tests(path) {
+            affected_tests.insert(path.to_owned());
         }
     }
 
     let traversal =
-        collect_affected_test_files(cg, &files, depth, None, &files_with_inline_tests).await?;
+        collect_verified_affected_test_files(graph, &files, depth, None, &files_with_inline_tests)
+            .await?;
     affected_tests.extend(traversal.test_distances.into_keys());
 
     let mut tests_sorted: Vec<String> = affected_tests.into_iter().collect();
@@ -238,6 +325,7 @@ pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
         "modified_symbols": modified_symbols,
         "impacted_symbols_count": impacted_symbols.len(),
         "impacted_symbols": impacted_symbols,
+        "impact_complete": impacted.complete,
         "affected_tests": tests_sorted,
     });
 
@@ -249,7 +337,11 @@ pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
     ))
 }
 /// Handles `tracedecay_changelog` tool calls.
-pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_changelog(
+    cg: &TraceDecay,
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_changelog")?;
     let from_ref = args
         .get("from_ref")
@@ -282,6 +374,15 @@ pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
         }
     };
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
+    let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
+    let graph_symbols = all_symbols_in_files(graph, &changed_paths)?;
+    let mut symbols_by_file: HashMap<String, Vec<Value>> = HashMap::new();
+    for symbol in &graph_symbols {
+        symbols_by_file
+            .entry(symbol_path(symbol)?.to_owned())
+            .or_default()
+            .push(symbol_value(symbol, true)?);
+    }
 
     // For each changed file, get current symbols from the graph
     let mut symbols_added: Vec<Value> = Vec::new();
@@ -291,20 +392,7 @@ pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
 
     for change in &changes {
         let file = &change.path;
-        let nodes = cg.get_nodes_by_file(file).await?;
-        let symbols: Vec<Value> = nodes
-            .iter()
-            .map(|n| {
-                json!({
-                    "id": n.id,
-                    "name": n.name,
-                    "kind": n.kind.as_str(),
-                    "file": n.file_path,
-                    "line": n.start_line,
-                    "signature": n.signature,
-                })
-            })
-            .collect();
+        let symbols = symbols_by_file.remove(file).unwrap_or_default();
 
         if symbols.is_empty() {
             // File was likely removed or not indexed
@@ -346,7 +434,11 @@ pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
 }
 
 /// Handles `tracedecay_commit_context` tool calls.
-pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_commit_context(
+    cg: &TraceDecay,
+    graph: &VerifiedGraphQuery,
+    args: Value,
+) -> Result<ToolResult> {
     let staged_only = args
         .get("staged_only")
         .and_then(serde_json::Value::as_bool)
@@ -389,16 +481,28 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
         ));
     }
 
-    // Pre-compute files with inline test modules.
-    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
+    let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
+    let files_with_inline_tests = graph.test_annotated_logical_files(
+        Some(&changed_paths),
+        VERIFIED_GRAPH_MAX_SYMBOLS,
+        VERIFIED_GRAPH_MAX_RELATIONS,
+    )?;
+    let graph_symbols = all_symbols_in_files(graph, &changed_paths)?;
+    let mut symbols_by_file: HashMap<String, Vec<&CodeGraphSymbolSummaryV1>> = HashMap::new();
+    for symbol in &graph_symbols {
+        symbols_by_file
+            .entry(symbol_path(symbol)?.to_owned())
+            .or_default()
+            .push(symbol);
+    }
 
     let mut file_roles: Vec<Value> = Vec::new();
     let mut symbols_by_role: HashMap<&str, Vec<Value>> = HashMap::new();
 
     for file in &changed_files {
         let role = classify_file_role(file, &files_with_inline_tests);
-        let nodes = cg.get_nodes_by_file(file).await?;
-        file_roles.push(json!({"file": file, "role": role, "symbols": nodes.len()}));
+        let symbols = symbols_by_file.get(file).map(Vec::as_slice).unwrap_or(&[]);
+        file_roles.push(json!({"file": file, "role": role, "symbols": symbols.len()}));
 
         // Config files (Cargo.toml, *.yaml, package.json, ...) explode into
         // one node per key. Surface a single summary entry per file instead
@@ -408,16 +512,17 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
             symbols_by_role.entry(role).or_default().push(json!({
                 "file": file,
                 "kind": "config_summary",
-                "config_keys": nodes.len(),
+                "config_keys": symbols.len(),
             }));
             continue;
         }
-        for node in &nodes {
+        for symbol in symbols {
+            let metadata = symbol_metadata(symbol)?;
             symbols_by_role.entry(role).or_default().push(json!({
-                "name": node.name,
-                "kind": node.kind.as_str(),
-                "file": node.file_path,
-                "line": node.start_line,
+                "name": metadata.simple_name.as_str(),
+                "kind": metadata.kind.as_str(),
+                "file": symbol_path(symbol)?,
+                "line": metadata.start_line,
             }));
         }
     }
@@ -500,16 +605,16 @@ fn elapsed_micros(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).map_or(u64::MAX, |value| value)
 }
 
-async fn pr_context_impact_snapshot(
-    snapshot: &DatabaseEngineReadSnapshot,
-    seed_nodes: &[Node],
+fn pr_context_impact_snapshot(
+    graph: &VerifiedGraphQuery,
+    seed_nodes: &[CodeGraphSymbolSummaryV1],
     max_depth: usize,
     prior_budget: PrContextImpactBudget,
     controls: &PrContextControls,
 ) -> Result<PrContextImpact> {
     let mut impact = PrContextImpact {
         nodes_admitted: prior_budget.nodes_admitted,
-        edges_admitted: prior_budget.edges_admitted,
+        direct_call_edges_admitted: prior_budget.direct_call_edges_admitted,
         bytes_admitted: prior_budget.bytes_admitted,
         ..PrContextImpact::default()
     };
@@ -525,66 +630,57 @@ async fn pr_context_impact_snapshot(
         }
         impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
         impact.nodes_admitted = impact.nodes_admitted.saturating_add(1);
-        visited.insert(node.id.clone());
-        frontier.push(node.id.clone());
+        visited.insert(node.occurrence.clone());
+        frontier.push(node.occurrence.clone());
         impact.nodes.push(node.clone());
     }
-    for depth in 0..max_depth {
-        if frontier.is_empty() {
-            break;
-        }
-        let remaining_edges = PR_CONTEXT_MAX_IMPACT_EDGES.saturating_sub(impact.edges_admitted);
-        if remaining_edges == 0 {
-            impact.partial = true;
-            break;
-        }
+    if frontier.is_empty() {
+        return Ok(impact);
+    }
+    let remaining_edges =
+        PR_CONTEXT_MAX_IMPACT_EDGES.saturating_sub(impact.direct_call_edges_admitted);
+    let remaining_nodes = PR_CONTEXT_MAX_IMPACT_NODES.saturating_sub(impact.nodes_admitted);
+    if remaining_edges == 0 || remaining_nodes == 0 {
+        impact.partial = true;
+        return Ok(impact);
+    }
+    controls.checkpoint()?;
+    let incoming_calls = graph.callers(&frontier, &[RelationEdgeKindV1::Calls], remaining_edges)?;
+    for edge in incoming_calls.into_iter().flatten() {
         controls.checkpoint()?;
-        let edge_page = snapshot
-            .get_incoming_edges_bulk_page_controlled(&frontier, &[], remaining_edges, || {
-                controls.checkpoint()
-            })
-            .await?;
-        impact.edge_rows_read = impact.edge_rows_read.saturating_add(edge_page.rows_read);
-        impact.partial |= edge_page.has_more;
-        let mut next_ids = Vec::new();
-        for edge in edge_page.edges {
-            let bytes = pr_context_edge_bytes(&edge);
-            if impact.bytes_admitted.saturating_add(bytes) > PR_CONTEXT_MAX_IMPACT_BYTES {
-                impact.partial = true;
-                break;
-            }
-            impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
-            impact.edges_admitted = impact.edges_admitted.saturating_add(1);
-            if depth == 0 && edge.kind == EdgeKind::Calls {
-                impact.incoming_calls.push(edge.clone());
-            }
-            if visited.insert(edge.source.clone()) {
-                next_ids.push(edge.source);
-            }
-        }
-        if next_ids.is_empty() {
+        let bytes = pr_context_edge_bytes(&edge);
+        if impact.bytes_admitted.saturating_add(bytes) > PR_CONTEXT_MAX_IMPACT_BYTES {
+            impact.partial = true;
             break;
         }
-        let remaining_nodes = PR_CONTEXT_MAX_IMPACT_NODES.saturating_sub(impact.nodes_admitted);
-        if next_ids.len() > remaining_nodes {
-            next_ids.truncate(remaining_nodes);
+        impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
+        impact.direct_call_edges_admitted = impact.direct_call_edges_admitted.saturating_add(1);
+        impact.incoming_calls.push(edge);
+    }
+    let depth = u32::try_from(max_depth).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid PR context impact depth: {error}"),
+    })?;
+    let graph_impact = graph.impact(
+        &frontier,
+        &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+        depth,
+        remaining_nodes,
+        remaining_edges,
+    )?;
+    impact.partial |= !graph_impact.complete;
+    for impacted in graph_impact.impacted {
+        controls.checkpoint()?;
+        if !visited.insert(impacted.summary.occurrence.clone()) {
+            continue;
+        }
+        let bytes = pr_context_node_bytes(&impacted.summary);
+        if impact.bytes_admitted.saturating_add(bytes) > PR_CONTEXT_MAX_IMPACT_BYTES {
             impact.partial = true;
+            continue;
         }
-        let nodes = snapshot
-            .get_nodes_by_ids_controlled(&next_ids, || controls.checkpoint())
-            .await?;
-        frontier.clear();
-        for node in nodes {
-            let bytes = pr_context_node_bytes(&node);
-            if impact.bytes_admitted.saturating_add(bytes) > PR_CONTEXT_MAX_IMPACT_BYTES {
-                impact.partial = true;
-                continue;
-            }
-            impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
-            impact.nodes_admitted = impact.nodes_admitted.saturating_add(1);
-            frontier.push(node.id.clone());
-            impact.nodes.push(node);
-        }
+        impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
+        impact.nodes_admitted = impact.nodes_admitted.saturating_add(1);
+        impact.nodes.push(impacted.summary);
     }
     Ok(impact)
 }
@@ -592,41 +688,54 @@ async fn pr_context_impact_snapshot(
 #[derive(Clone, Copy, Default)]
 struct PrContextImpactBudget {
     nodes_admitted: usize,
-    edges_admitted: usize,
+    direct_call_edges_admitted: usize,
     bytes_admitted: usize,
 }
 
 #[derive(Default)]
 struct PrContextImpact {
-    nodes: Vec<Node>,
-    incoming_calls: Vec<Edge>,
+    nodes: Vec<CodeGraphSymbolSummaryV1>,
+    incoming_calls: Vec<tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1>,
     nodes_admitted: usize,
-    edges_admitted: usize,
-    edge_rows_read: usize,
+    direct_call_edges_admitted: usize,
     bytes_admitted: usize,
     partial: bool,
 }
 
-fn pr_context_node_bytes(node: &Node) -> usize {
-    node.id
+fn pr_context_node_bytes(node: &CodeGraphSymbolSummaryV1) -> usize {
+    node.occurrence
+        .as_str()
         .len()
-        .saturating_add(node.name.len())
-        .saturating_add(node.qualified_name.len())
-        .saturating_add(node.file_path.len())
-        .saturating_add(node.docstring.as_ref().map_or(0, String::len))
-        .saturating_add(node.signature.as_ref().map_or(0, String::len))
+        .saturating_add(node.metadata.as_ref().map_or(0, |metadata| {
+            metadata
+                .simple_name
+                .len()
+                .saturating_add(metadata.qualified_name.len())
+                .saturating_add(metadata.signature.as_ref().map_or(0, String::len))
+        }))
+        .saturating_add(
+            node.binding
+                .as_ref()
+                .and_then(|binding| binding.logical_path.as_ref())
+                .map_or(0, String::len),
+        )
 }
 
-fn pr_context_edge_bytes(edge: &Edge) -> usize {
-    edge.source
+fn pr_context_edge_bytes(
+    edge: &tracedecay_code_index::graph_projection::CodeGraphSemanticEdgeV1,
+) -> usize {
+    edge.edge
+        .from_occurrence
+        .as_str()
         .len()
-        .saturating_add(edge.target.len())
-        .saturating_add(edge.kind.as_str().len())
+        .saturating_add(edge.edge.to_occurrence.as_str().len())
+        .saturating_add("calls".len())
 }
 
 /// Handles `tracedecay_pr_context` tool calls.
 pub(crate) async fn handle_pr_context(
     cg: &TraceDecay,
+    graph: &VerifiedGraphQuery,
     args: Value,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
@@ -686,7 +795,7 @@ pub(crate) async fn handle_pr_context(
             .then_with(|| left.status.cmp(right.status))
     });
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
-    let changed_paths: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
+    let changed_paths = changed_files.iter().cloned().collect::<HashSet<_>>();
 
     let maximum_symbols = args
         .get("maximum_symbols")
@@ -704,11 +813,7 @@ pub(crate) async fn handle_pr_context(
         None => None,
     };
 
-    let graph_snapshot = cg
-        .db()
-        .begin_engine_read_snapshot("PR context graph snapshot")
-        .await?;
-    let graph_generation = graph_snapshot.graph_generation_identity().await?;
+    let graph_generation = graph.generation().as_str().to_owned();
     let project_root = cg.project_root().to_string_lossy();
     let cursor_binding = PrContextCursorBinding {
         protocol: "tracedecay.pr-context.cursor.v1",
@@ -741,7 +846,7 @@ pub(crate) async fn handle_pr_context(
             .map_or_else(PrContextImpactBudget::default, |position| {
                 PrContextImpactBudget {
                     nodes_admitted: position.impact_nodes_admitted,
-                    edges_admitted: position.impact_edges_admitted,
+                    direct_call_edges_admitted: position.direct_call_edges_admitted,
                     bytes_admitted: position.impact_bytes_admitted,
                 }
             });
@@ -751,21 +856,16 @@ pub(crate) async fn handle_pr_context(
 
     // Pre-compute files with inline test modules.
     let stage_started = std::time::Instant::now();
-    let mut files_with_inline_tests = graph_snapshot
-        .get_files_with_test_annotations_for_paths_controlled(&changed_files, || {
-            controls.checkpoint()
-        })
-        .await?;
+    let mut files_with_inline_tests = graph.test_annotated_logical_files(
+        Some(&changed_paths),
+        VERIFIED_GRAPH_MAX_SYMBOLS,
+        VERIFIED_GRAPH_MAX_RELATIONS,
+    )?;
     controls.checkpoint()?;
     stage_timings.insert(
         "test_annotations".to_owned(),
         json!(elapsed_micros(stage_started)),
     );
-    let config_paths: Vec<String> = changes
-        .iter()
-        .filter(|change| classify_file_role(&change.path, &files_with_inline_tests) == "config")
-        .map(|change| change.path.clone())
-        .collect();
     let added_paths: Vec<String> = changes
         .iter()
         .filter(|change| change.status == "added")
@@ -783,62 +883,35 @@ pub(crate) async fn handle_pr_context(
     test_files_changed.dedup();
 
     let stage_started = std::time::Instant::now();
-    let symbol_page = graph_snapshot
-        .get_nodes_by_files_page_controlled(
-            &changed_files,
-            &config_paths,
-            cursor_position.as_ref().map(|position| &position.page_key),
-            maximum_symbols,
-            || controls.checkpoint(),
-        )
-        .await?;
+    let symbol_page = graph.symbols_in_logical_files_page(
+        &changed_paths,
+        cursor_position.as_ref().map(|position| &position.after),
+        maximum_symbols,
+        VERIFIED_GRAPH_MAX_SYMBOLS,
+    )?;
     controls.checkpoint()?;
     stage_timings.insert(
         "symbol_page".to_owned(),
         json!(elapsed_micros(stage_started)),
     );
     let symbol_has_more = symbol_page.has_more;
-    let symbol_rows_read = symbol_page.rows_read;
-    let next_page_key = symbol_page.entries.last().map(|entry| NodesByFilesPageKey {
-        file_path: entry.file_path.clone(),
-        start_line: entry.start_line,
-        rowid: entry.rowid,
-    });
+    let next_page_key = symbol_page
+        .symbols
+        .last()
+        .map(|symbol| symbol.occurrence.clone());
     let mut added = Vec::new();
     let mut modified = Vec::new();
-    let mut nodes = Vec::with_capacity(symbol_page.entries.len());
-    for entry in symbol_page.entries {
+    let mut nodes = Vec::with_capacity(symbol_page.symbols.len());
+    for symbol in symbol_page.symbols {
         controls.checkpoint()?;
-        let symbol = if entry.is_config_summary {
-            json!({
-                "file": &entry.file_path,
-                "kind": "config_summary",
-                "config_keys": Value::Null,
-                "coverage": "bounded_representative",
-            })
+        let path = symbol_path(&symbol)?;
+        let value = symbol_value(&symbol, false)?;
+        if added_path_set.contains(path) {
+            added.push(value);
         } else {
-            let node = entry
-                .node
-                .as_ref()
-                .ok_or_else(|| TraceDecayError::Database {
-                    message: "source symbol page entry has no node".to_owned(),
-                    operation: "get_nodes_by_files_page".to_owned(),
-                })?;
-            json!({
-                "name": &node.name,
-                "kind": node.kind.as_str(),
-                "file": &node.file_path,
-                "line": node.start_line,
-            })
-        };
-        if added_path_set.contains(entry.file_path.as_str()) {
-            added.push(symbol);
-        } else {
-            modified.push(symbol);
+            modified.push(value);
         }
-        if let Some(node) = entry.node {
-            nodes.push(node);
-        }
+        nodes.push(symbol);
     }
     let returned_symbols = added.len().saturating_add(modified.len());
     let symbols_added = added.len();
@@ -847,46 +920,41 @@ pub(crate) async fn handle_pr_context(
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
-    let impact =
-        pr_context_impact_snapshot(&graph_snapshot, &nodes, 2, prior_impact_budget, &controls)
-            .await?;
+    let impact = pr_context_impact_snapshot(graph, &nodes, 2, prior_impact_budget, &controls)?;
     controls.checkpoint()?;
     let impact_paths: Vec<String> = impact
         .nodes
         .iter()
-        .map(|node| node.file_path.clone())
-        .collect();
-    files_with_inline_tests.extend(
-        graph_snapshot
-            .get_files_with_test_annotations_for_paths_controlled(&impact_paths, || {
-                controls.checkpoint()
-            })
-            .await?,
-    );
-    let impacted_by_id: HashMap<&str, &Node> = impact
+        .map(|node| symbol_path(node).map(str::to_owned))
+        .collect::<Result<Vec<_>>>()?;
+    let impact_path_set = impact_paths.iter().cloned().collect::<HashSet<_>>();
+    files_with_inline_tests.extend(graph.test_annotated_logical_files(
+        Some(&impact_path_set),
+        VERIFIED_GRAPH_MAX_SYMBOLS,
+        VERIFIED_GRAPH_MAX_RELATIONS,
+    )?);
+    let impacted_by_id: HashMap<&str, &CodeGraphSymbolSummaryV1> = impact
         .nodes
         .iter()
-        .map(|node| (node.id.as_str(), node))
+        .map(|node| (node.occurrence.as_str(), node))
         .collect();
     for edge in &impact.incoming_calls {
-        if let Some(caller) = impacted_by_id.get(edge.source.as_str())
-            && !changed_paths.contains(caller.file_path.as_str())
+        if let Some(caller) = impacted_by_id.get(edge.edge.from_occurrence.as_str())
+            && !changed_paths.contains(symbol_path(caller)?)
         {
-            let dir = caller
-                .file_path
+            let caller_path = symbol_path(caller)?;
+            let dir = caller_path
                 .rfind('/')
-                .map_or(caller.file_path.as_str(), |index| {
-                    &caller.file_path[..index]
-                });
+                .map_or(caller_path, |index| &caller_path[..index]);
             impacted_modules.insert(dir.to_owned());
         }
     }
     for impacted in &impact.nodes {
-        if !changed_paths.contains(impacted.file_path.as_str())
-            && (crate::tracedecay::is_test_file(&impacted.file_path)
-                || files_with_inline_tests.contains(&impacted.file_path))
+        let path = symbol_path(impacted)?;
+        if !changed_paths.contains(path)
+            && (crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path))
         {
-            affected_tests.insert(impacted.file_path.clone());
+            affected_tests.insert(path.to_owned());
         }
     }
     stage_timings.insert("impact".to_owned(), json!(elapsed_micros(stage_started)));
@@ -916,7 +984,7 @@ pub(crate) async fn handle_pr_context(
         Some(encode_pr_context_cursor(
             key,
             impact.nodes_admitted,
-            impact.edges_admitted,
+            impact.direct_call_edges_admitted,
             impact.bytes_admitted,
             snapshot,
             authenticator,
@@ -939,7 +1007,6 @@ pub(crate) async fn handle_pr_context(
         "symbol_page": {
             "limit": maximum_symbols,
             "returned": returned_symbols,
-            "rows_read": symbol_rows_read,
             "has_more": symbol_has_more,
             "complete": symbol_complete,
             "selection": "stable_prefix",
@@ -951,8 +1018,7 @@ pub(crate) async fn handle_pr_context(
             "symbols_complete": symbol_complete,
             "impact_nodes_admitted": impact.nodes_admitted,
             "impact_nodes_returned": impact.nodes.len(),
-            "impact_edges_admitted": impact.edges_admitted,
-            "impact_edge_rows_read": impact.edge_rows_read,
+            "direct_call_edges_admitted": impact.direct_call_edges_admitted,
             "impact_bytes_admitted": impact.bytes_admitted,
             "impact_partial": impact.partial,
             "complete": impact_complete,

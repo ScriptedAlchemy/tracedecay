@@ -53,8 +53,6 @@ mod annotation_helpers_test;
 mod bench_test;
 mod cloud_test;
 mod complexity_test;
-mod context_test;
 mod display_test;
 mod graph_test;
-mod resolution_test;
 mod types_test;

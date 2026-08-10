@@ -2,10 +2,13 @@ use tracedecay_application::{
     SourceEditDiagnosticV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
 };
 
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::TraceDecayError;
 
-async fn run_edit_verification(graph: &TraceDecay, file_path: &str) -> SourceEditVerificationV1 {
+async fn run_edit_verification(
+    graph: &SourceEditRuntime,
+    file_path: &str,
+) -> SourceEditVerificationV1 {
     let diagnostics = match graph.run_diagnostics(file_path).await {
         Ok(diagnostics) => diagnostics,
         Err(error) => return failed_edit_verification(error),
@@ -48,7 +51,7 @@ async fn run_edit_verification(graph: &TraceDecay, file_path: &str) -> SourceEdi
 }
 
 pub(super) async fn run_edit_verifications(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     file_paths: &[String],
 ) -> SourceEditVerificationV1 {
     let mut aggregate = SourceEditVerificationV1 {

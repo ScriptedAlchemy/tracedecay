@@ -6,11 +6,14 @@
 //! partial-failure apply restores every already-written preimage.
 
 use crate::support::*;
+use crate::support::{
+    handle_production_source_edit_tool_call as handle_tool_call,
+    init_production_source_edit_project as init_test_project,
+};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 use tracedecay::mcp::ToolResult;
-use tracedecay::tracedecay::TraceDecay;
 
 /// A pricing crate whose caller lives in a *nested* directory and invokes the
 /// symbol through a fully-qualified path (no `use` import), so every literal
@@ -51,8 +54,29 @@ async fn rename_fixture(project: &Path) {
 
 /// Runs `tracedecay_rename_preview` for `symbol` and returns the exact node
 /// identity the apply must be bound to.
-async fn preview_node(cg: &TraceDecay, symbol: &str) -> Value {
-    let node_id = find_node_id(cg, symbol).await;
+async fn preview_node(cg: &ProductionSourceEditFixture, symbol: &str) -> Value {
+    let search = handle_tool_call(
+        cg,
+        "tracedecay_search",
+        json!({ "query": symbol, "limit": 20 }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let search: Value = serde_json::from_str(extract_text(&search.value)).unwrap();
+    let node_id = search["results"]
+        .as_array()
+        .and_then(|results| {
+            results.iter().find_map(|result| {
+                (result["display"]["name"].as_str() == Some(symbol))
+                    .then(|| result["node_id"].as_str())
+                    .flatten()
+            })
+        })
+        .unwrap_or_else(|| {
+            panic!("symbol {symbol:?} missing from production code graph: {search}")
+        });
     let result = handle_tool_call(
         cg,
         "tracedecay_rename_preview",
@@ -92,10 +116,10 @@ fn rename_payload(result: &ToolResult) -> Value {
 #[tokio::test]
 async fn test_rename_symbol_dry_run_default_reports_plan_and_writes_nothing() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     rename_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let before_orders = fs::read_to_string(project.join("src/nested/orders.rs")).unwrap();
@@ -145,10 +169,10 @@ async fn test_rename_symbol_dry_run_default_reports_plan_and_writes_nothing() {
 #[tokio::test]
 async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     rename_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let node = preview_node(&cg, "compute_grand_total").await;
     let mut args = rename_args(&node, "calculate_total_cents");
@@ -202,10 +226,10 @@ async fn test_rename_symbol_apply_rewrites_declaration_and_callers() {
 #[tokio::test]
 async fn test_rename_symbol_stale_tree_refuses_before_writing() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     rename_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let node = preview_node(&cg, "compute_grand_total").await;
 
@@ -250,10 +274,10 @@ async fn test_rename_symbol_stale_tree_refuses_before_writing() {
 #[tokio::test]
 async fn test_rename_symbol_denies_invalid_and_colliding_names() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     rename_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let before_orders = fs::read_to_string(project.join("src/nested/orders.rs")).unwrap();
@@ -315,10 +339,10 @@ async fn test_rename_symbol_partial_failure_restores_published_files() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     rename_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let before_orders = fs::read_to_string(project.join("src/nested/orders.rs")).unwrap();

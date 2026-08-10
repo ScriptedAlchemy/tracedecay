@@ -53,7 +53,6 @@ use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
     ManagedTestRunStaleReason, OperationEventAuthority,
 };
-use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 
 const MAX_OPERATION_PARAMETERS_BYTES: usize = 1_048_576;
@@ -385,11 +384,10 @@ impl PrimitiveCapacity {
 /// Teardown owner retained by central project-open.
 ///
 /// Dropping this value releases the dispatch facade and every Arc-backed
-/// project primitive authority together. The database and graph fields keep
-/// the exact project-open owners alive for the same lifetime as dispatch.
+/// project primitive authority together. The database and Arc-backed ports
+/// keep the exact project-open owners alive for the same lifetime as dispatch.
 pub struct PrimitiveProjectRuntime {
     database: Database,
-    graph: Arc<TraceDecay>,
     dispatch: Arc<dyn PrimitiveDispatch>,
 }
 
@@ -421,11 +419,7 @@ impl PrimitiveProjectRuntime {
         &self.database
     }
 
-    pub fn graph(&self) -> Arc<TraceDecay> {
-        Arc::clone(&self.graph)
-    }
-
-    /// Releases the project database, graph, dispatch, and all Arc-backed
+    /// Releases the project database, dispatch, and all Arc-backed
     /// primitive authorities as one teardown unit.
     pub fn teardown(self) {
         drop(self);
@@ -576,7 +570,7 @@ fn transport_context(
 ///
 /// Exact constructor signature:
 ///
-/// `open_primitive_project_runtime(database, graph, code_graph, symbol_graph_cursors,
+/// `open_primitive_project_runtime(database, source_runtime, code_graph, symbol_graph_cursors,
 /// tests, lexical_grep, redundancy, temporal, source_lines, health, extended,
 /// operational, scope, access,
 /// admitted_root_uri, operation_events, test_run_scope) ->
@@ -585,7 +579,7 @@ fn transport_context(
 #[allow(clippy::too_many_arguments)]
 pub fn open_primitive_project_runtime(
     database: Database,
-    graph: Arc<TraceDecay>,
+    source_runtime: Arc<crate::tracedecay::SourceReadRuntime>,
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     symbol_graph_cursors: Arc<dyn SymbolGraphCursorPort>,
     tests: Arc<dyn TestPrimitivePort + Send + Sync>,
@@ -610,10 +604,10 @@ pub fn open_primitive_project_runtime(
         });
     }
     let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> = Arc::new(
-        CanonicalSymbolGraphAdapter::new(Arc::clone(&graph), symbol_graph_cursors),
+        CanonicalSymbolGraphAdapter::new(Arc::clone(&code_graph), symbol_graph_cursors),
     );
     let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> = Arc::new(SourceReadAdapter::new(
-        Arc::clone(&graph),
+        Arc::clone(&source_runtime),
         Arc::clone(&code_graph),
         scope.clone(),
     )?);
@@ -622,8 +616,13 @@ pub fn open_primitive_project_runtime(
         source,
         tests,
         lexical_grep,
-        Arc::new(TraceDecayAstGrepAuthorityV1::new(Arc::clone(&graph))),
-        Arc::new(TraceDecayComplexityAuthorityV1::new(Arc::clone(&graph))),
+        Arc::new(TraceDecayAstGrepAuthorityV1::new(
+            Arc::clone(&source_runtime),
+            Arc::clone(&code_graph),
+        )),
+        Arc::new(TraceDecayComplexityAuthorityV1::new(Arc::clone(
+            &code_graph,
+        ))),
         redundancy,
         Arc::new(TraceDecayDependencyDepthAuthorityV1::new(Arc::clone(
             &code_graph,
@@ -643,11 +642,7 @@ pub fn open_primitive_project_runtime(
         test_run_scope,
         capacity: PrimitiveCapacity::new(MAX_CONCURRENT_PRIMITIVES),
     });
-    Ok(PrimitiveProjectRuntime {
-        database,
-        graph,
-        dispatch,
-    })
+    Ok(PrimitiveProjectRuntime { database, dispatch })
 }
 
 fn validate_admitted_root_uri(admitted_root_uri: &str) -> Result<(), ApplicationContractError> {
@@ -947,10 +942,34 @@ async fn dispatch_admitted(
             )
         }
         PrimitiveRequest::SessionLookup(request) => {
-            let outcome = runtime
+            let outcome = match runtime
                 .project_runtime
                 .temporal
-                .session_lookup(&retrieval_context(&context, &operation), &request);
+                .session_lookup(retrieval_context(&context, &operation), &request)
+                .await
+            {
+                Ok(outcome) => outcome,
+                Err(tracedecay_application::retrieval::TemporalRetrievalFailure::Unavailable) => {
+                    return problem(
+                        &context,
+                        &operation,
+                        ApplicationProblem::unavailable(SafeDiagnostic::new(
+                            "application.retrieval.session-temporal-unavailable",
+                            "The mounted project session-temporal authority is unavailable.",
+                        )?),
+                    );
+                }
+                Err(tracedecay_application::retrieval::TemporalRetrievalFailure::ResetRequired) => {
+                    return problem(
+                        &context,
+                        &operation,
+                        ApplicationProblem::reset_required(SafeDiagnostic::new(
+                            "application.retrieval.session-temporal-reset-required",
+                            "The mounted project session-temporal store requires an explicit reset.",
+                        )?),
+                    );
+                }
+            };
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
         PrimitiveRequest::QualifiedName(request) => {

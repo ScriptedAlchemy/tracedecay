@@ -69,10 +69,9 @@ fn temporal_relation_error(
             CANDIDATE_OPERATION,
             "session relation projection is invalid",
         ),
-        SessionRelationError::ResetRequired => read_message(
-            CANDIDATE_OPERATION,
-            "session relation projection requires reset",
-        ),
+        SessionRelationError::ResetRequired => TemporalPortError::ResetRequired {
+            resource: "session relation projection",
+        },
         SessionRelationError::DurabilityUncertain => read_message(
             CANDIDATE_OPERATION,
             "session relation projection durability is uncertain",

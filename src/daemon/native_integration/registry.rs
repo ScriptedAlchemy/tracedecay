@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use tracedecay_application::git::{
+    NativeWorktreeService, WorktreeCleanupReconcileRequestV1, WorktreeCleanupReconciliationV1,
+    WorktreeContractError,
+};
 use tracedecay_application::{
     AuthorizedScopeSet, CancellationSignal, NativeIntegrationContractError, NativeIntegrationPort,
     NativeIntegrationPortError, NativeIntegrationRecoveryRequestV1, NativeIntegrationService,
@@ -40,6 +44,7 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;
 use super::store::{DaemonNativeIntegrationStore, SharedDaemonNativeIntegrationStore};
+use super::worktree::{DaemonAuthorizedScopeSetReader, DaemonNativeWorktreeAuthority};
 
 const MAX_PENDING_WORKTREE_CLEANUPS: u32 = 4_096;
 
@@ -53,6 +58,26 @@ pub(crate) type DaemonProjectNativeIntegrationCoordinator = NativeIntegrationTra
 
 pub(crate) type DaemonProjectNativeIntegrationService =
     NativeIntegrationService<DaemonProjectNativeIntegrationCoordinator>;
+
+pub(crate) type DaemonProjectNativeWorktreeService =
+    NativeWorktreeService<DaemonAuthorizedScopeSetReader, DaemonNativeWorktreeAuthority>;
+
+fn worktree_recovery_error(error: WorktreeContractError) -> NativeIntegrationPortError {
+    match error {
+        WorktreeContractError::Denied | WorktreeContractError::ScopeSetDenied => {
+            NativeIntegrationPortError::Denied
+        }
+        WorktreeContractError::Stale => NativeIntegrationPortError::Stale,
+        WorktreeContractError::DurabilityUncertain => {
+            NativeIntegrationPortError::DurabilityUncertain
+        }
+        WorktreeContractError::Domain(_)
+        | WorktreeContractError::Inconsistent { .. }
+        | WorktreeContractError::ScopeSetUnavailable
+        | WorktreeContractError::AuthorityUnavailable
+        | WorktreeContractError::Native(_) => NativeIntegrationPortError::Unavailable,
+    }
+}
 
 /// Shares one enrolled topology resolver between the transaction coordinator
 /// and the stack-snapshot service without a second repository handle.
@@ -160,6 +185,7 @@ pub(crate) struct DaemonNativeIntegrationOwner {
     pub(crate) repository_id: RepositoryId,
     service: Arc<DaemonProjectNativeIntegrationService>,
     snapshots: Arc<NativeIntegrationStackSnapshotService<SharedProjectNativeIntegrationTopology>>,
+    worktrees: Option<Arc<DaemonProjectNativeWorktreeService>>,
     store: SharedDaemonNativeIntegrationStore,
     scope_sets: Option<AuthorizedScopeSetSqliteStorage>,
     stack_runtimes: Arc<Mutex<BTreeMap<ManifestDigest, Arc<DaemonGitHubStackRuntimeV1>>>>,
@@ -172,6 +198,10 @@ impl DaemonNativeIntegrationOwner {
 
     pub(crate) fn service_arc(&self) -> Arc<DaemonProjectNativeIntegrationService> {
         Arc::clone(&self.service)
+    }
+
+    pub(crate) fn worktree_service_arc(&self) -> Option<Arc<DaemonProjectNativeWorktreeService>> {
+        self.worktrees.as_ref().map(Arc::clone)
     }
 
     pub(crate) fn stack_snapshot(
@@ -199,6 +229,66 @@ impl DaemonNativeIntegrationOwner {
         roots.sort();
         roots.dedup();
         Ok(roots)
+    }
+
+    /// Reconciles every cleanup fenced during project-open before holder
+    /// runtimes are published. Any unresolved journal keeps its exact-root
+    /// fence and fails project-open closed.
+    pub(crate) async fn recover_worktree_cleanups(
+        &self,
+    ) -> Result<usize, NativeIntegrationPortError> {
+        let service = self
+            .worktree_service_arc()
+            .ok_or(NativeIntegrationPortError::Unavailable)?;
+        let store = self.store.clone();
+        let repository_id = self.repository_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let pending = store
+                .pending_worktree_cleanups(&repository_id, MAX_PENDING_WORKTREE_CLEANUPS)
+                .map_err(|_| NativeIntegrationPortError::Unavailable)?;
+            let mut reconciled = 0usize;
+            for (index, transaction) in pending.into_iter().enumerate() {
+                let signal = CancellationSignal::active(format!(
+                    "cancel.native-worktree-startup-recovery.{index}"
+                ))
+                .map_err(|_| NativeIntegrationPortError::Unavailable)?;
+                let outcome = service
+                    .reconcile(
+                        &WorktreeCleanupReconcileRequestV1 {
+                            scope_set_id: transaction.scope_set_id,
+                            scope_set_revision: transaction.scope_set_revision,
+                            scope_set_digest: transaction.scope_set_digest,
+                            target: tracedecay_application::git::NativeWorktreeTargetV1::Worktree {
+                                project_id: transaction.command.project_id,
+                                repository_id: transaction.command.repository_id,
+                                worktree_id: transaction.command.worktree_id,
+                            },
+                            confirmation_digest: transaction.confirmation_digest,
+                        },
+                        &signal,
+                    )
+                    .map_err(worktree_recovery_error)?;
+                match outcome {
+                    WorktreeCleanupReconciliationV1::Removed { .. }
+                    | WorktreeCleanupReconciliationV1::StillPresent
+                    | WorktreeCleanupReconciliationV1::Denied => {
+                        reconciled = reconciled.saturating_add(1);
+                    }
+                    WorktreeCleanupReconciliationV1::Stale => {
+                        return Err(NativeIntegrationPortError::Stale);
+                    }
+                    WorktreeCleanupReconciliationV1::DurabilityUncertain => {
+                        return Err(NativeIntegrationPortError::DurabilityUncertain);
+                    }
+                    WorktreeCleanupReconciliationV1::Unavailable => {
+                        return Err(NativeIntegrationPortError::Unavailable);
+                    }
+                }
+            }
+            Ok(reconciled)
+        })
+        .await
+        .map_err(|_| NativeIntegrationPortError::Unavailable)?
     }
 
     pub(crate) fn authorized_scope_set(
@@ -415,9 +505,10 @@ impl DaemonNativeIntegrationServiceRegistry {
         let recovery_store = store.clone();
         let native_root = repository_root.clone();
         let topology_runtime = graph_runtime.clone();
+        let worktree_scope_sets = scope_sets.clone();
         let owner_project_id = project_id.clone();
         let owner_repository_id = repository_id.clone();
-        let (owner_project_id, owner_repository_id, service, snapshots) =
+        let (owner_project_id, owner_repository_id, service, snapshots, worktrees) =
             tokio::task::spawn_blocking(move || {
                 let topology = SharedProjectNativeIntegrationTopology {
                     inner: Arc::new(match topology_runtime {
@@ -449,6 +540,23 @@ impl DaemonNativeIntegrationServiceRegistry {
                     Arc::new(native),
                     Arc::new(authorization),
                 );
+                let worktrees = worktree_scope_sets
+                    .map(|storage| {
+                        DaemonNativeWorktreeAuthority::open(
+                            owner_project_id.clone(),
+                            owner_repository_id.clone(),
+                            &native_root,
+                            recovery_store.clone(),
+                        )
+                        .map(|authority| {
+                            Arc::new(NativeWorktreeService::new(
+                                DaemonAuthorizedScopeSetReader::new(storage),
+                                authority,
+                            ))
+                        })
+                        .map_err(worktree_recovery_error)
+                    })
+                    .transpose()?;
                 // Durable startup recovery: every unfinished record reaches a
                 // terminal receipt or a quarantine fence before this owner
                 // serves a single request. Failing closed here mounts nothing.
@@ -466,6 +574,7 @@ impl DaemonNativeIntegrationServiceRegistry {
                     owner_repository_id,
                     Arc::new(NativeIntegrationService::new(coordinator)),
                     Arc::new(NativeIntegrationStackSnapshotService::new(topology)),
+                    worktrees,
                 ))
             })
             .await
@@ -476,6 +585,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             repository_id: owner_repository_id.clone(),
             service,
             snapshots,
+            worktrees,
             store,
             scope_sets,
             stack_runtimes: Arc::new(Mutex::new(BTreeMap::new())),

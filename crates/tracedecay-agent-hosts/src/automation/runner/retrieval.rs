@@ -508,6 +508,9 @@ pub(super) fn accept_automation_temporal_outcome(
         SessionRetrievalOutcome::Unavailable => {
             AutomationTemporalRetrieval::Rejected("session_evidence_unavailable")
         }
+        SessionRetrievalOutcome::ResetRequired => {
+            AutomationTemporalRetrieval::Rejected("session_evidence_reset_required")
+        }
         SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
             AutomationTemporalRetrieval::Rejected("session_cursor_manifest_limit_exceeded")
         }

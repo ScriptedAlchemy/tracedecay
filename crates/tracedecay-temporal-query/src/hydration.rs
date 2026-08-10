@@ -149,6 +149,8 @@ pub trait TemporalHydrationPort: Send + Sync {
 pub enum HydrationError {
     #[error("hydration payload is unavailable")]
     Unavailable,
+    #[error("hydration persisted state requires an explicit reset: {resource}")]
+    ResetRequired { resource: &'static str },
     #[error("available hydration cannot be represented as a denial")]
     InvalidDenial,
     #[error("hydration exceeded its frozen {resource} budget")]

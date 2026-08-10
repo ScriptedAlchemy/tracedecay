@@ -112,8 +112,8 @@ async fn source_edit_tool_result(
         cancellation,
     })
     .await?;
-    let value = result.value();
-    let touched_files = result.outcome.touched_files(result.dry_run);
+    let value = source_edit_surface_value(&result)?;
+    let touched_files = result.outcome.touched_files();
     let success = result.outcome.success();
     let tool_result =
         rendered_tool_result(Some(cg.project_root()), args, &value, touched_files, || {
@@ -191,7 +191,7 @@ pub(super) async fn handle_source_edit_rollback(
         cancellation,
     })
     .await?;
-    let value = result.value();
+    let value = source_edit_surface_value(&result)?;
     let success = result.outcome.success();
     let tool_result = generic_tool_result(Some(cg.project_root()), &args, &value, Vec::new())
         .with_semantic_error(!success);
@@ -279,7 +279,7 @@ pub(super) async fn handle_source_edit_reconcile(
         cancellation,
     })
     .await?;
-    let value = result.value();
+    let value = source_edit_surface_value(&result)?;
     let success = result.outcome.success();
     let tool_result = generic_tool_result(Some(cg.project_root()), &args, &value, Vec::new())
         .with_semantic_error(!success);
@@ -294,6 +294,12 @@ fn source_edit_identity_error(error: impl std::fmt::Display) -> TraceDecayError 
     TraceDecayError::Config {
         message: format!("invalid source edit effect identity: {error}"),
     }
+}
+
+fn source_edit_surface_value(
+    result: &tracedecay_application::source_edit::SourceEditSurfaceResultV1,
+) -> Result<Value> {
+    Ok(serde_json::to_value(result)?)
 }
 
 fn optional_idempotency_key(args: &Value) -> Result<Option<IdempotencyKey>> {
@@ -611,9 +617,11 @@ mod tests {
     use tracedecay_store::ProjectId;
 
     use super::*;
-    use crate::application::edit::{SourceEditApplicationResult, SourceEditOutcome};
     use crate::tracedecay::TraceDecayOpenOptions;
     use crate::types::EditResult;
+    use tracedecay_application::source_edit::{
+        SourceEditSurfaceOutcomeV1, SourceEditSurfaceResultV1,
+    };
 
     const EXPECTED_STATE: &str =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -734,8 +742,8 @@ mod tests {
             });
             let dry_run = invocation.edit.dry_run();
             Box::pin(async move {
-                Ok(SourceEditApplicationResult {
-                    outcome: SourceEditOutcome::Edit(EditResult {
+                Ok(SourceEditSurfaceResultV1 {
+                    outcome: SourceEditSurfaceOutcomeV1::Edit(EditResult {
                         success: true,
                         file_path: "src/lib.rs".to_owned(),
                         matched_str: "old".to_owned(),
@@ -744,7 +752,6 @@ mod tests {
                         message: "source edit fixture completed".to_owned(),
                         ..EditResult::default()
                     }),
-                    dry_run,
                     expected_state: digest(EXPECTED_STATE),
                     predicted_state: Some(digest(PREDICTED_STATE)),
                     verification: None,
@@ -765,15 +772,14 @@ mod tests {
                 cancellation: invocation.cancellation.context(),
             });
             Box::pin(async move {
-                Ok(SourceEditApplicationResult {
-                    outcome: SourceEditOutcome::Edit(EditResult {
+                Ok(SourceEditSurfaceResultV1 {
+                    outcome: SourceEditSurfaceOutcomeV1::Edit(EditResult {
                         success: true,
                         file_path: "src/lib.rs".to_owned(),
                         dry_run,
                         message: "source edit route fixture completed".to_owned(),
                         ..EditResult::default()
                     }),
-                    dry_run,
                     expected_state: digest(EXPECTED_STATE),
                     predicted_state: Some(digest(PREDICTED_STATE)),
                     verification: None,

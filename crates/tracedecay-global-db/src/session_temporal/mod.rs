@@ -540,7 +540,7 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         let batch = hydrate_selected(&authority, snapshot, &anchors)
             .await
             .map_err(|error| {
-                SessionTemporalExecutionError::Kernel(
+                map_kernel_execution_error(
                     tracedecay_temporal_query::TemporalKernelError::Hydration(error),
                 )
             })?;
@@ -716,7 +716,7 @@ impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution
                 estimator,
             )
             .await
-            .map_err(SessionTemporalExecutionError::Kernel)?;
+            .map_err(map_kernel_execution_error)?;
             let source_coverage = result
                 .snapshot
                 .source_coverage()
@@ -768,7 +768,7 @@ impl TaskSessionTemporalExecutionPortV1 for RegisteredGlobalDbSessionTemporalExe
             );
             let export = execute_temporal_candidate_export(&kernel_request, &read, &authenticator)
                 .await
-                .map_err(SessionTemporalExecutionError::Kernel)?;
+                .map_err(map_kernel_execution_error)?;
             let plan23 = TaskSessionPlan23BindingV1::from_export(&export)
                 .map_err(|error| task_session_callback_contract(error.to_string()))?;
             let candidate_port = CanonicalTaskSessionCandidateExportPortV1::new(
@@ -834,7 +834,7 @@ impl TaskSessionTemporalExecutionPortV1 for RegisteredGlobalDbSessionTemporalExe
                 estimator,
             )
             .await
-            .map_err(SessionTemporalExecutionError::Kernel)?;
+            .map_err(map_kernel_execution_error)?;
             let source_coverage = result
                 .snapshot
                 .source_coverage()
@@ -887,6 +887,31 @@ fn task_session_callback_contract(detail: String) -> SessionTemporalExecutionErr
     )
 }
 
+fn map_kernel_execution_error(
+    error: tracedecay_temporal_query::TemporalKernelError,
+) -> SessionTemporalExecutionError {
+    use tracedecay_temporal_query::TemporalKernelError;
+    use tracedecay_temporal_query::context::ContextError;
+    use tracedecay_temporal_query::hydration::HydrationError;
+    use tracedecay_temporal_query::ports::TemporalPortError;
+
+    if matches!(
+        &error,
+        TemporalKernelError::Port(TemporalPortError::ResetRequired { .. })
+            | TemporalKernelError::Hydration(HydrationError::ResetRequired { .. })
+            | TemporalKernelError::Hydration(HydrationError::Interrupted(
+                TemporalPortError::ResetRequired { .. }
+            ))
+            | TemporalKernelError::Context(ContextError::Interrupted(
+                TemporalPortError::ResetRequired { .. }
+            ))
+    ) {
+        SessionTemporalExecutionError::ResetRequired
+    } else {
+        SessionTemporalExecutionError::Kernel(error)
+    }
+}
+
 fn map_control_error(
     error: tracedecay_temporal_query::ports::TemporalPortError,
 ) -> SessionTemporalExecutionError {
@@ -897,6 +922,9 @@ fn map_control_error(
         }
         tracedecay_temporal_query::ports::TemporalPortError::BudgetExceeded { .. } => {
             SessionTemporalExecutionError::BudgetExhausted
+        }
+        tracedecay_temporal_query::ports::TemporalPortError::ResetRequired { .. } => {
+            SessionTemporalExecutionError::ResetRequired
         }
         error @ (tracedecay_temporal_query::ports::TemporalPortError::ParticipantLimitExceeded {
             ..

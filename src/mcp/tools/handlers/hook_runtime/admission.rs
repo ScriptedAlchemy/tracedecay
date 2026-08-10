@@ -6,16 +6,15 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
+use tracedecay_domain::{ProviderId, UtcMicros};
 
 use super::context_scout::{
-    admit_native_context_scout_lifecycle, hook_v2_context_scout_lifecycle_for_session,
-    hook_v2_native_context_scout_lifecycle, lookup_hook_v2_delivery_claim,
-    remove_hook_v2_delivery_claim, retain_hook_v2_delivery_claim,
+    admit_native_context_scout_lifecycle, hook_v2_native_context_scout_lifecycle,
+    lookup_hook_v2_delivery_claim, remove_hook_v2_delivery_claim, retain_hook_v2_delivery_claim,
 };
 use super::envelope::{
     daemon_mint_hook_v2_envelope, hook_now, hook_v2_envelope, hook_v2_family_label,
-    hook_v2_lifecycle_range, hook_v2_native_session_id, hook_v2_requires_producer_work,
+    hook_v2_lifecycle_range, hook_v2_requires_producer_work,
 };
 
 pub(super) enum HookV2BindingAdmission {
@@ -261,16 +260,14 @@ fn cursor_stack_wakeup_allowed(
 pub(crate) async fn admit_hook_v2_envelope(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    native_session_id: Option<SessionId>,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {
-    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, None, now).await
+    admit_hook_v2_envelope_with_lifecycle(cg, envelope, None, None, now).await
 }
 
 async fn admit_hook_v2_envelope_with_lifecycle(
     cg: &TraceDecay,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
-    native_session_id: Option<SessionId>,
     native_lifecycle: Option<crate::hooks::NativeContextScoutLifecycleV1>,
     project_sessions: Option<&RegisteredGlobalDb>,
     now: UtcMicros,
@@ -370,20 +367,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         )
         .await;
     }
-    let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
-    let claim_authority = match (
-        crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
-            envelope.clone(),
-            &snapshot.binding,
-        ),
-        lifecycle.as_ref(),
-    ) {
-        (Some(hook), Some(lifecycle)) => {
-            cg.resolve_current_context_scout_claim_authority(&hook, lifecycle, now)
-                .await
-        }
-        _ => None,
-    };
+    let claim_authority = None;
     let ready_guidance = match (first_admission, cg.context_scout_owner(), claim_authority) {
         (true, Some(owner), Some((address, input_watermark))) => match owner
             .claim_ready_guidance_exact(envelope, address, input_watermark, snapshot.revision, now)
@@ -414,14 +398,11 @@ async fn admit_hook_v2_envelope_with_lifecycle(
         },
         _ => Value::Null,
     };
-    let orchestration = crate::daemon::admit_registered_hook_orchestration(
-        envelope.clone(),
-        snapshot.binding.clone(),
-        lifecycle,
-        snapshot.revision,
-        false,
-        completion,
-    );
+    let orchestration =
+        crate::daemon::admit_hook_orchestration(envelope.clone(), snapshot.binding.clone(), false);
+    if let Some(completion) = completion {
+        completion();
+    }
     let feedback_notice = if first_admission {
         crate::application::advisory::peek_advisory_hook_notice(
             envelope.project_id,
@@ -471,13 +452,11 @@ pub(super) async fn hook_v2_admit(
 ) -> Result<Value> {
     let envelope = hook_v2_envelope(args, action)?;
     let now = hook_now();
-    let native_session_id = hook_v2_native_session_id(args, &envelope);
     let native_lifecycle = hook_v2_native_context_scout_lifecycle(args, &envelope);
     Ok(
         match admit_hook_v2_envelope_with_lifecycle(
             cg,
             &envelope,
-            native_session_id,
             native_lifecycle,
             Some(project_sessions),
             now,

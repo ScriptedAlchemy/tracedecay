@@ -199,6 +199,7 @@ pub enum WorkEvidenceOmissionReasonV1 {
     Pending,
     NotFoundOrNotAuthorized,
     Unavailable,
+    ResetRequired,
     Stale,
     Cancelled,
     TimedOut,
@@ -334,6 +335,8 @@ pub enum WorkEvidenceHydrationErrorV1 {
     NotFoundOrNotAuthorized,
     #[error("evidence is unavailable")]
     Unavailable,
+    #[error("evidence persisted state requires an explicit reset")]
+    ResetRequired,
     #[error("evidence is stale")]
     Stale,
     #[error("evidence hydration was cancelled")]
@@ -645,6 +648,7 @@ where
                 | WorkEvidenceOmissionReasonV1::Pending
                 | WorkEvidenceOmissionReasonV1::NotFoundOrNotAuthorized
                 | WorkEvidenceOmissionReasonV1::Unavailable
+                | WorkEvidenceOmissionReasonV1::ResetRequired
                 | WorkEvidenceOmissionReasonV1::Cancelled
                 | WorkEvidenceOmissionReasonV1::TimedOut => {
                     freshness = merge_freshness(freshness, WorkEvidenceFreshnessV1::Unknown)
@@ -1063,6 +1067,7 @@ fn hydration_omission(
             WorkEvidenceOmissionReasonV1::NotFoundOrNotAuthorized
         }
         WorkEvidenceHydrationErrorV1::Unavailable => WorkEvidenceOmissionReasonV1::Unavailable,
+        WorkEvidenceHydrationErrorV1::ResetRequired => WorkEvidenceOmissionReasonV1::ResetRequired,
         WorkEvidenceHydrationErrorV1::Stale => WorkEvidenceOmissionReasonV1::Stale,
         WorkEvidenceHydrationErrorV1::Cancelled => WorkEvidenceOmissionReasonV1::Cancelled,
         WorkEvidenceHydrationErrorV1::TimedOut => WorkEvidenceOmissionReasonV1::TimedOut,

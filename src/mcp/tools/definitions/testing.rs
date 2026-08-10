@@ -63,8 +63,8 @@ pub(super) fn def_diagnose() -> ToolDefinition {
          diagnostic to the smallest containing graph node, with callers \
          pre-attached so you can see what the failing code is reachable \
          from. Diagnostics without a `--> file:line:col` span are dropped. \
-         Each mapped node also carries up to 3 `near_duplicates` — cached \
-         functional-duplicate matches from the redundancy index, when present. \
+         Each mapped node also carries up to 3 `near_duplicates` — request-scoped \
+         functional-duplicate matches from the admitted code generation, when present. \
          Pass the full stderr capture; you do not need to pre-filter.",
         json!({
             "type": "object",

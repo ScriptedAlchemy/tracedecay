@@ -7,11 +7,9 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+mod home_env_lock;
 mod support;
 
-mod corruption_test;
-mod db_query_test;
-mod db_test;
 mod fact_merge_hydration_test;
 mod global_registry_test;
 mod multi_connection_test;

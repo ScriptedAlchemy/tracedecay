@@ -21,7 +21,6 @@ pub(super) fn observatory_definitions() -> DiscoveryResult<Vec<ToolDefinition>> 
         name: "tracedecay_observatory_read".to_owned(),
         description: "Read this project's canonical Observatory and Costs models.".to_owned(),
         input_schema: binding.request_schema().body().clone(),
-        output_schema: None,
         annotations: Some(json!({
             "readOnlyHint": binding.effect().is_read_only(),
             "title": "Read Observatory state",

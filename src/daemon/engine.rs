@@ -9,6 +9,7 @@
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
+use std::collections::HashSet;
 
 #[cfg(unix)]
 mod shutdown;

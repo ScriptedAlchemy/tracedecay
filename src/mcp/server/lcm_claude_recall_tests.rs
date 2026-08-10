@@ -15,17 +15,59 @@ use tempfile::TempDir;
 use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId};
 
 use super::McpServer;
-use super::message_search_cutover_tests::{MESSAGE_SEARCH_PROJECT_ID, server_with_authorities};
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::application::observation::ObservationCancellation;
 use crate::mcp::transport::JsonRpcRequest;
+use crate::tracedecay::TraceDecayOpenOptions;
 use tracedecay_sessions::runtime::claude::ClaudeSource;
 
+const PROJECT_ID: &str = "project.claude-recall";
 const SESSION: &str = "claude-recall-session";
 /// Present in every one of the four transcript records.
 const SHARED_TERM: &str = "quicksilver";
 /// Present in exactly one record.
 const UNIQUE_TERM: &str = "pangolin";
+
+fn git(root: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new(crate::git::git_program())
+        .current_dir(root)
+        .args(args)
+        .status()
+        .expect("git command should run");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+async fn server_with_authorities() -> (Arc<McpServer>, TempDir, crate::config::PinnedUserDataDir) {
+    let pin = crate::config::PinnedUserDataDir::new();
+    let dir = TempDir::new().expect("temp project");
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.email", "test@example.com"]);
+    git(dir.path(), &["config", "user.name", "Test"]);
+    std::fs::write(dir.path().join(".gitignore"), ".tracedecay/\n").expect("gitignore");
+    std::fs::create_dir_all(dir.path().join("src")).expect("source directory");
+    std::fs::write(
+        dir.path().join("src/lib.rs"),
+        "pub fn value() -> u8 { 1 }\n",
+    )
+    .expect("source");
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "initial"]);
+    let runtime = HostAdmissionTestRuntimeV1::project(
+        crate::config::user_data_dir().expect("isolated profile root"),
+        dir.path(),
+        ProjectId::new(PROJECT_ID).expect("typed project identity"),
+    )
+    .await
+    .expect("registered Claude recall runtime");
+    let graph = runtime
+        .initialize_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
+        .await
+        .expect("daemon-owned project init");
+    let context = runtime
+        .into_mcp_server_context_for_test(graph, None)
+        .expect("registered MCP server context");
+    (McpServer::new_with_context(context).await, dir, pin)
+}
 
 async fn call_tool(server: &McpServer, name: &str, arguments: Value) -> Value {
     let request = JsonRpcRequest {
@@ -132,7 +174,7 @@ async fn ingest_and_project(
 ) {
     let source = ClaudeSource::with_home(home);
     let scope = ObservationScopeV1::Project {
-        project_id: ProjectId::new(MESSAGE_SEARCH_PROJECT_ID).expect("typed project identity"),
+        project_id: ProjectId::new(PROJECT_ID).expect("typed project identity"),
     };
     let stats =
         tracedecay_sessions::runtime::claude_observation::ingest_source_with_observations_with_admission(

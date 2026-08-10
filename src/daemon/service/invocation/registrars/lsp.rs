@@ -74,7 +74,6 @@ impl DaemonLspOwnerRegistrar {
         let semantics = production_semantic_authorities(
             runtime.clone(),
             diagnostic_broker.clone(),
-            database.clone(),
             languages,
             project_root.clone(),
             root_uri,

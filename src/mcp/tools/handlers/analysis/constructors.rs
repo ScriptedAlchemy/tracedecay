@@ -4,6 +4,7 @@ use super::*;
 
 pub(crate) async fn handle_constructors(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -18,19 +19,24 @@ pub(crate) async fn handle_constructors(
         .and_then(serde_json::Value::as_u64)
         .map_or(100, |v| v.clamp(1, 1000) as usize);
 
-    let candidates = cg
-        .db()
-        .search_nodes_by_exact_name(&[struct_name.to_string()], 50)
-        .await?;
-    let struct_nodes: Vec<&crate::types::Node> = candidates
-        .iter()
-        .filter(|n| {
-            matches!(
-                n.kind,
-                NodeKind::Struct | NodeKind::Class | NodeKind::CaseClass
-            )
+    let candidates = graph.resolve_simple_name(struct_name, None, 50)?;
+    let struct_nodes = candidates
+        .into_iter()
+        .map(|symbol| {
+            let metadata = symbol.metadata.as_ref().ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "code-graph-corrupt",
+                    false,
+                    "constructor candidate is missing extraction-attested metadata",
+                )
+            })?;
+            let is_container = matches!(metadata.kind.as_str(), "struct" | "class" | "case_class");
+            Ok(is_container.then_some(symbol))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
     if struct_nodes.is_empty() {
         let payload = json!({
@@ -49,31 +55,38 @@ pub(crate) async fn handle_constructors(
     }
 
     let mut expected_fields: HashSet<String> = HashSet::new();
-    for sn in &struct_nodes {
-        let children = cg.db().get_children_of(&sn.id).await?;
+    let seeds = struct_nodes
+        .iter()
+        .map(|symbol| symbol.occurrence.clone())
+        .collect::<Vec<_>>();
+    for children in graph.callees(&seeds, &[RelationEdgeKindV1::Contains], 10_000)? {
         for child in children {
-            if matches!(
-                child.kind,
-                NodeKind::Field | NodeKind::ValField | NodeKind::VarField
-            ) {
-                expected_fields.insert(child.name);
+            let metadata = child.neighbor.metadata.ok_or_else(|| {
+                TraceDecayError::project_route(
+                    "code-graph-corrupt",
+                    false,
+                    "constructor field relation is missing extraction-attested metadata",
+                )
+            })?;
+            if matches!(metadata.kind.as_str(), "field" | "val_field" | "var_field") {
+                expected_fields.insert(metadata.simple_name);
             }
         }
     }
 
     let project_root = cg.project_root();
-    let files = cg.get_all_files().await?;
+    let files = verified_analysis_symbols(graph, scope_prefix)?
+        .into_iter()
+        .map(|symbol| symbol.path)
+        .collect::<HashSet<_>>();
 
     // Reading and parsing every source file in the project is a long CPU and
     // I/O slice with no await points. Running it inline pinned a request
     // runtime worker for the whole scan — tens of seconds on a large
     // repository — which is exactly what starves other interactive calls. The
     // scan is self-contained, so it belongs on a blocking thread.
-    let scan_paths: Vec<String> = files
-        .iter()
-        .filter(|file| path_matches_optional_scope(&file.path, scope_prefix))
-        .map(|file| file.path.clone())
-        .collect();
+    let mut scan_paths = files.into_iter().collect::<Vec<_>>();
+    scan_paths.sort();
     let scan_root = project_root.to_path_buf();
     let scan_struct = struct_name.to_string();
     let scan_fields = expected_fields.clone();

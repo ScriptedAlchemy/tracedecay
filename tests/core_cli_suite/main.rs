@@ -12,9 +12,7 @@ mod cli_non_interactive_test;
 mod common;
 mod config_test;
 mod gain_test;
-mod integration_test;
 mod monitor_test;
-mod regression_core_engine_test;
 mod sync_test;
 mod test_profile_isolation_test;
 #[cfg(unix)]

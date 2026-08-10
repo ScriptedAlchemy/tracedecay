@@ -3,18 +3,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tracedecay_application::retained_surfaces::{
-    FactCategoryV1, FactCollectionEntryV1, FactFeedbackActionV1, FactFeedbackRequestV1,
-    FactFeedbackResultV1, FactReadOptionsV1, FactStoreAddRequestV1, FactStoreAddResultV1,
-    FactStoreContradictRequestV1, FactStoreContradictResultV1, FactStoreGetRequestV1,
-    FactStoreGetResultV1, FactStoreListRequestV1, FactStoreListResultV1, FactStoreProbeRequestV1,
-    FactStoreProbeResultV1, FactStoreReasonRequestV1, FactStoreReasonResultV1,
-    FactStoreRelatedRequestV1, FactStoreRelatedResultV1, FactStoreRemoveRequestV1,
-    FactStoreRemoveResultV1, FactStoreSearchRequestV1, FactStoreSearchResultV1,
-    FactStoreUpdateRequestV1, FactStoreUpdateResultV1, MemoryFeedbackFunnelV1, MemoryScopeV1,
-    MemoryStatusRequestV1, MemoryStatusResultV1, MemoryStatusV1, RetainedOutcomeStatusV1,
-    RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    FactCategoryV1, FactCollectionEntryV1, FactContradictionV1, FactFeedbackRequestV1,
+    FactReadOptionsV1, FactSearchHitV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
+    FactStoreContradictResultV1, FactStoreGetRequestV1, FactStoreGetResultV1,
+    FactStoreListRequestV1, FactStoreListResultV1, FactStoreProbeRequestV1, FactStoreProbeResultV1,
+    FactStoreReasonRequestV1, FactStoreReasonResultV1, FactStoreRelatedRequestV1,
+    FactStoreRelatedResultV1, FactStoreRemoveRequestV1, FactStoreSearchRequestV1,
+    FactStoreSearchResultV1, FactStoreUpdateRequestV1, FactV1, MemoryFeedbackFunnelV1,
+    MemoryRepairStatsV1, MemoryScopeV1, MemoryStatusRequestV1, MemoryStatusResultV1,
+    MemoryStatusV1, RetainedFactIdV1, RetainedOutcomeStatusV1, RetainedProjectSelectorV1,
+    RetainedSurfaceOperation, RetainedSurfaceResultV1, TrustHistoryEntryV1,
 };
 use tracedecay_application::{
     ApplicationOutcome, RetainedMemoryExecutionPortV1, RetainedMemoryRequestV1,
@@ -23,19 +23,19 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{FactOwnerV1, ManifestDigest};
 use tracedecay_runtime_core::memory::types::{
-    AddFactRequest, MemoryCategory, MemoryStatus, SearchFactsRequest, UpdateFactRequest,
+    ContradictionResult, FactRecord, FactSearchResult, MemoryCategory, MemoryStatus,
+    SearchFactsRequest, TrustHistoryEntry,
 };
 use tracedecay_usecases::memory::{
-    FactUpdateEffect, MemoryApplication, MemoryOperationContext, memory_application_error,
+    MemoryApplication, MemoryOperationContext, memory_application_error,
 };
 
-use super::receipts::{effect_outcome, evidence_outcome, fact_mutation, no_op_effect_outcome};
+use super::receipts::evidence_outcome;
 use super::{bounded_execution, map_execution_error};
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::Database;
 use crate::errors::TraceDecayError;
 use crate::store::DatabaseFactStore;
-use crate::store::memory::FactWriteControl;
 use crate::tracedecay::TraceDecay;
 
 const MAX_RETAINED_FACT_LIMIT: usize = 200;
@@ -175,18 +175,10 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
 
     async fn execute_add(
         &self,
-        context: &RetainedSurfaceExecutionContextV1<'_>,
-        request: &FactStoreAddRequestV1,
+        _: &RetainedSurfaceExecutionContextV1<'_>,
+        _: &FactStoreAddRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        execute_scoped_memory!(
-            self,
-            context,
-            request.memory_scope,
-            request.project_selector.as_ref(),
-            request.project_id.as_deref(),
-            request.project_path.as_deref(),
-            execute_add_on_database(request)
-        )
+        unsupported_memory_effect()
     }
 
     async fn execute_read(
@@ -224,51 +216,35 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
 
     async fn execute_update(
         &self,
-        context: &RetainedSurfaceExecutionContextV1<'_>,
-        request: &FactStoreUpdateRequestV1,
+        _: &RetainedSurfaceExecutionContextV1<'_>,
+        _: &FactStoreUpdateRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        execute_scoped_memory!(
-            self,
-            context,
-            request.memory_scope,
-            request.project_selector.as_ref(),
-            request.project_id.as_deref(),
-            request.project_path.as_deref(),
-            execute_update_on_db(request)
-        )
+        unsupported_memory_effect()
     }
 
     async fn execute_remove(
         &self,
-        context: &RetainedSurfaceExecutionContextV1<'_>,
-        request: &FactStoreRemoveRequestV1,
+        _: &RetainedSurfaceExecutionContextV1<'_>,
+        _: &FactStoreRemoveRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        execute_scoped_memory!(
-            self,
-            context,
-            request.memory_scope,
-            request.project_selector.as_ref(),
-            request.project_id.as_deref(),
-            request.project_path.as_deref(),
-            execute_remove_on_db(request)
-        )
+        unsupported_memory_effect()
     }
 
     async fn execute_feedback(
         &self,
-        context: &RetainedSurfaceExecutionContextV1<'_>,
-        request: &FactFeedbackRequestV1,
+        _: &RetainedSurfaceExecutionContextV1<'_>,
+        _: &FactFeedbackRequestV1,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        execute_scoped_memory!(
-            self,
-            context,
-            request.memory_scope,
-            None,
-            None,
-            None,
-            execute_feedback_on_db(request)
-        )
+        unsupported_memory_effect()
     }
+}
+
+fn unsupported_memory_effect<T>() -> Result<T, RetainedSurfaceExecutionErrorV1> {
+    // The canonical memory use cases currently return only post-write
+    // projections. Until the lower authority returns its durable commit
+    // receipt, an effect cannot truthfully populate the application effect
+    // contract. Reject before opening a mounted store or issuing a write.
+    Err(RetainedSurfaceExecutionErrorV1::Unsupported)
 }
 
 impl RetainedMemoryExecutionPortV1 for DirectRetainedMemoryPortV1<'_> {
@@ -320,38 +296,6 @@ impl RetainedMemoryExecutionPortV1 for DirectRetainedMemoryPortV1<'_> {
     }
 }
 
-async fn execute_add_on_database(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    database: &Database,
-    owner: FactOwnerV1,
-    request: &FactStoreAddRequestV1,
-    configuration_digest: &ManifestDigest,
-) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let memory = controlled_memory_application(context, database, owner.clone())?;
-    let operation_context = memory_operation_context(context, &owner, "add")?;
-    let effect = bounded_execution(context, async {
-        memory
-            .add_fact_effect(add_request(request)?, operation_context)
-            .await
-            .map_err(memory_application_error)
-    })
-    .await?;
-    let outcome = effect.outcome;
-    let result = RetainedSurfaceResultV1::FactStoreAdd(FactStoreAddResultV1 {
-        count: usize::from(outcome.fact.is_some()),
-        fact: outcome.fact,
-        diff: outcome.diff.diff,
-        closest_fact_id: outcome.diff.closest_fact_id,
-        similarity: outcome.diff.similarity,
-        reason: outcome.diff.reason,
-        mutation: effect.mutation.as_ref().map(fact_mutation).transpose()?,
-    });
-    match effect.mutation {
-        Some(mutation) => effect_outcome(configuration_digest, context, result, &mutation),
-        None => no_op_effect_outcome(configuration_digest, context, request, result),
-    }
-}
-
 async fn execute_read_on_db(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     database: &Database,
@@ -392,7 +336,7 @@ async fn search_on_db(
         RetainedSurfaceOperation::FactStoreSearch,
         FactStoreSearch,
         FactStoreSearchResultV1,
-        search_entries(hits)
+        search_entries(hits)?
     )
 }
 
@@ -419,7 +363,7 @@ async fn probe_on_db(
         RetainedSurfaceOperation::FactStoreProbe,
         FactStoreProbe,
         FactStoreProbeResultV1,
-        search_entries(hits)
+        search_entries(hits)?
     )
 }
 
@@ -446,7 +390,7 @@ async fn related_on_db(
         RetainedSurfaceOperation::FactStoreRelated,
         FactStoreRelated,
         FactStoreRelatedResultV1,
-        search_entries(hits)
+        search_entries(hits)?
     )
 }
 
@@ -466,7 +410,7 @@ async fn reason_on_db(
     let memory = memory_application(database, owner.clone())?;
     let operation_context = memory_operation_context(context, &owner, "reason")?;
     let category = request.options.category.map(memory_category);
-    let limit = fact_limit(request.options.limit)?;
+    let limit = fact_limit(request.options.limit).map_err(map_execution_error)?;
     let hits = bounded_execution(context, async {
         memory
             .reason_facts(
@@ -485,7 +429,7 @@ async fn reason_on_db(
         RetainedSurfaceOperation::FactStoreReason,
         FactStoreReason,
         FactStoreReasonResultV1,
-        search_entries(hits)
+        search_entries(hits)?
     )
 }
 
@@ -496,7 +440,7 @@ async fn contradict_on_db(
     request: &FactStoreContradictRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner)?;
-    let limit = fact_limit(request.options.limit)?;
+    let limit = fact_limit(request.options.limit).map_err(map_execution_error)?;
     let contradictions = bounded_execution(context, async {
         memory
             .contradict_facts(
@@ -515,8 +459,9 @@ async fn contradict_on_db(
         FactStoreContradictResultV1,
         contradictions
             .into_iter()
-            .map(FactCollectionEntryV1::Contradiction)
-            .collect::<Vec<_>>()
+            .map(contradiction)
+            .map(|entry| entry.map(FactCollectionEntryV1::Contradiction))
+            .collect::<Result<Vec<_>, _>>()?
     )
 }
 
@@ -527,25 +472,27 @@ async fn get_on_db(
     request: &FactStoreGetRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner)?;
-    let fact = bounded_execution(context, async {
+    let fact_id = fact_id(&request.fact_id)?;
+    let fact_record = bounded_execution(context, async {
         memory
-            .get_fact(request.fact_id.clone())
+            .get_fact(fact_id)
             .await
             .map_err(memory_application_error)
     })
     .await?;
-    let fact = fact.ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)?;
+    let fact_record =
+        fact_record.ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)?;
     let trust_history = bounded_execution(context, async {
         memory
-            .fact_trust_history(request.fact_id.clone(), MAX_RETAINED_FACT_LIMIT)
+            .fact_trust_history(fact_id, MAX_RETAINED_FACT_LIMIT)
             .await
             .map_err(memory_application_error)
     })
     .await?;
     let result = RetainedSurfaceResultV1::FactStoreGet(FactStoreGetResultV1 {
         count: 1,
-        fact: Some(fact),
-        trust_history,
+        fact: Some(fact(fact_record)?),
+        trust_history: trust_history.into_iter().map(trust_history_entry).collect(),
     });
     evidence_outcome(context, RetainedSurfaceOperation::FactStoreGet, result)
 }
@@ -558,7 +505,7 @@ async fn list_on_db(
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner.clone())?;
     let operation_context = memory_operation_context(context, &owner, "list")?;
-    let limit = fact_limit(request.options.limit)?;
+    let limit = fact_limit(request.options.limit).map_err(map_execution_error)?;
     let facts = bounded_execution(context, async {
         memory
             .list_facts(
@@ -578,8 +525,9 @@ async fn list_on_db(
         FactStoreListResultV1,
         facts
             .into_iter()
-            .map(FactCollectionEntryV1::Fact)
-            .collect::<Vec<_>>()
+            .map(fact)
+            .map(|entry| entry.map(FactCollectionEntryV1::Fact))
+            .collect::<Result<Vec<_>, _>>()?
     )
 }
 
@@ -603,167 +551,6 @@ async fn execute_status_on_db(
         memory: memory_status(status),
     });
     evidence_outcome(context, RetainedSurfaceOperation::MemoryStatus, result)
-}
-
-fn controlled_memory_application<'database>(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    database: &'database Database,
-    owner: FactOwnerV1,
-) -> Result<MemoryApplication<DatabaseFactStore<'database>>, RetainedSurfaceExecutionErrorV1> {
-    let cancellation = context.cancellation_signal.clone();
-    let interruption = cancellation.clone();
-    let store = DatabaseFactStore::new_controlled(
-        database,
-        FactWriteControl::new(
-            Arc::new(move || interruption.is_cancelled()),
-            Arc::new(move || cancellation.try_begin_commit()),
-        ),
-    );
-    MemoryApplication::new(owner, store)
-        .map_err(memory_application_error)
-        .map_err(map_execution_error)
-}
-
-async fn execute_update_on_db(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    database: &Database,
-    owner: FactOwnerV1,
-    request: &FactStoreUpdateRequestV1,
-    configuration_digest: &ManifestDigest,
-) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let memory = controlled_memory_application(context, database, owner.clone())?;
-    let operation_context = memory_operation_context(context, &owner, "update")?;
-    let effect = bounded_execution(context, async {
-        memory
-            .update_fact_effect(update_request(request), operation_context)
-            .await
-            .map_err(memory_application_error)
-    })
-    .await?;
-    match effect {
-        FactUpdateEffect::Updated { fact, mutation } => {
-            let result = RetainedSurfaceResultV1::FactStoreUpdate(FactStoreUpdateResultV1 {
-                count: 1,
-                fact: Some(*fact),
-                diff: None,
-                reason: None,
-                error: None,
-                mutation: Some(fact_mutation(&mutation)?),
-            });
-            effect_outcome(configuration_digest, context, result, &mutation)
-        }
-        FactUpdateEffect::RejectedSecretLike { reason } => {
-            let result = RetainedSurfaceResultV1::FactStoreUpdate(FactStoreUpdateResultV1 {
-                count: 0,
-                fact: None,
-                diff: Some(
-                    tracedecay_application::retained_surfaces::FactDiffKindV1::RejectedSecretLike,
-                ),
-                reason: Some(reason.clone()),
-                error: Some(reason),
-                mutation: None,
-            });
-            no_op_effect_outcome(configuration_digest, context, request, result)
-        }
-    }
-}
-
-async fn execute_remove_on_db(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    database: &Database,
-    owner: FactOwnerV1,
-    request: &FactStoreRemoveRequestV1,
-    configuration_digest: &ManifestDigest,
-) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let memory = controlled_memory_application(context, database, owner.clone())?;
-    let operation_context = memory_operation_context(context, &owner, "remove")?;
-    let effect = bounded_execution(context, async {
-        memory
-            .remove_fact_effect(request.fact_id.clone(), operation_context)
-            .await
-            .map_err(memory_application_error)
-    })
-    .await?;
-    let result = RetainedSurfaceResultV1::FactStoreRemove(FactStoreRemoveResultV1 {
-        count: usize::from(effect.removed),
-        removed: effect.removed,
-        mutation: effect.mutation.as_ref().map(fact_mutation).transpose()?,
-    });
-    match effect.mutation {
-        Some(mutation) => effect_outcome(configuration_digest, context, result, &mutation),
-        None => no_op_effect_outcome(configuration_digest, context, request, result),
-    }
-}
-
-async fn execute_feedback_on_db(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    database: &Database,
-    owner: FactOwnerV1,
-    request: &FactFeedbackRequestV1,
-    configuration_digest: &ManifestDigest,
-) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    let memory = controlled_memory_application(context, database, owner.clone())?;
-    let fact_exists = bounded_execution(context, async {
-        memory
-            .get_fact(request.fact_id.clone())
-            .await
-            .map_err(memory_application_error)
-    })
-    .await?
-    .is_some();
-    if !fact_exists {
-        return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
-    }
-    let operation_context = memory_operation_context(context, &owner, "feedback")?;
-    let effect = bounded_execution(context, async {
-        memory
-            .record_fact_feedback_effect(
-                request.fact_id.clone(),
-                feedback_action(request)?,
-                request.source.clone(),
-                request.note.clone(),
-                operation_context,
-            )
-            .await
-            .map_err(memory_application_error)
-    })
-    .await?;
-    let result = RetainedSurfaceResultV1::FactFeedback(FactFeedbackResultV1 {
-        status: RetainedOutcomeStatusV1::Recorded,
-        feedback: effect.feedback,
-        mutation: fact_mutation(&effect.mutation)?,
-    });
-    effect_outcome(configuration_digest, context, result, &effect.mutation)
-}
-
-fn add_request(request: &FactStoreAddRequestV1) -> Result<AddFactRequest, TraceDecayError> {
-    let mut entities = request.entities.clone();
-    if let Some(entity) = request.entity.as_ref()
-        && !entities.contains(entity)
-    {
-        entities.push(entity.clone());
-    }
-    let tags = request.tags.clone();
-    let mut metadata = request
-        .metadata
-        .clone()
-        .map(|metadata| metadata.into_iter().collect::<Map<String, Value>>())
-        .unwrap_or_default();
-    if !tags.is_empty() {
-        metadata.insert("tags".to_owned(), Value::from(tags.clone()));
-    }
-    Ok(AddFactRequest {
-        content: request.content.clone(),
-        category: request
-            .category
-            .unwrap_or(tracedecay_application::retained_surfaces::FactCategoryV1::General)
-            .into(),
-        source: request.source.clone(),
-        tags,
-        entities,
-        trust: request.trust,
-        metadata: Value::Object(metadata),
-    })
 }
 
 fn search_request(
@@ -818,44 +605,105 @@ fn memory_application(
 }
 
 fn search_entries(
-    hits: Vec<tracedecay_application::retained_surfaces::FactSearchHitV1>,
-) -> Vec<FactCollectionEntryV1> {
+    hits: Vec<FactSearchResult>,
+) -> Result<Vec<FactCollectionEntryV1>, RetainedSurfaceExecutionErrorV1> {
     hits.into_iter()
-        .map(FactCollectionEntryV1::Search)
+        .map(search_hit)
+        .map(|entry| entry.map(FactCollectionEntryV1::Search))
         .collect()
 }
 
-fn update_request(request: &FactStoreUpdateRequestV1) -> UpdateFactRequest {
-    UpdateFactRequest {
-        fact_id: request.fact_id.clone(),
-        content: request.content.clone(),
-        category: request.category.map(memory_category),
-        tags: request.tags.clone(),
-        entities: request.entities.clone(),
-        trust: request.trust,
-        source: request.source.clone(),
-        metadata: request
-            .metadata
-            .clone()
-            .map(|metadata| Value::Object(metadata.into_iter().collect::<Map<_, _>>())),
+fn fact_id(id: &RetainedFactIdV1) -> Result<i64, RetainedSurfaceExecutionErrorV1> {
+    let value = match id {
+        RetainedFactIdV1::Numeric(value) => {
+            i64::try_from(*value).map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
+        }
+        RetainedFactIdV1::Text(value) => value
+            .parse::<i64>()
+            .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+    };
+    if value <= 0 {
+        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+    }
+    Ok(value)
+}
+
+fn fact(record: FactRecord) -> Result<FactV1, RetainedSurfaceExecutionErrorV1> {
+    let metadata = match record.metadata {
+        Value::Object(metadata) => metadata.into_iter().collect(),
+        _ => return Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+    };
+    Ok(FactV1 {
+        fact_id: record.fact_id,
+        content: record.content,
+        category: fact_category(record.category),
+        tags: record.tags,
+        entities: record.entities,
+        trust_score: record.trust_score,
+        source: record.source,
+        retrieval_count: record.retrieval_count,
+        access_count: record.access_count,
+        helpful_count: record.helpful_count,
+        unhelpful_count: record.unhelpful_count,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        last_retrieved_at: record.last_retrieved_at,
+        last_recalled_at: record.last_recalled_at,
+        last_feedback_at: record.last_feedback_at,
+        metadata,
+    })
+}
+
+fn search_hit(hit: FactSearchResult) -> Result<FactSearchHitV1, RetainedSurfaceExecutionErrorV1> {
+    Ok(FactSearchHitV1 {
+        fact: fact(hit.fact)?,
+        score: hit.score,
+        fts_score: hit.fts_score,
+        jaccard_score: hit.jaccard_score,
+        holographic_score: hit.holographic_score,
+        trust_score: hit.trust_score,
+        why: hit.why,
+    })
+}
+
+fn contradiction(
+    contradiction: ContradictionResult,
+) -> Result<FactContradictionV1, RetainedSurfaceExecutionErrorV1> {
+    Ok(FactContradictionV1 {
+        existing_fact: fact(contradiction.existing_fact)?,
+        new_content: contradiction.new_content,
+        score: contradiction.score,
+        why: contradiction.why,
+    })
+}
+
+fn trust_history_entry(entry: TrustHistoryEntry) -> TrustHistoryEntryV1 {
+    TrustHistoryEntryV1 {
+        timestamp: entry.timestamp,
+        action: match entry.action {
+            tracedecay_runtime_core::memory::types::FeedbackAction::Helpful => {
+                tracedecay_application::retained_surfaces::FactFeedbackActionV1::Helpful
+            }
+            tracedecay_runtime_core::memory::types::FeedbackAction::Unhelpful => {
+                tracedecay_application::retained_surfaces::FactFeedbackActionV1::Unhelpful
+            }
+        },
+        old_trust: entry.old_trust,
+        new_trust: entry.new_trust,
+        delta: entry.delta,
+        source: entry.source,
+        note: entry.note,
     }
 }
 
-fn feedback_action(
-    request: &FactFeedbackRequestV1,
-) -> Result<FactFeedbackActionV1, TraceDecayError> {
-    if let Some(action) = request.action {
-        return Ok(action);
-    }
-    match (
-        request.helpful.unwrap_or(false),
-        request.unhelpful.unwrap_or(false),
-    ) {
-        (true, false) => Ok(FactFeedbackActionV1::Helpful),
-        (false, true) => Ok(FactFeedbackActionV1::Unhelpful),
-        _ => Err(TraceDecayError::Config {
-            message: "missing feedback action: set action, helpful, or unhelpful".to_owned(),
-        }),
+const fn fact_category(category: MemoryCategory) -> FactCategoryV1 {
+    match category {
+        MemoryCategory::General => FactCategoryV1::General,
+        MemoryCategory::UserPref => FactCategoryV1::UserPref,
+        MemoryCategory::Project => FactCategoryV1::Project,
+        MemoryCategory::Tool => FactCategoryV1::Tool,
+        MemoryCategory::Decision => FactCategoryV1::Decision,
+        MemoryCategory::CodeArea => FactCategoryV1::CodeArea,
     }
 }
 
@@ -863,6 +711,7 @@ fn memory_status(status: MemoryStatus) -> MemoryStatusV1 {
     MemoryStatusV1 {
         fact_count: status.fact_count,
         entity_count: status.entity_count,
+        bank_count: status.bank_count,
         algebra_name: status.algebra_name,
         hrr_dim: status.hrr_dim,
         estimated_capacity: status.estimated_capacity,
@@ -873,6 +722,11 @@ fn memory_status(status: MemoryStatus) -> MemoryStatusV1 {
         below_default_recall_threshold_count: status.below_default_recall_threshold_count,
         helpful_count: status.helpful_count,
         unhelpful_count: status.unhelpful_count,
+        missing_vector_count: status.missing_vector_count,
+        repair: MemoryRepairStatsV1 {
+            missing_vectors_repaired: status.repair.missing_vectors_repaired,
+            banks_rebuilt: status.repair.banks_rebuilt,
+        },
         feedback_funnel: MemoryFeedbackFunnelV1 {
             retrieval_count_total: status.feedback_funnel.retrieval_count_total,
             access_count_total: status.feedback_funnel.access_count_total,
@@ -889,7 +743,7 @@ fn memory_operation_context(
     owner: &FactOwnerV1,
     action: &str,
 ) -> Result<MemoryOperationContext, RetainedSurfaceExecutionErrorV1> {
-    MemoryOperationContext::from_trusted_request_id(
+    MemoryOperationContext::from_request_id(
         owner,
         action,
         context.request_context.request_id().as_str(),

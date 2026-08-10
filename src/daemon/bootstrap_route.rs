@@ -118,7 +118,7 @@ pub(super) async fn cached_project_node_count(
         .canonicalize()
         .unwrap_or_else(|_| project_path.clone());
     let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
-    let server = {
+    let _server = {
         let servers = store_administration.project_servers().lock().await;
         servers
             .get_route(&route)
@@ -131,11 +131,9 @@ pub(super) async fn cached_project_node_count(
     )
     .await
     .ok()?;
-    server
-        .cg()
-        .await
-        .get_stats()
-        .await
-        .ok()
-        .map(|stats| stats.node_count)
+    // Bootstrap routing does not receive the daemon invocation state's
+    // retained code-index scheduler. A mounted project alone cannot prove a
+    // current generation or node count, so catalog discovery stays in its
+    // explicit warming state instead of reading the retired SQLite graph.
+    None
 }

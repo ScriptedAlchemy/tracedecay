@@ -439,6 +439,7 @@ impl DaemonInvocationOperation {
             Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
+            Self::GitHubStackSignalExpand => "github_stack_signal_expand",
             Self::NativeIntegrationStackSnapshot => "stack_snapshot",
             Self::NativeIntegrationPreflight => "preflight_native_integration",
             Self::NativeIntegrationApprove => "approve_native_integration",
@@ -1050,7 +1051,8 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::GitBlame
             | crate::application_surface::ApplicationSurfaceOperation::GitHunks
             | crate::application_surface::ApplicationSurfaceOperation::GitPreview
-            | crate::application_surface::ApplicationSurfaceOperation::GitApply => {
+            | crate::application_surface::ApplicationSurfaceOperation::GitApply
+            | crate::application_surface::ApplicationSurfaceOperation::GitHubStackSignalExpand => {
                 unreachable!("Git operations use their typed constructors")
             }
             crate::application_surface::ApplicationSurfaceOperation::NativeIntegrationStackSnapshot
@@ -1080,15 +1082,7 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedApply
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackPreview
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackApply
-            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit
-            | crate::application_surface::ApplicationSurfaceOperation::SemanticModelRetry
-            | crate::application_surface::ApplicationSurfaceOperation::SemanticModelRemove
-            | crate::application_surface::ApplicationSurfaceOperation::SemanticModelRollback
-            | crate::application_surface::ApplicationSurfaceOperation::SemanticEmbeddingImportLocal
-            | crate::application_surface::ApplicationSurfaceOperation::SemanticEmbeddingImportConfiguredHttps
-            | crate::application_surface::ApplicationSurfaceOperation::SemanticRerankerImportLocal
-            | crate::application_surface::ApplicationSurfaceOperation::SemanticRerankerImportConfiguredHttps
-            | crate::application_surface::ApplicationSurfaceOperation::SemanticRerankerRollback => {
+            | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit => {
                 unreachable!("configuration operations use their typed constructor")
             }
             crate::application_surface::ApplicationSurfaceOperation::ContextScoutStatus
@@ -1103,33 +1097,6 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ContextScoutDelivery
             | crate::application_surface::ApplicationSurfaceOperation::ContextScoutFeedback => {
                 unreachable!("Context Scout operations use their typed constructor")
-            }
-            crate::application_surface::ApplicationSurfaceOperation::FactStoreAdd
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreSearch
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreProbe
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreRelated
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreReason
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreContradict
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreGet
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreUpdate
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreRemove
-            | crate::application_surface::ApplicationSurfaceOperation::FactStoreList
-            | crate::application_surface::ApplicationSurfaceOperation::FactFeedback
-            | crate::application_surface::ApplicationSurfaceOperation::MemoryStatus
-            | crate::application_surface::ApplicationSurfaceOperation::SessionRefreshStatus
-            | crate::application_surface::ApplicationSurfaceOperation::SessionRefreshCancel
-            | crate::application_surface::ApplicationSurfaceOperation::SessionRefreshBegin
-            | crate::application_surface::ApplicationSurfaceOperation::MessageSearch
-            | crate::application_surface::ApplicationSurfaceOperation::SessionsFor
-            | crate::application_surface::ApplicationSurfaceOperation::Workflows
-            | crate::application_surface::ApplicationSurfaceOperation::LcmStatus
-            | crate::application_surface::ApplicationSurfaceOperation::LcmDoctor
-            | crate::application_surface::ApplicationSurfaceOperation::LcmLoadSession
-            | crate::application_surface::ApplicationSurfaceOperation::LcmGrep
-            | crate::application_surface::ApplicationSurfaceOperation::LcmDescribe
-            | crate::application_surface::ApplicationSurfaceOperation::LcmExpand
-            | crate::application_surface::ApplicationSurfaceOperation::LcmExpandQuery => {
-                unreachable!("retained operations use their typed constructor")
             }
         };
         Self {
@@ -2155,6 +2122,7 @@ impl DaemonInvocationRequest {
                 observed_at,
                 deadline,
                 cancellation,
+                ..
             } => {
                 if !(1..=365).contains(&request.window_days)
                     || observed_at.0 <= 0
@@ -2291,7 +2259,7 @@ impl DaemonInvocationRequest {
                 if observed_at.0 <= 0
                     || deadline.expires_at.0 <= 0
                     || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
-                    || !request.matches_operation(surface_operation.as_str())
+                    || !request.matches(*surface_operation)
                     || matches!(
                         request,
                         ContextScoutSurfaceRequest::Recent(request)
@@ -2791,6 +2759,10 @@ pub(crate) enum DaemonInvocationOutcome {
     GitApply {
         scope: ResolvedScope,
         effect: DaemonGitEffectResult,
+    },
+    GitHubStackSignalExpand {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<serde_json::Value>,
     },
     NativeIntegration {
         scope: ResolvedScope,

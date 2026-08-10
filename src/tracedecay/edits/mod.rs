@@ -78,7 +78,6 @@ mod test_support;
 // `use super::edits::{...}` — the re-exports below keep that import path
 // stable across the split, resolving each name at `crate::tracedecay::edits`
 // exactly as it did when they were all defined directly in `edits.rs`.
-pub(in crate::tracedecay) use file_authority::SourceEditFileAuthority;
 pub(in crate::tracedecay) use plan::{
     capture_planned_source_edit, publish_planned_source_edit, rollback_planned_source_edit_files,
     validate_planned_source_edit,
@@ -87,5 +86,7 @@ pub(in crate::tracedecay) use preview::{
     LeadingKind, MAX_PREVIEW_DIFF_LINES, PREVIEW_DIFF_CONTEXT, bounded_region_diff,
     classify_leading_line, edit_success_message,
 };
-pub(in crate::tracedecay) use primitives::{LeadingBlock, item_line_span, splice_lines};
-pub(in crate::tracedecay) use symbols::resolve_symbol_for_edit;
+pub(in crate::tracedecay) use primitives::splice_lines;
+pub(in crate::tracedecay) use symbols::{
+    EditSymbolV1, edit_symbol_from_summary, resolve_symbol_for_edit,
+};

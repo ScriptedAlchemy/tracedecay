@@ -1139,7 +1139,8 @@ fn automation_config_rejects_retired_curation_policy_flags() {
         ("--auto-enable-skills", "true"),
     ] {
         let error = Cli::try_parse_from(["tracedecay", "automation", "config", "set", flag, value])
-            .expect_err("curation policy flags must stay removed");
+            .err()
+            .expect("curation policy flags must stay removed");
         assert_eq!(error.kind(), ErrorKind::UnknownArgument, "flag: {flag}");
     }
 }
@@ -1154,7 +1155,8 @@ fn automation_install_rejects_removed_auto_apply_flag() {
         "--automation",
         "--auto-apply",
     ])
-    .expect_err("install-time approval bypass must stay removed");
+    .err()
+    .expect("install-time approval bypass must stay removed");
     assert_eq!(error.kind(), ErrorKind::UnknownArgument);
 }
 
@@ -1196,7 +1198,8 @@ fn automation_run_memory_curation_parses_manual_flags() {
 fn automation_facts_rejects_removed_mutation_commands() {
     for action in ["apply", "reject"] {
         let error = Cli::try_parse_from(["tracedecay", "automation", "facts", action, "fact-7"])
-            .expect_err("automation fact mutation commands must stay removed");
+            .err()
+            .expect("automation fact mutation commands must stay removed");
         assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }
 }
@@ -1204,7 +1207,8 @@ fn automation_facts_rejects_removed_mutation_commands() {
 #[test]
 fn automation_facts_help_describes_terminal_automatic_fact_receipts() {
     let help = Cli::try_parse_from(["tracedecay", "automation", "facts", "list", "--help"])
-        .expect_err("help exits through clap")
+        .err()
+        .expect("help exits through clap")
         .to_string()
         .to_ascii_lowercase();
 
@@ -1350,7 +1354,8 @@ fn automation_run_skill_writing_defaults_to_all_providers() {
 #[test]
 fn automation_skill_writing_help_describes_automatic_activation() {
     let help = Cli::try_parse_from(["tracedecay", "automation", "run", "skill-writing", "--help"])
-        .expect_err("help exits through clap")
+        .err()
+        .expect("help exits through clap")
         .to_string()
         .to_ascii_lowercase();
 
@@ -1532,11 +1537,13 @@ fn automation_skills_commands_parse_lifecycle_flags() {
         "approve",
         "repo-hygiene",
     ])
-    .expect_err("automation skills approve must stay removed");
+    .err()
+    .expect("automation skills approve must stay removed");
     assert_eq!(approve.kind(), ErrorKind::InvalidSubcommand);
 
     let install = Cli::try_parse_from(["tracedecay", "automation", "skills", "install"])
-        .expect_err("managed skills deploy automatically; manual install must stay removed");
+        .err()
+        .expect("managed skills deploy automatically; manual install must stay removed");
     assert_eq!(install.kind(), ErrorKind::InvalidSubcommand);
 }
 

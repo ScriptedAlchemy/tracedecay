@@ -16,7 +16,7 @@ use tracedecay_domain::UtcMicros;
 use super::symbol_graph::{SymbolGraphCursorFuture, SymbolGraphCursorPort, SymbolGraphPageClaim};
 use crate::context::read_modes::{LineRange, ReadMode};
 use crate::context::source_read::{SourceReadRequest, read_source};
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceReadRuntime;
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecutionSnapshot};
 
@@ -27,14 +27,14 @@ use tracedecay_temporal_query::ports::{SessionCursorAuthenticator, TemporalExecu
 /// extension seam for independently authorized roots; this adapter intentionally admits exactly one
 /// project/repository/worktree scope.
 pub struct SourceReadAdapter {
-    graph: Arc<TraceDecay>,
+    graph: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     scope: ResolvedScope,
 }
 
 impl SourceReadAdapter {
     pub fn new(
-        graph: Arc<TraceDecay>,
+        graph: Arc<SourceReadRuntime>,
         code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
         scope: ResolvedScope,
     ) -> Result<Self, ApplicationContractError> {
@@ -104,7 +104,9 @@ impl SourceReadAdapter {
             )
             .map_err(|_| ())?;
         let output = read_source(
-            self.graph.as_ref(),
+            self.graph.project_root(),
+            self.graph.db(),
+            self.graph.is_read_only(),
             &reader,
             cancellation,
             SourceReadRequest {

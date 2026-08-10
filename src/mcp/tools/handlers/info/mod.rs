@@ -17,6 +17,7 @@ mod simplify_scan;
 mod status;
 mod todos;
 mod type_hierarchy;
+mod verified;
 
 pub(super) use body::{extract_lines, handle_body};
 pub(super) use config::handle_config;
@@ -46,20 +47,24 @@ use crate::path_tree::format_compact_annotated_path_list;
 use crate::project_registry::{ProjectRegistryView, render_project_registry_view};
 use crate::storage::{ProjectPath, StorageMode, StoreKind};
 use crate::tracedecay::{BranchDiagnostics, TraceDecay};
-use crate::types::{FileRecord, NodeKind, Visibility};
+use crate::types::NodeKind;
+
+use self::verified::{
+    INFO_RELATION_LIMIT, all_symbols, end_line, indexed_files, info_graph_error,
+    required_file_path, required_metadata, required_symbol_parts, symbols_in_dir,
+};
 
 use super::super::ToolResult;
 use super::super::definitions;
 use super::super::render::{self, Md};
-use super::dependency_hints;
 use super::project_registry::{
     ProjectRegistryContextCommand, ProjectRegistryContextOutcome, ProjectRegistryListingCommand,
     ProjectRegistryListingOutcome, ProjectRegistryListingScope, ProjectRegistryReadPort,
     ProjectRegistrySelector, list_registered_projects, read_registered_project_context,
 };
 use super::support::{
-    effective_path, filter_by_scope, generic_tool_result, is_explicit_project_path_selector,
-    rendered_tool_result, require_node_id, require_object_args, unique_file_paths,
+    effective_path, generic_tool_result, is_explicit_project_path_selector, rendered_tool_result,
+    require_node_id, require_object_args, unique_file_paths,
 };
 
 fn display_path(path: &std::path::Path) -> String {

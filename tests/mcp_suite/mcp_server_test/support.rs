@@ -18,7 +18,12 @@ use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Creates a temporary Rust project, indexes it, and returns a ready server.
+/// Creates a temporary Rust project and returns a direct protocol server.
+///
+/// Graph journeys use [`crate::support::production_composition_fixture`]
+/// because only the daemon composition owns code-index publication and graph
+/// read admission. This helper is intentionally limited to transport and
+/// non-graph tool behavior.
 pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
@@ -31,12 +36,7 @@ pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
     let cg = crate::fixture::init_project_from_template(project)
         .await
         .unwrap();
-    cg.index_all().await.unwrap();
     let server = McpServer::new(cg, None).await;
-    server
-        .install_project_open_source_edit_authority_for_test()
-        .await
-        .unwrap();
     (server, dir)
 }
 
@@ -89,7 +89,6 @@ pub(crate) async fn setup_server_with_session_authority() -> (Arc<McpServer>, Te
     let cg = crate::fixture::init_project_from_template(project)
         .await
         .unwrap();
-    cg.index_all().await.unwrap();
     cg.checkpoint().await.unwrap();
     drop(cg);
     let server = server_with_session_authority(project).await;
@@ -327,7 +326,6 @@ async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
     let project_id = cg
         .store_layout()
         .identity
@@ -341,10 +339,6 @@ async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
     let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime)
         .await
         .expect("registered test server");
-    server
-        .install_project_open_source_edit_authority_for_test()
-        .await
-        .unwrap();
     AccountedServer {
         server,
         project: dir,
@@ -496,8 +490,7 @@ pub(crate) fn analytics_metadata(event: &tracedecay::global_db::AnalyticsEventRe
 }
 
 // ---------------------------------------------------------------------------
-// Mid-session branch switch: tool calls must reopen onto the live branch's
-// DB instead of serving the branch pinned at startup.
+// Repository setup used by routed hook journeys.
 // ---------------------------------------------------------------------------
 pub(crate) fn git(project: &std::path::Path, args: &[&str]) {
     let out = Command::new("git")
@@ -511,144 +504,3 @@ pub(crate) fn git(project: &std::path::Path, args: &[&str]) {
         String::from_utf8_lossy(&out.stderr)
     );
 }
-
-/// Drives one `tools/call` through the JSON-RPC transport and returns the full
-/// parsed response for the given id.
-///
-/// Runs as one client connection (the daemon's per-socket entry point), so a
-/// journey can issue several serial calls against one live server; a full
-/// `run` would latch the server's terminal shutdown after the first call and
-/// every later dispatch would be refused as `tool_dispatch_shutdown`.
-pub(crate) async fn tool_call_via_transport(
-    server: Arc<McpServer>,
-    id: i64,
-    name: &str,
-    arguments: Value,
-) -> Value {
-    let responses = run_client_connection_with_messages(
-        server,
-        vec![jsonrpc_request(
-            json!(id),
-            "tools/call",
-            json!({ "name": name, "arguments": arguments }),
-        )],
-    )
-    .await;
-    let resp_str = responses
-        .iter()
-        .find(|r| parse_response(r)["id"] == id)
-        .unwrap_or_else(|| panic!("no response for id={id}"));
-    parse_response(resp_str)
-}
-
-/// Drives one `tools/call` of `tracedecay_search` through the JSON-RPC
-/// transport and returns the full response text for the given id.
-pub(crate) async fn search_via_transport(server: Arc<McpServer>, id: i64, query: &str) -> Value {
-    tool_call_via_transport(server, id, "tracedecay_search", json!({ "query": query })).await
-}
-
-/// The mid-session branch-switch fixture, mounted on the production
-/// composition so searches serve through the daemon-owned code-index
-/// authority. Dropping the harness before the isolation directory shuts the
-/// composition down cleanly.
-pub(crate) struct BranchDriftFixture {
-    pub(crate) harness: tracedecay::daemon::ProductionProjectCompositionHarnessV1,
-    pub(crate) project: PathBuf,
-    pub(crate) server: Arc<McpServer>,
-    _isolation: crate::support::TestTempDir,
-}
-
-/// Builds the mid-session branch-switch fixture on the production
-/// composition harness inside an isolated profile root.
-///
-/// Branch state goes through the production tracked-branch machinery
-/// (`track_worktree_branch` / `sync_tracked_worktree_branch`): the single
-/// project graph store serves every branch, and each tracked branch seals a
-/// branch-graph generation with exact ref/OID provenance. Hand-seeding
-/// per-branch DB files would fabricate a store shape production no longer
-/// has.
-pub(crate) async fn setup_branch_drift_fixture() -> BranchDriftFixture {
-    let isolation = crate::support::test_temp_dir();
-    let project = isolation.path().join("project");
-
-    // main: one committed source file.
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
-        "pub fn main_only() -> u32 { 1 }\n",
-    )
-    .unwrap();
-    fs::write(project.join(".gitignore"), ".tracedecay/\n").unwrap();
-    git(&project, &["init", "-b", "main"]);
-    git(&project, &["config", "user.email", "test@test.com"]);
-    git(&project, &["config", "user.name", "Test"]);
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "-m", "initial"]);
-
-    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
-        isolation.path(),
-        vec![project.clone()],
-    )
-    .await
-    .expect("branch-drift production composition");
-    let server = harness
-        .server(&project)
-        .expect("branch-drift composition server");
-
-    // feature: add a feature-only symbol, then track + seal the branch's
-    // generation through the production branch machinery while the worktree
-    // is checked out on it.
-    git(&project, &["checkout", "-b", "feature"]);
-    fs::write(
-        project.join("src/feat.rs"),
-        "pub fn feature_only() -> u32 { 2 }\n",
-    )
-    .unwrap();
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "-m", "feature work"]);
-    let outcome = harness
-        .track_worktree_branch(&project, &project, "feature")
-        .await
-        .expect("track feature branch");
-    assert_eq!(
-        outcome,
-        tracedecay::branch::BranchAddOutcome::Added,
-        "feature branch tracking must seal a branch generation"
-    );
-
-    // Back on main: seal main's generation from the checked-out worktree so
-    // the server starts pinned to main and explicit main-scoped reads have
-    // exact provenance to serve from.
-    git(&project, &["checkout", "main"]);
-    let (_active, serving, fallback, contains_query) = harness
-        .sync_tracked_worktree_branch(&project, &project, "main", "main_only")
-        .await
-        .expect("seal main branch generation");
-    assert_eq!(serving.as_deref(), Some("main"), "main must serve itself");
-    assert!(!fallback, "main is tracked and must not serve via fallback");
-    assert!(
-        contains_query,
-        "main's sealed generation must contain the main-only symbol"
-    );
-
-    // Serve the cold-activation window here so the tests' first assertions
-    // are about branch content, not authority warm-up.
-    crate::support::warm_code_index_search(&server, "main_only").await;
-
-    BranchDriftFixture {
-        harness,
-        project,
-        server,
-        _isolation: isolation,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Live session↔git span + commit attribution
-// ---------------------------------------------------------------------------
-
-/// Captures stdout of a git command (trimmed).
-///
-/// The shared fixture helper resolves `git` once per process and applies the
-/// hermetic fixture config, which a raw `Command::new("git")` here did not.
-pub(crate) use crate::common::fixture::git_capture;

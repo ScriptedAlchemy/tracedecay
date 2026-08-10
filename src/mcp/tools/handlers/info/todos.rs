@@ -39,6 +39,7 @@ fn contains_marker_word(text: &str, marker: &str) -> Option<usize> {
 /// Handles `tracedecay_todos` tool calls.
 pub(crate) async fn handle_todos(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -65,7 +66,18 @@ pub(crate) async fn handle_todos(
         .map_or(200, |v| v.min(2000) as usize);
 
     let project_root = cg.project_root();
-    let files = cg.get_all_files().await?;
+    let files = indexed_files(cg, graph)?;
+    let symbols = all_symbols(graph)?;
+    let mut symbols_by_file = HashMap::<&str, Vec<_>>::new();
+    for symbol in &symbols {
+        let metadata = required_metadata(symbol)?;
+        let start = metadata.start_line.saturating_add(1);
+        let end = end_line(metadata)?.saturating_add(1);
+        symbols_by_file
+            .entry(required_file_path(symbol)?)
+            .or_default()
+            .push((metadata, start, end));
+    }
     let mut markers: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
     let mut by_kind: HashMap<String, u64> = HashMap::new();
@@ -76,27 +88,34 @@ pub(crate) async fn handle_todos(
         {
             continue;
         }
-        let Ok(project_path) = ProjectPath::resolve(project_root, Path::new(&file.path)) else {
-            continue;
-        };
-        let Ok(source) = crate::sync::read_source_file(&project_path.absolute_path()) else {
-            continue;
-        };
-        // Cache nodes per file so enclosing-symbol lookup is one DB call per
-        // file. Deliberately best-effort: the markers themselves come from
-        // reading the source, so a store failure only drops the enclosing
-        // symbol annotation — it never fakes an empty marker list.
-        let nodes = cg.get_nodes_by_file(&file.path).await.unwrap_or_default();
+        let project_path = ProjectPath::resolve(project_root, Path::new(&file.path))?;
+        let source =
+            crate::sync::read_source_file(&project_path.absolute_path()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("cannot read indexed source '{}': {error}", file.path),
+                }
+            })?;
+        let nodes = symbols_by_file.get(file.path.as_str());
 
         for (idx, line) in source.lines().enumerate() {
             let line_no = (idx as u32) + 1;
             for kind in &kinds {
                 if contains_marker_word(line, kind).is_some() {
-                    let enclosing = nodes
-                        .iter()
-                        .filter(|n| n.start_line <= line_no && line_no <= n.end_line)
-                        .min_by_key(|n| n.end_line.saturating_sub(n.start_line))
-                        .map(|n| n.qualified_name.clone());
+                    let mut enclosing = None;
+                    if let Some(nodes) = nodes {
+                        for &(metadata, start, end) in nodes {
+                            if start <= line_no && line_no <= end {
+                                let span = end - start;
+                                if enclosing
+                                    .as_ref()
+                                    .is_none_or(|(_, shortest_span)| span < *shortest_span)
+                                {
+                                    enclosing = Some((metadata.qualified_name.clone(), span));
+                                }
+                            }
+                        }
+                    }
+                    let enclosing = enclosing.map(|(qualified_name, _)| qualified_name);
                     *by_kind.entry(kind.clone()).or_insert(0) += 1;
                     markers.push(json!({
                         "kind": kind,
@@ -117,7 +136,7 @@ pub(crate) async fn handle_todos(
         }
     }
 
-    let counts = serde_json::to_value(&by_kind).unwrap_or(json!({}));
+    let counts = serde_json::to_value(&by_kind)?;
     let output = json!({
         "match_count": markers.len(),
         "by_kind": counts,

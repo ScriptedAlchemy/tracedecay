@@ -7,16 +7,19 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::{Extension, State},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery};
+use super::{DashboardHttpRequestControlV1, DashboardState};
 
 mod aggregates;
 
@@ -144,6 +147,7 @@ pub type DashboardLcmReadFutureV1<'a> =
 pub trait DashboardLcmReadPortV1: Send + Sync {
     fn read(
         &self,
+        control: DashboardHttpRequestControlV1,
         project_id: Option<&str>,
         request: DashboardLcmReadRequestV1,
     ) -> DashboardLcmReadFutureV1<'_>;
@@ -384,10 +388,12 @@ pub struct OverviewParams {
 /// manifest before this boundary reduces the hydrated records.
 pub async fn overview(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmOverviewPayloadV1>>> {
     lcm_read(
         &state,
+        control.map(|Extension(control)| control),
         DashboardLcmReadRequestV1::Overview {
             query: params.q,
             limit: params.limit.unwrap_or(25).clamp(1, 200),
@@ -417,6 +423,7 @@ pub struct SearchParams {
 /// GET /api/plugins/hermes-lcm/search
 pub async fn search(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSearchPayloadV1>>> {
     let since = match parse_optional_i64(&params.since) {
@@ -429,6 +436,7 @@ pub async fn search(
     };
     lcm_read(
         &state,
+        control.map(|Extension(control)| control),
         DashboardLcmReadRequestV1::Search {
             query: params.q,
             limit: params.limit.unwrap_or(50).clamp(1, 500),
@@ -452,11 +460,13 @@ pub struct SessionParams {
 /// GET /api/plugins/hermes-lcm/session/{session_id}
 pub async fn session(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmSessionPayloadV1>>> {
     lcm_read(
         &state,
+        control.map(|Extension(control)| control),
         DashboardLcmReadRequestV1::Session {
             session_id,
             limit: params.limit.unwrap_or(100).clamp(1, 500),
@@ -477,6 +487,7 @@ pub struct TimelineParams {
 /// GET /api/plugins/hermes-lcm/timeline
 pub async fn timeline(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<TimelineParams>,
 ) -> Json<DashboardEnvelopeV1<Option<LcmTimelinePayloadV1>>> {
     let bucket = match params.bucket.trim().to_ascii_lowercase().as_str() {
@@ -486,6 +497,7 @@ pub async fn timeline(
     };
     lcm_read(
         &state,
+        control.map(|Extension(control)| control),
         DashboardLcmReadRequestV1::Timeline {
             bucket,
             session_id: trimmed_nonempty(params.session_id),
@@ -497,6 +509,7 @@ pub async fn timeline(
 
 async fn lcm_read<T>(
     state: &DashboardState,
+    control: Option<DashboardHttpRequestControlV1>,
     request: DashboardLcmReadRequestV1,
 ) -> Json<DashboardEnvelopeV1<Option<T>>>
 where
@@ -509,8 +522,15 @@ where
             "lcm_daemon_authority_unavailable",
         ));
     };
+    let Some(control) = control else {
+        return Json(DashboardEnvelopeV1::unavailable(
+            scope_from_state(state),
+            None,
+            "dashboard_request_admission_unavailable",
+        ));
+    };
     let outcome = authority
-        .read(state.project_id.as_deref(), request.clone())
+        .read(control, state.project_id.as_deref(), request.clone())
         .await;
     let scope = scope_from_state(state);
     match outcome {

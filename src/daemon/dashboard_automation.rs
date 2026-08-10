@@ -300,27 +300,40 @@ async fn execute_dashboard_automation_run(
             start_time,
             end_time,
         } => {
+            let mut options = SessionReflectorAutomationOptions {
+                trigger: AutomationTrigger::Dashboard,
+                run_id: None,
+                session_id,
+                source,
+                role,
+                start_time,
+                end_time,
+                ..SessionReflectorAutomationOptions::default()
+            };
+            if let Some(provider) = provider {
+                options.provider = provider;
+            }
+            if let Some(query) = query {
+                options.query = query;
+            }
+            if let Some(evidence_limit) = evidence_limit {
+                options.evidence_limit = evidence_limit;
+            }
+            if let Some(scope) = scope {
+                options.scope = scope;
+            }
+            if let Some(include_summaries) = include_summaries {
+                options.include_summaries = include_summaries;
+            }
+            if let Some(sort) = sort {
+                options.sort = sort;
+            }
             let run = run_session_reflector_with_backend(
                 cg,
                 &config,
                 &pinned.revision_id,
                 &backend,
-                SessionReflectorAutomationOptions {
-                    trigger: AutomationTrigger::Dashboard,
-                    run_id: None,
-                    provider,
-                    query,
-                    evidence_limit,
-                    scope,
-                    session_id,
-                    include_summaries,
-                    sort,
-                    source,
-                    role,
-                    start_time,
-                    end_time,
-                    ..SessionReflectorAutomationOptions::default()
-                },
+                options,
             )
             .await
             .map_err(automation_failed)?;
@@ -337,23 +350,25 @@ async fn execute_dashboard_automation_run(
             query,
             evidence_limit,
         } => {
-            let run = run_skill_writer_with_backend(
-                cg,
-                &config,
-                &pinned.revision_id,
-                &backend,
-                SkillWriterAutomationOptions {
-                    trigger: AutomationTrigger::Dashboard,
-                    run_id: None,
-                    provider,
-                    query,
-                    evidence_limit,
-                    profile_root: Some(profile_root),
-                    ..SkillWriterAutomationOptions::default()
-                },
-            )
-            .await
-            .map_err(automation_failed)?;
+            let mut options = SkillWriterAutomationOptions {
+                trigger: AutomationTrigger::Dashboard,
+                run_id: None,
+                profile_root: Some(profile_root),
+                ..SkillWriterAutomationOptions::default()
+            };
+            if let Some(provider) = provider {
+                options.provider = provider;
+            }
+            if let Some(query) = query {
+                options.query = query;
+            }
+            if let Some(evidence_limit) = evidence_limit {
+                options.evidence_limit = evidence_limit;
+            }
+            let run =
+                run_skill_writer_with_backend(cg, &config, &pinned.revision_id, &backend, options)
+                    .await
+                    .map_err(automation_failed)?;
             crate::daemon::record_project_automation_run(
                 producer.as_ref(),
                 cg.project_root(),

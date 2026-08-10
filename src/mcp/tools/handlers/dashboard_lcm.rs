@@ -2,32 +2,35 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures_util::stream::{self, StreamExt};
-use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1};
+use tracedecay_application::{
+    CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestContext,
+};
+use tracedecay_domain::{ActorId, RetrievalGrainV1, SessionId, TemporalModeV1, canonical_sha256};
 use tracedecay_temporal_query::context::ContextBudget;
 use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::session::{SessionRetrievalScope, SessionTemporalQuery};
 
 use crate::dashboard::{
-    DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
-    DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1, DashboardLcmReadFutureV1,
-    DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
-    DashboardLcmReadStateV1,
+    DashboardHttpRequestControlV1, DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1,
+    DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1,
+    DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1,
+    DashboardLcmReadRequestV1, DashboardLcmReadStateV1,
 };
-use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
+use tracedecay_sessions::runtime::SessionSearchTimeRange;
 use tracedecay_sessions::runtime::lcm::{LcmDescribeResponse, LcmDescribeTarget};
-use tracedecay_sessions::runtime::{
-    SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
-};
 
-use super::{
-    LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionRetrievalCommand,
-    SessionRetrievalFilters, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
-    SessionRetrievalServicePort, SessionRetrievalStoreScope,
+use crate::daemon::session_retrieval::{
+    LcmDescribeServiceCommand, LcmDescribeServiceOutcome, SessionApplicationRetrievalPortV1,
+    SessionRetrievalPageView, SessionRetrievalServiceOutcome, SessionRetrievalStoreScope,
 };
+use tracedecay_usecases::context::ResolvedSessionIdentity;
 
 const SUMMARY_DESCRIBE_CONCURRENCY: usize = 8;
 const DASHBOARD_AGGREGATE_PAGE_LIMIT: usize = 16;
+const ADMITTED_RETRIEVAL_PAGE_LIMIT: i64 = 100;
+const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize = 64 * 1024;
 
 struct SummaryHydrationRequest {
     provider: String,
@@ -37,20 +40,27 @@ struct SummaryHydrationRequest {
 }
 
 pub(crate) struct DashboardLcmReadAdapter {
-    retrieval: Arc<dyn SessionRetrievalServicePort>,
+    retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+    identity: ResolvedSessionIdentity,
     project_id: String,
 }
 
 impl DashboardLcmReadAdapter {
-    pub(crate) fn new(retrieval: Arc<dyn SessionRetrievalServicePort>, project_id: String) -> Self {
-        Self {
+    pub(crate) fn new(
+        retrieval: Arc<dyn SessionApplicationRetrievalPortV1>,
+        identity: ResolvedSessionIdentity,
+    ) -> Option<Self> {
+        let project_id = identity.project_id()?.as_str().to_owned();
+        Some(Self {
             retrieval,
+            identity,
             project_id,
-        }
+        })
     }
 
     async fn execute(
         &self,
+        control: DashboardHttpRequestControlV1,
         project_id: Option<&str>,
         request: DashboardLcmReadRequestV1,
     ) -> DashboardLcmReadOutcomeV1 {
@@ -64,9 +74,13 @@ impl DashboardLcmReadAdapter {
             && !query.trim().is_empty()
         {
             return self
-                .execute_overview_with_matches(project_id, query.clone(), *limit)
+                .execute_overview_with_matches(control, project_id, query.clone(), *limit)
                 .await;
         }
+        let (context, cancellation) = match self.request_context(&control) {
+            Ok(admission) => admission,
+            Err(reason) => return not_ready(DashboardLcmReadStateV1::Unavailable, reason),
+        };
         let aggregate = matches!(
             request,
             DashboardLcmReadRequestV1::Overview { .. } | DashboardLcmReadRequestV1::Timeline { .. }
@@ -86,13 +100,17 @@ impl DashboardLcmReadAdapter {
         // manifest and ordering, while each execute call reauthorizes and
         // canonically hydrates that page.
         let temporal = loop {
-            let Some(command) = retrieval_command(&request, cursor.clone(), aggregate) else {
+            let Some(query) = retrieval_query(&request, cursor.clone(), aggregate) else {
                 return not_ready(
                     DashboardLcmReadStateV1::Unavailable,
                     "lcm_dashboard_request_invalid",
                 );
             };
-            let (page, omitted, paged_partial) = match self.retrieval.execute(command).await {
+            let (page, omitted, paged_partial) = match self
+                .retrieval
+                .retrieve_admitted_with_cancellation(&context, &cancellation, query)
+                .await
+            {
                 SessionRetrievalServiceOutcome::Complete { page, .. } => (page, 0, false),
                 SessionRetrievalServiceOutcome::CompleteZero { temporal, .. } => (
                     SessionRetrievalPageView {
@@ -126,6 +144,12 @@ impl DashboardLcmReadAdapter {
                 }
                 SessionRetrievalServiceOutcome::Denied => {
                     return not_ready(DashboardLcmReadStateV1::Denied, "lcm_temporal_read_denied");
+                }
+                SessionRetrievalServiceOutcome::ResetRequired { .. } => {
+                    return not_ready(
+                        DashboardLcmReadStateV1::Unavailable,
+                        "lcm_temporal_reset_required",
+                    );
                 }
                 SessionRetrievalServiceOutcome::Unavailable(_) => {
                     return not_ready(
@@ -238,7 +262,7 @@ impl DashboardLcmReadAdapter {
             }
         }
         let hydrated_summaries = stream::iter(summary_requests)
-            .map(|request| self.hydrate_summary(request))
+            .map(|request| self.hydrate_summary(&context, &cancellation, request))
             .buffered(SUMMARY_DESCRIBE_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
@@ -261,6 +285,8 @@ impl DashboardLcmReadAdapter {
                 Some(provider) => {
                     let (description, partial) = match self
                         .describe(
+                            &context,
+                            &cancellation,
                             &provider,
                             session_id,
                             LcmDescribeTarget::Session,
@@ -330,11 +356,13 @@ impl DashboardLcmReadAdapter {
 
     async fn execute_overview_with_matches(
         &self,
+        control: DashboardHttpRequestControlV1,
         project_id: Option<&str>,
         query: String,
         limit: i64,
     ) -> DashboardLcmReadOutcomeV1 {
         let base = Box::pin(self.execute(
+            control.clone(),
             project_id,
             DashboardLcmReadRequestV1::Overview {
                 query: String::new(),
@@ -348,6 +376,7 @@ impl DashboardLcmReadAdapter {
             not_ready @ DashboardLcmReadOutcomeV1::NotReady { .. } => return not_ready,
         };
         let matches = Box::pin(self.execute(
+            control,
             project_id,
             DashboardLcmReadRequestV1::Search {
                 query,
@@ -397,11 +426,15 @@ impl DashboardLcmReadAdapter {
 
     async fn hydrate_summary(
         &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
         request: SummaryHydrationRequest,
     ) -> Result<(DashboardLcmCanonicalSummaryV1, bool), (DashboardLcmReadStateV1, &'static str)>
     {
         let (description, partial) = self
             .describe(
+                context,
+                cancellation,
                 &request.provider,
                 request.session_id,
                 LcmDescribeTarget::SummaryNode {
@@ -440,6 +473,8 @@ impl DashboardLcmReadAdapter {
 
     async fn describe(
         &self,
+        context: &RequestContext,
+        cancellation: &CancellationSignal,
         provider: &str,
         session_id: SessionId,
         target: LcmDescribeTarget,
@@ -447,13 +482,17 @@ impl DashboardLcmReadAdapter {
     ) -> Result<(LcmDescribeResponse, bool), (DashboardLcmReadStateV1, &'static str)> {
         match self
             .retrieval
-            .describe_lcm(LcmDescribeServiceCommand::new(
-                provider,
-                session_id,
-                target,
-                grain,
-                SessionRetrievalStoreScope::Project,
-            ))
+            .describe_lcm_admitted(
+                context,
+                cancellation,
+                LcmDescribeServiceCommand::new(
+                    provider,
+                    session_id,
+                    target,
+                    grain,
+                    SessionRetrievalStoreScope::Project,
+                ),
+            )
             .await
         {
             LcmDescribeServiceOutcome::Complete { description, .. } => Ok((description, false)),
@@ -479,6 +518,10 @@ impl DashboardLcmReadAdapter {
             LcmDescribeServiceOutcome::Denied => {
                 Err((DashboardLcmReadStateV1::Denied, "lcm_temporal_read_denied"))
             }
+            LcmDescribeServiceOutcome::ResetRequired { .. } => Err((
+                DashboardLcmReadStateV1::Unavailable,
+                "lcm_temporal_reset_required",
+            )),
             LcmDescribeServiceOutcome::Partial {
                 description: None, ..
             }
@@ -490,16 +533,70 @@ impl DashboardLcmReadAdapter {
             )),
         }
     }
+
+    fn request_context(
+        &self,
+        control: &DashboardHttpRequestControlV1,
+    ) -> Result<(RequestContext, CancellationSignal), &'static str> {
+        if control.deadline().is_elapsed_at(control.observed_at()) {
+            return Err("lcm_dashboard_request_deadline_elapsed");
+        }
+        let scope = self
+            .identity
+            .session_request_scope()
+            .map_err(|_| "lcm_dashboard_scope_unavailable")?;
+        let actor = ActorId::new("dashboard.session-retrieval")
+            .map_err(|_| "lcm_dashboard_admission_invalid")?;
+        let cancellation = control.cancellation().clone();
+        let digest = canonical_sha256(&(
+            "tracedecay.dashboard.session-retrieval.grant.v1",
+            self.identity.profile_id().as_str(),
+            self.identity.project_id().map(|project| project.as_str()),
+            self.identity.store_id().as_str(),
+            self.identity.root_id().as_str(),
+            control.request_id().as_str(),
+            control.deadline().expires_at.0,
+            cancellation.context().token_id.as_str(),
+        ))
+        .map_err(|_| "lcm_dashboard_admission_invalid")?;
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.dashboard.session-retrieval")
+                .map_err(|_| "lcm_dashboard_admission_invalid")?,
+            1,
+            digest,
+            actor.clone(),
+            control.observed_at(),
+            control.deadline().expires_at,
+            scope.clone(),
+            BTreeSet::from([CapabilityId::new("capability.session.temporal-retrieval")
+                .map_err(|_| "lcm_dashboard_admission_invalid")?]),
+            BTreeSet::from([UseCaseId::new("use-case.dashboard.lcm-read")
+                .map_err(|_| "lcm_dashboard_admission_invalid")?]),
+            DisclosureClass::Evidence,
+        )
+        .map_err(|_| "lcm_dashboard_admission_invalid")?;
+        let context = RequestContext::new(
+            actor,
+            scope,
+            grant,
+            control.request_id(),
+            control.deadline(),
+            cancellation.context(),
+        )
+        .map_err(|_| "lcm_dashboard_admission_invalid")?;
+        Ok((context, cancellation))
+    }
 }
 
 impl DashboardLcmReadPortV1 for DashboardLcmReadAdapter {
     fn read(
         &self,
+        control: DashboardHttpRequestControlV1,
         project_id: Option<&str>,
         request: DashboardLcmReadRequestV1,
     ) -> DashboardLcmReadFutureV1<'_> {
         let project_id = project_id.map(str::to_owned);
-        Box::pin(async move { self.execute(project_id.as_deref(), request).await })
+        Box::pin(async move { self.execute(control, project_id.as_deref(), request).await })
     }
 }
 
@@ -532,11 +629,11 @@ fn initial_cursor(request: &DashboardLcmReadRequestV1) -> Option<String> {
     }
 }
 
-fn retrieval_command(
+fn retrieval_query(
     request: &DashboardLcmReadRequestV1,
     cursor: Option<String>,
     aggregate: bool,
-) -> Option<SessionRetrievalCommand> {
+) -> Option<SessionTemporalQuery> {
     let (session_id, cursor, query_text, limit, retrieval_scope, roles, source, time_range) =
         match request {
             DashboardLcmReadRequestV1::Overview { query, .. } => (
@@ -621,15 +718,24 @@ fn retrieval_command(
                 )
             }
         };
-    let limit = usize::try_from(limit.clamp(1, 500)).ok()?;
-    // The default execution limits hydrate at most 64 records per request;
-    // dashboard reads legitimately page up to 500 rows, so the request
-    // carries execution limits sized to its own page (still validated
-    // against the port's absolute read caps by the executor).
-    let mut execution_limits = ExecutionLimits::default();
-    if limit > execution_limits.hydration_limit {
-        execution_limits.hydration_limit = limit;
-    }
+    let limit = usize::try_from(limit.clamp(1, ADMITTED_RETRIEVAL_PAGE_LIMIT)).ok()?;
+    // The admitted application port caps each request at 100 records. Larger
+    // dashboard windows advance only through its opaque cursor, preserving the
+    // same immutable authorization and frozen participant manifest per page.
+    let execution_limits = ExecutionLimits {
+        candidate_limit: limit,
+        candidate_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        candidate_item_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        candidate_metadata_field_bytes: 16 * 1024,
+        record_limit: limit,
+        record_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        record_item_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        hydration_limit: limit,
+        hydration_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        hydration_payload_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        hydration_chunk_bytes: 16 * 1024,
+        ..ExecutionLimits::default()
+    };
     let query = SessionTemporalQuery::new(
         session_id,
         None,
@@ -644,30 +750,23 @@ fn retrieval_command(
             DiversityLimits::default()
         },
         ContextBudget {
-            max_bytes: 1024 * 1024,
-            max_tokens: 256 * 1024,
+            max_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT as u64,
+            max_tokens: 16 * 1024,
             estimator_version: "words-v1".to_owned(),
         },
     )
     .ok()?
     .with_execution_limits(execution_limits)
     .with_retrieval_scope(retrieval_scope);
-    Some(SessionRetrievalCommand::new(
-        query,
-        SessionRetrievalFilters {
-            project_key: None,
-            parent_session_id: None,
+    Some(query.with_semantic_filter(
+        tracedecay_temporal_query::ports::TemporalCandidateFilterV1 {
             source,
             include_summaries: true,
-            scope: SessionSearchScope::All,
-            message_type: SessionMessageType::All,
             roles,
-            time_range,
-            git_filter: GitScopeFilter::default(),
-            workflow_scope: None,
+            start_time: time_range.start_time,
+            end_time: time_range.end_time,
+            ..tracedecay_temporal_query::ports::TemporalCandidateFilterV1::default()
         },
-        false,
-        SessionRetrievalStoreScope::Project,
     ))
 }
 
@@ -704,12 +803,12 @@ mod tests {
             limit: 100,
             cursor: Some("opaque-temporal-cursor".to_owned()),
         };
-        let command = retrieval_command(&request, initial_cursor(&request), false)
+        let query = retrieval_query(&request, initial_cursor(&request), false)
             .expect("cursor-backed dashboard page");
 
-        assert_eq!(command.query().limit(), 100);
-        assert_eq!(command.query().cursor(), Some("opaque-temporal-cursor"));
-        assert!(command.filters().include_summaries);
+        assert_eq!(query.limit(), 100);
+        assert_eq!(query.cursor(), Some("opaque-temporal-cursor"));
+        assert!(query.semantic_filter().include_summaries);
     }
 
     #[test]
@@ -719,22 +818,19 @@ mod tests {
             session_id: None,
             limit: 400,
         };
-        let command = retrieval_command(
+        let query = retrieval_query(
             &request,
             Some("opaque-frozen-manifest-cursor".to_owned()),
             true,
         )
         .expect("aggregate continuation");
 
-        assert_eq!(command.query().limit(), 500);
+        assert_eq!(query.limit(), 100);
+        assert_eq!(query.cursor(), Some("opaque-frozen-manifest-cursor"));
         assert_eq!(
-            command.query().cursor(),
-            Some("opaque-frozen-manifest-cursor")
-        );
-        assert_eq!(
-            command.query().retrieval_scope(),
+            query.retrieval_scope(),
             &SessionRetrievalScope::AllSessionsInAuthorizedRoot
         );
-        assert!(command.filters().include_summaries);
+        assert!(query.semantic_filter().include_summaries);
     }
 }

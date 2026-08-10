@@ -542,8 +542,13 @@ pub struct HttpApplicationRequest {
     pub body: Value,
 }
 
-pub type HttpApplicationInvocationFuture =
-    Pin<Box<dyn Future<Output = CanonicalInvocationResult<Value>> + Send + 'static>>;
+pub type HttpApplicationInvocationFuture = Pin<
+    Box<
+        dyn Future<Output = Result<CanonicalInvocationResult<Value>, ApplicationContractError>>
+            + Send
+            + 'static,
+    >,
+>;
 
 /// Concrete application owners mounted behind the HTTP adapter.
 ///
@@ -585,7 +590,9 @@ pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
 impl<F, Fut> HttpApplicationOwners for F
 where
     F: Fn(HttpApplicationRequest) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = CanonicalInvocationResult<Value>> + Send + 'static,
+    Fut: Future<Output = Result<CanonicalInvocationResult<Value>, ApplicationContractError>>
+        + Send
+        + 'static,
 {
     fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
@@ -985,7 +992,10 @@ where
         HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
         HttpApplicationOwnerKind::NativeIntegration => owners.invoke_native_integration(request),
     };
-    invocation.await.into_http_response()
+    match invocation.await {
+        Ok(result) => result.into_http_response(),
+        Err(error) => application_contract_error_response(error),
+    }
 }
 
 #[cfg(test)]

@@ -143,8 +143,7 @@ pub(super) fn map_execution_error(error: TraceDecayError) -> RetainedSurfaceExec
         TraceDecayError::ResetRequired { .. } => {
             RetainedSurfaceExecutionErrorV1::ProjectResetRequired
         }
-        TraceDecayError::DatabaseAuthorityUnavailable { .. }
-        | TraceDecayError::SyncLock { .. }
+        TraceDecayError::SyncLock { .. }
         | TraceDecayError::ProjectRoute { .. }
         | TraceDecayError::Database { .. }
         | TraceDecayError::Search { .. }

@@ -6,11 +6,11 @@
 //!  2. For each selected repo (see `repos::REPOS`, optionally filtered with
 //!     `TRACEDECAY_BENCH_REPOS=name1,name2`), shallow-clones it (`git fetch
 //!     --depth 1`) at a constant ref the first time it is encountered.
-//!  3. Opens (or initialises) the `.tracedecay/` database for the repo and
-//!     **always runs a full `index_all()` first** — equivalent to
-//!     `tracedecay sync --force` — so every bench run starts from a freshly
-//!     synced graph regardless of how stale the cached index is.
-//!  4. Samples the resulting graph to build one query catalog per repo:
+//!  3. Opens the repos in one isolated production daemon composition. The
+//!     daemon performs normal final-schema admission and waits for its
+//!     background code-index scheduler to publish a complete generation.
+//!  4. Samples that generation through mounted MCP calls to build one query
+//!     catalog per repo:
 //!     ≥ 5 queries per tool, each holding concrete `node_id` / qualified-name
 //!     / file-pattern arguments drawn from real graph state. Write queries
 //!     (`str_replace`, `multi_str_replace`, `insert_at`, `ast_grep_rewrite`)
@@ -36,63 +36,64 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use serde_json::Value;
 use tokio::runtime::Runtime;
 
-use tracedecay::mcp::handle_tool_call;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
 use queries::{Query, QueryKind, SCRATCH_DIR, ToolGroup, build_context, build_queries};
 use repos::{Repo, ensure_cloned, repos_root, restore_repo, selected_repos};
 
-/// Per-repo state we hand to criterion: indexed graph + frozen query catalog.
+/// Per-repo state we hand to criterion: mounted project + frozen query catalog.
 struct RepoBench {
-    cg: TraceDecay,
     dir: PathBuf,
     name: &'static str,
     groups: Vec<ToolGroup>,
 }
 
-async fn prepare_repo(rt_root: &std::path::Path, repo: Repo) -> Result<RepoBench, String> {
-    let dir = ensure_cloned(rt_root, repo)?;
-
-    let cg = if TraceDecay::is_initialized(&dir) {
-        TraceDecay::open(&dir)
-            .await
-            .map_err(|e| format!("open {}: {e}", repo.name))?
-    } else {
-        TraceDecay::init(&dir)
-            .await
-            .map_err(|e| format!("init {}: {e}", repo.name))?
-    };
-
-    // Always force a full re-index before benching, matching
-    // `tracedecay sync --force`. This guarantees the cached graph reflects the
-    // pinned checkout regardless of how the repo dir was previously left.
-    eprintln!(
-        "[bench] force-indexing {} (sync --force equivalent)...",
-        repo.name
-    );
-    cg.index_all()
+async fn prepare_repo(
+    harness: &ProductionProjectCompositionHarnessV1,
+    dir: PathBuf,
+    repo: Repo,
+) -> Result<RepoBench, String> {
+    let ctx = build_context(harness, &dir)
         .await
-        .map_err(|e| format!("index {}: {e}", repo.name))?;
-
-    let ctx = build_context(&cg).await;
+        .map_err(|error| format!("sample {}: {error}", repo.name))?;
     let groups = build_queries(&ctx);
     Ok(RepoBench {
-        cg,
         dir,
         name: repo.name,
         groups,
     })
 }
 
-fn run_query(rt: &Runtime, cg: &TraceDecay, q: &Query) -> Value {
+fn run_query(
+    rt: &Runtime,
+    harness: &ProductionProjectCompositionHarnessV1,
+    project_root: &std::path::Path,
+    q: &Query,
+) -> Value {
     rt.block_on(async {
-        // We don't care about the response shape, only that the call completes.
-        // `unwrap_or_else` keeps the bench going even if a sampled id was stale
-        // (e.g. graph state shifted between context-build and call) — the timing
-        // for the error path is still representative of dispatcher overhead.
-        match handle_tool_call(cg, q.tool, q.args.clone(), None, None).await {
-            Ok(res) => res.value,
-            Err(_) => Value::Null,
+        // Preserve the complete wire response so criterion cannot optimize the
+        // mounted JSON-RPC dispatch or response rendering away.
+        match harness
+            .call_tool(project_root, q.tool, q.args.clone())
+            .await
+        {
+            Ok(response) => {
+                if response.error.is_some()
+                    || response
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.get("isError"))
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                {
+                    panic!("{} returned an error response: {response:?}", q.tool);
+                }
+                match serde_json::to_value(response) {
+                    Ok(value) => value,
+                    Err(error) => panic!("{} response serialization failed: {error}", q.tool),
+                }
+            }
+            Err(error) => panic!("{} transport failed: {error}", q.tool),
         }
     })
 }
@@ -134,9 +135,36 @@ fn bench_all(c: &mut Criterion) {
         return;
     }
 
-    let mut prepared: Vec<RepoBench> = Vec::new();
+    let mut cloned = Vec::new();
     for repo in &repos {
-        match rt.block_on(prepare_repo(&root, *repo)) {
+        match ensure_cloned(&root, *repo) {
+            Ok(dir) => cloned.push((*repo, dir)),
+            Err(e) => eprintln!("[bench] skipping {}: {e}", repo.name),
+        }
+    }
+    if cloned.is_empty() {
+        return;
+    }
+
+    eprintln!(
+        "[bench] mounting {} repositories in the production composition...",
+        cloned.len()
+    );
+    let project_roots = cloned.iter().map(|(_, dir)| dir.clone());
+    let harness = match rt.block_on(ProductionProjectCompositionHarnessV1::open(
+        &root,
+        project_roots,
+    )) {
+        Ok(harness) => harness,
+        Err(error) => {
+            eprintln!("[bench] production composition failed: {error}");
+            return;
+        }
+    };
+
+    let mut prepared: Vec<RepoBench> = Vec::new();
+    for (repo, dir) in cloned {
+        match rt.block_on(prepare_repo(&harness, dir, repo)) {
             Ok(rb) => prepared.push(rb),
             Err(e) => eprintln!("[bench] skipping {}: {e}", repo.name),
         }
@@ -151,20 +179,20 @@ fn bench_all(c: &mut Criterion) {
                 match &q.kind {
                     QueryKind::Read => {
                         g.bench_with_input(id, q, |b, q| {
-                            b.iter(|| run_query(&rt, &rb.cg, q));
+                            b.iter(|| run_query(&rt, &harness, &rb.dir, q));
                         });
                     }
                     QueryKind::Write {
                         scratch_path,
                         init_content,
                     } => {
-                        let root = rb.cg.project_root().to_path_buf();
+                        let root = rb.dir.clone();
                         let scratch = scratch_path.clone();
                         let init = init_content.clone();
                         g.bench_with_input(id, q, |b, q| {
                             b.iter_batched(
                                 || reset_scratch(&root, &scratch, &init),
-                                |()| run_query(&rt, &rb.cg, q),
+                                |()| run_query(&rt, &harness, &rb.dir, q),
                                 BatchSize::SmallInput,
                             );
                         });
@@ -174,6 +202,8 @@ fn bench_all(c: &mut Criterion) {
             g.finish();
         }
     }
+
+    rt.block_on(harness.shutdown());
 
     // Revert all scratch-file churn (and any other accidental edits) in each
     // repo we touched. `git stash --include-untracked` puts everything aside;

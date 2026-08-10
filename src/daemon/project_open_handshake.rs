@@ -10,28 +10,11 @@
 
 use super::*;
 
-#[cfg(all(test, unix))]
 pub(super) async fn open_project_for_handshake(
     project_path: &Path,
     handshake: &DaemonHandshake,
     store_administration: &StoreAdministration,
 ) -> Result<crate::tracedecay::TraceDecay> {
-    let (cg, _) = open_project_for_handshake_with_health_mode(
-        project_path,
-        handshake,
-        store_administration,
-        false,
-    )
-    .await?;
-    Ok(cg)
-}
-
-pub(super) async fn open_project_for_handshake_with_health_mode(
-    project_path: &Path,
-    handshake: &DaemonHandshake,
-    store_administration: &StoreAdministration,
-    defer_post_open_health: bool,
-) -> Result<(crate::tracedecay::TraceDecay, Option<crate::db::Database>)> {
     let open_options = handshake.open_options();
     let registry_database = store_administration.registered_profile_database().await?;
     let (store_layout, first_touch) =
@@ -98,35 +81,22 @@ pub(super) async fn open_project_for_handshake_with_health_mode(
         .registered_project_session_database(project_path, &store_layout)
         .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
-    let open_result = if defer_post_open_health {
-        crate::tracedecay::TraceDecay::open_with_registered_configuration_deferred_post_open_health(
-            project_path,
-            open_options.clone(),
-            store_layout.clone(),
-            Arc::clone(&configuration_database),
-            Arc::clone(&registry_database),
-            Arc::clone(&runtime_registry),
-        )
-        .await
-    } else {
-        crate::tracedecay::TraceDecay::open_with_registered_configuration(
-            project_path,
-            open_options.clone(),
-            store_layout.clone(),
-            Arc::clone(&configuration_database),
-            Arc::clone(&registry_database),
-            Arc::clone(&runtime_registry),
-        )
-        .await
-    };
+    // The retired relational graph health/index lane is never spent on the
+    // admission path. Opening establishes the exact registered configuration
+    // and durable store authority; project composition schedules the maintained
+    // bounded code-index owner after publication.
+    let open_result = crate::tracedecay::TraceDecay::open_with_registered_configuration(
+        project_path,
+        open_options.clone(),
+        store_layout.clone(),
+        Arc::clone(&configuration_database),
+        Arc::clone(&registry_database),
+        Arc::clone(&runtime_registry),
+    )
+    .await;
     match open_result {
-        Ok(cg) => {
-            let deferred_post_open_health = defer_post_open_health
-                .then(|| cg.retained_project_store_db())
-                .transpose()?;
-            Ok((cg, deferred_post_open_health))
-        }
-        Err(open_err) if defer_post_open_health && is_readonly_database_error(&open_err) => {
+        Ok(cg) => Ok(cg),
+        Err(open_err) if is_readonly_database_error(&open_err) => {
             match crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
                 project_path,
                 open_options,
@@ -139,18 +109,17 @@ pub(super) async fn open_project_for_handshake_with_health_mode(
             {
                 Ok(cg) => {
                     cg.ensure_schema_current().await?;
-                    Ok((cg, None))
+                    Ok(cg)
                 }
                 Err(_) => Err(open_err),
             }
         }
         Err(open_err) if handshake.allow_init && is_missing_index_error(&open_err) => {
-            // First-touch (or not-yet-indexed) bootstrap: create and index the
-            // store under the daemon's authority. Surface the bootstrap error
-            // itself on failure — the original "no index found" open error is a
-            // misleading symptom that hides the real reason init could not
-            // complete.
-            crate::tracedecay::TraceDecay::init_and_index_with_registered_configuration(
+            // First-touch bootstrap creates the final registered store and
+            // exact configuration authority only. The bounded code-index
+            // activation owner performs indexing after admission, so opening a
+            // project never waits for a repository scan or rebuild.
+            crate::tracedecay::TraceDecay::init_with_registered_configuration(
                 project_path,
                 open_options,
                 store_layout,
@@ -159,7 +128,6 @@ pub(super) async fn open_project_for_handshake_with_health_mode(
                 runtime_registry,
             )
             .await
-            .map(|cg| (cg, None))
         }
         Err(open_err) => Err(open_err),
     }

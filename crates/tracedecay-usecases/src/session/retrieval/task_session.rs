@@ -19,6 +19,7 @@ pub enum TaskSessionRetrievalOutcomeV1 {
     Denied,
     Stale { freshness: SessionDataFreshness },
     Unavailable,
+    ResetRequired,
     BudgetExhausted,
     Cancelled,
 }
@@ -284,6 +285,7 @@ fn map_task_session_execution_error(
         }
         SessionRetrievalOutcome::BudgetExhausted => TaskSessionRetrievalOutcomeV1::BudgetExhausted,
         SessionRetrievalOutcome::Cancelled => TaskSessionRetrievalOutcomeV1::Cancelled,
+        SessionRetrievalOutcome::ResetRequired => TaskSessionRetrievalOutcomeV1::ResetRequired,
         SessionRetrievalOutcome::Unavailable
         | SessionRetrievalOutcome::Complete { .. }
         | SessionRetrievalOutcome::Partial { .. }

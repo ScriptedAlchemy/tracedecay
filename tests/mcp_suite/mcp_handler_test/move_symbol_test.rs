@@ -1,4 +1,8 @@
 use crate::support::*;
+use crate::support::{
+    handle_production_source_edit_tool_call as handle_tool_call,
+    init_production_source_edit_project as init_test_project,
+};
 use serde_json::{Value, json};
 use std::fs;
 #[cfg(unix)]
@@ -9,10 +13,10 @@ use tracedecay::mcp::ToolResult;
 #[tokio::test]
 async fn test_move_symbol_dry_run_reports_impact_and_writes_nothing() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     move_pricing_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let before_orders = fs::read_to_string(project.join("src/orders.rs")).unwrap();
@@ -94,10 +98,10 @@ async fn test_move_symbol_dry_run_reports_impact_and_writes_nothing() {
 #[tokio::test]
 async fn test_move_symbol_resolves_qualified_names_like_bare_names() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     move_pricing_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let before_orders = fs::read_to_string(project.join("src/orders.rs")).unwrap();
@@ -159,7 +163,8 @@ async fn test_move_symbol_resolves_qualified_names_like_bare_names() {
 #[tokio::test]
 async fn test_move_symbol_only_prefers_callable_for_bare_names() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
     fs::write(
@@ -173,7 +178,6 @@ async fn test_move_symbol_only_prefers_callable_for_bare_names() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before_a = fs::read_to_string(project.join("src/a.rs")).unwrap();
     let before_b = fs::read_to_string(project.join("src/b.rs")).unwrap();
@@ -233,10 +237,10 @@ async fn test_move_symbol_only_prefers_callable_for_bare_names() {
 #[tokio::test]
 async fn test_move_symbol_apply_moves_and_rerun_errors_cleanly() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     move_pricing_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -297,7 +301,8 @@ async fn test_move_symbol_apply_moves_and_rerun_errors_cleanly() {
 #[tokio::test]
 async fn test_move_symbol_clean_move_has_empty_impact() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
     fs::write(
@@ -311,7 +316,6 @@ async fn test_move_symbol_clean_move_has_empty_impact() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -337,7 +341,8 @@ async fn test_move_symbol_clean_move_has_empty_impact() {
 #[tokio::test]
 async fn test_move_symbol_dest_collision_refuses() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
     fs::write(
@@ -351,7 +356,6 @@ async fn test_move_symbol_dest_collision_refuses() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before_b = fs::read_to_string(project.join("src/b.rs")).unwrap();
     let result = handle_tool_call(
@@ -382,7 +386,8 @@ async fn test_move_symbol_dest_collision_refuses() {
 #[tokio::test]
 async fn test_move_symbol_private_dependency_hints() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
     fs::write(
@@ -398,7 +403,6 @@ async fn test_move_symbol_private_dependency_hints() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -436,7 +440,8 @@ async fn test_move_symbol_private_dependency_hints() {
 #[tokio::test]
 async fn test_move_symbol_qualified_caller_hint() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
         project.join("src/lib.rs"),
@@ -468,7 +473,6 @@ async fn test_move_symbol_qualified_caller_hint() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -510,7 +514,8 @@ async fn test_move_symbol_qualified_caller_hint() {
 #[tokio::test]
 async fn test_move_symbol_first_in_file_docs_travel() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
     // The doc comment is literally the first line of the file — no module doc,
@@ -527,7 +532,6 @@ async fn test_move_symbol_first_in_file_docs_travel() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -572,10 +576,10 @@ async fn test_move_symbol_first_in_file_docs_travel() {
 #[tokio::test]
 async fn test_move_symbol_dot_prefixed_same_file_refuses() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     move_pricing_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before_pricing = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let result = handle_tool_call(
@@ -610,12 +614,12 @@ async fn test_move_symbol_dot_prefixed_same_file_refuses() {
 #[tokio::test]
 async fn test_move_symbol_symlink_escape_refuses() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     move_pricing_fixture(project).await;
     let outside = tempfile::tempdir().unwrap();
     unix_fs::symlink(outside.path(), project.join("src/escape")).unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let before = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
     let result = handle_tool_call(
@@ -650,7 +654,8 @@ async fn test_move_symbol_symlink_escape_refuses() {
 async fn test_move_symbol_aliases_to_source_refuse() {
     for hard_link in [false, true] {
         let dir = test_temp_dir();
-        let project = dir.path();
+        let project_root = dir.path().join("project");
+        let project = project_root.as_path();
         move_pricing_fixture(project).await;
         let source = project.join("src/pricing.rs");
         let alias = project.join("src/pricing_alias.rs");
@@ -660,7 +665,6 @@ async fn test_move_symbol_aliases_to_source_refuse() {
             unix_fs::symlink(&source, &alias).unwrap();
         }
         let (cg, _env) = init_test_project(project).await;
-        cg.index_all().await.unwrap();
 
         let before = fs::read_to_string(&source).unwrap();
         let result = handle_tool_call(
@@ -695,10 +699,10 @@ async fn test_move_symbol_aliases_to_source_refuse() {
 #[tokio::test]
 async fn test_move_symbol_dot_prefixed_dest_normalizes() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     move_pricing_fixture(project).await;
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -732,7 +736,8 @@ async fn test_move_symbol_dot_prefixed_dest_normalizes() {
 #[tokio::test]
 async fn test_move_symbol_leaves_contiguous_module_doc_behind() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\npub mod b;\n").unwrap();
     // Module doc is contiguous with the first item — no blank line between.
@@ -747,7 +752,6 @@ async fn test_move_symbol_leaves_contiguous_module_doc_behind() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     let result = handle_tool_call(
         &cg,
@@ -793,7 +797,8 @@ async fn test_move_symbol_leaves_contiguous_module_doc_behind() {
 #[tokio::test]
 async fn test_move_symbol_non_utf8_destination_refuses() {
     let dir = test_temp_dir();
-    let project = dir.path();
+    let project_root = dir.path().join("project");
+    let project = project_root.as_path();
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub mod a;\n").unwrap();
     fs::write(
@@ -802,7 +807,6 @@ async fn test_move_symbol_non_utf8_destination_refuses() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
-    cg.index_all().await.unwrap();
 
     // Write an existing destination with invalid UTF-8 bytes AFTER indexing so
     // the indexer never has to parse it.

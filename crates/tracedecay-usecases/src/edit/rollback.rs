@@ -5,7 +5,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::ManifestDigest;
 
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
 
 use super::JOURNAL_VERSION;
@@ -131,7 +131,7 @@ fn persist_pre_effect(
 }
 
 pub(super) async fn execute_source_edit_rollback_inner<A>(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     operation: &ApplicationOperation,
     request: SourceEditRollbackRequestV1,
     authorization: &A,

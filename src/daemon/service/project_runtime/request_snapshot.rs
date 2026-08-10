@@ -5,23 +5,21 @@ use std::sync::Arc;
 
 use crate::application::feedback::concrete::FeedbackRuntime;
 use crate::daemon::service::invocation::{
-    DaemonAdvisoryCycleInvocationOwner, DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
-    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredRetainedRuntime,
-    RegisteredWorkRuntime,
+    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, RegisteredConfigurationRuntime,
+    RegisteredFeedbackRuntime, RegisteredRetainedRuntime, RegisteredWorkRuntime,
 };
 
 use super::ProjectRuntimeRegistryV1;
 
 /// The per-project components one request may need, resolved together.
 #[derive(Default)]
-pub(super) struct ProjectRequestRuntimesV1 {
-    pub(super) feedback: Option<Arc<FeedbackRuntime>>,
-    pub(super) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
-    pub(super) advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
-    pub(super) configuration: Option<RegisteredConfigurationRuntime>,
-    pub(super) work: Option<RegisteredWorkRuntime>,
-    pub(super) retained: Option<RegisteredRetainedRuntime>,
-    pub(super) lsp_owner: Option<DaemonLspInvocationOwner>,
+pub(in crate::daemon::service) struct ProjectRequestRuntimesV1 {
+    pub(in crate::daemon::service) feedback: Option<Arc<FeedbackRuntime>>,
+    pub(in crate::daemon::service) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
+    pub(in crate::daemon::service) configuration: Option<RegisteredConfigurationRuntime>,
+    pub(in crate::daemon::service) work: Option<RegisteredWorkRuntime>,
+    pub(in crate::daemon::service) retained: Option<RegisteredRetainedRuntime>,
+    pub(in crate::daemon::service) lsp_owner: Option<DaemonLspInvocationOwner>,
 }
 
 impl ProjectRuntimeRegistryV1 {
@@ -29,7 +27,7 @@ impl ProjectRuntimeRegistryV1 {
     ///
     /// Only LSP retains canonical-root fallback because it is the sole runtime
     /// historically registered by either spelling of an opened root.
-    pub(super) async fn request_runtimes(
+    pub(in crate::daemon::service) async fn request_runtimes(
         &self,
         project_root: Option<&Path>,
         canonical_root: Option<&Path>,
@@ -43,7 +41,6 @@ impl ProjectRuntimeRegistryV1 {
         ProjectRequestRuntimesV1 {
             feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
-            advisory_cycle: runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
             configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
             work: runtime.and_then(|runtime| runtime.work.clone()),
             retained: runtime.and_then(|runtime| runtime.retained.clone()),

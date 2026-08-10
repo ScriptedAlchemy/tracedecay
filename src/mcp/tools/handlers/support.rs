@@ -165,15 +165,6 @@ fn search_cancelled_error(tool_name: &str) -> TraceDecayError {
     )
 }
 
-/// Trimmed, non-empty string argument by key, or `None` when absent, non-string,
-/// or blank after trimming.
-pub(super) fn string_arg<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
 /// Builds a `Config` error from a message, for argument-validation failures.
 pub(super) fn argument_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Config {
@@ -334,19 +325,6 @@ pub(super) fn effective_path<'a>(
     scope_prefix: Option<&'a str>,
 ) -> Option<&'a str> {
     args.get("path").and_then(|v| v.as_str()).or(scope_prefix)
-}
-
-/// Returns string elements from an optional JSON array argument.
-pub(super) fn string_array_values(args: &Value, key: &str) -> Vec<String> {
-    args.get(key)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Filters a Vec of items by file path prefix when a scope is active.
@@ -728,7 +706,7 @@ mod tests {
 
     use super::{
         CONTEXT_MEMORY_ANALYTICS_KEY, generic_tool_result, is_explicit_project_path_selector,
-        rendered_tool_result, require_node_id, string_array_values,
+        rendered_tool_result, require_node_id,
     };
 
     /// `generic_tool_result` must stay a pure spelling of the closure form it
@@ -836,21 +814,6 @@ mod tests {
                 "unexpected message for {args}: {message}"
             );
         }
-    }
-
-    #[test]
-    fn test_string_array_values_keeps_only_string_items() {
-        let args = json!({
-            "values": ["alpha", 7, null, "beta"],
-            "not_array": "alpha"
-        });
-
-        assert_eq!(
-            string_array_values(&args, "values"),
-            vec!["alpha".to_string(), "beta".to_string()]
-        );
-        assert!(string_array_values(&args, "missing").is_empty());
-        assert!(string_array_values(&args, "not_array").is_empty());
     }
 
     #[test]

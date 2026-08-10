@@ -1245,20 +1245,40 @@ fn finish_global_retention(now: std::time::Instant, succeeded: bool) {
     guard.finish(now, succeeded);
 }
 
+fn global_table_retention_config(
+    config: &crate::config::RetentionConfig,
+) -> crate::retention::RetentionConfig {
+    let (session_messages_days, lcm_raw_messages_days) = if config.session_lcm.enabled {
+        (
+            config.session_lcm.dedupe_projected_after_days,
+            config.session_lcm.drop_after_days,
+        )
+    } else {
+        (None, None)
+    };
+    crate::retention::RetentionConfig {
+        // The root retention tree has no analytics-event window. Disabling
+        // this legacy table is the only mapping that does not invent policy.
+        analytics_events_days: None,
+        session_messages_days,
+        lcm_raw_messages_days,
+    }
+}
+
 /// Applies the configured retention windows to the global telemetry tables,
 /// at most once per [`RETENTION_MIN_INTERVAL_SECS`]. Best-effort: retention is
 /// housekeeping, so failures are logged and never abort a scheduler tick.
 async fn maybe_run_global_retention(
     database: &crate::global_db::RegisteredGlobalDb,
-    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    config: &crate::config::RetentionConfig,
 ) {
     let Some(reservation) = reserve_global_retention(std::time::Instant::now()) else {
         return;
     };
     let now_secs = crate::tracedecay::current_timestamp();
+    let global_config = global_table_retention_config(config);
     let succeeded =
-        match crate::retention::prune_global_retention(database, &config.retention, now_secs).await
-        {
+        match crate::retention::prune_global_retention(database, &global_config, now_secs).await {
             Ok(reports) => {
                 for report in reports {
                     if report.applied && report.rows > 0 {
@@ -1344,7 +1364,8 @@ pub(super) async fn run_automation_scheduler_tick(
         .registered_profile_database()
         .await
     {
-        maybe_run_global_retention(profile_database.as_ref(), config).await;
+        maybe_run_global_retention(profile_database.as_ref(), &cg.get_config().sync.retention)
+            .await;
     }
     let backend = CodexAppServerBackend::from_automation_config(config);
     let authoritative_project_id = cg
@@ -1502,7 +1523,7 @@ pub(super) async fn run_automation_scheduler_tick(
 async fn run_host_receipt_review(
     project_path: &Path,
     cg: &TraceDecay,
-    handshake: &DaemonHandshake,
+    _handshake: &DaemonHandshake,
     engine: &DaemonEngine,
 ) -> Result<()> {
     use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;

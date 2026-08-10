@@ -1,55 +1,25 @@
 use std::sync::Arc;
 
-use serde_json::json;
-
-use crate::branch::BranchAddOutcome;
 use crate::errors::TraceDecayError;
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 use super::{DaemonHandshake, StoreAdministration};
 
 const BRANCH_ADD_TOOL_NAME: &str = "tracedecay_admin_branch_add";
+const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
+
+fn scheduler_unavailable(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route(CODE_INDEX_SCHEDULER_UNAVAILABLE, true, detail)
+}
 
 pub(super) fn coordinated_hook_branch_writer(
-    administration: StoreAdministration,
+    _administration: StoreAdministration,
 ) -> crate::mcp::server::HookBranchWriter {
-    Arc::new(move |mut request| {
-        let administration = administration.clone();
+    Arc::new(move |_request| {
         Box::pin(async move {
-            let canonical_root = request
-                .root
-                .canonicalize()
-                .unwrap_or_else(|_| request.root.clone());
-            // R4: reuse the write's single branch resolution rather than
-            // re-opening the repository ahead of the direct writer's own gates.
-            let active_branch = request.live_branch.resolve_for(&canonical_root);
-            let mounted = administration.mounted_project_graphs().await;
-            if let Some(graph) = mounted.iter().find(|graph| {
-                graph.project_root() == canonical_root
-                    && graph.active_branch() == active_branch.as_deref()
-            }) {
-                request.graph = Arc::clone(graph);
-            } else if !mounted
-                .iter()
-                .any(|graph| Arc::ptr_eq(graph, &request.graph))
-                || request.graph.branch_drifted_with(&request.live_branch)
-            {
-                return Err(TraceDecayError::Config {
-                    message: "retained hook branch graph is unavailable".to_string(),
-                });
-            }
-            // A hook branch write creates and tracks a branch family inside one
-            // store, so it takes that store's owner lane rather than excluding
-            // every other project's writers.
-            let scope = super::branch_admin::graph_writer_scope(
-                &request.graph,
-                super::branch_admin::StoreWriterClass::Owner,
-            );
-            administration
-                .with_writer_in(scope, || async move {
-                    crate::mcp::server::execute_hook_branch_write_direct(request).await
-                })
-                .await
+            Err(scheduler_unavailable(
+                "code-index scheduler authority is unavailable for hook branch activation",
+            ))
         })
     })
 }
@@ -85,11 +55,11 @@ pub(super) fn parse_branch_add_request(line: &str) -> Option<BranchAddRequest> {
 }
 
 pub(super) async fn branch_add_response(
-    administration: &StoreAdministration,
-    handshake: &DaemonHandshake,
+    _administration: &StoreAdministration,
+    _handshake: &DaemonHandshake,
     request: &BranchAddRequest,
 ) -> JsonRpcResponse {
-    let branch = match request.branch.as_deref() {
+    let _branch = match request.branch.as_deref() {
         Ok(branch) => branch,
         Err(message) => {
             return JsonRpcResponse::error(
@@ -100,73 +70,16 @@ pub(super) async fn branch_add_response(
         }
     };
 
-    let result = async {
-        let project_root =
-            handshake
-                .project_path
-                .as_deref()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "branch add requires a project path".to_string(),
-                })?;
-        let canonical_root = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf());
-        let active_branch = crate::branch::current_branch(&canonical_root);
-        let mounted = administration.mounted_project_graphs().await;
-        let cg = mounted
-            .iter()
-            .find(|graph| {
-                graph.project_root() == canonical_root
-                    && graph.active_branch() == active_branch.as_deref()
-            })
-            .or_else(|| {
-                mounted
-                    .iter()
-                    .find(|graph| graph.project_root() == canonical_root)
-            })
-            .cloned()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "retained branch-add graph is unavailable".to_string(),
-            })?;
-        let scope = super::branch_admin::graph_writer_scope(
-            &cg,
-            super::branch_admin::StoreWriterClass::Owner,
-        );
-        administration
-            .with_writer_in(scope, || async {
-                cg.track_worktree_branch(cg.project_root(), branch).await
-            })
-            .await
-    }
-    .await;
-
-    match result {
-        Ok(outcome) => {
-            JsonRpcResponse::success(request.id.clone(), branch_add_tool_result(&outcome))
-        }
-        Err(error) => JsonRpcResponse::error(
-            request.id.clone(),
-            ErrorCode::InternalError,
-            error.to_string(),
-        ),
-    }
-}
-
-fn branch_add_tool_result(outcome: &BranchAddOutcome) -> serde_json::Value {
-    let output = json!({ "outcome": branch_add_outcome_name(outcome) });
-    json!({
-        "content": [{
-            "type": "text",
-            "text": serde_json::to_string(&output).unwrap_or_default(),
-        }]
-    })
-}
-
-fn branch_add_outcome_name(outcome: &BranchAddOutcome) -> &'static str {
-    match outcome {
-        BranchAddOutcome::NotIndexed => "not_indexed",
-        BranchAddOutcome::AlreadyTracked => "already_tracked",
-        BranchAddOutcome::Added => "added",
-        BranchAddOutcome::Deferred => "deferred",
-    }
+    let detail = "code-index scheduler authority is unavailable for branch activation";
+    let error = scheduler_unavailable(detail);
+    JsonRpcResponse::error_with_data(
+        request.id.clone(),
+        ErrorCode::InternalError,
+        error.to_string(),
+        Some(serde_json::json!({
+            "reason_code": CODE_INDEX_SCHEDULER_UNAVAILABLE,
+            "retryable": true,
+            "detail": detail,
+        })),
+    )
 }

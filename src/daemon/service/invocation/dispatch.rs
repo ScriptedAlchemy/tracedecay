@@ -21,6 +21,7 @@ impl DaemonInvocationService {
     /// Executes a closed request after daemon socket authentication.
     /// `lsp_workspace` is supplied only after the daemon has resolved every
     /// requested root through registered project ownership.
+    #[cfg(test)]
     pub(crate) async fn invoke(
         &self,
         lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
@@ -91,7 +92,6 @@ impl DaemonInvocationService {
             )
             .await;
         let feedback_runtime = runtimes.feedback;
-        let advisory_cycle = runtimes.advisory_cycle;
         let observations = feedback_runtime
             .as_ref()
             .map(|runtime| runtime.source_observation_port());
@@ -316,7 +316,6 @@ impl DaemonInvocationService {
             } => {
                 execute_feedback_advisory_cycle(
                     request_id,
-                    advisory_cycle,
                     document_uri,
                     observed_at,
                     deadline,
@@ -640,7 +639,7 @@ impl DaemonInvocationService {
                         DaemonInvocationProblem::NotFoundOrNotAuthorized,
                     );
                 };
-                let Some(registered) = self.work_runtime(Some(project_root)).await else {
+                let Some(registered) = work_runtime.clone() else {
                     return DaemonInvocationResponse::problem(
                         request_id,
                         DaemonInvocationProblem::Unavailable,

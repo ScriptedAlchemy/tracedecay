@@ -1,29 +1,16 @@
 //! Reproducible benchmark harness for `tracedecay bench`.
 //!
-//! Loads a query file (TOML), runs each query through `cg.build_context(...)`,
-//! and reports retrieval savings: how many tokens an agent would have spent
-//! reading the full content of every file referenced, vs the tokens in the
-//! actual context response.
+//! The command surface is retained while the benchmark is remounted on the
+//! admitted code-graph authority. It currently fails closed with a typed
+//! unavailable state instead of reading the retired SQLite graph.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::context::format_context_as_markdown;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
-use crate::types::{BuildContextOptions, OutputFormat as ContextFormat};
-
-#[derive(Debug, Deserialize)]
-struct QueryFile {
-    query: Vec<Query>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct Query {
-    pub task: String,
-}
 
 #[derive(Debug, Serialize)]
 pub struct QueryResult {
@@ -89,75 +76,15 @@ pub async fn run_bench(
 /// Run the bench from an in-memory TOML string. Used by the CLI's default path
 /// (avoids a filesystem dependency on the embedded query set).
 pub async fn run_bench_with_toml(
-    cg: &TraceDecay,
-    toml_str: &str,
-    opts: BenchOptions,
+    _cg: &TraceDecay,
+    _toml_str: &str,
+    _opts: BenchOptions,
 ) -> Result<BenchReport> {
-    let parsed: QueryFile = toml::from_str(toml_str).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to parse query file as TOML: {e}"),
-    })?;
-
-    let mut results = Vec::with_capacity(parsed.query.len());
-    for q in &parsed.query {
-        let options = BuildContextOptions {
-            max_nodes: opts.max_nodes,
-            format: ContextFormat::Markdown,
-            ..Default::default()
-        };
-        let ctx = cg.build_context(&q.task, &options).await?;
-        let markdown = format_context_as_markdown(&ctx);
-        let context_tokens = (markdown.len() / 4) as u64;
-
-        // `related_files` is the deduplicated set of files referenced by the context.
-        let referenced_files = &ctx.related_files;
-        let mut baseline = 0u64;
-        for path in referenced_files {
-            let full = cg.project_root().join(path);
-            if let Ok(bytes) = std::fs::read(&full) {
-                baseline += (bytes.len() / 4) as u64;
-            }
-        }
-        // Safety floor: at least the context itself; prevents 100% savings when no files match.
-        if baseline < context_tokens {
-            baseline = context_tokens;
-        }
-
-        let savings_pct = if baseline == 0 {
-            0.0
-        } else {
-            (baseline.saturating_sub(context_tokens) as f64 / baseline as f64) * 100.0
-        };
-
-        let nodes_returned = ctx.subgraph.nodes.len();
-
-        results.push(QueryResult {
-            task: q.task.clone(),
-            baseline_tokens: baseline,
-            context_tokens,
-            savings_pct,
-            files_referenced: referenced_files.len(),
-            nodes_returned,
-        });
-    }
-
-    let total_baseline: u64 = results.iter().map(|r| r.baseline_tokens).sum();
-    let total_context: u64 = results.iter().map(|r| r.context_tokens).sum();
-    let mean_savings_pct = if results.is_empty() {
-        0.0
-    } else {
-        results.iter().map(|r| r.savings_pct).sum::<f64>() / results.len() as f64
-    };
-
-    let report = BenchReport {
-        aggregate: AggregateReport {
-            queries: results.len(),
-            total_baseline_tokens: total_baseline,
-            total_context_tokens: total_context,
-            mean_savings_pct,
-        },
-        results,
-    };
-    Ok(report)
+    Err(TraceDecayError::ProjectRoute {
+        reason_code: "verified-code-context-benchmark-unavailable".to_owned(),
+        retryable: false,
+        detail: "the benchmark is not yet mounted on an admitted code-graph authority".to_owned(),
+    })
 }
 
 /// Format the report for the terminal: a fixed-width colored table.

@@ -4,6 +4,7 @@ use super::*;
 
 pub(crate) async fn handle_field_sites(
     cg: &TraceDecay,
+    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -28,16 +29,21 @@ pub(crate) async fn handle_field_sites(
     };
 
     let project_root = cg.project_root();
-    let files = cg.get_all_files().await?;
+    let mut symbols_by_file = HashMap::<String, Vec<VerifiedAnalysisSymbol>>::new();
+    for symbol in verified_analysis_symbols(graph, scope_prefix)? {
+        symbols_by_file
+            .entry(symbol.path.clone())
+            .or_default()
+            .push(symbol);
+    }
+    let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
+    files.sort();
     let mut writes: Vec<Value> = Vec::new();
     let mut reads: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
 
     'outer: for file in &files {
-        if !path_matches_optional_scope(&file.path, scope_prefix) {
-            continue;
-        }
-        let abs = project_root.join(&file.path);
+        let abs = project_root.join(file);
         let Ok(source) = crate::sync::read_source_file(&abs) else {
             continue;
         };
@@ -50,23 +56,23 @@ pub(crate) async fn handle_field_sites(
         if sites.is_empty() {
             continue;
         }
-        let nodes = cg.get_nodes_by_file(&file.path).await?;
+        let nodes = symbols_by_file.get(file).map(Vec::as_slice).unwrap_or(&[]);
 
         for site in sites {
             let line_text = line_at(&source, site.byte).unwrap_or("");
             let enclosing = nodes
                 .iter()
-                .filter(|n| n.start_line <= site.line && site.line <= n.end_line)
-                .min_by_key(|n| n.end_line.saturating_sub(n.start_line))
-                .map(|n| n.qualified_name.clone());
+                .filter(|n| n.metadata.start_line <= site.line && site.line <= n.end_line())
+                .min_by_key(|n| n.metadata.line_span)
+                .map(|n| n.metadata.qualified_name.clone());
             let entry = json!({
-                "file": file.path,
+                "file": file,
                 "line": site.line,
                 "enclosing": enclosing,
                 "snippet": line_text.trim(),
             });
-            if !touched.contains(&file.path) {
-                touched.push(file.path.clone());
+            if !touched.contains(file) {
+                touched.push(file.clone());
             }
             match site.kind {
                 FieldRefKind::Write => {

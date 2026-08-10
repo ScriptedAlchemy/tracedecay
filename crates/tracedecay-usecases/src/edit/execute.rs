@@ -6,7 +6,7 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 use tracedecay_graph_db::GraphCancellation;
 
-use crate::tracedecay::TraceDecay;
+use crate::tracedecay::SourceEditRuntime;
 use tracedecay_runtime_core::errors::Result;
 
 use super::JOURNAL_VERSION;
@@ -196,7 +196,7 @@ fn authority_still_matches(
 }
 
 pub(super) async fn execute_source_edit_inner<A>(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
     operation: &ApplicationOperation,
     request: SourceEditEffectRequestV1,
@@ -622,7 +622,7 @@ where
 }
 
 pub(super) async fn resolve_source_edit_preview(
-    graph: &TraceDecay,
+    graph: &SourceEditRuntime,
     code_graph: &dyn crate::graph::CodeGraphProjectionReadPort,
     context: &tracedecay_application::RequestContext,
     observed_at: tracedecay_domain::UtcMicros,

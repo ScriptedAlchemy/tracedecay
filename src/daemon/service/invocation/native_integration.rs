@@ -26,6 +26,11 @@ use super::*;
 
 use tracedecay_application::NATIVE_INTEGRATION_APPLY_OPERATION;
 use tracedecay_application::git::NativeIntegrationApprovalProjectionV1;
+use tracedecay_application::git::{
+    NativeWorktreeSurfaceRequest, NativeWorktreeSurfaceResultV1, WorktreeCleanupReconciliationV1,
+    WorktreeCleanupRemovalV1, WorktreeConfirmationOutcomeV1, WorktreeContractError,
+    WorktreeInspectionOutcomeV1, WorktreeInventoryOutcomeV1,
+};
 use tracedecay_application::{
     CancellationSignal, CancellationState, NativeIntegrationApplyRequestV1,
     NativeIntegrationCancelRequestV1, NativeIntegrationContractError, NativeIntegrationPortError,
@@ -88,6 +93,41 @@ pub(super) async fn execute_native_integration(
     ) {
         Ok(bound) => bound,
         Err(problem) => return application_problem(wire_request_id, problem),
+    };
+
+    let request = match request {
+        NativeIntegrationSurfaceRequest::Worktree(request) => {
+            let result = match owner {
+                Some(owner) => {
+                    execute_worktree_with_owner(owner, request, &cancellation, observed_at).await
+                }
+                None => Ok(worktree_unavailable(
+                    request,
+                    WorktreeUnavailableReasonV1::Unavailable,
+                )),
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(problem) => return application_problem(wire_request_id, problem),
+            };
+            let Ok(payload) = serde_json::to_value(result) else {
+                return DaemonInvocationResponse::problem(
+                    wire_request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            };
+            return match native_integration_evidence(payload, authority, observed_at, deadline) {
+                Ok(outcome) => DaemonInvocationResponse::with_outcome(
+                    wire_request_id,
+                    DaemonInvocationOutcome::NativeIntegration {
+                        scope: registered.scope,
+                        outcome,
+                    },
+                ),
+                Err(problem) => application_problem(wire_request_id, problem),
+            };
+        }
+        request => request,
     };
 
     let owner_mounted = owner.is_some();
@@ -251,7 +291,7 @@ async fn execute_with_owner(
                 Ok(outcome) => {
                     let owner_preview = match &outcome {
                         NativeIntegrationPreflightOutcomeV1::Preview(preview) => {
-                            Some(preview.clone())
+                            Some((**preview).clone())
                         }
                         _ => None,
                     };
@@ -403,7 +443,7 @@ async fn execute_with_owner(
                         if let Some(runtime) = stack_runtime.as_ref()
                             && let Some(stack_signal) =
                                 signal_from_receipt(&signal_scope, &signal_preview, &receipt)
-                                    .map_err(stack_coordinator_contract_error)?
+                                    .map_err(|_| unavailable_native_integration())?
                         {
                             runtime
                                 .enqueue_from_approval(
@@ -411,7 +451,7 @@ async fn execute_with_owner(
                                     &signal_approval,
                                     &signal_context,
                                 )
-                                .map_err(stack_coordinator_contract_error)?;
+                                .map_err(|_| unavailable_native_integration())?;
                         }
                         NativeIntegrationReceiptProjectionV1::project(&receipt)
                             .map(NativeIntegrationSurfaceResultV1::Receipt)
@@ -467,6 +507,158 @@ async fn execute_with_owner(
                     .map(NativeIntegrationExecutionV1::without_preview),
             }
         }
+        NativeIntegrationSurfaceRequest::Worktree(_) => Err(invalid()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WorktreeOperationV1 {
+    Inventory,
+    Inspection,
+    Confirmation,
+    Removal,
+    Reconciliation,
+}
+
+#[derive(Clone, Copy)]
+enum WorktreeUnavailableReasonV1 {
+    Stale,
+    Denied,
+    DurabilityUncertain,
+    Unavailable,
+}
+
+async fn execute_worktree_with_owner(
+    owner: DaemonNativeIntegrationOwner,
+    request: NativeWorktreeSurfaceRequest,
+    cancellation: &CancellationContext,
+    observed_at: UtcMicros,
+) -> Result<NativeWorktreeSurfaceResultV1, ApplicationProblem> {
+    let operation = match &request {
+        NativeWorktreeSurfaceRequest::Inventory(_) => WorktreeOperationV1::Inventory,
+        NativeWorktreeSurfaceRequest::Inspect(_) => WorktreeOperationV1::Inspection,
+        NativeWorktreeSurfaceRequest::Confirm(_) => WorktreeOperationV1::Confirmation,
+        NativeWorktreeSurfaceRequest::Remove(_) => WorktreeOperationV1::Removal,
+        NativeWorktreeSurfaceRequest::Reconcile(_) => WorktreeOperationV1::Reconciliation,
+    };
+    let signal = live_cancellation_signal(cancellation, observed_at)?;
+    let Some(service) = owner.worktree_service_arc() else {
+        return Ok(worktree_unavailable(
+            request,
+            WorktreeUnavailableReasonV1::Unavailable,
+        ));
+    };
+    tokio::task::spawn_blocking(move || {
+        let outcome = match request {
+            NativeWorktreeSurfaceRequest::Inventory(request) => service
+                .inventory(&request, &signal)
+                .map(NativeWorktreeSurfaceResultV1::Inventory),
+            NativeWorktreeSurfaceRequest::Inspect(request) => service
+                .inspect(&request, &signal)
+                .map(NativeWorktreeSurfaceResultV1::Inspection),
+            NativeWorktreeSurfaceRequest::Confirm(request) => service
+                .confirm(&request, &signal)
+                .map(NativeWorktreeSurfaceResultV1::Confirmation),
+            NativeWorktreeSurfaceRequest::Remove(request) => service
+                .remove(&request, &signal)
+                .map(NativeWorktreeSurfaceResultV1::Removal),
+            NativeWorktreeSurfaceRequest::Reconcile(request) => service
+                .reconcile(&request, &signal)
+                .map(NativeWorktreeSurfaceResultV1::Reconciliation),
+        };
+        outcome.or_else(|error| worktree_result_from_error(operation, error))
+    })
+    .await
+    .map_err(|_| unavailable_native_integration())?
+}
+
+fn worktree_result_from_error(
+    operation: WorktreeOperationV1,
+    error: WorktreeContractError,
+) -> Result<NativeWorktreeSurfaceResultV1, ApplicationProblem> {
+    let reason = match error {
+        WorktreeContractError::Domain(_) | WorktreeContractError::Inconsistent { .. } => {
+            return Err(invalid_native_integration_request());
+        }
+        WorktreeContractError::ScopeSetDenied | WorktreeContractError::Denied => {
+            WorktreeUnavailableReasonV1::Denied
+        }
+        WorktreeContractError::Stale => WorktreeUnavailableReasonV1::Stale,
+        WorktreeContractError::DurabilityUncertain => {
+            WorktreeUnavailableReasonV1::DurabilityUncertain
+        }
+        WorktreeContractError::ScopeSetUnavailable
+        | WorktreeContractError::AuthorityUnavailable
+        | WorktreeContractError::Native(_) => WorktreeUnavailableReasonV1::Unavailable,
+    };
+    Ok(worktree_unavailable_for_operation(operation, reason))
+}
+
+fn worktree_unavailable(
+    request: NativeWorktreeSurfaceRequest,
+    reason: WorktreeUnavailableReasonV1,
+) -> NativeWorktreeSurfaceResultV1 {
+    let operation = match request {
+        NativeWorktreeSurfaceRequest::Inventory(_) => WorktreeOperationV1::Inventory,
+        NativeWorktreeSurfaceRequest::Inspect(_) => WorktreeOperationV1::Inspection,
+        NativeWorktreeSurfaceRequest::Confirm(_) => WorktreeOperationV1::Confirmation,
+        NativeWorktreeSurfaceRequest::Remove(_) => WorktreeOperationV1::Removal,
+        NativeWorktreeSurfaceRequest::Reconcile(_) => WorktreeOperationV1::Reconciliation,
+    };
+    worktree_unavailable_for_operation(operation, reason)
+}
+
+fn worktree_unavailable_for_operation(
+    operation: WorktreeOperationV1,
+    reason: WorktreeUnavailableReasonV1,
+) -> NativeWorktreeSurfaceResultV1 {
+    match operation {
+        WorktreeOperationV1::Inventory => NativeWorktreeSurfaceResultV1::Inventory(match reason {
+            WorktreeUnavailableReasonV1::Stale => WorktreeInventoryOutcomeV1::Stale,
+            WorktreeUnavailableReasonV1::Denied => WorktreeInventoryOutcomeV1::Denied,
+            WorktreeUnavailableReasonV1::DurabilityUncertain
+            | WorktreeUnavailableReasonV1::Unavailable => WorktreeInventoryOutcomeV1::Unavailable,
+        }),
+        WorktreeOperationV1::Inspection => {
+            NativeWorktreeSurfaceResultV1::Inspection(match reason {
+                WorktreeUnavailableReasonV1::Stale => WorktreeInspectionOutcomeV1::Stale,
+                WorktreeUnavailableReasonV1::Denied => WorktreeInspectionOutcomeV1::Denied,
+                WorktreeUnavailableReasonV1::DurabilityUncertain
+                | WorktreeUnavailableReasonV1::Unavailable => {
+                    WorktreeInspectionOutcomeV1::Unavailable
+                }
+            })
+        }
+        WorktreeOperationV1::Confirmation => {
+            NativeWorktreeSurfaceResultV1::Confirmation(match reason {
+                WorktreeUnavailableReasonV1::Stale => WorktreeConfirmationOutcomeV1::Stale,
+                WorktreeUnavailableReasonV1::Denied => WorktreeConfirmationOutcomeV1::Denied,
+                WorktreeUnavailableReasonV1::DurabilityUncertain
+                | WorktreeUnavailableReasonV1::Unavailable => {
+                    WorktreeConfirmationOutcomeV1::Unavailable
+                }
+            })
+        }
+        WorktreeOperationV1::Removal => NativeWorktreeSurfaceResultV1::Removal(match reason {
+            WorktreeUnavailableReasonV1::Stale => WorktreeCleanupRemovalV1::Stale,
+            WorktreeUnavailableReasonV1::Denied => WorktreeCleanupRemovalV1::Denied,
+            WorktreeUnavailableReasonV1::DurabilityUncertain => {
+                WorktreeCleanupRemovalV1::DurabilityUncertain
+            }
+            WorktreeUnavailableReasonV1::Unavailable => WorktreeCleanupRemovalV1::Unavailable,
+        }),
+        WorktreeOperationV1::Reconciliation => {
+            NativeWorktreeSurfaceResultV1::Reconciliation(match reason {
+                WorktreeUnavailableReasonV1::Stale => WorktreeCleanupReconciliationV1::Stale,
+                WorktreeUnavailableReasonV1::Denied => WorktreeCleanupReconciliationV1::Denied,
+                WorktreeUnavailableReasonV1::DurabilityUncertain => {
+                    WorktreeCleanupReconciliationV1::DurabilityUncertain
+                }
+                WorktreeUnavailableReasonV1::Unavailable => {
+                    WorktreeCleanupReconciliationV1::Unavailable
+                }
+            })
+        }
     }
 }
 
@@ -505,7 +697,7 @@ fn surface_result_from_contract_error(
 
 /// A live process-local cancellation signal carrying the caller's transport
 /// cancellation identity and any already-observed cancellation.
-fn live_cancellation_signal(
+pub(super) fn live_cancellation_signal(
     cancellation: &CancellationContext,
     observed_at: UtcMicros,
 ) -> Result<CancellationSignal, ApplicationProblem> {

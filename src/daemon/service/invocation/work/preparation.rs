@@ -46,7 +46,6 @@ pub(super) fn prepare_graph_mutation(
 }
 
 pub(super) fn prepare_duplicate_adjudication(
-    registered: &RegisteredWorkRuntime,
     services: &crate::global_db::RegisteredWorkApplicationServicesV1,
     context: &RequestContext,
     request: tracedecay_application::PrepareWorkDuplicateAdjudicationRequestV1,
@@ -87,8 +86,10 @@ pub(super) fn prepare_duplicate_adjudication(
     services.duplicate_adjudications().prepare_adjudication(
         context,
         request,
-        snapshot.generation_id().clone(),
-        topology_generation,
+        tracedecay_domain::WorkDuplicateAdjudicationEvidenceV1 {
+            work_generation: snapshot.generation_id().clone(),
+            topology_generation,
+        },
         command_id,
         observed_at,
     )

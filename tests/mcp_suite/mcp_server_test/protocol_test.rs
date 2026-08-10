@@ -372,9 +372,13 @@ async fn test_tools_call_search() {
 
 #[tokio::test]
 async fn test_tools_call_semantic_failure_sets_is_error() {
-    let (server, _dir) = setup_server().await;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
     let responses = run_server_with_messages(
-        server,
+        std::sync::Arc::clone(&server),
         vec![jsonrpc_request(
             json!(33),
             "tools/call",
@@ -406,6 +410,7 @@ async fn test_tools_call_semantic_failure_sets_is_error() {
         .expect("tool result text");
     let payload: Value = serde_json::from_str(text).expect("tool result JSON");
     assert_eq!(payload["success"], false);
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]
@@ -457,7 +462,7 @@ async fn test_tools_call_timings_enabled_by_default() {
         vec![jsonrpc_request(
             json!(31),
             "tools/call",
-            json!({"name": "tracedecay_search", "arguments": {"query": "helper"}}),
+            json!({"name": "tracedecay_status", "arguments": {"admission_only": true}}),
         )],
     )
     .await;
@@ -485,7 +490,7 @@ async fn test_tools_call_timings_can_be_disabled() {
         vec![jsonrpc_request(
             json!(32),
             "tools/call",
-            json!({"name": "tracedecay_search", "arguments": {"query": "helper"}}),
+            json!({"name": "tracedecay_status", "arguments": {"admission_only": true}}),
         )],
     )
     .await;
@@ -594,7 +599,12 @@ async fn cancellable_tool_call_is_dropped_on_full_peer_close() {
         }
     }
 
-    let (server, _dir) = setup_server().await;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
     let mut requests = std::collections::VecDeque::from([jsonrpc_request(
         json!(44),
         "tools/call",
@@ -617,6 +627,7 @@ async fn cancellable_tool_call_is_dropped_on_full_peer_close() {
         "full peer close must drop the in-flight handler, got {:?}",
         transport.written
     );
+    fixture.harness.shutdown().await;
 }
 
 /// The same full-close path must release a handler that is not in the live
@@ -703,7 +714,12 @@ async fn cancellable_tool_call_is_cancelled_on_peer_read_failure() {
         }
     }
 
-    let (server, _dir) = setup_server().await;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
     let mut transport = PeerLossTransport {
         request: Some(jsonrpc_request(
             json!(42),
@@ -726,6 +742,7 @@ async fn cancellable_tool_call_is_cancelled_on_peer_read_failure() {
         "peer-loss cancellation must not write a tools/call response, got {:?}",
         transport.written
     );
+    fixture.harness.shutdown().await;
 }
 
 /// A write-side peer loss after the request has been accepted must fail the
@@ -753,7 +770,12 @@ async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
         }
     }
 
-    let (server, _dir) = setup_server().await;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    crate::support::warm_code_index_search(&server, "helper").await;
     let mut transport = WriteFailTransport {
         request: Some(jsonrpc_request(
             json!(43),
@@ -770,6 +792,7 @@ async fn cancellable_tool_call_fails_connection_on_peer_write_failure() {
         err.to_string().contains("peer write half gone"),
         "unexpected error: {err}"
     );
+    fixture.harness.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -786,7 +809,7 @@ async fn test_tools_call_status() {
             "tools/call",
             json!({
                 "name": "tracedecay_status",
-                "arguments": {}
+                "arguments": { "format": "json" }
             }),
         )],
     )
@@ -801,16 +824,18 @@ async fn test_tools_call_status() {
         .expect("should have a response for id=40");
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "status should not error");
-    let content = resp["result"]["content"].as_array().unwrap();
-    let text = content
-        .iter()
-        .filter_map(|c| c["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(
-        text.contains("node_count") || text.contains("file_count"),
-        "status response should contain node_count or file_count, got: {}",
-        text
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .expect("status result text");
+    let payload: Value = serde_json::from_str(text).expect("status result JSON");
+    assert_eq!(payload["graph_statistics"]["status"], "unavailable");
+    assert_eq!(
+        payload["graph_statistics"]["reason"],
+        "sealed_generation_statistics_not_published"
+    );
+    assert_eq!(
+        payload["code_index_freshness"]["reason"], "code_index_scheduler_authority_not_attached",
+        "a direct protocol server must report the missing scheduler authority truthfully: {payload}"
     );
 }
 
@@ -1151,8 +1176,8 @@ async fn test_multiple_tool_calls() {
                 json!(103),
                 "tools/call",
                 json!({
-                    "name": "tracedecay_search",
-                    "arguments": { "query": "main" }
+                    "name": "tracedecay_status",
+                    "arguments": { "admission_only": true }
                 }),
             ),
         ],
@@ -1666,13 +1691,11 @@ async fn test_resources_read_status() {
     assert_eq!(contents[0]["mimeType"], "application/json");
 
     let text = contents[0]["text"].as_str().unwrap();
-    assert!(
-        text.contains("node_count"),
-        "status resource should contain node_count"
-    );
-    assert!(
-        text.contains("file_count"),
-        "status resource should contain file_count"
+    let payload: Value = serde_json::from_str(text).expect("status resource JSON");
+    assert_eq!(payload["graph_statistics"]["status"], "unavailable");
+    assert_eq!(
+        payload["graph_statistics"]["reason"],
+        "sealed_generation_statistics_not_published"
     );
 }
 
@@ -1713,13 +1736,9 @@ async fn test_resources_read_files() {
     assert_eq!(contents[0]["mimeType"], "text/plain");
 
     let text = contents[0]["text"].as_str().unwrap();
-    assert!(
-        text.contains("indexed files"),
-        "files resource should contain file count summary"
-    );
-    assert!(
-        text.contains("main.rs"),
-        "files resource should list main.rs"
+    assert_eq!(
+        text,
+        "status: unavailable\nreason: verified_generation_file_inventory_not_admitted"
     );
 }
 
@@ -1765,10 +1784,11 @@ async fn test_resources_read_overview() {
         "overview should start with Project:"
     );
     assert!(
-        text.contains("Graph:"),
-        "overview should contain Graph summary"
+        text.contains(
+            "Graph statistics: unavailable (sealed generation statistics are not published)"
+        ),
+        "overview must report unavailable graph statistics truthfully: {text}"
     );
-    assert!(text.contains("nodes"), "overview should mention nodes");
 }
 
 // ---------------------------------------------------------------------------

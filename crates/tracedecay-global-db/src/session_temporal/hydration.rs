@@ -1148,10 +1148,12 @@ fn hydration_relation_error(
         | SessionRelationError::NotFound
         | SessionRelationError::Unavailable
         | SessionRelationError::Conflict
-        | SessionRelationError::ResetRequired
         | SessionRelationError::DurabilityUncertain
         | SessionRelationError::Corrupt
         | SessionRelationError::Storage(_) => HydrationError::Unavailable,
+        SessionRelationError::ResetRequired => HydrationError::ResetRequired {
+            resource: "session relation projection",
+        },
     }
 }
 

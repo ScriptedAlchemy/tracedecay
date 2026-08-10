@@ -1,20 +1,18 @@
-//! Daemon-owned admission boundary for retained session refreshes.
+//! Daemon-owned admission boundary for retained session refresh status.
 //!
-//! The port returns the public application projection alongside the lower
-//! durable outcome.  MCP may adapt its envelope service to this port, but the
-//! retained application route never consumes MCP view types or `ToolResult`.
+//! The mounted service is shared with MCP, while this adapter independently
+//! binds the retained request to the canonical session application context.
 
-use std::future::Future;
-use std::pin::Pin;
+use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 use tracedecay_application::retained_surfaces::{
     RetainedSurfaceExecutionErrorV1, SessionRefreshActionRequestV1, SessionRefreshActionV1,
-    SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshResultV1,
-    SessionRefreshTemporalModeV1,
+    SessionRefreshGrainV1, SessionRefreshRequestV1, SessionRefreshTemporalModeV1,
 };
 use tracedecay_application::{
-    CancellationSignal, RequestContext, retained_surface_application_operation,
+    CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
+    DisclosureClass, RequestContext, retained_surface_application_operation,
 };
 use tracedecay_domain::{
     ManifestDigest, ProjectId, RepositoryId, RetrievalGrainV1, SessionId, TemporalModeV1,
@@ -24,68 +22,16 @@ use tracedecay_store::SessionRefreshFrontierV1;
 use tracedecay_usecases::context::{
     BranchId, CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId,
     RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
+    session_application_grant_digest,
 };
-use tracedecay_usecases::session::{
-    SessionRefreshCancelDispositionKind, SessionRefreshHandle, SessionRefreshOutcome,
-    SessionRefreshTarget, SessionRequestBinding,
-};
+use tracedecay_usecases::session::{SessionRefreshTarget, SessionRequestBinding};
+
+pub(crate) use crate::mcp::tools::SessionRefreshServicePort as RetainedSessionRefreshPortV1;
+use crate::mcp::tools::{SessionRefreshAction, SessionRefreshCommand};
 
 const REQUEST_MAX_RESULTS: u64 = 64;
 const REQUEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const REQUEST_MAX_WORK_UNITS: u64 = 10_000;
-
-/// Lower action selected by the retained application request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetainedSessionRefreshActionV1 {
-    Begin,
-    Status,
-    Cancel,
-}
-
-/// Public projection action. Begin retains the established start/join
-/// vocabulary at the envelope boundary without making it receipt authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetainedSessionRefreshProjectionActionV1 {
-    Start,
-    Status,
-    Cancel,
-}
-
-/// Fully admitted lower command. All scope, identity, digest, and cancellation
-/// fields are constructed from the retained request context before the port is
-/// invoked.
-#[derive(Clone, Debug)]
-pub(crate) struct RetainedSessionRefreshCommandV1 {
-    pub(crate) action: RetainedSessionRefreshActionV1,
-    pub(crate) projection_action: RetainedSessionRefreshProjectionActionV1,
-    pub(crate) context: RequestContext,
-    pub(crate) binding: SessionRequestBinding,
-    pub(crate) target: SessionRefreshTarget,
-    pub(crate) handle: Option<String>,
-}
-
-/// Exact durable outcome retained with the application projection.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RetainedSessionRefreshExecutionV1 {
-    pub(crate) result: SessionRefreshResultV1,
-    pub(crate) exact: SessionRefreshOutcome,
-    pub(crate) exact_handle: Option<SessionRefreshHandle>,
-    pub(crate) cancel_disposition: Option<SessionRefreshCancelDispositionKind>,
-}
-
-pub(crate) type RetainedSessionRefreshFutureV1<'a> =
-    Pin<Box<dyn Future<Output = RetainedSessionRefreshExecutionV1> + Send + 'a>>;
-
-/// Mounted lower refresh authority for retained application operations.
-///
-/// Implementations may encode a client handle, but must return the exact
-/// lower outcome and handle separately so receipts cannot trust that encoding.
-pub(crate) trait RetainedSessionRefreshPortV1: Send + Sync {
-    fn execute_admitted(
-        &self,
-        command: RetainedSessionRefreshCommandV1,
-    ) -> RetainedSessionRefreshFutureV1<'_>;
-}
 
 pub(crate) fn admitted_session_refresh_command(
     request: &SessionRefreshRequestV1,
@@ -95,7 +41,7 @@ pub(crate) fn admitted_session_refresh_command(
     mounted_session_store_id: &SessionStoreId,
     mounted_session_root_id: &SessionRootId,
     mounted_configuration_digest: &ManifestDigest,
-) -> Result<RetainedSessionRefreshCommandV1, RetainedSurfaceExecutionErrorV1> {
+) -> Result<SessionRefreshCommand, RetainedSurfaceExecutionErrorV1> {
     if cancellation_signal.context().token_id != context.cancellation().token_id {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
@@ -111,29 +57,13 @@ pub(crate) fn admitted_session_refresh_command(
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     }
 
-    let (action, projection_action) = match request.action {
-        SessionRefreshActionV1::Begin => (
-            RetainedSessionRefreshActionV1::Begin,
-            RetainedSessionRefreshProjectionActionV1::Start,
-        ),
-        SessionRefreshActionV1::Status => (
-            RetainedSessionRefreshActionV1::Status,
-            RetainedSessionRefreshProjectionActionV1::Status,
-        ),
-        SessionRefreshActionV1::Cancel => (
-            RetainedSessionRefreshActionV1::Cancel,
-            RetainedSessionRefreshProjectionActionV1::Cancel,
-        ),
-    };
+    if request.action != SessionRefreshActionV1::Status {
+        return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
+    }
+    let action = SessionRefreshAction::Status;
     let selectors = &request.request;
-    match (action, selectors.handle.as_deref()) {
-        (RetainedSessionRefreshActionV1::Begin, Some(_)) => {
-            return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
-        }
-        (RetainedSessionRefreshActionV1::Status | RetainedSessionRefreshActionV1::Cancel, None) => {
-            return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
-        }
-        _ => {}
+    if selectors.handle.is_none() {
+        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
     if selectors
         .handle
@@ -165,10 +95,7 @@ pub(crate) fn admitted_session_refresh_command(
         b"tracedecay.retained.session-refresh.configuration.v1\0",
         mounted_configuration_digest.as_str().as_bytes(),
     ));
-    let cancellation = CancellationToken::for_admitted_application_request(
-        context.cancellation().token_id.as_str(),
-    )
-    .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+    let cancellation = CancellationToken::for_application_request(context.request_id().as_str());
     if context.cancellation().is_cancelled() {
         cancellation.cancel();
     }
@@ -178,19 +105,54 @@ pub(crate) fn admitted_session_refresh_command(
         REQUEST_MAX_WORK_UNITS,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
-    let binding = SessionRequestBinding::for_admitted_context(
+    let grant_digest = session_application_grant_digest(
+        capability_digest,
+        policy_digest,
+        configuration_digest,
+        &cancellation,
+        budgets,
+    )
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+    let expires_at = std::cmp::min(context.grant().expires_at, context.deadline().expires_at);
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.retained.session-refresh")
+            .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+        1,
+        grant_digest,
+        context.actor().clone(),
+        context.grant().issued_at,
+        expires_at,
+        resolved_scope.clone(),
+        BTreeSet::from([operation.capability_id().clone()]),
+        BTreeSet::from([operation.use_case_id().clone()]),
+        DisclosureClass::Evidence,
+    )
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+    let lower_context = RequestContext::new(
+        context.actor().clone(),
+        resolved_scope,
+        grant,
+        context.request_id().clone(),
+        Deadline::new(expires_at).map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+        CancellationContext::active(
+            cancellation
+                .application_token_id()
+                .ok_or(RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+        )
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+    )
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+    let binding = SessionRequestBinding::new(
         identity,
         capability_digest,
         policy_digest,
         configuration_digest,
         cancellation,
         budgets,
-        context.grant().digest.clone(),
     );
-    Ok(RetainedSessionRefreshCommandV1 {
+    Ok(SessionRefreshCommand {
         action,
-        projection_action,
-        context: context.clone(),
+        context: lower_context,
         binding,
         target,
         handle: selectors.handle.clone(),

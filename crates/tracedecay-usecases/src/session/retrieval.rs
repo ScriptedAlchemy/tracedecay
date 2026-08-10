@@ -518,6 +518,7 @@ fn map_execution_error(
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
         SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::ResetRequired => SessionRetrievalOutcome::ResetRequired,
         SessionTemporalExecutionError::Empty { freshness } => {
             SessionRetrievalOutcome::CompleteZero { freshness }
         }
@@ -556,6 +557,7 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
             TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::Unavailable,
+            TemporalPortError::ResetRequired { .. } => SessionRetrievalOutcome::ResetRequired,
             TemporalPortError::InvalidBinding { .. }
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
@@ -598,6 +600,10 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             HydrationError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
                 SessionRetrievalOutcome::BudgetExhausted
             }
+            HydrationError::ResetRequired { .. }
+            | HydrationError::Interrupted(TemporalPortError::ResetRequired { .. }) => {
+                SessionRetrievalOutcome::ResetRequired
+            }
             HydrationError::Unavailable
             | HydrationError::InvalidDenial
             | HydrationError::Interrupted(_) => SessionRetrievalOutcome::Unavailable,
@@ -609,6 +615,9 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             ) => SessionRetrievalOutcome::Cancelled,
             ContextError::Interrupted(TemporalPortError::BudgetExceeded { .. }) => {
                 SessionRetrievalOutcome::BudgetExhausted
+            }
+            ContextError::Interrupted(TemporalPortError::ResetRequired { .. }) => {
+                SessionRetrievalOutcome::ResetRequired
             }
             ContextError::EstimatorVersionMismatch
             | ContextError::InvalidBundle(_)
@@ -910,6 +919,25 @@ mod tests {
             map_kernel_error(TemporalKernelError::Port(
                 TemporalPortError::EmptyParticipantManifest,
             )),
+            SessionRetrievalOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn persisted_reset_and_unavailable_remain_distinct() {
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Port(
+                TemporalPortError::ResetRequired {
+                    resource: "session relation projection",
+                },
+            )),
+            SessionRetrievalOutcome::ResetRequired
+        );
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Port(TemporalPortError::Read {
+                operation: "read temporal candidates",
+                message: "unavailable".to_owned(),
+            })),
             SessionRetrievalOutcome::Unavailable
         );
     }

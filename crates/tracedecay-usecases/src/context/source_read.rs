@@ -8,9 +8,9 @@ use super::read_modes::{
     self, LineRange, ReadMode, render_full, render_lines, render_map, render_signatures,
     render_symbol_context,
 };
-use crate::tracedecay::TraceDecay;
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_graph_db::GraphCancellation;
+use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::storage::ProjectPath;
 
@@ -35,7 +35,9 @@ pub struct SourceReadOutput {
 }
 
 pub async fn read_source(
-    graph: &TraceDecay,
+    project_root: &Path,
+    database: &Database,
+    read_only: bool,
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
     request: SourceReadRequest<'_>,
@@ -49,17 +51,13 @@ pub async fn read_source(
         project_id,
     } = request;
     let (absolute_path, display_file) =
-        resolve_indexed_source_file(graph, reader, Arc::clone(&cancellation), file)?;
+        resolve_indexed_source_file(project_root, reader, Arc::clone(&cancellation), file)?;
     let mtime_ns =
         read_cache::file_mtime_ns(&absolute_path).map_err(|error| TraceDecayError::Config {
             message: format!("cannot read file metadata for '{file}': {error}"),
         })?;
     let last_sync_at = if matches!(mode, ReadMode::Map | ReadMode::Signatures) {
-        graph
-            .db()
-            .get_metadata("last_sync_at")
-            .await
-            .unwrap_or(None)
+        database.get_metadata("last_sync_at").await?
     } else {
         None
     };
@@ -68,7 +66,7 @@ pub async fn read_source(
         "last_sync_at": last_sync_at,
     }))?;
 
-    let cache_connection = graph.db().engine_conn();
+    let cache_connection = database.engine_conn();
     if let Some(cached) = read_cache::get(
         &cache_connection,
         project_id,
@@ -145,9 +143,9 @@ pub async fn read_source(
     )?;
     let token_count = read_modes::estimate_tokens(&body);
     let digest = read_cache::digest_bytes(body.as_bytes());
-    if !graph.is_read_only() {
+    if !read_only {
         read_cache::put(
-            graph.db(),
+            database,
             project_id,
             GLOBAL_SESSION,
             &display_file,
@@ -173,7 +171,7 @@ pub async fn read_source(
 }
 
 pub fn resolve_indexed_source_file(
-    graph: &TraceDecay,
+    project_root: &Path,
     reader: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
     file: &str,
@@ -184,9 +182,8 @@ pub fn resolve_indexed_source_file(
         });
     }
 
-    let project_root = graph.project_root().to_path_buf();
     let input = Path::new(file);
-    if let Ok(project_path) = ProjectPath::resolve(&project_root, input) {
+    if let Ok(project_path) = ProjectPath::resolve(project_root, input) {
         let display_file = match relative_source_key(input)? {
             Some(relative) => relative,
             None => project_path.relative_path_string(),
@@ -196,7 +193,7 @@ pub fn resolve_indexed_source_file(
 
     let display_file = if let Some(relative) = relative_source_key(input)? {
         relative
-    } else if let Some(relative) = absolute_source_key(&project_root, input)? {
+    } else if let Some(relative) = absolute_source_key(project_root, input)? {
         relative
     } else {
         return Err(TraceDecayError::Config {

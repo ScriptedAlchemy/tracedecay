@@ -204,6 +204,7 @@ async fn skill_writer_skips_when_replay_disabled_and_no_grep_hits() {
     let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         &retrieval,
         SkillWriterAutomationOptions {
@@ -624,6 +625,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         &FixtureAutomationSessionRetrieval::new(&cg),
         manual_skill_writer_options(&profile_root),
@@ -659,6 +661,7 @@ async fn skill_writer_evidence_includes_underused_tool_family_summary() {
     let run = run_skill_writer_with_backend_and_retrieval(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         &FixtureAutomationSessionRetrieval::new(&cg),
         SkillWriterAutomationOptions {

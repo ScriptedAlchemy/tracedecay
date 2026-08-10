@@ -1,6 +1,4 @@
-//! Branch tracking: auto-tracking the active branch on a registered open,
-//! adding/syncing new tracked branches, resolving which DB file serves a
-//! branch, and opening a specific tracked branch's snapshot.
+//! Branch provenance resolution and opening a tracked branch snapshot.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -13,297 +11,15 @@ use crate::config::{
     materialize_root_runtime_configuration,
 };
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::db::{DatabaseAccessMode, DatabaseAuthority};
+use crate::db::DatabaseAccessMode;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::StoreLayout;
-use tracedecay_code_extraction::LanguageRegistry;
 use tracedecay_usecases::config::open_runtime_configuration_for_registered_database_read_only;
 
-use super::recovery::active_graph_layout;
 use super::{TraceDecay, TraceDecayOpenOptions};
 
 impl TraceDecay {
-    pub(crate) async fn track_worktree_branch(
-        &self,
-        worktree_root: &Path,
-        branch_name: &str,
-    ) -> Result<branch::BranchAddOutcome> {
-        let prepared = branch::prepare_branch_tracking_in_layout(
-            worktree_root,
-            branch_name,
-            &self.store_layout.data_root,
-        )
-        .await?;
-        let branch::BranchTrackingPreparation::Added(prepared) = prepared else {
-            return Ok(match prepared {
-                branch::BranchTrackingPreparation::AlreadyTracked => {
-                    branch::BranchAddOutcome::AlreadyTracked
-                }
-                branch::BranchTrackingPreparation::Deferred => branch::BranchAddOutcome::Deferred,
-                branch::BranchTrackingPreparation::Added(_) => unreachable!(),
-            });
-        };
-
-        let sync_result = self
-            .sync_retained_worktree_branch(worktree_root, branch_name)
-            .await;
-        if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
-            return Ok(branch::BranchAddOutcome::Deferred);
-        } else if let Err(error) = sync_result {
-            return match branch::rollback_prepared_branch_tracking(
-                &self.store_layout.data_root,
-                &prepared,
-            ) {
-                Ok(()) => Err(error),
-                Err(rollback_error) => Err(TraceDecayError::Config {
-                    message: format!(
-                        "branch sync failed: {error}; published branch rollback also failed: \
-                         {rollback_error}"
-                    ),
-                }),
-            };
-        }
-
-        branch::finalize_prepared_branch_tracking(&self.store_layout.data_root, &prepared);
-        Ok(branch::BranchAddOutcome::Added)
-    }
-
-    pub(crate) async fn sync_retained_worktree_branch(
-        &self,
-        worktree_root: &Path,
-        branch_name: &str,
-    ) -> Result<Self> {
-        let database_path = &self.store_layout.graph_db_path;
-        let db = self
-            .store_runtime_registry
-            .project_graph_registered(
-                Self::registered_project_id(&self.store_layout)?,
-                database_path.clone(),
-                DatabaseAccessMode::ReadWrite,
-            )
-            .await?;
-        let branch_graph = Self {
-            db,
-            profile_database: Arc::clone(&self.profile_database),
-            store_runtime_registry: Arc::clone(&self.store_runtime_registry),
-            config: self.config.clone(),
-            configuration_runtime: Arc::clone(&self.configuration_runtime),
-            project_root: worktree_root
-                .canonicalize()
-                .unwrap_or_else(|_| worktree_root.to_path_buf()),
-            store_layout: self.store_layout.clone(),
-            active_graph_layout: active_graph_layout(database_path),
-            open_options: self.open_options.clone(),
-            registry: LanguageRegistry::new(),
-            active_branch: Some(branch_name.to_owned()),
-            serving_branch: Some(branch_name.to_owned()),
-            fallback_warning: None,
-            read_only: false,
-            db_path_cache: OnceLock::new(),
-            context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::default(),
-            #[cfg(any(test, feature = "test-transport"))]
-            test_runtime_guard: self.test_runtime_guard.clone(),
-            standalone_maintenance_scope: self.standalone_maintenance_scope.clone(),
-        };
-
-        let mut attempts = 0;
-        let sync_error = loop {
-            match branch_graph.sync_checkpointed().await {
-                Ok(_) => {
-                    branch_graph
-                        .register_project_store_in_global_registry()
-                        .await?;
-                    return Ok(branch_graph);
-                }
-                Err(TraceDecayError::SyncLock { .. }) if attempts < 20 => {
-                    attempts += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                Err(error) => break error,
-            }
-        };
-        drop(branch_graph);
-        Err(sync_error)
-    }
-
-    /// Silently bootstraps/maintains tracedecay branch tracking for `branch_name`.
-    ///
-    /// This is the library-level core shared with the `tracedecay branch add`
-    /// CLI command and hook integrations. It loads or bootstraps branch
-    /// metadata, no-ops when the branch is already tracked, otherwise copies
-    /// the nearest tracked ancestor's DB and runs an incremental sync against
-    /// the new branch DB.
-    pub async fn add_branch_tracking(
-        project_root: &Path,
-        branch_name: &str,
-    ) -> Result<branch::BranchAddOutcome> {
-        Self::add_branch_tracking_with_options(
-            project_root,
-            branch_name,
-            TraceDecayOpenOptions::default(),
-        )
-        .await
-    }
-
-    pub async fn add_branch_tracking_with_options(
-        project_root: &Path,
-        branch_name: &str,
-        open_options: TraceDecayOpenOptions,
-    ) -> Result<branch::BranchAddOutcome> {
-        let store_layout = match Self::resolve_store_layout_for_project(project_root, &open_options)
-            .await
-        {
-            Ok(layout) => layout,
-            Err(TraceDecayError::Config { .. }) => return Ok(branch::BranchAddOutcome::NotIndexed),
-            Err(err) => return Err(err),
-        };
-
-        if !store_layout.graph_db_path.is_file() {
-            return Ok(branch::BranchAddOutcome::NotIndexed);
-        }
-
-        // Branch preparation copies a live SQLite store and rewrites metadata;
-        // reject non-daemon callers before either filesystem mutation occurs.
-        let _authority =
-            DatabaseAuthority::for_runtime(&store_layout.graph_db_path, "add branch tracking")?;
-        Self::add_branch_tracking_in_layout(
-            project_root,
-            branch_name,
-            &store_layout.data_root,
-            open_options,
-        )
-        .await
-    }
-
-    async fn add_branch_tracking_in_layout(
-        project_root: &Path,
-        branch_name: &str,
-        tracedecay_dir: &Path,
-        open_options: TraceDecayOpenOptions,
-    ) -> Result<branch::BranchAddOutcome> {
-        let prepared =
-            branch::prepare_branch_tracking_in_layout(project_root, branch_name, tracedecay_dir)
-                .await?;
-        let branch::BranchTrackingPreparation::Added(prepared) = prepared else {
-            return Ok(match prepared {
-                branch::BranchTrackingPreparation::AlreadyTracked => {
-                    branch::BranchAddOutcome::AlreadyTracked
-                }
-                branch::BranchTrackingPreparation::Deferred => branch::BranchAddOutcome::Deferred,
-                branch::BranchTrackingPreparation::Added(_) => unreachable!(),
-            });
-        };
-
-        let sync_result = Self::sync_new_branch_with_retries(
-            project_root,
-            branch_name,
-            tracedecay_dir,
-            open_options,
-        )
-        .await;
-        if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
-            return Ok(branch::BranchAddOutcome::Deferred);
-        } else if let Err(e) = sync_result {
-            return match branch::rollback_prepared_branch_tracking(tracedecay_dir, &prepared) {
-                Ok(()) => Err(e),
-                Err(rollback_error) => Err(TraceDecayError::Config {
-                    message: format!(
-                        "branch sync failed: {e}; published branch rollback also failed: {rollback_error}"
-                    ),
-                }),
-            };
-        }
-
-        branch::finalize_prepared_branch_tracking(tracedecay_dir, &prepared);
-        Ok(branch::BranchAddOutcome::Added)
-    }
-
-    async fn sync_new_branch_with_retries(
-        project_root: &Path,
-        branch_name: &str,
-        expected_data_root: &Path,
-        open_options: TraceDecayOpenOptions,
-    ) -> Result<()> {
-        #[cfg(any(test, feature = "test-transport"))]
-        let _test_runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
-
-        let profile_root = open_options.resolved_profile_root()?;
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
-        let profile_database = runtime_registry.profile_database().await?;
-        let store_layout = Self::resolve_registered_configuration_layout(
-            project_root,
-            &open_options,
-            profile_database.as_ref(),
-        )
-        .await?;
-        if store_layout.data_root != expected_data_root {
-            return Err(TraceDecayError::Config {
-                message: "branch sync resolved a different registered project store".to_owned(),
-            });
-        }
-        let project_id = Self::registered_project_id(&store_layout)?;
-        let enrollment_roots = Self::registered_enrollment_roots(
-            project_root,
-            &store_layout,
-            &project_id,
-            profile_database.as_ref(),
-        )
-        .await?;
-        let configuration_database = runtime_registry
-            .project_sessions(project_id, enrollment_roots)
-            .await?;
-        Self::sync_new_branch_with_registered_configuration(
-            project_root,
-            branch_name,
-            open_options,
-            store_layout,
-            configuration_database,
-            profile_database,
-            runtime_registry,
-        )
-        .await
-    }
-
-    async fn sync_new_branch_with_registered_configuration(
-        project_root: &Path,
-        branch_name: &str,
-        open_options: TraceDecayOpenOptions,
-        store_layout: StoreLayout,
-        configuration_database: Arc<RegisteredGlobalDb>,
-        profile_database: Arc<RegisteredGlobalDb>,
-        runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
-    ) -> Result<()> {
-        let mut attempts = 0;
-        loop {
-            let graph = Self::open_branch_with_registered_configuration_access(
-                project_root,
-                branch_name,
-                open_options.clone(),
-                store_layout.clone(),
-                Arc::clone(&configuration_database),
-                Arc::clone(&profile_database),
-                Arc::clone(&runtime_registry),
-                DatabaseAccessMode::ReadWrite,
-                "sync newly tracked branch",
-                false,
-            )
-            .await?;
-            let sync_result = graph.sync().await;
-            drop(graph);
-            match sync_result {
-                Ok(_) => return Ok(()),
-                Err(TraceDecayError::SyncLock { .. }) if attempts < 20 => {
-                    attempts += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
     /// Resolves the serving-branch provenance for a given live branch.
     ///
     /// Returns `(db_path, serving_branch, fallback_warning)`. Every branch is
@@ -397,7 +113,7 @@ impl TraceDecay {
                 maintenance.lifecycle(),
             )
             .await?;
-            graph.standalone_maintenance_scope = Some(maintenance);
+            graph._standalone_maintenance_scope = Some(maintenance);
             Ok(graph)
         }
     }
@@ -498,7 +214,6 @@ impl TraceDecay {
             });
         }
         let db_path = store_layout.graph_db_path.clone();
-        let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -539,19 +254,16 @@ impl TraceDecay {
             configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
-            active_graph_layout,
             open_options,
-            registry: LanguageRegistry::new(),
             active_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
             serving_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
             fallback_warning: None,
             read_only,
             db_path_cache: OnceLock::new(),
             context_scout_owner: None,
-            context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
-            standalone_maintenance_scope: None,
+            _standalone_maintenance_scope: None,
         })
     }
 }

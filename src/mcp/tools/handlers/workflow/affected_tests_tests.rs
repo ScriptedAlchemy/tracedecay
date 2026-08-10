@@ -1,9 +1,207 @@
 use super::*;
 
+use std::fmt::Debug;
+use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
+use tracedecay_application::CancellationSignal;
+use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
+use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_domain::{
+    BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ContentDigest,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, PolicyRevisionId,
+    RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+};
+use tracedecay_graph_db::NeverCancelled;
+
 #[allow(dead_code)]
 fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
     fn assert_send<T: Send>(_: T) {}
     assert_send(begin_test_run(cg, &[], deadline, None));
+}
+
+#[derive(Clone, Copy)]
+struct FixtureSymbol<'a> {
+    path: &'a str,
+    qualified_name: &'a str,
+    annotated_test: bool,
+}
+
+fn fixture_id<T>(value: impl Into<String>) -> T
+where
+    T: TryFrom<String>,
+    T::Error: Debug,
+{
+    T::try_from(value.into()).expect("valid fixture identity")
+}
+
+fn fixture_digest<T>(kind: &str, value: &str) -> T
+where
+    T: TryFrom<String>,
+    T::Error: Debug,
+{
+    let mut hasher = Sha256::new();
+    hasher.update(kind.as_bytes());
+    hasher.update([0]);
+    hasher.update(value.as_bytes());
+    fixture_id(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn verified_graph(
+    fixture_symbols: &[FixtureSymbol<'_>],
+) -> crate::tracedecay::queries::graph::VerifiedGraphQuery {
+    let generation = fixture_id::<CodeGenerationId>("generation.affected-tests.1");
+    let mut files = Vec::new();
+    let mut chunks = Vec::new();
+    let mut symbols = Vec::new();
+    let mut edges = Vec::new();
+    let mut file_occurrences = HashMap::<&str, FileOccurrenceId>::new();
+
+    for (ordinal, fixture) in fixture_symbols.iter().enumerate() {
+        let file = match file_occurrences.get(fixture.path) {
+            Some(occurrence) => occurrence.clone(),
+            None => {
+                let occurrence: FileOccurrenceId =
+                    fixture_id(format!("file.{}", file_occurrences.len()));
+                files.push(SanitizedCodeFileV1 {
+                    file_occurrence_id: occurrence.clone(),
+                    logical_path: fixture.path.to_owned(),
+                    language: Some(LanguageId::new("rust").expect("valid fixture language")),
+                    content_digest: fixture_digest("file", fixture.path),
+                    disposition: SnapshotFileDispositionV1::Present,
+                });
+                file_occurrences.insert(fixture.path, occurrence.clone());
+                occurrence
+            }
+        };
+        let occurrence = fixture_id::<SymbolOccurrenceId>(format!("symbol.{ordinal}"));
+        push_fixture_symbol(
+            &generation,
+            &file,
+            fixture.path,
+            &occurrence,
+            fixture.qualified_name,
+            "function",
+            u32::try_from(chunks.len()).expect("fixture chunk ordinal"),
+            &mut symbols,
+            &mut chunks,
+        );
+        if fixture.annotated_test {
+            let marker = fixture_id::<SymbolOccurrenceId>(format!("annotation.{ordinal}"));
+            push_fixture_symbol(
+                &generation,
+                &file,
+                fixture.path,
+                &marker,
+                "test",
+                "annotation_usage",
+                u32::try_from(chunks.len()).expect("fixture chunk ordinal"),
+                &mut symbols,
+                &mut chunks,
+            );
+            edges.push(CanonicalRelationEdgeV1 {
+                from_occurrence: marker,
+                to_occurrence: occurrence,
+                kind: RelationEdgeKindV1::Annotates,
+                authority: EdgeAuthorityV1::SyntaxExact,
+                evidence_span: SourceSpan {
+                    start_byte: 0,
+                    end_byte: 1,
+                },
+            });
+        }
+    }
+
+    let symbols = GenerationSymbolIndexV1::new(generation.clone(), symbols)
+        .expect("valid fixture symbol index");
+    let cancellation = CancellationSignal::active("cancellation.affected-tests.fixture")
+        .expect("valid fixture cancellation");
+    let store = HermeticCodeGraphProjectionStore::memory(&cancellation)
+        .expect("open hermetic fixture projection");
+    store
+        .publish_indexed_with_cancellation(
+            &generation,
+            &edges,
+            &chunks,
+            &files,
+            &symbols,
+            Arc::new(NeverCancelled),
+        )
+        .expect("publish indexed fixture generation");
+    let store = store
+        .verified_store(&generation)
+        .expect("open verified fixture generation");
+    let graph_cancellation =
+        tracedecay_usecases::graph::application_graph_cancellation(&cancellation);
+    let reader = store
+        .interactive_reader_with_cancellation(&generation, Arc::clone(&graph_cancellation))
+        .expect("open generation-pinned fixture reader");
+    crate::tracedecay::queries::graph::VerifiedGraphQuery::from_reader(reader, graph_cancellation)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_fixture_symbol(
+    generation: &CodeGenerationId,
+    file: &FileOccurrenceId,
+    path: &str,
+    occurrence: &SymbolOccurrenceId,
+    qualified_name: &str,
+    kind: &str,
+    ordinal: u32,
+    symbols: &mut Vec<LineageSymbolRecordV1>,
+    chunks: &mut Vec<CodeSearchChunkV1>,
+) {
+    symbols.push(LineageSymbolRecordV1 {
+        occurrence: occurrence.clone(),
+        identity: fixture_digest("symbol-identity", occurrence.as_str()),
+        qualified_name: qualified_name.to_owned(),
+        simple_name: qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(qualified_name)
+            .to_owned(),
+        kind: kind.to_owned(),
+        visibility: "private".to_owned(),
+        branches: 0,
+        loops: 0,
+        max_nesting: 0,
+        line_span: 1,
+        start_line: ordinal,
+        signature: None,
+        skip_test_coverage: false,
+        file_identity: fixture_digest("file-identity", path),
+        content_digest: fixture_digest("symbol-content", occurrence.as_str()),
+    });
+    chunks.push(CodeSearchChunkV1 {
+        id: fixture_id(format!("chunk.{ordinal}")),
+        anchor: CodeSearchChunkAnchorV1 {
+            generation_id: generation.clone(),
+            file_occurrence_id: file.clone(),
+            symbol_occurrence_id: Some(occurrence.clone()),
+            parent_chunk_id: None,
+            source_span: SourceSpan {
+                start_byte: u64::from(ordinal),
+                end_byte: u64::from(ordinal) + 1,
+            },
+            grain: CodeSearchChunkGrainV1::SymbolBody,
+            ordinal,
+        },
+        content_digest: fixture_digest::<ContentDigest>("chunk", occurrence.as_str()),
+        language_descriptor_revision: fixture_id::<LanguageDescriptorRevision>(
+            "language.rust.fixture.v1",
+        ),
+        chunker_revision: fixture_id::<ChunkerRevision>("chunker.fixture.v1"),
+        sanitizer_revision: fixture_id::<SanitizerRevision>("sanitizer.fixture.v1"),
+        sensitivity: SensitivityDecision {
+            level: SensitivityLevelV1::Public,
+            policy_revision: fixture_id::<PolicyRevisionId>("policy.fixture.v1"),
+        },
+        exact_terms: Vec::new(),
+        subtokens: Vec::new(),
+        sanitized_text: BoundedSanitizedText::new("fixture symbol").expect("bounded fixture text"),
+    });
 }
 
 #[tokio::test]
@@ -31,7 +229,6 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
     {
         let database = cg.dashboard_database_guard();
         database
@@ -42,9 +239,22 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
             .await
             .unwrap();
     }
+    let graph = verified_graph(&[
+        FixtureSymbol {
+            path: "tests/edited_only.rs",
+            qualified_name: "nested::first",
+            annotated_test: false,
+        },
+        FixtureSymbol {
+            path: "tests/edited_only.rs",
+            qualified_name: "nested::second",
+            annotated_test: false,
+        },
+    ]);
     let expected_root = project.to_path_buf();
     let result = handle_run_affected_tests_with_runner(
         &cg,
+        &graph,
         json!({
             "changed_paths": ["tests/edited_only.rs"],
             "timeout_secs": 60,
@@ -144,7 +354,6 @@ async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
     {
         let database = cg.dashboard_database_guard();
         database
@@ -156,9 +365,15 @@ async fn nested_source_module_dispatches_the_crate_relative_test_identity() {
             .unwrap();
     }
 
+    let graph = verified_graph(&[FixtureSymbol {
+        path: "src/auth/login.rs",
+        qualified_name: "tests::successful_login_creates_session",
+        annotated_test: true,
+    }]);
     const EXPECTED: &str = "auth::login::tests::successful_login_creates_session";
     let result = handle_run_affected_tests_with_runner(
         &cg,
+        &graph,
         json!({
             "changed_paths": ["src/auth/login.rs"],
             "timeout_secs": 60,
@@ -215,8 +430,14 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
     .await
     .unwrap();
 
+    let graph = verified_graph(&[FixtureSymbol {
+        path: "src/lib.rs",
+        qualified_name: "util",
+        annotated_test: false,
+    }]);
     let result = handle_run_affected_tests_with_runner(
         &cg,
+        &graph,
         json!({
             "changed_paths": ["tests/valid.rs", 7],
             "format": "json"
@@ -310,7 +531,6 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
     {
         let database = cg.dashboard_database_guard();
         database
@@ -322,8 +542,14 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
             .unwrap();
     }
 
+    let graph = verified_graph(&[FixtureSymbol {
+        path: "tests/edited.rs",
+        qualified_name: "timed_target",
+        annotated_test: false,
+    }]);
     let result = handle_run_affected_tests_with_runner(
         &cg,
+        &graph,
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -374,7 +600,6 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
     {
         let database = cg.dashboard_database_guard();
         database
@@ -386,8 +611,21 @@ async fn cancellation_retains_results_completed_before_the_later_test() {
             .unwrap();
     }
 
+    let graph = verified_graph(&[
+        FixtureSymbol {
+            path: "tests/edited.rs",
+            qualified_name: "first",
+            annotated_test: false,
+        },
+        FixtureSymbol {
+            path: "tests/edited.rs",
+            qualified_name: "second",
+            annotated_test: false,
+        },
+    ]);
     let result = handle_run_affected_tests_with_runner(
         &cg,
+        &graph,
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -442,7 +680,6 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
     {
         let database = cg.dashboard_database_guard();
         database
@@ -454,8 +691,14 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
             .unwrap();
     }
 
+    let graph = verified_graph(&[FixtureSymbol {
+        path: "tests/edited.rs",
+        qualified_name: "selected_target",
+        annotated_test: false,
+    }]);
     let vacuous = handle_run_affected_tests_with_runner(
         &cg,
+        &graph,
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -474,6 +717,7 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
 
     let nonzero = handle_run_affected_tests_with_runner(
         &cg,
+        &graph,
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,
@@ -518,7 +762,6 @@ async fn reported_passing_and_failing_tests_complete_with_observed_results() {
     )
     .await
     .unwrap();
-    cg.index_all().await.unwrap();
     {
         let database = cg.dashboard_database_guard();
         database
@@ -530,8 +773,21 @@ async fn reported_passing_and_failing_tests_complete_with_observed_results() {
             .unwrap();
     }
 
+    let graph = verified_graph(&[
+        FixtureSymbol {
+            path: "tests/edited.rs",
+            qualified_name: "passing_target",
+            annotated_test: false,
+        },
+        FixtureSymbol {
+            path: "tests/edited.rs",
+            qualified_name: "failing_target",
+            annotated_test: false,
+        },
+    ]);
     let result = handle_run_affected_tests_with_runner(
         &cg,
+        &graph,
         json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
         None,
         None,

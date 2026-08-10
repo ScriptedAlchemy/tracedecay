@@ -131,6 +131,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::retention::orphan_stores::{StoreContentFence, StoreDirectoryFence};
 
     fn orphan_finding(disposition: StoreDisposition) -> OrphanStoreFinding {
         OrphanStoreFinding {
@@ -144,6 +145,8 @@ mod tests {
             expected_created_at: 0,
             expected_last_write_at: None,
             expected_payload_mtime_secs: 0,
+            expected_data_root_fence: StoreDirectoryFence::Unverifiable,
+            expected_content_fence: StoreContentFence::Unverifiable,
             expected_manifest_bytes: None,
             graph_scope_relpaths: Vec::new(),
         }
@@ -178,6 +181,8 @@ mod tests {
             age_secs: 1_000_000,
             size_bytes: 4096,
             expected_payload_mtime_secs: 0,
+            expected_data_root_fence: StoreDirectoryFence::Unverifiable,
+            expected_content_fence: StoreContentFence::Unverifiable,
         };
         let typed = unregistered_store_doctor_finding(&finding)
             .expect("unregistered directory produces a typed finding");

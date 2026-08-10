@@ -64,6 +64,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) hook_branch_writer: HookBranchWriter,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
+    pub(crate) code_index_reconcile_sink: Option<super::CodeIndexReconcileSink>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
@@ -77,6 +78,10 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
     pub(crate) daemon_invocation_service: Option<crate::daemon::DaemonInvocationService>,
+    pub(crate) delivery_settlement_authority:
+        Option<Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>>,
+    pub(crate) delivery_settlement_recorder:
+        Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
     pub(crate) project_server_live: Option<Arc<AtomicBool>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
@@ -112,6 +117,10 @@ pub(crate) struct McpServerDaemonAuthority {
     pub(crate) database_owner_reconciler: DatabaseOwnerReconciler,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) writers: McpServerWriters,
+    pub(crate) delivery_settlement_authority:
+        Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
+    pub(crate) delivery_settlement_recorder:
+        Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
 }
 
 pub(crate) struct McpServerDaemonCoreAuthority {
@@ -167,6 +176,7 @@ impl McpServerConstructionContext {
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
+            code_index_reconcile_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -178,6 +188,8 @@ impl McpServerConstructionContext {
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
             daemon_invocation_service: None,
+            delivery_settlement_authority: None,
+            delivery_settlement_recorder: None,
             project_server_live: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
@@ -217,6 +229,8 @@ impl McpServerConstructionContext {
             database_owner_reconciler,
             project_routes,
             writers,
+            delivery_settlement_authority,
+            delivery_settlement_recorder,
         } = authority;
         let profile_root = profile_identity.profile_root().to_path_buf();
         let registry = databases.registry;
@@ -248,6 +262,7 @@ impl McpServerConstructionContext {
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
+            code_index_reconcile_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -258,6 +273,9 @@ impl McpServerConstructionContext {
             dashboard_graph_interactive_resolver: None,
             project_routes,
             application_invocation_executor: None,
+            daemon_invocation_service: None,
+            delivery_settlement_authority: Some(delivery_settlement_authority),
+            delivery_settlement_recorder: Some(delivery_settlement_recorder),
             project_server_live: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
@@ -306,6 +324,7 @@ impl McpServerConstructionContext {
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
+            code_index_reconcile_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
             code_index_branch_diff_executor: None,
@@ -316,14 +335,15 @@ impl McpServerConstructionContext {
             dashboard_graph_interactive_resolver: None,
             project_routes,
             application_invocation_executor: None,
+            daemon_invocation_service: None,
+            delivery_settlement_authority: None,
+            delivery_settlement_recorder: None,
             project_server_live: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
     }
 
-    /// Inject the daemon-owned code-index scheduler bridge so after-edit hooks
-    /// deliver touched paths into the incremental indexing queue.
     /// Installs the code-index generation authority every diagnostic producer
     /// resolves file and generation identity through.
     pub(crate) fn with_code_index_publication_identity(
@@ -336,6 +356,14 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_index_hook_sink(mut self, sink: super::CodeIndexHookSink) -> Self {
         self.code_index_hook_sink = Some(sink);
+        self
+    }
+
+    pub(crate) fn with_code_index_reconcile_sink(
+        mut self,
+        sink: super::CodeIndexReconcileSink,
+    ) -> Self {
+        self.code_index_reconcile_sink = Some(sink);
         self
     }
 
@@ -405,17 +433,6 @@ impl McpServerConstructionContext {
         resolver: super::RetainedProjectGraphResolver,
     ) -> Self {
         self.retained_project_graph_resolver = Some(resolver);
-        self
-    }
-
-    /// Inject the daemon-owned resolver of the retained interactive code
-    /// graph store, so dashboard graph adjacency reads serve from the
-    /// verified projection instead of relational adjacency.
-    pub(crate) fn with_dashboard_graph_interactive_resolver(
-        mut self,
-        resolver: super::DashboardGraphInteractiveResolver,
-    ) -> Self {
-        self.dashboard_graph_interactive_resolver = Some(resolver);
         self
     }
 

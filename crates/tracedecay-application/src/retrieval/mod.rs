@@ -40,7 +40,8 @@ pub use git_topology_anchor::{
 pub use ports::{
     AffectedTestsRetrievalPort, AnchorHydrationPort, GraphImpactRetrievalPort, GraphRetrievalPort,
     OperationalRetrievalPort, RetrievalPortContext, RetrievalPortOutcome, SourceRetrievalPort,
-    SymbolRetrievalPort, TemporalRetrievalPort, TestRetrievalPort,
+    SymbolRetrievalPort, TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
+    TestRetrievalPort,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

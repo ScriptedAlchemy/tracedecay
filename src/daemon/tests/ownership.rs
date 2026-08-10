@@ -900,7 +900,6 @@ fn failed_core_upgrade_retires_the_rekeyed_owner_without_quarantine() {
     assert!(registry.rekey(&old, &new));
     assert_eq!(registry.remove_owner(&new.owner).len(), 1);
     assert!(registry.get_route(&route).is_none());
-    assert!(!registry.requires_synchronous_health(&new.owner));
 }
 
 #[test]
@@ -944,37 +943,6 @@ fn failed_optional_upgrade_restores_the_ready_core() {
             .get_route(&route)
             .is_some_and(|(_, current)| Arc::ptr_eq(current, &core))
     );
-}
-
-#[test]
-fn failed_deferred_health_quarantines_only_the_exact_store_owner() {
-    let key = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profile-a"),
-            global_db_path: PathBuf::from("/profile-a/global.db"),
-            project_id: Some("unhealthy".to_owned()),
-            store_root: PathBuf::from("/store/unhealthy"),
-            graph_db_path: PathBuf::from("/store/unhealthy/graph.db"),
-        },
-        project_root: PathBuf::from("/project/unhealthy"),
-        scope_prefix: None,
-    };
-    let mut other = key.clone();
-    other.owner.profile_root = PathBuf::from("/profile-b");
-    other.owner.global_db_path = PathBuf::from("/profile-b/global.db");
-    let mut sibling_scope = key.clone();
-    sibling_scope.scope_prefix = Some("src".to_owned());
-    let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
-    registry.insert(key.clone(), Arc::new(1));
-    registry.insert(sibling_scope.clone(), Arc::new(2));
-
-    assert_eq!(registry.quarantine_and_remove_owner(&key.owner).len(), 2);
-    assert!(registry.get(&key).is_none());
-    assert!(registry.get(&sibling_scope).is_none());
-    assert!(registry.requires_synchronous_health(&key.owner));
-    assert!(!registry.requires_synchronous_health(&other.owner));
-    registry.clear_synchronous_health(&key.owner);
-    assert!(!registry.requires_synchronous_health(&key.owner));
 }
 
 #[cfg(unix)]

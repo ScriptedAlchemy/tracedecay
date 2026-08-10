@@ -82,7 +82,7 @@ fn test_tool_definitions_complete() {
     // Structural search runs in-process (bundled grammars), so it is always
     // advertised — unlike the CLI-backed rewrite tool gated just below.
     assert!(tool_names.contains(&"tracedecay_ast_grep_search"));
-    if super::super::definitions::ast_grep_available() {
+    if super::super::ast_grep_available() {
         assert!(tool_names.contains(&"tracedecay_ast_grep_rewrite"));
     } else {
         assert!(!tool_names.contains(&"tracedecay_ast_grep_rewrite"));
@@ -225,9 +225,7 @@ fn test_tool_definitions_have_schemas() {
 fn format_capable_tools_advertise_markdown_json_without_tables() {
     let tools = get_tool_definitions().expect("tool definitions");
     for tool_name in super::super::definitions::format_capable_tool_names() {
-        if *tool_name == "tracedecay_ast_grep_rewrite"
-            && !super::super::definitions::ast_grep_available()
-        {
+        if *tool_name == "tracedecay_ast_grep_rewrite" && !super::super::ast_grep_available() {
             continue;
         }
         let tool = tools
