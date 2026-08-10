@@ -265,7 +265,8 @@ function resolveObject(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: 
   }
 
   const ts = tsFields.length ? `{\n${tsFields.join("\n")}\n}` : "Record<string, never>";
-  const zod = zodFields.length ? `z.object({\n${zodFields.join("\n")}\n})` : "z.object({})";
+  const object = zodFields.length ? `z.object({\n${zodFields.join("\n")}\n})` : "z.object({})";
+  const zod = extra === false ? `${object}.strict()` : object;
   return { ts, zod };
 }
 

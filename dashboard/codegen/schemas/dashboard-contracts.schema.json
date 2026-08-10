@@ -1087,6 +1087,7 @@
       ]
     },
     "AutomationSchedulerStatusV1": {
+      "additionalProperties": false,
       "description": "The scheduler reading served by `status`, `pause`, and `resume`.\n\nAutomation is autonomous: the status has no pending-review counters. The\nlast run record carries the validation, repair, application, quarantine,\nand deployment receipts that describe what actually happened.",
       "properties": {
         "configuration_revision_id": {

@@ -174,4 +174,31 @@ describe("contracts generator", () => {
     expect(generated).not.toContain('kind: "unsupported_schema";');
     expect(generated).toContain('WIRE_SCHEMA_REVISION = "test.1"');
   });
+
+  it("preserves closed-object admission while leaving open objects extensible", () => {
+    const bundle: JsonSchema = {
+      schemaRevision: "test.1",
+      $defs: {
+        ClosedReading: {
+          type: "object",
+          properties: { status: { type: "string" } },
+          required: ["status"],
+          additionalProperties: false,
+        },
+        OpenReading: {
+          type: "object",
+          properties: { status: { type: "string" } },
+          required: ["status"],
+        },
+      },
+    };
+
+    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    expect(generated).toContain(
+      "export const ClosedReadingSchema = z.object({\n  status: z.string(),\n}).strict();",
+    );
+    expect(generated).toContain(
+      "export const OpenReadingSchema = z.object({\n  status: z.string(),\n});",
+    );
+  });
 });

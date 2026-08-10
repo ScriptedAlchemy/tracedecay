@@ -26,6 +26,7 @@ type ApiResult = std::result::Result<Json<AutomationSchedulerStatusV1>, JsonErro
 /// last run record carries the validation, repair, application, quarantine,
 /// and deployment receipts that describe what actually happened.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub(super) struct AutomationSchedulerStatusV1 {
     /// `paused`, `automation_disabled`, `delegated_host`, `backend_disabled`,
     /// or `configured`.
