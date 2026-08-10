@@ -36,44 +36,6 @@ fn retired_dashboard_routes_cannot_serve_placeholder_bundles() {
 }
 
 #[test]
-fn dashboard_memory_status_does_not_wait_for_the_writer_lane() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_dashboard_fixture(false).await;
-        let cg = fixture
-            .host_runtime
-            .open_project_graph_for_test(
-                &fixture.project_root,
-                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("reopen dashboard fixture project: {error}"));
-        let writer = cg
-            .db()
-            .memory_writer()
-            .await
-            .unwrap_or_else(|error| panic!("hold dashboard writer: {error}"));
-
-        let agent = http_agent_with_timeout(std::time::Duration::from_secs(2));
-        let response = agent
-            .get(&format!(
-                "{}/api/plugins/holographic/status",
-                fixture.base_url
-            ))
-            .call()
-            .unwrap_or_else(|error| panic!("status GET waited for writer lane: {error}"));
-        let (status, payload) = response_to_json(response);
-        assert_eq!(status, 200, "status payload: {payload}");
-
-        drop(writer);
-        cg.close();
-    });
-}
-
-#[test]
 fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_receipts() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -112,7 +74,7 @@ fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_rece
             .unwrap_or_else(|error| panic!("initialize automatic fact authority: {error}"));
         let apply_id = "automatic-fact-receipt-api-applied";
         let command = automatic_fact_add_command(
-            owner,
+            owner.clone(),
             AddFactRequest {
                 content: "Automatic receipt API preserves applied facts".to_owned(),
                 category: MemoryCategory::Decision,

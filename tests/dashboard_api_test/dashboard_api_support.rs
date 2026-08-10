@@ -17,7 +17,6 @@ pub(crate) use tempfile::TempDir;
 pub(crate) use tracedecay::application::host_admission::HostAdmissionScope;
 pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
-pub(crate) use tracedecay::errors::TraceDecayError;
 pub(crate) use tracedecay::memory::types::{
     AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory,
 };
@@ -850,18 +849,6 @@ pub(crate) fn commit_all(project: &Path, message: &str) {
             message,
         ],
     );
-}
-
-pub(crate) async fn index_all_retrying_sync_lock(cg: &TraceDecay, context: &str) {
-    for attempt in 0..20 {
-        match cg.index_all().await {
-            Ok(_) => return,
-            Err(TraceDecayError::SyncLock { .. }) if attempt < 19 => {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            Err(err) => panic!("{context}: {err}"),
-        }
-    }
 }
 
 /// Opens the resolved registered project session authority.
