@@ -5,19 +5,16 @@ import type {
   WorkProductMutationReceiptV1,
   WorkProductMutationRequestV1,
   WorkProductSelectionScopeV1,
-  WorkProjection,
-  WorkProjectionSnapshotV1,
 } from '../../contracts/index.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import type { WorkResult } from './workApi.ts';
 import { useWorkCommand, useWorkReadAction } from './workQueries.ts';
 import {
-  WORK_ACCEPT_TASK_ROUTE,
   WORK_MUTATE_GRAPH_ROUTE,
   WORK_PREPARE_GRAPH_MUTATION_ROUTE,
-  WORK_REPLAN_DEPENDENCIES_ROUTE,
 } from './workRoutes.ts';
+import type { WorkTaskView } from './workProductView.ts';
 
 /**
  * The controls for one task.
@@ -26,22 +23,10 @@ import {
  * submits generated requests and renders typed refusals rather than inferring
  * an allow-list from a projection.
  *
- * Legacy projection commands carry the projection's own `version` as
- * `expected_version`; product mutations receive their graph authority and
- * revision pins from the backend preparation response. Both paths are
- * compare-and-swap and surface a moved task as a typed conflict.
+ * Product mutations receive their graph authority and revision pins from the
+ * backend preparation response. The submitted command is therefore the exact
+ * compare-and-swap request minted by the canonical Work authority.
  */
-
-/** A fresh idempotency key per attempt. Re-sending one command twice under the
- * same key is the daemon's cue that it is a retry, so a new key per attempt is
- * what keeps a genuine second command from being swallowed as one. */
-function commandId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `work-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function occurredAt(): number {
-  return Date.now() * 1000;
-}
 
 /** What a finished command attempt reads as. `undefined` while nothing has been
  * sent, so a control that has never run says nothing rather than saying it
@@ -92,23 +77,19 @@ function CommandButton({
 
 export function WorkCommands({
   projection,
-  snapshot,
   graph,
 }: {
-  projection: WorkProjection;
-  snapshot: WorkProjectionSnapshotV1;
+  projection: WorkTaskView;
   graph: WorkResult<WorkGraphReadV1> | undefined;
 }) {
-  const acceptTask = useWorkCommand(WORK_ACCEPT_TASK_ROUTE);
+  const acceptPreparation = useWorkReadAction(WORK_PREPARE_GRAPH_MUTATION_ROUTE);
+  const acceptTask = useWorkCommand(WORK_MUTATE_GRAPH_ROUTE);
   const admissionPreparation = useWorkReadAction(WORK_PREPARE_GRAPH_MUTATION_ROUTE);
   const admitExecution = useWorkCommand(WORK_MUTATE_GRAPH_ROUTE);
-  const replan = useWorkCommand(WORK_REPLAN_DEPENDENCIES_ROUTE);
-  const [dependencies, setDependencies] = useState<readonly string[]>(projection.dependencies);
+  const replanPreparation = useWorkReadAction(WORK_PREPARE_GRAPH_MUTATION_ROUTE);
+  const applyReplan = useWorkCommand(WORK_MUTATE_GRAPH_ROUTE);
 
   const selection = currentWorkSelection(graph);
-  const candidates = snapshot.projections
-    .map((candidate) => candidate.task_id)
-    .filter((taskId) => taskId !== projection.task_id);
   const admissionReading =
     admitExecution.data !== undefined || admitExecution.isPending
       ? commandReading(
@@ -122,6 +103,51 @@ export function WorkCommands({
           admissionPreparation.isPending,
           'prepared exact execution admission',
         );
+
+  const acceptReading =
+    acceptTask.data !== undefined || acceptTask.isPending
+      ? commandReading(
+          acceptTask.data,
+          acceptTask.isPending,
+          (receipt) =>
+            `${receipt.replayed ? 'replayed' : 'committed'} ${receipt.event.event_id} at graph version ${receipt.verified_graph_version.graph_version}`,
+        )
+      : mutationReading(
+          acceptPreparation.data,
+          acceptPreparation.isPending,
+          'prepared exact task acceptance',
+        );
+
+  const replanReading =
+    applyReplan.data !== undefined || applyReplan.isPending
+      ? commandReading(
+          applyReplan.data,
+          applyReplan.isPending,
+          (receipt) =>
+            `${receipt.replayed ? 'replayed' : 'committed'} ${receipt.event.event_id} at graph version ${receipt.verified_graph_version.graph_version}`,
+        )
+      : mutationReading(
+          replanPreparation.data,
+          replanPreparation.isPending,
+          'prepared exact accepted relation replan',
+        );
+
+  async function prepareAndAcceptTask(): Promise<void> {
+    if (selection === undefined || projection.acceptance_evidence_required) return;
+    const prepared = await acceptPreparation.mutateAsync({
+      causation_event_id: null,
+      evidence: [],
+      selection,
+      change: {
+        change: 'accept_task',
+        task_id: projection.task_id,
+        evidence_by_criterion: {},
+      },
+    });
+    if (prepared.outcome === 'value' && prepared.value.mutation === 'accept_task') {
+      acceptTask.mutate(prepared.value);
+    }
+  }
 
   async function prepareAndAdmitExecution(): Promise<void> {
     if (selection === undefined) return;
@@ -139,6 +165,22 @@ export function WorkCommands({
     }
   }
 
+  async function prepareAndApplyReplan(): Promise<void> {
+    if (selection === undefined || projection.relation_replan === null) return;
+    const prepared = await replanPreparation.mutateAsync({
+      causation_event_id: null,
+      evidence: [],
+      selection,
+      change: {
+        change: 'apply_relation_replan',
+        proposal_id: projection.relation_replan.proposal_id,
+      },
+    });
+    if (prepared.outcome === 'value' && prepared.value.mutation === 'apply_relation_replan') {
+      applyReplan.mutate(prepared.value);
+    }
+  }
+
   return (
     <Panel legend={`Commands · ${projection.title}`} bodyClassName="p-0">
       <dl className="sr-only">
@@ -150,20 +192,21 @@ export function WorkCommands({
 
       <CommandButton
         label="Accept task"
-        disabled={acceptTask.isPending}
-        reading={commandReading(
-          acceptTask.data,
-          acceptTask.isPending,
-          (value) => `committed at version ${value.version}`,
-        )}
-        onRun={() =>
-          acceptTask.mutate({
-            command_id: commandId(),
-            expected_version: projection.version,
-            occurred_at: occurredAt(),
-            task_id: projection.task_id,
-          })
+        disabled={
+          selection === undefined ||
+          projection.acceptance_evidence_required ||
+          acceptPreparation.isPending ||
+          acceptTask.isPending
         }
+        reading={
+          projection.acceptance_evidence_required
+            ? {
+                state: 'locked',
+                detail: 'required criterion evidence is not selectable from this Work view',
+              }
+            : acceptReading
+        }
+        onRun={() => void prepareAndAcceptTask()}
       />
 
       <CommandButton
@@ -175,59 +218,24 @@ export function WorkCommands({
         onRun={() => void prepareAndAdmitExecution()}
       />
 
-      <div className="border-b border-edge px-2 py-1.5 last:border-b-0">
-        <label
-          htmlFor="work-replan-dependencies"
-          className="block text-2xs text-text-secondary"
-        >
-          Dependencies
-        </label>
-        {/* The options are the other tasks this snapshot returned, so a
-          * dependency can only ever name a task the daemon reported. A free
-          * text field here would let the board send an identifier that does
-          * not exist. */}
-        <select
-          id="work-replan-dependencies"
-          multiple
-          size={Math.min(Math.max(candidates.length, 2), 5)}
-          value={[...dependencies]}
-          onChange={(event) =>
-            setDependencies(Array.from(event.target.selectedOptions, (option) => option.value))
-          }
-          className="mt-1 w-full rounded-sm border border-edge bg-surface-1 p-1 font-mono text-3xs text-text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-        >
-          {candidates.map((taskId) => (
-            <option key={taskId} value={taskId}>
-              {taskId}
-            </option>
-          ))}
-        </select>
-        {candidates.length === 0 ? (
-          <p className="mt-0.5 text-3xs text-text-muted">
-            This snapshot returned no other task to depend on.
+      {projection.relation_replan === null ? null : (
+        <div className="border-b border-edge px-2 py-1.5 last:border-b-0">
+          <p className="text-2xs text-text-secondary">Accepted relation replan</p>
+          <p className="font-mono text-3xs text-text-muted">
+            {projection.relation_replan.proposal_id} · {projection.relation_replan.dependencies.length} dependencies · {projection.relation_replan.informational_relations.length} informational · {projection.relation_replan.causal_candidates.length} causal
           </p>
-        ) : null}
-        <div className="mt-1">
-          <CommandButton
-            label="Replan dependencies"
-            disabled={replan.isPending}
-            reading={commandReading(
-              replan.data,
-              replan.isPending,
-              (value) => `committed at version ${value.version}`,
-            )}
-            onRun={() =>
-              replan.mutate({
-                command_id: commandId(),
-                dependencies: [...dependencies],
-                expected_version: projection.version,
-                occurred_at: occurredAt(),
-                task_id: projection.task_id,
-              })
-            }
-          />
+          <div className="mt-1">
+            <CommandButton
+              label="Apply accepted relation replan"
+              disabled={
+                selection === undefined || replanPreparation.isPending || applyReplan.isPending
+              }
+              reading={replanReading}
+              onRun={() => void prepareAndApplyReplan()}
+            />
+          </div>
         </div>
-      </div>
+      )}
 
     </Panel>
   );

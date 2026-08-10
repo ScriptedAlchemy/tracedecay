@@ -15,15 +15,30 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { workGraphRead } from '../../test/workGraphFixture.ts';
 import { callWork, workPayload, workRefusal } from './workApi.ts';
-import { WORK_ACCEPT_TASK_ROUTE, WORK_SNAPSHOT_ROUTE } from './workRoutes.ts';
+import {
+  WORK_PREPARE_GRAPH_MUTATION_ROUTE,
+  WORK_VIEWS_ROUTE,
+} from './workRoutes.ts';
 
-/** A snapshot payload that satisfies the generated contract. */
-const SNAPSHOT = {
-  coverage: { state: 'complete', returned: 0, total: 0 },
-  generation_id: 'generation-1',
-  projections: [],
-  sequence: 7,
+/** A product graph payload and request that satisfy the generated contracts. */
+const GRAPH = workGraphRead({ tasks: [] });
+const GRAPH_REQUEST = {
+  selection: { selection: 'profile_owned_no_git' as const },
+  mode: { mode: 'current' as const },
+  continuation: null,
+  observed_at: 1,
+};
+const PREPARE_REQUEST = {
+  causation_event_id: null,
+  evidence: [],
+  selection: { selection: 'profile_owned_no_git' as const },
+  change: {
+    change: 'accept_task' as const,
+    evidence_by_criterion: {},
+    task_id: 'task-1',
+  },
 };
 
 const RESOLVED_SCOPE = {
@@ -95,8 +110,8 @@ describe('the Work problem taxonomy', () => {
 
 describe('the application envelope walk', () => {
   it('finds the contract inside an evidence packet and an effect result', () => {
-    expect(workPayload(success(SNAPSHOT))).toEqual({ found: true, payload: SNAPSHOT });
-    expect(workPayload(success(SNAPSHOT, 'effect'))).toEqual({ found: true, payload: SNAPSHOT });
+    expect(workPayload(success(GRAPH))).toEqual({ found: true, payload: GRAPH });
+    expect(workPayload(success(GRAPH, 'effect'))).toEqual({ found: true, payload: GRAPH });
   });
 
   /**
@@ -115,7 +130,7 @@ describe('the application envelope walk', () => {
         .found,
     ).toBe(false);
     // The payload itself is a bare value rather than the wrapped packet.
-    expect(workPayload({ kind: 'success', value: { outcome: SNAPSHOT } }).found).toBe(false);
+    expect(workPayload({ kind: 'success', value: { outcome: GRAPH } }).found).toBe(false);
   });
 
   /** `null` is the daemon saying the operation carried no value. That is found
@@ -128,50 +143,49 @@ describe('the application envelope walk', () => {
 
 describe('callWork', () => {
   it('returns the payload decoded by its generated schema', async () => {
-    stub(200, success(SNAPSHOT));
-    const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
-    expect(result).toEqual({ outcome: 'value', value: SNAPSHOT, scope: RESOLVED_SCOPE });
+    stub(200, success(GRAPH));
+    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
+    expect(result).toEqual({ outcome: 'value', value: GRAPH, scope: RESOLVED_SCOPE });
   });
 
   it('refuses a success envelope without a valid resolved scope', async () => {
-    const body = success(SNAPSHOT);
+    const body = success(GRAPH);
     stub(200, { ...body, value: { ...body.value, scope: {} } });
 
-    const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
+    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
 
     expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
   });
 
   it('refuses a payload the generated contract does not describe', async () => {
-    // A snapshot missing `coverage` is exactly what a drifted daemon would
-    // send, and rendering it would draw a board with no stated completeness.
-    stub(200, success({ generation_id: 'g', projections: [], sequence: 1 }));
-    const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
+    // A graph missing its authorized scope is exactly what a drifted daemon
+    // would send, and rendering it would draw a board with no selection authority.
+    stub(200, success({ mode: 'current', snapshot: GRAPH.snapshot }));
+    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
     expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
   });
 
   it('refuses an envelope it cannot walk', async () => {
     stub(200, { kind: 'success', value: { outcome: { outcome: 'evidence', value: {} } } });
-    const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
+    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
     expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
   });
 
   it('reports a version conflict as conflicting rather than as an error', async () => {
-    // The compare-and-swap case. Six of the seven commands carry
-    // `expected_version`, and 409 is the daemon saying the task moved — a
+    // A product mutation preparation conflict says the graph head moved — a
     // reason to read again, not a transport fault to retry blindly.
     stub(409, { kind: 'problem', value: { problem: { kind: 'conflict' } } });
     const result = await callWork(
-      WORK_ACCEPT_TASK_ROUTE,
-      { command_id: 'c1', expected_version: 3, occurred_at: 1, task_id: 't1' },
-      '/api/work/accept-task',
+      WORK_PREPARE_GRAPH_MUTATION_ROUTE,
+      PREPARE_REQUEST,
+      '/api/work/prepare-graph-mutation',
     );
     expect(result).toMatchObject({ outcome: 'refused', state: 'conflicting' });
   });
 
   it('reports an unavailable Work runtime rather than an empty board', async () => {
     stub(503, { kind: 'problem', value: { problem: { kind: 'unavailable' } } });
-    const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
+    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
     expect(result).toMatchObject({ outcome: 'refused', state: 'unavailable' });
   });
 
@@ -182,13 +196,13 @@ describe('callWork', () => {
         throw new TypeError('network');
       }),
     );
-    const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
+    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
     expect(result).toMatchObject({ outcome: 'refused', state: 'offline' });
   });
 
   it('reports a body that is not JSON without throwing', async () => {
     stub(200, null, { invalidJson: true });
-    const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
+    const result = await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/work/views');
     expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
   });
 
@@ -199,21 +213,22 @@ describe('callWork', () => {
     const sent = vi.fn();
     vi.stubGlobal('fetch', sent);
     const result = await callWork(
-      WORK_ACCEPT_TASK_ROUTE,
-      { command_id: 'c1', task_id: 't1' } as never,
-      '/api/work/accept-task',
+      WORK_PREPARE_GRAPH_MUTATION_ROUTE,
+      { change: { change: 'accept_task', task_id: 't1' } } as never,
+      '/api/work/prepare-graph-mutation',
     );
     expect(result).toMatchObject({ outcome: 'refused', state: 'error' });
     expect(sent, 'an invalid command must not reach the daemon').not.toHaveBeenCalled();
   });
 
   it('POSTs the encoded command to the route it was given', async () => {
-    const sent = vi.fn(async () => new Response(JSON.stringify(success(SNAPSHOT)), { status: 200 }));
-    vi.stubGlobal('fetch', sent);
-    await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 25 }, '/api/projects/p/work/snapshot');
-    expect(sent).toHaveBeenCalledWith(
-      '/api/projects/p/work/snapshot',
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({ page_size: 25 }) }),
+    const sent = vi.fn(async (_url: string, _init?: RequestInit) =>
+      new Response(JSON.stringify(success(GRAPH)), { status: 200 }),
     );
+    vi.stubGlobal('fetch', sent);
+    await callWork(WORK_VIEWS_ROUTE, GRAPH_REQUEST, '/api/projects/p/work/views');
+    expect(sent).toHaveBeenCalledWith('/api/projects/p/work/views', expect.objectContaining({ method: 'POST' }));
+    const [, init] = sent.mock.calls[0] ?? [];
+    expect(JSON.parse(String(init?.body))).toEqual(GRAPH_REQUEST);
   });
 });

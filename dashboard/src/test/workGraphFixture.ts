@@ -2,6 +2,7 @@ import type {
   WorkAttemptStateV1,
   WorkGraphTimelineCoverageV1,
   WorkRuntimeProjectionCoverageV1,
+  WorkRelationReplanDecisionV1,
   WorkTimelineLaneV1,
 } from '../contracts/index.ts';
 
@@ -27,6 +28,7 @@ import type {
 
 export interface WorkGraphTaskSpec {
   readonly taskId: string;
+  readonly title?: string;
   /** Declared effort. The authority sums these into `workload.total_effort`,
    * and this fixture does the same rather than letting the two drift. */
   readonly effort?: number;
@@ -87,6 +89,8 @@ export interface WorkGraphVersionSpec {
   readonly actualConcurrency?: number | null;
   readonly runtimeAttempts?: readonly WorkRuntimeAttemptSpec[];
   readonly runtimeCoverage?: WorkRuntimeProjectionCoverageV1;
+  readonly generationId?: string;
+  readonly relationReplanDecisions?: readonly WorkRelationReplanDecisionV1[];
 }
 
 const DEFAULT_OBSERVED_AT = 1_800_000_000_000_000;
@@ -130,7 +134,7 @@ function workItem(task: WorkGraphTaskSpec, observedAt: number) {
       informational_relations: [],
       scheduled_at: task.scheduledAt ?? null,
       task_id: task.taskId,
-      title: task.taskId,
+      title: task.title ?? task.taskId,
       updated_at: task.updatedAt ?? observedAt - 48 * HOUR_MICROS,
     },
   };
@@ -150,7 +154,7 @@ function runtimeProjection(spec: WorkGraphVersionSpec, version: number, observed
       state: attempt.state ?? 'running',
     })),
     coverage: spec.runtimeCoverage ?? { coverage: 'complete' },
-    generation_id: 'generation-7',
+    generation_id: spec.generationId ?? 'generation-7',
     graph_version: version,
     observed_at: observedAt,
     sequence: 12,
@@ -187,7 +191,7 @@ export function workGraphVersion(spec: WorkGraphVersionSpec) {
       milestones: [],
       plans: [],
       proposal_decisions: [],
-      relation_replan_decisions: [],
+      relation_replan_decisions: [...(spec.relationReplanDecisions ?? [])],
       version,
     },
     observed_at: observedAt,

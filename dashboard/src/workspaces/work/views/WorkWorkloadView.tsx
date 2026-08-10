@@ -1,4 +1,3 @@
-import type { WorkProjection, WorkProjectionSnapshotV1 } from '../../../contracts/index.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { MeterRow, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -10,6 +9,7 @@ import {
   terminalWorkAttempt,
   type WorkGraphReading,
 } from '../workGraphModel.ts';
+import type { WorkProductView, WorkTaskView } from '../workProductView.ts';
 import {
   type WorkloadReading,
   type WorkloadRegion,
@@ -72,7 +72,7 @@ interface RegionMember {
  * largest region rather than drawn as shares of a whole.
  */
 function regionMembers(
-  projections: readonly WorkProjection[],
+  projections: readonly WorkTaskView[],
   graph: WorkGraphReading,
 ): ReadonlyMap<string, readonly RegionMember[]> {
   const members = new Map<string, RegionMember[]>();
@@ -112,7 +112,7 @@ export function WorkWorkloadView({
   selected,
   onSelect,
 }: {
-  snapshot: WorkProjectionSnapshotV1;
+  snapshot: WorkProductView;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;

@@ -1,9 +1,9 @@
-import type { WorkProjectionSnapshotV1 } from '../../../contracts/index.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
 import { coverageReading } from '../workModel.ts';
 import type { WorkGraphReading } from '../workGraphModel.ts';
+import type { WorkProductView } from '../workProductView.ts';
 import {
   type WorkDagComponent,
   type WorkDagReading,
@@ -43,7 +43,7 @@ export function WorkDagView({
   selected,
   onSelect,
 }: {
-  snapshot: WorkProjectionSnapshotV1;
+  snapshot: WorkProductView;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;

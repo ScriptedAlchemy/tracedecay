@@ -1,11 +1,9 @@
 import {
-  AcceptTaskCommandSchema,
   AdmitWorkExecutionRequestV1Schema,
   DecideWorkProposalRequestV1Schema,
   ExecutionTopologyMetricsRequestV1Schema,
   ExecutionTopologyMetricsV1Schema,
   ExecutionTopologyViewV1Schema,
-  ReplanDependenciesCommandSchema,
   WorkAttemptListRequestV1Schema,
   WorkAttemptListV1Schema,
   WorkGraphReadRequestV1Schema,
@@ -15,11 +13,6 @@ import {
   PrepareWorkProductMutationRequestV1Schema,
   WorkProductMutationReceiptV1Schema,
   WorkProductMutationRequestV1Schema,
-  WorkProjectionDeltaRequestV1Schema,
-  WorkProjectionDeltaV1Schema,
-  WorkProjectionSchema,
-  WorkProjectionSnapshotRequestV1Schema,
-  WorkProjectionSnapshotV1Schema,
   WorkTopologyViewRequestV1Schema,
 } from "../../contracts/index.ts";
 import type { WorkRoute } from "./workApi.ts";
@@ -41,20 +34,6 @@ import type { WorkRoute } from "./workApi.ts";
  * backend-owned prepare/mutate handoff so the browser never mints authority
  * identities, clocks, or revision pins.
  */
-
-export const WORK_SNAPSHOT_ROUTE = {
-  operation: "operation.work.snapshot",
-  path: "/api/work/snapshot",
-  request: WorkProjectionSnapshotRequestV1Schema,
-  response: WorkProjectionSnapshotV1Schema,
-} as const satisfies WorkRoute<unknown, unknown>;
-
-export const WORK_DELTA_ROUTE = {
-  operation: "operation.work.delta",
-  path: "/api/work/delta",
-  request: WorkProjectionDeltaRequestV1Schema,
-  response: WorkProjectionDeltaV1Schema,
-} as const satisfies WorkRoute<unknown, unknown>;
 
 /**
  * The execution record behind the projections.
@@ -154,13 +133,6 @@ export const WORK_MUTATE_GRAPH_ROUTE = {
   response: WorkProductMutationReceiptV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
-export const WORK_REPLAN_DEPENDENCIES_ROUTE = {
-  operation: "operation.work.replan_dependencies",
-  path: "/api/work/replan-dependencies",
-  request: ReplanDependenciesCommandSchema,
-  response: WorkProjectionSchema,
-} as const satisfies WorkRoute<unknown, unknown>;
-
 export const WORK_REVIEW_PROPOSAL_ROUTE = {
   operation: "operation.work.review_proposal",
   path: "/api/work/review-proposal",
@@ -180,11 +152,4 @@ export const WORK_ADMIT_EXECUTION_ROUTE = {
   path: "/api/work/admit-execution",
   request: AdmitWorkExecutionRequestV1Schema,
   response: WorkProductMutationReceiptV1Schema,
-} as const satisfies WorkRoute<unknown, unknown>;
-
-export const WORK_ACCEPT_TASK_ROUTE = {
-  operation: "operation.work.accept_task",
-  path: "/api/work/accept-task",
-  request: AcceptTaskCommandSchema,
-  response: WorkProjectionSchema,
 } as const satisfies WorkRoute<unknown, unknown>;

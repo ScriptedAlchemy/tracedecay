@@ -1,5 +1,5 @@
 /**
- * The Work page over the twelve mounted routes.
+ * The Work page over the exact product-graph authority.
  *
  * These replace the assertions that pinned the old absence ledger. That ledger
  * said no generated Work read model existed in the build, which `3f43664cb`
@@ -9,7 +9,7 @@
  * The invariant they carry forward is the one that mattered: a refusal is never
  * a board. Every failure the daemon can return is asserted to render as its own
  * stated reason, and the empty-board case is asserted to be reachable *only*
- * from a snapshot that actually said the board was empty.
+ * from a product graph that actually said the board was empty.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -18,35 +18,19 @@ import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useScope } from '../../data/scope/store.ts';
+import { workGraphRead } from '../../test/workGraphFixture.ts';
 import { WorkPage } from './WorkPage.tsx';
 
-function projection(overrides: Record<string, unknown> = {}) {
-  return {
-    accepted_proposal: null,
-    authority: {
-      actor_id: 'actor',
-      policy_digest: 'digest',
-      project_id: 'project',
-      repository_id: 'repository',
-      worktree_id: 'worktree',
-    },
-    dependencies: [],
-    execution_admitted: false,
-    history_len: 2,
-    task_accepted: false,
-    task_id: 'task-alpha',
-    title: 'Alpha task',
-    version: 4,
-    ...overrides,
-  };
-}
-
-function snapshotBody(projections: readonly unknown[], coverage?: unknown) {
+function graphBody(
+  tasks: Parameters<typeof workGraphRead>[0]['tasks'] = [
+    { taskId: 'task-alpha', title: 'Alpha task' },
+  ],
+) {
   return {
     kind: 'success',
     value: {
-      binding_id: 'binding.http.work.snapshot',
-      contract: { schema_id: 'schema.work.snapshot.result', schema_revision: 1 },
+      binding_id: 'binding.http.work.views',
+      contract: { schema_id: 'schema.work.views.result', schema_revision: 1 },
       request_id: 'request-1',
       scope: {
         project_id: 'project.work',
@@ -58,23 +42,39 @@ function snapshotBody(projections: readonly unknown[], coverage?: unknown) {
       outcome: {
         outcome: 'evidence',
         value: {
-          payload: {
-            coverage: coverage ?? {
-              state: 'complete',
-              returned: projections.length,
-              total: projections.length,
-            },
-            generation_id: 'generation-7',
-            projections,
-            sequence: 12,
-          },
+          payload: workGraphRead({ tasks }),
         },
       },
     },
   };
 }
 
-/** Answers the snapshot route and refuses anything else, so a test that
+function graphBodyFromPayload(payload: ReturnType<typeof workGraphRead>) {
+  const body = graphBody([]);
+  body.value.outcome.value.payload = payload;
+  return body;
+}
+
+function workSuccess(payload: unknown, bindingId: string) {
+  return {
+    kind: 'success',
+    value: {
+      binding_id: bindingId,
+      contract: { schema_id: 'schema.work.result', schema_revision: 1 },
+      request_id: 'request-1',
+      scope: {
+        project_id: 'project.work',
+        repository_id: 'repository.work',
+        worktree_id: 'worktree.work',
+        reference: null,
+        scope_digest: 'sha256:scope',
+      },
+      outcome: { outcome: 'evidence', value: { payload } },
+    },
+  };
+}
+
+/** Answers the product graph route and refuses anything else, so a test that
  * accidentally depends on another route fails loudly. */
 function serve(handler: (url: string) => { status: number; body: unknown }) {
   vi.stubGlobal(
@@ -103,7 +103,11 @@ function renderPage() {
 }
 
 beforeEach(() => {
-  serve(() => ({ status: 200, body: snapshotBody([projection()]) }));
+  serve((url) =>
+    url.includes('/work/views')
+      ? { status: 200, body: graphBody() }
+      : { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+  );
 });
 
 afterEach(() => {
@@ -112,7 +116,23 @@ afterEach(() => {
 });
 
 describe('the Work page over mounted routes', () => {
-  it('reads the snapshot and names the task it returned', async () => {
+  it('draws the board from the product graph without calling the legacy snapshot', async () => {
+    const calls: string[] = [];
+    serve((url) => {
+      calls.push(url);
+      return url.includes('/work/views')
+        ? { status: 200, body: graphBody() }
+        : { status: 410, body: { kind: 'problem', value: { problem: {} } } };
+    });
+
+    renderPage();
+
+    expect(await screen.findByRole('button', { name: 'Alpha task' })).toBeTruthy();
+    expect(calls.some((url) => url.includes('/work/snapshot'))).toBe(false);
+    expect(calls.some((url) => url.includes('/work/delta'))).toBe(false);
+  });
+
+  it('reads the product graph and names the task it returned', async () => {
     renderPage();
     expect(await screen.findByText('Alpha task')).toBeTruthy();
   });
@@ -120,7 +140,7 @@ describe('the Work page over mounted routes', () => {
   it('labels the default Work view as the active project', async () => {
     renderPage();
     expect(
-      await screen.findByText('canonical task graph · the active project · twelve mounted routes'),
+      await screen.findByText('canonical task graph · the active project · exact product authority'),
     ).toBeTruthy();
   });
 
@@ -136,7 +156,7 @@ describe('the Work page over mounted routes', () => {
     renderPage();
 
     const provenance = await screen.findByText(
-      'canonical task graph · Beta (project-beta) · selected project · twelve mounted routes',
+      'canonical task graph · Beta (project-beta) · selected project · exact product authority',
     );
     expect(provenance.textContent).not.toContain('active project');
   });
@@ -154,7 +174,7 @@ describe('the Work page over mounted routes', () => {
 
     expect(
       await screen.findByText(
-        'canonical task graph · Alpha (project-alpha) · selected active project · twelve mounted routes',
+        'canonical task graph · Alpha (project-alpha) · selected active project · exact product authority',
       ),
     ).toBeTruthy();
   });
@@ -168,7 +188,7 @@ describe('the Work page over mounted routes', () => {
 
   /**
    * The assertion this file exists for. A 503 from the Work runtime and a
-   * snapshot of zero tasks are different facts, and the first must never be
+   * product graph of zero tasks are different facts, and the first must never be
    * drawn as the second.
    */
   it('draws no board when the runtime is unavailable', async () => {
@@ -195,49 +215,17 @@ describe('the Work page over mounted routes', () => {
 
   /** An empty board is legitimate — but only when the daemon said the board was
    * complete and empty. */
-  it('draws an empty board only from a complete snapshot that was empty', async () => {
-    serve(() => ({ status: 200, body: snapshotBody([]) }));
+  it('draws an empty board only from a current product graph that was empty', async () => {
+    serve((url) =>
+      url.includes('/work/views')
+        ? { status: 200, body: graphBody([]) }
+        : { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+    );
     const { container } = renderPage();
     await waitFor(() => expect(container.querySelector('[data-work-board]')).not.toBeNull());
     expect(screen.getAllByText(/No task in this build has reached this gate/).length).toBeGreaterThan(
       0,
     );
-  });
-
-  it('never rounds a capped snapshot up to a complete board', async () => {
-    serve((url) =>
-      url.includes('/delta')
-        ? { status: 503, body: { kind: 'problem', value: { problem: {} } } }
-        : {
-            status: 200,
-            body: snapshotBody([projection()], {
-              state: 'capped',
-              cap: 1,
-              returned: 1,
-              total: 40,
-              cursor: { generation_id: 'generation-7', token: 'resume-1' },
-              range: { start_exclusive: 0, end_inclusive: 1 },
-            }),
-          },
-    );
-    renderPage();
-    expect(await screen.findByText(/1 of 40, capped at 1/)).toBeTruthy();
-  });
-
-  it('asks for a continuation only when the snapshot carried a cursor', async () => {
-    const calls: string[] = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        calls.push(String(url));
-        return new Response(JSON.stringify(snapshotBody([projection()])), { status: 200 });
-      }),
-    );
-    renderPage();
-    await screen.findByText('Alpha task');
-    // A complete snapshot has no resume cursor, so continuing from it would be
-    // asking the daemon to resume from a position it never reported.
-    expect(calls.some((url) => url.includes('/delta'))).toBe(false);
   });
 
   it('draws no boundary aside for the retired attempt family', async () => {
@@ -257,6 +245,135 @@ describe('the Work page over mounted routes', () => {
     await user.keyboard('{Enter}');
     await waitFor(() => expect(task.getAttribute('aria-pressed')).toBe('true'));
     expect(screen.getByText(/Commands · Alpha task/)).toBeTruthy();
+  });
+
+  it('accepts a task through the prepared product mutation and never calls the legacy command', async () => {
+    const calls: string[] = [];
+    const prepared = {
+      mutation: 'accept_task',
+      request: {
+        evidence_by_criterion: {},
+        mutation: {
+          causation_event_id: null,
+          command_id: 'command.accept-task',
+          evidence: [],
+          expected_authority: {
+            authority: 'verified',
+            verified_version: {
+              event_sequence: 12,
+              graph_version: 4,
+              recovered_graph_digest: 'digest-graph',
+              source_watermark: {},
+            },
+          },
+          occurred_at: 1,
+          revisions: {
+            catalog_generation_id: 'catalog-1',
+            configuration_revision_id: 'configuration-1',
+            policy_revision_id: 'policy-1',
+          },
+        },
+        selection: { selection: 'profile_owned_no_git' },
+        task_id: 'task-alpha',
+      },
+    };
+    serve((url) => {
+      calls.push(url);
+      if (url.includes('/work/views')) return { status: 200, body: graphBody() };
+      if (url.includes('/work/prepare-graph-mutation')) {
+        return {
+          status: 200,
+          body: workSuccess(prepared, 'binding.http.work.prepare_graph_mutation'),
+        };
+      }
+      return { status: 503, body: { kind: 'problem', value: { problem: {} } } };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Alpha task' }));
+
+    await user.click(await screen.findByRole('button', { name: 'Accept task' }));
+
+    await waitFor(() =>
+      expect(calls.some((url) => url.includes('/work/mutate-graph'))).toBe(true),
+    );
+    expect(calls.some((url) => url.includes('/work/accept-task'))).toBe(false);
+  });
+
+  it('applies an accepted relation replan through the product mutation and never calls the legacy command', async () => {
+    const calls: string[] = [];
+    const graph = workGraphRead({
+      version: 4,
+      tasks: [
+        { taskId: 'task-alpha', title: 'Alpha task' },
+        { taskId: 'task-beta', title: 'Beta task' },
+      ],
+      relationReplanDecisions: [
+        {
+          decided_at: 1_799_999_999_000_000,
+          disposition: 'accepted',
+          proposal: {
+            based_on_version: 3,
+            causal_candidates: [],
+            dependencies: ['task-beta'],
+            informational_relations: [],
+            payload_digest: 'digest.replan-alpha',
+            proposal_id: 'proposal.replan-alpha',
+            task_id: 'task-alpha',
+          },
+        },
+      ],
+    });
+    const prepared = {
+      mutation: 'apply_relation_replan',
+      request: {
+        mutation: {
+          causation_event_id: null,
+          command_id: 'command.apply-replan',
+          evidence: [],
+          expected_authority: {
+            authority: 'verified',
+            verified_version: {
+              event_sequence: 12,
+              graph_version: 4,
+              recovered_graph_digest: 'digest-graph',
+              source_watermark: {},
+            },
+          },
+          occurred_at: 1_800_000_000_000_000,
+          revisions: {
+            catalog_generation_id: 'catalog-1',
+            configuration_revision_id: 'configuration-1',
+            policy_revision_id: 'policy-1',
+          },
+        },
+        proposal_id: 'proposal.replan-alpha',
+        selection: { selection: 'profile_owned_no_git' },
+      },
+    };
+    serve((url) => {
+      calls.push(url);
+      if (url.includes('/work/views')) {
+        return { status: 200, body: graphBodyFromPayload(graph) };
+      }
+      if (url.includes('/work/prepare-graph-mutation')) {
+        return {
+          status: 200,
+          body: workSuccess(prepared, 'binding.http.work.prepare_graph_mutation'),
+        };
+      }
+      return { status: 503, body: { kind: 'problem', value: { problem: {} } } };
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: 'Alpha task' }));
+
+    await user.click(await screen.findByRole('button', { name: 'Apply accepted relation replan' }));
+
+    await waitFor(() =>
+      expect(calls.some((url) => url.includes('/work/mutate-graph'))).toBe(true),
+    );
+    expect(calls.some((url) => url.includes('/work/replan-dependencies'))).toBe(false);
   });
 
   /** Keeps the narrow-width information loss from returning: the identity and

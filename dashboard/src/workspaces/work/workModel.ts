@@ -1,5 +1,5 @@
-import type { WorkProjection, WorkProjectionCoverageV1 } from '../../contracts/index.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
+import type { WorkTaskCoverage, WorkTaskView } from './workProductView.ts';
 
 /**
  * What a Work projection says about itself.
@@ -35,7 +35,7 @@ export const WORK_STAGES: readonly WorkStage[] = [
 /** Read in reverse: the furthest gate a task has passed is its stage. The
  * fields are cumulative in the domain — execution is not admitted before the
  * task is accepted — so the first match walking back is the true one. */
-export function workStage(projection: WorkProjection, terminal = false): WorkStage {
+export function workStage(projection: WorkTaskView, terminal = false): WorkStage {
   if (terminal) return 'evidence_terminal';
   if (projection.execution_admitted) return 'execution_admitted';
   if (projection.task_accepted) return 'task_accepted';
@@ -75,100 +75,18 @@ export function stageState(stage: WorkStage): DomainStateKind {
 }
 
 /**
- * Which of the seven commands this build may offer for one task.
- *
- * Gated on the projection's own fields so a control is only drawn where the
- * daemon could act on it — offering "admit execution" for a task whose proposal
- * is still open would be a button whose only possible outcome is a refusal.
- *
- * `create` is absent because it does not act on an existing task.
- */
-export function availableCommands(projection: WorkProjection): readonly WorkCommandKind[] {
-  const stage = workStage(projection);
-  const commands: WorkCommandKind[] = ['replan_dependencies'];
-  if (stage === 'proposal_open') {
-    commands.push('review_proposal', 'accept_proposal');
-  }
-  if (!projection.task_accepted) commands.push('accept_task');
-  if (projection.task_accepted && !projection.execution_admitted) commands.push('admit_execution');
-  if (projection.execution_admitted) commands.push('attach_runtime_evidence');
-  return commands;
-}
-
-export type WorkCommandKind =
-  | 'replan_dependencies'
-  | 'review_proposal'
-  | 'accept_proposal'
-  | 'accept_task'
-  | 'admit_execution'
-  | 'attach_runtime_evidence';
-
-/**
- * Whether this build can assemble a command, as distinct from whether the
- * daemon would accept one.
- *
- * `availableCommands` answers the domain question: has the task reached the
- * gate this command acts on. This answers the dashboard's own question: are the
- * command's inputs anywhere in a generated read model.
- *
- * Three of the seven fail that test, and they fail it the same way. Reviewing a
- * proposal needs `proposal_id` and `proposal_digest`; accepting one needs the
- * same; attaching evidence needs `run_id` and `evidence_digest`. `WorkProjection`
- * carries `accepted_proposal` — the proposal already chosen — and a list of
- * evidence already attached, and no contract in this build enumerates the
- * pending proposals or the runs. A control for them could only ask an operator
- * to type an opaque digest, or mint one, and a minted digest is a fabricated
- * authority record aimed at the daemon's own audit trail.
- *
- * So they are named and explained rather than drawn. The gap is in the read
- * model, not in the command surface, and saying which is what lets it be closed.
- */
-export function commandBlocked(kind: WorkCommandKind): string | undefined {
-  switch (kind) {
-    case 'review_proposal':
-    case 'accept_proposal':
-      return 'no generated contract lists the pending proposals, so this build has no proposal identity or digest to send';
-    case 'attach_runtime_evidence':
-      return 'no generated contract lists runs or their evidence digests, so this build has nothing to attach';
-    case 'replan_dependencies':
-    case 'accept_task':
-    case 'admit_execution':
-      return undefined;
-    default: {
-      const unhandled: never = kind;
-      return unhandled;
-    }
-  }
-}
-
-/**
  * How much of the board this page is actually showing.
  *
- * `returned` and `total` come from the daemon. A capped or partial reading is
- * reported as `partial` and never rounded up to a complete board, because the
- * difference between "these are the tasks" and "these are some of the tasks" is
- * the difference this surface exists to keep.
+ * The current product graph is one complete, immutable head rather than a
+ * paginated projection. `returned` and `total` are therefore identical; the
+ * explicit count still distinguishes an empty graph from an unread one.
  */
-export function coverageReading(coverage: WorkProjectionCoverageV1): {
+export function coverageReading(coverage: WorkTaskCoverage): {
   state: DomainStateKind;
   detail: string;
 } {
-  switch (coverage.state) {
-    case 'complete':
-      return {
-        state: coverage.returned === 0 ? 'complete_zero_findings' : 'ready',
-        detail: `${coverage.returned} of ${coverage.total}`,
-      };
-    case 'capped':
-      return {
-        state: 'partial',
-        detail: `${coverage.returned} of ${coverage.total}, capped at ${coverage.cap}`,
-      };
-    case 'partial':
-      return { state: 'partial', detail: `${coverage.returned} of ${coverage.total}` };
-    default: {
-      const unhandled: never = coverage;
-      return unhandled;
-    }
-  }
+  return {
+    state: coverage.returned === 0 ? 'complete_zero_findings' : 'ready',
+    detail: `${coverage.returned} of ${coverage.total}`,
+  };
 }

@@ -30,7 +30,7 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
 /** A route the daemon actually mounts, with the contracts on either side of it.
  *
- * Named for the operation id the backend registers (`operation.work.snapshot`
+ * Named for the operation id the backend registers (`operation.work.views`
  * and so on) so a route here can be checked against
  * `src/dashboard/work_api.rs` by eye. */
 export interface WorkRoute<Request, Response> {

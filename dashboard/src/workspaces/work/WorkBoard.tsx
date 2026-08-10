@@ -1,5 +1,4 @@
 import { useSearchParams } from 'react-router';
-import type { WorkProjection, WorkProjectionSnapshotV1 } from '../../contracts/index.ts';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import {
@@ -16,6 +15,7 @@ import {
   terminalWorkAttempt,
   type WorkGraphReading,
 } from './workGraphModel.ts';
+import type { WorkProductView, WorkTaskView } from './workProductView.ts';
 
 /**
  * The Work board.
@@ -100,10 +100,10 @@ function AttemptCoverage({ graph }: { graph: WorkGraphReading }) {
 }
 
 function byStage(
-  projections: readonly WorkProjection[],
+  projections: readonly WorkTaskView[],
   graph: WorkGraphReading,
-): ReadonlyMap<WorkStage, readonly WorkProjection[]> {
-  const grouped = new Map<WorkStage, WorkProjection[]>(WORK_STAGES.map((stage) => [stage, []]));
+): ReadonlyMap<WorkStage, readonly WorkTaskView[]> {
+  const grouped = new Map<WorkStage, WorkTaskView[]>(WORK_STAGES.map((stage) => [stage, []]));
   const terminal = new Set(
     graphRuntimeAttempts(graph)
       .filter((attempt) => terminalWorkAttempt(attempt.state))
@@ -121,7 +121,7 @@ function TaskRow({
   selected,
   onSelect,
 }: {
-  projection: WorkProjection;
+  projection: WorkTaskView;
   attempts: number;
   selected: boolean;
   onSelect: (taskId: string) => void;
@@ -169,7 +169,7 @@ function TaskRow({
         {projection.dependencies.length}
       </td>
       <td className="px-2 py-1.5 text-right tabular-nums text-text-secondary">
-        {projection.history_len}
+        {projection.history_len ?? '—'}
       </td>
       <td className="px-2 py-1.5 text-right tabular-nums text-text-secondary">
         {attempts}
@@ -186,7 +186,7 @@ function StageGroup({
   onSelect,
 }: {
   stage: WorkStage;
-  projections: readonly WorkProjection[];
+  projections: readonly WorkTaskView[];
   attemptsByTask: ReadonlyMap<string, number>;
   selected: string | null;
   onSelect: (taskId: string) => void;
@@ -264,7 +264,7 @@ export function WorkBoard({
   selected,
   onSelect,
 }: {
-  snapshot: WorkProjectionSnapshotV1;
+  snapshot: WorkProductView;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;

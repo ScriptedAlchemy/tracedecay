@@ -14,12 +14,11 @@ import {
   scopeWritable,
 } from "../../data/scope/store.ts";
 
-import { resumeCursor } from "./workQueries.ts";
 import { workGraphReadRequest } from "./workViewsQueries.ts";
 import {
-  WORK_ACCEPT_TASK_ROUTE,
-  WORK_SNAPSHOT_ROUTE,
+  WORK_MUTATE_GRAPH_ROUTE,
   WORK_TOPOLOGY_ROUTE,
+  WORK_VIEWS_ROUTE,
 } from "./workRoutes.ts";
 
 function project(
@@ -35,19 +34,19 @@ function project(
 
 describe("where a Work read is sent", () => {
   it("leaves the aggregate view and the active project unprefixed", () => {
-    expect(scopedUrl({ kind: "all" }, WORK_SNAPSHOT_ROUTE.path)).toBe(
-      "/api/work/snapshot",
+    expect(scopedUrl({ kind: "all" }, WORK_VIEWS_ROUTE.path)).toBe(
+      "/api/work/views",
     );
   });
 
   /** The defect this guards: a selected project must be asked about by name, or
    * the board would answer with the active project's tasks. */
   it("names the project a selected scope is asking about", () => {
-    expect(scopedUrl(project("selected"), WORK_SNAPSHOT_ROUTE.path)).toBe(
-      "/api/projects/project.beta/work/snapshot",
+    expect(scopedUrl(project("selected"), WORK_VIEWS_ROUTE.path)).toBe(
+      "/api/projects/project.beta/work/views",
     );
-    expect(scopedUrl(project("unresolved"), WORK_SNAPSHOT_ROUTE.path)).toBe(
-      "/api/projects/project.beta/work/snapshot",
+    expect(scopedUrl(project("unresolved"), WORK_VIEWS_ROUTE.path)).toBe(
+      "/api/projects/project.beta/work/views",
     );
   });
 
@@ -112,35 +111,8 @@ describe("which scopes accept a Work command", () => {
   });
 
   it("sends an accepted command to the scope it was written for", () => {
-    expect(scopedUrl({ kind: "all" }, WORK_ACCEPT_TASK_ROUTE.path)).toBe(
-      "/api/work/accept-task",
+    expect(scopedUrl({ kind: "all" }, WORK_MUTATE_GRAPH_ROUTE.path)).toBe(
+      "/api/work/mutate-graph",
     );
-  });
-});
-
-describe("continuing a snapshot", () => {
-  it("offers a cursor only where the daemon gave one", () => {
-    expect(
-      resumeCursor({ state: "complete", returned: 2, total: 2 }),
-    ).toBeUndefined();
-    expect(
-      resumeCursor({
-        state: "capped",
-        cap: 1,
-        returned: 1,
-        total: 9,
-        cursor: { generation_id: "g", token: "resume" },
-        range: { start_exclusive: 0, end_inclusive: 1 },
-      }),
-    ).toEqual({ generation_id: "g", token: "resume" });
-    expect(
-      resumeCursor({
-        state: "partial",
-        returned: 1,
-        total: 9,
-        cursor: { generation_id: "g", token: "resume-2" },
-        range: { start_exclusive: 0, end_inclusive: 1 },
-      }),
-    ).toEqual({ generation_id: "g", token: "resume-2" });
   });
 });

@@ -22,7 +22,7 @@ import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { STORY_SURFACES } from '../../../stories/registry.ts';
 import { useScope } from '../../data/scope/store.ts';
 
-// No EventsProvider is mounted here, and the subject is the snapshot read
+// No EventsProvider is mounted here, and the subject is the product graph read
 // rather than the live stream, so both hooks answer as a connected feed that
 // has carried nothing.
 vi.mock('../../data/sse/useEvents.tsx', () => ({
@@ -68,12 +68,12 @@ describe('the Work surface the visual audit screenshots', () => {
   it('draws the board from the fixture, not a refusal plate', async () => {
     renderWork();
 
-    // A task title only exists on this page if the snapshot decoded: the
+    // A task title only exists on this page if the graph decoded: the
     // application envelope opened, and the payload satisfied
-    // `WorkProjectionSnapshotV1Schema`.
+    // `WorkGraphReadV1Schema`.
     await waitFor(() =>
       expect(
-        screen.getByText('Gate fixture payloads against their generated contract'),
+        screen.getByText('Draw the handoff frontier on Agents'),
       ).toBeTruthy(),
     );
 

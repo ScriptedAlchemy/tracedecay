@@ -1,5 +1,5 @@
 /**
- * The four plan 11c Work projections, over the one mounted snapshot route.
+ * The Work cameras over one exact product graph and its execution projections.
  *
  * Two invariants carry this file.
  *
@@ -31,50 +31,6 @@ import {
 import { workGraphRead, type WorkGraphVersionSpec } from '../../../test/workGraphFixture.ts';
 import { WorkPage } from '../WorkPage.tsx';
 
-function projection(overrides: Record<string, unknown> = {}) {
-  return {
-    accepted_proposal: null,
-    authority: {
-      actor_id: 'actor',
-      policy_digest: 'digest',
-      project_id: 'project',
-      repository_id: 'repository',
-      worktree_id: 'worktree',
-    },
-    dependencies: [],
-    execution_admitted: false,
-    history_len: 2,
-    task_accepted: false,
-    task_id: 'task-alpha',
-    title: 'Alpha task',
-    version: 4,
-    ...overrides,
-  };
-}
-
-/**
- * A graph with one of everything the projections have to read: a chain, a
- * declared cycle, an off-page dependency, a run that crossed two tasks, a
- * retry, a task no run touched, and a dependent that finished while its
- * dependency had not.
- */
-const GRAPH = [
-  projection({ task_id: 'root', title: 'Root task' }),
-  projection({
-    task_id: 'middle',
-    title: 'Middle task',
-    dependencies: ['root'],
-  }),
-  projection({
-    task_id: 'leaf',
-    title: 'Leaf task',
-    dependencies: ['middle', 'offpage'],
-  }),
-  projection({ task_id: 'loop-a', title: 'Loop A', dependencies: ['loop-b'] }),
-  projection({ task_id: 'loop-b', title: 'Loop B', dependencies: ['loop-a'] }),
-  projection({ task_id: 'lonely', title: 'Lonely task' }),
-];
-
 /** The application envelope every Work route answers in. */
 function workEnvelope(payload: unknown, bindingId: string) {
   return {
@@ -93,18 +49,6 @@ function workEnvelope(payload: unknown, bindingId: string) {
       outcome: { outcome: 'evidence', value: { payload } },
     },
   };
-}
-
-function snapshotBody(projections: readonly unknown[], generation = 'generation-7') {
-  return workEnvelope(
-    {
-      coverage: { state: 'complete', returned: projections.length, total: projections.length },
-      generation_id: generation,
-      projections,
-      sequence: 12,
-    },
-    'binding.http.work.snapshot',
-  );
 }
 
 /**
@@ -145,19 +89,19 @@ const ATTEMPTS = [
 ];
 
 /**
- * The work-product graph behind the projections, coherent with GRAPH above: the
- * same chain carries declared effort, its dependencies are the gating edges,
+ * The work-product graph behind every camera: the same chain carries declared
+ * effort, its dependencies are the gating edges,
  * one causal candidate is nominated, and one attempt is live under complete
  * runtime coverage.
  */
 const VIEWS_GRAPH: WorkGraphVersionSpec = {
   tasks: [
-    { taskId: 'root', effort: 2 },
-    { taskId: 'middle', effort: 3, dependencies: ['root'] },
-    { taskId: 'leaf', effort: 5, dependencies: ['middle'], causalCandidates: ['middle'] },
-    { taskId: 'loop-a', dependencies: ['loop-b'] },
-    { taskId: 'loop-b', dependencies: ['loop-a'] },
-    { taskId: 'lonely' },
+    { taskId: 'root', title: 'Root task', effort: 2 },
+    { taskId: 'middle', title: 'Middle task', effort: 3, dependencies: ['root'] },
+    { taskId: 'leaf', title: 'Leaf task', effort: 5, dependencies: ['middle'], causalCandidates: ['middle'] },
+    { taskId: 'loop-a', title: 'Loop A' },
+    { taskId: 'loop-b', title: 'Loop B', dependencies: ['loop-a'] },
+    { taskId: 'lonely', title: 'Lonely task' },
   ],
   criticalPath: ['root', 'middle', 'leaf'],
   runtimeAttempts: [{ attemptId: 'attempt-2', taskId: 'middle', runId: 'run-1' }],
@@ -249,10 +193,8 @@ function serveWork(
     status: 200,
     body: workEnvelope(workAttemptList(ATTEMPTS), 'binding.http.work.list_attempts'),
   },
-  projections: readonly unknown[] = GRAPH,
   views: { status: number; body: unknown } = viewsBody(),
   topology: { status: number; body: unknown } = topologyBody(),
-  snapshotGeneration = 'generation-7',
 ) {
   serve((url) =>
     url.includes('/work/list-attempts')
@@ -261,7 +203,7 @@ function serveWork(
         ? views
         : url.includes('/work/topology')
           ? topology
-        : { status: 200, body: snapshotBody(projections, snapshotGeneration) },
+        : { status: 503, body: { kind: 'problem' } },
   );
 }
 
@@ -453,21 +395,6 @@ describe('the DAG projection', () => {
     expect(container.querySelectorAll('[data-work-widest="true"]').length).toBeGreaterThan(0);
   });
 
-  it('condenses a declared cycle and states that it is an observation', async () => {
-    const { container } = renderPage('/work?view=dag');
-    await waitFor(() => expect(container.querySelector('[data-work-cycle]')).not.toBeNull());
-
-    expect(container.querySelector('[data-work-cycle]')?.getAttribute('data-work-cycle')).toBe('2');
-    expect(screen.getByText(/not an error in this drawing/)).toBeTruthy();
-  });
-
-  it('lists a dependency the snapshot did not return rather than dropping it', async () => {
-    const { container } = renderPage('/work?view=dag');
-    await waitFor(() => expect(container.querySelector('[data-work-view="dag"]')).not.toBeNull());
-
-    expect(screen.getByText('leaf needs offpage')).toBeTruthy();
-  });
-
   /** The effort-weighted critical path is the measurement 11c asks for, and
    * `operation.work.views` now carries it: the authority's chain and its
    * weight render from the wire, beside — never in place of — the unweighted
@@ -492,25 +419,11 @@ describe('the DAG projection', () => {
     await waitFor(() => expect(container.querySelector('[data-work-gating]')).not.toBeNull());
 
     expect(container.querySelector('[data-work-gating]')?.getAttribute('data-work-gating')).toBe(
-      '4',
+      '3',
     );
     expect(screen.getByText('middle needs root')).toBeTruthy();
   });
 
-  /** When the graph read is refused, the two graph-fed panels state the
-   * refusal in the read's own words rather than drawing an empty chain. */
-  it('states a refused graph read on the channels it would have fed', async () => {
-    serveWork(undefined, GRAPH, {
-      status: 503,
-      body: { kind: 'problem' },
-    });
-    const { container } = renderPage('/work?view=dag');
-    await waitFor(() =>
-      expect(
-        container.querySelector('[data-work-critical-path="absent"]')?.textContent ?? '',
-      ).toContain('refused'),
-    );
-  });
 });
 
 describe('every attempt-shaped projection', () => {
@@ -544,7 +457,7 @@ describe('every attempt-shaped projection', () => {
     ['Causal', 'causal'],
     ['Workload', 'workload'],
   ])('%s draws an empty board as an empty board, not as a failure', async (name, view) => {
-    serveWork(undefined, []);
+    serveWork(undefined, viewsBody({ ...VIEWS_GRAPH, tasks: [] }));
     const { container } = renderPage(`/work?view=${view}`);
 
     await waitFor(() =>
@@ -644,7 +557,7 @@ describe('the graph-fed channels', () => {
    * like the complete-and-empty reading, which is the authority stating that
    * nothing is running. */
   it('renders unmeasured attempts as unmeasured, never as zero attempts', async () => {
-    serveWork(undefined, GRAPH, viewsBody({
+    serveWork(undefined, viewsBody({
       ...VIEWS_GRAPH,
       runtimeAttempts: [],
       runtimeCoverage: { coverage: 'unavailable' },
@@ -664,7 +577,7 @@ describe('the graph-fed channels', () => {
   });
 
   it('does not render unavailable board attempt stages as zero attempts', async () => {
-    serveWork(undefined, GRAPH, viewsBody({
+    serveWork(undefined, viewsBody({
       ...VIEWS_GRAPH,
       runtimeAttempts: [],
       runtimeCoverage: { coverage: 'unavailable' },
@@ -692,7 +605,7 @@ describe('the graph-fed channels', () => {
    * mount must never cause: a graph that declares no candidate renders the
    * declaration, and the observed order stays a stated absence beside it. */
   it('renders declared-none candidates as an answer while order stays absent', async () => {
-    serveWork(undefined, GRAPH, viewsBody({
+    serveWork(undefined, viewsBody({
       ...VIEWS_GRAPH,
       tasks: VIEWS_GRAPH.tasks.map((task) => ({ ...task, causalCandidates: [] })),
     }));
@@ -909,7 +822,7 @@ describe('the execution-topology lens', () => {
   });
 
   it('draws a refused canonical topology read as a refusal, never as an empty lane set', async () => {
-    serveWork(undefined, GRAPH, viewsBody(), { status: 503, body: { kind: 'problem' } });
+    serveWork(undefined, viewsBody(), { status: 503, body: { kind: 'problem' } });
     const container = await openTopology();
 
     expect(container.querySelector('[data-work-topology-lane]')).toBeNull();
@@ -923,7 +836,7 @@ describe('the execution-topology lens', () => {
   });
 
   it('draws an authorized empty canonical page as a statement, not a failed render', async () => {
-    serveWork(undefined, GRAPH, viewsBody(), topologyBody('generation-7', []));
+    serveWork(undefined, viewsBody(), topologyBody('generation-7', []));
     const container = await openTopology();
 
     await waitFor(() =>
@@ -967,7 +880,7 @@ describe('the execution-topology lens', () => {
   });
 
   it('refuses graph runtime figures when the mounted canonical topology generation differs', async () => {
-    serveWork(undefined, GRAPH, viewsBody(), topologyBody('generation-other'));
+    serveWork(undefined, viewsBody(), topologyBody('generation-other'));
     const container = await openTopology();
     await waitFor(() =>
       expect(container.querySelector('[data-work-accounting="concurrency_and_fanout"]')).not.toBeNull(),
@@ -995,10 +908,8 @@ describe('the execution-topology lens', () => {
           'binding.http.work.list_attempts',
         ),
       },
-      GRAPH,
-      viewsBody(),
+      viewsBody({ ...VIEWS_GRAPH, generationId: 'generation-graph' }),
       topologyBody('generation-topology'),
-      'generation-snapshot',
     );
     const container = await openTopology();
 
@@ -1008,7 +919,7 @@ describe('the execution-topology lens', () => {
     const titleJoin = container.querySelector<HTMLElement>(
       '[data-work-snapshot-title-join="conflicting"]',
     );
-    expect(titleJoin?.textContent).toContain('generation-snapshot');
+    expect(titleJoin?.textContent).toContain('generation-graph');
     expect(titleJoin?.textContent).toContain('generation-topology');
     expect(titleJoin?.textContent).toContain('unbound');
 

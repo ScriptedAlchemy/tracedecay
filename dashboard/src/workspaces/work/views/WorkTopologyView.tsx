@@ -3,7 +3,6 @@ import type {
   WorkAttemptListCoverageV1,
   WorkAttemptListV1,
   WorkPlacementV1,
-  WorkProjectionSnapshotV1,
   WorkTopologyPlacementLaneV1,
 } from '../../../contracts/index.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
@@ -11,6 +10,7 @@ import { Panel } from '../../../ui/instrument.tsx';
 import type { WorkResult } from '../workApi.ts';
 import type { WorkChannel } from '../workChannel.ts';
 import type { WorkGraphReading } from '../workGraphModel.ts';
+import type { WorkProductView } from '../workProductView.ts';
 import {
   WORK_TOPOLOGY_DIMENSIONS,
   topologyDimensionLabel,
@@ -58,7 +58,7 @@ export function WorkTopologyView({
   selected,
   onSelect,
 }: {
-  snapshot: WorkProjectionSnapshotV1;
+  snapshot: WorkProductView;
   /** The separate attempt page is solely for the accounting facts not present
    * in `ExecutionTopologyViewV1`; structural lanes always use `topology`. */
   attemptList: WorkResult<WorkAttemptListV1> | undefined;
@@ -112,7 +112,7 @@ function SnapshotTitleAbsence({ channel }: { channel: WorkChannel<never> }) {
  * identify the same topology population.
  */
 function snapshotTitlesBoundToTopology(
-  snapshot: WorkProjectionSnapshotV1,
+  snapshot: WorkProductView,
   reading: WorkTopologyReading,
 ): SnapshotTitleJoin {
   if (!reading.binding.available) {

@@ -1,4 +1,3 @@
-import type { WorkProjectionSnapshotV1 } from '../../../contracts/index.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Meter, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
@@ -7,6 +6,7 @@ import { kindColorVars } from '../../../viz/graph/kindColor.ts';
 import { coverageReading } from '../workModel.ts';
 import type { WorkAttemptReading } from '../workAttemptModel.ts';
 import type { WorkGraphReading } from '../workGraphModel.ts';
+import type { WorkProductView } from '../workProductView.ts';
 import {
   type WorkWeaveLanding,
   type WorkWeaveReading,
@@ -66,7 +66,7 @@ export function WorkTimelineView({
   selected,
   onSelect,
 }: {
-  snapshot: WorkProjectionSnapshotV1;
+  snapshot: WorkProductView;
   attempts: WorkAttemptReading;
   graph: WorkGraphReading;
   selected: string | null;

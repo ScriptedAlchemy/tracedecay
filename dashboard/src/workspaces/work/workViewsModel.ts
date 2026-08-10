@@ -1,4 +1,4 @@
-import type { WorkDagEdgeV1, WorkProjection } from '../../contracts/index.ts';
+import type { WorkDagEdgeV1 } from '../../contracts/index.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import {
   attemptPageOf,
@@ -30,6 +30,7 @@ import {
   type WorkRuntimeReading,
   type WorkTimelineInstantReading,
 } from './workGraphModel.ts';
+import type { WorkTaskView } from './workProductView.ts';
 
 /**
  * The four Work projections of plan 11c, derived from the reads this build can
@@ -41,8 +42,8 @@ import {
  * The data arrives from three reads, and which read a channel comes from is the
  * thing to keep straight:
  *
- *   the snapshot        `WorkProjection` — task command gates and the declared
- *                       dependency graph used for snapshot paging
+ *   the product graph   `WorkItemV1` — task command gates and the declared
+ *                       dependency graph
  *   the attempt list    `WorkAttemptV1` — the execution record: who ran what
  *                       (`requested_route`/`actual_route`), the retry chains,
  *                       the typed cancellation ladder, and the instant each
@@ -254,7 +255,7 @@ function stronglyConnected(
  * read draws its two channels as not-yet-answered rather than as absent.
  */
 export function workDagReading(
-  projections: readonly WorkProjection[],
+  projections: readonly WorkTaskView[],
   graph: WorkGraphReading = { state: 'pending' },
 ): WorkDagReading {
   const entry = graphEntryOf(graph);
@@ -518,7 +519,7 @@ function attemptChannel<T>(
  * read draws its channels as not-yet-answered rather than as absent.
  */
 export function workWeaveReading(
-  projections: readonly WorkProjection[],
+  projections: readonly WorkTaskView[],
   attempts: WorkAttemptReading = { state: 'pending' },
   graph: WorkGraphReading = { state: 'pending' },
 ): WorkWeaveReading {
@@ -686,7 +687,7 @@ export function causalReadingState(kind: WorkCausalReadingKind): DomainStateKind
 }
 
 export function workCausalReading(
-  projections: readonly WorkProjection[],
+  projections: readonly WorkTaskView[],
   graph: WorkGraphReading = { state: 'pending' },
 ): WorkCausalReading {
   const entry = graphEntryOf(graph);
@@ -789,7 +790,7 @@ export interface WorkloadReading {
  * read draws its four channels as not-yet-answered rather than as absent.
  */
 export function workloadReading(
-  projections: readonly WorkProjection[],
+  projections: readonly WorkTaskView[],
   graph: WorkGraphReading = { state: 'pending' },
   churnWindow: number = WORK_CHURN_WINDOW_MICROS,
 ): WorkloadReading {

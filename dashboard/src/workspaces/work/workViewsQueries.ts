@@ -179,24 +179,34 @@ export function workGraphReadRequest(observedAt: number, scope?: ResolvedScope) 
 }
 
 /**
- * @param enabled the graph read feeds the four projections beside the board and
- * nothing on the board itself, so it is issued when one of them is the camera
- * rather than on every visit to the Work page. A disabled query has no data,
- * which the reading reports as pending — correct, because nothing has been
- * asked.
+ * @param enabled the graph read is the board and camera authority. The Work
+ * page enables it for every camera; callers that render no Work product can
+ * still keep the query disabled.
  */
-export function useWorkGraphViews(enabled: boolean, authority?: ResolvedScope) {
+export function useWorkGraphViews(enabled: boolean) {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
-  return useQuery<WorkResult<WorkGraphReadV1>>({
+  const bootstrap = useQuery<WorkResult<WorkGraphReadV1>>({
+    queryKey: workQueryKey(key, 'views', 'profile-owned-no-git'),
+    enabled,
+    queryFn: () =>
+      callWork(
+        WORK_VIEWS_ROUTE,
+        workGraphReadRequest(Date.now() * 1_000),
+        scopedUrl(scope, WORK_VIEWS_ROUTE.path),
+      ),
+  });
+  const authority =
+    bootstrap.data?.outcome === 'value' ? bootstrap.data.scope : undefined;
+  const exact = useQuery<WorkResult<WorkGraphReadV1>>({
     queryKey: workQueryKey(
       key,
       'views',
       authority === undefined
-        ? 'profile-owned-no-git'
+        ? 'repository-unresolved'
         : `${authority.project_id}/${authority.repository_id}`,
     ),
-    enabled,
+    enabled: enabled && authority !== undefined,
     // The observation instant is minted per fetch rather than per render: as a
     // query-key member it would mint a new cache entry on every render and turn
     // one read into an unbounded stream of them.
@@ -207,4 +217,5 @@ export function useWorkGraphViews(enabled: boolean, authority?: ResolvedScope) {
         scopedUrl(scope, WORK_VIEWS_ROUTE.path),
       ),
   });
+  return authority === undefined ? bootstrap : exact;
 }

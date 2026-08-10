@@ -1,9 +1,9 @@
-import type { WorkProjectionSnapshotV1 } from '../../../contracts/index.ts';
 import { type DomainStateKind, StateChip } from '../../../ui/StateChip.tsx';
 import { MeterRow, Panel } from '../../../ui/instrument.tsx';
 import { cn } from '../../../ui/cn.ts';
 import { coverageReading } from '../workModel.ts';
 import type { WorkGraphReading } from '../workGraphModel.ts';
+import type { WorkProductView } from '../workProductView.ts';
 import {
   type WorkCausalEdge,
   type WorkCausalReading,
@@ -92,7 +92,7 @@ export function WorkCausalView({
   selected,
   onSelect,
 }: {
-  snapshot: WorkProjectionSnapshotV1;
+  snapshot: WorkProductView;
   graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;

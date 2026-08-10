@@ -1,19 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type {
-  WorkProjectionCoverageV1,
-  WorkProjectionDeltaV1,
-  WorkProjectionResumeCursorV1,
-  WorkProjectionSnapshotV1,
-} from "../../contracts/index.ts";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   scopeKey,
   scopedUrl,
   scopeWritable,
   useScope,
 } from "../../data/scope/store.ts";
-import { workQueryKey } from "../../data/query/work.ts";
 import { callWork, type WorkResult, type WorkRoute } from "./workApi.ts";
-import { WORK_DELTA_ROUTE, WORK_SNAPSHOT_ROUTE } from "./workRoutes.ts";
 
 /**
  * Work reads and commands as queries.
@@ -30,32 +22,6 @@ import { WORK_DELTA_ROUTE, WORK_SNAPSHOT_ROUTE } from "./workRoutes.ts";
  * rather than keeping a second account of the same thing.
  */
 
-/** How many projections a page asks for. The daemon decides what it can
- * actually return and says so in `coverage`; this is a request, not a promise. */
-export const WORK_PAGE_SIZE = 100;
-
-/** The resume cursor a coverage reading carries, or `undefined` when it carries
- * none.
- *
- * Only `capped` and `partial` have one — `complete` is the daemon saying there
- * is nothing after this page, so asking for a delta from it would be asking for
- * a continuation that does not exist. */
-export function resumeCursor(
-  coverage: WorkProjectionCoverageV1,
-): WorkProjectionResumeCursorV1 | undefined {
-  switch (coverage.state) {
-    case "capped":
-    case "partial":
-      return coverage.cursor;
-    case "complete":
-      return undefined;
-    default: {
-      const unhandled: never = coverage;
-      return unhandled;
-    }
-  }
-}
-
 /** The refusal a command outside the writable scope reports, without issuing a
  * request.
  *
@@ -66,58 +32,14 @@ function notWritable<T>(reason: string): WorkResult<T> {
   return { outcome: "refused", state: "locked", detail: reason };
 }
 
-export function useWorkSnapshot(pageSize: number = WORK_PAGE_SIZE) {
-  const scope = useScope((state) => state.scope);
-  const key = scopeKey(scope);
-  return useQuery<WorkResult<WorkProjectionSnapshotV1>>({
-    queryKey: workQueryKey(key, "snapshot", pageSize),
-    queryFn: () =>
-      callWork(
-        WORK_SNAPSHOT_ROUTE,
-        { page_size: pageSize },
-        scopedUrl(scope, WORK_SNAPSHOT_ROUTE.path),
-      ),
-  });
-}
-
-/**
- * The continuation of a capped or partial snapshot.
- *
- * Disabled without a cursor rather than called with a fabricated one: a delta
- * request needs a resume token the daemon minted, and inventing one would ask
- * the daemon to continue from a position it never reported.
- */
-export function useWorkDelta(
-  cursor: WorkProjectionResumeCursorV1 | undefined,
-  pageSize: number = WORK_PAGE_SIZE,
-) {
-  const scope = useScope((state) => state.scope);
-  const key = scopeKey(scope);
-  return useQuery<WorkResult<WorkProjectionDeltaV1>>({
-    queryKey: workQueryKey(key, "delta", cursor?.token ?? null, pageSize),
-    enabled: cursor !== undefined,
-    queryFn: () =>
-      callWork(
-        WORK_DELTA_ROUTE,
-        { cursor: cursor as WorkProjectionResumeCursorV1, page_size: pageSize },
-        scopedUrl(scope, WORK_DELTA_ROUTE.path),
-      ),
-  });
-}
-
 /**
  * One Work command.
  *
  * A command that lands invalidates every Work read rather than splicing its
- * returned projection into the cached snapshot. The projection it answers with
- * is authoritative for that one task, but a snapshot is a coherent set at one
- * `sequence` with one `coverage`; writing a newer row into an older set would
- * assemble a snapshot the daemon never produced, and the sequence stamped on it
- * would then be a claim this build invented. Refetching costs a round trip and
+ * returned receipt into the cached graph. A product graph is a coherent version
+ * with one verified runtime projection; splicing a newer event into it would
+ * assemble a head the daemon never produced. Refetching costs a round trip and
  * keeps the page showing a state that actually existed.
- *
- * The returned projection is still handed back to the caller, so a control can
- * report precisely what it committed while the refetch is in flight.
  */
 export function useWorkCommand<Request, Response>(
   route: WorkRoute<Request, Response>,

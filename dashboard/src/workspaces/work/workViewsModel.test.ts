@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WorkGraphReadV1Schema, type WorkProjection } from '../../contracts/index.ts';
+import { WorkGraphReadV1Schema } from '../../contracts/index.ts';
 import { workGraphRead } from '../../test/workGraphFixture.ts';
 import { absentChannel, channelGap, type WorkChannelGap } from './workChannel.ts';
 import { workGraphReading } from './workGraphModel.ts';
@@ -9,6 +9,7 @@ import {
   workWeaveReading,
   workloadReading,
 } from './workViewsModel.ts';
+import type { WorkTaskView } from './workProductView.ts';
 
 /**
  * The four projections, falsified against graphs whose answers are known by
@@ -23,19 +24,14 @@ import {
  * a claim of agreement.
  */
 
-function projection(overrides: Partial<WorkProjection> = {}): WorkProjection {
+function projection(overrides: Partial<WorkTaskView> = {}): WorkTaskView {
   return {
     accepted_proposal: null,
-    authority: {
-      actor_id: 'actor',
-      policy_digest: 'digest',
-      project_id: 'project',
-      repository_id: 'repository',
-      worktree_id: 'worktree',
-    },
+    acceptance_evidence_required: false,
     dependencies: [],
     execution_admitted: false,
     history_len: 1,
+    relation_replan: null,
     task_accepted: false,
     task_id: 'task',
     title: 'Task',

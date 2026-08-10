@@ -2477,8 +2477,6 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // are wrapped in the application's `HttpJsonEnvelope` rather than
   // `DashboardEnvelopeV1`, because `mod.rs` nests the Work routes straight
   // onto the application router — see `workApi.ts`, which walks that wrapper.
-  '/api/work/snapshot': workEnvelope(workSnapshotPayload()),
-  '/api/work/delta': workEnvelope(workDeltaPayload()),
   // The work-product graph read. Serves the Work projections and the Agents
   // workspace's handoff frontier and attempt failures.
   '/api/work/views': workEnvelope(workGraphViewsPayload()),
@@ -2504,7 +2502,7 @@ export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
 ];
 
 /* ==========================================================================
- * Work (`/api/work/snapshot`, `/api/work/delta`).
+ * Work product graph (`/api/work/views`).
  *
  * The Work routes are the one family on this dashboard that does not answer
  * with `DashboardEnvelopeV1`. `src/dashboard/mod.rs` nests them onto the
@@ -2521,144 +2519,21 @@ function workEnvelope(payload: unknown): Record<string, unknown> {
   return {
     kind: 'success',
     value: {
+      binding_id: 'binding.http.work.fixture',
+      contract: { schema_id: 'schema.work.fixture.result', schema_revision: 1 },
+      request_id: 'request.work.fixture',
+      scope: {
+        project_id: 'project.tracedecay',
+        repository_id: 'repository.tracedecay',
+        worktree_id: 'worktree.primary',
+        reference: null,
+        scope_digest: 'sha256:work-fixture-scope',
+      },
       // Reads answer as evidence; commands as effects. Both put the contract
       // in the same place, which is why `workApi.ts` checks the tag for
       // presence and does not branch on it.
       outcome: { outcome: 'evidence', value: { payload } },
     },
-  };
-}
-
-/** One `WorkProjection`. The four booleans and the accepted proposal are what
- * `workModel.ts` reads a stage from, so the set below walks the lifecycle:
- * proposed, accepted, admitted, and admitted with evidence attached. */
-function workProjection(spec: {
-  taskId: string;
-  title: string;
-  version: number;
-  acceptedProposal?: string | null;
-  taskAccepted?: boolean;
-  executionAdmitted?: boolean;
-  dependencies?: readonly string[];
-  runtimeEvidence?: readonly Record<string, unknown>[];
-  historyLen?: number;
-}): Record<string, unknown> {
-  return {
-    accepted_proposal: spec.acceptedProposal ?? null,
-    authority: {
-      actor_id: 'actor.agent.opus',
-      policy_digest: 'sha256:9f2c41d6',
-      project_id: 'project.tracedecay',
-      repository_id: 'repository.tracedecay',
-      worktree_id: 'worktree.primary',
-    },
-    dependencies: spec.dependencies ?? [],
-    execution_admitted: spec.executionAdmitted ?? false,
-    history_len: spec.historyLen ?? 1,
-    runtime_evidence: spec.runtimeEvidence ?? [],
-    task_accepted: spec.taskAccepted ?? false,
-    task_id: spec.taskId,
-    title: spec.title,
-    version: spec.version,
-  };
-}
-
-/** A function rather than a `const` for the reason
- * `OBSERVATORY_SINCE_MICROS` is declared where it is: the fixture map is built
- * at module init, and a `const` below it is not hoisted. */
-function workProjections(): readonly Record<string, unknown>[] {
-  return [
-  workProjection({
-    taskId: 'task.contract-drift-gate',
-    title: 'Gate fixture payloads against their generated contract',
-    version: 4,
-    acceptedProposal: 'proposal.contract-drift-gate.2',
-    taskAccepted: true,
-    executionAdmitted: true,
-    historyLen: 9,
-    // `RuntimeEvidenceRef`: the run it came from, the digest that seals it,
-    // and whether it is the attempt's last word.
-    runtimeEvidence: [
-      {
-        evidence_digest: 'sha256:4c1b8a0e77d2f5936ab41e0c9d5f2731',
-        run_id: 'run.contract-drift-gate.1',
-        terminal: true,
-      },
-    ],
-  }),
-  workProjection({
-    taskId: 'task.storage-findings-authority',
-    title: 'Give Doctor findings one hook and one poll',
-    version: 3,
-    acceptedProposal: 'proposal.storage-findings-authority.1',
-    taskAccepted: true,
-    historyLen: 6,
-  }),
-  workProjection({
-    taskId: 'task.scope-cache-token',
-    title: 'Key scoped reads by the request the scope rewrites',
-    version: 2,
-    acceptedProposal: 'proposal.scope-cache-token.1',
-    dependencies: ['task.storage-findings-authority'],
-    historyLen: 4,
-  }),
-  workProjection({
-    taskId: 'task.route-inventory',
-    title: 'Hold the mounted Work routes against the descriptor',
-    version: 1,
-    historyLen: 1,
-  }),
-  ];
-}
-
-/**
- * A capped snapshot rather than a complete one.
- *
- * The board's coverage line and its continuation request are only exercised
- * when the daemon reports that it withheld rows, and a fixture that always
- * said `complete` would leave both undrawn in every screenshot.
- */
-function workSnapshotPayload(): Record<string, unknown> {
-  return {
-    coverage: {
-      state: 'capped',
-      cap: 4,
-      cursor: { generation_id: WORK_GENERATION_ID, token: 'cursor.work.4' },
-      range: { start_exclusive: 0, end_inclusive: 4 },
-      returned: workProjections().length,
-      total: 6,
-    },
-    generation_id: WORK_GENERATION_ID,
-    projections: workProjections(),
-    sequence: 4,
-  };
-}
-
-/** The continuation the capped snapshot above resumes into: the remaining two
- * tasks, and a coverage line that completes the board. */
-function workDeltaPayload(): Record<string, unknown> {
-  return {
-    changed: [
-      workProjection({
-        taskId: 'task.command-palette-identity',
-        title: 'Give palette options ids no path can break',
-        version: 2,
-        acceptedProposal: 'proposal.command-palette-identity.1',
-        taskAccepted: true,
-        historyLen: 5,
-      }),
-      workProjection({
-        taskId: 'task.zero-graph-counts',
-        title: 'Print the graph zeros Code measured',
-        version: 1,
-        historyLen: 2,
-      }),
-    ],
-    coverage: { state: 'complete', returned: 2, total: 6 },
-    from_sequence: 4,
-    generation_id: WORK_GENERATION_ID,
-    removed: [],
-    to_sequence: 6,
   };
 }
 

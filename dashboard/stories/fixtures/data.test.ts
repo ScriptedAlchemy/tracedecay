@@ -51,8 +51,6 @@ import {
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   WorkGraphReadV1Schema,
-  WorkProjectionDeltaV1Schema,
-  WorkProjectionSnapshotV1Schema,
 } from '../../src/contracts/generated.ts';
 import { workPayload } from '../../src/workspaces/work/workApi.ts';
 
@@ -131,8 +129,6 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
  * wrapper is subtly wrong fails here exactly as it would in the browser.
  */
 const APPLICATION_ENVELOPE: Readonly<Record<string, ZodType<unknown>>> = {
-  '/api/work/snapshot': WorkProjectionSnapshotV1Schema,
-  '/api/work/delta': WorkProjectionDeltaV1Schema,
   // The work-product graph read. Two workspaces derive from it: the Work
   // projections, and the Agents handoff frontier and attempt failures.
   '/api/work/views': WorkGraphReadV1Schema,
