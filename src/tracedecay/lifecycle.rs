@@ -239,8 +239,7 @@ impl TraceDecay {
             && !candidates.is_empty()
             && let Some(selected) = selected.as_ref()
         {
-            let selected_inventory = store_identity_inventory(selected).await;
-            if selected_inventory.is_healthy() && !selected_inventory.is_pristine() {
+            if store_identity_is_healthy_non_pristine(selected).await {
                 return Ok(Some(selected.clone()));
             }
         }
@@ -1433,6 +1432,59 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
         payload_files: count_tree_files(&layout.lcm_payload_root),
         response_files: count_tree_files(&layout.response_handle_root),
     }
+}
+
+/// Check the common exact-root case without counting every row in large
+/// session tables. Exact counts are needed only when constructing an
+/// ambiguity/cutover diagnostic; this predicate only needs to distinguish a
+/// healthy populated store from an empty or unhealthy one.
+async fn store_identity_is_healthy_non_pristine(layout: &StoreLayout) -> bool {
+    let authority = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store inventory");
+    let Ok((db, _)) = (match authority {
+        Ok(authority) => Database::open_read_only(&layout.graph_db_path, &authority).await,
+        Err(error) => Err(error),
+    }) else {
+        return false;
+    };
+    let Ok(stats) = db.get_stats().await else {
+        db.close();
+        return false;
+    };
+    let graph_is_populated = stats.node_count > 0
+        || stats.file_count > 0
+        || table_has_rows(db.conn(), "memory_facts").await;
+    db.close();
+    if graph_is_populated {
+        return true;
+    }
+
+    if let Some(db) = crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await
+    {
+        let conn = db.dashboard_connection();
+        let sessions_are_populated = table_has_rows(&conn, "sessions").await
+            || table_has_rows(&conn, "session_messages").await
+            || table_has_rows(&conn, "lcm_raw_messages").await
+            || table_has_rows(&conn, "lcm_summary_nodes").await;
+        db.close();
+        if sessions_are_populated {
+            return true;
+        }
+    }
+
+    branch_meta::load_branch_meta(&layout.data_root).is_some_and(|meta| meta.branches.len() > 1)
+        || count_tree_files(&layout.dashboard_root) > 0
+        || count_tree_files(&layout.lcm_payload_root) > 0
+        || count_tree_files(&layout.response_handle_root) > 0
+}
+
+async fn table_has_rows(connection: &libsql::Connection, table: &str) -> bool {
+    let Ok(mut rows) = connection
+        .query(&format!("SELECT 1 FROM {table} LIMIT 1"), ())
+        .await
+    else {
+        return false;
+    };
+    rows.next().await.ok().flatten().is_some()
 }
 
 async fn count_rows(connection: &libsql::Connection, table: &str) -> u64 {
