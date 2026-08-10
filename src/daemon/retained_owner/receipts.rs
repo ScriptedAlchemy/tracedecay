@@ -6,13 +6,14 @@ use tracedecay_application::retained_surfaces::{
     SessionCoverageModeV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, AuthorityReceipt, EvidenceAuthority, EvidenceCoverage, EvidenceIdentity,
-    EvidencePacket, Omission, OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageState,
-    PolicyDecisionRef, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    ApplicationOutcome, AuthorityReceipt, EffectId, EffectReceipt, EffectResult, EffectTermination,
+    EvidenceAuthority, EvidenceCoverage, EvidenceIdentity, EvidencePacket, IdempotencyKey,
+    Omission, OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageState, PolicyDecisionRef,
+    ReconciliationState, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     TemporalState, now_micros,
 };
-use tracedecay_domain::{ComponentVersion, TemporalModeV1, canonical_sha256};
-use tracedecay_tool_catalog::SortContractId;
+use tracedecay_domain::{ComponentVersion, ManifestDigest, TemporalModeV1, canonical_sha256};
+use tracedecay_tool_catalog::{EffectClass, SortContractId};
 
 pub(super) fn evidence_outcome(
     context: &RetainedSurfaceExecutionContextV1<'_>,
@@ -88,6 +89,106 @@ pub(super) fn evidence_outcome(
         execution,
         payload: Some(result),
     }))
+}
+
+pub(super) fn session_refresh_effect_outcome<T: Serialize>(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    operation: RetainedSurfaceOperation,
+    configuration_digest: &ManifestDigest,
+    request: &T,
+    durable_operation_id: &str,
+    result: RetainedSurfaceResultV1,
+) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    if !matches!(
+        operation,
+        RetainedSurfaceOperation::SessionRefreshBegin
+            | RetainedSurfaceOperation::SessionRefreshCancel
+    ) || durable_operation_id.trim().is_empty()
+    {
+        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+    }
+    let finished_at = now_micros();
+    let authority = authority_receipt(context, finished_at)?;
+    let input_digest = canonical_sha256(&(
+        "tracedecay.retained.effect.input.v1",
+        operation.as_str(),
+        request,
+    ))
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let expected_state = canonical_sha256(&(
+        "tracedecay.retained.effect.expected-state.v1",
+        context.request_context.scope(),
+        operation.as_str(),
+        request,
+    ))
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let committed_state = canonical_sha256(&(
+        "tracedecay.retained.effect.committed-state.v1",
+        durable_operation_id,
+        &result,
+    ))
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let catalog_digest = canonical_sha256(&(
+        "tracedecay.retained.effect.catalog.v1",
+        context.operation.capability_id(),
+        context.operation.use_case_id(),
+        context.operation.result_contract(),
+    ))
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let privacy_digest = canonical_sha256(&(
+        "tracedecay.retained.effect.privacy.v1",
+        context.request_context.scope(),
+        context.request_context.grant().disclosure,
+    ))
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let suffix = input_digest.as_str().trim_start_matches("sha256:");
+    let idempotency_key = IdempotencyKey::new(format!(
+        "idempotency.retained.{}.{suffix}",
+        operation.as_str()
+    ))
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let execution = OperationReceipt::completed(
+        context.observed_at,
+        finished_at,
+        context.request_context.deadline().clone(),
+        measured_budget(context.observed_at, finished_at, &result)?,
+    )
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let receipt = EffectReceipt {
+        operation: context.operation.use_case_id().clone(),
+        request_id: context.request_context.request_id().clone(),
+        actor: context.request_context.actor().clone(),
+        scope: context.request_context.scope().clone(),
+        effect_class: EffectClass::Administrative,
+        idempotency_key: idempotency_key.clone(),
+        input_digest,
+        expected_state: expected_state.clone(),
+        policy_digest: context.request_context.grant().digest.clone(),
+        configuration_digest: configuration_digest.clone(),
+        catalog_digest,
+        privacy_digest,
+        outcome: EffectTermination::Completed,
+        committed_state: Some(committed_state),
+        external_proof: None,
+    };
+    let effect = EffectResult::new(
+        EffectId::new(format!(
+            "effect.retained.{}.{}",
+            operation.as_str(),
+            durable_operation_id
+        ))
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
+        EffectClass::Administrative,
+        idempotency_key,
+        authority,
+        expected_state,
+        execution,
+        ReconciliationState::Reconciled,
+        receipt,
+        Some(result),
+    )
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    Ok(ApplicationOutcome::Effect(effect))
 }
 
 fn map_evidence_terminal(
@@ -213,4 +314,107 @@ pub(super) fn authority_receipt(
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
     AuthorityReceipt::from_context(context.request_context, policy, observed_at)
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use tracedecay_application::retained_surfaces::{
+        RetainedOutcomeStatusV1, SessionRefreshBeginResultV1,
+    };
+    use tracedecay_application::{
+        ApplicationOutcome, CancellationContext, CancellationSignal, CapabilityGrantId,
+        CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
+        RetainedSurfaceExecutionContextV1, retained_surface_application_operation,
+    };
+    use tracedecay_domain::{
+        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    };
+
+    use super::{
+        RetainedSurfaceOperation, RetainedSurfaceResultV1, session_refresh_effect_outcome,
+    };
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
+            .expect("valid digest")
+    }
+
+    #[test]
+    fn refresh_effect_receipt_binds_the_durable_operation() {
+        let operation =
+            retained_surface_application_operation(RetainedSurfaceOperation::SessionRefreshBegin)
+                .expect("begin operation");
+        let scope = tracedecay_application::ResolvedScope::new(
+            ProjectId::new("project.retained.refresh").expect("project"),
+            RepositoryId::new("repository.retained.refresh").expect("repository"),
+            WorktreeId::new("worktree.retained.refresh").expect("worktree"),
+            None,
+        )
+        .expect("scope");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.retained.refresh").expect("grant id"),
+            1,
+            digest('a'),
+            ActorId::new("actor.retained.issuer").expect("issuer"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            BTreeSet::from([operation.capability_id().clone()]),
+            BTreeSet::from([operation.use_case_id().clone()]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        let context = RequestContext::new(
+            ActorId::new("actor.retained.caller").expect("caller"),
+            scope,
+            grant,
+            RequestId::new("request.retained.refresh").expect("request"),
+            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            CancellationContext::active("cancel.retained.refresh").expect("cancellation"),
+        )
+        .expect("context");
+        let cancellation = CancellationSignal::active("cancel.retained.refresh").expect("signal");
+        let execution = RetainedSurfaceExecutionContextV1 {
+            request_context: &context,
+            cancellation_signal: &cancellation,
+            operation: &operation,
+            observed_at: UtcMicros(1),
+        };
+        let result = RetainedSurfaceResultV1::SessionRefreshBegin(SessionRefreshBeginResultV1 {
+            outcome: RetainedOutcomeStatusV1::Started,
+            scope: "project".to_owned(),
+            tool: "tracedecay_session_refresh".to_owned(),
+            accepted_at: Some(2),
+            handle: Some("srh_fixture".to_owned()),
+            operation_id: Some("refresh.operation.fixture".to_owned()),
+            progress: None,
+            receipt: None,
+            error: None,
+        });
+
+        let outcome = session_refresh_effect_outcome(
+            &execution,
+            RetainedSurfaceOperation::SessionRefreshBegin,
+            &digest('b'),
+            &"request fixture",
+            "refresh.operation.fixture",
+            result,
+        )
+        .expect("effect outcome");
+        let ApplicationOutcome::Effect(effect) = outcome else {
+            panic!("refresh begin must be an effect");
+        };
+        assert!(
+            effect
+                .effect_id
+                .as_str()
+                .ends_with("refresh.operation.fixture")
+        );
+        assert_eq!(&effect.receipt.operation, operation.use_case_id());
+        assert_eq!(&effect.receipt.request_id, context.request_id());
+        assert!(effect.receipt.committed_state.is_some());
+        assert!(effect.payload.is_some());
+    }
 }

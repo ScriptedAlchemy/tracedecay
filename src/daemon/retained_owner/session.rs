@@ -5,14 +5,12 @@ use std::time::Duration;
 use tracedecay_application::retained_surfaces::{
     ClosedUtcIntervalV1, GitScopeV1, HydrationStateResultV1, MessageRelationshipScopeV1,
     MessageSearchHitV1, MessageSearchRequestV1, MessageSearchResultV1, MessageTypeFilterV1,
-    RetainedErrorV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+    RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
     SessionCoverageIntervalV1, SessionCoverageModeV1, SessionCoverageReasonV1,
     SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1, SessionRecordV1,
-    SessionRefreshProgressV1, SessionRefreshReceiptV1, SessionRefreshRequestV1,
-    SessionRefreshStatusResultV1, SessionSourceCoverageV1 as WireSourceCoverageV1,
-    SessionsForRequestV1, TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1,
-    TemporalMetadataV1, TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1,
-    WorkflowsRequestV1,
+    SessionRefreshRequestV1, SessionSourceCoverageV1 as WireSourceCoverageV1, SessionsForRequestV1,
+    TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1,
+    TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1, WorkflowsRequestV1,
 };
 use tracedecay_application::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
@@ -41,7 +39,7 @@ use tracedecay_usecases::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
 };
 
-use super::receipts::evidence_outcome;
+use super::receipts::{evidence_outcome, session_refresh_effect_outcome};
 use super::session_refresh::{RetainedSessionRefreshPortV1, admitted_session_refresh_command};
 use crate::daemon::session_retrieval::{
     SessionApplicationRetrievalPortV1, SessionRetrievalPageView, SessionRetrievalServiceOutcome,
@@ -49,10 +47,9 @@ use crate::daemon::session_retrieval::{
 };
 use crate::errors::TraceDecayError;
 use crate::global_db::RegisteredGlobalDb;
-use crate::mcp::tools::{
-    SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
-};
 use crate::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
+
+mod refresh;
 
 const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.root";
 const MESSAGE_SEARCH_CONTEXT_BYTES: u64 = 64 * 1024;
@@ -103,9 +100,6 @@ impl DirectRetainedSessionPortV1 {
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         ensure_session_refresh_identity(context, request, &self.authorities)?;
         let operation = request.operation();
-        if operation != RetainedSurfaceOperation::SessionRefreshStatus {
-            return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
-        }
         let command = admitted_session_refresh_command(
             request,
             context.request_context,
@@ -115,13 +109,38 @@ impl DirectRetainedSessionPortV1 {
             &self.authorities.session_root_id,
             &self.authorities.configuration_digest,
         )?;
-        let handled = self
-            .bounded(context, async {
-                Ok::<_, TraceDecayError>(self.authorities.refresh.execute(command).await)
-            })
-            .await?;
-        let result = session_refresh_status_result(handled)?;
-        evidence_outcome(context, operation, result)
+        if operation == RetainedSurfaceOperation::SessionRefreshStatus {
+            let handled = self
+                .bounded(context, async {
+                    Ok::<_, TraceDecayError>(self.authorities.refresh.execute(command).await)
+                })
+                .await?;
+            return evidence_outcome(context, operation, refresh::status_result(handled)?);
+        }
+
+        // Once an administrative refresh crosses its effect boundary it must
+        // settle to a durable receipt. A transport cancellation may win before
+        // this CAS; after it wins, cancellation cannot drop the in-flight DB
+        // transaction and misreport an unknown effect as a pre-admission error.
+        if !context.cancellation_signal.try_begin_commit() {
+            return Err(RetainedSurfaceExecutionErrorV1::Cancelled);
+        }
+        let handled = self.authorities.refresh.execute(command).await;
+        let projected = match operation {
+            RetainedSurfaceOperation::SessionRefreshBegin => refresh::begin_result(handled)?,
+            RetainedSurfaceOperation::SessionRefreshCancel => {
+                refresh::cancel_result(handled, request.request.handle.as_deref())?
+            }
+            _ => return Err(RetainedSurfaceExecutionErrorV1::Unsupported),
+        };
+        session_refresh_effect_outcome(
+            context,
+            operation,
+            &self.authorities.configuration_digest,
+            request,
+            &projected.operation_id,
+            projected.result,
+        )
     }
 
     async fn execute_sessions_for(
@@ -630,140 +649,6 @@ async fn retrieve_bounded(
             outcome.map_err(|_| RetainedSurfaceExecutionErrorV1::TimedOut)
         }
     }
-}
-
-fn session_refresh_status_result(
-    outcome: SessionRefreshServiceOutcome,
-) -> Result<RetainedSurfaceResultV1, RetainedSurfaceExecutionErrorV1> {
-    let (outcome, progress, receipt, error) = match outcome {
-        SessionRefreshServiceOutcome::Running(progress) => (
-            RetainedOutcomeStatusV1::Running,
-            progress.map(session_refresh_progress).transpose()?,
-            None,
-            None,
-        ),
-        SessionRefreshServiceOutcome::Complete(receipt) => (
-            RetainedOutcomeStatusV1::Complete,
-            None,
-            Some(session_refresh_receipt(receipt)?),
-            None,
-        ),
-        SessionRefreshServiceOutcome::Failed(receipt) => (
-            RetainedOutcomeStatusV1::Failed,
-            None,
-            Some(session_refresh_receipt(receipt)?),
-            Some(refresh_error(
-                "refresh_failed",
-                "the durable session refresh failed",
-            )),
-        ),
-        SessionRefreshServiceOutcome::Cancelled(receipt) => (
-            RetainedOutcomeStatusV1::Cancelled,
-            None,
-            Some(session_refresh_receipt(receipt)?),
-            None,
-        ),
-        SessionRefreshServiceOutcome::Denied => refresh_problem(
-            RetainedOutcomeStatusV1::Denied,
-            "refresh_denied",
-            "the caller is not authorized for this session refresh",
-        ),
-        SessionRefreshServiceOutcome::WrongScope => refresh_problem(
-            RetainedOutcomeStatusV1::WrongScope,
-            "refresh_wrong_scope",
-            "the refresh handle does not belong to the requested scope",
-        ),
-        SessionRefreshServiceOutcome::Stale => refresh_problem(
-            RetainedOutcomeStatusV1::Stale,
-            "refresh_handle_stale",
-            "the refresh handle is no longer current",
-        ),
-        SessionRefreshServiceOutcome::NotFound => refresh_problem(
-            RetainedOutcomeStatusV1::NotFound,
-            "refresh_handle_not_found",
-            "the refresh handle was not found",
-        ),
-        SessionRefreshServiceOutcome::Aborted => refresh_problem(
-            RetainedOutcomeStatusV1::Aborted,
-            "refresh_aborted",
-            "the session refresh request was aborted",
-        ),
-        SessionRefreshServiceOutcome::DeadlineExceeded => refresh_problem(
-            RetainedOutcomeStatusV1::DeadlineExceeded,
-            "refresh_deadline_exceeded",
-            "the session refresh request deadline was exceeded",
-        ),
-        SessionRefreshServiceOutcome::Unavailable => refresh_problem(
-            RetainedOutcomeStatusV1::Unavailable,
-            "refresh_service_unavailable",
-            "the daemon-owned session refresh service is unavailable",
-        ),
-        SessionRefreshServiceOutcome::Busy => refresh_problem(
-            RetainedOutcomeStatusV1::Busy,
-            "refresh_busy",
-            "a conflicting refresh target is already running",
-        ),
-        SessionRefreshServiceOutcome::Started { .. }
-        | SessionRefreshServiceOutcome::Joined { .. } => refresh_problem(
-            RetainedOutcomeStatusV1::Unavailable,
-            "refresh_contract_violation",
-            "the refresh status authority returned a begin outcome",
-        ),
-    };
-    Ok(RetainedSurfaceResultV1::SessionRefreshStatus(
-        SessionRefreshStatusResultV1 {
-            outcome,
-            scope: "project".to_owned(),
-            tool: "tracedecay_session_refresh".to_owned(),
-            progress,
-            receipt,
-            error,
-        },
-    ))
-}
-
-fn refresh_problem(
-    outcome: RetainedOutcomeStatusV1,
-    code: &str,
-    message: &str,
-) -> (
-    RetainedOutcomeStatusV1,
-    Option<SessionRefreshProgressV1>,
-    Option<SessionRefreshReceiptV1>,
-    Option<RetainedErrorV1>,
-) {
-    (outcome, None, None, Some(refresh_error(code, message)))
-}
-
-fn refresh_error(code: &str, message: &str) -> RetainedErrorV1 {
-    RetainedErrorV1 {
-        code: code.to_owned(),
-        message: message.to_owned(),
-        kind: None,
-        maximum: None,
-        observed: None,
-        reason: None,
-        retryable: None,
-    }
-}
-
-fn session_refresh_progress(
-    value: SessionRefreshProgressView,
-) -> Result<SessionRefreshProgressV1, RetainedSurfaceExecutionErrorV1> {
-    // The MCP projection is serialized by the same wire contract; decode it
-    // into the retained SDK authority instead of maintaining a second field
-    // mapper here.
-    serde_json::to_value(value)
-        .and_then(serde_json::from_value)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
-}
-
-fn session_refresh_receipt(
-    value: SessionRefreshReceiptView,
-) -> Result<SessionRefreshReceiptV1, RetainedSurfaceExecutionErrorV1> {
-    serde_json::to_value(value)
-        .and_then(serde_json::from_value)
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
 }
 
 fn apply_page(

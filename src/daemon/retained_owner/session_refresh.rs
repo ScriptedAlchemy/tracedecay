@@ -57,21 +57,8 @@ pub(crate) fn admitted_session_refresh_command(
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     }
 
-    if request.action != SessionRefreshActionV1::Status {
-        return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
-    }
-    let action = SessionRefreshAction::Status;
     let selectors = &request.request;
-    if selectors.handle.is_none() {
-        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
-    }
-    if selectors
-        .handle
-        .as_deref()
-        .is_some_and(|handle| handle.trim().is_empty())
-    {
-        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
-    }
+    let action = admitted_action(request.action, selectors.handle.as_deref())?;
 
     let identity = admitted_identity(selectors)?;
     let resolved_scope = identity
@@ -157,6 +144,21 @@ pub(crate) fn admitted_session_refresh_command(
         target,
         handle: selectors.handle.clone(),
     })
+}
+
+fn admitted_action(
+    action: SessionRefreshActionV1,
+    handle: Option<&str>,
+) -> Result<SessionRefreshAction, RetainedSurfaceExecutionErrorV1> {
+    if handle.is_some_and(|handle| handle.is_empty() || handle != handle.trim()) {
+        return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+    }
+    match (action, handle) {
+        (SessionRefreshActionV1::Begin, None) => Ok(SessionRefreshAction::Begin),
+        (SessionRefreshActionV1::Status, Some(_)) => Ok(SessionRefreshAction::Status),
+        (SessionRefreshActionV1::Cancel, Some(_)) => Ok(SessionRefreshAction::Cancel),
+        _ => Err(RetainedSurfaceExecutionErrorV1::InvalidRequest),
+    }
 }
 
 fn request_matches_mounted_project_scope(
@@ -246,4 +248,38 @@ fn admitted_digest(domain: &[u8], material: &[u8]) -> [u8; 32] {
     digest.update(domain);
     digest.update(material);
     digest.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionRefreshAction, SessionRefreshActionV1, admitted_action};
+
+    #[test]
+    fn begin_requires_no_handle() {
+        assert_eq!(
+            admitted_action(SessionRefreshActionV1::Begin, None),
+            Ok(SessionRefreshAction::Begin)
+        );
+        assert!(admitted_action(SessionRefreshActionV1::Begin, Some("srh_token")).is_err());
+    }
+
+    #[test]
+    fn status_and_cancel_require_nonempty_handles() {
+        assert_eq!(
+            admitted_action(SessionRefreshActionV1::Status, Some("srh_status")),
+            Ok(SessionRefreshAction::Status)
+        );
+        assert_eq!(
+            admitted_action(SessionRefreshActionV1::Cancel, Some("srh_cancel")),
+            Ok(SessionRefreshAction::Cancel)
+        );
+        for action in [
+            SessionRefreshActionV1::Status,
+            SessionRefreshActionV1::Cancel,
+        ] {
+            assert!(admitted_action(action, None).is_err());
+            assert!(admitted_action(action, Some("  ")).is_err());
+            assert!(admitted_action(action, Some(" srh_handle")).is_err());
+        }
+    }
 }

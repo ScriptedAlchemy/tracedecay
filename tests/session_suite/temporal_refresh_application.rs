@@ -247,7 +247,7 @@ fn request_context_with_digests(
 ) -> TestRequestContext {
     let actor = ActorId::new(actor).unwrap();
     let request_id = RequestId::new(request).unwrap();
-    let scope = identity.application_scope().unwrap();
+    let scope = identity.session_request_scope().unwrap();
     let observed_at = application_observed_at();
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new("grant.refresh.application.context").unwrap(),
