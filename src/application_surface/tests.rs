@@ -29,10 +29,10 @@ use super::{
     HttpDisconnectCancellation, HttpOperationEventState, NativeIntegrationSurfaceRequest,
     PrimitiveCodeSurfaceRequest, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
-    feedback_sse_stream_event, http_operation_event_router, normalize_application_tool_args,
-    parse_application_surface_request, resolve_application_binding,
-    resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
-    surface_rejection_metadata,
+    feedback_sse_stream_event, http_operation_event_router, invocation_problem,
+    normalize_application_tool_args, parse_application_surface_request,
+    resolve_application_binding, resolve_application_surface_dispatch,
+    resolve_authenticated_http_request_context, surface_rejection_metadata,
 };
 use crate::application::feedback::observations::{
     FeedbackArgumentRejectionClassV1, FeedbackOutcomeV1, FeedbackRejectedArgumentV1,
@@ -77,6 +77,27 @@ fn operation_context(project_id: &ProjectId) -> RequestContext {
         CancellationContext::active("cancel.http-adapter").expect("cancellation"),
     )
     .expect("context")
+}
+
+#[test]
+fn daemon_reset_problem_preserves_reset_terminal_contract() {
+    let problem =
+        invocation_problem(crate::daemon_contract::DaemonInvocationProblem::ResetRequired)
+            .expect("canonical reset problem");
+    let ApplicationProblem::ResetRequired {
+        retry,
+        legal_actions,
+        ..
+    } = problem
+    else {
+        panic!("application surface must preserve reset-required");
+    };
+
+    assert_eq!(retry, tracedecay_application::RetryDirective::Never);
+    assert_eq!(
+        legal_actions,
+        vec![tracedecay_application::LegalAction::Reset]
+    );
 }
 
 #[test]

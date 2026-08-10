@@ -257,17 +257,15 @@ fn daemon_problem(problem: DaemonInvocationProblem) -> ApplicationProblem {
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
-        // The store the scope set lives in refused its own shape. Retrying the
-        // same request cannot help until the operator resets it, so this is a
-        // request-correcting problem rather than a retryable outage.
-        DaemonInvocationProblem::ResetRequired => ApplicationProblem::InvalidRequest {
-            diagnostic: SafeDiagnostic {
+        // The store the scope set lives in refused its own shape. Retrying or
+        // correcting the request cannot help; only the explicit reset action
+        // carried by this terminal category is legal.
+        DaemonInvocationProblem::ResetRequired => {
+            ApplicationProblem::reset_required(SafeDiagnostic {
                 code: "multi_root.reset_required".to_owned(),
                 message: "The multi-root scope-set store requires an explicit reset".to_owned(),
-            },
-            retry: RetryDirective::Never,
-            legal_actions: vec![LegalAction::CorrectRequest],
-        },
+            })
+        }
         DaemonInvocationProblem::ApplicationContractViolation => {
             unavailable("multi_root.application_contract_violation")
         }
@@ -309,9 +307,11 @@ fn result_contract(operation: MultiRootApplicationOperation) -> Result<ResultCon
 
 #[cfg(test)]
 mod tests {
+    use crate::daemon_contract::DaemonInvocationProblem;
     use serde_json::{Value, json};
+    use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective};
 
-    use super::handle_multi_root;
+    use super::{daemon_problem, handle_multi_root};
 
     fn problem_code(result: &crate::mcp::tools::ToolResult) -> String {
         let text = result.value["content"][0]["text"].as_str().unwrap();
@@ -364,5 +364,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(problem_code(&result), "multi_root.invalid_request");
+    }
+
+    #[test]
+    fn reset_required_preserves_its_terminal_category_and_only_legal_action() {
+        let ApplicationProblem::ResetRequired {
+            diagnostic,
+            retry,
+            legal_actions,
+        } = daemon_problem(DaemonInvocationProblem::ResetRequired)
+        else {
+            panic!("multi-root reset must remain reset-required");
+        };
+
+        assert_eq!(diagnostic.code, "multi_root.reset_required");
+        assert_eq!(retry, RetryDirective::Never);
+        assert_eq!(legal_actions, vec![LegalAction::Reset]);
     }
 }

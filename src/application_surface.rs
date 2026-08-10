@@ -1225,7 +1225,7 @@ where
                     ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
                 }
                 crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
-                    ApplicationProblem::unavailable(SafeDiagnostic {
+                    ApplicationProblem::reset_required(SafeDiagnostic {
                         code: problem_code("reset_required"),
                         message: format!("The {family} store requires an explicit reset"),
                     })
@@ -4248,7 +4248,7 @@ fn invocation_problem(
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
         crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
-            ApplicationProblem::unavailable(SafeDiagnostic::new(
+            ApplicationProblem::reset_required(SafeDiagnostic::new(
                 "application.surface.reset_required",
                 "The application store requires an explicit reset",
             )?)

@@ -903,7 +903,7 @@ pub(super) async fn dispatch_retained_application_tools(
                                     )
                                 }
                                 crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
-                                    ApplicationProblem::unavailable(retained_safe_diagnostic(
+                                    ApplicationProblem::reset_required(retained_safe_diagnostic(
                                         "application.surface.reset_required",
                                         "The retained application store requires an explicit reset",
                                     )?)

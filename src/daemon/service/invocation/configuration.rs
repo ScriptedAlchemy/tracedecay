@@ -868,7 +868,7 @@ pub(super) fn configuration_problem(error: ConfigurationError) -> ApplicationPro
             message: "The configuration authority is unavailable".to_owned(),
         }),
         ConfigurationError::ResetRequired { .. } => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
+            ApplicationProblem::reset_required(SafeDiagnostic {
                 code: "configuration.reset_required".to_owned(),
                 message: "The configuration store must be reset before use".to_owned(),
             })
@@ -939,5 +939,31 @@ impl DaemonSemanticRuntimeRegistrar {
                 },
             )
             .await
+    }
+}
+
+#[cfg(test)]
+mod terminal_problem_tests {
+    use super::*;
+
+    #[test]
+    fn configuration_reset_preserves_its_terminal_category() {
+        let problem = configuration_problem(ConfigurationError::ResetRequired {
+            reason: "fixture reset".to_owned(),
+        });
+        let ApplicationProblem::ResetRequired {
+            retry,
+            legal_actions,
+            ..
+        } = problem
+        else {
+            panic!("configuration reset must remain reset-required");
+        };
+
+        assert_eq!(retry, RetryDirective::Never);
+        assert_eq!(
+            legal_actions,
+            vec![tracedecay_application::LegalAction::Reset]
+        );
     }
 }

@@ -959,7 +959,13 @@ pub(crate) fn application_response(
                     InvocationError::Denied
                 }
                 crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
-                    InvocationError::Unavailable
+                    InvocationError::Problem(Box::new(ApplicationProblem::reset_required(
+                        SafeDiagnostic {
+                            code: "daemon.reset_required".to_owned(),
+                            message: "The owning daemon authority requires an explicit reset"
+                                .to_owned(),
+                        },
+                    )))
                 }
                 crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
                     InvocationError::Unavailable
@@ -1086,9 +1092,13 @@ pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
 mod tests {
     use super::{
         DaemonInvocationError, InvocationCancellationPolicy, SemanticEvaluationPublicationResultV1,
-        semantic_evaluation_application_problem,
+        application_response, semantic_evaluation_application_problem,
     };
-    use tracedecay_application::{ApplicationProblem, ApplicationProblemKind, CancellationStage};
+    use tracedecay_application::{
+        ApplicationProblem, ApplicationProblemKind, CancellationStage, InvocationError, RequestId,
+        ResultContractRef,
+    };
+    use tracedecay_tool_catalog::SchemaId;
 
     #[test]
     fn daemon_invocation_errors_keep_canonical_problem_categories() {
@@ -1112,6 +1122,27 @@ mod tests {
         ] {
             assert_eq!(error.into_application_problem().kind(), expected);
         }
+    }
+
+    #[test]
+    fn daemon_reset_response_remains_an_authoritative_typed_problem() {
+        let error = application_response(
+            RequestId::new("request.daemon-client.reset").expect("request"),
+            ResultContractRef::new(
+                SchemaId::new("schema.test.daemon-client-reset-result").expect("schema"),
+                1,
+            )
+            .expect("contract"),
+            crate::daemon_contract::DaemonInvocationOutcome::Problem {
+                problem: crate::daemon_contract::DaemonInvocationProblem::ResetRequired,
+            },
+        )
+        .expect_err("reset-required must not become a successful response");
+
+        let InvocationError::Problem(problem) = error else {
+            panic!("reset-required must remain an authoritative typed problem");
+        };
+        assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
     }
 
     #[test]
