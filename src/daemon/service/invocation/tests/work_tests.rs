@@ -126,6 +126,14 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
         ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).expect("configuration digest");
     let service = DaemonInvocationService::default();
     let (proposal_routing, configuration_digest) = empty_work_proposal_routing(scope.clone());
+    let policy_digest = mount_test_work_observability(
+        &service,
+        project.path(),
+        Arc::clone(&database),
+        &scope,
+        &configuration_digest,
+    )
+    .await;
     DaemonWorkRuntimeRegistrar::new(&service)
         .register(
             project.path().to_path_buf(),
@@ -133,7 +141,7 @@ async fn registered_work_services_dispatch_the_core_lifecycle() {
             authority,
             actor,
             grant,
-            ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest"),
+            policy_digest,
             configuration_digest,
             tracedecay_domain::configuration::safe_work_topology_policy_v1(),
             proposal_routing,
@@ -482,6 +490,14 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
     .expect("Work authority");
     let service = DaemonInvocationService::default();
     let (proposal_routing, configuration_digest) = empty_work_proposal_routing(scope.clone());
+    let policy_digest = mount_test_work_observability(
+        &service,
+        project.path(),
+        Arc::clone(&database),
+        &scope,
+        &configuration_digest,
+    )
+    .await;
     DaemonWorkRuntimeRegistrar::new(&service)
         .register(
             project.path().to_path_buf(),
@@ -489,7 +505,7 @@ async fn committed_work_mutations_publish_task_activity_and_reads_do_not() {
             authority,
             actor,
             grant,
-            ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest"),
+            policy_digest,
             configuration_digest,
             tracedecay_domain::configuration::safe_work_topology_policy_v1(),
             proposal_routing,

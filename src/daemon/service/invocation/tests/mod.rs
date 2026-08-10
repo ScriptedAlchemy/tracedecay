@@ -45,18 +45,50 @@ pub(in crate::daemon) fn empty_work_proposal_routing(
     .expect("work executable bindings key");
     let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
         std::collections::BTreeMap::from([(
-            key,
+            key.clone(),
             tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
                 Vec::new(),
             ),
         )]),
-        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::from([(
+            key,
+            vec![tracedecay_domain::configuration::ConfigurationCandidateV1 {
+                layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                    project_id: scope.project_id.clone(),
+                },
+                revision_id: revision.clone(),
+                disposition: tracedecay_domain::configuration::CandidateDispositionV1::Winning,
+                safe_reason: None,
+            }],
+        )]),
     )
     .expect("empty Work routing snapshot");
     let digest = snapshot.effective_behavior_digest.clone();
     let routing = DaemonWorkProposalRoutingAuthorityV1::mount(scope, revision, &snapshot, &digest)
         .expect("empty Work proposal routing");
     (routing, digest)
+}
+
+pub(in crate::daemon) async fn mount_test_work_observability(
+    service: &DaemonInvocationService,
+    project_root: &std::path::Path,
+    database: Arc<crate::global_db::RegisteredGlobalDb>,
+    scope: &ResolvedScope,
+    configuration_digest: &ManifestDigest,
+) -> ManifestDigest {
+    let policy_digest =
+        ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest");
+    service
+        .mount_observability_producer(
+            project_root.to_path_buf(),
+            database,
+            scope.project_id.clone(),
+            configuration_digest.clone(),
+            policy_digest.clone(),
+        )
+        .await
+        .expect("mounted Work observability producer");
+    policy_digest
 }
 
 #[derive(Default)]

@@ -112,16 +112,53 @@ where
         let port_context =
             WorkProductPortContextV1::from_request(context, authorized_scope, occurred_at);
         let read_request = WorkGraphReadRequestV1::current(request.selection.clone(), occurred_at);
-        let read = self.graph.read_graph(&port_context, &read_request)?;
-        super::read::validate_result(&read_request, port_context.authorized_scope(), &read)?;
-        let WorkGraphReadV1::Current { snapshot, .. } = read else {
-            return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+        let expected_authority = match self.graph.read_graph(&port_context, &read_request) {
+            Ok(read) => {
+                super::read::validate_result(
+                    &read_request,
+                    port_context.authorized_scope(),
+                    &read,
+                )?;
+                let WorkGraphReadV1::Current { snapshot, .. } = read else {
+                    return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+                };
+                WorkProductExpectedAuthorityV1::Verified {
+                    verified_version: snapshot.verified_version().clone(),
+                }
+            }
+            Err(super::WorkGraphReadPortErrorV1::NotFoundOrNotAuthorized)
+                if matches!(&request.change, WorkProductChangeDraftV1::CreateTask { .. }) =>
+            {
+                let empty_request = WorkGraphReadRequestV1::forensic(
+                    request.selection.clone(),
+                    UtcMicros(i64::MIN),
+                    occurred_at,
+                    occurred_at,
+                )?;
+                let empty_read = self.graph.read_graph(&port_context, &empty_request)?;
+                super::read::validate_result(
+                    &empty_request,
+                    port_context.authorized_scope(),
+                    &empty_read,
+                )?;
+                let WorkGraphReadV1::Forensic { timeline, .. } = empty_read else {
+                    return Err(WorkProductApplicationErrorV1::GraphAuthorityUnavailable);
+                };
+                if !timeline.entries().is_empty() {
+                    return Err(WorkProductApplicationErrorV1::NotFoundOrNotAuthorized);
+                }
+                WorkProductExpectedAuthorityV1::NoPriorGraph
+            }
+            Err(error) => return Err(error.into()),
         };
-        let expected_graph_version = snapshot.verified_version().graph_version();
+        let expected_graph_version = match &expected_authority {
+            WorkProductExpectedAuthorityV1::Verified { verified_version } => {
+                Some(verified_version.graph_version())
+            }
+            WorkProductExpectedAuthorityV1::NoPriorGraph => None,
+        };
         let mut mutation = WorkProductMutationIdentityV1 {
-            expected_authority: WorkProductExpectedAuthorityV1::Verified {
-                verified_version: snapshot.verified_version().clone(),
-            },
+            expected_authority,
             command_id,
             causation_event_id: request.causation_event_id,
             evidence: request.evidence,
@@ -193,7 +230,8 @@ where
                 WorkProductMutationRequestV1::AdmitExecution(AdmitWorkExecutionRequestV1 {
                     selection,
                     task_id,
-                    based_on_version: expected_graph_version,
+                    based_on_version: expected_graph_version
+                        .ok_or(WorkProductApplicationErrorV1::InvalidRequest)?,
                     mutation,
                 })
             }
@@ -202,7 +240,8 @@ where
                     LinkAcceptedWorkAttemptRequestV1 {
                         selection,
                         task_id,
-                        based_on_version: expected_graph_version,
+                        based_on_version: expected_graph_version
+                            .ok_or(WorkProductApplicationErrorV1::InvalidRequest)?,
                         identity,
                         mutation,
                     },
