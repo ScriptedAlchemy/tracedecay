@@ -1,7 +1,8 @@
 # V2 RC reboot handoff
 
-**Status:** active product delivery; local reboot recovery and the live Work
-product journey are complete as of 2026-08-09.
+**Status:** active product delivery; local reboot recovery, the live Work
+product journey, and the verified dashboard code-graph cutover are complete as
+of 2026-08-09.
 
 `00-plan-set-index.md` remains the sole roadmap and acceptance authority. This
 file is the current operational handoff updated from direct branch, test, and
@@ -119,8 +120,18 @@ the commit as attribution evidence.
   through the real daemon in 44.38 seconds.
 - Obsolete dashboard test helpers for the removed `index_all` and SQLite
   writer lane are deleted in `77b70befa`, and the automatic-fact owner reuse
-  is repaired. The dashboard no-run target now fails only on nine relational
-  graph seed calls in `tests/dashboard_api_test/graph.rs`.
+  is repaired.
+- Dashboard graph, structure, and Explorer code reads now open the canonical
+  exact-project admitted `CodeGraphProjectionReadPort` directly in
+  `8a039e9af`. The shadow `DashboardGraphReadPortV1`, its SQLite adapter and
+  query modules, its separate interactive resolver, and all nine relational
+  graph fixture writes are deleted. The fixture publishes a real hermetic code
+  generation with files, symbol lineage, chunks, and semantic edges. The graph
+  HTTP journeys passed 5/5; the generated-contract authority and drift check
+  passed 1/1 each; dashboard typecheck and production build passed; focused
+  graph-contract, Code workspace, and Explorer suites passed 1/1, 10/10, and
+  35/35. Unpublished documentation, columns, edge lines, and file sizes remain
+  explicit null/absent evidence rather than relational or zero-valued backfill.
 - Recovered daemon session retrieval authority is byte-exact in
   `7e5812db71`.
 - Automatic fact application and receipts are checkpointed in `b1da03fbfc`,
@@ -150,13 +161,6 @@ the commit as attribution evidence.
   correlation, who worked on a task, provider-qualified session evidence,
   continuation, revocation, restart, stale graph, denied/unavailable, and
   current/as-of/evolution/forensic retrieval.
-- Mount the daemon's verified code-graph projection port into the standalone
-  dashboard composition and migrate `dashboard_api_test` off the deleted
-  SQLite graph seed authority. Its no-run build now reaches the test target
-  and reports only nine removed `insert_nodes`/`insert_edges`/`insert_edge`/
-  `upsert_files` calls in the graph journey.
-  Keep graph routes typed unavailable until that production authority is
-  present; do not restore relational tables or a synthetic lookalike fixture.
 - After the SQLite fact repair compiles, run the global-db/usecases checks and
   the rank-final revocation regression in addition to the focused query tests.
 
