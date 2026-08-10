@@ -54,6 +54,7 @@ pub enum FeedbackOutcomeV1 {
     AtCapacity,
     Completed,
     Unavailable,
+    ResetRequired,
     Denied,
     Cancelled,
     TimedOut,

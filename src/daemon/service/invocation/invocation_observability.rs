@@ -180,14 +180,14 @@ pub(super) fn invocation_response_outcome(
             ApplicationProblemKind::Cancelled => FeedbackOutcomeV1::Cancelled,
             ApplicationProblemKind::TimedOut => FeedbackOutcomeV1::TimedOut,
             ApplicationProblemKind::PartialEffect => FeedbackOutcomeV1::Partial,
-            ApplicationProblemKind::ResetRequired => FeedbackOutcomeV1::Unavailable,
+            ApplicationProblemKind::ResetRequired => FeedbackOutcomeV1::ResetRequired,
         },
         DaemonInvocationOutcome::Problem { problem } => match problem {
             DaemonInvocationProblem::InvalidRequest
             | DaemonInvocationProblem::UnsupportedRevision => FeedbackOutcomeV1::Rejected,
             DaemonInvocationProblem::NotFoundOrNotAuthorized => FeedbackOutcomeV1::Denied,
-            DaemonInvocationProblem::ResetRequired
-            | DaemonInvocationProblem::ApplicationContractViolation
+            DaemonInvocationProblem::ResetRequired => FeedbackOutcomeV1::ResetRequired,
+            DaemonInvocationProblem::ApplicationContractViolation
             | DaemonInvocationProblem::Unavailable => FeedbackOutcomeV1::Unavailable,
         },
     }

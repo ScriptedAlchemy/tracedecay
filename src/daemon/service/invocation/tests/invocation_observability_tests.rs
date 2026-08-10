@@ -38,3 +38,30 @@ fn feedback_rejection_observation_classifies_request_and_revision_failures() {
         FeedbackOutcomeV1::Unavailable
     );
 }
+
+#[test]
+fn reset_required_observation_is_distinct_from_unavailability() {
+    let typed = DaemonInvocationResponse::application_problem(
+        "request.typed-reset",
+        ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
+                "configuration.reset_required",
+                "The configuration authority requires reset",
+            )
+            .expect("diagnostic"),
+        ),
+    );
+    assert_eq!(
+        invocation_response_outcome(&typed),
+        FeedbackOutcomeV1::ResetRequired
+    );
+
+    let legacy = DaemonInvocationResponse::problem(
+        "request.legacy-reset",
+        DaemonInvocationProblem::ResetRequired,
+    );
+    assert_eq!(
+        invocation_response_outcome(&legacy),
+        FeedbackOutcomeV1::ResetRequired
+    );
+}
