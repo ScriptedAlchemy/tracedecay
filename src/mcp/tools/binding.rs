@@ -307,7 +307,6 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_dashboard"
         | "tracedecay_fact_store"
         | "tracedecay_fact_feedback"
-        | "tracedecay_memory_status"
         | "tracedecay_session_refresh"
         | "tracedecay_run_affected_tests" => EffectClass::Administrative,
         _ => EffectClass::Read,
@@ -468,7 +467,6 @@ fn verified_effect_journey(tool_name: &str) -> bool {
         "tracedecay_dashboard"
             | "tracedecay_fact_store"
             | "tracedecay_fact_feedback"
-            | "tracedecay_memory_status"
             | "tracedecay_session_refresh"
             | "tracedecay_run_affected_tests"
             | "tracedecay_configuration_set"
@@ -755,19 +753,17 @@ mod tests {
     }
 
     #[test]
-    fn administrative_tools_are_effects_without_fabricated_lifecycle_claims() {
+    fn memory_status_is_a_read_only_retained_operation() {
         let catalog = mcp_dispatch_catalog().unwrap();
-        for tool_name in ["tracedecay_memory_status", "tracedecay_session_refresh"] {
-            let contract = catalog.contract(tool_name).unwrap();
-            assert_eq!(contract.effect(), EffectClass::Administrative);
-            assert!(!contract.read_only());
-            assert!(!contract.availability().is_available());
-            assert_eq!(contract.idempotency(), McpIdempotencyContract::NotProvided);
-            assert!(matches!(
-                contract.inverse(),
-                McpInverseContract::Unavailable { .. }
-            ));
-        }
+        let contract = catalog.contract("tracedecay_memory_status").unwrap();
+        assert_eq!(contract.effect(), EffectClass::Read);
+        assert!(contract.read_only());
+        assert!(contract.availability().is_available());
+        assert_eq!(contract.idempotency(), McpIdempotencyContract::NotProvided);
+        assert!(matches!(
+            contract.inverse(),
+            McpInverseContract::NotApplicable
+        ));
     }
 
     #[test]
@@ -826,7 +822,6 @@ mod tests {
         let catalog = mcp_dispatch_catalog().unwrap();
         for tool_name in [
             "tracedecay_fact_feedback",
-            "tracedecay_memory_status",
             "tracedecay_session_refresh",
             "tracedecay_run_affected_tests",
         ] {

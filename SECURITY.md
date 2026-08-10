@@ -99,7 +99,7 @@ The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-
 
 **Local-state tools** (write only inside the active TraceDecay store, never your source):
 
-- `tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status` — store fact text, entity names, feedback events, trust-score inputs, and memory-bank repair state in the local project database.
+- `tracedecay_fact_store`, `tracedecay_fact_feedback` — store fact text, entity names, feedback events, and trust-score inputs in the local project database. `tracedecay_memory_status` is a read-only snapshot; repair is daemon-owned background work.
 
 ### Support bundles and storage diagnostics
 

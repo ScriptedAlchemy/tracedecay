@@ -316,7 +316,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_run_affected_tests",
         "tracedecay_fact_store",
         "tracedecay_fact_feedback",
-        "tracedecay_memory_status",
         "tracedecay_session_refresh",
         "tracedecay_configuration_set",
         "tracedecay_configuration_unset",
@@ -356,6 +355,20 @@ fn test_tool_definitions_have_annotations() {
             tool.name
         );
     }
+}
+
+#[test]
+fn memory_status_discovery_matches_its_pure_read_owner() {
+    let status = get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .find(|tool| tool.name == "tracedecay_memory_status")
+        .expect("memory status definition");
+    assert_eq!(status.annotations.unwrap()["readOnlyHint"], true);
+    assert!(
+        status.description.contains("without advancing repair"),
+        "read-only discovery must distinguish the status snapshot from the repair effect"
+    );
 }
 
 #[test]

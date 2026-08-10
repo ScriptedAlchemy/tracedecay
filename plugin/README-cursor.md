@@ -192,6 +192,7 @@ per-call review, add the snippet below to `~/.cursor/permissions.json`
     "tracedecay:tracedecay_lcm_grep",
     "tracedecay:tracedecay_lcm_load_session",
     "tracedecay:tracedecay_lcm_status",
+    "tracedecay:tracedecay_memory_status",
     "tracedecay:tracedecay_message_search",
     "tracedecay:tracedecay_module_api",
     "tracedecay:tracedecay_node",

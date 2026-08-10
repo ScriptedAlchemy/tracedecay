@@ -54,8 +54,9 @@ write only narrow durable changes.
 - `tracedecay_message_search` and `fact_store` search/get/contradict are
   read-only recall. Search/list/probe/related/reason are read-mostly but can
   update access/retrieval counters. `fact_store` add/update/remove,
-  `fact_feedback`, `memory_status` repair, and `dashboard` start/stop mutate
-  state or launch a local process; respect host approval/run-mode.
+  `fact_feedback`, and `dashboard` start/stop mutate state or launch a local
+  process; respect host approval/run-mode. `memory_status` only reads the
+  current state and daemon-owned repair backlog.
 - Deletion is permanent: there is no archive, soft-delete, restore, or undo
   path. Prefer update/merge when useful provenance should survive; delete only
   approved stale, duplicate, wrong, secret-like, or user-requested facts.

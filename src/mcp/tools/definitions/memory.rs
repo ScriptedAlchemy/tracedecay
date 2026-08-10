@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::{def_rw, project_selector_object, project_selector_properties};
+use super::{def, def_rw, project_selector_object, project_selector_properties};
 use crate::mcp::tools::ToolDefinition;
 
 fn memory_fact_properties() -> Value {
@@ -229,10 +229,10 @@ pub(super) fn def_fact_feedback() -> ToolDefinition {
 }
 
 pub(super) fn def_memory_status() -> ToolDefinition {
-    def_rw(
+    def(
         "tracedecay_memory_status",
         "Memory Status",
-        "Repair derived holographic memory vectors and banks, then return fact/entity counts, trust distribution, below-threshold and missing-vector signals, capacity-per-bank, and repair stats. Defaults to the active project; pass project_id or project_path only when intentionally checking another registered project. Human/operator equivalents: `tracedecay memory status` and `GET /api/plugins/holographic/status`.",
+        "Inspect derived holographic memory state without advancing repair: return fact/entity counts, trust distribution, below-threshold and missing-vector signals, capacity-per-bank, and the current repair backlog. Defaults to the active project; pass project_id or project_path only when intentionally checking another registered project. Human/operator equivalents: `tracedecay memory status` and `GET /api/plugins/holographic/status`.",
         json!({
             "type": "object",
             "properties": memory_status_properties()
