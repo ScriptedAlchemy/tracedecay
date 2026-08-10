@@ -114,6 +114,7 @@ function worktree() {
     source_reference: 'refs/heads/codex/tracedecay-total-redesign-plan',
     latest_generation_id: 'generation.4f21c9',
     snapshot_content_identity: 'sha256:8ab31c',
+    source_revision: null,
     sealed_at_micros: NOW_MICROS - 600_000_000,
     last_reconcile_micros: NOW_MICROS,
     staleness_state: 'fresh',

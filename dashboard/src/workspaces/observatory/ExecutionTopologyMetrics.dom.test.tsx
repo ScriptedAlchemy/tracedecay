@@ -13,6 +13,14 @@ describe('the Observatory execution-topology metrics projection', () => {
         response({
           kind: 'success',
           value: {
+            scope: {
+              project_id: 'project.tracedecay',
+              repository_id: 'repository.tracedecay',
+              worktree_id: 'worktree.tracedecay',
+              reference: null,
+              scope_digest:
+                'sha256:e0f55213520e40ec75c565c7e153a8d6452d09ac4abac1a4a4312ca4abcd3bcb',
+            },
             outcome: {
               outcome: 'evidence',
               value: { payload: topologyMetricsPayload() },

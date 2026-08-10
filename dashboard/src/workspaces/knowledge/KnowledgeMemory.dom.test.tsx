@@ -671,7 +671,7 @@ describe("Curation console", () => {
     stubRoutes();
     renderPage("/knowledge?view=curation");
     const list = await screen.findByRole("region", {
-      name: "Automation run records",
+      name: "Automatic run records",
     });
     expect(within(list).getByText("backend timed out after 60s")).toBeTruthy();
     // The failed run keeps its own chip rather than being folded into a count,

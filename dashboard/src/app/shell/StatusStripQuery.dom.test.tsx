@@ -95,14 +95,16 @@ describe('status-strip query activity', () => {
   });
 
   it('reports non-cancelable background work without offering a false control', async () => {
+    let aborted = false;
     mount(false, () => {
-      throw new Error('a non-cancelable query must not be aborted by the strip');
+      aborted = true;
     });
 
     expect(await screen.findByText('Refreshing graph authority')).toBeTruthy();
     expect(
       screen.queryByRole('button', { name: 'Cancel Refreshing graph authority' }),
     ).toBeNull();
+    expect(aborted).toBe(false);
   });
 
   it('tracks and aborts the real shared query transport when a caller labels it', async () => {
