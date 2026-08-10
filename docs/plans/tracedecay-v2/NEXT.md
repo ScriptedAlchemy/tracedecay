@@ -200,6 +200,23 @@ the commit as attribution evidence.
   affected workspace dependencies compiled.
 - Retained transport adapters are checkpointed in `90e326c27e`; retained API
   types are included in `7b82a36ff9`.
+- The retained daemon owner, direct memory/session/LCM ports, project-open and
+  profile factories, receipt projection, and session-refresh effects are
+  present in the production composition through `e98ac761f` and `be4581001`.
+  The stale session-refresh wire fixture is corrected in `fea89b562`: the
+  complete application retained suite passed 26/26 and the daemon-owner suite
+  passed 8/8. HTTP owner/API checks passed 1/1 and 2/2; the non-vacuous CLI
+  suite passed 11/11.
+- Advertised retained MCP translators now verify every exact action binding in
+  `0899d7e87`; the full advertised-dispatch regression passed 1/1. Memory
+  status is consistently a pure read in the direct dispatch catalog, MCP
+  discovery, Cursor allowlist, and operator guidance in `6f6833cdb`; its
+  focused catalog, discovery, and canonical-effect regressions passed 1/1
+  each. Repair remains a separate daemon-owned background effect.
+- Obsolete SessionStart/SessionEnd dispatch and operator documentation are
+  absent from the current tree; the intended retained cleanup from the
+  contaminated `4e4715c09` checkpoint is preserved without its TaskSession
+  reversions.
 - Duplicate receipt/revision identity is approved through `642b0221ae`.
 - Native topology recovery is checkpointed in `5e3f72b738`, but its review is
   still rejected on the exact issues below.
@@ -235,20 +252,14 @@ the commit as attribution evidence.
 
 ### Retained production surfaces
 
-- Restore `src/daemon/retained_owner.rs` and its direct memory, session, and LCM
-  children. Construct `RetainedSurfaceServiceV1` from real ports and map real
-  receipts; the current production composition references a missing owner.
-- Finish factory wiring against current server arguments and mount the same
-  behavior through CLI, MCP, HTTP, and SDK.
-- Restore behavior tests for exact identity, read/effect separation,
-  cancellation, unavailable families, partial effects, reset-required,
-  restart, and LCM production composition.
-- Keep `MemoryStatus` classified as Read only if the mounted implementation is
-  genuinely read-only. The old `memory_status_with_repair_v1` handler is
-  administrative and cannot substantiate the new contract.
-- The obsolete SessionStart/SessionEnd dispatch and documentation cleanup is
-  present in the contaminated retained checkpoint; preserve its intended four
-  blobs while normalizing history.
+- Run one physical-daemon restart journey through real project and profile
+  stores that exercises memory reads/effects, session-refresh
+  begin/status/cancel, and LCM retrieval with exact identity. Carry the same
+  requests through CLI, MCP, HTTP, and both typed SDKs.
+- In that journey, prove cancellation, unavailable families, partial-effect
+  receipts, reset-required, and post-restart reconciliation as externally
+  observed typed terminals. The focused owner/application tests prove their
+  internal mappings but are not a restart or end-to-end transport receipt.
 
 ### Native topology and executable projection
 
