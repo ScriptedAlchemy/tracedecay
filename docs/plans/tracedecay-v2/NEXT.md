@@ -189,9 +189,11 @@ the commit as attribution evidence.
   TypeScript terminal journey passed 1/1, TypeScript typecheck passed, the SDK
   codegen drift check passed, and the focused Rust SDK status test passed 1/1.
   The full TypeScript client file remains 27/28 because ten unrelated
-  application bindings truthfully regenerate as `schema_unavailable`; the full
-  Rust SDK library remains 5/6 because invalid explicit trust-root rejection is
-  separately failing.
+  application bindings truthfully regenerate as `schema_unavailable`.
+- Explicit Rust SDK trust roots are eagerly parsed as exactly one PEM
+  certificate in `71dd669c7`; reqwest's rustls-backed deferred `from_pem` path
+  can no longer accept a non-PEM blob as an empty root set. The focused
+  regression passed 1/1 and the full Rust SDK library passed 6/6.
 - Invocation observations distinguish reset-required from ordinary
   unavailability in `7e31c7a28` for both canonical application problems and
   retained legacy daemon outcomes. Its focused root test passed 1/1 after the
@@ -230,8 +232,6 @@ the commit as attribution evidence.
 - Repair the ten application bindings that regenerate as `schema_unavailable`,
   then restore the full TypeScript client suite from 27/28 to green without
   weakening its complete-operation assertion.
-- Repair the Rust SDK invalid explicit trust-root rejection and restore its
-  full library suite from 5/6 to green.
 
 ### Retained production surfaces
 
