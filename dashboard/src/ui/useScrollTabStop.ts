@@ -16,18 +16,23 @@ import { useEffect, useState, type RefObject } from 'react';
  * width where tabbing is most of the navigation.
  *
  * So the answer is measured rather than assumed. Reading the computed
- * `overflow-y` means the breakpoint lives in the stylesheet only; a JS copy of
- * `1024px` would be a second source of truth to keep in step. Under jsdom
- * nothing has layout or styles, so this reports "not a scroller" and the
- * behaviour is proved in a browser.
+ * overflow on the requested axis means the breakpoint lives in the stylesheet
+ * only; a JS copy of `1024px` would be a second source of truth to keep in step.
+ * Under jsdom nothing has layout or styles, so this reports "not a scroller"
+ * unless a focused component test supplies the computed overflow state; the
+ * rendered breakpoint behavior is proved in a browser.
  */
-export function useScrollTabStop(ref: RefObject<HTMLElement | null>): 0 | undefined {
+export function useScrollTabStop(
+  ref: RefObject<HTMLElement | null>,
+  axis: 'horizontal' | 'vertical' = 'vertical',
+): 0 | undefined {
   const [scrolls, setScrolls] = useState(false);
   useEffect(() => {
     const node = ref.current;
     if (node === null) return;
     const measure = () => {
-      const overflow = getComputedStyle(node).overflowY;
+      const style = getComputedStyle(node);
+      const overflow = axis === 'horizontal' ? style.overflowX : style.overflowY;
       setScrolls(overflow === 'auto' || overflow === 'scroll');
     };
     measure();
@@ -37,6 +42,6 @@ export function useScrollTabStop(ref: RefObject<HTMLElement | null>): 0 | undefi
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [ref]);
+  }, [axis, ref]);
   return scrolls ? 0 : undefined;
 }

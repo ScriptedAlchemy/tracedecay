@@ -17,8 +17,10 @@
  * column carries its state in `data-family-state` so an assertion does not have
  * to read colour either.
  */
+import { useRef } from 'react';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { cn } from '../../ui/cn';
+import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
 import type { FamilyRowPresentation } from './observedFamilies.ts';
 
 /**
@@ -74,6 +76,8 @@ export function ObservedFamilyLedger({
   /** `data-family-ledger` marker so a test can address one ledger. */
   marker: string;
 }) {
+  const tableViewportRef = useRef<HTMLDivElement>(null);
+  const tableViewportTabStop = useScrollTabStop(tableViewportRef, 'horizontal');
   const observed = rows.filter((row) => row.available).length;
   return (
     <section
@@ -91,7 +95,13 @@ export function ObservedFamilyLedger({
       <p className="text-3xs leading-snug text-text-muted" data-family-caption={marker}>
         {caption}
       </p>
-      <div className="min-w-0 overflow-x-auto">
+      <div
+        ref={tableViewportRef}
+        className="min-w-0 overflow-x-auto sm:overflow-x-visible"
+        role="region"
+        aria-label={`${label} table`}
+        tabIndex={tableViewportTabStop}
+      >
         <table className="w-full min-w-[34rem] border-collapse text-2xs">
           <caption className="sr-only">{caption}</caption>
           <thead>
