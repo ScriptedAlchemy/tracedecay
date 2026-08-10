@@ -117,6 +117,10 @@ the commit as attribution evidence.
   withholds graph readiness until a verified production projection is mounted.
   The normal feature-gated Work integration journey compiles and passed 1/1
   through the real daemon in 44.38 seconds.
+- Obsolete dashboard test helpers for the removed `index_all` and SQLite
+  writer lane are deleted in `77b70befa`, and the automatic-fact owner reuse
+  is repaired. The dashboard no-run target now fails only on nine relational
+  graph seed calls in `tests/dashboard_api_test/graph.rs`.
 - Recovered daemon session retrieval authority is byte-exact in
   `7e5812db71`.
 - Automatic fact application and receipts are checkpointed in `b1da03fbfc`,
@@ -148,9 +152,9 @@ the commit as attribution evidence.
   current/as-of/evolution/forensic retrieval.
 - Mount the daemon's verified code-graph projection port into the standalone
   dashboard composition and migrate `dashboard_api_test` off the deleted
-  SQLite graph/index authorities. Its no-run build now reaches the test target
-  and reports the remaining removed `index_all`, `insert_nodes`/`insert_edges`/
-  `upsert_files`, and `memory_writer` callers plus one moved `FactOwnerV1`.
+  SQLite graph seed authority. Its no-run build now reaches the test target
+  and reports only nine removed `insert_nodes`/`insert_edges`/`insert_edge`/
+  `upsert_files` calls in the graph journey.
   Keep graph routes typed unavailable until that production authority is
   present; do not restore relational tables or a synthetic lookalike fixture.
 - After the SQLite fact repair compiles, run the global-db/usecases checks and
