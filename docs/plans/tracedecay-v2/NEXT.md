@@ -95,6 +95,13 @@ the commit as attribution evidence.
   rebinds Work graph reads, commands, and evidence to its exact repository in
   `bbb979b00`; its focused Work suite passed 95/95 with typecheck and production
   build green.
+- Live TaskId-rooted `RetrieveEvidence` now crosses both the daemon HTTP and
+  dashboard mounts in `3cc0d17e5`. The two surfaces preserve the same verified
+  Work root for current, as-of, evolution, and forensic requests, return typed
+  stale for a well-formed mismatched graph identity, and conceal a missing task
+  as not-found-or-not-authorized. The new assertions live in a focused child
+  module instead of growing the already oversized route-conformance source;
+  the exact live journey passed 1/1 and its integration target check passed.
 - The dashboard board and commands now consume only the product graph authority
   in `d0d9f7dcb`; its complete focused Work suite passed 202/202 with typecheck
   and production build green. The public `WorkProjection` snapshot, delta,
@@ -164,10 +171,10 @@ the commit as attribution evidence.
 
 ### Work and TaskSession retrieval
 
-- Complete real MCP, HTTP, SDK, and dashboard journeys for task-to-session
-  correlation, who worked on a task, provider-qualified session evidence,
-  continuation, revocation, restart, stale graph, denied/unavailable, and
-  current/as-of/evolution/forensic retrieval.
+- Complete real MCP and typed SDK journeys for task-to-session correlation and
+  extend the dashboard journey beyond its verified task root to who worked on
+  a task, provider-qualified session evidence, continuation, revocation,
+  restart, unavailable authority, and all four temporal modes.
 
 ### Typed terminal problem propagation
 
