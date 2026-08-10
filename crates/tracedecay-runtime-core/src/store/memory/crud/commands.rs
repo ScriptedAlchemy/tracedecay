@@ -17,10 +17,9 @@ use super::super::projection::{
 use super::{
     CompatibilityMirrorInsertV1, compatibility_active_fact_count_tx, compatibility_commit_batch_tx,
     compatibility_initial_batch, compatibility_last_insert_rowid_tx,
-    compatibility_legacy_mapping_for_new_fact, compatibility_mirror_delete_tx,
-    compatibility_mirror_insert_tx, compatibility_mirror_update_tx, compatibility_payload_metadata,
-    compatibility_sanitize_payload, compatibility_verified_payload, load_current_fact_tx,
-    load_current_projection,
+    compatibility_legacy_mapping_for_new_fact, compatibility_mirror_insert_tx,
+    compatibility_mirror_update_tx, compatibility_payload_metadata, compatibility_sanitize_payload,
+    compatibility_verified_payload, load_current_fact_tx, load_current_projection,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -704,9 +703,6 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
     };
     let removed = current.access != PayloadAccessState::Deleted;
     let event_id = if removed {
-        let mapping =
-            project_memory_required_mapping_tx(transaction, request.target().owner(), &fact_id)
-                .await?;
         let expected_last_event_id = request
             .expected_last_event_id()
             .cloned()
@@ -726,7 +722,6 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
             now,
         )?;
         let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-        compatibility_mirror_delete_tx(transaction, mapping.legacy_fact_id()).await?;
         let canonical_event_id = canonical_receipt.last_event_id().clone();
         tombstone_fact_derivatives_tx(
             transaction,

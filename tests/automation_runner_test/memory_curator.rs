@@ -37,10 +37,14 @@ async fn memory_curator_runner_skips_when_automation_is_disabled() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let backend = JsonBackend::new(json!({"ops": []}));
+    let config = AutomationConfig {
+        enabled: false,
+        ..AutomationConfig::default()
+    };
 
     let run = run_memory_curator_with_backend(
         &cg,
-        &AutomationConfig::default(),
+        &config,
         &backend,
         MemoryCuratorAutomationOptions::default(),
     )
@@ -199,7 +203,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:"))
     );
-    assert!(!fact_exists(&cg, facts.loser_id).await);
+    assert!(!fact_exists(&cg, &facts.loser_id).await);
     assert_eq!(
         run.ledger_record.report_ref.as_ref().unwrap()["run_id"],
         json!(run.run_id)
@@ -260,8 +264,8 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         json!(true)
     );
     assert_eq!(
-        validation_payload["improvement_gate"]["criteria"]["auto_apply_allowed"],
-        json!(true)
+        validation_payload["improvement_gate"]["criteria"]["automatic_application"]["status"],
+        json!("applied")
     );
     assert_eq!(
         validation_payload["improvement_gate"]["source_refs"]
@@ -338,7 +342,10 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     .unwrap();
     assert_eq!(eval_payload["status"], json!("generated_from_validation"));
     assert_eq!(eval_payload["loop_stage"], json!("generated_evals"));
-    assert_eq!(eval_payload["promotion"]["auto_apply"], json!(false));
+    assert_eq!(
+        eval_payload["automatic_application"]["status"],
+        json!("applied")
+    );
     assert_eq!(eval_payload["source_refs"][0]["kind"], json!("traces"));
     assert_eq!(eval_payload["source_refs"][1]["kind"], json!("feedback"));
     assert_eq!(
@@ -389,10 +396,9 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         eval_payload["runner"]["results"][0]["status"],
         json!("passed")
     );
-    assert_eq!(eval_payload["promotion"]["state"], json!("validated"));
     assert_eq!(
-        eval_payload["promotion"]["requires_human_review"],
-        json!(true)
+        eval_payload["automatic_application"]["retry_required"],
+        json!(false)
     );
     assert!(
         eval_payload["artifact_refs"]
@@ -504,12 +510,12 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     );
     assert_eq!(handoff_payload["readiness"]["eval_count"], json!(1));
     assert_eq!(
-        handoff_payload["readiness"]["auto_apply_allowed"],
-        json!(true)
+        handoff_payload["readiness"]["automatic_application"]["status"],
+        json!("applied")
     );
     assert_eq!(
         handoff_payload["machine_summary"]["next_stage"],
-        json!("codex_review")
+        json!("monitor_applied_outcomes")
     );
     assert_eq!(
         handoff_payload["source_refs"][0]["kind"],
@@ -571,7 +577,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     assert_eq!(records[0].artifacts.len(), 6);
     assert_eq!(records[0].artifacts, run.ledger_record.artifacts);
     assert!(
-        !fact_exists(&cg, facts.loser_id).await,
+        !fact_exists(&cg, &facts.loser_id).await,
         "default memory curation must apply accepted validated ops"
     );
 }
@@ -668,7 +674,7 @@ async fn scheduler_memory_curator_applies_validated_ops_automatically() {
         run.report["curation_policy"]["decision"]["disposition"],
         json!("allow")
     );
-    assert!(!fact_exists(&cg, facts.loser_id).await);
+    assert!(!fact_exists(&cg, &facts.loser_id).await);
 }
 
 #[tokio::test]
@@ -713,8 +719,8 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["summary"]["eval_count"], json!(0));
     assert_eq!(
-        eval_payload["promotion"]["state"],
-        json!("blocked_no_examples")
+        eval_payload["automatic_application"]["status"],
+        json!("no_candidate")
     );
     assert_eq!(eval_payload["eval_definitions"], json!([]));
 
@@ -805,7 +811,10 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
 
     let eval_payload = read_artifact(&cg, &run.run_id, &run.ledger_record, "generated_evals").await;
     assert_eq!(eval_payload["runner"]["status"], json!("passed"));
-    assert_eq!(eval_payload["promotion"]["state"], json!("validated"));
+    assert_eq!(
+        eval_payload["automatic_application"]["status"],
+        json!("applied")
+    );
 
     let validation_payload =
         read_artifact(&cg, &run.run_id, &run.ledger_record, "validation_gate").await;
@@ -843,7 +852,7 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
     );
     assert_eq!(
         handoff_payload["machine_summary"]["next_stage"],
-        json!("codex_review")
+        json!("monitor_applied_outcomes")
     );
 }
 
@@ -901,7 +910,7 @@ async fn memory_curator_runner_applies_validated_ops_under_apply_policy() {
     );
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
     assert!(
-        !fact_exists(&cg, facts.loser_id).await,
+        !fact_exists(&cg, &facts.loser_id).await,
         "auto-apply must delete accepted permanent-delete ops"
     );
 }
@@ -955,9 +964,9 @@ async fn memory_curator_quarantines_output_after_bounded_repair_exhaustion() {
 
     assert_eq!(backend.calls(), 2);
     assert!(error.to_string().contains("repair budget exhausted"));
-    assert!(fact_exists(&cg, facts.winner_id).await);
+    assert!(fact_exists(&cg, &facts.winner_id).await);
     assert!(
-        fact_exists(&cg, facts.loser_id).await,
+        fact_exists(&cg, &facts.loser_id).await,
         "quarantined validation failures must not mutate memory"
     );
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
@@ -1031,7 +1040,7 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
         json!("deleted")
     );
     assert!(
-        !fact_exists(&cg, facts.loser_id).await,
+        !fact_exists(&cg, &facts.loser_id).await,
         "automatic validation policy should delete accepted fact"
     );
 }

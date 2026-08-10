@@ -601,7 +601,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
         {
             Ok(response) => response,
             Err(error) => {
-                retry_report = repair_retry_report;
+                retry_report.append(repair_retry_report);
                 let receipt = SessionFactCurationReceipt {
                     schema_version: 1,
                     outcome: SessionFactCurationOutcome::classify(
@@ -639,7 +639,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                 return Err(error);
             }
         };
-        retry_report = repair_retry_report;
+        retry_report.append(repair_retry_report);
         (proposed_ops, proposals) = finalizer
             .response_output_array(
                 &response,

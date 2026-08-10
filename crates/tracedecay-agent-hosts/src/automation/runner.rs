@@ -515,7 +515,7 @@ async fn run_skill_writer_for_store(
         {
             Ok(response) => response,
             Err(error) => {
-                retry_report = repair_retry_report;
+                retry_report.append(repair_retry_report);
                 finalizer
                     .append_failed_record(
                         None,
@@ -528,7 +528,7 @@ async fn run_skill_writer_for_store(
                 return Err(error);
             }
         };
-        retry_report = repair_retry_report;
+        retry_report.append(repair_retry_report);
         (proposed_ops, proposals) = finalizer
             .response_output_array(
                 &response,
@@ -1126,7 +1126,7 @@ async fn run_combined_review_for_retrieval(
         {
             Ok(response) => response,
             Err(err) => {
-                retry_report = repair_retry_report;
+                retry_report.append(repair_retry_report);
                 let (reflector_record, skill_record) = append_combined_failed_records(
                     &reflector_finalizer,
                     &skill_finalizer,
@@ -1143,7 +1143,7 @@ async fn run_combined_review_for_retrieval(
                 });
             }
         };
-        retry_report = repair_retry_report;
+        retry_report.append(repair_retry_report);
         (output, facts, skills) = match combined_review_output(&response) {
             Ok(output) => output,
             Err(err) => {

@@ -417,6 +417,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     );
     assert_eq!(run.ledger_record.task, AgentTaskKind::SessionReflector);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+    assert_eq!(run.ledger_record.backend_attempt_count, 2);
     assert_eq!(run.ledger_record.accepted_count, 3);
     assert_eq!(
         run.report["accepted_facts"][0]["add_fact_request"]["source"],

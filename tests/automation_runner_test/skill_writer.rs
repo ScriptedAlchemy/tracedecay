@@ -376,6 +376,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
     assert_eq!(backend.calls(), 2);
     assert_eq!(run.ledger_record.task, AgentTaskKind::SkillWriter);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+    assert_eq!(run.ledger_record.backend_attempt_count, 2);
     assert_eq!(run.ledger_record.accepted_count, 1);
     assert_eq!(run.ledger_record.rejected_count, 0);
     assert_eq!(run.report["status"], json!("applied"));

@@ -17,7 +17,7 @@ use tracedecay_store::{
     ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1, ProjectMemoryResult,
 };
 
-use super::crud::{compatibility_mirror_vector, load_current_fact_tx};
+use super::crud::compatibility_mirror_vector;
 use super::curation::{
     project_memory_available_curation_fact_tx, project_memory_curation_evidence_ids_tx,
 };
@@ -26,10 +26,9 @@ use super::envelope::{
     project_memory_record_operation_receipt_tx,
 };
 use super::primitives::{
-    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp,
-    compatibility_source_store_id, project_memory_now, row_string, storage_error, storage_message,
+    PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp, project_memory_now,
+    storage_error, storage_message,
 };
-use super::projection::project_memory_required_mapping_tx;
 
 /// Per-repair-pass batch caps. The daemon scheduler treats a pass that hits
 /// either cap as incomplete and keeps ticking rather than going idle with a
@@ -146,100 +145,12 @@ pub(super) async fn repair_project_memory_tx(
 }
 
 pub(super) async fn compatibility_repair_missing_vectors_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    limit: i64,
+    _transaction: &Transaction<'_>,
+    _owner: &FactOwnerV1,
+    _limit: i64,
 ) -> FactStoreResult<u64> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let mut rows = transaction
-        .query(
-            "SELECT mappings.fact_id
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             JOIN memory_v2_current_facts AS current_facts
-               ON current_facts.fact_id = mappings.fact_id
-              AND current_facts.owner_kind = mappings.owner_kind
-              AND current_facts.project_id = mappings.project_id
-             JOIN memory_v2_assertion_payloads AS payloads
-               ON payloads.assertion_id = current_facts.active_assertion_id
-              AND payloads.fact_id = current_facts.fact_id
-              AND payloads.owner_kind = current_facts.owner_kind
-              AND payloads.project_id = current_facts.project_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-               AND current_facts.payload_access = 'eligible'
-               AND (
-                    legacy_facts.hrr_vector IS NULL
-                    OR legacy_facts.hrr_algebra <> 'amari_fhrr'
-                    OR legacy_facts.hrr_dim <> ?5
-                    OR legacy_facts.hrr_precision <> ?6
-                    OR length(legacy_facts.hrr_vector) <> ?7
-               )
-             ORDER BY legacy_facts.updated_at DESC, mappings.fact_id ASC
-             LIMIT ?8",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                HolographicEncoder::DIMENSIONS as i64,
-                HolographicEncoder::HRR_PRECISION,
-                HolographicEncoder::SERIALIZED_F32_BYTES as i64,
-                limit,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let mut fact_ids = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-    {
-        fact_ids.push(
-            FactId::new(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)
-                .map_err(FactStoreError::from)?,
-        );
-    }
-    drop(rows);
-    let mut repaired = 0_u64;
-    for fact_id in fact_ids {
-        let Some(fact) = load_current_fact_tx(transaction, &key, owner, &fact_id).await? else {
-            continue;
-        };
-        let Some(payload) = fact.payload() else {
-            continue;
-        };
-        let mapping = project_memory_required_mapping_tx(transaction, owner, &fact_id).await?;
-        let vector = compatibility_mirror_vector(payload)?;
-        let changed = transaction
-            .execute(
-                "UPDATE memory_facts
-                 SET hrr_vector = ?1,
-                     hrr_algebra = 'amari_fhrr',
-                     hrr_dim = ?2,
-                     hrr_precision = ?3
-                 WHERE fact_id = ?4",
-                params![
-                    vector,
-                    HolographicEncoder::DIMENSIONS as i64,
-                    HolographicEncoder::HRR_PRECISION,
-                    mapping.legacy_fact_id(),
-                ],
-            )
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-        if changed != 1 {
-            return Err(storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility vector target is missing from the legacy mirror",
-            ));
-        }
-        repaired = repaired.saturating_add(1);
-    }
-    Ok(repaired)
+    // Canonical V2 recall encodes current fact content at query time. There is
+    // no persisted vector projection to scan or repair, so the bounded repair
+    // pass is truthfully complete without consulting the retired legacy table.
+    Ok(0)
 }

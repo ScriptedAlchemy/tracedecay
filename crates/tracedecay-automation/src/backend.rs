@@ -466,6 +466,15 @@ impl AgentTaskRetryReport {
     pub fn attempts(&self) -> &[AgentTaskRetryAttempt] {
         &self.attempts
     }
+
+    /// Appends a later backend request's attempts to this run-level history.
+    ///
+    /// Validation repair requests are separate backend calls, but the durable
+    /// automation ledger reports the full run. Each attempt retains its
+    /// request-local ordinal while list order preserves the run sequence.
+    pub fn append(&mut self, later: Self) {
+        self.attempts.extend(later.attempts);
+    }
 }
 
 pub async fn run_agent_task_with_retry(
@@ -1045,6 +1054,35 @@ mod tests {
             Some(AgentTaskFailureClass::Unavailable)
         );
         assert!(report.attempts()[1].succeeded);
+    }
+
+    #[test]
+    fn retry_report_appends_later_request_history() {
+        let mut initial = AgentTaskRetryReport {
+            attempts: vec![AgentTaskRetryAttempt {
+                attempt: 1,
+                succeeded: true,
+                failure_classification: None,
+                backoff_millis: 0,
+            }],
+        };
+        let repair = AgentTaskRetryReport {
+            attempts: vec![AgentTaskRetryAttempt {
+                attempt: 1,
+                succeeded: false,
+                failure_classification: Some(AgentTaskFailureClass::MalformedOutput),
+                backoff_millis: 0,
+            }],
+        };
+
+        initial.append(repair);
+
+        assert_eq!(initial.attempt_count(), 2);
+        assert!(initial.attempts()[0].succeeded);
+        assert_eq!(
+            initial.attempts()[1].failure_classification,
+            Some(AgentTaskFailureClass::MalformedOutput)
+        );
     }
 
     #[test]

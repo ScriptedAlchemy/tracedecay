@@ -2,17 +2,16 @@
 
 use super::super::DatabaseFactStore;
 use super::super::primitives::{
-    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, compatibility_source_store_id, from_json,
-    parse_payload_access, row_i64, row_optional_f64, row_optional_string, row_string,
-    storage_error, storage_message,
+    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, from_json, parse_payload_access, row_i64,
+    row_optional_f64, row_optional_string, row_string, storage_error, storage_message,
 };
 use super::{Projection, anchor_matches, commit_fact_tx};
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use tracedecay_domain::{
     Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
-    FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyFactMappingV1, LegacyHistoryCoverageV1,
-    PayloadAccessState, RetrievalAnchorRecordV2, ShardDispositionV1, UtcMicros,
+    FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyHistoryCoverageV1, PayloadAccessState,
+    RetrievalAnchorRecordV2, ShardDispositionV1, UtcMicros,
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
@@ -175,7 +174,6 @@ pub(in crate::store::memory) async fn load_current_fact_tx(
         }
         _ => None,
     };
-    let mapping = load_current_legacy_mapping_tx(snapshot, owner, typed_owner, fact_id).await?;
     StoredFactV1::new(
         stored_id,
         typed_owner.clone(),
@@ -184,7 +182,7 @@ pub(in crate::store::memory) async fn load_current_fact_tx(
         trust,
         active_assertion_id,
         last_event_id,
-        mapping,
+        None,
         projected_as_of,
     )
     .map(Some)
@@ -256,9 +254,6 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
         }
         access => (None, access),
     };
-    let mapping = load_current_legacy_mapping_tx(snapshot, &owner, query.owner(), query.fact_id())
-        .await?
-        .filter(|mapping| mapping.migrated_at() <= query.as_of());
     StoredFactV1::new(
         query.fact_id().clone(),
         query.owner().clone(),
@@ -267,7 +262,7 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
         projection.trust,
         active_assertion_id,
         last_event_id,
-        mapping,
+        None,
         projection.updated_at,
     )
     .map(Some)
@@ -837,44 +832,6 @@ pub(in crate::store::memory) async fn get_retrieval_anchor_tx(
         ));
     }
     Ok(Some(anchor))
-}
-
-async fn load_current_legacy_mapping_tx(
-    snapshot: &Transaction<'_>,
-    owner: &OwnerKey,
-    typed_owner: &FactOwnerV1,
-    fact_id: &FactId,
-) -> FactStoreResult<Option<LegacyFactMappingV1>> {
-    let mut rows = snapshot
-        .query(
-            "SELECT projections.fact_id, facts.created_at, facts.owner_json
-             FROM memory_facts AS projections
-             JOIN memory_v2_facts AS facts
-               ON facts.fact_id = projections.canonical_fact_id
-             WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
-               AND facts.fact_id = ?3",
-            params![owner.kind, owner.project_id.as_str(), fact_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?
-    else {
-        return Ok(None);
-    };
-    if row_string(&row, 2, QUERY_OPERATION)? != owner.json {
-        return Err(FactStoreError::OwnerMismatch);
-    }
-    Ok(Some(LegacyFactMappingV1::new(
-        typed_owner.clone(),
-        compatibility_source_store_id()?,
-        row_i64(&row, 0, QUERY_OPERATION)?,
-        fact_id.clone(),
-        LegacyHistoryCoverageV1::Complete,
-        UtcMicros(row_i64(&row, 1, QUERY_OPERATION)?),
-    )?))
 }
 
 impl DatabaseFactStore<'_> {

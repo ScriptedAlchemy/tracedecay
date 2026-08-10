@@ -27,7 +27,8 @@ use tracedecay_policy::{
 use tracedecay_runtime_core::memory::types::FactRelationKind;
 use tracedecay_store::ProjectMemoryFactRelationV1;
 use tracedecay_usecases::memory::{
-    CanonicalMemoryGroomingOperation, MemoryApplication, MemoryOperationContext,
+    CanonicalMemoryGroomingOperation, MemoryApplication, MemoryApplicationError,
+    MemoryOperationContext,
 };
 
 const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
@@ -319,7 +320,7 @@ async fn run_memory_curator_for_store(
         {
             Ok(response) => response,
             Err(error) => {
-                retry_report = repair_retry_report;
+                retry_report.append(repair_retry_report);
                 finalizer
                     .append_failed_record(
                         None,
@@ -332,7 +333,7 @@ async fn run_memory_curator_for_store(
                 return Err(error);
             }
         };
-        retry_report = repair_retry_report;
+        retry_report.append(repair_retry_report);
         proposed_ops = finalizer
             .response_output_json(&response, evidence_hash.clone(), &retry_report)
             .await?;
@@ -831,10 +832,19 @@ async fn apply_memory_curation_ops<A: tracedecay_store::ProjectMemoryFactStore>(
     }
 }
 
-fn memory_application_error(error: impl std::fmt::Display) -> TraceDecayError {
+fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
+    use std::error::Error as _;
+
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
     TraceDecayError::Database {
         operation: "apply validated memory curator operations".to_owned(),
-        message: error.to_string(),
+        message,
     }
 }
 

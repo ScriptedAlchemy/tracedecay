@@ -14,6 +14,7 @@ pub(crate) use tracedecay::memory::encoding::HolographicEncoder;
 pub(crate) use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 pub(crate) use tracedecay_agent_hosts::automation::automatic_facts::{
     AutomaticFactState, list_automatic_fact_receipts, load_automatic_fact_receipt,
+    record_session_automatic_facts,
 };
 pub(crate) use tracedecay_agent_hosts::automation::backend::{
     AgentTaskBackend, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
@@ -376,7 +377,7 @@ impl AgentTaskBackend for JsonBackend {
         assert_eq!(request.task, AgentTaskKind::MemoryCurator);
         assert_request_contract(request, "memory_curator", "memory_curator:v1", "ops");
         assert!(
-            request.prompt.contains("generation-bound memory pairs"),
+            request.prompt.contains("canonical current-fact pairs"),
             "runner should build a task prompt from the curation messages"
         );
         assert_eq!(
@@ -1328,53 +1329,101 @@ pub(crate) async fn seed_session_message_in_db(
     );
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct SeededDuplicateFacts {
-    pub(crate) winner_id: i64,
-    pub(crate) loser_id: i64,
+    pub(crate) winner_id: String,
+    pub(crate) loser_id: String,
 }
 
 pub(crate) async fn seed_duplicate_facts(cg: &TraceDecay) -> SeededDuplicateFacts {
-    use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
     use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
+    use tracedecay_usecases::memory::MemoryApplication;
 
     let owner = project_memory_owner(cg);
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db())).unwrap();
-    let mut fact_ids = [0_i64; 2];
+    let mut fact_ids = Vec::with_capacity(2);
     for (index, (content, trust)) in [
         ("Cache invalidation policy must be explicit", 0.97),
-        ("Cache invalidation policy must stay explicit", 0.95),
+        ("Cache invalidation policy must be explicit!", 0.95),
     ]
     .into_iter()
     .enumerate()
     {
-        let outcome = memory
-            .add_fact(
-                AddFactRequest {
-                    content: content.to_string(),
-                    category: MemoryCategory::Project,
-                    source: None,
-                    tags: vec!["cache".to_string(), "policy".to_string()],
-                    entities: Vec::new(),
-                    trust: Some(trust),
-                    metadata: json!({}),
+        let batch = record_session_automatic_facts(
+            &memory,
+            &format!("run.memory-curator-seed-{index}"),
+            Some("evidence.memory-curator-seed"),
+            &[json!({
+                "add_fact_request": {
+                    "content": content,
+                    "category": "project",
+                    "source": "memory-curator-test-seed",
+                    "tags": ["cache", "policy"],
+                    "entities": [],
+                    "trust": trust,
+                    "metadata": {},
                 },
-                MemoryOperationContext::generated(&owner, "seed automation duplicate fact", None)
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        fact_ids[index] = outcome.fact.expect("seeded fact must be projected").fact_id;
+                "validation": {"status": "accepted"},
+            })],
+        )
+        .await
+        .unwrap();
+        assert!(batch.retry_error.is_none());
+        assert_eq!(batch.receipts.len(), 1);
+        fact_ids.push(
+            batch.receipts[0]
+                .applied_canonical_fact_id
+                .clone()
+                .expect("seeded fact must have a canonical id"),
+        );
     }
+    assert_ne!(
+        fact_ids[0], fact_ids[1],
+        "curator fixture must persist two distinct canonical facts"
+    );
+    let facts = memory
+        .query_current_facts(tracedecay_store::CurrentFactsQuery::new(owner, None, 10).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(facts.len(), 2, "curator fixture must expose both facts");
+    let encoder = HolographicEncoder::new();
+    let vectors = facts
+        .iter()
+        .map(|fact| {
+            let payload = fact
+                .payload()
+                .expect("curator seed payload must be visible");
+            encoder.encode_fact(payload.content(), payload.entities())
+        })
+        .collect::<Vec<_>>();
+    let similarity = encoder.similarity(&vectors[0], &vectors[1]);
+    assert!(
+        similarity >= 0.9,
+        "curator fixture similarity {similarity} must cross the review threshold"
+    );
     SeededDuplicateFacts {
-        winner_id: fact_ids[0],
-        loser_id: fact_ids[1],
+        winner_id: fact_ids.remove(0),
+        loser_id: fact_ids.remove(0),
     }
 }
 
-pub(crate) async fn fact_exists(cg: &TraceDecay, fact_id: i64) -> bool {
-    cg.get_fact(fact_id).await.unwrap().is_some()
+pub(crate) async fn fact_exists(cg: &TraceDecay, fact_id: &str) -> bool {
+    use tracedecay::store::memory::DatabaseFactStore;
+    use tracedecay_domain::FactId;
+    use tracedecay_store::{
+        ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
+    };
+    use tracedecay_usecases::memory::MemoryApplication;
+
+    let owner = project_memory_owner(cg);
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db())).unwrap();
+    let fact_id = FactId::new(fact_id.to_owned()).unwrap();
+    let target =
+        ProjectMemoryFactTargetV1::Canonical(ProjectMemoryFactIdV1::new(owner, fact_id).unwrap());
+    matches!(
+        memory.get_project_memory_fact(target).await.unwrap(),
+        Some(ProjectMemoryFactProjectionV1::Available(_))
+    )
 }
 
 pub(crate) async fn read_artifact(
