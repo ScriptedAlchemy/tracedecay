@@ -18,10 +18,6 @@ pub(crate) mod assets;
 #[doc(hidden)]
 pub mod observation_seed;
 
-/// Interactive code-graph projection mount for dashboard integration fixtures.
-#[cfg(feature = "test-transport")]
-pub(crate) mod graph_projection_fixture;
-
 /// Installs root-owned values consumed by the extracted dashboard crate.
 pub(crate) fn register_runtime_ports() {
     tracedecay_dashboard_api::install_build_version(crate::version::build_version);
@@ -92,13 +88,21 @@ pub fn dashboard_automation_authority_for_test(
             })
         });
     let writer = standalone_dashboard_automation_writer();
+    let resident_memory = std::sync::Arc::new(
+        tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+            tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+        ),
+    );
     let authority = crate::daemon::dashboard_automation::compose_dashboard_automation_authority(
         profile_root,
         cg.store_runtime_registry().profile_id().clone(),
         resolver,
         std::sync::Arc::clone(&writer),
-        crate::daemon::service::invocation::DaemonInvocationService::with_code_index_schedulers(
-            crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+        crate::daemon::DaemonInvocationService::with_code_index_schedulers(
+            crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(
+                1,
+                resident_memory,
+            ),
         ),
     )?;
     Ok((authority, writer))
@@ -300,38 +304,19 @@ pub async fn dashboard_lcm_read_authority_for_test(
     Some(std::sync::Arc::new(adapter))
 }
 
-/// Composes the daemon-owned verified graph read authority over the fixture's
-/// retained project graph and registered project-sessions store — the same
-/// `DashboardGraphReadAdapter` the MCP dashboard composition mounts in
-/// production. Without it every `/api/plugins/graph/*` and explorer code
-/// read answers its typed unavailable envelope.
-///
-/// The interactive code-graph resolver is mounted here for the same reason the
-/// daemon mounts one: neighbor reads take adjacency exclusively from a
-/// verified projection, so a fixture that seeded only the relational graph
-/// would answer every `/neighbors` read as unavailable. The fixture's
-/// projection is published from the graph already seeded on `cg`, so it must
-/// be composed after seeding completes.
+/// Reports the verified graph authority available to the standalone fixture.
+/// This composition does not own the daemon code-index scheduler
+/// that publishes a verified code-graph projection. The removed SQLite graph
+/// tables are not a fallback authority, so the fixture truthfully withholds
+/// the port and graph routes answer their typed unavailable envelope until the
+/// production projection port is injected.
 #[cfg(feature = "test-transport")]
 #[doc(hidden)]
 pub async fn dashboard_graph_read_authority_for_test(
-    cg: &crate::tracedecay::TraceDecay,
-    project_database: &crate::global_db::RegisteredGlobalDb,
+    _cg: &crate::tracedecay::TraceDecay,
+    _project_database: &crate::global_db::RegisteredGlobalDb,
 ) -> Option<std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>> {
-    let interactive = graph_projection_fixture::interactive_resolver_for_test(cg)
-        .await
-        .unwrap_or_else(|error| {
-            panic!("dashboard fixture could not publish its code graph projection: {error}")
-        });
-    crate::mcp::tools::handlers::DashboardGraphReadAdapter::for_project(
-        cg,
-        project_database,
-        Some(interactive),
-    )
-    .map(|adapter| {
-        std::sync::Arc::new(adapter)
-            as std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>
-    })
+    None
 }
 
 /// Composes the daemon-owned git-correlation read authority over the

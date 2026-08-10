@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde_json::Value;
 use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::dashboard;
 use tracedecay::errors::{Result, TraceDecayError};
@@ -140,19 +139,19 @@ impl DashboardTestRuntimeV1 {
             cg.as_ref(),
             self.project_database.as_ref(),
         )
-        .await
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "dashboard fixture could not compose the graph read authority".to_owned(),
-        })?;
+        .await;
         let git_correlation_read_authority =
             dashboard::dashboard_git_correlation_read_authority_for_test(Arc::clone(
                 &self.project_database,
             ));
-        Ok(authority
+        let authority = authority
             .with_automation_authority(automation_authority, automation_writer)
             .with_lcm_read_authority(lcm_read_authority)
-            .with_graph_read_authority(graph_read_authority)
-            .with_git_correlation_read_authority(git_correlation_read_authority))
+            .with_git_correlation_read_authority(git_correlation_read_authority);
+        Ok(match graph_read_authority {
+            Some(graph_read_authority) => authority.with_graph_read_authority(graph_read_authority),
+            None => authority,
+        })
     }
 
     /// The registered project identity this fixture runtime was opened for.
