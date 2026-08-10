@@ -13,7 +13,8 @@ use serde_json::Value;
 use tracedecay_application::{
     ApplicationContractError, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationProblemKind, CancellationSignal, Deadline, OpaqueCursor, PageRequest,
-    ProblemOwningLayer, RequestId, ResultContractRef, RetryDirective, SafeDiagnostic,
+    ProblemOwningLayer, RequestId, ResultContractRef, RetainedSurfaceOperation, RetryDirective,
+    SafeDiagnostic,
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId, ProfileId, SchemaId, ScopeDimension,
@@ -502,18 +503,23 @@ pub fn http_route_documents(
         authorized_capabilities,
         available_scope,
     ) {
-        let Some(operation) =
-            HttpApplicationOperation::from_catalog_name(binding.operation().as_str())
-        else {
-            continue;
+        let path = match HttpApplicationOperation::from_catalog_name(binding.operation().as_str()) {
+            Some(operation) if operation.is_http_exposed() => operation.application_route_path(),
+            Some(_) => continue,
+            None => {
+                let Some(operation) =
+                    RetainedSurfaceOperation::from_name(binding.operation().as_str())
+                        .filter(|operation| operation.is_callable())
+                else {
+                    continue;
+                };
+                crate::retained::retained_application_route_path(operation)
+            }
         };
-        if !operation.is_http_exposed() {
-            continue;
-        }
         documents.push(HttpRouteDocumentV1 {
             method: "POST",
-            path: operation.application_route_path(),
-            operation: operation.as_str().to_owned(),
+            path,
+            operation: binding.operation().as_str().to_owned(),
             capability_id: capability.capability_id().as_str().to_owned(),
             binding_id: binding.binding_id().as_str().to_owned(),
             request_schema: capability.request_schema().schema_id().as_str().to_owned(),

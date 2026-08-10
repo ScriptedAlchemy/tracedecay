@@ -286,7 +286,7 @@ const PRE_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Http,
 ];
 
-const MCP_PRIMITIVE_SURFACE: [BindingSurface; 1] = [BindingSurface::Mcp];
+const CLI_MCP_PRIMITIVE_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
 
 const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
@@ -297,11 +297,11 @@ const DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
 
 fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
     match spec.operation {
-        // These established MCP handlers retain their current wire schemas and
-        // rendering, but use this operation identity for the canonical
-        // verified code-graph read admission boundary.
+        // These established tool handlers retain their current wire schemas
+        // and rendering across the generic CLI fallback and MCP, while using
+        // this operation identity for canonical code-graph read admission.
         "context" | "redundancy" | "node" | "callees" | "impact" | "similar" | "rename_preview"
-        | "port_status" | "port_order" | "todos" => &MCP_PRIMITIVE_SURFACE,
+        | "port_status" | "port_order" | "todos" => &CLI_MCP_PRIMITIVE_SURFACES,
         "health_read" | "storage_status" | "diagnostics_read" => &DASHBOARD_PRIMITIVE_SURFACES,
         _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
     }
@@ -792,6 +792,19 @@ fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
 mod tests {
     use super::*;
 
+    const ESTABLISHED_TOOL_PRIMITIVES: [&str; 10] = [
+        "context",
+        "redundancy",
+        "node",
+        "callees",
+        "impact",
+        "similar",
+        "rename_preview",
+        "port_status",
+        "port_order",
+        "todos",
+    ];
+
     #[test]
     fn symbol_search_advertises_only_supported_temporal_modes() {
         let contribution = symbol_search_contribution().expect("symbol-search contribution");
@@ -801,5 +814,24 @@ mod tests {
             .expect("symbol-search retrieval primitive");
 
         assert_eq!(primitive.temporal_modes(), &[TemporalMode::Current]);
+    }
+
+    #[test]
+    fn established_tool_primitives_pair_cli_and_mcp_bindings() {
+        let contribution = primitive_read_contribution().expect("primitive contribution");
+
+        for operation in ESTABLISHED_TOOL_PRIMITIVES {
+            let surfaces = contribution
+                .bindings()
+                .iter()
+                .filter(|binding| binding.operation().as_str() == operation)
+                .map(|binding| binding.surface())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                surfaces,
+                vec![BindingSurface::Cli, BindingSurface::Mcp],
+                "{operation} must remain callable from the paired default profile"
+            );
+        }
     }
 }

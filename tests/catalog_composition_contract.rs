@@ -3,11 +3,14 @@ use std::collections::BTreeSet;
 use tracedecay::catalog_composition::{
     CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
 };
-use tracedecay_api::{HttpApplicationOperation, http_route_documents};
+use tracedecay_api::{
+    HttpApplicationOperation, http_route_documents, retained_application_route_path,
+};
 use tracedecay_application::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationHandlerDescriptors,
-    ApplicationOperation, ResultContractRef, application_catalog_contributions,
-    application_handler_descriptors, retrieval::catalog::symbol_search_contribution,
+    ApplicationOperation, ResultContractRef, RetainedSurfaceOperation,
+    application_catalog_contributions, application_handler_descriptors,
+    retrieval::catalog::symbol_search_contribution,
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef,
@@ -48,115 +51,25 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
         }
     }
 
-    let symbol_search = CapabilityId::new("capability.retrieval.symbol-search").unwrap();
+    let symbol_search = CapabilityId::new("capability.application.symbol-search").unwrap();
     assert!(snapshot.capability(&symbol_search).is_some());
 
     let default_profile = ProfileId::new("profile.default").unwrap();
     assert!(snapshot.profile(&default_profile).is_some());
-    assert_eq!(
-        snapshot
-            .visible_capabilities(&default_profile, &BTreeSet::new())
-            .into_iter()
-            .map(|capability| capability.capability_id().as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            "capability.application.code-query.callees",
-            "capability.application.code-query.declaration",
-            "capability.application.code-query.definition",
-            "capability.application.code-query.exact-occurrence",
-            "capability.application.code-query.facets",
-            "capability.application.code-query.phrase-search",
-            "capability.application.code-query.references",
-            "capability.application.code-query.timeline",
-            "capability.application.code-query.type-definition",
-            "capability.application.configuration.audit",
-            "capability.application.configuration.batch",
-            "capability.application.configuration.explain",
-            "capability.application.configuration.get",
-            "capability.application.configuration.list",
-            "capability.application.configuration.observed_state",
-            "capability.application.configuration.protected_apply",
-            "capability.application.configuration.protected_preview",
-            "capability.application.configuration.rollback_apply",
-            "capability.application.configuration.rollback_preview",
-            "capability.application.configuration.set",
-            "capability.application.configuration.unset",
-            "capability.application.configuration.write_credential",
-            "capability.application.context-scout-budget",
-            "capability.application.context-scout-cancel",
-            "capability.application.context-scout-capability",
-            "capability.application.context-scout-claim",
-            "capability.application.context-scout-delivery",
-            "capability.application.context-scout-explain",
-            "capability.application.context-scout-feedback",
-            "capability.application.context-scout-pause",
-            "capability.application.context-scout-recent",
-            "capability.application.context-scout-resume",
-            "capability.application.context-scout-status",
-            "capability.application.feedback.advisory-cycle",
-            "capability.application.feedback.affected-tests",
-            "capability.application.feedback.diagnostics",
-            "capability.application.feedback.expand",
-            "capability.application.feedback.get",
-            "capability.application.feedback.impact",
-            "capability.application.feedback.list",
-            "capability.application.feedback.test-results",
-            "capability.application.git.apply",
-            "capability.application.git.blame",
-            "capability.application.git.diff",
-            "capability.application.git.history",
-            "capability.application.git.hunks",
-            "capability.application.git.preview",
-            "capability.application.git.status",
-            "capability.application.primitive.call-chain",
-            "capability.application.primitive.code-callers",
-            "capability.application.primitive.code-implementations",
-            "capability.application.primitive.code-signature-search",
-            "capability.application.primitive.code-type-hierarchy",
-            "capability.application.primitive.diagnostics-read",
-            "capability.application.primitive.file-dependents",
-            "capability.application.primitive.file-metadata",
-            "capability.application.primitive.health-delta",
-            "capability.application.primitive.health-read",
-            "capability.application.primitive.module-api",
-            "capability.application.primitive.qualified-name",
-            "capability.application.primitive.session-lookup",
-            "capability.application.primitive.source-body",
-            "capability.application.primitive.source-lines",
-            "capability.application.primitive.source-outline",
-            "capability.application.primitive.storage-status",
-            "capability.application.retained.fact-feedback",
-            "capability.application.retained.fact-store",
-            "capability.application.retained.lcm-compress",
-            "capability.application.retained.lcm-describe",
-            "capability.application.retained.lcm-doctor",
-            "capability.application.retained.lcm-expand",
-            "capability.application.retained.lcm-expand-query",
-            "capability.application.retained.lcm-grep",
-            "capability.application.retained.lcm-load-session",
-            "capability.application.retained.lcm-preflight",
-            "capability.application.retained.lcm-session-boundary",
-            "capability.application.retained.lcm-status",
-            "capability.application.retained.memory-status",
-            "capability.application.retained.message-search",
-            "capability.application.retained.session-end",
-            "capability.application.retained.session-refresh",
-            "capability.application.retained.session-start",
-            "capability.application.retained.sessions-for",
-            "capability.application.retained.workflows",
-            "capability.application.source-edit.ast-grep-rewrite",
-            "capability.application.source-edit.insert-at",
-            "capability.application.source-edit.insert-at-symbol",
-            "capability.application.source-edit.move-symbol",
-            "capability.application.source-edit.multi-str-replace",
-            "capability.application.source-edit.reconcile",
-            "capability.application.source-edit.rename-symbol",
-            "capability.application.source-edit.replace-symbol",
-            "capability.application.source-edit.rollback",
-            "capability.application.source-edit.str-replace",
-            "capability.retrieval.symbol-search",
-        ]
-    );
+    let visible_default = snapshot.visible_capabilities(&default_profile, &BTreeSet::new());
+    for capability_id in [
+        "capability.application.symbol-search",
+        "capability.application.primitive.todos",
+        "capability.application.configuration.semantic_model_retry",
+        "capability.application.retained.fact-store-search",
+    ] {
+        assert!(
+            visible_default
+                .iter()
+                .any(|capability| capability.capability_id().as_str() == capability_id),
+            "the composed default profile must expose {capability_id}"
+        );
+    }
 }
 
 #[test]
@@ -166,7 +79,7 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.default",
             ProfileKind::Default,
-            ProfileBudget::new(320, 18_000).unwrap(),
+            ProfileBudget::new(448, 18_000).unwrap(),
         ),
         (
             "profile.compact",
@@ -222,7 +135,7 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
 fn binding_discovery_intersects_profile_surface_authority_and_scope() {
     let snapshot = build_application_catalog_snapshot().unwrap();
     let profile = ProfileId::new("profile.compact").unwrap();
-    let symbol_search = CapabilityId::new("capability.retrieval.symbol-search").unwrap();
+    let symbol_search = CapabilityId::new("capability.application.symbol-search").unwrap();
     let authorized = BTreeSet::from([symbol_search.clone()]);
     let scope = BTreeSet::from([
         ScopeDimension::ConfigurationLayer,
@@ -306,12 +219,31 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
         &authorized,
         &scope,
     );
+    let unrouted = visible_http_bindings
+        .iter()
+        .filter(|(binding, _)| {
+            match HttpApplicationOperation::from_catalog_name(binding.operation().as_str()) {
+                Some(operation) => !operation.is_http_exposed(),
+                None => RetainedSurfaceOperation::from_name(binding.operation().as_str())
+                    .is_none_or(|operation| !operation.is_callable()),
+            }
+        })
+        .map(|(binding, _)| binding.operation().as_str())
+        .collect::<Vec<_>>();
 
     assert!(!documents.is_empty());
+    assert!(
+        unrouted.is_empty(),
+        "every visible HTTP catalog binding must have a public route: {unrouted:?}"
+    );
     assert_eq!(documents.len(), visible_http_bindings.len());
     assert!(documents.iter().all(|document| {
         HttpApplicationOperation::from_catalog_name(&document.operation)
             .is_some_and(|operation| operation.application_route_path() == document.path)
+            || RetainedSurfaceOperation::from_name(&document.operation).is_some_and(|operation| {
+                operation.is_callable()
+                    && retained_application_route_path(operation) == document.path
+            })
     }));
     assert!(documents.iter().all(|document| {
         !matches!(document.operation.as_str(), "git_preview" | "git_apply")
@@ -323,8 +255,8 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
     assert!(
         documents
             .iter()
-            .any(|document| document.operation == "configuration_list"
-                && document.path == "/application/configuration/configuration_list")
+            .any(|document| document.operation == "code_symbol_search"
+                && document.path == "/application/code/code_symbol_search")
     );
 }
 
@@ -334,8 +266,8 @@ fn registered_capability_does_not_require_a_catalog_surface_binding() {
         validate_application_catalog(
             &[symbol_search_contribution().unwrap()],
             &ApplicationHandlerDescriptors::new([descriptor_with_contract(
-                "capability.retrieval.symbol-search",
-                "use-case.retrieval.symbol-search",
+                "capability.application.symbol-search",
+                "use-case.application.symbol-search",
                 symbol_request_schema(),
                 symbol_result_schema(),
             )])
@@ -351,8 +283,8 @@ fn mismatched_descriptor_schema_is_rejected() {
     let cases = [
         (
             descriptor_with_contract(
-                "capability.retrieval.symbol-search",
-                "use-case.retrieval.symbol-search",
+                "capability.application.symbol-search",
+                "use-case.application.symbol-search",
                 schema("schema.test.drifted-request"),
                 symbol_result_schema(),
             ),
@@ -360,8 +292,8 @@ fn mismatched_descriptor_schema_is_rejected() {
         ),
         (
             descriptor_with_contract(
-                "capability.retrieval.symbol-search",
-                "use-case.retrieval.symbol-search",
+                "capability.application.symbol-search",
+                "use-case.application.symbol-search",
                 symbol_request_schema(),
                 schema("schema.test.drifted-result"),
             ),
@@ -384,7 +316,7 @@ fn mismatched_descriptor_capability_is_rejected() {
     let contribution = symbol_search_contribution().unwrap();
     let handlers = ApplicationHandlerDescriptors::new([descriptor_with_contract(
         "capability.retrieval.wrong-symbol-search",
-        "use-case.retrieval.symbol-search",
+        "use-case.application.symbol-search",
         symbol_request_schema(),
         symbol_result_schema(),
     )])

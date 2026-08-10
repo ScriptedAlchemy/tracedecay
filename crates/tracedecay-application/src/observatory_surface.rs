@@ -101,7 +101,7 @@ pub fn observatory_read_catalog_contribution()
     let (bindings, binding_ids) = current_bindings(
         &capability_id,
         OBSERVATORY_READ_OPERATION,
-        [BindingSurface::Mcp],
+        [BindingSurface::Cli, BindingSurface::Mcp],
     )?;
     let manifest = CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id,
@@ -264,14 +264,15 @@ mod tests {
     }
 
     #[test]
-    fn observatory_catalog_is_mcp_only_and_matches_its_handler() {
+    fn observatory_catalog_pairs_cli_and_mcp_and_matches_its_handler() {
         let contribution = observatory_read_catalog_contribution().expect("catalog contribution");
-        let binding = contribution
+        let surfaces = contribution
             .bindings()
             .iter()
-            .find(|binding| binding.operation().as_str() == OBSERVATORY_READ_OPERATION)
-            .expect("observatory MCP binding");
-        assert_eq!(binding.surface(), BindingSurface::Mcp);
+            .filter(|binding| binding.operation().as_str() == OBSERVATORY_READ_OPERATION)
+            .map(|binding| binding.surface())
+            .collect::<Vec<_>>();
+        assert_eq!(surfaces, vec![BindingSurface::Cli, BindingSurface::Mcp]);
         assert_eq!(
             observatory_read_handler_descriptor()
                 .expect("handler descriptor")

@@ -137,7 +137,7 @@ async fn brokered_init(
     tracedecay::daemon::call_default_tool_awaiting_project_open(
         handshake,
         "tracedecay_status",
-        serde_json::json!({"format": "json"}),
+        serde_json::json!({"format": "json", "admission_only": true}),
         init_deadline,
     )
     .await?;

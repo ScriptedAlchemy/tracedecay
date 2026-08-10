@@ -20,6 +20,11 @@ use tracedecay_tool_catalog::{
     UseCaseId,
 };
 
+// The default profile currently composes 403 shipped bindings. This reviewed
+// ceiling leaves 45 bindings of admission headroom while the eager-profile
+// routing and serialized discovery tests below bound the client-facing cost.
+const DEFAULT_PROFILE_MAXIMUM_BINDINGS: u32 = 448;
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CatalogCompositionError {
     #[error("application catalog contribution is invalid: {0}")]
@@ -140,7 +145,7 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(320, 18_000)?,
+            ProfileBudget::new(DEFAULT_PROFILE_MAXIMUM_BINDINGS, 18_000)?,
             true,
         ),
         (
@@ -342,12 +347,12 @@ mod tests {
     };
     use tracedecay_tool_catalog::SurfaceOperationName;
 
-    // Growth tripwire only, not an MCP client or protocol limit. The original
-    // full-registry measurement was 231,640 bytes; the exact deterministic
-    // default-profile baseline is 222,664 bytes after catalog filtering.
-    // Raising this 512 KiB ceiling requires a fresh serialized tools/list
-    // measurement and a stated reason for the additional payload.
-    const DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES: usize = 524_288;
+    // Growth tripwire only, not an MCP client or protocol limit. The complete
+    // final-V2 profile measures 573,502 bytes after the typed Work and workflow
+    // schemas ship. This reviewed 640 KiB ceiling leaves about 14% headroom;
+    // raising it requires another serialized tools/list measurement and a
+    // stated reason for the additional payload.
+    const DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES: usize = 640 * 1024;
 
     const DASHBOARD_OPERATIONS: [&str; 23] = [
         "feedback_diagnostics",
@@ -480,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn raised_default_budget_routes_dashboard_operations_for_an_eager_client() {
+    fn reviewed_default_budget_routes_every_capability_for_an_eager_client() {
         let snapshot = build_application_catalog_snapshot().expect("application catalog");
         let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
         let profile = snapshot.profile(&profile_id).expect("default profile");
@@ -493,12 +498,57 @@ mod tests {
             .filter(|binding| profile.enables_surface(binding.surface()))
             .count();
 
-        assert_eq!(profile.budget().maximum_bindings(), 320);
-        assert!(
-            eager_binding_count > 288
-                && eager_binding_count <= profile.budget().maximum_bindings() as usize,
-            "acceptance must exercise the raised budget with the full eager profile loaded"
+        assert_eq!(
+            profile.budget().maximum_bindings(),
+            DEFAULT_PROFILE_MAXIMUM_BINDINGS
         );
+        assert!(
+            eager_binding_count > 320
+                && eager_binding_count <= profile.budget().maximum_bindings() as usize,
+            "acceptance must exercise the reviewed budget with the full eager profile loaded"
+        );
+
+        for capability in &eager_visible_capabilities {
+            let fixture = profile
+                .routing_fixtures()
+                .iter()
+                .find(|fixture| {
+                    matches!(
+                        fixture.expectation(),
+                        RoutingFixtureExpectation::Select { capability_id }
+                            if capability_id == capability.capability_id()
+                    )
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} must retain an eager routing fixture",
+                        capability.capability_id()
+                    )
+                });
+            let routed = eager_visible_capabilities
+                .iter()
+                .filter(|candidate| {
+                    candidate.routing().name() == fixture.utterance()
+                        || candidate
+                            .routing()
+                            .examples()
+                            .iter()
+                            .any(|example| example == fixture.utterance())
+                        || format!(
+                            "{} [{}]",
+                            candidate.routing().name(),
+                            candidate.capability_id().as_str()
+                        ) == fixture.utterance()
+                })
+                .map(|candidate| candidate.capability_id())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                routed,
+                vec![capability.capability_id()],
+                "{} must route unambiguously with every eager capability loaded",
+                capability.capability_id()
+            );
+        }
 
         for operation in DASHBOARD_OPERATIONS {
             let operation_name =
@@ -565,7 +615,10 @@ mod tests {
                     && default_profile.enables_surface(binding.surface())
             })
             .count();
-        assert_eq!(default_profile.budget().maximum_bindings(), 320);
+        assert_eq!(
+            default_profile.budget().maximum_bindings(),
+            DEFAULT_PROFILE_MAXIMUM_BINDINGS
+        );
         assert!(default_binding_count > 0);
         assert!(default_binding_count <= default_profile.budget().maximum_bindings() as usize);
 
