@@ -15,6 +15,7 @@ import {
 } from "../../data/scope/store.ts";
 
 import { resumeCursor } from "./workQueries.ts";
+import { workGraphReadRequest } from "./workViewsQueries.ts";
 import {
   WORK_ACCEPT_TASK_ROUTE,
   WORK_SNAPSHOT_ROUTE,
@@ -55,6 +56,37 @@ describe("where a Work read is sent", () => {
     expect(scopedUrl(project("selected"), WORK_TOPOLOGY_ROUTE.path)).toBe(
       "/api/projects/project.beta/work/topology",
     );
+  });
+});
+
+describe("which Work product authority is read", () => {
+  it("uses the exact daemon-resolved repository after bootstrap", () => {
+    expect(
+      workGraphReadRequest(123, {
+        project_id: "project.beta",
+        repository_id: "repository.beta",
+        worktree_id: "worktree.beta",
+        reference: null,
+        scope_digest: "sha256:scope",
+      }),
+    ).toMatchObject({
+      selection: {
+        selection: "relations",
+        relation_scopes: [
+          {
+            kind: "repository",
+            project_id: "project.beta",
+            repository_id: "repository.beta",
+          },
+        ],
+      },
+    });
+  });
+
+  it("keeps the profile-owned bootstrap when no resolved scope exists", () => {
+    expect(workGraphReadRequest(123).selection).toEqual({
+      selection: "profile_owned_no_git",
+    });
   });
 });
 

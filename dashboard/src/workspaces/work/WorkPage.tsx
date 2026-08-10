@@ -159,6 +159,8 @@ export function WorkPage() {
   const [selected, setSelected] = useSelectedTask();
   const [projection, setProjection] = useWorkProjection();
   const snapshot = useWorkSnapshot();
+  const result = snapshot.data;
+  const value = result?.outcome === 'value' ? result.value : undefined;
   // The execution record belongs to the timeline and the topology lens, so
   // the attempt list is read when one of those projections is the camera and
   // not on every visit to the page.
@@ -167,10 +169,11 @@ export function WorkPage() {
   const attemptReading = workAttemptReading(attempts.data);
   // Create needs the exact selection a current graph read authorized. The
   // browser never reconstructs a scope while assembling its task draft.
-  const graph = useWorkGraphViews(true);
+  const graph = useWorkGraphViews(
+    true,
+    result?.outcome === 'value' ? result.scope : undefined,
+  );
   const graphReading = workGraphReading(graph.data);
-  const result = snapshot.data;
-  const value = result?.outcome === 'value' ? result.value : undefined;
   // Only asked for when the snapshot says it was capped or partial, so a
   // complete board issues no continuation request at all.
   const delta = useWorkDelta(value === undefined ? undefined : resumeCursor(value.coverage));
@@ -291,7 +294,11 @@ export function WorkPage() {
                   </Panel>
                 ) : (
                   <div className="grid min-w-0 gap-3">
-                    <WorkCommands projection={selectedProjection} snapshot={value} />
+                    <WorkCommands
+                      projection={selectedProjection}
+                      snapshot={value}
+                      graph={graph.data}
+                    />
                     <WorkEvidencePanel taskId={selectedProjection.task_id} graph={graph.data} />
                   </div>
                 )}

@@ -48,7 +48,13 @@ function snapshotBody(projections: readonly unknown[], coverage?: unknown) {
       binding_id: 'binding.http.work.snapshot',
       contract: { schema_id: 'schema.work.snapshot.result', schema_revision: 1 },
       request_id: 'request-1',
-      scope: {},
+      scope: {
+        project_id: 'project.work',
+        repository_id: 'repository.work',
+        worktree_id: 'worktree.work',
+        reference: null,
+        scope_digest: 'sha256:scope',
+      },
       outcome: {
         outcome: 'evidence',
         value: {

@@ -26,6 +26,14 @@ const SNAPSHOT = {
   sequence: 7,
 };
 
+const RESOLVED_SCOPE = {
+  project_id: 'project.work',
+  repository_id: 'repository.work',
+  worktree_id: 'worktree.work',
+  reference: null,
+  scope_digest: 'sha256:scope',
+};
+
 /** The daemon's success envelope: `kind`/`value`, then the outcome tag, then
  * the packet whose `payload` holds the contract. */
 function success(payload: unknown, outcome: 'evidence' | 'effect' = 'evidence') {
@@ -35,7 +43,7 @@ function success(payload: unknown, outcome: 'evidence' | 'effect' = 'evidence') 
       binding_id: 'binding.http.work.snapshot',
       contract: { schema_id: 'schema.work.snapshot.result', schema_revision: 1 },
       request_id: 'request-1',
-      scope: {},
+      scope: RESOLVED_SCOPE,
       outcome: { outcome, value: { payload } },
     },
   };
@@ -122,7 +130,16 @@ describe('callWork', () => {
   it('returns the payload decoded by its generated schema', async () => {
     stub(200, success(SNAPSHOT));
     const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
-    expect(result).toEqual({ outcome: 'value', value: SNAPSHOT });
+    expect(result).toEqual({ outcome: 'value', value: SNAPSHOT, scope: RESOLVED_SCOPE });
+  });
+
+  it('refuses a success envelope without a valid resolved scope', async () => {
+    const body = success(SNAPSHOT);
+    stub(200, { ...body, value: { ...body.value, scope: {} } });
+
+    const result = await callWork(WORK_SNAPSHOT_ROUTE, { page_size: 10 }, '/api/work/snapshot');
+
+    expect(result).toMatchObject({ outcome: 'refused', state: 'unsupported_schema' });
   });
 
   it('refuses a payload the generated contract does not describe', async () => {

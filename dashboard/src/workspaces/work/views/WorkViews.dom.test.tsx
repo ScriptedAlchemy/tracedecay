@@ -83,7 +83,13 @@ function workEnvelope(payload: unknown, bindingId: string) {
       binding_id: bindingId,
       contract: { schema_id: 'schema.work.result', schema_revision: 1 },
       request_id: 'request-1',
-      scope: {},
+      scope: {
+        project_id: 'project.work',
+        repository_id: 'repository.work',
+        worktree_id: 'worktree.work',
+        reference: null,
+        scope_digest: 'sha256:scope',
+      },
       outcome: { outcome: 'evidence', value: { payload } },
     },
   };
@@ -500,12 +506,10 @@ describe('the DAG projection', () => {
     });
     const { container } = renderPage('/work?view=dag');
     await waitFor(() =>
-      expect(container.querySelector('[data-work-critical-path="absent"]')).not.toBeNull(),
+      expect(
+        container.querySelector('[data-work-critical-path="absent"]')?.textContent ?? '',
+      ).toContain('refused'),
     );
-
-    expect(
-      container.querySelector('[data-work-critical-path="absent"]')?.textContent ?? '',
-    ).toContain('refused');
   });
 });
 

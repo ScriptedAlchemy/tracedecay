@@ -3,6 +3,7 @@ import type {
   ExecutionTopologyMetricsRequestV1,
   ExecutionTopologyMetricsV1,
   ExecutionTopologyViewV1,
+  ResolvedScope,
   WorkAttemptListV1,
   WorkGraphReadV1,
 } from '../../contracts/index.ts';
@@ -132,13 +133,13 @@ export function useWorkTopologyMetrics(enabled: boolean) {
 /**
  * The work-product graph read behind the four Work projections.
  *
- * One read, in `current` mode, over the profile-owned no-Git selection — the
- * one selection that names no relation scope and therefore cannot be got wrong
- * from the dashboard, where the scope bar picks a project rather than a set of
- * authorized work-product relations. A `relations` selection with an empty set
- * is an invalid request rather than an empty answer, so this build asks the
- * question it can state exactly instead of assembling one it would be guessing
- * at.
+ * The bootstrap read uses the profile-owned no-Git selection. Once any Work
+ * response supplies its canonical `ResolvedScope`, subsequent reads use the
+ * exact project/repository relation from that daemon-owned envelope. This is
+ * required for provider attempts: atomic admission links them under repository
+ * authority, and a later profile-only read cannot truthfully claim that head.
+ * The browser never derives a repository or worktree identity from a path,
+ * label, or project id.
  *
  * `continuation` is null and stays null. It is a timeline cursor and is legal
  * only on `evolution` and `forensic`; on `current` it would name a position in
@@ -156,9 +157,21 @@ export function useWorkTopologyMetrics(enabled: boolean) {
  * blocked effort split and both concurrency figures — against the instant the
  * caller names.
  */
-export function workGraphReadRequest(observedAt: number) {
+export function workGraphReadRequest(observedAt: number, scope?: ResolvedScope) {
   return {
-    selection: { selection: 'profile_owned_no_git' },
+    selection:
+      scope === undefined
+        ? { selection: 'profile_owned_no_git' as const }
+        : {
+            selection: 'relations' as const,
+            relation_scopes: [
+              {
+                kind: 'repository' as const,
+                project_id: scope.project_id,
+                repository_id: scope.repository_id,
+              },
+            ],
+          },
     mode: { mode: 'current' },
     continuation: null,
     observed_at: observedAt,
@@ -172,11 +185,17 @@ export function workGraphReadRequest(observedAt: number) {
  * which the reading reports as pending — correct, because nothing has been
  * asked.
  */
-export function useWorkGraphViews(enabled: boolean) {
+export function useWorkGraphViews(enabled: boolean, authority?: ResolvedScope) {
   const scope = useScope((state) => state.scope);
   const key = scopeKey(scope);
   return useQuery<WorkResult<WorkGraphReadV1>>({
-    queryKey: workQueryKey(key, 'views'),
+    queryKey: workQueryKey(
+      key,
+      'views',
+      authority === undefined
+        ? 'profile-owned-no-git'
+        : `${authority.project_id}/${authority.repository_id}`,
+    ),
     enabled,
     // The observation instant is minted per fetch rather than per render: as a
     // query-key member it would mint a new cache entry on every render and turn
@@ -184,7 +203,7 @@ export function useWorkGraphViews(enabled: boolean) {
     queryFn: () =>
       callWork(
         WORK_VIEWS_ROUTE,
-        workGraphReadRequest(Date.now() * 1_000),
+        workGraphReadRequest(Date.now() * 1_000, authority),
         scopedUrl(scope, WORK_VIEWS_ROUTE.path),
       ),
   });

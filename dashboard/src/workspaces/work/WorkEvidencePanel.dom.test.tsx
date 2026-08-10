@@ -114,6 +114,13 @@ function envelope(value: unknown) {
   return {
     kind: 'success',
     value: {
+      scope: {
+        project_id: 'project.work',
+        repository_id: 'repository.work',
+        worktree_id: 'worktree.work',
+        reference: null,
+        scope_digest: 'sha256:scope',
+      },
       outcome: { outcome: 'evidence', value: { payload: value } },
     },
   };

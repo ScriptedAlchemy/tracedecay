@@ -18,7 +18,6 @@ import {
   WORK_PREPARE_GRAPH_MUTATION_ROUTE,
   WORK_REPLAN_DEPENDENCIES_ROUTE,
 } from './workRoutes.ts';
-import { useWorkGraphViews } from './workViewsQueries.ts';
 
 /**
  * The controls for one task.
@@ -94,18 +93,19 @@ function CommandButton({
 export function WorkCommands({
   projection,
   snapshot,
+  graph,
 }: {
   projection: WorkProjection;
   snapshot: WorkProjectionSnapshotV1;
+  graph: WorkResult<WorkGraphReadV1> | undefined;
 }) {
   const acceptTask = useWorkCommand(WORK_ACCEPT_TASK_ROUTE);
   const admissionPreparation = useWorkReadAction(WORK_PREPARE_GRAPH_MUTATION_ROUTE);
   const admitExecution = useWorkCommand(WORK_MUTATE_GRAPH_ROUTE);
   const replan = useWorkCommand(WORK_REPLAN_DEPENDENCIES_ROUTE);
-  const graph = useWorkGraphViews(true);
   const [dependencies, setDependencies] = useState<readonly string[]>(projection.dependencies);
 
-  const selection = currentWorkSelection(graph.data);
+  const selection = currentWorkSelection(graph);
   const candidates = snapshot.projections
     .map((candidate) => candidate.task_id)
     .filter((taskId) => taskId !== projection.task_id);

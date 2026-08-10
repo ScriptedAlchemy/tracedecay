@@ -1,4 +1,5 @@
 import type { z } from 'zod';
+import { ResolvedScopeSchema, type ResolvedScope } from '../../contracts/index.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
 /**
@@ -21,11 +22,10 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
  *
  * Rather than restate the wrapper as a second wire format, this module treats it
  * as structure to walk and never as a shape to trust: it reaches for the payload
- * and hands whatever it finds to the generated schema, which is the only thing
- * that decides what the value is. If the envelope ever moves, the walk misses,
- * the parse never runs, and the caller is told `unsupported_schema`. The failure
- * is a truthful refusal rather than a fabricated read, which is the property
- * that matters while the wrapper is uncontracted.
+ * and hands that and the envelope's resolved scope to their generated schemas.
+ * If either moves, the caller is told `unsupported_schema`. The failure is a
+ * truthful refusal rather than a fabricated read, which is the property that
+ * matters while the wrapper itself remains uncontracted.
  */
 
 /** A route the daemon actually mounts, with the contracts on either side of it.
@@ -45,7 +45,7 @@ export interface WorkRoute<Request, Response> {
  * There is no third case. A refusal always carries a domain state and a
  * sentence, so no caller can render an absence as an empty success. */
 export type WorkResult<T> =
-  | { readonly outcome: 'value'; readonly value: T }
+  | { readonly outcome: 'value'; readonly value: T; readonly scope?: ResolvedScope }
   | { readonly outcome: 'refused'; readonly state: DomainStateKind; readonly detail: string };
 
 /**
@@ -94,6 +94,12 @@ export function workRefusal(status: number): { state: DomainStateKind; detail: s
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function workResolvedScope(body: unknown): ResolvedScope | undefined {
+  if (!isRecord(body) || body.kind !== 'success' || !isRecord(body.value)) return undefined;
+  const parsed = ResolvedScopeSchema.safeParse(body.value.scope);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**
@@ -195,7 +201,15 @@ export async function callWork<Request, Response>(
       detail: `the payload does not satisfy ${route.operation}`,
     };
   }
-  return { outcome: 'value', value: parsed.data };
+  const scope = workResolvedScope(body);
+  if (scope === undefined) {
+    return {
+      outcome: 'refused',
+      state: 'unsupported_schema',
+      detail: 'the response envelope carries no valid resolved Work scope',
+    };
+  }
+  return { outcome: 'value', value: parsed.data, scope };
 }
 
 /** Aliased so the `Response` type is not shadowed by the generic parameter. */
