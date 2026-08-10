@@ -2,14 +2,13 @@
 //! executables, bounded stream capture, the cancellation ladder, and the
 //! typed availability states that refuse to spawn at all.
 //!
-//! Framing note (learned from the module under test): nothing here parses
-//! provider stream framing. The `(backend, protocol)` pair selects argv only —
+//! Framing note: the `(backend, protocol)` pair selects argv and the single
+//! provider-owned session-start event whose identity is sealed into Work —
 //! `--print --output-format stream-json --verbose` for `ClaudeStreamJson`,
 //! `exec --json -` for `CodexExecJson` — the attempt instructions are written
 //! to the child's stdin, and both streams are captured as bounded opaque bytes
-//! summarized by true byte length plus the sha256 of the retained prefix. The
-//! fixtures below therefore emit provider-shaped JSONL and assert on the
-//! byte-exact summary and the forwarded argv, never on parsed events.
+//! summarized by true byte length plus the sha256 of the retained prefix. No
+//! assistant content is parsed or reinterpreted.
 //!
 //! Gate note: the app-server preference gate is exercised against a *real*
 //! `PinnedWorkExecutableBindingResolver` over real on-disk executables, not a
@@ -24,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Mutex;
 
+use sha2::{Digest, Sha256};
 use tracedecay_domain::configuration::{
     ConfigurationLayerIdV1, ConfigurationValueV1, SettingKey, TopologyConcurrencyPolicyV1,
     WORK_EXECUTABLE_BINDINGS_SETTING_KEY, WorkExecutableBindingV1, WorkExecutableCapabilityV1,
@@ -38,12 +38,12 @@ use tracedecay_application::{
     DisclosureClass, RequestId, ResolvedScope, WorkAttemptAdmissionKind, WorkAttemptCapacityV1,
     WorkAttemptCapacityVerdictV1, WorkAttemptInsertOutcome, WorkAttemptListPageV1,
     WorkAttemptService, WorkAttemptStatusRequestV1, WorkAttemptStorageError,
-    WorkAttemptStoragePort,
+    WorkAttemptStoragePort, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
     OperationActivationOutcomeV1, OperationStageV1, ProjectId, ProposalId, ProviderId, RefId,
-    RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1,
+    RepositoryId, RunId, SessionId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
     WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
     WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
@@ -822,7 +822,17 @@ async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream(
     let route = requested_route(WorkProviderBackendV1::ClaudeCodeCli);
     assert_eq!(evidence.requested_route, route);
     assert_eq!(evidence.actual_route, Some(route));
-    // The stream is summarized byte-exactly, not parsed.
+    assert_eq!(
+        evidence.provider_session,
+        Some(
+            ObservationSourceIdentityV1::for_provider(
+                id::<ProviderId>("claude"),
+                id::<SessionId>("s-1"),
+            )
+            .expect("Claude provider session"),
+        ),
+    );
+    // Session correlation does not weaken byte-exact stream accounting.
     let stdout = evidence.stdout.expect("stdout summary");
     assert_eq!(stdout.byte_length, stream.len() as u64);
     assert!(!stdout.truncated);
@@ -1252,7 +1262,7 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
         "codex-cli",
         "codex.cli",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat > /dev/null\nexit 0\n",
+            "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat > /dev/null\nprintf '%s\\n' '{{\"type\":\"thread.started\",\"thread_id\":\"thread-codex-fallback\"}}'\nexit 0\n",
             argv = argv_marker.display(),
         ),
     );
@@ -1343,6 +1353,16 @@ async fn a_disqualified_app_server_falls_back_to_codex_cli_and_says_so_in_the_ev
     );
     assert_eq!(evidence.actual_route, Some(fallback_route()));
     assert_eq!(evidence.provider_fallback, Some(report));
+    assert_eq!(
+        evidence.provider_session,
+        Some(
+            ObservationSourceIdentityV1::for_provider(
+                id::<ProviderId>("codex"),
+                id::<SessionId>("thread-codex-fallback"),
+            )
+            .expect("Codex provider session"),
+        ),
+    );
 }
 
 /// A snapshot whose topology is `Disabled` has no successor to name. Losing
