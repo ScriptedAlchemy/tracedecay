@@ -338,10 +338,7 @@ pub struct McpServer {
     project_session_root_id: Option<tracedecay_usecases::context::SessionRootId>,
     session_sync_service:
         Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
-    project_application_retrieval_service:
-        Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>>,
-    project_application_retrieval_identity:
-        Option<tracedecay_usecases::context::ResolvedSessionIdentity>,
+    project_application_retrieval: Option<MountedProjectApplicationRetrievalV1>,
     project_lcm_authority: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
     user_lcm_authority: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
@@ -500,6 +497,41 @@ pub struct McpServer {
     /// The transport-visible response lifecycle for a retained project route.
     project_server_lifecycle: ProjectServerResponseLifecycle,
     dispatch_authority: RetainedDispatchAuthority,
+}
+
+#[derive(Clone)]
+struct MountedProjectApplicationRetrievalV1 {
+    identity: tracedecay_usecases::context::ResolvedSessionIdentity,
+    service: Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>,
+}
+
+impl MountedProjectApplicationRetrievalV1 {
+    fn work_evidence_retrieval(
+        &self,
+        expected_scope: &tracedecay_application::ResolvedScope,
+        federated_authority: Arc<
+            dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
+        >,
+    ) -> Result<crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1> {
+        let mounted_scope =
+            self.identity
+                .session_request_scope()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("mounted project session identity is invalid: {error}"),
+                })?;
+        if &mounted_scope != expected_scope {
+            return Err(TraceDecayError::Config {
+                message: "Work evidence retrieval scope does not match the mounted project session authority"
+                    .to_owned(),
+            });
+        }
+        Ok(
+            crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::clone(
+                &self.service,
+            ))
+            .with_federated_authority(federated_authority),
+        )
+    }
 }
 
 impl McpServer {
@@ -867,30 +899,33 @@ impl McpServer {
             Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
                 as Arc<dyn ProjectRegistryReadPort>
         });
-        let project_application_retrieval_identity = project_session_retrieval_root
-            .as_ref()
-            .map(|root| root.identity().clone());
-        let project_application_retrieval_service = session_db
+        let project_application_retrieval = session_db
             .as_ref()
             .zip(project_session_retrieval_root.clone())
-            .and_then(|(database, root)| match registered_session_db.as_ref() {
-                Some(registered) => {
+            .and_then(|(database, root)| {
+                let identity = root.identity().clone();
+                let service = match registered_session_db.as_ref() {
+                    Some(registered) => {
                     crate::daemon::session_retrieval::DaemonSessionRetrievalService::new_registered(
                         Arc::clone(database),
                         Arc::clone(registered),
                         root,
                         project_session_refresh_wake.clone(),
                     )
-                }
-                None => crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
-                    Arc::clone(database),
-                    root,
-                    project_session_refresh_wake.clone(),
-                ),
-            })
-            .map(|service| {
-                Arc::new(service)
-                    as Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>
+                    }
+                    None => crate::daemon::session_retrieval::DaemonSessionRetrievalService::new(
+                        Arc::clone(database),
+                        root,
+                        project_session_refresh_wake.clone(),
+                    ),
+                }?;
+                Some(MountedProjectApplicationRetrievalV1 {
+                    identity,
+                    service: Arc::new(service)
+                        as Arc<
+                            dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1,
+                        >,
+                })
             });
         let project_lcm_authority = project_session_retrieval_root
             .as_ref()
@@ -968,8 +1003,7 @@ impl McpServer {
             project_session_store_id,
             project_session_root_id,
             session_sync_service,
-            project_application_retrieval_service,
-            project_application_retrieval_identity,
+            project_application_retrieval,
             project_lcm_authority,
             user_lcm_authority,
             project_host_admission_replay: tokio::sync::Mutex::new(None),
@@ -1205,20 +1239,26 @@ impl McpServer {
 
     pub(crate) fn work_evidence_retrieval(
         &self,
+        expected_scope: &tracedecay_application::ResolvedScope,
+        federated_authority: Arc<
+            dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
+        >,
     ) -> Result<crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1> {
-        self.project_application_retrieval_service
-            .clone()
-            .map(crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "Work evidence retrieval requires the mounted project session authority"
+        let Some(mounted) = self.project_application_retrieval.as_ref() else {
+            return Err(TraceDecayError::Config {
+                message: "Work evidence retrieval requires a mounted project session authority"
                     .to_owned(),
-            })
+            });
+        };
+        mounted.work_evidence_retrieval(expected_scope, federated_authority)
     }
 
     pub(crate) fn project_session_application_retrieval_service(
         &self,
     ) -> Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>> {
-        self.project_application_retrieval_service.clone()
+        self.project_application_retrieval
+            .as_ref()
+            .map(|mounted| Arc::clone(&mounted.service))
     }
 
     pub(crate) fn retained_surface_ports(
@@ -1244,7 +1284,10 @@ impl McpServer {
                 mounted_session_root_id: self.project_session_root_id.clone(),
                 registered_session_db: self.registered_session_db.clone(),
                 project_refresh: self.project_session_refresh_service.clone(),
-                project_retrieval: self.project_application_retrieval_service.clone(),
+                project_retrieval: self
+                    .project_application_retrieval
+                    .as_ref()
+                    .map(|mounted| Arc::clone(&mounted.service)),
                 project_workflow_index,
                 project_lcm: self.project_lcm_authority.clone(),
             },
@@ -1397,6 +1440,10 @@ mod application_surface_request_id_tests {
         assert!(application_surface_request_id(&json!(null), "connection").is_none());
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod work_evidence_mount_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

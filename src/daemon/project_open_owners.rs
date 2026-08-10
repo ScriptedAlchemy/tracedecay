@@ -783,9 +783,8 @@ pub(super) async fn register_project_open_production_owners(
             &access,
         )
         .await?;
-    let work_evidence_retrieval = server
-        .work_evidence_retrieval()?
-        .with_federated_authority(invocation.work_federated_query_authority());
+    let work_evidence_retrieval =
+        server.work_evidence_retrieval(&scope, invocation.work_federated_query_authority())?;
     invocation
         .configuration_runtime_registrar()
         .register(

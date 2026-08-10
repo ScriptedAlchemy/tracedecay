@@ -842,11 +842,13 @@ impl McpServer {
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
                 dashboard_session_retrieval_service: self
-                    .project_application_retrieval_service
-                    .clone(),
+                    .project_application_retrieval
+                    .as_ref()
+                    .map(|mounted| Arc::clone(&mounted.service)),
                 dashboard_session_retrieval_identity: self
-                    .project_application_retrieval_identity
-                    .clone(),
+                    .project_application_retrieval
+                    .as_ref()
+                    .map(|mounted| mounted.identity.clone()),
                 daemon_user_profile_id: self
                     .profile_identity
                     .as_ref()
