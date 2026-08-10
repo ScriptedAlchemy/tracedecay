@@ -270,9 +270,10 @@ mod tests {
         .await?;
 
         assert_eq!(documents.len(), 1);
+        let canonical_package_root = package_root.canonicalize()?;
         assert_eq!(
             adapter_workspace_root(project_root, &adapter, "package/src/lib.fake"),
-            Some(package_root)
+            Some(canonical_package_root)
         );
         Ok(())
     }
