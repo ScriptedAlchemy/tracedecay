@@ -603,7 +603,7 @@ fn declared_stack_projection_conforms_to_native_linked_worktree_state() {
 }
 
 #[test]
-fn declared_scope_revision_change_retains_its_matching_worktree_occupancies() {
+fn declared_scope_revision_change_replaces_the_prior_projected_scope() {
     let fixture = NativeGitFixture::new();
     fixture.advance_feature("first feature revision\n");
     let first = declared_stack_request_for_scope(
@@ -639,19 +639,39 @@ fn declared_scope_revision_change_retains_its_matching_worktree_occupancies() {
     );
 
     let store = projection_store(&runtime, &second.repository);
+    assert_eq!(store.branch_stacks().len(), 1);
+    assert_eq!(store.worktree_occupancies().len(), 2);
     assert_eq!(
-        store
-            .worktree_occupancy_exact(
-                &first.project,
-                &first.repository,
-                &first.scope_set_id,
-                first.scope_set_revision,
-                first.request.authorized_scope_set.digest(),
-                first.source.reference.as_ref().expect("source ref"),
-                Arc::new(NeverCancelled),
-            )
-            .expect("first scope occupancy"),
-        vec![first.source.worktree_id.clone()]
+        store.branch_stack_revision_exact(
+            &first.project,
+            &first.repository,
+            &first.scope_set_id,
+            first.scope_set_revision,
+            first.request.authorized_scope_set.digest(),
+            &first.revision.stack_id,
+            &first.revision.revision_id,
+            &first.revision.digest,
+            &first.inventory_snapshot_id,
+            first.inventory_epoch,
+            Arc::new(NeverCancelled),
+        ),
+        Err(GitTopologyProjectionError::StaleBinding {
+            detail: "scope-set revision or digest changed",
+        })
+    );
+    assert_eq!(
+        store.worktree_occupancy_exact(
+            &first.project,
+            &first.repository,
+            &first.scope_set_id,
+            first.scope_set_revision,
+            first.request.authorized_scope_set.digest(),
+            first.source.reference.as_ref().expect("source ref"),
+            Arc::new(NeverCancelled),
+        ),
+        Err(GitTopologyProjectionError::StaleBinding {
+            detail: "scope-set revision or digest changed",
+        })
     );
     assert_eq!(
         store

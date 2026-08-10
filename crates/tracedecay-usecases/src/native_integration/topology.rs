@@ -200,16 +200,11 @@ impl ExactPairNativeIntegrationTopology {
             candidate.project_id != binding.project_id
                 || candidate.repository_id != binding.repository_id
                 || candidate.scope_set_id != binding.scope_set_id
-                || candidate.scope_set_revision != binding.scope_set_revision
-                || candidate.scope_set_digest != binding.scope_set_digest
-                || candidate.revision.stack_id != binding.revision.stack_id
         });
         worktree_occupancies.retain(|candidate| {
             candidate.project_id != binding.project_id
                 || candidate.repository_id != binding.repository_id
                 || candidate.scope_set_id != binding.scope_set_id
-                || candidate.scope_set_revision != binding.scope_set_revision
-                || candidate.scope_set_digest != binding.scope_set_digest
         });
         branch_stacks.push(binding);
         worktree_occupancies.extend(occupancies);
