@@ -140,8 +140,18 @@ impl EnrolledRemoteClient {
                 .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
         let mut builder = HttpClient::builder().timeout(timeout);
         if let Some(pem) = root_certificate_pem {
-            let certificate = reqwest::Certificate::from_pem(pem)
+            let mut certificates = reqwest::Certificate::from_pem_bundle(pem)
                 .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
+            if certificates.len() != 1 {
+                return Err(RemoteClientError::Configuration(
+                    "explicit trust root must contain exactly one PEM certificate".to_owned(),
+                ));
+            }
+            let certificate = certificates.pop().ok_or_else(|| {
+                RemoteClientError::Configuration(
+                    "explicit trust root did not contain a PEM certificate".to_owned(),
+                )
+            })?;
             builder = builder.add_root_certificate(certificate);
         }
         let http = builder
