@@ -22,6 +22,13 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            skill_writer: AutomationTaskConfig {
+                enabled: false,
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
         ..AutomationConfig::default()
     };
 
@@ -385,7 +392,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
         run.report["validation_repairs"][0]["errors"]
             .as_array()
             .is_some_and(|errors| errors.iter().any(|error| {
-                error["id"] == json!("retired-draft-action")
+                error["proposal"]["id"] == json!("retired-draft-action")
                     && error["reason"]
                         .as_str()
                         .is_some_and(|reason| reason.contains("unsupported skill proposal action"))
@@ -469,7 +476,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
     assert_eq!(handoff_payload["task"], json!("skill_writer"));
     assert_eq!(
         handoff_payload["next_actions"][0],
-        json!("review automatically activated managed skill changes")
+        json!("inspect automatically activated managed skill changes")
     );
     assert_eq!(
         handoff_payload["eval_replay"]["commands"][0],
@@ -592,6 +599,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     )
     .await
     .unwrap();
+    assert_eq!(active.metadata.id, "automation-run-review");
     let global_db = project_session_runtime(&cg).await;
     global_db
         .append_profile_analytics_event_for_test(&tracedecay::global_db::AnalyticsEventInsert {
@@ -757,7 +765,7 @@ async fn skill_writer_runner_activates_validated_skills() {
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 2);
+    assert_eq!(backend.calls(), 1);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 2);
     assert_eq!(run.ledger_record.rejected_count, 0);
@@ -858,8 +866,9 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     )
     .await
     .unwrap();
-    let backend = SkillJsonBackend::new(json!({
-        "skills": [
+    let backend = SequentialJsonBackend::new(vec![
+        json!({
+            "skills": [
             {
                 "action": "update",
                 "id": "automation-run-review",
@@ -900,8 +909,24 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
                 "base_checksum": user_owned.metadata.checksum.clone(),
                 "summary": "Automation must not edit this user-owned skill."
             }
-        ]
-    }));
+            ]
+        }),
+        json!({
+            "skills": [{
+                "action": "update",
+                "id": "automation-run-review",
+                "base_checksum": base_checksum.clone(),
+                "summary": "Review automation runs, rejected proposals, and validation gates.",
+                "targets": ["claude", "kimi"],
+                "body_markdown": "Check the run ledger, rejected proposals, and validation outcomes before applying changes.",
+                "support_files": [{
+                    "path": "references/checklist.md",
+                    "text": "- Check ledger counts\n- Check rejected proposals\n"
+                }],
+                "reason": "Session evidence repeats automation workflow outcome review."
+            }]
+        }),
+    ]);
     let config = enabled_skill_writer_config();
 
     let run = run_skill_writer_with_backend(
@@ -913,7 +938,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 1);
+    assert_eq!(backend.calls(), 2);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 1);
     assert_eq!(run.ledger_record.rejected_count, 0);
