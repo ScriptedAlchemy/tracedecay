@@ -73,6 +73,11 @@ the commit as attribution evidence.
   in branch history by `74ae0df268`. Its domain test passed 1/1 and focused
   query tests passed 4/4. `b9b200eb10` adds the typed application boundary and
   `cargo check -p tracedecay-application --lib` passed at that checkpoint.
+- Canonical mounted TaskSession hydration, four temporal modes, exact
+  continuation, rank-final revocation, and typed stale/denied/unavailable
+  outcomes are checkpointed in `4215d2009`. The concrete project-session
+  evidence mount and exact-scope reuse are in `3574fa695`; verified first-task
+  bootstrap and repaired Work invocation fixtures are in `42c4496ab`.
 - Recovered daemon session retrieval authority is byte-exact in
   `7e5812db71`.
 - Automatic fact application and receipts are checkpointed in `b1da03fbfc`,
@@ -98,16 +103,6 @@ the commit as attribution evidence.
 
 ### Work and TaskSession retrieval
 
-- Replace the removed Narrative/string compatibility path in
-  `src/daemon/work_evidence_retrieval.rs` with the real
-  `WorkTaskSessionPortV1` path. Construct the sealed `TaskSessionBindingV1`,
-  call `SessionRetrievalService::execute_task_session`, and use the active
-  `federated_authority_for` selector with reauthorization before selection,
-  hydration, expansion, and continuation.
-- Land the currently unfinished daemon module declaration,
-  `McpServer::work_evidence_retrieval`, adapter `same_authority`, concrete
-  evidence injection, and invocation adapter. Do not restore the old
-  `.ok_or_else` optional-adapter assumption or the fabricated root session.
 - Complete real MCP, HTTP, SDK, and dashboard journeys for task-to-session
   correlation, who worked on a task, provider-qualified session evidence,
   continuation, revocation, restart, stale graph, denied/unavailable, and
