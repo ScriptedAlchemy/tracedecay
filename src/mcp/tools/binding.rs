@@ -34,6 +34,7 @@ mod workflow;
 
 use work::work_executable_binding_for_tool;
 pub(crate) use work::work_operation_for_tool;
+use workflow::workflow_executable_binding_for_tool;
 pub(crate) use workflow::workflow_operation_for_tool;
 
 /// Which dispatch family owns a tool once the surface predicates decline it.
@@ -386,7 +387,17 @@ fn application_capability_for_tool(
 pub(crate) fn canonical_tool_dispatch_ceiling(
     tool_name: &str,
 ) -> Result<std::time::Duration, super::dispatch::McpDispatchMetadataError> {
+    if let Some(capability) = multi_root_capability_for_tool(tool_name)? {
+        return Ok(std::time::Duration::from_millis(
+            capability.deadline().maximum_millis(),
+        ));
+    }
     if let Some(binding) = work_executable_binding_for_tool(tool_name)? {
+        return Ok(std::time::Duration::from_millis(
+            binding.deadline().maximum_millis(),
+        ));
+    }
+    if let Some(binding) = workflow_executable_binding_for_tool(tool_name)? {
         return Ok(std::time::Duration::from_millis(
             binding.deadline().maximum_millis(),
         ));
@@ -738,7 +749,9 @@ mod tests {
                 contract.deadline().maximum_millis(),
                 canonical_tool_dispatch_ceiling(contract.tool_name())
                     .unwrap()
-                    .as_millis() as u64
+                    .as_millis() as u64,
+                "{} must use one canonical dispatch ceiling",
+                contract.tool_name(),
             );
             assert_eq!(
                 contract.availability().is_available(),
@@ -783,10 +796,10 @@ mod tests {
     }
 
     #[test]
-    fn source_edit_reconcile_is_unavailable_without_an_authentic_journey() {
+    fn source_edit_reconcile_is_available_with_the_daemon_owned_recovery_path() {
         let catalog = mcp_dispatch_catalog().unwrap();
         assert!(
-            !catalog
+            catalog
                 .contract("tracedecay_source_edit_reconcile")
                 .unwrap()
                 .availability()
