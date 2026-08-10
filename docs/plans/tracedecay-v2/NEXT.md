@@ -256,7 +256,13 @@ the commit as attribution evidence.
   complete session-sync focused module passed 12/12. The cleanup recovery
   owner/caller, executable registry reexport/SDK mount, and extracted native
   MCP modules were verified present and compiling rather than recreated.
-- Remote transferred-frame quota enforcement already exists in `6642b45803`.
+- Remote transferred-frame quota enforcement is current through `dad2c2ed0`.
+  The registered defaults are pinned at 4,096 events and 64 MiB; both event
+  and ciphertext overflow refuse the second frame without a partial insert,
+  while replay of the accepted frame remains idempotent. The exact remote
+  transfer module passed 2/2 after retained rusqlite integration tests were
+  aligned with current Work projection, provider-session, mutation, and
+  handoff contracts and the retired persisted-routing test was removed.
 - The P0 GitHub stack coordinator and anchored corpus remain restored in
   `c70556fe38` and `ec35c90497`; native stack transition producers are in
   `e26461eac6`.
@@ -385,9 +391,6 @@ the commit as attribution evidence.
 
 ### Backend performance and final verification
 
-- Re-run the remote quota regression after rusqlite-runtime compiles; verify
-  cumulative 4,096-event/64MiB transfer bounds, no partial insert on overflow,
-  and idempotent replay.
 - Refresh the stale performance evidence on the current tree. Run the
   same-host release `perf-gate.sh`, repair the session benchmark hash, execute
   the session temporal benchmark with meaningful repetitions, and add real
