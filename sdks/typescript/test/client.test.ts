@@ -19,7 +19,9 @@ import {
   TraceDecayAbortError,
   TraceDecayDisconnectedError,
   TraceDecayMalformedResponseError,
+  TraceDecayPartialEffectError,
   TraceDecayProtocolError,
+  TraceDecayResetRequiredError,
   createClient,
   type OperationRequestOptions,
 } from "../src/client";
@@ -95,6 +97,7 @@ function problemEnvelope(
     retryable?: boolean;
     legalActions?: string[];
     retryAfterMillis?: number | null;
+    committedReceipt?: unknown;
   } = {},
 ) {
   const value: Record<string, unknown> = {
@@ -109,8 +112,12 @@ function problemEnvelope(
       code,
       message: code,
       diagnostic: { code, message: code },
+      committed_receipt: options.committedReceipt ?? null,
       owning_layer: "application",
-      terminality: "terminal",
+      terminality:
+        kind === "partial_effect" || kind === "reset_required"
+          ? "admitted_terminal"
+          : "pre_admission",
       retryable: options.retryable ?? false,
       retry: options.retry ?? "never",
       retry_scope: null,
@@ -584,6 +591,57 @@ describe("TraceDecayClient generated operation bindings", () => {
 });
 
 describe("TraceDecayClient transport envelopes", () => {
+  it("classifies admitted terminal problems and requires committed_receipt", async () => {
+    const bindingId = "binding.http.workflow.list_definitions";
+    const reset = problemEnvelope("reset_required", "store_reset_required", {
+      bindingId,
+      legalActions: ["reset"],
+    });
+    const partial = problemEnvelope("partial_effect", "effect_partially_committed", {
+      bindingId,
+      legalActions: ["reconcile"],
+      committedReceipt: { outcome: "partial", receipt_id: "receipt.partial" },
+    });
+    const missingReceipt = problemEnvelope("reset_required", "missing_receipt_field", {
+      bindingId,
+      legalActions: ["reset"],
+    });
+    delete (missingReceipt.value.problem as Record<string, unknown>).committed_receipt;
+    const wrongStatus = problemEnvelope("reset_required", "wrong_status", {
+      bindingId,
+      legalActions: ["reset"],
+    });
+
+    await withServer(
+      [
+        (_request, response) => json(response, 503, reset),
+        (_request, response) => json(response, 409, partial),
+        (_request, response) => json(response, 503, missingReceipt),
+        (_request, response) => json(response, 409, wrongStatus),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayResetRequiredError,
+        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayPartialEffectError,
+        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+      },
+    );
+  });
+
   it("rejects invalid canonical page options before transport", async () => {
     let fetchCalls = 0;
     const client = createClient({

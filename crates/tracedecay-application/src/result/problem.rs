@@ -135,8 +135,7 @@ impl ApplicationProblemKind {
 
 /// Application failure or admitted terminal. Resource-addressed denial
 /// intentionally shares one shape with absence and hidden policy outcomes.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApplicationProblem {
     InvalidRequest {
         diagnostic: SafeDiagnostic,
@@ -195,7 +194,7 @@ pub enum ApplicationProblem {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
 enum ApplicationProblemWire {
     InvalidRequest {
@@ -251,6 +250,118 @@ enum ApplicationProblemWire {
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
     },
+}
+
+impl From<ApplicationProblem> for ApplicationProblemWire {
+    fn from(problem: ApplicationProblem) -> Self {
+        match problem {
+            ApplicationProblem::InvalidRequest {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::InvalidRequest {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::NotFoundOrNotAuthorized {
+                retry,
+                legal_actions,
+            } => Self::NotFoundOrNotAuthorized {
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::Conflict {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Conflict {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::PartialEffect {
+                diagnostic,
+                committed_receipt,
+                retry,
+                legal_actions,
+            } => Self::PartialEffect {
+                diagnostic,
+                committed_receipt,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::Stale {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Stale {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::Unsupported {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Unsupported {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::Unavailable {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Unavailable {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::ResetRequired {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::ResetRequired {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::Saturated {
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::Saturated {
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::Cancelled {
+                retry,
+                legal_actions,
+            } => Self::Cancelled {
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::TimedOut {
+                retry,
+                legal_actions,
+            } => Self::TimedOut {
+                retry,
+                legal_actions,
+            },
+        }
+    }
+}
+
+impl Serialize for ApplicationProblem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        ApplicationProblemWire::from(self.clone()).serialize(serializer)
+    }
 }
 
 impl<'de> Deserialize<'de> for ApplicationProblem {
@@ -610,5 +721,17 @@ mod tests {
         let mut wrong_action = wire;
         wrong_action["legal_actions"] = serde_json::json!(["retry"]);
         assert!(serde_json::from_value::<ApplicationProblem>(wrong_action).is_err());
+    }
+
+    #[test]
+    fn direct_serialization_rejects_an_invalid_terminal() {
+        let invalid = ApplicationProblem::ResetRequired {
+            diagnostic: SafeDiagnostic::new("store.reset_required", "The store must be reset.")
+                .expect("fixture diagnostic is valid"),
+            retry: RetryDirective::AfterDelay,
+            legal_actions: vec![LegalAction::Retry],
+        };
+
+        assert!(serde_json::to_value(invalid).is_err());
     }
 }

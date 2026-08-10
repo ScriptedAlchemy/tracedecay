@@ -784,9 +784,10 @@ fn render_types() -> String {
         "{HEADER}{}",
         r##"export type UnknownValue = string & {};
 export type RetryDirective = "never" | "same_request" | "after_delay" | "after_revalidate" | "after_reconcile" | UnknownValue;
-export type LegalAction = "correct_request" | "reauthorize" | "refresh" | "retry" | "reconcile" | "contact_administrator" | UnknownValue;
-export type OperationTermination = "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown" | UnknownValue;
-export type ApplicationProblemKind = "invalid_request" | "not_found_or_not_authorized" | "conflict" | "stale" | "unsupported" | "unavailable" | "saturated" | "cancelled" | "timed_out" | UnknownValue;
+export type LegalAction = "correct_request" | "reauthorize" | "refresh" | "retry" | "reconcile" | "reset" | "contact_administrator" | UnknownValue;
+export type OperationTermination = "completed" | "cancelled" | "timed_out" | "failed" | "unavailable" | "partial" | "effect_unknown" | UnknownValue;
+export type EffectTermination = "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown" | UnknownValue;
+export type ApplicationProblemKind = "invalid_request" | "not_found_or_not_authorized" | "conflict" | "partial_effect" | "stale" | "unsupported" | "unavailable" | "reset_required" | "saturated" | "cancelled" | "timed_out" | UnknownValue;
 export type StreamEventName = "open" | "item" | "progress" | "resume_gap" | OperationTermination;
 export type Decoder<T> = (value: unknown) => T;
 export type CanonicalJsonSchema = Readonly<Record<string, unknown>>;
@@ -794,13 +795,14 @@ export type CanonicalCancellation = Readonly<Record<string, unknown>>;
 export interface ContractRef { schema_id: string; schema_revision: number; [key: string]: unknown }
 export interface SafeDiagnostic { code: string; message: string; [key: string]: unknown }
 export interface OperationReceipt { started_at: number; ended_at: number; effective_deadline: unknown; cancellation: unknown | null; budget: { units_consumed: number; bytes_consumed: number; elapsed_micros: number; [key: string]: unknown }; termination: OperationTermination; [key: string]: unknown }
+export interface EffectReceipt { operation: string; request_id: string; actor: string; scope: Record<string, unknown>; effect_class: string; idempotency_key: string; input_digest: string; expected_state: string; policy_digest: string; configuration_digest: string; catalog_digest: string; privacy_digest: string; outcome: EffectTermination; committed_state: string | null; external_proof: string | null; [key: string]: unknown }
 export interface PageState { sort_contract_id: string; sort_revision: number; total: number | null; returned: number; cursor: string | null; expires_at: number | null; [key: string]: unknown }
 export interface EvidencePacket<T> { temporal: Record<string, unknown>; authority: Record<string, unknown>; evidence_authorities: unknown[]; coverage: Record<string, unknown>; omissions: unknown[]; scores: unknown[]; contributions: unknown[]; page: PageState; execution: OperationReceipt; payload: T | null; [key: string]: unknown }
 export interface PreviewResult<T> { preview_id: string; preview_digest: string; effect_class: string; authority: Record<string, unknown>; expected_state: string; execution: OperationReceipt; payload: T | null; [key: string]: unknown }
 export interface EffectResult<T> { effect_id: string; effect_class: string; idempotency_key: string; authority: Record<string, unknown>; expected_state: string; execution: OperationReceipt; reconciliation: string; receipt: Record<string, unknown>; payload: T | null; [key: string]: unknown }
 export type ApplicationOutcome<T> = { outcome: "evidence"; value: EvidencePacket<T>; [key: string]: unknown } | { outcome: "preview"; value: PreviewResult<T>; [key: string]: unknown } | { outcome: "effect"; value: EffectResult<T>; [key: string]: unknown };
 export interface ApplicationEnvelope<T> { contract: ContractRef; request_id: string; scope: Record<string, unknown>; outcome: ApplicationOutcome<T>; [key: string]: unknown }
-export interface ApplicationProblemRecord { revision: number; kind: ApplicationProblemKind; code: string; message: string; diagnostic: SafeDiagnostic | null; owning_layer: string; terminality: string; retryable: boolean; retry: RetryDirective; retry_scope: string | null; retry_after_millis: number | null; cancellation_stage: string | null; request_id: string; trace_id: string; details: SafeDiagnostic[]; legal_actions: LegalAction[]; coverage: unknown | null; [key: string]: unknown }
+export interface ApplicationProblemRecord { revision: number; kind: ApplicationProblemKind; code: string; message: string; diagnostic: SafeDiagnostic | null; committed_receipt: EffectReceipt | null; owning_layer: string; terminality: string; retryable: boolean; retry: RetryDirective; retry_scope: string | null; retry_after_millis: number | null; cancellation_stage: string | null; request_id: string; trace_id: string; details: SafeDiagnostic[]; legal_actions: LegalAction[]; coverage: unknown | null; [key: string]: unknown }
 export interface ApplicationProblemEnvelope { contract: ContractRef; request_id: string; problem: ApplicationProblemRecord; [key: string]: unknown }
 export type HttpSuccessEnvelope<T> = ApplicationEnvelope<T> & { binding_id: string };
 export type HttpProblemEnvelope = ApplicationProblemEnvelope & { binding_id?: string };
@@ -847,7 +849,7 @@ export function decodeHttpSuccessEnvelope<T>(value: unknown, binding: string, sc
 fn render_index() -> String {
     format!(
         "{HEADER}\
-         export {{ TraceDecayAbortError, TraceDecayAuthenticationError, TraceDecayCancelledError, TraceDecayClient, TraceDecayConflictError, TraceDecayDeniedError, TraceDecayDisconnectedError, TraceDecayInvalidRequestError, TraceDecayMalformedResponseError, TraceDecayProblemError, TraceDecayProtocolError, TraceDecaySaturatedError, TraceDecayStaleError, TraceDecayTimedOutError, TraceDecayTransportError, TraceDecayUnavailableError, TraceDecayUnsupportedError, createClient }} from \"./client\";\n\
+         export {{ TraceDecayAbortError, TraceDecayAuthenticationError, TraceDecayCancelledError, TraceDecayClient, TraceDecayConflictError, TraceDecayDeniedError, TraceDecayDisconnectedError, TraceDecayInvalidRequestError, TraceDecayMalformedResponseError, TraceDecayPartialEffectError, TraceDecayProblemError, TraceDecayProtocolError, TraceDecayResetRequiredError, TraceDecaySaturatedError, TraceDecayStaleError, TraceDecayTimedOutError, TraceDecayTransportError, TraceDecayUnavailableError, TraceDecayUnsupportedError, createClient }} from \"./client\";\n\
          export type {{ ClientOptions, McpToolAdapter, OperationCancellation, OperationRequestOptions, OperationStreamEvent, OperationStreamOptions, OperationStreamResume, PageOptions }} from \"./client\";\n\
          export * from \"./operations\";\n\
          export * from \"./types\";\n"

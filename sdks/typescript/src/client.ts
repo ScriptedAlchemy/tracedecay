@@ -143,6 +143,8 @@ export class TraceDecayUnavailableError extends TraceDecayProblemError {}
 export class TraceDecayUnsupportedError extends TraceDecayProblemError {}
 export class TraceDecayStaleError extends TraceDecayProblemError {}
 export class TraceDecayConflictError extends TraceDecayProblemError {}
+export class TraceDecayPartialEffectError extends TraceDecayProblemError {}
+export class TraceDecayResetRequiredError extends TraceDecayProblemError {}
 export class TraceDecaySaturatedError extends TraceDecayProblemError {}
 export class TraceDecayCancelledError extends TraceDecayProblemError {}
 export class TraceDecayTimedOutError extends TraceDecayProblemError {}
@@ -298,12 +300,16 @@ function isProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
     return false;
   }
   const problem = value.problem;
-  return (
+  const legalActions = Array.isArray(problem.legal_actions)
+    ? problem.legal_actions
+    : null;
+  const validShape =
     problem.revision === 1 &&
     typeof problem.kind === "string" &&
     typeof problem.code === "string" &&
     typeof problem.message === "string" &&
     (problem.diagnostic === null || isDiagnostic(problem.diagnostic)) &&
+    "committed_receipt" in problem &&
     typeof problem.owning_layer === "string" &&
     typeof problem.terminality === "string" &&
     typeof problem.retryable === "boolean" &&
@@ -317,10 +323,59 @@ function isProblemEnvelope(value: unknown): value is HttpProblemEnvelope {
     isBoundedOpaqueString(problem.trace_id, MAX_REQUEST_ID_BYTES) &&
     Array.isArray(problem.details) &&
     problem.details.every(isDiagnostic) &&
-    Array.isArray(problem.legal_actions) &&
-    problem.legal_actions.every((action) => typeof action === "string") &&
-    "coverage" in problem
-  );
+    legalActions !== null &&
+    legalActions.every((action) => typeof action === "string") &&
+    "coverage" in problem;
+  if (!validShape || legalActions === null) {
+    return false;
+  }
+  if (problem.kind === "partial_effect") {
+    return (
+      problem.terminality === "admitted_terminal" &&
+      problem.retryable === false &&
+      problem.retry === "never" &&
+      isRecord(problem.committed_receipt) &&
+      legalActions.length === 1 &&
+      legalActions[0] === "reconcile"
+    );
+  }
+  if (problem.kind === "reset_required") {
+    return (
+      problem.terminality === "admitted_terminal" &&
+      problem.retryable === false &&
+      problem.retry === "never" &&
+      problem.committed_receipt === null &&
+      legalActions.length === 1 &&
+      legalActions[0] === "reset"
+    );
+  }
+  return problem.committed_receipt === null;
+}
+
+function statusMatchesProblem(status: number, kind: string): boolean {
+  switch (kind) {
+    case "invalid_request":
+      return status === 400;
+    case "not_found_or_not_authorized":
+      return status === 404;
+    case "conflict":
+    case "partial_effect":
+    case "stale":
+      return status === 409;
+    case "unsupported":
+      return status === 422;
+    case "unavailable":
+    case "reset_required":
+      return status === 503;
+    case "saturated":
+      return status === 429;
+    case "cancelled":
+      return status === 408;
+    case "timed_out":
+      return status === 504;
+    default:
+      return true;
+  }
 }
 
 function validatePageOptions(page: PageOptions | undefined): void {
@@ -380,6 +435,10 @@ function problemError(
       return new TraceDecayStaleError(status, envelope);
     case "conflict":
       return new TraceDecayConflictError(status, envelope);
+    case "partial_effect":
+      return new TraceDecayPartialEffectError(status, envelope);
+    case "reset_required":
+      return new TraceDecayResetRequiredError(status, envelope);
     case "saturated":
       return new TraceDecaySaturatedError(status, envelope);
     case "cancelled":
@@ -832,7 +891,11 @@ export class TraceDecayClient {
         (problemEnvelope.problem.kind === "not_found_or_not_authorized"
           ? problemEnvelope.binding_id === undefined
           : problemEnvelope.binding_id === expectedBinding);
-      if (response.ok || !validBinding) {
+      if (
+        response.ok ||
+        !validBinding ||
+        !statusMatchesProblem(response.status, problemEnvelope.problem.kind)
+      ) {
         throw new TraceDecayMalformedResponseError(
           "the daemon returned a malformed problem envelope",
           { status: response.status, payload: problemEnvelope },
