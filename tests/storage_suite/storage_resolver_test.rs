@@ -1395,6 +1395,67 @@ async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store(
 }
 
 #[tokio::test]
+async fn registered_healthy_exact_root_ignores_duplicate_exact_manifests() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn registered_root() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+
+    let selected = TraceDecay::init(&project).await.unwrap();
+    selected.index_all().await.unwrap();
+    let selected_project_id = selected.store_layout().identity.project_id.clone().unwrap();
+    let selected_data_root = selected.store_layout().data_root.clone();
+    selected.close();
+
+    for project_id in ["proj_duplicate_exact_one", "proj_duplicate_exact_two"] {
+        let data_root = profile_root.join(format!("projects/{project_id}"));
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(data_root.join("tracedecay.db"), project_id).unwrap();
+        fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
+        branch_meta::save_branch_meta(&data_root, &BranchMeta::new_for_dir(&data_root, "main"))
+            .unwrap();
+        write_store_manifest_to_path(
+            &data_root.join(STORE_MANIFEST_FILENAME),
+            &StoreManifest {
+                schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+                project_id: Some(project_id.to_string()),
+                store_kind: StoreKind::CodeProject,
+                storage_mode: StorageMode::ProfileSharded,
+                project_root: project.clone(),
+                data_root,
+                graph_db_relpath: "tracedecay.db".into(),
+                sessions_db_relpath: "sessions.db".into(),
+                branch_meta_relpath: "branch-meta.json".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    let layout = TraceDecay::resolve_store_layout_for_identity(&project)
+        .await
+        .expect("a healthy selected exact-root shard must outrank duplicate legacy manifests");
+
+    assert_eq!(
+        layout.identity.project_id.as_deref(),
+        Some(selected_project_id.as_str())
+    );
+    assert_path_eq(&layout.data_root, &selected_data_root);
+    for project_id in ["proj_duplicate_exact_one", "proj_duplicate_exact_two"] {
+        assert_eq!(
+            fs::read_to_string(profile_root.join(format!("projects/{project_id}/tracedecay.db")))
+                .unwrap(),
+            project_id,
+            "duplicate stores must remain untouched as recoverable history"
+        );
+    }
+}
+
+#[tokio::test]
 async fn registered_exact_root_ignores_sibling_worktree_manifests() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
