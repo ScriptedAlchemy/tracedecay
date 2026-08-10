@@ -173,6 +173,29 @@ the commit as attribution evidence.
 - Automatic-curation dashboard receipt UI is checkpointed in `91f9527f1b`;
   focused memory-config, RunHistory, and KnowledgeCuration tests passed 11/11.
 - Typed terminal problem validation is checkpointed in `850265033c`.
+- Reset-required propagation is no longer downgraded at the Workflow CLI,
+  multi-root MCP, generic daemon client, registered HTTP/application,
+  configuration, or retained MCP boundaries in `db26adbfa`. Every mapped reset
+  now preserves `Never + [Reset]`; the multiline repository scan found no
+  remaining `ResetRequired` arm that constructs `Unavailable` or
+  `InvalidRequest`. Five focused mapper tests passed 1/1 each.
+- Direct `ApplicationProblem` serialization now validates before emitting wire
+  data in `a6a016428`, so an invalid admitted terminal cannot bypass envelope
+  construction. The generated TypeScript SDK now includes `reset`,
+  `partial_effect`, `reset_required`, and required-nullable
+  `committed_receipt`, exposes distinct terminal error classes, validates the
+  terminal invariants and canonical HTTP statuses, and is byte-idempotent under
+  the canonical generator. Application result tests passed 5/5, the focused
+  TypeScript terminal journey passed 1/1, TypeScript typecheck passed, the SDK
+  codegen drift check passed, and the focused Rust SDK status test passed 1/1.
+  The full TypeScript client file remains 27/28 because ten unrelated
+  application bindings truthfully regenerate as `schema_unavailable`; the full
+  Rust SDK library remains 5/6 because invalid explicit trust-root rejection is
+  separately failing.
+- Invocation observations distinguish reset-required from ordinary
+  unavailability in `7e31c7a28` for both canonical application problems and
+  retained legacy daemon outcomes. Its focused root test passed 1/1 after the
+  affected workspace dependencies compiled.
 - Retained transport adapters are checkpointed in `90e326c27e`; retained API
   types are included in `7b82a36ff9`.
 - Duplicate receipt/revision identity is approved through `642b0221ae`.
@@ -200,19 +223,15 @@ the commit as attribution evidence.
 - Keep the strict core from `850265033c`: ResetRequired is `Never + [Reset]`;
   PartialEffect is `Never + [Reconcile]` with a partial receipt and concrete
   commit proof; envelope construction is fallible and validated.
-- Finish fallible-constructor propagation in feedback reads, operation stream,
-  application JSON output, MCP tests, and every other caller still treating
-  `ApplicationProblemEnvelope::new` as infallible.
-- Add both terminal kinds to the remaining exhaustive API/SDK status,
-  application surface, observability, and daemon-client matches.
-- Stop downgrading reset-required results to Unavailable or InvalidRequest in
-  application surface, daemon client, and multi-root paths.
-- Make direct public `ApplicationProblem` serialization impossible for invalid
-  values, or route it through validated canonical constructors.
-- Regenerate the SDK wire authority so `reset`, PartialEffect,
-  ResetRequired, and required-nullable `committed_receipt` are present.
-- Re-run `cargo test -p tracedecay-application --lib result:: -- --nocapture`
-  and then compile every recorded constructor consumer.
+- Drive real mounted PartialEffect and ResetRequired results through HTTP, MCP,
+  CLI, and both SDKs. Prove the partial-effect committed receipt and reset-only
+  legal action survive each boundary and physical daemon restart; unit mappers
+  and synthetic SDK envelopes are necessary but not final journey evidence.
+- Repair the ten application bindings that regenerate as `schema_unavailable`,
+  then restore the full TypeScript client suite from 27/28 to green without
+  weakening its complete-operation assertion.
+- Repair the Rust SDK invalid explicit trust-root rejection and restore its
+  full library suite from 5/6 to green.
 
 ### Retained production surfaces
 
