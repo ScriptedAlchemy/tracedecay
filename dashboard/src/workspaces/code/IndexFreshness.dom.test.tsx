@@ -112,6 +112,7 @@ function worktree() {
     repository_id: 'repository.tracedecay',
     worktree_id: 'worktree.primary',
     source_reference: 'refs/heads/codex/tracedecay-total-redesign-plan',
+    source_revision: null,
     latest_generation_id: 'generation.4f21c9',
     snapshot_content_identity: 'sha256:8ab31c',
     source_revision: null,

@@ -30,17 +30,19 @@ function ActiveQuery({
         },
       },
     },
-    queryFn: ({ signal }) =>
-      new Promise<never>((_resolve, reject) => {
-        signal.addEventListener(
-          'abort',
-          () => {
-            onAbort();
-            reject(signal.reason);
-          },
-          { once: true },
-        );
-      }),
+    queryFn: cancelable
+      ? ({ signal }) =>
+          new Promise<never>((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => {
+                onAbort();
+                reject(signal.reason);
+              },
+              { once: true },
+            );
+          })
+      : () => new Promise<never>(() => {}),
   });
   return null;
 }

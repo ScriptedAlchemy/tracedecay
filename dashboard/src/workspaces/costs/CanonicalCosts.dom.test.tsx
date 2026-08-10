@@ -183,6 +183,61 @@ function readModel(overrides: {
   };
 }
 
+function unavailableProviderLatency(
+  horizon: { since_micros: number; until_micros: number },
+): ProviderLatencyReadModelV1 {
+  const reason = 'provider_latency_scope_unavailable';
+  const provenance: MetricProvenanceV1 = {
+    source: 'observability_envelope',
+    source_revision: 'operation-resource-observation.v1',
+    projector_revision: 'costs-provider-latency-projector.v1',
+    watermark: 'analytics:unavailable',
+  };
+  const metric = (stage: string, percentile: number): MetricValueV1 => ({
+    descriptor_revision: 'provider-latency.v1',
+    metric: `provider_${stage}_latency_p${percentile}`,
+    value: null,
+    unit: 'microseconds',
+    denominator: 'provider_operation_resource_observations',
+    denominator_value: null,
+    coverage: {
+      state: 'unknown',
+      eligible: null,
+      observed: 0,
+      completed: 0,
+      censored: 0,
+      excluded: 0,
+      unknown: 1,
+    },
+    evidence_class: 'measurement',
+    provenance,
+    cohort: {
+      descriptor_revision: 'provider_operation_resource_observations.v1',
+      eligible_population: 'provider_operation_resource_observations',
+    },
+    temporal: { horizon, baseline_watermark: null, delta: null },
+    uncertainty: { lower: null, upper: null, reason },
+    calibration: null,
+    unavailable_reason: reason,
+  });
+  const distribution = (stage: string) => ({
+    p50: metric(stage, 50),
+    p95: metric(stage, 95),
+    p99: metric(stage, 99),
+  });
+  return {
+    provider: null,
+    model: null,
+    identity_provenance: provenance,
+    identity_unavailable_reason: reason,
+    queue: distribution('queue'),
+    start: distribution('start'),
+    first_progress: distribution('first_progress'),
+    service: distribution('service'),
+    terminal: distribution('terminal'),
+  };
+}
+
 function envelope(payload: unknown) {
   return {
     schema_revision: 1,
