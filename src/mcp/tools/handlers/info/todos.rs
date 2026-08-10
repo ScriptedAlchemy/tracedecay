@@ -1,6 +1,11 @@
 //! `tracedecay_todos` — marker-word scan (TODO, FIXME, …) across indexed files.
 
 use super::*;
+use std::collections::BTreeMap;
+
+use tracedecay_application::retrieval::{TodoMarkerV1, TodosResultV1, TodosSurfaceRequestV1};
+
+use super::super::support::decode_primitive_request;
 
 /// Default marker kinds recognised by `tracedecay_todos`.
 const DEFAULT_TODO_KINDS: &[&str] = &[
@@ -43,12 +48,14 @@ pub(crate) async fn handle_todos(
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let kinds: Vec<String> = args
-        .get("kinds")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_uppercase))
+    let request: TodosSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_todos")?;
+    let kinds = request
+        .kinds
+        .as_ref()
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| value.to_uppercase())
                 .collect::<Vec<_>>()
         })
         .filter(|v: &Vec<String>| !v.is_empty())
@@ -59,11 +66,8 @@ pub(crate) async fn handle_todos(
                 .collect()
         });
 
-    let path = effective_path(&args, scope_prefix);
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(200, |v| v.min(2000) as usize);
+    let path = request.path.as_deref().or(scope_prefix);
+    let limit = request.limit.map_or(200, |value| value.min(2000) as usize);
 
     let project_root = cg.project_root();
     let files = indexed_files(cg, graph)?;
@@ -78,9 +82,9 @@ pub(crate) async fn handle_todos(
             .or_default()
             .push((metadata, start, end));
     }
-    let mut markers: Vec<Value> = Vec::new();
+    let mut markers = Vec::<TodoMarkerV1>::new();
     let mut touched: Vec<String> = Vec::new();
-    let mut by_kind: HashMap<String, u64> = HashMap::new();
+    let mut by_kind = BTreeMap::<String, u64>::new();
 
     'outer: for file in &files {
         if let Some(prefix) = path
@@ -117,13 +121,13 @@ pub(crate) async fn handle_todos(
                     }
                     let enclosing = enclosing.map(|(qualified_name, _)| qualified_name);
                     *by_kind.entry(kind.clone()).or_insert(0) += 1;
-                    markers.push(json!({
-                        "kind": kind,
-                        "file": file.path,
-                        "line": line_no,
-                        "text": line.trim(),
-                        "enclosing": enclosing,
-                    }));
+                    markers.push(TodoMarkerV1 {
+                        kind: kind.clone(),
+                        file: file.path.clone(),
+                        line: line_no,
+                        text: line.trim().to_owned(),
+                        enclosing,
+                    });
                     if !touched.contains(&file.path) {
                         touched.push(file.path.clone());
                     }
@@ -136,12 +140,12 @@ pub(crate) async fn handle_todos(
         }
     }
 
-    let counts = serde_json::to_value(&by_kind)?;
-    let output = json!({
-        "match_count": markers.len(),
-        "by_kind": counts,
-        "markers": markers,
-    });
+    let result = TodosResultV1 {
+        match_count: markers.len(),
+        by_kind,
+        markers,
+    };
+    let output = serde_json::to_value(result)?;
     Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,

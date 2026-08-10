@@ -1,7 +1,57 @@
 use serde_json::json;
+use tracedecay_tool_catalog::OperationId;
 
 use super::super::get_tool_definitions;
 use super::*;
+
+#[test]
+fn terminal_application_definitions_project_canonical_request_schemas() {
+    let registry = tracedecay_application::mcp_executable_binding_registry()
+        .expect("MCP executable binding registry");
+    let definitions = get_tool_definitions().expect("tool definitions");
+    for (operation, tool_name, admits_project_selector) in [
+        ("context", "tracedecay_context", true),
+        ("callees", "tracedecay_callees", true),
+        ("impact", "tracedecay_impact", true),
+        ("node", "tracedecay_node", true),
+        ("similar", "tracedecay_similar", false),
+        ("rename_preview", "tracedecay_rename_preview", false),
+        ("port_status", "tracedecay_port_status", false),
+        ("port_order", "tracedecay_port_order", false),
+        ("redundancy", "tracedecay_redundancy", false),
+        ("todos", "tracedecay_todos", false),
+    ] {
+        let operation_id = OperationId::new(format!("operation.application.{operation}"))
+            .expect("terminal application operation id");
+        let canonical = registry
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .unwrap_or_else(|| panic!("{operation} must have an executable MCP binding"))
+            .request_schema()
+            .body();
+        let definition = definitions
+            .iter()
+            .find(|definition| definition.name == tool_name)
+            .unwrap_or_else(|| panic!("{tool_name} must be advertised"));
+        let mut projected = definition.input_schema.clone();
+        let properties = projected["properties"]
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("{tool_name} request properties"));
+        assert!(properties.remove("format").is_some(), "{tool_name} format");
+        if admits_project_selector {
+            for selector in ["project_selector", "project_id", "project_path"] {
+                assert!(
+                    properties.remove(selector).is_some(),
+                    "{tool_name} must expose transport selector {selector}",
+                );
+            }
+        }
+        assert_eq!(
+            &projected, canonical,
+            "{tool_name} must project its canonical executable request schema before MCP transport fields",
+        );
+    }
+}
 
 #[test]
 fn test_tool_definitions_complete() {

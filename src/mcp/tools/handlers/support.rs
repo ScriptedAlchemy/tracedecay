@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
@@ -277,6 +278,31 @@ pub(crate) fn require_object_args(args: &Value, tool_name: &str) -> Result<()> {
     }
     Err(TraceDecayError::Config {
         message: format!("invalid arguments: {tool_name} expects a JSON object"),
+    })
+}
+
+/// Decode one catalog-owned primitive request after removing keys owned by
+/// the MCP transport rather than the application operation.
+pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
+    args: &Value,
+    tool_name: &str,
+) -> Result<T> {
+    require_object_args(args, tool_name)?;
+    let mut request = args.clone();
+    if let Some(object) = request.as_object_mut() {
+        for key in [
+            "format",
+            "__mcp_request_id",
+            "project_selector",
+            "project_id",
+            "project_path",
+            "project_root",
+        ] {
+            object.remove(key);
+        }
+    }
+    serde_json::from_value(request).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid arguments for {tool_name}: {error}"),
     })
 }
 
@@ -705,9 +731,10 @@ mod tests {
     use crate::mcp::tools::render;
 
     use super::{
-        CONTEXT_MEMORY_ANALYTICS_KEY, generic_tool_result, is_explicit_project_path_selector,
-        rendered_tool_result, require_node_id,
+        CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, generic_tool_result,
+        is_explicit_project_path_selector, rendered_tool_result, require_node_id,
     };
+    use tracedecay_application::retrieval::NodeSurfaceRequestV1;
 
     /// `generic_tool_result` must stay a pure spelling of the closure form it
     /// replaced at every call site — same bytes on both output formats, and the
@@ -794,6 +821,28 @@ mod tests {
     fn test_require_node_id_missing() {
         let args = json!({"query": "something"});
         assert!(require_node_id(&args).is_err());
+    }
+
+    #[test]
+    fn primitive_request_decode_strips_transport_keys_and_rejects_legacy_aliases() {
+        let decoded = decode_primitive_request::<NodeSurfaceRequestV1>(
+            &json!({
+                "node_id": "function:canonical",
+                "format": "json",
+                "project_id": "project.fixture",
+                "__mcp_request_id": "request.fixture",
+            }),
+            "tracedecay_node",
+        )
+        .expect("transport keys must not enter the canonical request body");
+        assert_eq!(decoded.node_id, "function:canonical");
+
+        let error = decode_primitive_request::<NodeSurfaceRequestV1>(
+            &json!({"id": "function:legacy"}),
+            "tracedecay_node",
+        )
+        .expect_err("the unreleased id alias is not part of the canonical request");
+        assert!(error.to_string().contains("unknown field `id`"));
     }
 
     /// Every node-id handler shares this one guard, so a blank value must be

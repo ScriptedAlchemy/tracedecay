@@ -1,12 +1,14 @@
 #![cfg(feature = "test-transport")]
 
+mod graph_readiness;
+
 use crate::support::*;
+use graph_readiness::{find_node_id, wait_for_current_graph};
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
@@ -293,44 +295,6 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
     )
 }
 
-async fn find_node_id(host: &impl AnalysisToolHost, name: &str) -> String {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    let result = loop {
-        match handle_tool_call(
-            host,
-            "tracedecay_find_exact_symbol",
-            json!({"name": name, "limit": 20}),
-            None,
-            None,
-        )
-        .await
-        {
-            Ok(result) => break result,
-            Err(error)
-                if error
-                    .to_string()
-                    .contains("verified code graph is not ready")
-                    && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            Err(error) => panic!("production exact-symbol read failed: {error}"),
-        }
-    };
-    let payload: Value =
-        serde_json::from_str(extract_text(&result.value)).expect("exact-symbol JSON");
-    payload["matches"]
-        .as_array()
-        .and_then(|matches| {
-            matches
-                .iter()
-                .find(|result| result["name"].as_str() == Some(name))
-        })
-        .and_then(|result| result["id"].as_str())
-        .unwrap_or_else(|| panic!("node '{name}' not found in production generation: {payload}"))
-        .to_owned()
-}
-
 #[tokio::test]
 async fn test_branch_list_reports_live_vs_serving_drift_state() {
     fn git(project: &Path, args: &[&str]) {
@@ -582,6 +546,7 @@ async fn pr_context_no_git_returns_structured_git_error() {
 #[tokio::test]
 async fn test_port_status() {
     let (cg, _dir) = setup_project().await;
+    wait_for_current_graph(&cg).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_port_status",
@@ -718,6 +683,7 @@ async fn port_status_matches_methods_with_same_parent_type() {
 #[tokio::test]
 async fn test_port_order() {
     let (cg, _dir) = setup_project().await;
+    wait_for_current_graph(&cg).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_port_order",
@@ -1130,6 +1096,7 @@ pub fn unrelated(x: i32) -> i32 {
     .unwrap();
 
     let (cg, _env) = init_test_project(project).await;
+    wait_for_current_graph(&cg).await;
     let result = handle_tool_call(
         &cg,
         "tracedecay_redundancy",
@@ -1593,6 +1560,7 @@ fn helper() {
     )
     .unwrap();
     let (cg, _env) = init_test_project(project).await;
+    wait_for_current_graph(&cg).await;
 
     let result = handle_tool_call(&cg, "tracedecay_todos", json!({}), None, None)
         .await

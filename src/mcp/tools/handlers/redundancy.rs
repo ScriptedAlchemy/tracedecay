@@ -6,6 +6,8 @@
 //! supplies the admitted verified graph and renders the resulting payload.
 
 use serde_json::{Value, json};
+use tracedecay_application::retrieval::RedundancySurfaceRequestV1;
+use tracedecay_application::retrieval::grep_analysis::RedundancyResultV1;
 
 use crate::errors::Result;
 use crate::graph::redundancy_scan::{RedundancyOptions, RedundancyScanV1, redundancy_scan};
@@ -14,7 +16,7 @@ use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::super::render::{self, Md};
-use super::support::effective_path;
+use super::support::decode_primitive_request;
 
 /// `tracedecay_redundancy` handler.
 pub(crate) async fn handle_redundancy(
@@ -23,11 +25,15 @@ pub(crate) async fn handle_redundancy(
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    let options = redundancy_options(&args, scope_prefix);
+    let request: RedundancySurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_redundancy")?;
+    let options = redundancy_options(&request, scope_prefix);
     let scan = redundancy_scan(cg, graph, &options).await?;
-    let text = render::finalize(Some(cg.project_root()), &args, &scan.output, || {
+    let result = serde_json::from_value::<RedundancyResultV1>(scan.output.clone())?;
+    let output = serde_json::to_value(result)?;
+    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
         if scan.semantic_active {
-            render::generic_md(&scan.output)
+            render::generic_md(&output)
         } else {
             redundancy_md(&options, &scan)
         }
@@ -40,30 +46,19 @@ pub(crate) async fn handle_redundancy(
     ))
 }
 
-fn redundancy_options<'a>(args: &'a Value, scope_prefix: Option<&'a str>) -> RedundancyOptions<'a> {
+fn redundancy_options<'a>(
+    request: &'a RedundancySurfaceRequestV1,
+    scope_prefix: Option<&'a str>,
+) -> RedundancyOptions<'a> {
     RedundancyOptions {
-        path_prefix: effective_path(args, scope_prefix),
-        min_lines: args
-            .get("min_lines")
-            .and_then(Value::as_u64)
-            .map_or(8u32, |v| u32::try_from(v).unwrap_or(8)),
-        max_pairs: args
-            .get("max_pairs")
-            .and_then(Value::as_u64)
-            .map_or(20usize, |v| usize::try_from(v.min(500)).unwrap_or(20)),
-        threshold: args
-            .get("similarity_threshold")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.6)
-            .clamp(0.0, 1.0),
-        include_naming: args
-            .get("include_naming_only")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        include_generated: args
-            .get("include_generated_paths")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        path_prefix: request.path.as_deref().or(scope_prefix),
+        min_lines: request.min_lines.unwrap_or(8),
+        max_pairs: request
+            .max_pairs
+            .map_or(20, |value| value.min(500) as usize),
+        threshold: request.similarity_threshold.unwrap_or(0.6).clamp(0.0, 1.0),
+        include_naming: request.include_naming_only.unwrap_or(false),
+        include_generated: request.include_generated_paths.unwrap_or(false),
     }
 }
 

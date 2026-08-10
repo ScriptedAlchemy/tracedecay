@@ -1,7 +1,13 @@
 //! `tracedecay_port_order` — dependency-first porting order (Kahn levels) with SCC cycle reporting.
 
 use super::*;
+use tracedecay_application::retrieval::{
+    PortCycleAnchorV1, PortCycleFileV1, PortCycleSymbolV1, PortCycleV1, PortOrderLevelV1,
+    PortOrderResultV1, PortOrderSurfaceRequestV1, PortOrderSymbolV1,
+};
 use tracedecay_domain::RelationEdgeKindV1;
+
+use super::super::support::decode_primitive_request;
 
 #[derive(Clone, Copy)]
 struct PortOrderSymbol<'a> {
@@ -18,33 +24,19 @@ pub(crate) async fn handle_port_order(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    require_object_args(&args, "tracedecay_port_order")?;
-
-    let source_dir = args
-        .get("source_dir")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: source_dir".to_string(),
-        })?;
-
-    let kind_strs: Vec<String> = args.get("kinds").and_then(|v| v.as_array()).map_or_else(
+    let request: PortOrderSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_port_order")?;
+    let kind_strs = request.kinds.as_ref().map_or_else(
         || {
             PORT_DEFAULT_KINDS
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect()
         },
-        |arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
-                .collect()
-        },
+        Clone::clone,
     );
 
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(50, |v| v.min(500) as usize);
+    let limit = request.limit.map_or(50, |value| value.min(500) as usize);
 
     let kinds: Vec<NodeKind> = kind_strs
         .iter()
@@ -52,15 +44,13 @@ pub(crate) async fn handle_port_order(
         .collect();
 
     if kinds.is_empty() {
-        return Ok(ToolResult::new(
-            json!({
-                "content": [{ "type": "text", "text": "No valid node kinds specified." }]
-            }),
-            vec![],
-        ));
+        return Err(TraceDecayError::Config {
+            message: "invalid parameter: kinds must contain at least one supported node kind"
+                .to_owned(),
+        });
     }
 
-    let summaries = symbols_in_dir(graph, source_dir, &kinds)?;
+    let summaries = symbols_in_dir(graph, &request.source_dir, &kinds)?;
     let nodes = summaries
         .iter()
         .map(|symbol| {
@@ -77,17 +67,18 @@ pub(crate) async fn handle_port_order(
     let total_symbols = nodes.len();
 
     if nodes.is_empty() {
-        let result = json!({
-            "source_dir": source_dir,
-            "total_symbols": 0,
-            "returned": 0,
-            "levels": [],
-            "cycles": [],
-        });
+        let result = PortOrderResultV1 {
+            source_dir: request.source_dir,
+            total_symbols: 0,
+            returned: 0,
+            levels: Vec::new(),
+            cycles: Vec::new(),
+        };
+        let output = serde_json::to_value(result)?;
         return Ok(generic_tool_result(
             Some(cg.project_root()),
             &args,
-            &result,
+            &output,
             vec![],
         ));
     }
@@ -240,7 +231,7 @@ pub(crate) async fn handle_port_order(
     }
     let sccs = crate::graph::scc::tarjan_scc(&cycle_adj);
 
-    let mut cycles_json: Vec<Value> = Vec::new();
+    let mut cycles = Vec::<PortCycleV1>::new();
     for scc in sccs {
         if !crate::graph::scc::is_cyclic_scc(&scc, &cycle_adj) {
             continue;
@@ -280,18 +271,18 @@ pub(crate) async fn handle_port_order(
         // surfaces just after the cleanest leaf.
         ranked.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| b.2.cmp(&a.2)));
 
-        let symbols_detailed: Vec<Value> = ranked
+        let symbols = ranked
             .iter()
             .filter_map(|(id, out_deg, in_deg)| {
                 let node = node_map.get(id)?;
-                Some(json!({
-                    "name": node.name,
-                    "kind": node.kind,
-                    "file": node.file,
-                    "line": node.start_line,
-                    "in_cycle_out_degree": out_deg,
-                    "in_cycle_in_degree": in_deg,
-                }))
+                Some(PortCycleSymbolV1 {
+                    name: node.name.to_owned(),
+                    kind: node.kind.to_owned(),
+                    file: node.file.to_owned(),
+                    line: node.start_line,
+                    in_cycle_out_degree: *out_deg,
+                    in_cycle_in_degree: *in_deg,
+                })
             })
             .collect();
 
@@ -305,9 +296,12 @@ pub(crate) async fn handle_port_order(
         }
         let mut files_ranked: Vec<(&str, usize)> = file_counts.into_iter().collect();
         files_ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        let files_json: Vec<Value> = files_ranked
+        let files = files_ranked
             .iter()
-            .map(|(path, count)| json!({"file": path, "members_in_cycle": count}))
+            .map(|(path, count)| PortCycleFileV1 {
+                file: (*path).to_owned(),
+                members_in_cycle: *count,
+            })
             .collect();
 
         let entry_point = ranked.first().and_then(|(id, _, _)| node_map.get(id));
@@ -316,22 +310,31 @@ pub(crate) async fn handle_port_order(
             .max_by_key(|(_, _out, in_deg)| *in_deg)
             .and_then(|(id, _, _)| node_map.get(id));
 
-        cycles_json.push(json!({
-            "size": scc.len(),
-            "files": files_json,
-            "symbols": symbols_detailed,
-            "entry_point": entry_point.map(|n| json!({
-                "name": n.name, "file": n.file, "line": n.start_line,
-            })),
-            "break_point_candidate": hub.map(|n| json!({
-                "name": n.name, "file": n.file, "line": n.start_line,
-                "rationale": "Highest in-cycle in-degree — refactoring its callers is the most effective way to fragment this SCC.",
-            })),
-            "note": "Mutual dependency — port together, starting at `entry_point` and refactoring `break_point_candidate` to split the cycle.",
-        }));
+        cycles.push(PortCycleV1 {
+            size: scc.len(),
+            files,
+            symbols,
+            entry_point: entry_point.map(|node| PortCycleAnchorV1 {
+                name: node.name.to_owned(),
+                file: node.file.to_owned(),
+                line: node.start_line,
+                rationale: None,
+            }),
+            break_point_candidate: hub.map(|node| PortCycleAnchorV1 {
+                name: node.name.to_owned(),
+                file: node.file.to_owned(),
+                line: node.start_line,
+                rationale: Some(
+                    "Highest in-cycle in-degree — refactoring its callers is the most effective way to fragment this SCC."
+                        .to_owned(),
+                ),
+            }),
+            note: "Mutual dependency — port together, starting at `entry_point` and refactoring `break_point_candidate` to split the cycle."
+                .to_owned(),
+        });
     }
 
-    let levels_json: Vec<Value> = levels
+    let result_levels = levels
         .iter()
         .enumerate()
         .map(|(i, level_ids)| {
@@ -341,55 +344,55 @@ pub(crate) async fn handle_port_order(
                 format!("Depends only on levels 0–{}", i - 1)
             };
 
-            let symbols: Vec<Value> = level_ids
+            let symbols = level_ids
                 .iter()
                 .filter_map(|id| {
                     let node = node_map.get(id)?;
                     // Find what this node depends on (for depends_on field)
-                    let deps: Vec<&str> = dep_graph
+                    let depends_on = dep_graph
                         .get(id)
                         .map(|d| {
                             d.iter()
-                                .filter_map(|dep_id| node_map.get(dep_id).map(|n| n.name))
-                                .collect()
+                                .filter_map(|dep_id| {
+                                    node_map.get(dep_id).map(|node| node.name.to_owned())
+                                })
+                                .collect::<Vec<_>>()
                         })
-                        .unwrap_or_default();
+                        .filter(|dependencies| !dependencies.is_empty());
 
-                    let mut sym = json!({
-                        "name": node.name,
-                        "kind": node.kind,
-                        "file": node.file,
-                        "line": node.start_line,
-                    });
-                    if !deps.is_empty() {
-                        sym["depends_on"] = json!(deps);
-                    }
-                    Some(sym)
+                    Some(PortOrderSymbolV1 {
+                        name: node.name.to_owned(),
+                        kind: node.kind.to_owned(),
+                        file: node.file.to_owned(),
+                        line: node.start_line,
+                        depends_on,
+                    })
                 })
                 .collect();
 
-            json!({
-                "level": i,
-                "description": description,
-                "symbols": symbols,
-            })
+            PortOrderLevelV1 {
+                level: i,
+                description,
+                symbols,
+            }
         })
         .collect();
 
     let touched_files = unique_file_paths(nodes.iter().map(|node| node.file));
 
-    let result = json!({
-        "source_dir": source_dir,
-        "total_symbols": total_symbols,
-        "returned": emitted,
-        "levels": levels_json,
-        "cycles": cycles_json,
-    });
+    let result = PortOrderResultV1 {
+        source_dir: request.source_dir,
+        total_symbols,
+        returned: emitted,
+        levels: result_levels,
+        cycles,
+    };
+    let output = serde_json::to_value(result)?;
 
     Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
-        &result,
+        &output,
         touched_files,
     ))
 }

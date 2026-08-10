@@ -65,58 +65,7 @@ macro_rules! typed_operation {
     };
 }
 
-pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[
-    UnavailableOperationCapability {
-        operation: "application_callees",
-        operation_id: "operation.application.callees",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_context",
-        operation_id: "operation.application.context",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_impact",
-        operation_id: "operation.application.impact",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_node",
-        operation_id: "operation.application.node",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_port_order",
-        operation_id: "operation.application.port_order",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_port_status",
-        operation_id: "operation.application.port_status",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_redundancy",
-        operation_id: "operation.application.redundancy",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_rename_preview",
-        operation_id: "operation.application.rename_preview",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_similar",
-        operation_id: "operation.application.similar",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-    UnavailableOperationCapability {
-        operation: "application_todos",
-        operation_id: "operation.application.todos",
-        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-    },
-];
+pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[];
 
 pub mod application_affected_tests {
     pub type Request = tracedecay_application::feedback::FeedbackHandleRequestV1;
@@ -298,6 +247,42 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.application.primitive.call-chain.result",
+    1
+);
+
+pub mod callees {
+    pub type Request = tracedecay_application::retrieval::CalleesSurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::CalleesResultV1;
+}
+typed_operation!(
+    Callees,
+    callees,
+    "operation.application.callees",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_callees"
+    },
+    "binding.mcp.callees.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.callees.result",
     1
 );
 
@@ -1302,6 +1287,42 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.application.configuration.configuration_write_credential.result",
+    1
+);
+
+pub mod context {
+    pub type Request = tracedecay_application::retrieval::ContextSurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::ContextResultV1;
+}
+typed_operation!(
+    Context,
+    context,
+    "operation.application.context",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_context"
+    },
+    "binding.mcp.context.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.context.result",
     1
 );
 
@@ -2752,6 +2773,42 @@ typed_operation!(
     1
 );
 
+pub mod impact {
+    pub type Request = tracedecay_application::retrieval::ImpactSurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::ImpactResultV1;
+}
+typed_operation!(
+    Impact,
+    impact,
+    "operation.application.impact",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_impact"
+    },
+    "binding.mcp.impact.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.impact.result",
+    1
+);
+
 pub mod insert_at {
     pub type Request = tracedecay_application::source_edit::InsertAtSurfaceRequestV1;
     pub type Result = tracedecay_application::source_edit::SourceEditSurfaceResultV1;
@@ -3295,6 +3352,42 @@ typed_operation!(
     1
 );
 
+pub mod node {
+    pub type Request = tracedecay_application::retrieval::NodeSurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::NodeResultV1;
+}
+typed_operation!(
+    Node,
+    node,
+    "operation.application.node",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_node"
+    },
+    "binding.mcp.node.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.node.result",
+    1
+);
+
 pub mod observatory_read {
     pub type Request = tracedecay_application::observatory_surface::ObservatoryReadRequestV1;
     pub type Result = tracedecay_application::observatory_surface::ObservatoryReadResultV1;
@@ -3328,6 +3421,78 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.application.observatory-read.result",
+    1
+);
+
+pub mod port_order {
+    pub type Request = tracedecay_application::retrieval::PortOrderSurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::PortOrderResultV1;
+}
+typed_operation!(
+    PortOrder,
+    port_order,
+    "operation.application.port_order",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_port_order"
+    },
+    "binding.mcp.port_order.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.port-order.result",
+    1
+);
+
+pub mod port_status {
+    pub type Request = tracedecay_application::retrieval::PortStatusSurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::PortStatusResultV1;
+}
+typed_operation!(
+    PortStatus,
+    port_status,
+    "operation.application.port_status",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_port_status"
+    },
+    "binding.mcp.port_status.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.port-status.result",
     1
 );
 
@@ -3399,6 +3564,78 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.application.primitive.qualified-name.result",
+    1
+);
+
+pub mod redundancy {
+    pub type Request = tracedecay_application::retrieval::RedundancySurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::RedundancyResultV1;
+}
+typed_operation!(
+    Redundancy,
+    redundancy,
+    "operation.application.redundancy",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_redundancy"
+    },
+    "binding.mcp.redundancy.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.redundancy.result",
+    1
+);
+
+pub mod rename_preview {
+    pub type Request = tracedecay_application::retrieval::RenamePreviewPrimitiveRequestV1;
+    pub type Result = tracedecay_application::retrieval::RenamePreviewPrimitiveOutcomeV1;
+}
+typed_operation!(
+    RenamePreview,
+    rename_preview,
+    "operation.application.rename_preview",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_rename_preview"
+    },
+    "binding.mcp.rename_preview.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.rename-preview.result",
     1
 );
 
@@ -3932,6 +4169,42 @@ typed_operation!(
     1
 );
 
+pub mod similar {
+    pub type Request = tracedecay_application::retrieval::SimilarSurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::SimilarResultV1;
+}
+typed_operation!(
+    Similar,
+    similar,
+    "operation.application.similar",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_similar"
+    },
+    "binding.mcp.similar.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.similar.result",
+    1
+);
+
 pub mod application_source_body {
     pub type Request = tracedecay_application::retrieval::SourceBodyPrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::SourceBodyPrimitiveResult;
@@ -4255,6 +4528,42 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.application.feedback.test-results.result",
+    1
+);
+
+pub mod todos {
+    pub type Request = tracedecay_application::retrieval::TodosSurfaceRequestV1;
+    pub type Result = tracedecay_application::retrieval::TodosResultV1;
+}
+typed_operation!(
+    Todos,
+    todos,
+    "operation.application.todos",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_todos"
+    },
+    "binding.mcp.todos.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeRead,
+        CancellationPoint::DuringRead
+    ],
+    10000,
+    DeadlineBehavior::ReturnOperationReceipt,
+    ReconciliationContract::NotRequired,
+    ReceiptContract::Operation,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::Partial
+    ],
+    "schema.application.primitive.todos.result",
     1
 );
 

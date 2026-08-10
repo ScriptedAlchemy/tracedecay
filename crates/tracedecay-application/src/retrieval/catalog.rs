@@ -19,6 +19,14 @@ use crate::current_bindings;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
+use crate::retrieval::grep_analysis::RedundancyResultV1;
+use crate::retrieval::primitive_surface::{
+    CalleesResultV1, CalleesSurfaceRequestV1, ContextResultV1, ContextSurfaceRequestV1,
+    ImpactResultV1, ImpactSurfaceRequestV1, NodeResultV1, NodeSurfaceRequestV1, PortOrderResultV1,
+    PortOrderSurfaceRequestV1, PortStatusResultV1, PortStatusSurfaceRequestV1,
+    RedundancySurfaceRequestV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
+    SimilarResultV1, SimilarSurfaceRequestV1, TodosResultV1, TodosSurfaceRequestV1,
+};
 use crate::retrieval::requests::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticsPrimitiveRequest,
     DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest, FileDependentsPrimitiveResult,
@@ -474,11 +482,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
 /// `crate::retrieval::requests` pairs, and the symbol-graph reads bind the
 /// request each [`crate::retrieval::SymbolGraphPrimitivePort`] method
 /// validates against the [`SymbolGraphPage`] payload it returns, so the
-/// generated SDKs cannot describe a shape the surface does not speak. The
-/// remaining primitive reads keep truthful `schema_unavailable` dispositions:
-/// their wire request and result types live outside this crate's dependency
-/// cone (usecases-owned runtime types) or need a dedicated surface DTO before
-/// a registration here could be honest.
+/// generated SDKs cannot describe a shape the surface does not speak.
 fn primitive_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
@@ -574,6 +578,24 @@ fn primitive_executable_schemas(
         GraphRelationRequest,
         SymbolGraphPage<SymbolRelationRecord>
     );
+    add!("context", ContextSurfaceRequestV1, ContextResultV1);
+    add!("callees", CalleesSurfaceRequestV1, CalleesResultV1);
+    add!("impact", ImpactSurfaceRequestV1, ImpactResultV1);
+    add!("node", NodeSurfaceRequestV1, NodeResultV1);
+    add!("similar", SimilarSurfaceRequestV1, SimilarResultV1);
+    add!(
+        "rename_preview",
+        RenamePreviewPrimitiveRequestV1,
+        RenamePreviewPrimitiveOutcomeV1
+    );
+    add!(
+        "port_status",
+        PortStatusSurfaceRequestV1,
+        PortStatusResultV1
+    );
+    add!("port_order", PortOrderSurfaceRequestV1, PortOrderResultV1);
+    add!("redundancy", RedundancySurfaceRequestV1, RedundancyResultV1);
+    add!("todos", TodosSurfaceRequestV1, TodosResultV1);
     Ok(schemas)
 }
 

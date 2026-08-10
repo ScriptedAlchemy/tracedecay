@@ -1,6 +1,6 @@
 //! Code-health and architecture analysis tool definitions.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{
     def, def_limit_path_tool, def_object, def_path_flag_tool, def_path_limit_tool, number_property,
@@ -245,57 +245,21 @@ pub(super) fn def_god_class() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_port_status() -> ToolDefinition {
+pub(super) fn def_port_status(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_port_status",
         "Port Status",
         "Compare symbols between source and target directories to track porting progress.",
-        json!({
-            "type": "object",
-            "properties": {
-                "source_dir": {
-                    "type": "string",
-                    "description": "Path prefix for source code (e.g. 'src/python/')"
-                },
-                "target_dir": {
-                    "type": "string",
-                    "description": "Path prefix for target code (e.g. 'src/rust/')"
-                },
-                "kinds": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Node kinds to compare (default: [\"function\", \"method\", \"class\", \"struct\", \"interface\", \"trait\", \"enum\", \"module\"])"
-                }
-            },
-            "required": ["source_dir", "target_dir"]
-        }),
+        input_schema,
     )
 }
 
-pub(super) fn def_port_order() -> ToolDefinition {
+pub(super) fn def_port_order(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_port_order",
         "Port Order",
         "Topological sort of symbols in a directory -- port leaves first, dependents after.",
-        json!({
-            "type": "object",
-            "properties": {
-                "source_dir": {
-                    "type": "string",
-                    "description": "Path prefix for source code (e.g. 'src/python/')"
-                },
-                "kinds": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Node kinds to include (default: [\"function\", \"method\", \"class\", \"struct\", \"interface\", \"trait\", \"enum\", \"module\"])"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of symbols to return (default: 50)"
-                }
-            },
-            "required": ["source_dir"]
-        }),
+        input_schema,
     )
 }
 
@@ -361,40 +325,12 @@ pub(super) fn def_health() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_redundancy() -> ToolDefinition {
+pub(super) fn def_redundancy(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_redundancy",
         "Redundancy Hunt",
         "Find functionally duplicated function/method bodies via AST isomorphism, control-flow match, call-sequence match, token-shingle Jaccard similarity, and body-vector cosine similarity. Results include similarity, ranking_score (a rank key, not a thresholded quantity), grouped duplicate components (connected components over the returned pairs only), and signal details such as body_vector_cosine and generic_helper_downranked. Each pair is bucketed as 'definite' (AST-identical with score >= 0.8), 'likely' (CFG, algorithmic, token, body-vector, or lower-scoring AST match at score >= 0.55), or 'naming_only' (weaker signals). Use when consolidating helpers or auditing code health. Computed lazily and cached per (node, body source hash) — first call on a fresh index can be slow on large repos.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path"
-                },
-                "min_lines": {
-                    "type": "number",
-                    "description": "Skip functions shorter than this many source lines (default: 8)"
-                },
-                "max_pairs": {
-                    "type": "number",
-                    "description": "Maximum number of duplicate pairs to return (default: 20, max: 500)"
-                },
-                "similarity_threshold": {
-                    "type": "number",
-                    "description": "Drop pairs only when both the composite similarity and the body-vector cosine fall below this value (default: 0.6, range 0.0-1.0). A naming-only pair whose cosine clears this and 0.55 is reclassified as 'body_vector'"
-                },
-                "include_naming_only": {
-                    "type": "boolean",
-                    "description": "If true, include pairs whose only signal is name similarity (overlap_kind 'naming'), including identical-non-generic-name pairs rescued below the score gate. Cosine-rescued 'body_vector' pairs are always included regardless of this flag (default: false)"
-                },
-                "include_generated_paths": {
-                    "type": "boolean",
-                    "description": "If true, also scan build outputs, vendored code, and worktree mirrors (dist/, build/, out/, node_modules/, vendor/, target/, .worktrees/, *.min.js). Excluded by default because generated mirrors duplicate real sources byte-for-byte (default: false)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 
@@ -424,31 +360,14 @@ pub(super) fn def_dsm() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_todos() -> ToolDefinition {
+pub(super) fn def_todos(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_todos",
         "TODOs and FIXMEs",
         "Find TODO, FIXME, XXX, HACK, WIP, NOTE, and unimplemented markers across the project. \
          Each result includes the marker kind, file, line, the comment text, and the enclosing \
          symbol name (function/method) for quick orientation.",
-        json!({
-            "type": "object",
-            "properties": {
-                "kinds": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Marker kinds to include (default: TODO, FIXME, XXX, HACK, WIP, NOTE, UNIMPLEMENTED). Matched case-insensitively."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Filter to files under this directory path (relative to project root)"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of markers to return (default: 200, max: 2000)"
-                }
-            }
-        }),
+        input_schema,
     )
 }
 

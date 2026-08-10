@@ -1,11 +1,10 @@
 //! Graph query and navigation tool definitions.
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{
-    boolean_property, context_description, def, def_always_load, def_node_depth_tool, def_object,
-    def_required_object, number_property, required_object_schema, string_property,
-    with_project_selector_properties,
+    context_description, def, def_always_load, def_object, def_required_object, number_property,
+    required_object_schema, string_property, with_project_selector_properties,
 };
 use crate::mcp::tools::ToolDefinition;
 
@@ -107,68 +106,12 @@ pub(super) fn def_retrieve() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_context() -> ToolDefinition {
+pub(super) fn def_context(input_schema: Value) -> ToolDefinition {
     def_always_load(
         "tracedecay_context",
         "Task Context",
         &context_description(0, 3),
-        json!({
-            "type": "object",
-            "properties": with_project_selector_properties(json!({
-                "task": {
-                    "type": "string",
-                    "description": "Natural language description of the task or question"
-                },
-                "max_nodes": {
-                    "type": "number",
-                    "description": "Maximum number of symbols to include (default: 20)"
-                },
-                "include_code": {
-                    "type": "boolean",
-                    "description": "If true, include source code snippets for key symbols (default: false)"
-                },
-                "max_code_blocks": {
-                    "type": "number",
-                    "description": "Maximum number of code snippets when include_code is true (default: 5)"
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["explore", "plan"],
-                    "description": "Context mode: 'explore' (default) for general exploration, 'plan' for implementation planning (adds extension points, dependency order, test coverage)"
-                },
-                "keywords": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Extra search keywords for synonym expansion. Use this when the task uses conceptual terms that may not match symbol names — e.g. for 'authentication', pass [\"login\", \"session\", \"credential\", \"token\", \"auth\"]. The graph is searched for each keyword independently."
-                },
-                "exclude_node_ids": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Node IDs to exclude from results (pass seen_node_ids from previous call for session deduplication)"
-                },
-                "merge_adjacent": {
-                    "type": "boolean",
-                    "description": "When true, merge code blocks from the same file whose line ranges are adjacent or overlapping (default: false)"
-                },
-                "max_per_file": {
-                    "type": "number",
-                    "description": "Maximum symbols from a single file in results. Prevents one large file from dominating (default: max_nodes/3, minimum 3)"
-                },
-                "include_memory": {
-                    "type": "boolean",
-                    "description": "When true, include up to memory_limit matching project memory facts as a separate context lane (default: true)"
-                },
-                "memory_limit": {
-                    "type": "number",
-                    "description": "Maximum memory facts to include when include_memory is true (default: 3, max: 10)"
-                },
-                "memory_min_trust": {
-                    "type": "number",
-                    "description": "Minimum trust score for memory facts included in context (default: 0.5)"
-                }
-            })),
-            "required": ["task"]
-        }),
+        input_schema,
     )
 }
 
@@ -279,8 +222,8 @@ pub(super) fn def_callers() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_callees() -> ToolDefinition {
-    def_required_object(
+pub(super) fn def_callees(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_callees",
         "Callees",
         "What does this call, outgoing calls, dependencies of a function. \
@@ -290,33 +233,25 @@ pub(super) fn def_callees() -> ToolDefinition {
          returned, tagged with `dispatch_via_trait: true` and a `dispatch_from` \
          pointing at the trait method. Pass `resolve_dispatch: false` to \
          disable this behaviour and get only direct call edges.",
-        json!({
-            "node_id": string_property("The unique node ID to find callees for"),
-            "max_depth": number_property("Maximum traversal depth (default: 3)"),
-            "resolve_dispatch": boolean_property("If true (default), append concrete impl methods for any trait-method callee.")
-        }),
-        &["node_id"],
+        input_schema,
     )
 }
 
-pub(super) fn def_impact() -> ToolDefinition {
-    def_node_depth_tool(
+pub(super) fn def_impact(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_impact",
         "Impact Radius",
         "Compute the impact radius of a node: all symbols that directly or indirectly depend on it.",
-        "The unique node ID to compute impact for",
+        input_schema,
     )
 }
 
-pub(super) fn def_node() -> ToolDefinition {
-    def_required_object(
+pub(super) fn def_node(input_schema: Value) -> ToolDefinition {
+    def(
         "tracedecay_node",
         "Node Details",
         "Retrieve detailed information about a single node by its ID.",
-        json!({
-            "node_id": string_property("The unique node ID to retrieve")
-        }),
-        &["node_id"],
+        input_schema,
     )
 }
 
@@ -346,25 +281,12 @@ pub(super) fn def_files() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_similar() -> ToolDefinition {
+pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_similar",
         "Similar Symbols",
         "Find symbols with similar names using full-text search and substring matching.",
-        json!({
-            "type": "object",
-            "properties": {
-                "symbol": {
-                    "type": "string",
-                    "description": "Symbol name to find similar matches for"
-                },
-                "limit": {
-                    "type": "number",
-                    "description": "Maximum number of results (default: 10)"
-                }
-            },
-            "required": ["symbol"]
-        }),
+        input_schema,
     )
 }
 

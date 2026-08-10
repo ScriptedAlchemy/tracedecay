@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
@@ -188,7 +189,7 @@ impl RedundancyRequestV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RedundancyNodeV1 {
     pub file: String,
@@ -197,7 +198,7 @@ pub struct RedundancyNodeV1 {
     pub id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RedundancySignalsV1 {
     pub ast_match: bool,
@@ -213,7 +214,7 @@ pub struct RedundancySignalsV1 {
     pub body_tokens: [u64; 2],
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RedundancyPairV1 {
     pub similarity: f64,
@@ -227,7 +228,7 @@ pub struct RedundancyPairV1 {
     pub signals: RedundancySignalsV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticRedundancyGenerationV1 {
     pub vector_generation: String,
@@ -241,14 +242,14 @@ pub struct SemanticRedundancyGenerationV1 {
     pub maximum_distance_micros: i64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RedundancyGroupV1 {
     pub size: u64,
     pub nodes: Vec<RedundancyNodeV1>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RedundancyThresholdsV1 {
     pub min_lines: u32,
@@ -257,7 +258,7 @@ pub struct RedundancyThresholdsV1 {
     pub include_generated_paths: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RedundancyResultV1 {
     pub candidates: u64,

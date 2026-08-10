@@ -315,7 +315,7 @@ pub(super) fn def_insert_at() -> ToolDefinition {
     }
 }
 
-pub(super) fn def_rename_preview() -> ToolDefinition {
+pub(super) fn def_rename_preview(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_rename_preview",
         "Rename Preview",
@@ -329,20 +329,7 @@ pub(super) fn def_rename_preview() -> ToolDefinition {
          apply the rename. Graph call-edge coverage improves as the resolver \
          does; text-only counts catch what the graph misses (comments, \
          strings, dynamic dispatch, unresolved refs).",
-        json!({
-            "type": "object",
-            "properties": {
-                "node_id": {
-                    "type": "string",
-                    "description": "The unique node ID of the symbol to preview renaming"
-                },
-                "new_name": {
-                    "type": "string",
-                    "description": "Proposed new name. Optional — only used to label the preview; no text is rewritten."
-                }
-            },
-            "required": ["node_id"]
-        }),
+        input_schema,
     )
 }
 

@@ -5,6 +5,7 @@ pub mod catalog;
 mod git_topology_anchor;
 pub mod grep_analysis;
 mod ports;
+mod primitive_surface;
 mod requests;
 mod service;
 mod source_read;
@@ -37,11 +38,27 @@ pub use git_topology_anchor::{
     GitTopologyAnchorResolutionOutcomeV2, GitTopologyAnchorResolutionV2,
     MAX_GIT_TOPOLOGY_ANCHORS_PER_PUBLICATION_V2,
 };
+pub use grep_analysis::RedundancyResultV1;
 pub use ports::{
     AffectedTestsRetrievalPort, AnchorHydrationPort, GraphImpactRetrievalPort, GraphRetrievalPort,
     OperationalRetrievalPort, RetrievalPortContext, RetrievalPortOutcome, SourceRetrievalPort,
     SymbolRetrievalPort, TemporalRetrievalFailure, TemporalRetrievalFuture, TemporalRetrievalPort,
     TestRetrievalPort,
+};
+pub use primitive_surface::{
+    CalleeV1, CalleesResultV1, CalleesSurfaceRequestV1, ContextCodeBlockV1, ContextMemoryFactV1,
+    ContextMemoryMatchV1, ContextModeV1, ContextResultV1, ContextSurfaceRequestV1, ImpactNodeV1,
+    ImpactResultV1, ImpactSurfaceRequestV1, NodeDepthSurfaceRequestV1, NodeDetailsV1,
+    NodeExpansionCostV1, NodeResultV1, NodeSurfaceRequestV1, PortCycleAnchorV1, PortCycleFileV1,
+    PortCycleSymbolV1, PortCycleV1, PortMatchedSymbolV1, PortOrderLevelV1, PortOrderResultV1,
+    PortOrderSurfaceRequestV1, PortOrderSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1,
+    PortTargetOnlySymbolV1, PortUnmatchedSymbolV1, PrimitiveLaneCompleteV1, PrimitiveLaneStateV1,
+    PrimitiveLaneStatusV1, PrimitiveNotFoundV1, PrimitiveRecallV1, PrimitiveSearchCoverageV1,
+    PrimitiveSemanticModeV1, PrimitiveSymbolLocationV1, RedundancySurfaceRequestV1,
+    RenamePreviewNodeV1, RenamePreviewPrimitiveOutcomeV1, RenamePreviewPrimitiveRequestV1,
+    RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1, RenamePreviewTextOnlyMatchV1,
+    SimilarResultV1, SimilarSurfaceRequestV1, SimilarSymbolV1, TodoMarkerV1, TodosResultV1,
+    TodosSurfaceRequestV1,
 };
 pub use requests::{
     AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,

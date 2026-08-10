@@ -41,6 +41,7 @@ mod workflow;
 use admin::*;
 use analysis::*;
 use application::*;
+use application_schema::canonical_application_request_schema;
 use ast_grep::ast_grep_available;
 pub(crate) use ast_grep::ast_grep_diagnostics;
 use edit::*;
@@ -155,13 +156,6 @@ fn number_property(description: &str) -> Value {
     })
 }
 
-fn boolean_property(description: &str) -> Value {
-    json!({
-        "type": "boolean",
-        "description": description
-    })
-}
-
 fn def_path_limit_tool(
     name: &str,
     title: &str,
@@ -208,26 +202,14 @@ fn def_path_flag_tool(
 ) -> ToolDefinition {
     let mut properties = serde_json::Map::new();
     properties.insert("path".to_string(), string_property(path_description));
-    properties.insert(flag_name.to_string(), boolean_property(flag_description));
-    def_object(name, title, description, Value::Object(properties))
-}
-
-fn def_node_depth_tool(
-    name: &str,
-    title: &str,
-    description: &str,
-    node_id_description: &str,
-) -> ToolDefinition {
-    def_required_object(
-        name,
-        title,
-        description,
+    properties.insert(
+        flag_name.to_string(),
         json!({
-            "node_id": string_property(node_id_description),
-            "max_depth": number_property("Maximum traversal depth (default: 3)")
+            "type": "boolean",
+            "description": flag_description
         }),
-        &["node_id"],
-    )
+    );
+    def_object(name, title, description, Value::Object(properties))
 }
 
 fn project_selector_properties() -> Value {
@@ -480,16 +462,23 @@ pub fn get_tool_definitions()
 
 pub(super) fn get_maximal_tool_definitions()
 -> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
+    let application_registry =
+        tracedecay_application::mcp_executable_binding_registry().map_err(|error| {
+            super::dispatch::McpDispatchMetadataError::Initialization(error.to_string())
+        })?;
+    let request_schema = |operation: &'static str| {
+        canonical_application_request_schema(&application_registry, operation)
+    };
     let mut definitions = vec![
         def_search(),
         def_grep(),
         def_ast_grep_search(),
         def_retrieve(),
-        def_context(),
+        def_context(request_schema("context")?),
         def_callers(),
-        def_callees(),
-        def_impact(),
-        def_node(),
+        def_callees(request_schema("callees")?),
+        def_impact(request_schema("impact")?),
+        def_node(request_schema("node")?),
         def_status(),
         def_active_project(),
         def_project_list(),
@@ -558,8 +547,8 @@ pub(super) fn get_maximal_tool_definitions()
         def_diff_context(),
         def_circular(),
         def_hotspots(),
-        def_similar(),
-        def_rename_preview(),
+        def_similar(request_schema("similar")?),
+        def_rename_preview(request_schema("rename_preview")?),
         def_unused_imports(),
         def_rank(),
         def_largest(),
@@ -571,8 +560,8 @@ pub(super) fn get_maximal_tool_definitions()
         def_doc_coverage(),
         def_god_class(),
         def_changelog(),
-        def_port_status(),
-        def_port_order(),
+        def_port_status(request_schema("port_status")?),
+        def_port_order(request_schema("port_order")?),
         def_commit_context(),
         def_pr_context(),
         def_simplify_scan(),
@@ -588,12 +577,12 @@ pub(super) fn get_maximal_tool_definitions()
         def_gini(),
         def_dependency_depth(),
         def_health(),
-        def_redundancy(),
+        def_redundancy(request_schema("redundancy")?),
         def_runtime(),
         def_dsm(),
         def_test_risk(),
         def_body(),
-        def_todos(),
+        def_todos(request_schema("todos")?),
         def_callers_for(),
         def_by_qualified_name(),
         def_signature(),

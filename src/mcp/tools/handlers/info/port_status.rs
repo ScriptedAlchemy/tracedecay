@@ -1,6 +1,14 @@
 //! `tracedecay_port_status` — cross-directory symbol coverage between a source and target port.
 
 use super::*;
+use std::collections::BTreeMap;
+
+use tracedecay_application::retrieval::{
+    PortMatchedSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1, PortTargetOnlySymbolV1,
+    PortUnmatchedSymbolV1,
+};
+
+use super::super::support::decode_primitive_request;
 
 /// Returns the compatibility group for a node kind string used in port matching.
 ///
@@ -74,34 +82,16 @@ pub(crate) async fn handle_port_status(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    require_object_args(&args, "tracedecay_port_status")?;
-
-    let source_dir = args
-        .get("source_dir")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: source_dir".to_string(),
-        })?;
-
-    let target_dir = args
-        .get("target_dir")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "missing required parameter: target_dir".to_string(),
-        })?;
-
-    let kind_strs: Vec<String> = args.get("kinds").and_then(|v| v.as_array()).map_or_else(
+    let request: PortStatusSurfaceRequestV1 =
+        decode_primitive_request(&args, "tracedecay_port_status")?;
+    let kind_strs = request.kinds.as_ref().map_or_else(
         || {
             PORT_DEFAULT_KINDS
                 .iter()
                 .map(std::string::ToString::to_string)
                 .collect()
         },
-        |arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
-                .collect()
-        },
+        Clone::clone,
     );
 
     let kinds: Vec<NodeKind> = kind_strs
@@ -110,16 +100,14 @@ pub(crate) async fn handle_port_status(
         .collect();
 
     if kinds.is_empty() {
-        return Ok(ToolResult::new(
-            json!({
-                "content": [{ "type": "text", "text": "No valid node kinds specified." }]
-            }),
-            vec![],
-        ));
+        return Err(TraceDecayError::Config {
+            message: "invalid parameter: kinds must contain at least one supported node kind"
+                .to_owned(),
+        });
     }
 
-    let source_nodes = symbols_in_dir(graph, source_dir, &kinds)?;
-    let target_nodes = symbols_in_dir(graph, target_dir, &kinds)?;
+    let source_nodes = symbols_in_dir(graph, &request.source_dir, &kinds)?;
+    let target_nodes = symbols_in_dir(graph, &request.target_dir, &kinds)?;
 
     // Match key includes the parent qualifier (e.g. enclosing struct/class) for
     // kinds that have one, so `Biquad::new` does NOT collide with `Adaa::new`.
@@ -136,9 +124,9 @@ pub(crate) async fn handle_port_status(
         target_map.entry(key).or_default().push(node);
     }
 
-    let mut matched_symbols: Vec<Value> = Vec::new();
+    let mut matched_symbols = Vec::<PortMatchedSymbolV1>::new();
     let mut matched_target_ids = HashSet::new();
-    let mut unmatched_by_file: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut unmatched_by_file = BTreeMap::<String, Vec<PortUnmatchedSymbolV1>>::new();
 
     for src_node in &source_nodes {
         let (source_metadata, source_file) = required_symbol_parts(src_node)?;
@@ -152,23 +140,23 @@ pub(crate) async fn handle_port_status(
             // Take the first match
             let tgt = targets[0];
             let (target_metadata, target_file) = required_symbol_parts(tgt)?;
-            matched_symbols.push(json!({
-                "name": source_metadata.simple_name,
-                "source_kind": source_metadata.kind,
-                "target_kind": target_metadata.kind,
-                "source_file": source_file,
-                "target_file": target_file,
-            }));
+            matched_symbols.push(PortMatchedSymbolV1 {
+                name: source_metadata.simple_name.clone(),
+                source_kind: source_metadata.kind.clone(),
+                target_kind: target_metadata.kind.clone(),
+                source_file: source_file.to_owned(),
+                target_file: target_file.to_owned(),
+            });
             matched_target_ids.insert(tgt.occurrence.clone());
         } else {
             unmatched_by_file
                 .entry(source_file.to_owned())
                 .or_default()
-                .push(json!({
-                    "name": source_metadata.simple_name,
-                    "kind": source_metadata.kind,
-                    "line": source_metadata.start_line.saturating_add(1),
-                }));
+                .push(PortUnmatchedSymbolV1 {
+                    name: source_metadata.simple_name.clone(),
+                    kind: source_metadata.kind.clone(),
+                    line: source_metadata.start_line.saturating_add(1),
+                });
         }
     }
 
@@ -179,12 +167,12 @@ pub(crate) async fn handle_port_status(
             continue;
         }
         let (metadata, file) = required_symbol_parts(node)?;
-        target_only.push(json!({
-            "name": metadata.simple_name,
-            "kind": metadata.kind,
-            "file": file,
-            "line": metadata.start_line.saturating_add(1),
-        }));
+        target_only.push(PortTargetOnlySymbolV1 {
+            name: metadata.simple_name.clone(),
+            kind: metadata.kind.clone(),
+            file: file.to_owned(),
+            line: metadata.start_line.saturating_add(1),
+        });
     }
 
     let source_count = source_nodes.len();
@@ -203,24 +191,25 @@ pub(crate) async fn handle_port_status(
         .collect::<Result<Vec<_>>>()?;
     let touched_files = unique_file_paths(touched_paths.into_iter());
 
-    let result = json!({
-        "source_dir": source_dir,
-        "target_dir": target_dir,
-        "source_count": source_count,
-        "target_count": target_nodes.len(),
-        "matched": matched_count,
-        "unmatched": unmatched_count,
-        "target_only": target_only.len(),
-        "coverage_percent": (coverage * 10.0).round() / 10.0,
-        "unmatched_by_file": unmatched_by_file,
-        "matched_symbols": matched_symbols,
-        "target_only_symbols": target_only,
-    });
+    let result = PortStatusResultV1 {
+        source_dir: request.source_dir,
+        target_dir: request.target_dir,
+        source_count,
+        target_count: target_nodes.len(),
+        matched: matched_count,
+        unmatched: unmatched_count,
+        target_only: target_only.len(),
+        coverage_percent: (coverage * 10.0).round() / 10.0,
+        unmatched_by_file,
+        matched_symbols,
+        target_only_symbols: target_only,
+    };
+    let output = serde_json::to_value(result)?;
 
     Ok(generic_tool_result(
         Some(cg.project_root()),
         &args,
-        &result,
+        &output,
         touched_files,
     ))
 }

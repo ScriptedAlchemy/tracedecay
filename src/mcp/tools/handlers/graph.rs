@@ -6,6 +6,13 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
+use tracedecay_application::retrieval::{
+    CalleeV1, CalleesSurfaceRequestV1, ContextCodeBlockV1, ContextModeV1, ContextResultV1,
+    ContextSurfaceRequestV1, ImpactNodeV1, ImpactResultV1, ImpactSurfaceRequestV1, NodeDetailsV1,
+    NodeExpansionCostV1, NodeSurfaceRequestV1, RenamePreviewNodeV1,
+    RenamePreviewPrimitiveRequestV1, RenamePreviewPrimitiveResultV1, RenamePreviewReferenceV1,
+    RenamePreviewTextOnlyMatchV1, SimilarSurfaceRequestV1, SimilarSymbolV1,
+};
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_domain::RelationEdgeKindV1;
 
@@ -18,11 +25,12 @@ use super::super::ToolResult;
 use super::super::render::{self, Md};
 use super::dependency_hints;
 use super::support::{
-    self, CONTEXT_MEMORY_ANALYTICS_KEY, require_node_id, require_object_args,
+    self, CONTEXT_MEMORY_ANALYTICS_KEY, decode_primitive_request, require_node_id,
     take_internal_context_memory_analytics, text_tool_result, unique_file_paths,
 };
 
 mod context_support;
+mod primitive_surface;
 mod verified;
 
 #[cfg(test)]
@@ -30,6 +38,12 @@ use context_support::context_memory_section;
 use context_support::{
     context_markdown_lane_preview, context_memory_analytics_value, context_memory_enabled,
     context_memory_matches, context_memory_options, insert_context_memory_section,
+};
+use primitive_surface::{
+    memory_match as context_memory_match, node_not_found as node_not_found_result,
+    search_coverage as primitive_search_coverage,
+    semantic_search_mode as primitive_semantic_search_mode,
+    symbol_location as primitive_symbol_location,
 };
 
 use verified::{
@@ -480,29 +494,17 @@ pub(super) async fn handle_context(
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
-    let task =
-        args.get("task")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: task".to_string(),
-            })?;
-
-    let mode = args
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("explore");
-    let max_nodes = args
-        .get("max_nodes")
-        .and_then(Value::as_u64)
+    let request: ContextSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_context")?;
+    let task = request.task.as_str();
+    let mode = request.mode.unwrap_or(ContextModeV1::Explore);
+    let max_nodes = request
+        .max_nodes
         .map_or(20, |value| value.clamp(1, 200) as usize);
-    let include_code = args
-        .get("include_code")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let max_code_blocks = args
-        .get("max_code_blocks")
-        .and_then(Value::as_u64)
+    let include_code = request.include_code.unwrap_or(false);
+    let max_code_blocks = request
+        .max_code_blocks
         .map_or(5, |value| value.clamp(1, 20) as usize);
+    let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
     let outcome = execute_code_index_search(
         search_executor,
         crate::mcp::server::CodeIndexSearchRequestV1 {
@@ -513,7 +515,7 @@ pub(super) async fn handle_context(
             source_reference: None,
             limit: max_nodes,
             cursor: None,
-            mode: semantic_search_mode(&args)?,
+            mode: semantic_mode,
             authority: search_authority.cloned(),
             deadline,
             cancellation,
@@ -591,42 +593,58 @@ pub(super) async fn handle_context(
     let mut all_symbols = selected.clone();
     all_symbols.extend(related.iter().cloned());
     let touched_files = graph_symbol_paths(&all_symbols)?;
-    let mut code_blocks = Vec::new();
+    let mut code_blocks = Vec::<ContextCodeBlockV1>::new();
     if include_code {
         for symbol in selected.iter().take(max_code_blocks) {
             let metadata = required_graph_metadata(symbol)?;
             let file_path = required_graph_file_path(symbol)?;
             let source = crate::sync::read_source_file(&cg.project_root().join(file_path))?;
-            code_blocks.push(json!({
-                "node_id": symbol.occurrence.as_str(),
-                "file": file_path,
-                "start_line": user_line(metadata.start_line),
-                "end_line": user_line(graph_symbol_end_line(metadata)?),
-                "code": super::info::extract_lines(
+            code_blocks.push(ContextCodeBlockV1 {
+                node_id: symbol.occurrence.as_str().to_owned(),
+                file: file_path.to_owned(),
+                start_line: user_line(metadata.start_line),
+                end_line: user_line(graph_symbol_end_line(metadata)?),
+                code: super::info::extract_lines(
                     &source,
                     metadata.start_line,
                     graph_symbol_end_line(metadata)?,
                 ),
-            }));
+            });
         }
     }
     let symbol_values = selected
         .iter()
-        .map(graph_symbol_location_value)
+        .map(primitive_symbol_location)
         .collect::<Result<Vec<_>>>()?;
     let related_values = related
         .iter()
-        .map(graph_symbol_location_value)
+        .map(primitive_symbol_location)
         .collect::<Result<Vec<_>>>()?;
-    let mut output =
-        verified_context_markdown(task, &symbol_values, &related_values, &code_blocks)?;
+    let symbol_render_values = symbol_values
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let related_render_values = related_values
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let code_render_values = code_blocks
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut output = verified_context_markdown(
+        task,
+        &symbol_render_values,
+        &related_render_values,
+        &code_render_values,
+    )?;
     insert_context_memory_section(
         &mut output,
         &memory_matches,
         memory_matches_error.as_deref(),
     );
     // Plan mode: append extension points, test coverage, and dependency info
-    if mode == "plan" {
+    if mode == ContextModeV1::Plan {
         append_verified_plan_context(graph, &selected, &mut output)?;
     }
 
@@ -639,20 +657,19 @@ pub(super) async fn handle_context(
         );
     }
 
-    let mut value = json!({
-        "task": task,
-        "mode": mode,
-        "code_generation": graph.generation().as_str(),
-        "symbols": symbol_values,
-        "related_symbols": related_values,
-        "code": code_blocks,
-        "coverage": coverage_value(&complete.coverage),
-    });
+    let result = ContextResultV1 {
+        task: request.task,
+        mode,
+        code_generation: graph.generation().as_str().to_owned(),
+        symbols: symbol_values,
+        related_symbols: related_values,
+        code: code_blocks,
+        coverage: primitive_search_coverage(&complete.coverage),
+        memory_matches: memory_matches.iter().map(context_memory_match).collect(),
+        memory_matches_error: memory_matches_error.clone(),
+    };
+    let mut value = serde_json::to_value(result)?;
     if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "memory_matches".to_string(),
-            serde_json::to_value(&memory_matches).unwrap_or_else(|_| json!([])),
-        );
         object.insert(
             CONTEXT_MEMORY_ANALYTICS_KEY.to_string(),
             json!({
@@ -663,9 +680,6 @@ pub(super) async fn handle_context(
                 ),
             }),
         );
-        if let Some(err) = memory_matches_error {
-            object.insert("memory_matches_error".to_string(), json!(err));
-        }
     }
     let preview = (!render::wants_json(&args)).then(|| context_markdown_lane_preview(&output));
     Ok(rendered_context_tool_result(
@@ -728,19 +742,11 @@ pub(super) async fn handle_callees(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    let node_id = require_node_id(&args)?;
+    let request: CalleesSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_callees")?;
+    let max_depth = request.max_depth.map_or(3, |value| value.min(10) as usize);
+    let resolve_dispatch = request.resolve_dispatch.unwrap_or(true);
 
-    let max_depth = args
-        .get("max_depth")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(3, |v| v.min(10) as usize);
-
-    let resolve_dispatch = args
-        .get("resolve_dispatch")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-
-    let occurrence = graph_occurrence_id(node_id)?;
+    let occurrence = graph_occurrence_id(&request.node_id)?;
     let results = traverse_verified_neighbors(
         graph,
         occurrence,
@@ -756,9 +762,20 @@ pub(super) async fn handle_callees(
     let mut items = results
         .iter()
         .map(|result| {
-            let mut value = verified_neighbor_value(result)?;
-            value["dispatch_via_trait"] = json!(false);
-            Ok(value)
+            let metadata = required_graph_metadata(&result.symbol)?;
+            Ok(CalleeV1 {
+                node_id: result.symbol.occurrence.as_str().to_owned(),
+                name: metadata.simple_name.clone(),
+                kind: metadata.kind.clone(),
+                file: required_graph_file_path(&result.symbol)?.to_owned(),
+                line: user_line(metadata.start_line),
+                edge_kind: canonical_relation_kind_name(result.edge_kind).to_owned(),
+                dispatch_via_trait: false,
+                depth: Some(u32::try_from(result.depth).map_err(|_| {
+                    graph_symbol_corrupt("callee traversal depth exceeds u32".to_owned())
+                })?),
+                dispatch_from: None,
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -769,27 +786,24 @@ pub(super) async fn handle_callees(
                     continue;
                 }
                 let metadata = required_graph_metadata(&impl_method)?;
-                items.push(json!({
-                    "node_id": impl_method.occurrence.as_str(),
-                    "name": metadata.simple_name,
-                    "kind": metadata.kind,
-                    "file": required_graph_file_path(&impl_method)?,
-                    "line": user_line(metadata.start_line),
-                    "edge_kind": "calls",
-                    "dispatch_via_trait": true,
-                    "dispatch_from": callee.symbol.occurrence.as_str(),
-                }));
+                items.push(CalleeV1 {
+                    node_id: impl_method.occurrence.as_str().to_owned(),
+                    name: metadata.simple_name.clone(),
+                    kind: metadata.kind.clone(),
+                    file: required_graph_file_path(&impl_method)?.to_owned(),
+                    line: user_line(metadata.start_line),
+                    edge_kind: "calls".to_owned(),
+                    dispatch_via_trait: true,
+                    depth: None,
+                    dispatch_from: Some(callee.symbol.occurrence.as_str().to_owned()),
+                });
             }
         }
     }
 
-    let touched_files = unique_file_paths(
-        items
-            .iter()
-            .filter_map(|v| v.get("file").and_then(Value::as_str)),
-    );
+    let touched_files = unique_file_paths(items.iter().map(|item| item.file.as_str()));
 
-    let value = json!(items);
+    let value = serde_json::to_value(items)?;
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
@@ -875,18 +889,14 @@ pub(super) async fn handle_impact(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    let node_id = require_node_id(&args)?;
+    let request: ImpactSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_impact")?;
+    let max_depth = request.max_depth.map_or(3, |value| value.min(10));
 
-    let max_depth = args
-        .get("max_depth")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(3, |v| v.min(10) as usize);
-
-    let occurrence = graph_occurrence_id(node_id)?;
+    let occurrence = graph_occurrence_id(&request.node_id)?;
     let impact = graph.impact(
         std::slice::from_ref(&occurrence),
         &[],
-        max_depth as u32,
+        max_depth,
         50_000,
         GRAPH_RELATION_READ_LIMIT,
     )?;
@@ -901,23 +911,23 @@ pub(super) async fn handle_impact(
         .iter()
         .map(|item| {
             let metadata = required_graph_metadata(&item.summary)?;
-            Ok(json!({
-                "id": item.summary.occurrence.as_str(),
-                "name": metadata.simple_name,
-                "kind": metadata.kind,
-                "file": required_graph_file_path(&item.summary)?,
-                "line": user_line(metadata.start_line),
-                "depth": item.depth,
-            }))
+            Ok(ImpactNodeV1 {
+                id: item.summary.occurrence.as_str().to_owned(),
+                name: metadata.simple_name.clone(),
+                kind: metadata.kind.clone(),
+                file: required_graph_file_path(&item.summary)?.to_owned(),
+                line: user_line(metadata.start_line),
+                depth: item.depth,
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let output = json!({
-        "node_count": nodes.len(),
-        "complete": impact.complete,
-        "unavailable_fields": ["edge_count"],
-        "nodes": nodes,
-    });
+    let output = serde_json::to_value(ImpactResultV1 {
+        node_count: nodes.len(),
+        complete: impact.complete,
+        unavailable_fields: vec!["edge_count".to_owned()],
+        nodes,
+    })?;
 
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }
@@ -928,8 +938,8 @@ pub(super) async fn handle_node(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    let node_id = require_node_id(&args)?;
-    let occurrence = graph_occurrence_id(node_id)?;
+    let request: NodeSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_node")?;
+    let occurrence = graph_occurrence_id(&request.node_id)?;
     let node = graph.symbol_summary(&occurrence)?;
 
     match node {
@@ -945,46 +955,43 @@ pub(super) async fn handle_node(
                     n.occurrence.as_str()
                 ))
             })?;
-            let output = json!({
-                "id": n.occurrence.as_str(),
-                "name": metadata.simple_name,
-                "kind": metadata.kind,
-                "qualified_name": metadata.qualified_name,
-                "file": file_path,
-                "start_line": user_line(metadata.start_line),
-                "end_line": user_line(end_line),
-                "signature": metadata.signature,
-                "visibility": metadata.visibility,
-                "branches": metadata.branches,
-                "loops": metadata.loops,
-                "max_nesting": metadata.max_nesting,
-                "cyclomatic_complexity": cyclomatic_complexity,
-                "cost_to_expand": cost_to_expand_verified(metadata, file_size_bytes)?,
-                "unavailable_fields": [
-                    "assertions", "attrs_start_line", "derives", "docstring", "is_async",
-                    "returns", "unchecked_calls", "unsafe_blocks"
-                ],
-            });
+            let line_count = end_line - metadata.start_line + 1;
+            let output = serde_json::to_value(NodeDetailsV1 {
+                id: n.occurrence.as_str().to_owned(),
+                name: metadata.simple_name.clone(),
+                kind: metadata.kind.clone(),
+                qualified_name: metadata.qualified_name.clone(),
+                file: file_path.to_owned(),
+                start_line: user_line(metadata.start_line),
+                end_line: user_line(end_line),
+                signature: metadata.signature.clone(),
+                visibility: metadata.visibility.clone(),
+                branches: metadata.branches,
+                loops: metadata.loops,
+                max_nesting: metadata.max_nesting,
+                cyclomatic_complexity,
+                cost_to_expand: NodeExpansionCostV1 {
+                    body: u64::from(line_count) * 20,
+                    full_file: file_size_bytes / 4,
+                },
+                unavailable_fields: [
+                    "assertions",
+                    "attrs_start_line",
+                    "derives",
+                    "docstring",
+                    "is_async",
+                    "returns",
+                    "unchecked_calls",
+                    "unsafe_blocks",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            })?;
             Ok(generic_tool_result(cg, &args, &output, touched_files))
         }
-        None => node_not_found_result(node_id),
+        None => node_not_found_result(&request.node_id),
     }
-}
-
-/// Typed not-found result for node lookups: a structured `status`/`reason_code`
-/// payload marked as a semantic failure, never a success-framed text blob.
-fn node_not_found_result(node_id: &str) -> Result<ToolResult> {
-    let output = json!({
-        "status": "not_found",
-        "reason_code": "node_not_found",
-        "node_id": node_id,
-        "message": format!("Node not found: {node_id}"),
-    });
-    Ok(
-        text_tool_result(&serde_json::to_string_pretty(&output)?, vec![])
-            .with_semantic_error(true)
-            .with_failure_message(format!("node not found: {node_id}")),
-    )
 }
 
 /// Handles `tracedecay_similar` tool calls.
@@ -997,30 +1004,21 @@ pub(super) async fn handle_similar(
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
-    require_object_args(&args, "tracedecay_similar")?;
-    let symbol =
-        args.get("symbol")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "missing required parameter: symbol".to_string(),
-            })?;
-
-    let limit = args
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .map_or(10, |v| v.min(100) as usize);
+    let request: SimilarSurfaceRequestV1 = decode_primitive_request(&args, "tracedecay_similar")?;
+    let limit = request.limit.map_or(10, |value| value.min(100) as usize);
+    let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
 
     let outcome = execute_code_index_search(
         search_executor,
         crate::mcp::server::CodeIndexSearchRequestV1 {
             project_root: cg.project_root().to_path_buf(),
-            query: symbol.to_owned(),
+            query: request.symbol,
             source_revision: None,
             source_tree: None,
             source_reference: None,
             limit,
             cursor: None,
-            mode: semantic_search_mode(&args)?,
+            mode: semantic_mode,
             authority: search_authority.cloned(),
             deadline,
             cancellation,
@@ -1064,19 +1062,19 @@ pub(super) async fn handle_similar(
         .iter()
         .map(|(node, utility_micros)| {
             let metadata = required_graph_metadata(node)?;
-            Ok(json!({
-                "id": node.occurrence.as_str(),
-                "name": metadata.simple_name,
-                "kind": metadata.kind,
-                "file": required_graph_file_path(node)?,
-                "line": user_line(metadata.start_line),
-                "signature": metadata.signature,
-                "utility_micros": utility_micros,
-            }))
+            Ok(SimilarSymbolV1 {
+                id: node.occurrence.as_str().to_owned(),
+                name: metadata.simple_name.clone(),
+                kind: metadata.kind.clone(),
+                file: required_graph_file_path(node)?.to_owned(),
+                line: user_line(metadata.start_line),
+                signature: metadata.signature.clone(),
+                utility_micros: *utility_micros,
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let value = json!(items);
+    let value = serde_json::to_value(items)?;
     Ok(generic_tool_result(cg, &args, &value, touched_files))
 }
 
@@ -1164,12 +1162,12 @@ pub(super) async fn handle_rename_preview(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
 ) -> Result<ToolResult> {
-    let node_id = require_node_id(&args)?;
-    let new_name = args.get("new_name").and_then(Value::as_str);
+    let request: RenamePreviewPrimitiveRequestV1 =
+        decode_primitive_request(&args, "tracedecay_rename_preview")?;
 
-    let occurrence = graph_occurrence_id(node_id)?;
+    let occurrence = graph_occurrence_id(&request.node_id)?;
     let Some(node) = graph.symbol_summary(&occurrence)? else {
-        return node_not_found_result(node_id);
+        return node_not_found_result(&request.node_id);
     };
     let node_metadata = required_graph_metadata(&node)?;
     let node_file = required_graph_file_path(&node)?;
@@ -1187,15 +1185,15 @@ pub(super) async fn handle_rename_preview(
             .get(node_metadata.start_line as usize)
             .map(|line| snippet_text(line))
     });
-    let declaration = json!({
-        "id": node.occurrence.as_str(),
-        "name": node_metadata.simple_name,
-        "qualified_name": node_metadata.qualified_name,
-        "kind": node_metadata.kind,
-        "file": node_file,
-        "line": user_line(node_metadata.start_line),
-        "snippet": decl_snippet,
-    });
+    let declaration = RenamePreviewNodeV1 {
+        id: node.occurrence.as_str().to_owned(),
+        name: node_metadata.simple_name.clone(),
+        qualified_name: node_metadata.qualified_name.clone(),
+        kind: node_metadata.kind.clone(),
+        file: node_file.to_owned(),
+        line: user_line(node_metadata.start_line),
+        snippet: decl_snippet,
+    };
 
     // Reference sites: incoming edges are the callers/users that name this
     // symbol. NOTE: call-edge coverage improves as the resolver improves; the
@@ -1205,7 +1203,7 @@ pub(super) async fn handle_rename_preview(
         &[],
         2_000_000,
     )?)?;
-    let mut references: Vec<Value> = Vec::new();
+    let mut references = Vec::<RenamePreviewReferenceV1>::new();
     for edge in incoming {
         let source_node = edge.neighbor;
         let source_metadata = required_graph_metadata(&source_node)?;
@@ -1216,15 +1214,15 @@ pub(super) async fn handle_rename_preview(
         let line = line_for_byte_offset(&source, edge.edge.evidence_span.start_byte)?;
         let snippet = cached_file_lines(cg, &mut lines_cache, source_file)
             .and_then(|lines| reference_line_snippet(lines, Some(line), &symbol_name));
-        references.push(json!({
-            "from_node_id": source_node.occurrence.as_str(),
-            "from_name": source_metadata.simple_name,
-            "from_kind": source_metadata.kind,
-            "edge_kind": canonical_relation_kind_name(edge.edge.kind),
-            "file": source_file,
-            "line": user_line(line),
-            "snippet": snippet,
-        }));
+        references.push(RenamePreviewReferenceV1 {
+            from_node_id: source_node.occurrence.as_str().to_owned(),
+            from_name: source_metadata.simple_name.clone(),
+            from_kind: source_metadata.kind.clone(),
+            edge_kind: canonical_relation_kind_name(edge.edge.kind).to_owned(),
+            file: source_file.to_owned(),
+            line: user_line(line),
+            snippet,
+        });
     }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));
@@ -1234,7 +1232,7 @@ pub(super) async fn handle_rename_preview(
     // comments/strings/dynamic-dispatch/unresolved sites a graph-only rename
     // would miss — the scan is bounded to files that already appear in the
     // preview, so occurrences in wholly unrelated files are not counted.
-    let mut text_only_matches: Vec<Value> = Vec::new();
+    let mut text_only_matches = Vec::<RenamePreviewTextOnlyMatchV1>::new();
     for file in &touched_files {
         let total = cached_file_lines(cg, &mut lines_cache, file).map_or(0, |lines| {
             lines
@@ -1245,28 +1243,29 @@ pub(super) async fn handle_rename_preview(
         let graph = graph_counts.get(file).copied().unwrap_or(0);
         let text_only = total.saturating_sub(graph);
         if text_only > 0 {
-            text_only_matches.push(json!({
-                "file": file,
-                "text_only_count": text_only,
-                "note": "text-only matches — review manually",
-            }));
+            text_only_matches.push(RenamePreviewTextOnlyMatchV1 {
+                file: file.clone(),
+                text_only_count: text_only,
+                note: "text-only matches — review manually".to_owned(),
+            });
         }
     }
 
-    let output = json!({
-        "read_only": true,
-        "note": "Preview only — nothing is edited. 'references' are graph reference \
-                 sites (the declaration is reported separately in 'node'); \
-                 'text_only_matches' are literal name occurrences NOT backed by a graph \
-                 edge (comments, strings, dynamic dispatch, unresolved refs) and must be \
-                 reviewed by hand. Graph call-edge coverage improves as the resolver does.",
-        "symbol": symbol_name,
-        "new_name": new_name,
-        "node": declaration,
-        "reference_count": references.len(),
-        "references": references,
-        "text_only_matches": text_only_matches,
-    });
+    let output = serde_json::to_value(RenamePreviewPrimitiveResultV1 {
+        read_only: true,
+        note: "Preview only — nothing is edited. 'references' are graph reference sites \
+               (the declaration is reported separately in 'node'); 'text_only_matches' are \
+               literal name occurrences NOT backed by a graph edge (comments, strings, \
+               dynamic dispatch, unresolved refs) and must be reviewed by hand. Graph \
+               call-edge coverage improves as the resolver does."
+            .to_owned(),
+        symbol: symbol_name,
+        new_name: request.new_name,
+        node: declaration,
+        reference_count: references.len(),
+        references,
+        text_only_matches,
+    })?;
 
     Ok(generic_tool_result(cg, &args, &output, touched_files))
 }

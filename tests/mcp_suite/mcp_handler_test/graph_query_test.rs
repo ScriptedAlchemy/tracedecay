@@ -1459,25 +1459,6 @@ async fn test_missing_required_params() {
 }
 
 // ---------------------------------------------------------------------------
-// 37. Node ID alias — using "id" instead of "node_id"
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_node_id_alias() {
-    let (cg, _dir) = production_graph_query_fixture().await;
-    let node_id = graph_node_id(&cg, "helper").await;
-    // Use "id" instead of "node_id"
-    let result = call_production_tool(&cg, "tracedecay_node", json!({"id": node_id}), None, None)
-        .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    assert!(
-        text.contains("helper"),
-        "node lookup via 'id' alias should still find the node"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Extra: coupling with fan_out direction
 // ---------------------------------------------------------------------------
 
