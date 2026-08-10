@@ -19,9 +19,10 @@ Claude Code.
   loads the body only when the workflow matches.
 - **Lifecycle hooks** (`hooks/hooks.json`): `SessionStart`, `Stop`, and saved
   edit `PostToolUse` events. Each handler submits one bounded native envelope
-  to the daemon and returns. The daemon owns follow-up capture, indexing,
-  staleness work, and any advisory delivery; hooks never read stores, route
-  tools, or run a model.
+  to the daemon and may return daemon-approved guidance through Claude Code's
+  documented `additionalContext` response. The daemon owns follow-up capture,
+  indexing, staleness work, and any advisory delivery; hooks never read stores,
+  route tools, or run a model.
 
 ## Install
 

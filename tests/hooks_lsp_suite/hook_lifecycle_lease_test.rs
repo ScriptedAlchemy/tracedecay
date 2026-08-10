@@ -126,7 +126,18 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
             !home.join(".tracedecay").exists(),
             "{hook} created broad profile state"
         );
-        assert_eq!(output.stdout, b"{}\n", "{hook}: {output:?}");
+        let expected_stdout: &[u8] = match hook {
+            // These providers support immediate context for PostToolUse. With
+            // no bound daemon guidance, the canonical response journey emits
+            // no JSON instead of fabricating context or the capture lane's
+            // transport-only `{}` acknowledgement.
+            "hook-claude-post-tool-use" | "hook-codex-post-tool-use" => b"",
+            // Cursor sessionStart has a host-specific response even when no
+            // project is bound: empty context and no session environment.
+            "hook-cursor-session-start" => b"{\"additional_context\":\"\",\"env\":{}}\n",
+            _ => b"{}\n",
+        };
+        assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");
         assert!(output.stderr.is_empty(), "{hook}: {output:?}");
     }
 
@@ -137,6 +148,110 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
     assert!(output.stdout.is_empty(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
     assert!(!home.join(".tracedecay").exists());
+}
+
+#[test]
+fn cursor_before_submit_prompt_remains_capture_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let payload = serde_json::json!({
+        "hook_event_name": "beforeSubmitPrompt",
+        "conversation_id": "cursor-prompt-session",
+        "generation_id": "cursor-prompt-generation",
+        "prompt": "inspect the current change",
+        "workspace_roots": [temp.path()],
+    })
+    .to_string();
+
+    let output = run_hook(
+        temp.path(),
+        "hook-cursor-before-submit-prompt",
+        Some(payload.as_bytes()),
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"{}\n", "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(
+        !temp.path().join(".tracedecay").exists(),
+        "capture-only denial surface must not create profile state"
+    );
+}
+
+#[test]
+fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
+    let temp = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            "hook-claude-session-start",
+            serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "claude-session",
+                "cwd": temp.path(),
+                "source": "startup",
+            }),
+            b"{}\n".as_slice(),
+        ),
+        (
+            "hook-claude-post-tool-use",
+            serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "claude-session",
+                "cwd": temp.path(),
+                "tool_name": "Write",
+                "tool_input": { "file_path": temp.path().join("src/lib.rs") },
+                "tool_response": { "success": true },
+            }),
+            b"".as_slice(),
+        ),
+        (
+            "hook-stop",
+            serde_json::json!({
+                "hook_event_name": "Stop",
+                "session_id": "claude-session",
+                "cwd": temp.path(),
+                "stop_hook_active": false,
+            }),
+            b"{}\n".as_slice(),
+        ),
+        (
+            "hook-codex-session-start",
+            serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "codex-session",
+                "cwd": temp.path(),
+                "source": "startup",
+            }),
+            b"{}\n".as_slice(),
+        ),
+        (
+            "hook-codex-post-tool-use",
+            serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "codex-session",
+                "cwd": temp.path(),
+                "tool_name": "apply_patch",
+                "tool_input": { "command": "*** Begin Patch\n*** End Patch" },
+                "tool_response": "Done!",
+            }),
+            b"".as_slice(),
+        ),
+        (
+            "hook-cursor-session-start",
+            serde_json::json!({
+                "hook_event_name": "sessionStart",
+                "conversation_id": "cursor-session",
+                "workspace_roots": [],
+            }),
+            b"{\"additional_context\":\"\",\"env\":{}}\n".as_slice(),
+        ),
+    ];
+
+    for (hook, payload, expected_stdout) in cases {
+        let output = run_hook(temp.path(), hook, Some(payload.to_string().as_bytes()));
+        assert!(output.status.success(), "{hook}: {output:?}");
+        assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");
+        assert!(output.stderr.is_empty(), "{hook}: {output:?}");
+    }
 }
 
 #[test]
@@ -259,7 +374,12 @@ fn native_hook_captures_only_bound_transport_spool_records() {
         let output = run_hook_at(&home, &project, hook, Some(&payload));
 
         assert!(output.status.success(), "{hook}: {output:?}");
-        assert_eq!(output.stdout, b"{}\n", "{hook}: {output:?}");
+        let expected_stdout: &[u8] = if hook == "hook-claude-post-tool-use" {
+            b""
+        } else {
+            b"{}\n"
+        };
+        assert_eq!(output.stdout, expected_stdout, "{hook}: {output:?}");
         assert!(output.stderr.is_empty(), "{hook}: {output:?}");
         assert!(!home.join(".tracedecay/lifecycle.lock").exists());
         assert!(!home.join(".tracedecay/global.db").exists());

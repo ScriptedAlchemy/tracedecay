@@ -50,8 +50,8 @@ pub use codex::{
 pub use cursor::{
     CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
     cursor_should_run_sync, evaluate_cursor_subagent_start, hook_cursor_after_file_edit,
-    hook_cursor_after_shell, hook_cursor_before_submit_prompt, hook_cursor_post_tool_use,
-    hook_cursor_pre_compact, hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
+    hook_cursor_after_shell, hook_cursor_post_tool_use, hook_cursor_pre_compact,
+    hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
     hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
@@ -67,12 +67,12 @@ pub use steering::{
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;
 pub(crate) use analytics::HookCompletedReadinessDistributions;
+use analytics::mint_hint_id;
 #[cfg(test)]
 pub(crate) use analytics::{host_hook_telemetry_contract, measure_host_event_payload_bytes};
 use analytics::{
-    mint_hint_id, record_hint_analytics, record_hint_emitted, record_hook_analytics,
-    record_hook_invoked, record_hook_invoked_parsed, record_other_hook_invoked,
-    record_workspace_status_analytics,
+    record_hint_analytics, record_hint_emitted, record_hook_analytics, record_hook_invoked,
+    record_hook_invoked_parsed, record_other_hook_invoked, record_workspace_status_analytics,
 };
 
 pub(crate) fn aggregate_hook_completed_readiness(
@@ -814,21 +814,6 @@ fn hook_route_session_id(parsed: &Value) -> Option<String> {
             "chatId",
         ],
     )
-}
-
-/// Dedupes a hint for a project without a pre-minted candidate id. Callers that
-/// do not record their own `hint_candidate` (e.g. the Claude post-tool-use
-/// surface) use this shape; it mints an id so the terminal row still correlates
-/// via `hint_id`. Callers that already recorded a `hint_candidate` must instead
-/// use [`deduped_project_hint_with_id`] so the terminal shares that id.
-fn deduped_project_hint(
-    root: Option<&Path>,
-    agent: HintAgent,
-    session_id: Option<String>,
-    hint: ToolHint,
-) -> Option<ToolHint> {
-    let hint_id = mint_hint_id();
-    deduped_project_hint_with_id(root, agent, session_id, &hint_id, hint)
 }
 
 fn deduped_project_hint_with_id(

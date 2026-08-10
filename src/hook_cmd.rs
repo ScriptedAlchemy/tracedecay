@@ -17,6 +17,27 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         exit_if_nonzero(tracedecay::hooks::hook_codex_post_compact().await);
         return Ok(());
     }
+    let native_response_code = match &command {
+        Commands::HookStop => Some(tracedecay::hooks::hook_stop().await),
+        Commands::HookClaudeSessionStart => {
+            Some(tracedecay::hooks::hook_claude_session_start().await)
+        }
+        Commands::HookClaudePostToolUse => {
+            Some(tracedecay::hooks::hook_claude_post_tool_use().await)
+        }
+        Commands::HookCursorSessionStart => {
+            Some(tracedecay::hooks::hook_cursor_session_start().await)
+        }
+        Commands::HookCodexSessionStart => {
+            Some(tracedecay::hooks::hook_codex_session_start().await)
+        }
+        Commands::HookCodexPostToolUse => Some(tracedecay::hooks::hook_codex_post_tool_use().await),
+        _ => None,
+    };
+    if let Some(code) = native_response_code {
+        exit_if_nonzero(code);
+        return Ok(());
+    }
     if let Some(source) = crate::hook_capture_cmd::capture_source_for_command(&command) {
         exit_if_nonzero(crate::hook_capture_cmd::run_native_capture(source));
         return Ok(());

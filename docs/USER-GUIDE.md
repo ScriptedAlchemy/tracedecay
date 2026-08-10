@@ -305,10 +305,12 @@ Cursor install is plugin-based:
 - `tracedecay install --agent cursor` installs `cursor-plugin/` into `~/.cursor/plugins/local/tracedecay`.
 - The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory. If a host spawns the server without expanding `${workspaceFolder}`, `serve` warns and falls back to project discovery where possible (details in the plugin's `README.md`).
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
-- The plugin bundles Cursor-specific, fail-open hooks: `sessionStart`,
-  `preCompact`, `afterFileEdit`, and `stop`. Each uses the native event only to
-  make a bounded daemon-admission attempt. The daemon then owns transcript
-  capture, indexing, compaction, branch/preflight work, and advisory delivery.
+- The Cursor plugin's daemon-owned native lifecycle journey uses
+  `sessionStart`, `preCompact`, `afterFileEdit`, and `stop`. Each hook is
+  fail-open; only `sessionStart` can return immediate `additional_context`.
+  Cursor's `beforeSubmitPrompt` contract cannot inject model context, so
+  TraceDecay does not install it. The daemon owns transcript capture, indexing,
+  compaction, branch/preflight work, and advisory delivery.
   Manual or external-terminal changes are still best covered by the git
   post-commit hook and on-demand MCP staleness checks.
 

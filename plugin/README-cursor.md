@@ -296,9 +296,10 @@ window.
 
 ## Known limitations
 
-- **Cloud agents:** lifecycle availability is host-dependent. The installed
-  desktop projection uses `sessionStart`, `preCompact`, `afterFileEdit`, and
-  `stop`; each is fail-open and only performs bounded daemon admission.
+- **Cloud agents:** lifecycle availability is host-dependent. The desktop
+  projection's daemon-owned native lifecycle journey uses `sessionStart`,
+  `preCompact`, `afterFileEdit`, and `stop`; each is fail-open. Only
+  `sessionStart` has a host-supported immediate context response.
 - Session recall is sourced from the daemon's canonical project store, not a
   host hook's local transcript read.
 

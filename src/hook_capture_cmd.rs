@@ -129,6 +129,13 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
         // without reviving the removed hook-local policy authority.
         return (args.len() == 2).then_some(0).or(Some(1));
     }
+    // Hooks with a provider-supported synchronous response must enter the
+    // async composition root: their existing handlers perform the canonical
+    // V2 admission/replay journey and render only daemon-approved guidance.
+    // The remaining native callbacks stay on the capture-only fast path.
+    if native_response_command_from_name(command) {
+        return None;
+    }
     let source = capture_source_from_name(command)?;
     (args.len() == 2)
         .then(|| run_native_capture(source))
@@ -147,6 +154,18 @@ fn capture_source_from_name(command: &str) -> Option<NativeHookCaptureSourceV1> 
     NATIVE_CAPTURE_COMMANDS
         .iter()
         .find_map(|(name, source)| (*name == command).then_some(*source))
+}
+
+fn native_response_command_from_name(command: &str) -> bool {
+    matches!(
+        command,
+        "hook-stop"
+            | "hook-claude-session-start"
+            | "hook-claude-post-tool-use"
+            | "hook-cursor-session-start"
+            | "hook-codex-session-start"
+            | "hook-codex-post-tool-use"
+    )
 }
 
 fn capture_command_name(command: &Commands) -> Option<&'static str> {

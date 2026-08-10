@@ -11,17 +11,13 @@ use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::claude::is_code_research_prompt;
-use super::post_tool_use::{
-    CODEX_POST_TOOL_USE_SPEC, captured_tool_output, notify_post_tool_use, tool_input_command_str,
-    trusted_tool_failure,
-};
 use super::steering::{
     HookWorkspaceStatus, build_codex_session_context_for_workspace, cursor_index_signals_for_root,
 };
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
-    append_tool_hint, deduped_project_hint, deduped_project_hint_with_id, event_cwd_from_parsed,
-    event_project_root, event_project_root_from_json, event_project_root_with_identity,
+    append_tool_hint, deduped_project_hint_with_id, event_cwd_from_parsed, event_project_root,
+    event_project_root_from_json, event_project_root_with_identity,
     event_project_root_with_identity_from_json, event_session_id, format_tool_hint,
     is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,
     record_hint_analytics, record_hook_analytics, record_hook_invoked, record_hook_invoked_parsed,
@@ -57,19 +53,15 @@ pub async fn hook_codex_session_start() -> i32 {
         &event,
         &parsed,
     );
-    let guidance = if let Some(root) = root.as_deref() {
-        super::dispatch::dispatch(
-            tracedecay_hooks::HookHostV1::Codex,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-        .flatten()
-    } else {
-        None
-    };
+    let guidance = super::dispatch::dispatch_for_scope(
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten();
     let output = guidance.map_or_else(
         || serde_json::json!({}).to_string(),
         |guidance| codex_additional_context_json("SessionStart", &guidance),
@@ -190,19 +182,14 @@ pub async fn hook_codex_subagent_start() -> i32 {
     0
 }
 
-/// Codex `PostToolUse` hook handler used to keep the graph fresh and to surface
-/// a soft tracedecay hint for edits and shell commands.
+/// Codex `PostToolUse` hook handler.
 ///
-/// Two independent outputs, mirroring [`super::claude::hook_claude_post_tool_use`]:
-/// the daemon notification (targeted sync / branch tracking, via IPC only) and,
-/// for `apply_patch` edits plus `Bash`/`shell` commands, a `PostToolUse`
-/// `additionalContext` hint printed to stdout (Codex injects it as developer
-/// context). The daemon path never writes stdout, so the two do not interfere.
-/// Fail-open: no surviving hint leaves prior behavior unchanged.
+/// The native event enters the canonical V2 admission/replay journey. Only
+/// daemon-approved ready guidance is rendered in Codex's documented
+/// `additionalContext` shape; unavailable or guidance-free admission is silent.
 pub async fn hook_codex_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    // One parse for the whole hook, like the Claude post-tool surface: root,
-    // analytics, the hint decision, and the daemon notification all read it.
+    // One parse supplies exact scope and analytics attribution.
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
@@ -212,37 +199,21 @@ pub async fn hook_codex_post_tool_use() -> i32 {
         &event,
         &parsed,
     );
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::dispatch::dispatch(
-            tracedecay_hooks::HookHostV1::Codex,
-            &event,
-            root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            if !super::write_hook_output(
-                Some(root),
-                tracedecay_hooks::HookHostV1::Codex,
-                &event,
-                &codex_additional_context_json("PostToolUse", &guidance),
-                Some(&hook_telemetry),
-            )
-            .await
-            {
-                return 1;
-            }
-        }
-        return 0;
-    }
-    if let Some(context) = codex_post_tool_use_hint(&parsed) {
+    let guidance = super::dispatch::dispatch_for_scope(
+        tracedecay_hooks::HookHostV1::Codex,
+        &event,
+        root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    .flatten();
+    if let Some(guidance) = guidance {
         if !super::write_hook_output(
             root.as_deref(),
             tracedecay_hooks::HookHostV1::Codex,
             &event,
-            &codex_additional_context_json("PostToolUse", &context),
+            &codex_additional_context_json("PostToolUse", &guidance),
             Some(&hook_telemetry),
         )
         .await
@@ -250,73 +221,7 @@ pub async fn hook_codex_post_tool_use() -> i32 {
             return 1;
         }
     }
-    notify_post_tool_use(&CODEX_POST_TOOL_USE_SPEC, &parsed).await;
     0
-}
-
-/// Builds the `PostToolUse` `additionalContext` string for a Codex edit or
-/// shell event, or `None` when no hint survives dedupe. Decides the raw hint
-/// with [`decide_codex_post_tool_use_hint`], then dedupes per (session,
-/// category) via [`deduped_project_hint`] exactly like the Claude post-tool-use
-/// surface (which mints its own candidate id and records only the terminal row).
-fn codex_post_tool_use_hint(parsed: &Value) -> Option<String> {
-    let hint = decide_codex_post_tool_use_hint(parsed)?;
-    let root = event_project_root(parsed);
-    let session_id = event_session_id(parsed);
-    let hint = deduped_project_hint(root.as_deref(), HintAgent::Codex, session_id, hint)?;
-    Some(format_tool_hint(&hint))
-}
-
-/// Pure hint decision for a Codex `PostToolUse` event: shapes a
-/// [`ToolHintInput`] from the event's tool name and `tool_input.command`, then
-/// runs [`decide_hint`]. Returns `None` for tools outside the installed
-/// `Bash|apply_patch` matcher and when no hint applies. No I/O, so it is
-/// unit-testable without a profile store.
-///
-/// The tool name is mapped onto the hint system's Claude-shaped vocabulary so
-/// the shared classifiers apply unchanged: `apply_patch` -> `Edit` (an edit
-/// tool, with the added source and target path extracted from the patch
-/// envelope so the redundancy heuristic sees the same function-body shape
-/// Claude's `new_string` carries), and `shell`/`bash` -> `Bash` (the command
-/// drives the search/build classifiers). The patch envelope is never forwarded
-/// as a shell `command`, so command classifiers cannot misfire on patch text.
-fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
-    let tool_name = parsed.get("tool_name").and_then(Value::as_str)?;
-    let command = tool_input_command_str(parsed);
-    let session_id = event_session_id(parsed);
-    let input = match tool_name.to_ascii_lowercase().as_str() {
-        "apply_patch" => {
-            let command = command?;
-            ToolHintInput {
-                agent: HintAgent::Codex,
-                session_id,
-                tool_name: Some("Edit".to_string()),
-                command: None,
-                prompt: None,
-                subagent_type: None,
-                file_path: codex_apply_patch_first_target_path(&command),
-                captured_output: captured_tool_output(parsed),
-                trusted_failure: trusted_tool_failure(parsed),
-                edit_text: codex_apply_patch_added_text(&command),
-                hints_enabled: true,
-            }
-        }
-        "bash" | "shell" => ToolHintInput {
-            agent: HintAgent::Codex,
-            session_id,
-            tool_name: Some("Bash".to_string()),
-            command,
-            prompt: None,
-            subagent_type: None,
-            file_path: None,
-            captured_output: captured_tool_output(parsed),
-            trusted_failure: trusted_tool_failure(parsed),
-            edit_text: None,
-            hints_enabled: true,
-        },
-        _ => return None,
-    };
-    decide_hint(&input)
 }
 
 /// Codex `PostCompact` hook handler.
@@ -727,42 +632,6 @@ pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Pat
     rels
 }
 
-/// First target file path named by a Codex `apply_patch` envelope, verbatim (not
-/// resolved against any root). Enough for the redundancy hint classifier, which
-/// keys only off the path's extension to pick the language. `O(len(command))`.
-fn codex_apply_patch_first_target_path(command: &str) -> Option<String> {
-    command.lines().find_map(|line| {
-        let line = line.trim();
-        CODEX_APPLY_PATCH_PATH_PREFIXES.iter().find_map(|prefix| {
-            line.strip_prefix(prefix)
-                .map(str::trim)
-                .filter(|raw| !raw.is_empty())
-                .map(str::to_string)
-        })
-    })
-}
-
-/// The added-line text of a Codex `apply_patch` envelope: the body of every
-/// `+`-prefixed addition with the marker stripped, joined by newlines. This is
-/// the Codex analogue of Claude's edit `new_string`/`content` — the source the
-/// model just wrote — so it feeds the shared function-body redundancy heuristic
-/// without the envelope markers, hunk headers, or unchanged context lines
-/// defeating the line-count and keyword checks. Returns `None` when the patch
-/// adds nothing. `O(len(command))`: one line scan, no patch application.
-fn codex_apply_patch_added_text(command: &str) -> Option<String> {
-    let mut added: Vec<&str> = Vec::new();
-    for line in command.lines() {
-        // Envelope (`*** …`) and hunk (`@@ …`) markers are never added source.
-        if line.starts_with("***") || line.starts_with("@@") {
-            continue;
-        }
-        if let Some(body) = line.strip_prefix('+') {
-            added.push(body);
-        }
-    }
-    (!added.is_empty()).then(|| added.join("\n"))
-}
-
 async fn codex_post_compact(
     event_json: &str,
     telemetry: Option<&super::analytics::HookTimingSpan>,
@@ -868,121 +737,6 @@ mod tests {
             event.cwd.as_deref(),
             Some(Path::new("/workspace/codex-session"))
         );
-    }
-
-    const QUALIFYING_RUST_PATCH: &str = "*** Begin Patch\n\
-*** Add File: src/util.rs\n\
-+pub fn summarize(hits: &[Hit]) -> u32 {\n\
-+    let mut total = 0;\n\
-+    for hit in hits {\n\
-+        if hit.active {\n\
-+            total += hit.count;\n\
-+        }\n\
-+    }\n\
-+    total\n\
-+}\n\
-*** End Patch\n";
-
-    #[test]
-    fn codex_apply_patch_added_text_strips_markers_and_plus() {
-        let added = codex_apply_patch_added_text(QUALIFYING_RUST_PATCH).unwrap();
-        assert!(added.starts_with("pub fn summarize("));
-        assert!(added.contains("fn "));
-        // Envelope markers and hunk headers must not leak into the added text.
-        assert!(!added.contains("*** "));
-        assert!(!added.contains("Begin Patch"));
-        // Nine `+` body lines, one per addition, marker stripped.
-        assert_eq!(added.lines().count(), 9);
-        assert!(!added.lines().any(|line| line.starts_with('+')));
-
-        // A patch that adds nothing yields no text.
-        let no_adds = "*** Begin Patch\n*** Delete File: src/gone.rs\n*** End Patch\n";
-        assert!(codex_apply_patch_added_text(no_adds).is_none());
-    }
-
-    #[test]
-    fn codex_apply_patch_first_target_path_reads_first_marker() {
-        assert_eq!(
-            codex_apply_patch_first_target_path(QUALIFYING_RUST_PATCH).as_deref(),
-            Some("src/util.rs")
-        );
-        assert!(codex_apply_patch_first_target_path("no markers here").is_none());
-    }
-
-    fn post_tool_use_event(tool_name: &str, command: &str) -> Value {
-        serde_json::json!({
-            "session_id": "codex-post-tool",
-            "cwd": "/repo",
-            "tool_name": tool_name,
-            "tool_input": { "command": command },
-        })
-    }
-
-    #[test]
-    fn codex_apply_patch_event_nudges_edit_redundancy() {
-        let event = post_tool_use_event("apply_patch", QUALIFYING_RUST_PATCH);
-        let hint = decide_codex_post_tool_use_hint(&event)
-            .expect("a function-sized apply_patch must nudge edit redundancy");
-        assert_eq!(hint.category, HintCategory::EditRedundancy);
-    }
-
-    #[test]
-    fn codex_small_apply_patch_stays_silent() {
-        let small = "*** Begin Patch\n\
-*** Update File: src/util.rs\n\
-+    let x = compute();\n\
-*** End Patch\n";
-        let event = post_tool_use_event("apply_patch", small);
-        assert!(
-            decide_codex_post_tool_use_hint(&event).is_none(),
-            "a one-line apply_patch is below the redundancy line threshold"
-        );
-    }
-
-    #[test]
-    fn codex_non_code_apply_patch_stays_silent() {
-        let notes = "*** Begin Patch\n\
-*** Add File: NOTES.md\n\
-+# Heading\n\
-+first paragraph line\n\
-+second paragraph line\n\
-+third paragraph line\n\
-+fourth paragraph line\n\
-+fifth paragraph line\n\
-+sixth paragraph line\n\
-+seventh paragraph line\n\
-+eighth paragraph line\n\
-*** End Patch\n";
-        let event = post_tool_use_event("apply_patch", notes);
-        assert!(
-            decide_codex_post_tool_use_hint(&event).is_none(),
-            "a prose markdown patch has no function shape and must stay silent"
-        );
-    }
-
-    #[test]
-    fn codex_shell_event_carries_command_and_no_edit_text() {
-        // A recursive shell search routes to the graph-search hint off the
-        // command alone, with no edit_text — the Bash-shaped surface.
-        let event = post_tool_use_event("shell", "grep -r needle src/");
-        let hint = decide_codex_post_tool_use_hint(&event)
-            .expect("a recursive shell search must produce a search hint");
-        assert_eq!(hint.category, HintCategory::Search);
-
-        // A plain shell command is not a candidate.
-        let plain = post_tool_use_event("bash", "ls -la");
-        assert!(decide_codex_post_tool_use_hint(&plain).is_none());
-    }
-
-    #[test]
-    fn codex_post_tool_use_ignores_untracked_tools() {
-        // No tool_name and tools outside the Bash|apply_patch matcher are silent.
-        assert!(decide_codex_post_tool_use_hint(&serde_json::json!({})).is_none());
-        let read = serde_json::json!({
-            "tool_name": "read",
-            "tool_input": { "command": "" },
-        });
-        assert!(decide_codex_post_tool_use_hint(&read).is_none());
     }
 
     #[test]

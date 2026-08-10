@@ -25,12 +25,6 @@
         "timeout": 5
       }
     ],
-    "beforeSubmitPrompt": [
-      {
-        "command": "tracedecay hook-cursor-before-submit-prompt",
-        "timeout": 5
-      }
-    ],
     "afterFileEdit": [
       {
         "command": "tracedecay hook-cursor-after-file-edit",

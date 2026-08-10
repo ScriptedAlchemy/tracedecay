@@ -159,11 +159,11 @@ deliberate design choice preventing ad-hoc work.
 
 Two structural notes:
 
-- The Cursor `beforeSubmitPrompt` hook **cannot inject context** (per the
-  comment at `src/hooks/cursor.rs`, only `user_message` is available on that
-  event), so per-prompt re-steering à la Codex's `UserPromptSubmit` is not
-  available on Cursor — which makes sessionStart and postToolUse the only
-  injection points, and both are currently minimal.
+- Cursor's `beforeSubmitPrompt` event **cannot inject context** (its documented
+  output is only `{continue, user_message}`), so TraceDecay does not install
+  that hook. Per-prompt re-steering à la Codex's `UserPromptSubmit` is not
+  available on Cursor; `sessionStart` and `postToolUse` are the available
+  context-injection contracts.
 - Skill overlap is real: a model wanting to "find where X is defined and what
   calls it" plausibly matches `searching-for-code`, `tracing-functions`,
   `reading-code-cheaply`, `exploring-types-and-traits`, and

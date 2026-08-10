@@ -15,9 +15,11 @@ Codex.
   only when the workflow matches. These mirror the model-invocable Cursor skills
   so both hosts steer agents toward the same tracedecay tools.
 - **Lifecycle hooks** (`hooks/hooks.json`, referenced from the manifest's
-  `hooks` field): `SessionStart`, `PostCompact`, and `Stop` submit bounded
-  native lifecycle envelopes to the daemon. The host hook exits after the
-  admission attempt; the daemon owns capture, preflight, compaction, and any
+  `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
+  `PostToolUse`, `PostCompact`, and `Stop`. `SessionStart` and `PostToolUse`
+  can return daemon-approved guidance through Codex's documented
+  `additionalContext` response. The other events are capture-only or bounded
+  pressure probes. The daemon owns capture, preflight, compaction, and any
   model work.
 
 The source `hooks/hooks-codex.json` is an empty seed for repo-local bundles.

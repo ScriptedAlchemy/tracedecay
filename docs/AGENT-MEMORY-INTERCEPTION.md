@@ -87,17 +87,16 @@ hashes recorded under `[hooks.state]` in `config.toml`):
 | Event | Payload includes | Output contract | Context injection? |
 | --- | --- | --- | --- |
 | `SessionStart` | session id, cwd, source (`compact` for post-compaction restarts) | `hookSpecificOutput.additionalContext` | **Yes** |
-| `UserPromptSubmit` | session id, cwd, **prompt text** | `hookSpecificOutput.additionalContext` | **Yes — per prompt** |
-| `SubagentStart` | session id, agent type | `hookSpecificOutput.additionalContext` | **Yes** |
-| `PostToolUse` | tool name, command | (used for ingest/steering) | Yes |
+| `UserPromptSubmit` | session id, cwd, **prompt text** | capture-only in TraceDecay | No |
+| `SubagentStart` | session id, agent type | capture-only in TraceDecay | No |
+| `PostToolUse` | tool name, command | `hookSpecificOutput.additionalContext` | **Yes** |
 | `PostCompact` | rollout path / pressure boundary | typed native-payload availability probe | No |
+| `Stop` | session id, cwd, final response metadata | capture-only in TraceDecay | No |
 
-**Key asymmetry vs Cursor:** Codex's `UserPromptSubmit` hook receives the
-prompt text *and* can inject `additionalContext` — a true per-prompt memory
-recall channel. TraceDecay already exploits this channel for tool-routing
-hints (`src/hooks/codex.rs::hook_codex_user_prompt_submit` →
-`codex_user_prompt_submit_context_for_event` →
-`codex_additional_context_json("UserPromptSubmit", …)`), just not for facts.
+Codex's mounted immediate-response journey is deliberately limited to the
+documented `SessionStart` and `PostToolUse` response contracts. The remaining
+registered events are capture-only or pressure probes and never fabricate
+context locally.
 
 ---
 
@@ -141,8 +140,7 @@ cursor.com/docs/hooks): `sessionStart`/`sessionEnd`, `preToolUse`/`postToolUse`/
 `beforeReadFile`/`afterFileEdit`, `beforeSubmitPrompt`, `preCompact`, `stop`,
 `afterAgentResponse`/`afterAgentThought`, `workspaceOpen`.
 
-Context-injection capability per event (verified against docs + forum + the
-comment in `src/hooks/cursor.rs::hook_cursor_before_submit_prompt`):
+Context-injection capability per event (verified against host documentation):
 
 | Event | Injection field | Notes |
 | --- | --- | --- |
@@ -169,9 +167,9 @@ Writes the Cursor projection of the shared plugin bundle
 
 - **`mcp.json`** — stdio server `tracedecay serve --path ${workspaceFolder}`
   (all fact-store/memory/graph tools available to the model).
-- **`hooks/hooks.json`** — 9 hooks: `sessionStart`, `beforeSubmitPrompt`,
-  `postToolUse`, `afterFileEdit`, `afterShellExecution`, `preCompact`,
-  `sessionEnd`, `stop`, `workspaceOpen`, each shelling to
+- **`hooks/hooks.json`** — 8 hooks: `sessionStart`, `postToolUse`,
+  `afterFileEdit`, `afterShellExecution`, `preCompact`, `sessionEnd`, `stop`,
+  `workspaceOpen`, each shelling to
   `tracedecay hook-cursor-*` (dispatch: `src/hook_cmd.rs`, impls:
   `src/hooks/`).
 - **`rules/tracedecay.mdc`** — always-applied rule; its **Recall** bullet
@@ -186,13 +184,18 @@ Writes the Cursor projection of the shared plugin bundle
 
 What the hooks currently do (all fail-open):
 
-- `sessionStart`, `afterFileEdit`, and `stop` submit their content-free native
-  event boundary to the daemon-owned V2 admission route. Immediate daemon
-  guidance is returned in Cursor's output shape; an unavailable daemon returns
-  the host's empty/fail-open response. `sessionStart` also sets
-  `TRACEDECAY_PROJECT_ROOT` when a registered workspace is resolved.
-- `beforeSubmitPrompt` and `postToolUse` are passive legacy surfaces; they do
-  not read transcripts, memory, or hint state.
+- `sessionStart` submits its content-free native event boundary to the
+  daemon-owned V2 admission route. Immediate daemon guidance is returned in
+  Cursor's documented `additional_context` shape; an unavailable daemon
+  returns empty context. It also sets `TRACEDECAY_PROJECT_ROOT` when a
+  registered workspace is resolved.
+- `afterFileEdit`, `sessionEnd`, and `stop` are capture-only native boundaries;
+  their host contracts do not accept immediate context. `postToolUse`,
+  `afterShellExecution`, and `workspaceOpen` remain fail-open capture-only
+  commands for installed or stale projections, and unsupported native families
+  produce no replay record.
+- `beforeSubmitPrompt` is not installed because Cursor only accepts
+  `{continue, user_message}` there; it cannot carry model context.
 - `preCompact` submits only the bounded daemon compaction event. The daemon,
   not the hook process, owns any transcript, LCM, review, or indexing work.
   The pressure probe is read-only: Cursor exposes no authenticated native
@@ -212,15 +215,14 @@ marketplace entry (`install_codex_marketplace_entry`) and
 - **`hooks/hooks.json`** (`codex_plugin_hooks`, `crates/tracedecay-agent-hosts/src/agents/codex.rs:582`) —
   `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
   `PostToolUse` (matcher `Bash|apply_patch`), `PostCompact`
-  (matcher `auto|manual`). Hooks require one-time `/hooks` trust
+  (matcher `auto|manual`), and `Stop`. Hooks require one-time `/hooks` trust
   (`print_hook_trust_guidance`); trusted hashes live in `[hooks.state]`.
 - **`skills/`** — shared skills from `plugin/skills/` plus the
   `agent-managed/` overlay.
-- **No rule surface exists in Codex**, so the steering text Cursor gets via
-  `tracedecay.mdc` is injected through `SessionStart`/`UserPromptSubmit`
-  `additionalContext` instead (`build_codex_session_context`,
-  `codex_user_prompt_submit_context_for_event` — index status + skills + tool
-  hints. **No facts.**).
+- **No rule surface exists in Codex.** `SessionStart` and `PostToolUse` may
+  return only daemon-approved `additionalContext`; `UserPromptSubmit`,
+  `SubagentStart`, and `Stop` remain capture-only. **No facts are fabricated or
+  injected by the hook process.**
 - `PostCompact` forwards the native pressure boundary to the daemon. Because
   the hook exposes no authenticated compacted payload, publication is typed
   unavailable and no auxiliary summary is substituted.
@@ -285,7 +287,7 @@ surfaces on a schedule.
 | --- | --- | --- |
 | Facts stored | ✅ fact store (9 facts here) + LCM transcripts | same store |
 | Model *can* recall | ✅ MCP `tracedecay_fact_store_search` + skill | ✅ same |
-| Model is *told* to recall | ⚠️ soft steering in SessionStart/UserPromptSubmit context; `project-memory` skill matches only when the model thinks "recall" | ⚠️ one Recall bullet in `tracedecay.mdc`; same skill-match dependency |
+| Model is *told* to recall | ⚠️ daemon-approved SessionStart/PostToolUse guidance when available; `project-memory` skill matches only when the model thinks "recall" | ⚠️ one Recall bullet in `tracedecay.mdc`; same skill-match dependency |
 | Facts *pushed* into context | ❌ none — hook context is index status + hints only | ❌ none |
 | Automatic storage | ⚠️ session_reflector exists but disabled by default; skills say "add facts **only when the user asks**" (`project-memory` guardrail) | same |
 | Native memory overlap | ⚠️ Codex memories **on** (`features.memories=true`), learning from the same threads in parallel | Unknown toggle state; server-side, uninspectable |
@@ -300,11 +302,11 @@ model electing to call an MCP tool; storage depends on the user saying
 
 ## 5. Integration designs
 
-### A. Codex per-prompt & session-start fact injection via existing hooks
+### A. Codex session-start fact delivery through daemon admission
 
-Codex is the lowest-effort path because `UserPromptSubmit` carries the prompt
-text and honors `hookSpecificOutput.additionalContext`, and the hook binary is
-`tracedecay` with in-process store access (no MCP hop, fits the 5s timeout).
+Codex's mounted context response is the daemon-owned `SessionStart` admission;
+`UserPromptSubmit` stays capture-only and cannot become a parallel local recall
+authority.
 
 - `SessionStart`: in `codex_session_context_for_event` (`src/hooks/codex.rs`),
   after workspace status, run `FactRetriever::search`/`list` for the top-K
@@ -313,12 +315,9 @@ text and honors `hookSpecificOutput.additionalContext`, and the hook binary is
   fact ids ("rate with tracedecay_fact_feedback, correct with exact fact tools
   update"). Reuse the token-budget discipline the context builders already
   have.
-- `UserPromptSubmit`: in `codex_user_prompt_submit_context_for_event`
-  (`src/hooks/codex.rs`), query the verified Grafeo similarity authority with
-  the bounded prompt view and inject only facts whose returned similarity,
-  trust, generation, and coverage satisfy the active policy. Deduplicate per
-  session the same way tool hints are deduped (`deduped_codex_hint` pattern,
-  `remember_hint_in_process`). An unavailable or empty result injects nothing.
+- Any future prompt-specific retrieval must enter the same daemon admission
+  authority on a provider-supported response event; it must not revive a
+  hook-local fact or hint path.
 - `SubagentStart`: optionally include the same session-start block so
   subagents inherit memory.
 
