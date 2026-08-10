@@ -12,6 +12,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
+use tracedecay_tool_catalog::BindingId;
 
 use crate::bridge::{
     DaemonLspSessionTransport, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
@@ -21,6 +22,7 @@ use crate::capabilities::{
     GatewayCapabilities, UpstreamCapabilities, is_supported_context_projection,
     negotiate_capabilities,
 };
+use crate::catalog::{LspCatalogAdmission, LspCatalogAdmissionError};
 use crate::context::{
     ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
     ContextFreshness, ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,
@@ -125,6 +127,7 @@ where
     dynamic_diagnostics: DynamicDiagnosticsController,
     context: ContextController,
     semantic: SemanticController,
+    catalog: Result<LspCatalogAdmission, LspCatalogAdmissionError>,
     pending_workspace_mutation: Option<WorkspaceFolderMutation>,
 }
 

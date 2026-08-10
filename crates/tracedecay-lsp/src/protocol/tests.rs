@@ -12,7 +12,9 @@ use crate::workspace_diagnostics::{
 };
 use std::cell::RefCell;
 use std::sync::Mutex;
+use tracedecay_application::{application_catalog_contributions, application_handler_descriptors};
 use tracedecay_domain::ManifestDigest;
+use tracedecay_tool_catalog::{BindingSurface, CatalogContributionInputV1, CatalogContributionV1};
 
 mod diagnostic_publication;
 mod workspace_diagnostics;
@@ -270,6 +272,58 @@ pub(super) fn initialize(session: &mut DaemonLspProtocolSession<Feedback, Semant
         1,
     );
     assert_eq!(session.lifecycle(), SessionLifecycle::Ready);
+}
+
+#[test]
+fn missing_catalog_binding_rejects_semantic_dispatch() {
+    let mut session = session();
+    session.catalog = Ok(catalog_without_lsp_binding("textDocument/definition"));
+    initialize(&mut session);
+
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///root/a.rs"},"position":{"line":0,"character":0}}}"#,
+        2,
+    );
+
+    let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["error"]["code"], -32601);
+    assert_eq!(response["error"]["data"]["reason"], "explicitlyUnavailable");
+}
+
+fn catalog_without_lsp_binding(operation: &str) -> LspCatalogAdmission {
+    let mut contributions = application_catalog_contributions().unwrap();
+    let owner_index = contributions
+        .iter()
+        .position(|contribution| {
+            contribution.bindings().iter().any(|binding| {
+                binding.surface() == BindingSurface::Lsp
+                    && binding.operation().as_str() == operation
+            })
+        })
+        .unwrap();
+    let owner = &contributions[owner_index];
+    let bindings = owner
+        .bindings()
+        .iter()
+        .filter(|binding| {
+            binding.surface() != BindingSurface::Lsp || binding.operation().as_str() != operation
+        })
+        .cloned()
+        .collect();
+    let replacement = CatalogContributionV1::new(CatalogContributionInputV1 {
+        contribution_id: owner.contribution_id().clone(),
+        depends_on: owner.depends_on().to_vec(),
+        capabilities: owner.capabilities().to_vec(),
+        retrieval_primitives: owner.retrieval_primitives().to_vec(),
+        bindings,
+    })
+    .unwrap()
+    .with_executable_schemas(owner.executable_schemas().to_vec())
+    .unwrap();
+    contributions[owner_index] = replacement;
+    LspCatalogAdmission::from_parts(&contributions, &application_handler_descriptors().unwrap())
+        .unwrap()
 }
 
 #[test]
@@ -786,7 +840,7 @@ fn document_change_invalidates_context_currentness_before_expansion() {
 }
 
 #[test]
-fn context_dispatch_supplies_session_overlay_digest_to_canonical_reader() {
+fn catalog_admitted_context_dispatch_supplies_overlay_digest_to_canonical_reader() {
     let captured = CapturingContext::default();
     let observed = Arc::clone(&captured.document_content_digest);
     let mut capabilities = GatewayCapabilities::default();

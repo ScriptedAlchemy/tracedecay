@@ -32,6 +32,7 @@ pub mod analyzer;
 
 mod bridge;
 mod capabilities;
+mod catalog;
 mod context;
 mod diagnostics;
 mod dispatch;

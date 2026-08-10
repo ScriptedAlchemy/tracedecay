@@ -5963,8 +5963,10 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-domain",
+ "tracedecay-tool-catalog",
  "url",
 ]
 

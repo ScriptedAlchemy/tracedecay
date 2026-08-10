@@ -22,11 +22,10 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         BindingSurface::Http,
         BindingSurface::Dashboard,
     ];
-    const ADVISORY_SURFACES: [BindingSurface; 4] = [
+    const ADVISORY_SURFACES: [BindingSurface; 3] = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
         BindingSurface::Http,
-        BindingSurface::Lsp,
     ];
     const NO_SURFACES: [BindingSurface; 0] = [];
     let git = git_surface_catalog_contribution().expect("git");

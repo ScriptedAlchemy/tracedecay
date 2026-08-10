@@ -1,16 +1,16 @@
 use super::{
     AdmittedRoot, AnalyzerCancellationPort, Arc, AuthorizedLspWorkspace, BTreeMap, BTreeSet,
-    CancellationOutcome, CapabilityAvailability, CapabilityParseError, ClientCapabilities,
-    ContextController, ContextProjectionPort, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspGateway,
-    DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController,
+    BindingId, CancellationOutcome, CapabilityAvailability, CapabilityParseError,
+    ClientCapabilities, ContextController, ContextProjectionPort, DEFAULT_LSP_REQUEST_DEADLINE_MS,
+    DaemonLspGateway, DaemonLspProtocolSession, DiagnosticSnapshotPort, DiagnosticsController,
     DynamicDiagnosticsController, EffectiveCapabilities, FeedbackCyclePort, GatewayCapabilities,
-    GatewayMethod, LifecycleError, LspRequestFailure, LspRequestId, LspSessionControl,
-    MAX_CONTEXT_PROJECTION_KINDS, Map, MethodUnavailableReason, OutboundController, OverlayError,
-    OverlayStore, RpcFailure, SemanticController, SemanticProviderPort, SessionLifecycle,
-    TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
-    UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, Value, error_response,
-    initialized_workspace_uris, is_supported_context_projection, json, negotiate_capabilities,
-    overlay_failure, request_id, request_id_value, success_response,
+    GatewayMethod, LifecycleError, LspCatalogAdmission, LspRequestFailure, LspRequestId,
+    LspSessionControl, MAX_CONTEXT_PROJECTION_KINDS, Map, MethodUnavailableReason,
+    OutboundController, OverlayError, OverlayStore, RpcFailure, SemanticController,
+    SemanticProviderPort, SessionLifecycle, TRACEDECAY_CONTEXT_EXPAND_METHOD,
+    TRACEDECAY_CONTEXT_METHOD, UnavailableDiagnosticSnapshotProvider, UpstreamCapabilities, Value,
+    error_response, initialized_workspace_uris, is_supported_context_projection, json,
+    negotiate_capabilities, overlay_failure, request_id, request_id_value, success_response,
 };
 
 pub(super) struct LifecycleController<P, S>
@@ -137,8 +137,22 @@ where
             dynamic_diagnostics: DynamicDiagnosticsController::default(),
             context: ContextController::default(),
             semantic: SemanticController::default(),
+            catalog: LspCatalogAdmission::from_application_catalog(),
             pending_workspace_mutation: None,
         }
+    }
+
+    pub(crate) fn catalog_binding(&self, operation: &str) -> Result<BindingId, RpcFailure> {
+        self.catalog
+            .as_ref()
+            .map_err(|_| {
+                RpcFailure::unavailable(operation, MethodUnavailableReason::ExplicitlyUnavailable)
+            })?
+            .binding(operation)
+            .cloned()
+            .map_err(|_| {
+                RpcFailure::unavailable(operation, MethodUnavailableReason::ExplicitlyUnavailable)
+            })
     }
 
     /// Mounts the daemon-owned analyzer cancellation adapter. Session

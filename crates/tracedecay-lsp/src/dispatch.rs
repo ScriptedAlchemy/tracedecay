@@ -6,7 +6,7 @@ use crate::context::{
     TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD,
 };
 use crate::diagnostics::LspPosition;
-use crate::gateway::{FeedbackCyclePort, SemanticProviderPort, SemanticRequest};
+use crate::gateway::{FeedbackCyclePort, GatewayMethod, SemanticProviderPort, SemanticRequest};
 use crate::protocol::{DaemonLspProtocolSession, TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD};
 use crate::provider::DiagnosticSnapshotPort;
 use crate::rpc::{
@@ -53,7 +53,7 @@ pub(crate) enum LspClientMethod {
 }
 
 impl LspClientMethod {
-    fn parse(method: &str) -> Self {
+    pub(super) fn parse(method: &str) -> Self {
         match method {
             "initialize" => Self::Initialize,
             "initialized" => Self::Initialized,
@@ -88,6 +88,39 @@ impl LspClientMethod {
             TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD => Self::TraceDecayNativeDiagnostics,
             other => Self::Unknown(other.to_owned()),
         }
+    }
+
+    pub(super) fn catalog_operation(&self) -> Option<&'static str> {
+        let method = match self {
+            Self::TextDocumentDiagnostic => GatewayMethod::TextDocumentDiagnostic,
+            Self::TextDocumentDeclaration => GatewayMethod::TextDocumentDeclaration,
+            Self::TextDocumentDefinition => GatewayMethod::TextDocumentDefinition,
+            Self::TextDocumentTypeDefinition => GatewayMethod::TextDocumentTypeDefinition,
+            Self::TextDocumentImplementation => GatewayMethod::TextDocumentImplementation,
+            Self::TextDocumentReferences => GatewayMethod::TextDocumentReferences,
+            Self::TextDocumentHover => GatewayMethod::TextDocumentHover,
+            Self::TextDocumentDocumentSymbol => GatewayMethod::TextDocumentDocumentSymbol,
+            Self::WorkspaceSymbol => GatewayMethod::WorkspaceSymbol,
+            Self::TextDocumentPrepareCallHierarchy => {
+                GatewayMethod::TextDocumentPrepareCallHierarchy
+            }
+            Self::CallHierarchyIncomingCalls => GatewayMethod::CallHierarchyIncomingCalls,
+            Self::CallHierarchyOutgoingCalls => GatewayMethod::CallHierarchyOutgoingCalls,
+            Self::TextDocumentSignatureHelp => GatewayMethod::TextDocumentSignatureHelp,
+            Self::TextDocumentPrepareTypeHierarchy => {
+                GatewayMethod::TextDocumentPrepareTypeHierarchy
+            }
+            Self::TypeHierarchySupertypes => GatewayMethod::TypeHierarchySupertypes,
+            Self::TypeHierarchySubtypes => GatewayMethod::TypeHierarchySubtypes,
+            Self::TraceDecayContext => return Some(TRACEDECAY_CONTEXT_METHOD),
+            Self::TraceDecayContextExpand => return Some(TRACEDECAY_CONTEXT_EXPAND_METHOD),
+            _ => return None,
+        };
+        Some(method.as_lsp_method())
+    }
+
+    pub(super) fn is_catalog_routable_operation(operation: &str) -> bool {
+        Self::parse(operation).catalog_operation() == Some(operation)
     }
 }
 
@@ -253,6 +286,17 @@ fn dispatch_request<P, S, D>(
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
+    let _catalog_binding = if let Some(operation) = method.catalog_operation() {
+        match session.catalog_binding(operation) {
+            Ok(binding) => Some(binding),
+            Err(error) => {
+                let _ = session.enqueue_value(error_response(response_id, error));
+                return;
+            }
+        }
+    } else {
+        None
+    };
     match method {
         LspClientMethod::Initialize => session.handle_initialize(response_id, &params),
         LspClientMethod::Initialized => session.handle_initialized_request(response_id),
