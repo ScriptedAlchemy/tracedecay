@@ -5,6 +5,21 @@
 import { afterEach } from 'vitest';
 import { cleanup } from '@testing-library/react';
 
+// Vitest aliases `window` to globalThis after copying jsdom globals. Node's
+// unavailable localStorage getter therefore shadows that copy; the original
+// jsdom window is retained on `globalThis.jsdom`.
+type VitestJsdomGlobal = typeof globalThis & {
+  jsdom?: { window?: { localStorage: Storage } };
+};
+const jsdomWindow = (globalThis as VitestJsdomGlobal).jsdom?.window;
+if (jsdomWindow === undefined) {
+  throw new Error('DOM tests require Vitest to expose its jsdom window');
+}
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  value: jsdomWindow.localStorage,
+});
+
 // Sigma reads `WebGL2RenderingContext` at MODULE scope, so merely importing a
 // component whose module graph reaches it throws `ReferenceError` under jsdom —
 // before any test body runs, and regardless of whether that test touches the

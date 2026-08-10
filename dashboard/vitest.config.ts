@@ -1,14 +1,24 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig } from 'vitest/config';
 
-// Foundation-lane vitest config. Scoped to the two foundation modules
-// (contracts codegen + SSE reducer). The design owner replaces/extends this
-// when the app shell lands; keep it minimal and framework-free.
 export default defineConfig({
   test: {
-    include: [
-      "codegen/**/*.test.ts",
-      "src/**/*.test.ts",
+    projects: [
+      {
+        test: {
+          name: 'node',
+          environment: 'node',
+          include: ['codegen/**/*.test.ts', 'src/**/*.test.ts', 'stories/**/*.test.ts'],
+          exclude: ['**/node_modules/**', '**/*.dom.test.{ts,tsx}'],
+        },
+      },
+      {
+        test: {
+          name: 'dom',
+          environment: 'jsdom',
+          include: ['src/**/*.dom.test.{ts,tsx}', 'e2e/**/*.dom.test.ts'],
+          setupFiles: ['./vitest.setup.dom.ts'],
+        },
+      },
     ],
-    environment: "node",
   },
 });
