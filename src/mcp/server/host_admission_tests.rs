@@ -10,16 +10,12 @@ use tokio::sync::Notify;
 use super::writer_test_support::{
     WriterTestFixtureAuthority, init_indexed_repo, registered_context, registered_runtime,
 };
-use super::{
-    HookBranchWriteRequest, HookBranchWriteResult, HookBranchWriter, McpServer,
-    McpServerConstructionContext,
-};
+use super::{CodeIndexReconcileSink, McpServer, McpServerConstructionContext};
 use crate::application::host_admission::{
     HostAdmissionBroker, HostAdmissionOutcome, HostAdmissionRuntime, HostAdmissionScope,
     HostAdmissionStatus, HostAdmissionTestRuntimeV1, SharedHostAdmissionBroker, SpoolBounds,
 };
 use crate::daemon::{DaemonHookEvent, HookAgent, HookRouteMetadata, HookTerminalReceipt};
-use crate::errors::TraceDecayError;
 use crate::mcp::project_route::HookProjectRouteCache;
 use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitRefFilter, SessionsForQuery,
@@ -55,9 +51,9 @@ async fn server_with_broker(
     cg: crate::tracedecay::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
-    writer: HookBranchWriter,
+    reconcile_sink: CodeIndexReconcileSink,
 ) -> Arc<McpServer> {
-    let context = with_broker(registered_context(cg, authority), broker, writer);
+    let context = with_broker(registered_context(cg, authority), broker, reconcile_sink);
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server")
@@ -67,9 +63,9 @@ async fn server_with_owned_project_replay_worker(
     cg: crate::tracedecay::TraceDecay,
     authority: &WriterTestFixtureAuthority,
     broker: SharedHostAdmissionBroker,
-    writer: HookBranchWriter,
+    reconcile_sink: CodeIndexReconcileSink,
 ) -> Arc<McpServer> {
-    let context = with_broker(registered_context(cg, authority), broker, writer)
+    let context = with_broker(registered_context(cg, authority), broker, reconcile_sink)
         .with_owned_project_host_admission_replay();
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
@@ -79,9 +75,9 @@ async fn server_with_owned_project_replay_worker(
 fn with_broker(
     context: McpServerConstructionContext,
     broker: SharedHostAdmissionBroker,
-    writer: HookBranchWriter,
+    reconcile_sink: CodeIndexReconcileSink,
 ) -> McpServerConstructionContext {
-    let mut context = context.with_hook_branch_writer(writer);
+    let mut context = context.with_code_index_reconcile_sink(reconcile_sink);
     context.host_admission_broker = Some(broker);
     context
 }
@@ -107,15 +103,8 @@ fn sync_current_branch_payload(branch: &str) -> Vec<u8> {
     .expect("sync_current_branch plan should encode")
 }
 
-fn success_writer() -> HookBranchWriter {
-    Arc::new(|_request| {
-        Box::pin(async {
-            Ok(HookBranchWriteResult {
-                branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                refresh_file_token_map: false,
-            })
-        })
-    })
+fn success_reconcile_sink() -> CodeIndexReconcileSink {
+    Arc::new(|_root| Box::pin(async { true }))
 }
 
 #[tokio::test]
@@ -127,22 +116,20 @@ async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted_after_append = Arc::new(Mutex::new(false));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let broker = Arc::clone(&broker);
         let attempted_after_append = Arc::clone(&attempted_after_append);
-        Arc::new(move |_request: HookBranchWriteRequest| {
+        Arc::new(move |_request: PathBuf| {
             let broker = Arc::clone(&broker);
             let attempted_after_append = Arc::clone(&attempted_after_append);
             Box::pin(async move {
                 assert_eq!(broker.pending_count().await, 1);
                 *attempted_after_append.lock().unwrap() = true;
-                Err(TraceDecayError::Config {
-                    message: "injected canonical admission failure".to_string(),
-                })
+                false
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -152,7 +139,10 @@ async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
     .await;
 
     assert_eq!(outcome.status, HostAdmissionStatus::Unavailable);
-    assert_eq!(outcome.reason_code, Some("canonical_admission_failed"));
+    assert_eq!(
+        outcome.reason_code,
+        Some("code_index_scheduler_unavailable")
+    );
     assert!(*attempted_after_append.lock().unwrap());
     assert_eq!(broker.pending_count().await, 1);
     server.shutdown().await;
@@ -167,19 +157,18 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let authoritative_commit = Arc::new(Mutex::new(false));
-    let failing_writer: HookBranchWriter = {
+    let failing_reconcile_sink: CodeIndexReconcileSink = {
         let authoritative_commit = Arc::clone(&authoritative_commit);
         Arc::new(move |_request| {
             let authoritative_commit = Arc::clone(&authoritative_commit);
             Box::pin(async move {
                 *authoritative_commit.lock().unwrap() = true;
-                Err(TraceDecayError::Config {
-                    message: "injected failure after authoritative commit".to_string(),
-                })
+                false
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), failing_writer).await;
+    let server =
+        server_with_broker(cg, &authority, Arc::clone(&broker), failing_reconcile_sink).await;
     let mut routes = HookProjectRouteCache::default();
     Box::pin(server.handle_hook_event_notification(
         Some(&session_start(project.path().to_path_buf())),
@@ -196,33 +185,35 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let writes = Arc::new(Mutex::new(0usize));
-    let duplicate_writer: HookBranchWriter = {
-        let writes = Arc::clone(&writes);
+    let attempts = Arc::new(Mutex::new(0usize));
+    let duplicate_reconcile_sink: CodeIndexReconcileSink = {
+        let attempts = Arc::clone(&attempts);
         let authoritative_commit = Arc::clone(&authoritative_commit);
         Arc::new(move |_request| {
-            let writes = Arc::clone(&writes);
+            let attempts = Arc::clone(&attempts);
             let authoritative_commit = Arc::clone(&authoritative_commit);
             Box::pin(async move {
                 assert!(*authoritative_commit.lock().unwrap());
-                *writes.lock().unwrap() += 1;
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                    refresh_file_token_map: false,
-                })
+                *attempts.lock().unwrap() += 1;
+                true
             })
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server =
-        server_with_broker(reopened, &authority, Arc::clone(&broker), duplicate_writer).await;
+    let server = server_with_broker(
+        reopened,
+        &authority,
+        Arc::clone(&broker),
+        duplicate_reconcile_sink,
+    )
+    .await;
 
     // The constructor schedules startup replay. This explicit pass joins the
     // same single-flight, so either ordering leaves one authoritative attempt
     // and an empty durable backlog.
     Box::pin(server.replay_host_admission(None)).await;
     assert_eq!(broker.pending_count().await, 0);
-    assert_eq!(*writes.lock().unwrap(), 1);
+    assert_eq!(*attempts.lock().unwrap(), 1);
     server.shutdown().await;
 }
 
@@ -234,15 +225,8 @@ async fn authoritative_commit_deletes_the_durable_hook_event() {
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let writer: HookBranchWriter = Arc::new(|_request| {
-        Box::pin(async {
-            Ok(HookBranchWriteResult {
-                branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                refresh_file_token_map: false,
-            })
-        })
-    });
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let reconcile_sink: CodeIndexReconcileSink = Arc::new(|_request| Box::pin(async { true }));
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -265,20 +249,17 @@ async fn oversized_event_is_rejected_before_canonical_attempt() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(Mutex::new(false));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() = true;
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -303,20 +284,23 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(Mutex::new(false));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() = true;
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), Arc::clone(&writer)).await;
+    let server = server_with_broker(
+        cg,
+        &authority,
+        Arc::clone(&broker),
+        Arc::clone(&reconcile_sink),
+    )
+    .await;
     let admitted = broker
         .admit(
             "codex:invalid-plan-fixture",
@@ -347,7 +331,8 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(broker.quarantine_count().await, 1);
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
+    let server =
+        server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
 
     let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
 
@@ -367,20 +352,17 @@ async fn unsupported_payload_version_is_retryable_and_retained_across_reopen() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(Mutex::new(false));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() = true;
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let payload = br#"{"version":2,"plan":{"kind":"future_host_event","opaque":"private"}}"#;
     let admitted = broker
         .admit("codex:future-plan-fixture", payload)
@@ -424,20 +406,17 @@ async fn quarantine_releases_active_capacity_then_full_fails_closed() {
     let runtime = HostAdmissionRuntime::open(spool.path(), bounds).unwrap().0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 attempted.fetch_add(1, Ordering::SeqCst);
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
 
     let first = broker
         .admit(
@@ -491,20 +470,17 @@ async fn malformed_source_does_not_starve_valid_sibling_source() {
     )
     .unwrap();
     let attempts = Arc::new(Mutex::new(0usize));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempts = Arc::clone(&attempts);
         Arc::new(move |_request| {
             let attempts = Arc::clone(&attempts);
             Box::pin(async move {
                 *attempts.lock().unwrap() += 1;
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let malformed = broker
         .admit(
             "codex:malformed-source",
@@ -553,7 +529,7 @@ async fn cancelled_canonical_attempt_is_recovered_and_replayed() {
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempts = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(Notify::new());
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempts = Arc::clone(&attempts);
         let started = Arc::clone(&started);
         Arc::new(move |_request| {
@@ -562,19 +538,13 @@ async fn cancelled_canonical_attempt_is_recovered_and_replayed() {
             Box::pin(async move {
                 if attempt == 0 {
                     started.notify_one();
-                    return std::future::pending::<
-                        std::result::Result<HookBranchWriteResult, TraceDecayError>,
-                    >()
-                    .await;
+                    return std::future::pending::<bool>().await;
                 }
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let event = session_start(project.path().to_path_buf());
     let attempt = {
         let server = Arc::clone(&server);
@@ -656,20 +626,17 @@ async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(Mutex::new(false));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 *attempted.lock().unwrap() = true;
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let admitted = broker
         .admit("codex:add-branch-at-stale", &payload)
         .await
@@ -712,20 +679,17 @@ async fn add_branch_at_replay_rejects_stale_branch_after_switch() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 attempted.fetch_add(1, Ordering::SeqCst);
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let admitted = broker
         .admit("codex:add-branch-at-stale-branch", &payload)
         .await
@@ -751,20 +715,17 @@ async fn add_branch_replay_rejects_stale_branch_after_delayed_switch() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 attempted.fetch_add(1, Ordering::SeqCst);
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let admitted = broker
         .admit("codex:add-branch-stale-delayed", &payload)
         .await
@@ -811,21 +772,19 @@ async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 attempted.fetch_add(1, Ordering::SeqCst);
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
+    let server =
+        server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
 
     let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
@@ -853,20 +812,17 @@ async fn sync_current_branch_replay_rejects_stale_branch_after_delayed_switch() 
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 attempted.fetch_add(1, Ordering::SeqCst);
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                    refresh_file_token_map: true,
-                })
+                true
             })
         })
     };
-    let server = server_with_broker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let admitted = broker
         .admit("codex:sync-current-branch-stale-delayed", &payload)
         .await
@@ -912,21 +868,19 @@ async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() 
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 attempted.fetch_add(1, Ordering::SeqCst);
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                    refresh_file_token_map: true,
-                })
+                true
             })
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
+    let server =
+        server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
 
     let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
@@ -983,21 +937,19 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 attempted.fetch_add(1, Ordering::SeqCst);
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
+    let server =
+        server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
 
     let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
@@ -1049,21 +1001,19 @@ async fn add_branch_at_restart_replay_rejects_symlink_swap() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempted = Arc::clone(&attempted);
         Arc::new(move |_request| {
             let attempted = Arc::clone(&attempted);
             Box::pin(async move {
                 attempted.fetch_add(1, Ordering::SeqCst);
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::Added,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
     let reopened = authority.reopen_project_graph(project.path()).await;
-    let server = server_with_broker(reopened, &authority, Arc::clone(&broker), writer).await;
+    let server =
+        server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
 
     let outcome = Box::pin(server.replay_host_admission(None)).await;
     assert!(matches!(
@@ -1097,7 +1047,7 @@ fn session_start_with_route(root: PathBuf) -> Value {
 async fn server_with_broker_and_runtime(
     cg: crate::tracedecay::TraceDecay,
     broker: SharedHostAdmissionBroker,
-    writer: HookBranchWriter,
+    reconcile_sink: CodeIndexReconcileSink,
     runtime: Arc<HostAdmissionTestRuntimeV1>,
 ) -> Arc<McpServer> {
     let context = with_broker(
@@ -1105,7 +1055,7 @@ async fn server_with_broker_and_runtime(
             .mcp_server_context_for_test(cg, None)
             .expect("registered MCP server context"),
         broker,
-        writer,
+        reconcile_sink,
     );
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
@@ -1121,15 +1071,9 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let writer: HookBranchWriter = Arc::new(|_request| {
-        Box::pin(async {
-            Err(TraceDecayError::Config {
-                message: "injected canonical admission failure".to_string(),
-            })
-        })
-    });
+    let reconcile_sink: CodeIndexReconcileSink = Arc::new(|_request| Box::pin(async { false }));
     let server =
-        server_with_broker_and_runtime(cg, Arc::clone(&broker), writer, test_runtime).await;
+        server_with_broker_and_runtime(cg, Arc::clone(&broker), reconcile_sink, test_runtime).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -1188,25 +1132,20 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let first_attempt = Arc::new(AtomicBool::new(true));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let first_attempt = Arc::clone(&first_attempt);
         Arc::new(move |_request| {
             let first_attempt = Arc::clone(&first_attempt);
             Box::pin(async move {
                 if first_attempt.swap(false, Ordering::SeqCst) {
-                    return Err(TraceDecayError::Config {
-                        message: "injected delayed effect".to_string(),
-                    });
+                    return false;
                 }
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
     let server =
-        server_with_broker_and_runtime(cg, Arc::clone(&broker), writer, test_runtime).await;
+        server_with_broker_and_runtime(cg, Arc::clone(&broker), reconcile_sink, test_runtime).await;
     let raw_session = ["AKIA", "SYNTHETIC", "CANARY", "3"].concat();
     let event = serde_json::to_value(
         DaemonHookEvent::session_start(HookAgent::Codex, project.path().to_path_buf()).with_route(
@@ -1304,16 +1243,9 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let writer: HookBranchWriter = Arc::new(|_request| {
-        Box::pin(async {
-            Ok(HookBranchWriteResult {
-                branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                refresh_file_token_map: false,
-            })
-        })
-    });
+    let reconcile_sink: CodeIndexReconcileSink = Arc::new(|_request| Box::pin(async { true }));
     let server =
-        server_with_broker_and_runtime(cg, Arc::clone(&broker), writer, test_runtime).await;
+        server_with_broker_and_runtime(cg, Arc::clone(&broker), reconcile_sink, test_runtime).await;
     let mut routes = HookProjectRouteCache::default();
     let event = terminal_receipt(project.path().to_path_buf());
 
@@ -1400,9 +1332,13 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let server =
-        server_with_broker_and_runtime(cg, Arc::clone(&broker), success_writer(), test_runtime)
-            .await;
+    let server = server_with_broker_and_runtime(
+        cg,
+        Arc::clone(&broker),
+        success_reconcile_sink(),
+        test_runtime,
+    )
+    .await;
     let raw = ["AKIA", "SYNTHETIC", "CANARY", "4"].concat();
     let protected = crate::privacy::protect_sensitive_structural_id(&raw).unwrap();
     let session = SessionRecord {
@@ -1503,7 +1439,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
     );
 
     server.shutdown().await;
-    // The profile session-relation graph has exactly one writer, so every
+    // The profile session-relation graph has exactly one reconcile_sink, so every
     // retained handle must drop before a fresh-process reopen can mount it.
     // `test_runtime` only borrows the server, so its borrow ends here on its
     // own; the server is the retained handle that must drop.
@@ -1581,7 +1517,7 @@ async fn owned_project_replay_worker_continues_past_one_bounded_batch() {
         cg,
         &authority,
         Arc::clone(&broker),
-        success_writer(),
+        success_reconcile_sink(),
     )
     .await;
 
@@ -1612,21 +1548,24 @@ async fn owned_project_replay_worker_backoffs_on_retryable_failure() {
         .await
         .unwrap();
     let attempts = Arc::new(AtomicUsize::new(0));
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let attempts = Arc::clone(&attempts);
         Arc::new(move |_request| {
             let attempts = Arc::clone(&attempts);
             Box::pin(async move {
                 attempts.fetch_add(1, Ordering::SeqCst);
-                Err(TraceDecayError::Config {
-                    message: "injected retryable canonical failure".to_string(),
-                })
+                false
             })
         })
     };
 
-    let server =
-        server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_owned_project_replay_worker(
+        cg,
+        &authority,
+        Arc::clone(&broker),
+        reconcile_sink,
+    )
+    .await;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while server.project_host_admission_replay_backoff_count().await < 2
@@ -1657,7 +1596,7 @@ async fn owned_project_replay_worker_is_cancelled_and_joined_on_shutdown() {
         .unwrap();
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let writer: HookBranchWriter = {
+    let reconcile_sink: CodeIndexReconcileSink = {
         let entered = Arc::clone(&entered);
         let release = Arc::clone(&release);
         Arc::new(move |_request| {
@@ -1666,16 +1605,18 @@ async fn owned_project_replay_worker_is_cancelled_and_joined_on_shutdown() {
             Box::pin(async move {
                 entered.notify_waiters();
                 release.notified().await;
-                Ok(HookBranchWriteResult {
-                    branch_outcome: crate::branch::BranchAddOutcome::AlreadyTracked,
-                    refresh_file_token_map: false,
-                })
+                true
             })
         })
     };
 
-    let server =
-        server_with_owned_project_replay_worker(cg, &authority, Arc::clone(&broker), writer).await;
+    let server = server_with_owned_project_replay_worker(
+        cg,
+        &authority,
+        Arc::clone(&broker),
+        reconcile_sink,
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .expect("worker must enter an in-flight canonical attempt");

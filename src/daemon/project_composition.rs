@@ -560,7 +560,6 @@ pub(super) async fn production_project_server(
             project_routes: store_administration.project_routes(),
             writers: crate::mcp::server::McpServerWriters::daemon_owned(
                 coordinated_dashboard_automation_writer(store_administration.clone()),
-                coordinated_hook_branch_writer(store_administration.clone()),
                 coordinated_background_refresh_writer(store_administration.clone()),
             ),
         },
@@ -926,7 +925,6 @@ pub(super) async fn production_project_server(
                     project_routes: store_administration.project_routes(),
                     writers: crate::mcp::server::McpServerWriters::daemon_owned(
                         coordinated_dashboard_automation_writer(store_administration.clone()),
-                        coordinated_hook_branch_writer(store_administration.clone()),
                         coordinated_background_refresh_writer(store_administration.clone()),
                     ),
                     delivery_settlement_authority,

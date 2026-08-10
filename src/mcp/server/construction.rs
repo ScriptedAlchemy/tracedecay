@@ -11,10 +11,7 @@ use std::sync::atomic::AtomicBool;
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
-use super::hook_writes::{
-    BackgroundRefreshWriter, HookBranchWriter, direct_background_refresh_writer,
-    direct_hook_branch_writer,
-};
+use super::hook_writes::{BackgroundRefreshWriter, direct_background_refresh_writer};
 
 /// Updates daemon ownership routing after this server changes physical graph DB.
 /// Implementations must not call back into this `McpServer`: reconciliation is
@@ -61,7 +58,6 @@ pub(crate) struct McpServerConstructionContext {
         Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>>,
-    pub(crate) hook_branch_writer: HookBranchWriter,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_reconcile_sink: Option<super::CodeIndexReconcileSink>,
@@ -90,7 +86,6 @@ pub(crate) struct McpServerConstructionContext {
 
 pub(crate) struct McpServerWriters {
     dashboard_automation: crate::dashboard::DashboardAutomationWriter,
-    hook_branch: HookBranchWriter,
     background_refresh: BackgroundRefreshWriter,
 }
 
@@ -135,12 +130,10 @@ pub(crate) struct McpServerDaemonCoreAuthority {
 impl McpServerWriters {
     pub(crate) fn daemon_owned(
         dashboard_automation: crate::dashboard::DashboardAutomationWriter,
-        hook_branch: HookBranchWriter,
         background_refresh: BackgroundRefreshWriter,
     ) -> Self {
         Self {
             dashboard_automation,
-            hook_branch,
             background_refresh,
         }
     }
@@ -173,7 +166,6 @@ impl McpServerConstructionContext {
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
-            hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
@@ -259,7 +251,6 @@ impl McpServerConstructionContext {
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
-            hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
@@ -321,7 +312,6 @@ impl McpServerConstructionContext {
             dashboard_code_index_freshness_reader: None,
             dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
-            hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_reconcile_sink: None,
@@ -495,12 +485,6 @@ impl McpServerConstructionContext {
         reconciler: DatabaseOwnerReconciler,
     ) -> Self {
         self.database_owner_reconciler = Some(reconciler);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_hook_branch_writer(mut self, writer: HookBranchWriter) -> Self {
-        self.hook_branch_writer = writer;
         self
     }
 

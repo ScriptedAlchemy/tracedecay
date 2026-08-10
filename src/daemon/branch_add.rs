@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::errors::TraceDecayError;
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -10,18 +8,6 @@ const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable
 
 fn scheduler_unavailable(detail: impl Into<String>) -> TraceDecayError {
     TraceDecayError::project_route(CODE_INDEX_SCHEDULER_UNAVAILABLE, true, detail)
-}
-
-pub(super) fn coordinated_hook_branch_writer(
-    _administration: StoreAdministration,
-) -> crate::mcp::server::HookBranchWriter {
-    Arc::new(move |_request| {
-        Box::pin(async move {
-            Err(scheduler_unavailable(
-                "code-index scheduler authority is unavailable for hook branch activation",
-            ))
-        })
-    })
 }
 
 pub(super) struct BranchAddRequest {

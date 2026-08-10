@@ -363,7 +363,6 @@ pub struct McpServer {
     dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
-    hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
     /// scheduler queue. `None` for direct servers with no scheduler registry.
@@ -751,7 +750,6 @@ impl McpServer {
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
             diagnostics_lsp,
-            hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
             code_index_reconcile_sink,
@@ -982,7 +980,6 @@ impl McpServer {
             doctor_report_published: AtomicBool::new(false),
             dashboard_code_index_freshness_reader,
             dashboard_feedback_status_reader,
-            hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
             code_index_reconcile_sink,
@@ -1422,9 +1419,6 @@ mod freshness_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod hook_boundary_failure_matrix_tests;
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod hook_branch_writer_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod host_admission_tests;
