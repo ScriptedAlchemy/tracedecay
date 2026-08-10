@@ -629,6 +629,16 @@ pub(super) async fn resolve_source_edit_preview(
     cancellation: Arc<dyn GraphCancellation>,
     edit: SourceEditRequest,
 ) -> Result<ResolvedSourceEditPreview> {
+    // An accepted rename must retain apply semantics while the task-local plan
+    // authority intercepts its publication. Converting it back to a dry run
+    // leaves the accepted preview attached to a preview request, which the
+    // rename primitive correctly rejects as stale evidence. Other edits do not
+    // carry an accepted-preview contract and continue to use their dry-run
+    // path for plan capture.
+    let capture_edit = match &edit {
+        SourceEditRequest::RenameSymbol { dry_run: false, .. } => edit,
+        _ => edit.with_dry_run(true),
+    };
     let (outcome, planned_files) = crate::tracedecay::capture_source_edit_plan(run_source_edit(
         graph,
         SourceEditGraphReadAuthorityV1 {
@@ -637,11 +647,11 @@ pub(super) async fn resolve_source_edit_preview(
             observed_at,
             cancellation,
         },
-        edit.with_dry_run(true),
+        capture_edit,
         None,
     ))
     .await;
-    let outcome = outcome?;
+    let mut outcome = outcome?;
     if !outcome.success() {
         return Ok(ResolvedSourceEditPreview {
             outcome,
@@ -672,6 +682,7 @@ pub(super) async fn resolve_source_edit_preview(
             "source edit candidate state changed while its exact preview was captured",
         ));
     }
+    outcome.bind_preview_digest(expected_state.clone());
     let predicted_state = planned_source_edit_state_digest(&candidate_files, &planned_files, true)?;
     Ok(ResolvedSourceEditPreview {
         outcome,

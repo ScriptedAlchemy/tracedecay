@@ -1211,6 +1211,12 @@ impl McpServer {
         self.session_db.clone()
     }
 
+    #[cfg(feature = "test-transport")]
+    #[doc(hidden)]
+    pub fn has_project_application_retrieval_for_test(&self) -> bool {
+        self.project_application_retrieval.is_some()
+    }
+
     pub(crate) fn work_evidence_retrieval(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,

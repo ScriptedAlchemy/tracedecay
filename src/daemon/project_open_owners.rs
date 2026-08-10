@@ -1799,26 +1799,9 @@ fn production_owner_capabilities()
         "capability.application.code-query.type-definition",
         "capability.application.code-query.references",
         "capability.application.symbol-search",
-        "capability.application.primitive.code-signature-search",
-        "capability.application.primitive.code-implementations",
-        "capability.application.primitive.code-type-hierarchy",
-        "capability.application.primitive.code-callers",
         GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
         CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
         PROXIMITY_CAPABILITY_ID_V1,
-        "capability.application.primitive.session-lookup",
-        "capability.application.primitive.qualified-name",
-        "capability.application.primitive.call-chain",
-        "capability.application.primitive.file-dependents",
-        "capability.application.primitive.source-lines",
-        "capability.application.primitive.source-body",
-        "capability.application.primitive.source-outline",
-        "capability.application.primitive.module-api",
-        "capability.application.primitive.file-metadata",
-        "capability.application.primitive.health-read",
-        "capability.application.primitive.health-delta",
-        "capability.application.primitive.storage-status",
-        "capability.application.primitive.diagnostics-read",
         "capability.application.git.status",
         "capability.application.git.diff",
         "capability.application.git.history",
@@ -1844,6 +1827,11 @@ fn production_owner_capabilities()
                 field: "project-open capability",
             }
         })?);
+    }
+    for descriptor in
+        tracedecay_application::retrieval::catalog::primitive_read_handler_descriptors()?
+    {
+        capabilities.insert(descriptor.operation().capability_id().clone());
     }
     for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
         .into_iter()
@@ -1906,6 +1894,22 @@ mod tests {
                 capabilities.contains(&capability),
                 "{} must be granted to the daemon-owned project route",
                 capability.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn production_project_owner_grants_every_primitive_read() {
+        let capabilities = production_owner_capabilities().expect("production capabilities");
+
+        for descriptor in
+            tracedecay_application::retrieval::catalog::primitive_read_handler_descriptors()
+                .expect("primitive read descriptors")
+        {
+            assert!(
+                capabilities.contains(descriptor.operation().capability_id()),
+                "{} must be granted to the daemon-owned project route",
+                descriptor.operation().capability_id().as_str()
             );
         }
     }

@@ -399,7 +399,7 @@ async fn path_containment_config_rejects_symlink_escape_before_serving_config() 
 async fn project_selector_is_rejected_before_write_tool_parsing() {
     let (cg, _env, _dir) = setup_empty_project().await;
 
-    let result = handle_tool_call(
+    let result = crate::support::handle_tool_call(
         &cg,
         "tracedecay_str_replace",
         json!({"project_selector": {"include_all_registered": true}}),

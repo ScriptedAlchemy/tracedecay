@@ -358,17 +358,19 @@ pub fn capture_planned_source_edit(
     relative_path: &str,
     expected: Option<&str>,
     intended: Option<&str>,
-) {
-    let _ = SOURCE_EDIT_PLAN_CAPTURE.try_with(|capture| {
-        capture
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(PlannedSourceEditFile {
-                relative_path: relative_path.to_owned(),
-                expected: expected.map(str::to_owned),
-                intended: intended.map(str::to_owned),
-            });
-    });
+) -> bool {
+    SOURCE_EDIT_PLAN_CAPTURE
+        .try_with(|capture| {
+            capture
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(PlannedSourceEditFile {
+                    relative_path: relative_path.to_owned(),
+                    expected: expected.map(str::to_owned),
+                    intended: intended.map(str::to_owned),
+                });
+        })
+        .is_ok()
 }
 
 pub fn validate_planned_source_edit(

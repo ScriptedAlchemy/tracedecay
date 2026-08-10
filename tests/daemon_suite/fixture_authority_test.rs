@@ -126,7 +126,7 @@ async fn project_server_arrives_with_its_session_authority() {
     let server = project.mcp_server().await;
 
     assert!(
-        server.has_project_session_retrieval_service_for_test(),
-        "the fixture server must mount the project session retrieval service"
+        server.has_project_application_retrieval_for_test(),
+        "the fixture server must mount the project application retrieval authority"
     );
 }

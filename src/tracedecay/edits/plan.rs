@@ -105,6 +105,9 @@ pub(in crate::tracedecay) fn publish_planned_source_edit(
     expected: Option<&str>,
     intended: &str,
 ) -> Result<()> {
+    if capture_planned_source_edit(relative_path, expected, Some(intended)) {
+        return Ok(());
+    }
     publish_planned_source_edit_state(project_root, relative_path, expected, Some(intended))
 }
 
@@ -176,6 +179,29 @@ mod tests {
         assert_eq!(files[0].relative_path, "src/lib.rs");
         assert_eq!(files[0].expected.as_deref(), Some("before\n"));
         assert_eq!(files[0].intended.as_deref(), Some("after\n"));
+    }
+
+    #[tokio::test]
+    async fn source_edit_plan_capture_intercepts_apply_publication() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("lib.rs");
+        std::fs::write(&path, "before\n").unwrap();
+
+        let (result, files) = capture_source_edit_plan(async {
+            publish_planned_source_edit(directory.path(), "lib.rs", Some("before\n"), "after\n")
+        })
+        .await;
+
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "before\n");
+        assert_eq!(
+            files,
+            vec![PlannedSourceEditFile {
+                relative_path: "lib.rs".to_owned(),
+                expected: Some("before\n".to_owned()),
+                intended: Some("after\n".to_owned()),
+            }]
+        );
     }
 
     #[test]

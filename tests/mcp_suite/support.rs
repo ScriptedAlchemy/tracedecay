@@ -409,9 +409,9 @@ pub(crate) async fn handle_tool_call(
             runtime,
         )
         .await?;
-        if !server.has_project_session_retrieval_service_for_test() {
+        if !server.has_project_application_retrieval_for_test() {
             return Err(TraceDecayError::Config {
-                message: format!("{tool_name} project retrieval service was not constructed"),
+                message: format!("{tool_name} project retrieval authority was not constructed"),
             });
         }
         let request = json!({
@@ -575,7 +575,41 @@ pub(crate) async fn handle_production_source_edit_tool_call(
             .expect("source edit arguments are an object");
         object
             .entry("expected_state".to_owned())
-            .or_insert(Value::String(expected_state));
+            .or_insert(Value::String(expected_state.clone()));
+        if tool_name == "tracedecay_rename_symbol" && object.get("accepted_preview").is_none() {
+            let preview_id = preview_value.get("preview_id").cloned().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "rename preview returned no preview identity".to_owned(),
+                }
+            })?;
+            let preview_digest = preview_value
+                .get("preview_digest")
+                .cloned()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "rename preview returned no candidate-state digest".to_owned(),
+                })?;
+            let plan_digest = preview_value.get("plan_digest").cloned().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "rename preview returned no plan digest".to_owned(),
+                }
+            })?;
+            let graph_revision = preview_value
+                .get("graph_revision")
+                .cloned()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "rename preview returned no graph revision".to_owned(),
+                })?;
+            let mut accepted_preview = json!({
+                "preview_id": preview_id,
+                "preview_digest": preview_digest,
+                "plan_digest": plan_digest,
+                "graph_revision": graph_revision,
+            });
+            if let Some(repository_revision) = preview_value.get("repository_revision") {
+                accepted_preview["repository_revision"] = repository_revision.clone();
+            }
+            object.insert("accepted_preview".to_owned(), accepted_preview);
+        }
         object
             .entry("idempotency_key".to_owned())
             .or_insert_with(|| {

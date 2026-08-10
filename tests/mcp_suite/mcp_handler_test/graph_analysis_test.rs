@@ -6,6 +6,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
@@ -293,25 +294,39 @@ async fn init_test_project(project: &Path) -> (MountedProductionProject, ()) {
 }
 
 async fn find_node_id(host: &impl AnalysisToolHost, name: &str) -> String {
-    let result = handle_tool_call(
-        host,
-        "tracedecay_search",
-        json!({"query": name, "include_graph_node_ids": true}),
-        None,
-        None,
-    )
-    .await
-    .expect("production search");
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).expect("search JSON");
-    payload["results"]
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let result = loop {
+        match handle_tool_call(
+            host,
+            "tracedecay_find_exact_symbol",
+            json!({"name": name, "limit": 20}),
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(result) => break result,
+            Err(error)
+                if error
+                    .to_string()
+                    .contains("verified code graph is not ready")
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("production exact-symbol read failed: {error}"),
+        }
+    };
+    let payload: Value =
+        serde_json::from_str(extract_text(&result.value)).expect("exact-symbol JSON");
+    payload["matches"]
         .as_array()
-        .and_then(|results| {
-            results.iter().find(|result| {
-                result["display"]["name"].as_str() == Some(name)
-                    || result["display"]["qualified_name"].as_str() == Some(name)
-            })
+        .and_then(|matches| {
+            matches
+                .iter()
+                .find(|result| result["name"].as_str() == Some(name))
         })
-        .and_then(|result| result["node_id"].as_str())
+        .and_then(|result| result["id"].as_str())
         .unwrap_or_else(|| panic!("node '{name}' not found in production generation: {payload}"))
         .to_owned()
 }

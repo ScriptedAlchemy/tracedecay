@@ -243,6 +243,12 @@ impl SourceEditOutcome {
         }
     }
 
+    pub(super) fn bind_preview_digest(&mut self, digest: ManifestDigest) {
+        if let Self::Rename(result) = self {
+            result.bind_preview_digest(digest);
+        }
+    }
+
     pub(super) fn to_value(&self) -> Value {
         match self {
             Self::Edit(result) => serde_json::to_value(result),

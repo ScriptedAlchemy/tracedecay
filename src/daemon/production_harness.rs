@@ -671,7 +671,7 @@ async fn wait_for_production_composition_code_index(
         loop {
             if invocation
                 .code_index_schedulers
-                .latest_generation_id(project_root)
+                .latest_complete_ready(project_root)
                 .await
                 .is_some()
             {

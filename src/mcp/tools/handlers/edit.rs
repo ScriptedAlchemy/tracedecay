@@ -52,6 +52,7 @@ where
     let mut input = args.clone();
     if let Some(object) = input.as_object_mut() {
         object.remove("format");
+        object.remove("__mcp_request_id");
     }
     serde_json::from_value(input).map_err(|error| TraceDecayError::Config {
         message: format!("invalid source edit request: {error}"),
@@ -854,7 +855,8 @@ mod tests {
                 "kind": "function",
                 "file": "src/lib.rs",
                 "old_name": "old",
-                "new_name": "renamed"
+                "new_name": "renamed",
+                "__mcp_request_id": "request.mcp.source-edit.fixture"
             }),
             invocation_context(Some(executor)),
         )
