@@ -1,4 +1,8 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use tracedecay_application::session_sync::{
@@ -8,8 +12,24 @@ use tracedecay_application::session_sync::{
     SessionTranscriptImportV1,
 };
 use tracedecay_application::{
-    CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
+    AuthorizedRootAdmission, AuthorizedScopeSetAuthority, CancellationContext, CancellationSignal,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, IdempotencyKey, OperationTermination,
+    RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
 };
+use tracedecay_code_index::git_projection::{
+    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitBranchStackBindingV1, GitTopologyProjectionStore,
+    GitWorktreeOccupancyV1, build_git_topology_manifest_checked, git_topology_idempotency_key,
+    git_topology_namespace, git_topology_projection_identity,
+};
+use tracedecay_domain::{
+    ActorId, BrainId, BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
+    BranchStackRevisionV1, BranchStackSourceV1, CommitId, ManifestDigest, ProjectId, RefId,
+    RepositoryId, ScopeSetId, ScopeSetRevision, StackNodeId, UserProfileId, UtcMicros, WorktreeId,
+    WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
+};
+use tracedecay_graph_db::{GraphCancellation, GraphProjectorRevision};
+use tracedecay_store::runtime::ScopeSetCasOutcomeV1;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::git_topology::GitTopologySyncFailure;
 use super::work::{
@@ -20,7 +40,14 @@ use super::{
     DaemonSessionSyncConfig, DaemonSessionSyncService, SessionSyncWorkResult,
     completed_profile_sweep_covers, completion_termination, decode_matching_journal, journal_key,
 };
-use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
+
+struct NeverCancelled;
+
+impl GraphCancellation for NeverCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
 
 #[test]
 fn cancel_after_first_git_commit_preserves_progress_and_cancelled_termination() {
@@ -238,6 +265,418 @@ fn declared_git_topology_failures_keep_their_typed_failure_code() {
         };
         assert_eq!(failure_codes, vec![expected.to_owned()]);
     }
+}
+
+fn native_topology_digest(byte: char) -> ManifestDigest {
+    ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+}
+
+fn run_native_topology_git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("start Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 Git output")
+        .trim()
+        .to_owned()
+}
+
+fn native_topology_context(
+    scope: ResolvedScope,
+    suffix: &str,
+    capability: &CapabilityId,
+    use_case: &UseCaseId,
+) -> RequestContext {
+    let grant = CapabilityGrantSnapshot::new(
+        tracedecay_application::CapabilityGrantId::new(format!("grant.session-sync.{suffix}"))
+            .expect("grant"),
+        1,
+        native_topology_digest('c'),
+        ActorId::new("actor.session-sync.issuer").expect("issuer"),
+        UtcMicros(1),
+        UtcMicros(100),
+        scope.clone(),
+        BTreeSet::from([capability.clone()]),
+        BTreeSet::from([use_case.clone()]),
+        DisclosureClass::Evidence,
+    )
+    .expect("capability grant");
+    RequestContext::new(
+        ActorId::new("actor.session-sync.requester").expect("requester"),
+        scope,
+        grant,
+        RequestId::new(format!("request.session-sync.{suffix}")).expect("request"),
+        Deadline::new(UtcMicros(90)).expect("deadline"),
+        CancellationContext::active(format!("cancel.session-sync.{suffix}")).expect("cancellation"),
+    )
+    .expect("request context")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persisted_declared_topology_survives_registry_restart_and_session_sync_revalidation() {
+    let temporary = tempfile::tempdir().expect("native topology fixture");
+    let profile_root = temporary.path().join("profile");
+    let repository_root = temporary.path().join("repository");
+    std::fs::create_dir_all(&repository_root).expect("repository root");
+    run_native_topology_git(&repository_root, &["init", "--quiet", "-b", "main"]);
+    run_native_topology_git(
+        &repository_root,
+        &["config", "user.name", "TraceDecay Fixture"],
+    );
+    run_native_topology_git(
+        &repository_root,
+        &["config", "user.email", "fixture@tracedecay.invalid"],
+    );
+    std::fs::write(repository_root.join("base.txt"), "base\n").expect("base file");
+    run_native_topology_git(&repository_root, &["add", "base.txt"]);
+    run_native_topology_git(&repository_root, &["commit", "--quiet", "-m", "base"]);
+    run_native_topology_git(&repository_root, &["branch", "feature"]);
+    let linked_root = temporary.path().join("feature");
+    run_native_topology_git(
+        &repository_root,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            linked_root.to_str().expect("UTF-8 linked root"),
+            "feature",
+        ],
+    );
+
+    let project = ProjectId::new("project.session-sync.native-topology").expect("project");
+    let repository =
+        RepositoryId::new("repository.session-sync.native-topology").expect("repository");
+    let main_worktree = WorktreeId::new("worktree.session-sync.main").expect("main worktree");
+    let feature_worktree =
+        WorktreeId::new("worktree.session-sync.feature").expect("feature worktree");
+    for root in [&repository_root, &linked_root] {
+        crate::storage::write_enrollment_marker(
+            root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("project enrollment");
+    }
+    let roots = vec![
+        repository_root
+            .canonicalize()
+            .expect("canonical repository"),
+        linked_root.canonicalize().expect("canonical linked root"),
+    ];
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 47, "native topology restart")
+            .expect("daemon database scope");
+    let first_registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity.clone(),
+        )
+        .await
+        .expect("first session registry");
+    let first_project_database = first_registry
+        .project_memory(project.clone(), roots.clone())
+        .await
+        .expect("first project graph database");
+    let first_sessions = first_registry
+        .project_sessions(project.clone(), roots.clone())
+        .await
+        .expect("first project sessions database");
+    let first_runtime = first_registry
+        .retain_project_graph_runtime(project.clone(), Arc::clone(&first_project_database))
+        .await
+        .expect("first project graph runtime");
+    let first_runtime: Arc<dyn crate::global_db::ProjectGraphRuntimePortV1> =
+        Arc::new(first_runtime);
+    assert!(
+        first_sessions
+            .bind_project_graph_runtime(Arc::clone(&first_runtime))
+            .is_ok(),
+        "bind first graph runtime"
+    );
+
+    let main_ref = RefId::new("refs/heads/main").expect("main ref");
+    let feature_ref = RefId::new("refs/heads/feature").expect("feature ref");
+    let main_scope = ResolvedScope::new(
+        project.clone(),
+        repository.clone(),
+        main_worktree.clone(),
+        Some(main_ref.clone()),
+    )
+    .expect("main scope");
+    let feature_scope = ResolvedScope::new(
+        project.clone(),
+        repository.clone(),
+        feature_worktree.clone(),
+        Some(feature_ref.clone()),
+    )
+    .expect("feature scope");
+    let capability =
+        CapabilityId::new("capability.session-sync.native-topology").expect("topology capability");
+    let use_case =
+        UseCaseId::new("use-case.session-sync.native-topology").expect("topology use case");
+    let scope_set_id =
+        ScopeSetId::new("scope-set.session-sync.native-topology").expect("scope set");
+    let scope_set = AuthorizedScopeSetAuthority::authorize_registered(
+        scope_set_id.clone(),
+        ScopeSetRevision::new(1).expect("scope revision"),
+        vec![
+            AuthorizedRootAdmission::new(
+                native_topology_context(main_scope.clone(), "main.1", &capability, &use_case),
+                RegisteredRootLocatorV1::new(
+                    project.clone(),
+                    identity.profile_id().clone(),
+                    "store.session-sync.native-topology",
+                    roots[0].clone(),
+                )
+                .expect("main locator"),
+            )
+            .expect("main admission"),
+            AuthorizedRootAdmission::new(
+                native_topology_context(feature_scope.clone(), "feature.1", &capability, &use_case),
+                RegisteredRootLocatorV1::new(
+                    project.clone(),
+                    identity.profile_id().clone(),
+                    "store.session-sync.native-topology",
+                    roots[1].clone(),
+                )
+                .expect("feature locator"),
+            )
+            .expect("feature admission"),
+        ],
+        &capability,
+        &use_case,
+        UtcMicros(10),
+    )
+    .expect("authorized registered roots");
+    let scope_storage = first_sessions
+        .authorized_scope_set_storage()
+        .expect("scope-set storage");
+    assert!(matches!(
+        scope_storage.compare_and_swap(None, &scope_set),
+        Ok(ScopeSetCasOutcomeV1::Applied(_))
+    ));
+
+    let inventory_snapshot =
+        WorktreeInventorySnapshotId::new("worktree-inventory.session-sync.native-topology")
+            .expect("inventory snapshot");
+    let inventory_epoch = WorktreeInventoryEpoch::new(1).expect("inventory epoch");
+    let main_node = StackNodeId::new("stack-node.session-sync.main").expect("main node");
+    let feature_node = StackNodeId::new("stack-node.session-sync.feature").expect("feature node");
+    let revision = BranchStackRevisionV1::new(
+        BranchStackId::new("branch-stack.session-sync").expect("stack"),
+        BranchStackRevisionId::new("branch-stack-revision.session-sync.1").expect("revision"),
+        inventory_snapshot,
+        inventory_epoch,
+        BranchStackSourceV1::ExplicitDeclaration,
+        vec![
+            BranchStackNodeV1 {
+                node_id: main_node.clone(),
+                project_id: project.clone(),
+                repository_id: repository.clone(),
+                reference: main_ref.clone(),
+                tip: CommitId::new(run_native_topology_git(
+                    &repository_root,
+                    &["rev-parse", "refs/heads/main"],
+                ))
+                .expect("main tip"),
+                worktree_id: Some(main_worktree.clone()),
+            },
+            BranchStackNodeV1 {
+                node_id: feature_node.clone(),
+                project_id: project.clone(),
+                repository_id: repository.clone(),
+                reference: feature_ref.clone(),
+                tip: CommitId::new(run_native_topology_git(
+                    &linked_root,
+                    &["rev-parse", "refs/heads/feature"],
+                ))
+                .expect("feature tip"),
+                worktree_id: Some(feature_worktree.clone()),
+            },
+        ],
+        vec![BranchStackEdgeV1 {
+            dependency: main_node,
+            dependent: feature_node,
+        }],
+    )
+    .expect("branch-stack revision");
+    let branch_binding = GitBranchStackBindingV1 {
+        project_id: project.clone(),
+        repository_id: repository.clone(),
+        scope_set_id: scope_set_id.clone(),
+        scope_set_revision: scope_set.revision(),
+        scope_set_digest: scope_set.digest().clone(),
+        revision,
+    };
+    let occupancies = vec![
+        GitWorktreeOccupancyV1 {
+            project_id: project.clone(),
+            repository_id: repository.clone(),
+            scope_set_id: scope_set_id.clone(),
+            scope_set_revision: scope_set.revision(),
+            scope_set_digest: scope_set.digest().clone(),
+            worktree_id: main_worktree.clone(),
+            reference: Some(main_ref),
+        },
+        GitWorktreeOccupancyV1 {
+            project_id: project.clone(),
+            repository_id: repository.clone(),
+            scope_set_id: scope_set_id.clone(),
+            scope_set_revision: scope_set.revision(),
+            scope_set_digest: scope_set.digest().clone(),
+            worktree_id: feature_worktree.clone(),
+            reference: Some(feature_ref),
+        },
+    ];
+    let projection = crate::git_intelligence::NativeGitIntelligence::new(
+        roots[0].clone(),
+        repository.clone(),
+        main_worktree.clone(),
+    )
+    .topology_projection(crate::git_intelligence::GIT_HISTORY_MAX_COUNT_LIMIT)
+    .expect("native topology projection")
+    .with_declared_topology(vec![branch_binding], occupancies)
+    .expect("declared topology projection");
+    let projection_identity = git_topology_projection_identity(
+        git_topology_namespace(&repository).expect("topology namespace"),
+    )
+    .expect("topology identity");
+    let projector_revision =
+        GraphProjectorRevision::try_from(GIT_TOPOLOGY_PROJECTOR_REVISION_V1.to_owned())
+            .expect("projector revision");
+    let manifest = build_git_topology_manifest_checked(
+        projection_identity.clone(),
+        &projection,
+        &projector_revision,
+        &|| Ok(()),
+    )
+    .expect("topology manifest");
+    first_runtime
+        .publish_verified_manifest(
+            &manifest,
+            git_topology_idempotency_key(&projection, &projector_revision)
+                .expect("topology idempotency"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("persist declared topology");
+
+    drop(scope_storage);
+    drop(first_runtime);
+    drop(first_sessions);
+    drop(first_project_database);
+    drop(first_registry);
+
+    let restarted_registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity.clone(),
+        )
+        .await
+        .expect("restarted session registry");
+    let restarted_project_database = restarted_registry
+        .project_memory(project.clone(), roots.clone())
+        .await
+        .expect("restarted project graph database");
+    let restarted_sessions = restarted_registry
+        .project_sessions(project.clone(), roots.clone())
+        .await
+        .expect("restarted project sessions database");
+    let restarted_runtime = restarted_registry
+        .retain_project_graph_runtime(project.clone(), restarted_project_database)
+        .await
+        .expect("restarted project graph runtime");
+    let restarted_runtime: Arc<dyn crate::global_db::ProjectGraphRuntimePortV1> =
+        Arc::new(restarted_runtime);
+    assert!(
+        restarted_sessions
+            .bind_project_graph_runtime(Arc::clone(&restarted_runtime))
+            .is_ok(),
+        "bind restarted graph runtime"
+    );
+    let restarted_scope_storage = restarted_sessions
+        .authorized_scope_set_storage()
+        .expect("restarted scope-set storage");
+    super::git_topology::publish_native_topology(
+        Arc::clone(&restarted_runtime),
+        roots[0].clone(),
+        repository.clone(),
+        main_worktree,
+        restarted_scope_storage.clone(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .expect("session sync must revalidate and republish retained topology after restart");
+
+    let snapshot = restarted_runtime
+        .verified_snapshot(&projection_identity, Arc::new(AtomicBool::new(false)))
+        .expect("read restarted topology")
+        .expect("persisted topology head");
+    let store = GitTopologyProjectionStore::from_verified_snapshot_verified(
+        snapshot,
+        Arc::new(NeverCancelled),
+    )
+    .expect("verified restarted topology");
+    assert_eq!(store.branch_stacks().len(), 1);
+    assert_eq!(store.worktree_occupancies().len(), 2);
+
+    let replacement_scope_set = AuthorizedScopeSetAuthority::authorize_registered(
+        scope_set_id,
+        ScopeSetRevision::new(2).expect("replacement scope revision"),
+        vec![
+            AuthorizedRootAdmission::new(
+                native_topology_context(main_scope, "main.2", &capability, &use_case),
+                RegisteredRootLocatorV1::new(
+                    project.clone(),
+                    identity.profile_id().clone(),
+                    "store.session-sync.native-topology",
+                    roots[0].clone(),
+                )
+                .expect("replacement main locator"),
+            )
+            .expect("replacement main admission"),
+            AuthorizedRootAdmission::new(
+                native_topology_context(feature_scope, "feature.2", &capability, &use_case),
+                RegisteredRootLocatorV1::new(
+                    project,
+                    identity.profile_id().clone(),
+                    "store.session-sync.native-topology",
+                    roots[1].clone(),
+                )
+                .expect("replacement feature locator"),
+            )
+            .expect("replacement feature admission"),
+        ],
+        &capability,
+        &use_case,
+        UtcMicros(20),
+    )
+    .expect("replacement authorized roots");
+    assert!(matches!(
+        restarted_scope_storage.compare_and_swap(
+            Some(ScopeSetRevision::new(1).expect("prior scope revision")),
+            &replacement_scope_set,
+        ),
+        Ok(ScopeSetCasOutcomeV1::Applied(_))
+    ));
+    assert_eq!(
+        super::git_topology::publish_native_topology(
+            restarted_runtime,
+            roots[0].clone(),
+            repository,
+            feature_worktree,
+            restarted_scope_storage,
+            Arc::new(AtomicBool::new(false)),
+        ),
+        Err(GitTopologySyncFailure::Stale)
+    );
 }
 
 #[test]

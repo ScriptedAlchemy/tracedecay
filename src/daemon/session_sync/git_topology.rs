@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_application::{AuthorizedRoot, AuthorizedScopeSet};
 use tracedecay_code_index::git_projection::{
-    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitBranchStackBindingV1, GitTopologyProjectionStore,
-    GitWorktreeOccupancyV1, build_git_topology_manifest_checked, git_topology_idempotency_key,
-    git_topology_namespace, git_topology_projection_identity,
+    GIT_TOPOLOGY_PROJECTOR_REVISION_V1, GitTopologyProjectionError, GitTopologyProjectionStore,
+    build_git_topology_manifest_checked, git_topology_idempotency_key, git_topology_namespace,
+    git_topology_projection_identity,
 };
 use tracedecay_domain::{GitHeadStateV1, RefId, RepositoryId, WorktreeId};
 use tracedecay_global_db::ProjectGraphRuntimePortV1;
@@ -65,6 +65,13 @@ pub(super) fn publish_native_topology(
                 Arc::new(GitTopologySyncCancellation(Arc::clone(&cancelled))),
             )
             .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+            validate_retained_declared_topology(
+                &repository,
+                &project_root,
+                &store,
+                &scope_sets,
+                &cancelled,
+            )?;
             (
                 store.branch_stacks().to_vec(),
                 store.worktree_occupancies().to_vec(),
@@ -72,13 +79,6 @@ pub(super) fn publish_native_topology(
         }
         None => (Vec::new(), Vec::new()),
     };
-    validate_retained_declared_topology(
-        &repository,
-        &project_root,
-        &branch_stacks,
-        &worktree_occupancies,
-        &scope_sets,
-    )?;
     let adapter = NativeGitIntelligence::new(project_root, repository.clone(), worktree);
     let projection = adapter
         .topology_projection(GIT_HISTORY_MAX_COUNT_LIMIT)
@@ -107,19 +107,37 @@ pub(super) fn publish_native_topology(
 pub(super) fn validate_retained_declared_topology(
     repository: &RepositoryId,
     repository_root: &Path,
-    branch_stacks: &[GitBranchStackBindingV1],
-    worktree_occupancies: &[GitWorktreeOccupancyV1],
+    topology: &GitTopologyProjectionStore,
     storage: &AuthorizedScopeSetSqliteStorage,
+    cancelled: &Arc<AtomicBool>,
 ) -> Result<(), GitTopologySyncFailure> {
     let enrolled = GitRepositoryAuthority::discover(repository_root)
         .map_err(|_| GitTopologySyncFailure::Unavailable)?;
-    for binding in branch_stacks {
+    for binding in topology.branch_stacks() {
         let scope_set = exact_scope_set(
             storage,
             &binding.scope_set_id,
             binding.scope_set_revision,
             &binding.scope_set_digest,
         )?;
+        let exact_revision = topology
+            .branch_stack_revision_exact(
+                &binding.project_id,
+                &binding.repository_id,
+                &binding.scope_set_id,
+                binding.scope_set_revision,
+                &binding.scope_set_digest,
+                &binding.revision.stack_id,
+                &binding.revision.revision_id,
+                &binding.revision.digest,
+                &binding.revision.inventory_snapshot_id,
+                binding.revision.inventory_epoch,
+                Arc::new(GitTopologySyncCancellation(Arc::clone(cancelled))),
+            )
+            .map_err(topology_read_failure)?;
+        if exact_revision.as_ref() != Some(&binding.revision) {
+            return Err(GitTopologySyncFailure::Stale);
+        }
         let expected_worktrees = scope_set
             .roots()
             .iter()
@@ -129,7 +147,8 @@ pub(super) fn validate_retained_declared_topology(
             })
             .map(|root| root.scope().worktree_id.clone())
             .collect::<BTreeSet<_>>();
-        let projected_worktrees = worktree_occupancies
+        let projected_worktrees = topology
+            .worktree_occupancies()
             .iter()
             .filter(|occupancy| {
                 occupancy.project_id == binding.project_id
@@ -176,12 +195,26 @@ pub(super) fn validate_retained_declared_topology(
                 &node.reference,
                 &enrolled,
             )?;
+            let projected_occupied = topology
+                .worktree_occupancy_exact(
+                    &binding.project_id,
+                    &binding.repository_id,
+                    &binding.scope_set_id,
+                    binding.scope_set_revision,
+                    &binding.scope_set_digest,
+                    &node.reference,
+                    Arc::new(GitTopologySyncCancellation(Arc::clone(cancelled))),
+                )
+                .map_err(topology_read_failure)?;
+            if projected_occupied != occupied {
+                return Err(GitTopologySyncFailure::Stale);
+            }
             if occupied.len() > 1 || occupied.first() != node.worktree_id.as_ref() {
                 return Err(GitTopologySyncFailure::Stale);
             }
         }
     }
-    for occupancy in worktree_occupancies {
+    for occupancy in topology.worktree_occupancies() {
         let scope_set = exact_scope_set(
             storage,
             &occupancy.scope_set_id,
@@ -206,6 +239,15 @@ pub(super) fn validate_retained_declared_topology(
         }
     }
     Ok(())
+}
+
+fn topology_read_failure(error: GitTopologyProjectionError) -> GitTopologySyncFailure {
+    match error {
+        GitTopologyProjectionError::Stale { .. }
+        | GitTopologyProjectionError::StaleBinding { .. } => GitTopologySyncFailure::Stale,
+        GitTopologyProjectionError::RepositoryMismatch => GitTopologySyncFailure::Denied,
+        _ => GitTopologySyncFailure::Unavailable,
+    }
 }
 
 fn exact_scope_set(
