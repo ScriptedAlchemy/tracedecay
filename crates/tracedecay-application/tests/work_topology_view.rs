@@ -6,6 +6,7 @@
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU16;
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
@@ -155,7 +156,7 @@ fn requested_route() -> WorkProviderRouteV1 {
     .unwrap()
 }
 
-fn execution_snapshot() -> WorkExecutionSnapshot {
+fn execution_snapshot(topology: tracedecay_domain::WorkTopologyPolicyV1) -> WorkExecutionSnapshot {
     WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.top.1"),
         configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.top.1"),
@@ -179,7 +180,7 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
         deadline: UtcMicros(1_000_000),
         fallback: WorkFallbackTopology::Disabled,
-        topology: tracedecay_domain::safe_work_topology_policy_v1(),
+        topology,
     })
     .unwrap()
 }
@@ -223,13 +224,17 @@ fn admit_work(
     assert_eq!(proposal.proposal.task_id(), &task_id);
 }
 
-fn start_command(task: &str, attempt: &str) -> StartWorkAttemptCommand {
+fn start_command(
+    task: &str,
+    attempt: &str,
+    topology: tracedecay_domain::WorkTopologyPolicyV1,
+) -> StartWorkAttemptCommand {
     StartWorkAttemptCommand {
         task_id: id(task),
         run_id: id(&format!("run.{task}")),
         attempt_id: id(attempt),
         operation: id::<WorkflowOperationRef>("operation.attempt.execute-provider"),
-        execution_snapshot: execution_snapshot(),
+        execution_snapshot: execution_snapshot(topology),
         worktree_root: "/tmp/topology-fixture".to_owned(),
         reference: Some(id::<RefId>("refs/heads/topology-fixture")),
         commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
@@ -283,6 +288,10 @@ fn verified_binding()
 fn view_joins_placement_lanes_to_the_page_and_carries_the_policy_dimensions() {
     let (attempts, product_attempts, proposals, store, placements, context) =
         fixture("project.topology.view");
+    let mut policy = safe_work_topology_policy_v1();
+    policy.concurrency.maximum_active_per_repository = NonZeroU16::new(2).unwrap();
+    policy.concurrency.maximum_global_active = NonZeroU16::new(2).unwrap();
+    policy.validate().unwrap();
     for task in ["task.topology.a", "task.topology.b"] {
         admit_work(&store, &proposals, &context, task);
         product_attempts
@@ -290,8 +299,8 @@ fn view_joins_placement_lanes_to_the_page_and_carries_the_policy_dimensions() {
                 &context,
                 &common::work_product_binding(),
                 &common::work_product_revisions(&context),
-                &safe_work_topology_policy_v1(),
-                start_command(task, &format!("attempt.{task}.1")),
+                &policy,
+                start_command(task, &format!("attempt.{task}.1"), policy.clone()),
             )
             .unwrap();
     }
@@ -326,7 +335,6 @@ fn view_joins_placement_lanes_to_the_page_and_carries_the_policy_dimensions() {
         .unwrap();
     assert_eq!(placed.state(), WorkPlacementStateV1::Admitted);
 
-    let policy = safe_work_topology_policy_v1();
     let view = execution_topology_view(
         &attempts,
         &placements,

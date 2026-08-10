@@ -5,6 +5,7 @@
 mod common;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU16;
 
 use common::{
     WorkProductAttemptStore, work_authority, work_product_binding, work_product_revisions,
@@ -121,6 +122,22 @@ fn admit_synthesis(
     )
 }
 
+fn admit_synthesis_with_topology(
+    attempts: &WorkProductSynthesisAttemptServiceV1<WorkProductAttemptStore>,
+    context: &RequestContext,
+    topology: &tracedecay_domain::WorkTopologyPolicyV1,
+    command: AdmitWorkSynthesisCommand,
+) -> Result<WorkSynthesisAttemptV1, tracedecay_application::ApplicationProblem> {
+    admit_work_synthesis_against_registered_topology(
+        attempts,
+        context,
+        &work_product_binding(),
+        &work_product_revisions(context),
+        topology,
+        command,
+    )
+}
+
 fn requested_route() -> WorkProviderRouteV1 {
     WorkProviderRouteV1::new(
         id::<ProviderId>("provider.work.claude-code-cli"),
@@ -130,6 +147,12 @@ fn requested_route() -> WorkProviderRouteV1 {
 }
 
 fn execution_snapshot() -> WorkExecutionSnapshot {
+    execution_snapshot_with_topology(tracedecay_domain::safe_work_topology_policy_v1())
+}
+
+fn execution_snapshot_with_topology(
+    topology: tracedecay_domain::WorkTopologyPolicyV1,
+) -> WorkExecutionSnapshot {
     WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.syn.1"),
         configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.syn.1"),
@@ -153,18 +176,30 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
         deadline: UtcMicros(1_000_000),
         fallback: WorkFallbackTopology::Disabled,
-        topology: tracedecay_domain::safe_work_topology_policy_v1(),
+        topology,
     })
     .unwrap()
 }
 
 fn start_command(task: &str, attempt: &str) -> StartWorkAttemptCommand {
+    start_command_with_topology(
+        task,
+        attempt,
+        tracedecay_domain::safe_work_topology_policy_v1(),
+    )
+}
+
+fn start_command_with_topology(
+    task: &str,
+    attempt: &str,
+    topology: tracedecay_domain::WorkTopologyPolicyV1,
+) -> StartWorkAttemptCommand {
     StartWorkAttemptCommand {
         task_id: id(task),
         run_id: id(&format!("run.{task}")),
         attempt_id: id(attempt),
         operation: id::<WorkflowOperationRef>("operation.attempt.execute-provider"),
-        execution_snapshot: execution_snapshot(),
+        execution_snapshot: execution_snapshot_with_topology(topology),
         worktree_root: "/tmp/synthesis-fixture".to_owned(),
         reference: Some(id::<RefId>("refs/heads/synthesis-fixture")),
         commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
@@ -352,6 +387,17 @@ fn attempt_count_for_run(
 fn synthesis_command(sources: Vec<WorkAttemptIdentityV1>) -> AdmitWorkSynthesisCommand {
     AdmitWorkSynthesisCommand {
         start: start_command("task.synthesis", "attempt.synthesis"),
+        output_name: id::<WorkflowOutputName>("output.synthesis.fixture"),
+        sources,
+    }
+}
+
+fn synthesis_command_with_topology(
+    sources: Vec<WorkAttemptIdentityV1>,
+    topology: tracedecay_domain::WorkTopologyPolicyV1,
+) -> AdmitWorkSynthesisCommand {
+    AdmitWorkSynthesisCommand {
+        start: start_command_with_topology("task.synthesis", "attempt.synthesis", topology),
         output_name: id::<WorkflowOutputName>("output.synthesis.fixture"),
         sources,
     }
@@ -584,9 +630,14 @@ fn identical_synthesis_replay_returns_the_byte_stable_admitted_result() {
     );
     let mutable = source_identity("task.source.mutable", "attempt.1");
     let running = insert_running_source(&attempt_store, &mine, mutable.clone());
-    let command = synthesis_command(vec![citable, mutable]);
+    let mut topology = registered_topology();
+    topology.concurrency.maximum_active_per_repository = NonZeroU16::new(2).unwrap();
+    topology.concurrency.maximum_global_active = NonZeroU16::new(2).unwrap();
+    topology.validate().unwrap();
+    let command = synthesis_command_with_topology(vec![citable, mutable], topology.clone());
 
-    let first = admit_synthesis(&attempts, &context, command.clone()).unwrap();
+    let first =
+        admit_synthesis_with_topology(&attempts, &context, &topology, command.clone()).unwrap();
     let WorkSynthesisAttemptV1::Admitted(first_admission) = &first else {
         panic!("expected an admitted synthesis attempt");
     };
@@ -607,7 +658,7 @@ fn identical_synthesis_replay_returns_the_byte_stable_admitted_result() {
         &running,
         vec![artifact("artifact.late", '3')],
     );
-    let replay = admit_synthesis(&attempts, &context, command).unwrap();
+    let replay = admit_synthesis_with_topology(&attempts, &context, &topology, command).unwrap();
 
     assert_eq!(
         serde_json::to_vec(&replay).unwrap(),

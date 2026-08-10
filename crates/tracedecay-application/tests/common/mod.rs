@@ -582,6 +582,15 @@ impl WorkGraphReadPortV1 for WorkProductAttemptStore {
             .commit
             .verified_graph_version()
             .clone();
+        let runtime_coverage = if graph
+            .items()
+            .iter()
+            .any(|item| !item.accepted_attempts().is_empty())
+        {
+            WorkRuntimeProjectionCoverageV1::Unavailable
+        } else {
+            WorkRuntimeProjectionCoverageV1::Complete
+        };
         let runtime = WorkRuntimeProjectionV1::new(
             graph.version(),
             ProjectionGenerationId::new("generation.work-product.fixture")
@@ -589,7 +598,7 @@ impl WorkGraphReadPortV1 for WorkProductAttemptStore {
             tracedecay_domain::WorkProjectionSequenceV1::new(graph.version().get()),
             request.observed_at,
             Vec::new(),
-            WorkRuntimeProjectionCoverageV1::Complete,
+            runtime_coverage,
         )
         .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
         let projections =

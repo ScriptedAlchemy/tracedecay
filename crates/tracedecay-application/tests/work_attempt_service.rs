@@ -286,6 +286,7 @@ fn start_replays_an_identical_admission_after_the_projection_moves() {
     let command = start_command("task.attempt.replay", "attempt.1");
     let leased = attempts.start(&context, command.clone()).unwrap();
     let admitted_binding = leased.projection_binding().clone();
+    let graph_after_admission = work.graph_version();
 
     attempts
         .mark_running(&context, leased.identity(), requested_route())
@@ -306,7 +307,7 @@ fn start_replays_an_identical_admission_after_the_projection_moves() {
         .unwrap();
     assert_eq!(
         work.graph_version(),
-        Some(admitted_binding.graph_version()),
+        graph_after_admission,
         "terminal evidence must not fabricate a product-graph transition"
     );
 

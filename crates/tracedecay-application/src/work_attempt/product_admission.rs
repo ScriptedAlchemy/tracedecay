@@ -281,6 +281,12 @@ where
         command: StartWorkAttemptCommand,
     ) -> Result<WorkAttemptV1, ApplicationProblem> {
         admit_product_attempt_request(context, binding, command.occurred_at)?;
+        if command.execution_snapshot.topology() != topology {
+            return Err(conflict_problem(
+                "application.work-attempt.topology-conflict",
+                "The Work attempt topology does not match the registered runtime authority.",
+            ));
+        }
         let authority = crate::work::work_authority(context)?;
         let identity = WorkAttemptIdentityV1::new(
             command.task_id.clone(),
