@@ -87,6 +87,14 @@ the commit as attribution evidence.
   rebinds Work graph reads, commands, and evidence to its exact repository in
   `bbb979b00`; its focused Work suite passed 95/95 with typecheck and production
   build green.
+- The dashboard board and commands now consume only the product graph authority
+  in `d0d9f7dcb`; its complete focused Work suite passed 202/202 with typecheck
+  and production build green. The public `WorkProjection` snapshot, delta,
+  replan-dependencies, and accept-task operations are removed from HTTP,
+  dashboard, MCP, CLI, daemon dispatch, Rust/TypeScript SDKs, and generated
+  contracts in `1be58ce45`. The root library, dashboard contract drift check,
+  SDK codegen drift check, dashboard route tests, and migrated live-journey
+  source compile passed.
 - Recovered daemon session retrieval authority is byte-exact in
   `7e5812db71`.
 - Automatic fact application and receipts are checkpointed in `b1da03fbfc`,
@@ -116,8 +124,13 @@ the commit as attribution evidence.
   correlation, who worked on a task, provider-qualified session evidence,
   continuation, revocation, restart, stale graph, denied/unavailable, and
   current/as-of/evolution/forensic retrieval.
-- Remove remaining public `WorkProjection` SDK uses from accept-task, replan,
-  delta, and snapshot operations after all callers use the product authority.
+- Re-run the migrated live Work loop after catalog composition admits the
+  profile. The current binary refuses `tracedecay init` before Work dispatch
+  because `profile.default` has 403 bindings against a 320-binding budget.
+- Repair the independent `test-transport` dashboard graph fixture before using
+  the normal integration target: it still imports the private daemon service,
+  calls removed relational `get_all_nodes`/`get_all_edges` APIs, and uses the
+  obsolete one-argument code-index scheduler constructor.
 - After the SQLite fact repair compiles, run the global-db/usecases checks and
   the rank-final revocation regression in addition to the focused query tests.
 
@@ -262,10 +275,9 @@ the commit as attribution evidence.
 
 - Freeze Rust source first, then run the canonical contract generator and
   `contracts:check`; never hand-edit generated dashboard contracts.
-- Finish the Work create/prepare/mutate/evidence UI against the regenerated
-  product schemas. Re-run Automations DOM tests after scheduler schemas are
-  regenerated. Basic browser usability remains required; screen-reader polish
-  is not an RC priority.
+- Re-run Automations DOM tests after scheduler schemas are regenerated. Basic
+  browser usability remains required; screen-reader polish is not an RC
+  priority.
 - Regenerate SDK operations/types only after Work, TaskSession, terminal
   problems, source edit, retained surfaces, native topology, and automation are
   mounted and compile together.
