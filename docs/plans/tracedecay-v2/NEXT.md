@@ -110,6 +110,13 @@ the commit as attribution evidence.
   authority suite, generated dashboard contract check, Rust formatting, and
   diff hygiene are green. Product publication remains distinct from executor
   topology and cannot fabricate attempt hydration.
+- The obsolete `test-transport` SQLite graph-projection fixture is retired in
+  `8b3900960`. It no longer imports the private daemon service, calls deleted
+  relational graph reads, or constructs a scheduler without the process
+  resident-memory authority. The standalone dashboard composition now
+  withholds graph readiness until a verified production projection is mounted.
+  The normal feature-gated Work integration journey compiles and passed 1/1
+  through the real daemon in 44.38 seconds.
 - Recovered daemon session retrieval authority is byte-exact in
   `7e5812db71`.
 - Automatic fact application and receipts are checkpointed in `b1da03fbfc`,
@@ -139,10 +146,13 @@ the commit as attribution evidence.
   correlation, who worked on a task, provider-qualified session evidence,
   continuation, revocation, restart, stale graph, denied/unavailable, and
   current/as-of/evolution/forensic retrieval.
-- Repair the independent `test-transport` dashboard graph fixture before using
-  the normal integration target: it still imports the private daemon service,
-  calls removed relational `get_all_nodes`/`get_all_edges` APIs, and uses the
-  obsolete one-argument code-index scheduler constructor.
+- Mount the daemon's verified code-graph projection port into the standalone
+  dashboard composition and migrate `dashboard_api_test` off the deleted
+  SQLite graph/index authorities. Its no-run build now reaches the test target
+  and reports the remaining removed `index_all`, `insert_nodes`/`insert_edges`/
+  `upsert_files`, and `memory_writer` callers plus one moved `FactOwnerV1`.
+  Keep graph routes typed unavailable until that production authority is
+  present; do not restore relational tables or a synthetic lookalike fixture.
 - After the SQLite fact repair compiles, run the global-db/usecases checks and
   the rank-final revocation regression in addition to the focused query tests.
 
