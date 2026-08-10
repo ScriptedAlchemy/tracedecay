@@ -288,8 +288,8 @@ pub fn work_product_binding() -> WorkProductBindingV1 {
 
 pub fn work_product_revisions(context: &RequestContext) -> WorkProductRevisionPinsV1 {
     WorkProductRevisionPinsV1 {
-        // Combined admission verifies this against the exact Work authority;
-        // a fixture revision must therefore retain the grant digest byte-for-byte.
+        // Keep the shared fixture's policy revision stable across its seeded
+        // product graph and attempt services.
         policy_revision_id: id(context.grant().digest.as_str()),
         configuration_revision_id: id("configuration.work-product.fixture"),
         catalog_generation_id: id("catalog.work-product.fixture"),

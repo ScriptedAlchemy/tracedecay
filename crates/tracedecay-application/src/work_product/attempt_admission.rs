@@ -31,10 +31,12 @@ pub struct WorkProductAttemptAdmissionV1 {
 
 impl WorkProductAttemptAdmissionV1 {
     pub fn validate(&self) -> Result<(), WorkProductAttemptAdmissionErrorV1> {
+        // The draft's policy revision is pinned by the mounted product
+        // runtime. WorkAuthority's legacy `policy_digest` field carries the
+        // capability-grant digest, so those independent identities must not
+        // be equated here.
         if self.product_context.actor() != self.authority.actor_id()
             || &self.product_draft.actor_id != self.authority.actor_id()
-            || self.product_draft.policy_revision_id.as_str()
-                != self.authority.policy_digest().as_str()
             || !selection_covers_authority(
                 self.product_context.authorized_scope().selection(),
                 &self.authority,

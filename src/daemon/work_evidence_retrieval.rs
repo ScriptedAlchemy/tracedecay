@@ -577,7 +577,7 @@ const fn work_freshness(freshness: SessionDataFreshness) -> WorkEvidenceFreshnes
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -649,7 +649,7 @@ mod tests {
         .expect("verified Work version")
     }
 
-    pub(super) fn federated_authority(privacy_domain: PrivacyDomainId) -> QueryAuthorityV1 {
+    pub(crate) fn federated_authority(privacy_domain: PrivacyDomainId) -> QueryAuthorityV1 {
         let budget = RetrievalBudget {
             max_candidates_per_lane: 32,
             max_fused_candidates: 16,
@@ -730,7 +730,7 @@ mod tests {
         .expect("federated TaskSession authority")
     }
 
-    pub(super) struct StaticFederatedAuthority(pub(super) Arc<QueryAuthorityV1>);
+    pub(crate) struct StaticFederatedAuthority(pub(crate) Arc<QueryAuthorityV1>);
 
     impl WorkFederatedQueryAuthorityPortV1 for StaticFederatedAuthority {
         fn authority_for<'a>(
