@@ -78,6 +78,15 @@ the commit as attribution evidence.
   outcomes are checkpointed in `4215d2009`. The concrete project-session
   evidence mount and exact-scope reuse are in `3574fa695`; verified first-task
   bootstrap and repaired Work invocation fixtures are in `42c4496ab`.
+- Atomic provider admission now accepts the product policy revision and the
+  registered daemon task-to-provider-session journey hydrates sealed
+  TaskSession evidence in `d3b7fb959`. Registered topology equality and the
+  repaired admission/synthesis/topology regressions are in `2b3ae407d`.
+- `RetrieveEvidence` is exercised through MCP/HTTP parity and the typed SDK
+  route in `bb7555b1a`. The dashboard now retains the daemon-resolved scope and
+  rebinds Work graph reads, commands, and evidence to its exact repository in
+  `bbb979b00`; its focused Work suite passed 95/95 with typecheck and production
+  build green.
 - Recovered daemon session retrieval authority is byte-exact in
   `7e5812db71`.
 - Automatic fact application and receipts are checkpointed in `b1da03fbfc`,
