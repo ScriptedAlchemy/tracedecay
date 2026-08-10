@@ -235,6 +235,20 @@ the commit as attribution evidence.
 - The P0 GitHub stack coordinator and anchored corpus remain restored in
   `c70556fe38` and `ec35c90497`; native stack transition producers are in
   `e26461eac6`.
+- Generation-bound rename preview/apply is normalized in `738776d2f`. The
+  daemon project owner now grants every canonical primitive-read capability,
+  exact graph lookup replaces ranked-search identity discovery, internal MCP
+  metadata is removed before strict request decoding, and apply preserves the
+  caller's accepted preview while the task-local plan authority intercepts
+  publication without changing bytes. The production MCP suite passed 6/6
+  serialized journeys covering preview digest CAS, accepted apply and
+  idempotent replay, stale-source refusal, lexical collisions, unresolved
+  cross-module graph hazards, and publication rollback. The exact
+  rename-preview route passed 1/1, the root source-edit module passed 35/35,
+  application effect/SDK schemas passed 7/7, SDK codegen remained byte-clean,
+  and TypeScript typecheck passed. `b66f0009a` additionally makes multi-root
+  and Workflow settlement use their executable registries' canonical dispatch
+  deadlines; the complete MCP binding suite passed 11/11.
 
 ## Remaining work by lane
 
@@ -271,18 +285,6 @@ the commit as attribution evidence.
   receipts, reset-required, and post-restart reconciliation as externally
   observed typed terminals. The focused owner/application tests prove their
   internal mappings but are not a restart or end-to-end transport receipt.
-
-### Source edit and graph evidence
-
-- Normalize the intended source-edit portion of `7913905113` without reverting
-  peer work. Preserve generation-bound rename preview/apply, accepted-preview
-  digest CAS, lexical and graph hazards, and the daemon
-  `CodeGraphProjectionReadPort` injection.
-- Reconcile `project_open_owners.rs` with the deferred automation config-scout
-  hunk after the graph-port mount is stable.
-- Compile the real daemon/MCP journey, run focused rename preview/apply and
-  workspace tests, then regenerate Rust and TypeScript SDK contracts. The
-  checked-in generated schema still describes the old text-only shape.
 
 ### Automatic curation, memory, and configuration
 
