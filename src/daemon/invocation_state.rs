@@ -625,8 +625,7 @@ impl DaemonInvocationState {
                 .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
                 if !matches!(
                     request,
-                    service::invocation::WorkApplicationInvocationV1::Snapshot(_)
-                        | service::invocation::WorkApplicationInvocationV1::Delta(_)
+                    service::invocation::WorkApplicationInvocationV1::Views(_)
                 ) {
                     return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
                 }

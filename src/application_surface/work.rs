@@ -9,27 +9,26 @@ use std::sync::Arc;
 use axum::response::Response;
 use tracedecay_api::{WorkHttpRequest, WorkOperation};
 use tracedecay_application::{
-    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, CancelWorkAttemptCommand,
-    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
-    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
-    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryWorkAttemptCommandV1,
-    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
-    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
-    WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
+    AdmitWorkSynthesisCommand, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
+    DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    RetryWorkAttemptCommandV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkProposalComparisonRequestV1, WorkProposalComparisonV1,
-    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkSynthesisAttemptV1,
-    WorkTopologyViewRequestV1,
+    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
+    WorkProposalComparisonV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
-    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
+    WorkRunControlV1,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -140,12 +139,6 @@ pub(crate) async fn invoke_work_operation(
     }
 
     match operation {
-        WorkOperation::Snapshot => core!(
-            WorkProjectionSnapshotRequestV1,
-            Snapshot,
-            WorkProjectionSnapshotV1
-        ),
-        WorkOperation::Delta => core!(WorkProjectionDeltaRequestV1, Delta, WorkProjectionDeltaV1),
         WorkOperation::GenerateProposal => core!(
             GenerateProposalRequest,
             GenerateProposal,
@@ -156,13 +149,6 @@ pub(crate) async fn invoke_work_operation(
             Create,
             WorkProductMutationReceiptV1
         ),
-        WorkOperation::ReplanDependencies => {
-            core!(
-                ReplanDependenciesCommand,
-                ReplanDependencies,
-                WorkProjection
-            )
-        }
         WorkOperation::ReviewProposal => {
             core!(
                 DecideWorkProposalRequestV1,
@@ -184,7 +170,6 @@ pub(crate) async fn invoke_work_operation(
                 WorkProductMutationReceiptV1
             )
         }
-        WorkOperation::AcceptTask => core!(AcceptTaskCommand, AcceptTask, WorkProjection),
         WorkOperation::StartAttempt => {
             core!(StartWorkAttemptCommand, StartAttempt, WorkAttemptV1)
         }

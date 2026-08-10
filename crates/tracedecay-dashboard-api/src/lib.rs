@@ -2409,7 +2409,7 @@ mod authority_tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/work/snapshot")
+                    .uri("/api/work/views")
                     .header("content-type", "application/json")
                     .body(Body::from("{}"))
                     .expect("dashboard Work request"),

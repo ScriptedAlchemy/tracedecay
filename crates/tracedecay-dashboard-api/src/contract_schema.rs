@@ -4,15 +4,14 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
 use tracedecay_application::{
-    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AuthorizedScopeSet,
-    CancelWorkAttemptCommand, CostsReadModelV1, CreateWorkTaskRequestV1,
-    DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
-    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal,
-    MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
-    MultiRootScopeSetReadRequestV1, ObservatoryReadModelV1, PauseWorkRunCommand,
-    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResumeWorkAttemptsCommand,
+    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
+    AdmitWorkSynthesisCommand, AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1,
+    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
+    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
+    GeneratedWorkProposal, MultiRootExecuteRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, ObservatoryReadModelV1,
+    PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand,
     ResumeWorkRunCommand, RetryWorkAttemptCommandV1, StartWorkAttemptCommand,
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
     WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
@@ -20,14 +19,13 @@ use tracedecay_application::{
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkProposalComparisonRequestV1, WorkProposalComparisonV1,
-    WorkRetryAttemptOutcomeV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
-    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
+    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
+    WorkProposalComparisonV1, WorkRetryAttemptOutcomeV1, WorkRunControlReadingV1,
+    WorkRunControlRequestV1, WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
-    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
+    WorkRunControlV1,
 };
 
 use super::analytics_api::{
@@ -110,18 +108,11 @@ struct DashboardContractCatalogV1 {
     graph_fact_matches: StructureReadV1<FactMatchesMeasurementV1>,
     graph_test_map: StructureReadV1<TestMapMeasurementV1>,
     graph_node_sessions: StructureReadV1<NodeSessionsMeasurementV1>,
-    work_projection_snapshot_request: WorkProjectionSnapshotRequestV1,
-    work_projection_snapshot: WorkProjectionSnapshotV1,
-    work_projection_delta_request: WorkProjectionDeltaRequestV1,
-    work_projection_delta: WorkProjectionDeltaV1,
     work_generate_proposal_request: GenerateProposalRequest,
     work_generated_proposal: GeneratedWorkProposal,
     work_create_task_request: CreateWorkTaskRequestV1,
-    work_replan_dependencies_command: ReplanDependenciesCommand,
     work_decide_proposal_request: DecideWorkProposalRequestV1,
     work_admit_execution_request: AdmitWorkExecutionRequestV1,
-    work_accept_task_command: AcceptTaskCommand,
-    work_projection: WorkProjection,
     work_start_attempt_command: StartWorkAttemptCommand,
     work_admit_synthesis_command: AdmitWorkSynthesisCommand,
     work_synthesis_attempt: WorkSynthesisAttemptV1,
@@ -266,23 +257,9 @@ mod tests {
             .expect("dashboard contracts expose schema definitions");
 
         for (field, contract) in [
-            (
-                "work_projection_snapshot_request",
-                "WorkProjectionSnapshotRequestV1",
-            ),
-            ("work_projection_snapshot", "WorkProjectionSnapshotV1"),
-            (
-                "work_projection_delta_request",
-                "WorkProjectionDeltaRequestV1",
-            ),
-            ("work_projection_delta", "WorkProjectionDeltaV1"),
             ("work_generate_proposal_request", "GenerateProposalRequest"),
             ("work_generated_proposal", "GeneratedWorkProposal"),
             ("work_create_task_request", "CreateWorkTaskRequestV1"),
-            (
-                "work_replan_dependencies_command",
-                "ReplanDependenciesCommand",
-            ),
             (
                 "work_decide_proposal_request",
                 "DecideWorkProposalRequestV1",
@@ -291,8 +268,6 @@ mod tests {
                 "work_admit_execution_request",
                 "AdmitWorkExecutionRequestV1",
             ),
-            ("work_accept_task_command", "AcceptTaskCommand"),
-            ("work_projection", "WorkProjection"),
             ("work_start_attempt_command", "StartWorkAttemptCommand"),
             ("work_admit_synthesis_command", "AdmitWorkSynthesisCommand"),
             ("work_synthesis_attempt", "WorkSynthesisAttemptV1"),

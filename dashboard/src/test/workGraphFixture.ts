@@ -29,6 +29,9 @@ import type {
 export interface WorkGraphTaskSpec {
   readonly taskId: string;
   readonly title?: string;
+  readonly acceptedProposal?: string | null;
+  readonly acceptedAt?: number | null;
+  readonly executionAdmittedAt?: number | null;
   /** Declared effort. The authority sums these into `workload.total_effort`,
    * and this fixture does the same rather than letting the two drift. */
   readonly effort?: number;
@@ -102,14 +105,14 @@ function taskEffort(task: WorkGraphTaskSpec): number {
 
 function workItem(task: WorkGraphTaskSpec, observedAt: number) {
   return {
-    accepted_at: null,
+    accepted_at: task.acceptedAt ?? null,
     accepted_attempts: [],
     accepted_criteria: {},
-    accepted_proposal: null,
+    accepted_proposal: task.acceptedProposal ?? null,
     accepted_route: null,
     archived_at: null,
     evidence_links: [],
-    execution_admitted_at: null,
+    execution_admitted_at: task.executionAdmittedAt ?? null,
     handoffs: (task.handoffs ?? []).map((handoff) => ({
       evidence_frontier: [...(handoff.evidenceFrontier ?? [])],
       from_actor: handoff.fromActor,

@@ -1,31 +1,5 @@
 {
   "$defs": {
-    "AcceptTaskCommand": {
-      "additionalProperties": false,
-      "properties": {
-        "command_id": {
-          "$ref": "#/$defs/WorkCommandId"
-        },
-        "expected_version": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "occurred_at": {
-          "$ref": "#/$defs/UtcMicros"
-        },
-        "task_id": {
-          "$ref": "#/$defs/TaskId"
-        }
-      },
-      "required": [
-        "task_id",
-        "expected_version",
-        "command_id",
-        "occurred_at"
-      ],
-      "type": "object"
-    },
     "AcceptWorkTaskRequestV1": {
       "additionalProperties": false,
       "properties": {
@@ -11674,41 +11648,6 @@
       "title": "ReleaseWorkPlacementCommand",
       "type": "object"
     },
-    "ReplanDependenciesCommand": {
-      "additionalProperties": false,
-      "properties": {
-        "command_id": {
-          "$ref": "#/$defs/WorkCommandId"
-        },
-        "dependencies": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/TaskId"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "expected_version": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "occurred_at": {
-          "$ref": "#/$defs/UtcMicros"
-        },
-        "task_id": {
-          "$ref": "#/$defs/TaskId"
-        }
-      },
-      "required": [
-        "task_id",
-        "dependencies",
-        "expected_version",
-        "command_id",
-        "occurred_at"
-      ],
-      "type": "object"
-    },
     "RepositoryId": {
       "description": "Strongly typed canonical identity: `RepositoryId`.",
       "type": "string"
@@ -15744,34 +15683,6 @@
         "requested_route",
         "actual_route",
         "terminal"
-      ],
-      "type": "object"
-    },
-    "WorkAuthority": {
-      "additionalProperties": false,
-      "properties": {
-        "actor_id": {
-          "$ref": "#/$defs/ActorId"
-        },
-        "policy_digest": {
-          "$ref": "#/$defs/ManifestDigest"
-        },
-        "project_id": {
-          "$ref": "#/$defs/ProjectId"
-        },
-        "repository_id": {
-          "$ref": "#/$defs/RepositoryId"
-        },
-        "worktree_id": {
-          "$ref": "#/$defs/WorktreeId"
-        }
-      },
-      "required": [
-        "project_id",
-        "repository_id",
-        "worktree_id",
-        "actor_id",
-        "policy_digest"
       ],
       "type": "object"
     },
@@ -20087,294 +19998,11 @@
         }
       ]
     },
-    "WorkProjection": {
-      "additionalProperties": false,
-      "properties": {
-        "accepted_proposal": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ProposalId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "authority": {
-          "$ref": "#/$defs/WorkAuthority"
-        },
-        "dependencies": {
-          "items": {
-            "$ref": "#/$defs/TaskId"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "execution_admitted": {
-          "type": "boolean"
-        },
-        "history_len": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "task_accepted": {
-          "type": "boolean"
-        },
-        "task_id": {
-          "$ref": "#/$defs/TaskId"
-        },
-        "title": {
-          "type": "string"
-        },
-        "version": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "task_id",
-        "version",
-        "authority",
-        "title",
-        "dependencies",
-        "accepted_proposal",
-        "execution_admitted",
-        "task_accepted",
-        "history_len"
-      ],
-      "type": "object"
-    },
-    "WorkProjectionCoverageV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "returned": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "state": {
-              "const": "complete",
-              "type": "string"
-            },
-            "total": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "state",
-            "returned",
-            "total"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "cursor": {
-              "$ref": "#/$defs/WorkProjectionResumeCursorV1"
-            },
-            "range": {
-              "$ref": "#/$defs/WorkProjectionSequenceRangeV1"
-            },
-            "returned": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "state": {
-              "const": "partial",
-              "type": "string"
-            },
-            "total": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "state",
-            "returned",
-            "total",
-            "range",
-            "cursor"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "cap": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "cursor": {
-              "$ref": "#/$defs/WorkProjectionResumeCursorV1"
-            },
-            "range": {
-              "$ref": "#/$defs/WorkProjectionSequenceRangeV1"
-            },
-            "returned": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "state": {
-              "const": "capped",
-              "type": "string"
-            },
-            "total": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "state",
-            "returned",
-            "total",
-            "cap",
-            "range",
-            "cursor"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "WorkProjectionDeltaRequestV1": {
-      "additionalProperties": false,
-      "properties": {
-        "cursor": {
-          "$ref": "#/$defs/WorkProjectionResumeCursorV1"
-        },
-        "page_size": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "cursor",
-        "page_size"
-      ],
-      "type": "object"
-    },
-    "WorkProjectionDeltaV1": {
-      "properties": {
-        "changed": {
-          "items": {
-            "$ref": "#/$defs/WorkProjection"
-          },
-          "type": "array"
-        },
-        "coverage": {
-          "$ref": "#/$defs/WorkProjectionCoverageV1"
-        },
-        "from_sequence": {
-          "$ref": "#/$defs/WorkProjectionSequenceV1"
-        },
-        "generation_id": {
-          "$ref": "#/$defs/ProjectionGenerationId"
-        },
-        "removed": {
-          "items": {
-            "$ref": "#/$defs/TaskId"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "to_sequence": {
-          "$ref": "#/$defs/WorkProjectionSequenceV1"
-        }
-      },
-      "required": [
-        "generation_id",
-        "from_sequence",
-        "to_sequence",
-        "changed",
-        "removed",
-        "coverage"
-      ],
-      "type": "object"
-    },
-    "WorkProjectionResumeCursorV1": {
-      "properties": {
-        "generation_id": {
-          "$ref": "#/$defs/ProjectionGenerationId"
-        },
-        "token": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "generation_id",
-        "token"
-      ],
-      "type": "object"
-    },
-    "WorkProjectionSequenceRangeV1": {
-      "properties": {
-        "end_inclusive": {
-          "$ref": "#/$defs/WorkProjectionSequenceV1"
-        },
-        "start_exclusive": {
-          "$ref": "#/$defs/WorkProjectionSequenceV1"
-        }
-      },
-      "required": [
-        "start_exclusive",
-        "end_inclusive"
-      ],
-      "type": "object"
-    },
     "WorkProjectionSequenceV1": {
       "format": "uint64",
       "minimum": 0,
       "title": "WorkProjectionSequenceV1",
       "type": "integer"
-    },
-    "WorkProjectionSnapshotRequestV1": {
-      "additionalProperties": false,
-      "properties": {
-        "page_size": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "page_size"
-      ],
-      "type": "object"
-    },
-    "WorkProjectionSnapshotV1": {
-      "properties": {
-        "coverage": {
-          "$ref": "#/$defs/WorkProjectionCoverageV1"
-        },
-        "generation_id": {
-          "$ref": "#/$defs/ProjectionGenerationId"
-        },
-        "projections": {
-          "items": {
-            "$ref": "#/$defs/WorkProjection"
-          },
-          "type": "array"
-        },
-        "sequence": {
-          "$ref": "#/$defs/WorkProjectionSequenceV1"
-        }
-      },
-      "required": [
-        "generation_id",
-        "sequence",
-        "projections",
-        "coverage"
-      ],
-      "type": "object"
     },
     "WorkProposalActionV1": {
       "description": "The explicit command the decision recommends next. A recommendation never\nexecutes; each action names a separate version-checked application command.",
@@ -23076,9 +22704,6 @@
     "storage_telemetry": {
       "$ref": "#/$defs/StorageTelemetryPayloadV1"
     },
-    "work_accept_task_command": {
-      "$ref": "#/$defs/AcceptTaskCommand"
-    },
     "work_admit_execution_request": {
       "$ref": "#/$defs/AdmitWorkExecutionRequestV1"
     },
@@ -23187,21 +22812,6 @@
     "work_product_mutation_request": {
       "$ref": "#/$defs/WorkProductMutationRequestV1"
     },
-    "work_projection": {
-      "$ref": "#/$defs/WorkProjection"
-    },
-    "work_projection_delta": {
-      "$ref": "#/$defs/WorkProjectionDeltaV1"
-    },
-    "work_projection_delta_request": {
-      "$ref": "#/$defs/WorkProjectionDeltaRequestV1"
-    },
-    "work_projection_snapshot": {
-      "$ref": "#/$defs/WorkProjectionSnapshotV1"
-    },
-    "work_projection_snapshot_request": {
-      "$ref": "#/$defs/WorkProjectionSnapshotRequestV1"
-    },
     "work_proposal_comparison": {
       "$ref": "#/$defs/WorkProposalComparisonV1"
     },
@@ -23210,9 +22820,6 @@
     },
     "work_release_placement_command": {
       "$ref": "#/$defs/ReleaseWorkPlacementCommand"
-    },
-    "work_replan_dependencies_command": {
-      "$ref": "#/$defs/ReplanDependenciesCommand"
     },
     "work_resume_attempts_command": {
       "$ref": "#/$defs/ResumeWorkAttemptsCommand"
@@ -23299,18 +22906,11 @@
     "graph_fact_matches",
     "graph_test_map",
     "graph_node_sessions",
-    "work_projection_snapshot_request",
-    "work_projection_snapshot",
-    "work_projection_delta_request",
-    "work_projection_delta",
     "work_generate_proposal_request",
     "work_generated_proposal",
     "work_create_task_request",
-    "work_replan_dependencies_command",
     "work_decide_proposal_request",
     "work_admit_execution_request",
-    "work_accept_task_command",
-    "work_projection",
     "work_start_attempt_command",
     "work_admit_synthesis_command",
     "work_synthesis_attempt",

@@ -26,28 +26,26 @@ use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
-    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationProblem,
-    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
-    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
-    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
-    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, RequestId, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
-    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
+    AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand,
+    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
+    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
+    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, RequestId,
+    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1,
+    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkProposalComparisonRequestV1, WorkProposalComparisonV1,
-    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkSynthesisAttemptV1,
-    WorkTopologyViewRequestV1,
+    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
+    WorkProposalComparisonV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 use tracedecay_domain::{
     WorkAttemptV1, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
-    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
+    WorkRunControlV1,
 };
 
 use crate::http::{
@@ -62,15 +60,11 @@ fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
 /// One canonical Work operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum WorkOperation {
-    Snapshot,
-    Delta,
     GenerateProposal,
     Create,
-    ReplanDependencies,
     ReviewProposal,
     AcceptProposal,
     AdmitExecution,
-    AcceptTask,
     StartAttempt,
     Synthesize,
     AttemptStatus,
@@ -147,15 +141,11 @@ macro_rules! work_operations {
 }
 
 work_operations! {
-    Snapshot: "snapshot", "snapshot";
-    Delta: "delta", "delta";
     GenerateProposal: "generate_proposal", "generate-proposal";
     Create: "create", "create";
-    ReplanDependencies: "replan_dependencies", "replan-dependencies";
     ReviewProposal: "review_proposal", "review-proposal";
     AcceptProposal: "accept_proposal", "accept-proposal";
     AdmitExecution: "admit_execution", "admit-execution";
-    AcceptTask: "accept_task", "accept-task";
     StartAttempt: "start_attempt", "start-attempt";
     Synthesize: "synthesize", "synthesize";
     AttemptStatus: "attempt_status", "attempt-status";
@@ -187,16 +177,12 @@ work_operations! {
 
 impl WorkOperation {
     /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 36] = [
-        Self::Snapshot,
-        Self::Delta,
+    pub const ALL: [Self; 32] = [
         Self::GenerateProposal,
         Self::Create,
-        Self::ReplanDependencies,
         Self::ReviewProposal,
         Self::AcceptProposal,
         Self::AdmitExecution,
-        Self::AcceptTask,
         Self::StartAttempt,
         Self::Synthesize,
         Self::AttemptStatus,
@@ -235,9 +221,7 @@ impl WorkOperation {
     pub const fn is_read_only(self) -> bool {
         matches!(
             self,
-            Self::Snapshot
-                | Self::Delta
-                | Self::GenerateProposal
+            Self::GenerateProposal
                 | Self::AttemptStatus
                 | Self::ListAttempts
                 | Self::ExecutionHistory
@@ -259,16 +243,12 @@ impl WorkOperation {
     /// The generated name of the schema this operation's request satisfies.
     pub fn request_schema_name(self) -> Cow<'static, str> {
         match self {
-            Self::Snapshot => schema_name::<WorkProjectionSnapshotRequestV1>(),
-            Self::Delta => schema_name::<WorkProjectionDeltaRequestV1>(),
             Self::GenerateProposal => schema_name::<GenerateProposalRequest>(),
             Self::Create => schema_name::<CreateWorkTaskRequestV1>(),
-            Self::ReplanDependencies => schema_name::<ReplanDependenciesCommand>(),
             Self::ReviewProposal | Self::AcceptProposal => {
                 schema_name::<DecideWorkProposalRequestV1>()
             }
             Self::AdmitExecution => schema_name::<AdmitWorkExecutionRequestV1>(),
-            Self::AcceptTask => schema_name::<AcceptTaskCommand>(),
             Self::StartAttempt => schema_name::<StartWorkAttemptCommand>(),
             Self::Synthesize => schema_name::<AdmitWorkSynthesisCommand>(),
             Self::AttemptStatus => schema_name::<WorkAttemptStatusRequestV1>(),
@@ -304,13 +284,10 @@ impl WorkOperation {
     /// The generated name of the schema this operation answers with.
     pub fn result_schema_name(self) -> Cow<'static, str> {
         match self {
-            Self::Snapshot => schema_name::<WorkProjectionSnapshotV1>(),
-            Self::Delta => schema_name::<WorkProjectionDeltaV1>(),
             Self::GenerateProposal => schema_name::<GeneratedWorkProposal>(),
             Self::Create | Self::ReviewProposal | Self::AcceptProposal | Self::AdmitExecution => {
                 schema_name::<WorkProductMutationReceiptV1>()
             }
-            Self::ReplanDependencies | Self::AcceptTask => schema_name::<WorkProjection>(),
             Self::StartAttempt | Self::AttemptStatus | Self::CancelAttempt => {
                 schema_name::<WorkAttemptV1>()
             }
@@ -521,6 +498,7 @@ pub fn work_invalid_request_response(request_id: RequestId) -> Response {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::str::FromStr;
 
     use super::WorkOperation;
 
@@ -547,6 +525,22 @@ mod tests {
                 .len(),
             WorkOperation::ALL.len(),
         );
+    }
+
+    #[test]
+    fn retired_projection_operations_are_not_public_routes() {
+        for retired in ["snapshot", "delta", "replan_dependencies", "accept_task"] {
+            assert!(
+                WorkOperation::from_str(retired).is_err(),
+                "retired operation {retired} must not decode"
+            );
+            assert!(
+                WorkOperation::ALL
+                    .iter()
+                    .all(|operation| operation.operation_key() != retired),
+                "retired operation {retired} must not be mounted"
+            );
+        }
     }
 
     #[test]
@@ -585,8 +579,6 @@ mod tests {
         assert_eq!(
             read_only,
             vec![
-                WorkOperation::Snapshot,
-                WorkOperation::Delta,
                 WorkOperation::GenerateProposal,
                 WorkOperation::AttemptStatus,
                 WorkOperation::ListAttempts,

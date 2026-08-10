@@ -20,8 +20,8 @@ use super::leak_adjudication::adjudicate_leak;
 use super::preparation;
 use super::{
     RegisteredWorkRuntime, complete_work_effect, complete_work_read, observe_placement_target,
-    offer_work_blocked_interval_receipts, work_product_problem, work_projection_problem,
-    work_request_context, work_topology_problem, work_topology_unavailable_problem,
+    offer_work_blocked_interval_receipts, work_product_problem, work_request_context,
+    work_topology_problem, work_topology_unavailable_problem,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -79,38 +79,6 @@ pub(super) async fn dispatch_work_application(
         }
     };
     let response = match request {
-        WorkApplicationInvocationV1::Snapshot(request) => complete_work_read(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services
-                .projections()
-                .snapshot(&context, request.page_size)
-                .map_err(work_projection_problem),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::Snapshot,
-        ),
-        WorkApplicationInvocationV1::Delta(request) => complete_work_read(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services
-                .projections()
-                .delta(&context, &request.cursor, request.page_size)
-                .map_err(work_projection_problem),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::Delta,
-        ),
         WorkApplicationInvocationV1::GenerateProposal(request) => {
             let result = intelligence::generate_proposal(
                 &registered,
@@ -186,19 +154,6 @@ pub(super) async fn dispatch_work_application(
                 WorkApplicationOutcomeV1::Create,
             )
         }
-        WorkApplicationInvocationV1::ReplanDependencies(command) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services.commands().replan_dependencies(&context, command),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::ReplanDependencies,
-        ),
         WorkApplicationInvocationV1::ReviewProposal(request) => {
             let proposal_ref = request.proposal.proposal_id().as_str().to_owned();
             let command_ref = request.mutation.command_id.as_str().to_owned();
@@ -327,19 +282,6 @@ pub(super) async fn dispatch_work_application(
                 WorkApplicationOutcomeV1::AdmitExecution,
             )
         }
-        WorkApplicationInvocationV1::AcceptTask(command) => complete_work_effect(
-            &registered,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            services.commands().accept_task(&context, command),
-            observed_at,
-            deadline,
-            WorkApplicationOutcomeV1::AcceptTask,
-        ),
         WorkApplicationInvocationV1::StartAttempt(command) => {
             let Ok(capability) = CapabilityId::new(*capability) else {
                 return DaemonInvocationResponse::problem(

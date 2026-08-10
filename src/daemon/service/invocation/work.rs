@@ -124,9 +124,7 @@ fn publish_committed_task_activity_in_background(
 
 const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool {
     match request {
-        WorkApplicationInvocationV1::Snapshot(_)
-        | WorkApplicationInvocationV1::Delta(_)
-        | WorkApplicationInvocationV1::GenerateProposal(_)
+        WorkApplicationInvocationV1::GenerateProposal(_)
         | WorkApplicationInvocationV1::AttemptStatus(_)
         | WorkApplicationInvocationV1::ListAttempts(_)
         | WorkApplicationInvocationV1::ExecutionHistory(_)
@@ -143,11 +141,9 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::PlacementPreflight(_)
         | WorkApplicationInvocationV1::PlacementStatus(_) => false,
         WorkApplicationInvocationV1::Create(_)
-        | WorkApplicationInvocationV1::ReplanDependencies(_)
         | WorkApplicationInvocationV1::ReviewProposal(_)
         | WorkApplicationInvocationV1::AcceptProposal(_)
         | WorkApplicationInvocationV1::AdmitExecution(_)
-        | WorkApplicationInvocationV1::AcceptTask(_)
         | WorkApplicationInvocationV1::StartAttempt(_)
         | WorkApplicationInvocationV1::Synthesize(_)
         | WorkApplicationInvocationV1::CancelAttempt(_)

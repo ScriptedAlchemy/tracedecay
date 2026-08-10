@@ -11,19 +11,18 @@ use std::path::PathBuf;
 use serde_json::Value;
 use tracedecay_api::WorkOperation;
 use tracedecay_application::{
-    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome,
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, CancelWorkAttemptCommand,
-    CancellationSignal, CreateWorkTaskRequestV1, Deadline, DecideWorkProposalRequestV1,
+    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
+    AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,
+    ApplicationProblemEnvelope, ApplicationResult, CancelWorkAttemptCommand, CancellationSignal,
+    CreateWorkTaskRequestV1, Deadline, DecideWorkProposalRequestV1,
     ExecutionTopologyMetricsRequestV1, GenerateProposalRequest, LegalAction, PauseWorkRunCommand,
     PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
-    ReleaseWorkPlacementCommand, ReplanDependenciesCommand, ResultContractRef,
-    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1,
-    SafeDiagnostic, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
-    WorkAttemptListRequestV1, WorkAttemptStatusRequestV1, WorkEvidenceRetrieveRequestV1,
-    WorkExperienceRequestV1, WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1,
-    WorkPlacementStatusRequestV1, WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkProposalComparisonRequestV1, WorkRunControlRequestV1,
+    ReleaseWorkPlacementCommand, ResultContractRef, ResumeWorkAttemptsCommand,
+    ResumeWorkRunCommand, RetryDirective, RetryWorkAttemptCommandV1, SafeDiagnostic,
+    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1,
+    WorkAttemptStatusRequestV1, WorkEvidenceRetrieveRequestV1, WorkExperienceRequestV1,
+    WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1,
+    WorkProductMutationRequestV1, WorkProposalComparisonRequestV1, WorkRunControlRequestV1,
     WorkTopologyViewRequestV1, work_executable_binding_registry,
 };
 use tracedecay_domain::UtcMicros;
@@ -133,27 +132,17 @@ fn decode_work_invocation(
     body: Value,
 ) -> Result<WorkApplicationInvocationV1> {
     match operation {
-        WorkOperation::Snapshot => decode::<WorkProjectionSnapshotRequestV1>(body)
-            .map(WorkApplicationInvocationV1::Snapshot),
-        WorkOperation::Delta => {
-            decode::<WorkProjectionDeltaRequestV1>(body).map(WorkApplicationInvocationV1::Delta)
-        }
         WorkOperation::GenerateProposal => decode::<GenerateProposalRequest>(body)
             .map(WorkApplicationInvocationV1::GenerateProposal),
         WorkOperation::Create => {
             decode::<CreateWorkTaskRequestV1>(body).map(WorkApplicationInvocationV1::Create)
         }
-        WorkOperation::ReplanDependencies => decode::<ReplanDependenciesCommand>(body)
-            .map(WorkApplicationInvocationV1::ReplanDependencies),
         WorkOperation::ReviewProposal => decode::<DecideWorkProposalRequestV1>(body)
             .map(WorkApplicationInvocationV1::ReviewProposal),
         WorkOperation::AcceptProposal => decode::<DecideWorkProposalRequestV1>(body)
             .map(WorkApplicationInvocationV1::AcceptProposal),
         WorkOperation::AdmitExecution => decode::<AdmitWorkExecutionRequestV1>(body)
             .map(WorkApplicationInvocationV1::AdmitExecution),
-        WorkOperation::AcceptTask => {
-            decode::<AcceptTaskCommand>(body).map(WorkApplicationInvocationV1::AcceptTask)
-        }
         WorkOperation::StartAttempt => {
             decode::<StartWorkAttemptCommand>(body).map(WorkApplicationInvocationV1::StartAttempt)
         }
@@ -228,18 +217,9 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
     matches!(
         (operation, outcome),
         (
-            WorkOperation::Snapshot,
-            WorkApplicationOutcomeV1::Snapshot(_)
-        ) | (WorkOperation::Delta, WorkApplicationOutcomeV1::Delta(_))
-            | (
-                WorkOperation::GenerateProposal,
-                WorkApplicationOutcomeV1::GenerateProposal(_)
-            )
-            | (WorkOperation::Create, WorkApplicationOutcomeV1::Create(_))
-            | (
-                WorkOperation::ReplanDependencies,
-                WorkApplicationOutcomeV1::ReplanDependencies(_)
-            )
+            WorkOperation::GenerateProposal,
+            WorkApplicationOutcomeV1::GenerateProposal(_)
+        ) | (WorkOperation::Create, WorkApplicationOutcomeV1::Create(_))
             | (
                 WorkOperation::ReviewProposal,
                 WorkApplicationOutcomeV1::ReviewProposal(_)
@@ -251,10 +231,6 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
             | (
                 WorkOperation::AdmitExecution,
                 WorkApplicationOutcomeV1::AdmitExecution(_)
-            )
-            | (
-                WorkOperation::AcceptTask,
-                WorkApplicationOutcomeV1::AcceptTask(_)
             )
             | (
                 WorkOperation::StartAttempt,
@@ -507,15 +483,11 @@ fn application_outcome_payload<T>(outcome: &ApplicationOutcome<T>) -> Option<&T>
 
 fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOutcome<Value>> {
     let outcome = match outcome {
-        WorkApplicationOutcomeV1::Snapshot(outcome) => serde_json::to_value(outcome),
-        WorkApplicationOutcomeV1::Delta(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::GenerateProposal(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Create(outcome) => serde_json::to_value(outcome),
-        WorkApplicationOutcomeV1::ReplanDependencies(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ReviewProposal(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AcceptProposal(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AdmitExecution(outcome) => serde_json::to_value(outcome),
-        WorkApplicationOutcomeV1::AcceptTask(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::StartAttempt(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Synthesize(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::AttemptStatus(outcome) => serde_json::to_value(outcome),

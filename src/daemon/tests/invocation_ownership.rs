@@ -7,7 +7,8 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay_application::{
-    ApplicationProblemKind, CancellationContext, Deadline, WorkProjectionSnapshotRequestV1,
+    ApplicationProblemKind, CancellationContext, Deadline, WorkGraphReadRequestV1,
+    WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::UtcMicros;
 
@@ -154,9 +155,10 @@ fn assert_work_routes_mounted<'a>(
             handshake,
             DaemonInvocationRequest::work_application(
                 "request.project-open.work",
-                WorkApplicationInvocationV1::Snapshot(WorkProjectionSnapshotRequestV1 {
-                    page_size: 100,
-                }),
+                WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+                    WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                    observed_at,
+                )),
                 observed_at,
                 deadline,
                 cancellation,

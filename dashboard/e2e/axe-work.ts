@@ -14,86 +14,61 @@
  * real wire failed.
  */
 import { expectAbsent, expectEqual, expectVisibleText, type Scenario } from './axe-harness.ts';
-
-const AUTHORITY = {
-  actor_id: 'actor.dashboard',
-  policy_digest: 'digest.policy',
-  project_id: 'project.tracedecay',
-  repository_id: 'repository.tracedecay',
-  worktree_id: 'worktree.primary',
-};
-
-function task(overrides: Record<string, unknown>) {
-  return {
-    accepted_proposal: null,
-    authority: AUTHORITY,
-    dependencies: [],
-    execution_admitted: false,
-    history_len: 3,
-    runtime_evidence: [],
-    task_accepted: false,
-    ...overrides,
-  };
-}
+import { workGraphRead } from '../src/test/workGraphFixture.ts';
 
 /** One task at each recorded gate, so every stage group has content and the
  * densest layout is the one that gets scanned. */
 const PROJECTIONS = [
-  task({ task_id: 'task.parse', title: 'Parse the manifest', version: 2 }),
-  task({
-    task_id: 'task.index',
+  { taskId: 'task.parse', title: 'Parse the manifest' },
+  {
+    taskId: 'task.index',
     title: 'Index the workspace',
-    version: 5,
-    accepted_proposal: 'proposal.index',
+    acceptedProposal: 'proposal.index',
     dependencies: ['task.parse'],
-  }),
-  task({
-    task_id: 'task.resolve',
+  },
+  {
+    taskId: 'task.resolve',
     title: 'Resolve the dependency graph',
-    version: 9,
-    accepted_proposal: 'proposal.resolve',
-    task_accepted: true,
+    acceptedProposal: 'proposal.resolve',
+    acceptedAt: 1_800_000_000_000_000,
     dependencies: ['task.parse', 'task.index'],
-  }),
-  task({
-    task_id: 'task.compact',
+  },
+  {
+    taskId: 'task.compact',
     title: 'Compact the session archive',
-    version: 14,
-    accepted_proposal: 'proposal.compact',
-    task_accepted: true,
-    execution_admitted: true,
-    runtime_evidence: [{ evidence_digest: 'digest.run.1', run_id: 'run.1', terminal: false }],
-  }),
-  task({
-    task_id: 'task.publish',
+    acceptedProposal: 'proposal.compact',
+    acceptedAt: 1_800_000_000_000_000,
+    executionAdmittedAt: 1_800_000_000_000_000,
+  },
+  {
+    taskId: 'task.publish',
     title: 'Publish the read model',
-    version: 21,
-    accepted_proposal: 'proposal.publish',
-    task_accepted: true,
-    execution_admitted: true,
-    runtime_evidence: [{ evidence_digest: 'digest.run.2', run_id: 'run.2', terminal: true }],
-  }),
+    acceptedProposal: 'proposal.publish',
+    acceptedAt: 1_800_000_000_000_000,
+    executionAdmittedAt: 1_800_000_000_000_000,
+  },
 ];
 
 function envelope(payload: unknown) {
   return {
     kind: 'success',
     value: {
-      binding_id: 'binding.http.work.snapshot',
-      contract: { schema_id: 'schema.work.snapshot.result', schema_revision: 1 },
+      binding_id: 'binding.http.work.views',
+      contract: { schema_id: 'schema.work.views.result', schema_revision: 1 },
       request_id: 'request.axe',
-      scope: {},
+      scope: {
+        project_id: 'project.tracedecay',
+        repository_id: 'repository.tracedecay',
+        worktree_id: 'worktree.primary',
+        reference: null,
+        scope_digest: 'sha256:scope',
+      },
       outcome: { outcome: 'evidence', value: { payload } },
     },
   };
 }
 
-const SNAPSHOT = envelope({
-  coverage: { state: 'complete', returned: PROJECTIONS.length, total: PROJECTIONS.length },
-  generation_id: 'generation.axe',
-  projections: PROJECTIONS,
-  sequence: 128,
-});
+const GRAPH_READ = envelope(workGraphRead({ tasks: PROJECTIONS, version: 21 }));
 
 export const WORK_SCENARIOS: readonly Scenario[] = [
   {
@@ -101,7 +76,7 @@ export const WORK_SCENARIOS: readonly Scenario[] = [
     route: '/work',
     proves:
       'the thirteenth channel draws its board from the snapshot the daemon returned, states how much of it it is showing, and offers a command only where the recorded state allows one',
-    overrides: { '/api/work/snapshot': { status: 200, body: SNAPSHOT } },
+    overrides: { '/api/work/views': { status: 200, body: GRAPH_READ } },
     // A dense ruled board across five stage groups is exactly the shape that
     // traps content in a collapsed scroller at 400% zoom, so this surface
     // carries the matrix for /work.
@@ -180,7 +155,7 @@ export const WORK_SCENARIOS: readonly Scenario[] = [
     proves:
       'a Work runtime that refuses is drawn as the refusal it was, and never as an empty board',
     overrides: {
-      '/api/work/snapshot': { status: 503, body: { kind: 'problem', value: { problem: {} } } },
+      '/api/work/views': { status: 503, body: { kind: 'problem', value: { problem: {} } } },
     },
     assert: async (page) => {
       await expectVisibleText(page, 'Work runtime is unavailable', 'the refusal reading');

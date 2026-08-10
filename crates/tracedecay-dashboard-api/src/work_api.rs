@@ -49,15 +49,11 @@ macro_rules! dashboard_work_routes {
 }
 
 dashboard_work_routes!(
-    Snapshot,
-    Delta,
     GenerateProposal,
     Create,
-    ReplanDependencies,
     ReviewProposal,
     AcceptProposal,
     AdmitExecution,
-    AcceptTask,
     Synthesize,
     AttemptStatus,
     CancelAttempt,
@@ -149,6 +145,18 @@ mod tests {
             post(&router, "/api/work/not-an-operation").await,
             StatusCode::NOT_FOUND
         );
+        for retired in [
+            "/api/work/snapshot",
+            "/api/work/delta",
+            "/api/work/replan-dependencies",
+            "/api/work/accept-task",
+        ] {
+            assert_eq!(
+                post(&router, retired).await,
+                StatusCode::NOT_FOUND,
+                "{retired}"
+            );
+        }
     }
 
     #[test]

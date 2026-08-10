@@ -1,8 +1,7 @@
 use schemars::JsonSchema;
 use tracedecay_domain::{
     ManifestDigest, WorkDuplicateAdjudicationCommandV1, WorkPlacementPreflightV1, WorkPlacementV1,
-    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlV1,
-    canonical_sha256,
+    WorkRunControlV1, canonical_sha256,
 };
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, CancellationContract, CancellationPoint,
@@ -20,44 +19,31 @@ use tracedecay_domain::WorkAttemptV1;
 
 use crate::work_retry::{RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1};
 use crate::{
-    AcceptTaskCommand, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, CancelWorkAttemptCommand,
-    CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
-    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
-    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
-    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
-    WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
+    AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
+    AdmitWorkSynthesisCommand, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
+    DecideWorkProposalRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
+    WorkAttemptListRequestV1, WorkAttemptListV1, WorkAttemptRecoveryReportV1,
+    WorkAttemptStatusRequestV1, WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
     WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
-    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkProposalComparisonRequestV1, WorkProposalComparisonV1,
-    WorkRunControlReadingV1, WorkRunControlRequestV1, WorkSynthesisAttemptV1,
-    WorkTopologyViewRequestV1,
+    WorkProductMutationReceiptV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
+    WorkProposalComparisonV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+    WorkSynthesisAttemptV1, WorkTopologyViewRequestV1,
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 36] = [
-    (
-        "snapshot",
-        "capability.work.snapshot",
-        "use-case.work.snapshot",
-    ),
-    ("delta", "capability.work.delta", "use-case.work.delta"),
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
     (
         "generate_proposal",
         "capability.work.generate_proposal",
         "use-case.work.generate_proposal",
     ),
     ("create", "capability.work.create", "use-case.work.create"),
-    (
-        "replan_dependencies",
-        "capability.work.replan_dependencies",
-        "use-case.work.replan_dependencies",
-    ),
     (
         "review_proposal",
         "capability.work.review_proposal",
@@ -72,11 +58,6 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 36] = [
         "admit_execution",
         "capability.work.admit_execution",
         "use-case.work.admit_execution",
-    ),
-    (
-        "accept_task",
-        "capability.work.accept_task",
-        "use-case.work.accept_task",
     ),
     (
         "start_attempt",
@@ -214,20 +195,6 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 36] = [
 pub fn work_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     let bindings = vec![
-        available::<WorkProjectionSnapshotRequestV1, WorkProjectionSnapshotV1>(
-            "snapshot",
-            "/application/work/snapshot",
-            EffectClass::Read,
-            "tracedecay_application::WorkProjectionSnapshotRequestV1",
-            "tracedecay_domain::WorkProjectionSnapshotV1",
-        )?,
-        available::<WorkProjectionDeltaRequestV1, WorkProjectionDeltaV1>(
-            "delta",
-            "/application/work/delta",
-            EffectClass::Read,
-            "tracedecay_application::WorkProjectionDeltaRequestV1",
-            "tracedecay_domain::WorkProjectionDeltaV1",
-        )?,
         available::<GenerateProposalRequest, GeneratedWorkProposal>(
             "generate_proposal",
             "/application/work/generate-proposal",
@@ -241,13 +208,6 @@ pub fn work_executable_binding_registry()
             EffectClass::Administrative,
             "tracedecay_application::CreateWorkTaskRequestV1",
             "tracedecay_application::WorkProductMutationReceiptV1",
-        )?,
-        available::<ReplanDependenciesCommand, WorkProjection>(
-            "replan_dependencies",
-            "/application/work/replan-dependencies",
-            EffectClass::Administrative,
-            "tracedecay_application::ReplanDependenciesCommand",
-            "tracedecay_domain::WorkProjection",
         )?,
         available::<DecideWorkProposalRequestV1, WorkProductMutationReceiptV1>(
             "review_proposal",
@@ -269,13 +229,6 @@ pub fn work_executable_binding_registry()
             EffectClass::Administrative,
             "tracedecay_application::AdmitWorkExecutionRequestV1",
             "tracedecay_application::WorkProductMutationReceiptV1",
-        )?,
-        available::<AcceptTaskCommand, WorkProjection>(
-            "accept_task",
-            "/application/work/accept-task",
-            EffectClass::Administrative,
-            "tracedecay_application::AcceptTaskCommand",
-            "tracedecay_domain::WorkProjection",
         )?,
         available::<StartWorkAttemptCommand, WorkAttemptV1>(
             "start_attempt",
@@ -688,24 +641,19 @@ mod tests {
                 serde_json::Value::String("Value".to_owned())
             );
         }
-        let snapshot = registry
-            .get(&tracedecay_tool_catalog::OperationId::new("operation.work.snapshot").unwrap())
-            .unwrap()
-            .binding()
-            .unwrap();
-        let delta = registry
-            .get(&tracedecay_tool_catalog::OperationId::new("operation.work.delta").unwrap())
-            .unwrap()
-            .binding()
-            .unwrap();
-        assert_eq!(
-            snapshot.result_schema().body()["title"],
-            "WorkProjectionSnapshotV1"
-        );
-        assert_eq!(
-            delta.result_schema().body()["title"],
-            "WorkProjectionDeltaV1"
-        );
+        for retired in [
+            "operation.work.snapshot",
+            "operation.work.delta",
+            "operation.work.replan_dependencies",
+            "operation.work.accept_task",
+        ] {
+            assert!(
+                registry
+                    .get(&tracedecay_tool_catalog::OperationId::new(retired).unwrap())
+                    .is_none(),
+                "retired operation {retired} must not be advertised"
+            );
+        }
     }
 
     #[test]

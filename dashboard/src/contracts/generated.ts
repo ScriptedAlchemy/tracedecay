@@ -16,14 +16,6 @@ export function assertNever(value: never): never {
 
 export const WIRE_SCHEMA_REVISION = 1 as const;
 
-export const AcceptTaskCommandSchema = z.object({
-  command_id: z.lazy(() => WorkCommandIdSchema),
-  expected_version: z.number().int(),
-  occurred_at: z.lazy(() => UtcMicrosSchema),
-  task_id: z.lazy(() => TaskIdSchema),
-});
-export type AcceptTaskCommand = z.infer<typeof AcceptTaskCommandSchema>;
-
 export const AcceptWorkTaskRequestV1Schema = z.object({
   evidence_by_criterion: z.record(z.string()),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
@@ -2761,15 +2753,6 @@ export const ReleaseWorkPlacementCommandSchema = z.object({
 });
 export type ReleaseWorkPlacementCommand = z.infer<typeof ReleaseWorkPlacementCommandSchema>;
 
-export const ReplanDependenciesCommandSchema = z.object({
-  command_id: z.lazy(() => WorkCommandIdSchema),
-  dependencies: z.array(z.lazy(() => TaskIdSchema)),
-  expected_version: z.number().int(),
-  occurred_at: z.lazy(() => UtcMicrosSchema),
-  task_id: z.lazy(() => TaskIdSchema),
-});
-export type ReplanDependenciesCommand = z.infer<typeof ReplanDependenciesCommandSchema>;
-
 /** Strongly typed canonical identity: `RepositoryId`. */
 export const RepositoryIdSchema = z.string();
 export type RepositoryId = z.infer<typeof RepositoryIdSchema>;
@@ -3878,15 +3861,6 @@ export const WorkAttemptV1Schema = z.object({
 });
 export type WorkAttemptV1 = z.infer<typeof WorkAttemptV1Schema>;
 
-export const WorkAuthoritySchema = z.object({
-  actor_id: z.lazy(() => ActorIdSchema),
-  policy_digest: z.lazy(() => ManifestDigestSchema),
-  project_id: z.lazy(() => ProjectIdSchema),
-  repository_id: z.lazy(() => RepositoryIdSchema),
-  worktree_id: z.lazy(() => WorktreeIdSchema),
-});
-export type WorkAuthority = z.infer<typeof WorkAuthoritySchema>;
-
 /** Calibrated sizing. Emitted ONLY when support >= floor. Every field named separately
 per Plan 06 :84-85; `support_floor` carries the governing floor into the record. */
 export const WorkCalibratedSizingV1Schema = z.object({
@@ -4988,82 +4962,8 @@ export const WorkProductSelectionScopeV1Schema = z.discriminatedUnion("selection
 })]);
 export type WorkProductSelectionScopeV1 = z.infer<typeof WorkProductSelectionScopeV1Schema>;
 
-export const WorkProjectionSchema = z.object({
-  accepted_proposal: z.union([z.lazy(() => ProposalIdSchema), z.null()]),
-  authority: z.lazy(() => WorkAuthoritySchema),
-  dependencies: z.array(z.lazy(() => TaskIdSchema)),
-  execution_admitted: z.boolean(),
-  history_len: z.number().int(),
-  task_accepted: z.boolean(),
-  task_id: z.lazy(() => TaskIdSchema),
-  title: z.string(),
-  version: z.number().int(),
-});
-export type WorkProjection = z.infer<typeof WorkProjectionSchema>;
-
-export const WorkProjectionCoverageV1Schema = z.discriminatedUnion("state", [z.object({
-  cap: z.number().int(),
-  cursor: z.lazy(() => WorkProjectionResumeCursorV1Schema),
-  range: z.lazy(() => WorkProjectionSequenceRangeV1Schema),
-  returned: z.number().int(),
-  state: z.literal("capped"),
-  total: z.number().int(),
-}), z.object({
-  returned: z.number().int(),
-  state: z.literal("complete"),
-  total: z.number().int(),
-}), z.object({
-  cursor: z.lazy(() => WorkProjectionResumeCursorV1Schema),
-  range: z.lazy(() => WorkProjectionSequenceRangeV1Schema),
-  returned: z.number().int(),
-  state: z.literal("partial"),
-  total: z.number().int(),
-})]);
-export type WorkProjectionCoverageV1 = z.infer<typeof WorkProjectionCoverageV1Schema>;
-
-export const WorkProjectionDeltaRequestV1Schema = z.object({
-  cursor: z.lazy(() => WorkProjectionResumeCursorV1Schema),
-  page_size: z.number().int(),
-});
-export type WorkProjectionDeltaRequestV1 = z.infer<typeof WorkProjectionDeltaRequestV1Schema>;
-
-export const WorkProjectionDeltaV1Schema = z.object({
-  changed: z.array(z.lazy(() => WorkProjectionSchema)),
-  coverage: z.lazy(() => WorkProjectionCoverageV1Schema),
-  from_sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
-  generation_id: z.lazy(() => ProjectionGenerationIdSchema),
-  removed: z.array(z.lazy(() => TaskIdSchema)),
-  to_sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
-});
-export type WorkProjectionDeltaV1 = z.infer<typeof WorkProjectionDeltaV1Schema>;
-
-export const WorkProjectionResumeCursorV1Schema = z.object({
-  generation_id: z.lazy(() => ProjectionGenerationIdSchema),
-  token: z.string(),
-});
-export type WorkProjectionResumeCursorV1 = z.infer<typeof WorkProjectionResumeCursorV1Schema>;
-
-export const WorkProjectionSequenceRangeV1Schema = z.object({
-  end_inclusive: z.lazy(() => WorkProjectionSequenceV1Schema),
-  start_exclusive: z.lazy(() => WorkProjectionSequenceV1Schema),
-});
-export type WorkProjectionSequenceRangeV1 = z.infer<typeof WorkProjectionSequenceRangeV1Schema>;
-
 export const WorkProjectionSequenceV1Schema = z.number().int();
 export type WorkProjectionSequenceV1 = z.infer<typeof WorkProjectionSequenceV1Schema>;
-
-export const WorkProjectionSnapshotRequestV1Schema = z.object({
-  page_size: z.number().int(),
-});
-export type WorkProjectionSnapshotRequestV1 = z.infer<typeof WorkProjectionSnapshotRequestV1Schema>;
-
-export const WorkProjectionSnapshotV1Schema = z.object({
-  coverage: z.lazy(() => WorkProjectionCoverageV1Schema),
-  generation_id: z.lazy(() => ProjectionGenerationIdSchema),
-  projections: z.array(z.lazy(() => WorkProjectionSchema)),
-  sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
-});
-export type WorkProjectionSnapshotV1 = z.infer<typeof WorkProjectionSnapshotV1Schema>;
 
 /** The explicit command the decision recommends next. A recommendation never
 executes; each action names a separate version-checked application command. */

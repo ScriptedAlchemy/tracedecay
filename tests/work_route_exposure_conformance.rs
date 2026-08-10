@@ -161,11 +161,6 @@ impl ProductionDaemon {
                 .current_dir(&project),
             "git init",
         );
-        run_ok(
-            isolated(&root, &profile).arg("init").current_dir(&project),
-            "tracedecay init",
-        );
-
         let mut daemon = isolated(&root, &profile)
             .args(["daemon", "run"])
             .current_dir(&project)
@@ -175,6 +170,10 @@ impl ProductionDaemon {
             .spawn()
             .expect("daemon should start");
         let authority = wait_for_authority(&mut daemon, &common::daemon_authority_path(&profile));
+        run_ok(
+            isolated(&root, &profile).arg("init").current_dir(&project),
+            "tracedecay init",
+        );
 
         let context = run_ok(
             isolated(&root, &profile)
@@ -413,6 +412,77 @@ fn superseded_cursor_request() -> Value {
                 "task_id": "task.work-surface-conformance",
                 "run_id": "run.work-surface-conformance",
                 "attempt_id": "attempt.work-surface-conformance.1",
+            },
+        },
+    })
+}
+
+fn product_selection() -> Value {
+    serde_json::json!({ "selection": "profile_owned_no_git" })
+}
+
+fn current_product_graph_request() -> Value {
+    serde_json::json!({
+        "selection": product_selection(),
+        "mode": { "mode": "current" },
+        "continuation": null,
+        "observed_at": 1_700_000_000_000_100i64,
+    })
+}
+
+fn product_task_create_draft() -> Value {
+    let occurred_at = 1_700_000_000_000_000i64;
+    serde_json::json!({
+        "selection": product_selection(),
+        "causation_event_id": null,
+        "evidence": [],
+        "change": {
+            "change": "create_task",
+            "initiative": {
+                "id": "initiative.work-surface-conformance",
+                "title": "Work surface conformance",
+                "created_at": occurred_at,
+            },
+            "plan": {
+                "id": "plan.work-surface-conformance",
+                "initiative_id": "initiative.work-surface-conformance",
+                "title": "Work surface conformance",
+                "created_at": occurred_at,
+            },
+            "milestone": {
+                "id": "milestone.work-surface-conformance",
+                "plan_id": "plan.work-surface-conformance",
+                "title": "Work surface conformance",
+                "created_at": occurred_at,
+            },
+            "item": {
+                "input": {
+                    "task_id": "task.work-surface-conformance",
+                    "hierarchy": {
+                        "initiative_id": "initiative.work-surface-conformance",
+                        "plan_id": "plan.work-surface-conformance",
+                        "milestone_id": "milestone.work-surface-conformance",
+                    },
+                    "title": "Work surface conformance",
+                    "dependencies": [],
+                    "informational_relations": [],
+                    "causal_candidates": [],
+                    "acceptance_criteria": [],
+                    "effort": 1,
+                    "scheduled_at": null,
+                    "deadline": null,
+                    "created_at": occurred_at,
+                    "updated_at": occurred_at,
+                },
+                "accepted_proposal": null,
+                "accepted_route": null,
+                "execution_admitted_at": null,
+                "evidence_links": [],
+                "accepted_criteria": {},
+                "accepted_attempts": [],
+                "handoffs": [],
+                "accepted_at": null,
+                "archived_at": null,
             },
         },
     })
@@ -713,13 +783,15 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         eprintln!("{label} -> {status} {body}");
         assert_typed_problem(label, status, &body, (400, "invalid_request", false));
     }
+    let mut malformed_views = current_product_graph_request();
+    malformed_views["observed_at"] = serde_json::json!("not-a-number");
     let (status, body) = post_envelope(
         &agent,
-        &fixture.external_url("/application/work/snapshot"),
+        &fixture.external_url("/application/work/views"),
         &fixture,
-        &serde_json::json!({ "page_size": "not-a-number" }),
+        &malformed_views,
     );
-    eprintln!("DAEMON work/snapshot malformed -> {status} {body}");
+    eprintln!("DAEMON work/views malformed -> {status} {body}");
     assert_eq!(
         body["kind"], "problem",
         "a malformed body is refused: {body}"
@@ -740,23 +812,29 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     eprintln!("DAEMON work/not-an-operation -> {status} {body}");
     assert_eq!(status, 404, "an unmounted Work segment is refused: {body}");
 
-    // -- Real payload: create through the daemon, read through both mounts. --
-    // `create` is an authoritative effect: it must come back reconciled, with a
-    // receipt, and carrying the task it just wrote — not merely "not an error".
+    // -- Real payload: prepare and commit through the daemon, then read the
+    // exact product graph through both mounts. Preparation is the authority
+    // handoff: the caller never fabricates graph or revision CAS pins.
+    let (status, prepared) = post_envelope(
+        &agent,
+        &fixture.external_url("/application/work/prepare-graph-mutation"),
+        &fixture,
+        &product_task_create_draft(),
+    );
+    eprintln!("DAEMON work/prepare-graph-mutation -> {status} {prepared}");
+    assert_canonical_envelope("daemon work/prepare-graph-mutation", status, &prepared);
+    assert_eq!(prepared["value"]["outcome"]["outcome"], "evidence");
+    let mutation = prepared["value"]["outcome"]["value"]["payload"].clone();
+    assert_eq!(mutation["mutation"], "create_task", "{prepared}");
+
     let (status, created) = post_envelope(
         &agent,
-        &fixture.external_url("/application/work/create"),
+        &fixture.external_url("/application/work/mutate-graph"),
         &fixture,
-        &serde_json::json!({
-            "task_id": "task.work-surface-conformance",
-            "title": "Work surface conformance",
-            "dependencies": [],
-            "command_id": "command.work-surface-conformance",
-            "occurred_at": 1_700_000_000_000_000i64,
-        }),
+        &mutation,
     );
-    eprintln!("DAEMON work/create -> {status} {created}");
-    assert_canonical_envelope("daemon work/create", status, &created);
+    eprintln!("DAEMON work/mutate-graph -> {status} {created}");
+    assert_canonical_envelope("daemon work/mutate-graph", status, &created);
     let effect = &created["value"]["outcome"]["value"];
     assert_eq!(
         created["value"]["outcome"]["outcome"], "effect",
@@ -765,53 +843,69 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     assert_eq!(effect["reconciliation"], "reconciled", "{created}");
     assert_eq!(effect["receipt"]["outcome"], "completed", "{created}");
     assert_eq!(
-        effect["payload"]["task_id"], "task.work-surface-conformance",
+        effect["payload"]["event"]["payload"]["kind"], "task_created",
         "{created}"
     );
 
-    // `snapshot` is the read the Work workspace opens with, so the write above
-    // has to be visible through both mounts. This is the leg that proves the
+    // `views` is the read the Work workspace opens with, so the write above has
+    // to be visible through both mounts. This is the leg that proves the
     // operations share one store through the daemon rather than each answering
     // plausibly.
-    let snapshot_request = serde_json::json!({ "page_size": 25 });
-    for (label, (status, snapshot)) in [
+    let graph_request = current_product_graph_request();
+    for (label, (status, graph_read)) in [
         (
-            "daemon work/snapshot",
+            "daemon work/views",
             post_envelope(
                 &agent,
-                &fixture.external_url("/application/work/snapshot"),
+                &fixture.external_url("/application/work/views"),
                 &fixture,
-                &snapshot_request,
+                &graph_request,
             ),
         ),
         (
-            "dashboard api/work/snapshot",
+            "dashboard api/work/views",
             post_dashboard_envelope(
                 &agent,
-                &format!("{}/api/work/snapshot", dashboard.base_url),
-                &snapshot_request,
+                &format!("{}/api/work/views", dashboard.base_url),
+                &graph_request,
             ),
         ),
     ] {
-        eprintln!("{label} -> {status} {snapshot}");
-        assert_canonical_envelope(label, status, &snapshot);
-        let evidence = &snapshot["value"]["outcome"]["value"];
+        eprintln!("{label} -> {status} {graph_read}");
+        assert_canonical_envelope(label, status, &graph_read);
+        let evidence = &graph_read["value"]["outcome"]["value"];
         assert_eq!(
-            snapshot["value"]["outcome"]["outcome"], "evidence",
-            "{snapshot}"
+            graph_read["value"]["outcome"]["outcome"], "evidence",
+            "{graph_read}"
         );
-        assert_eq!(
-            evidence["payload"]["coverage"]["state"], "complete",
-            "{snapshot}"
-        );
-        let projections = evidence["payload"]["projections"]
+        assert_eq!(evidence["payload"]["mode"], "current", "{graph_read}");
+        let items = evidence["payload"]["snapshot"]["graph"]["items"]
             .as_array()
-            .unwrap_or_else(|| panic!("{label} must carry projections: {snapshot}"));
+            .unwrap_or_else(|| panic!("{label} must carry graph items: {graph_read}"));
         assert!(
-            projections
+            items
                 .iter()
-                .any(|projection| projection["task_id"] == "task.work-surface-conformance"),
-            "the created task must be readable through {label}: {snapshot}"
+                .any(|item| item["input"]["task_id"] == "task.work-surface-conformance"),
+            "the created task must be readable through {label}: {graph_read}"
+        );
+    }
+
+    for retired in ["snapshot", "delta", "replan-dependencies", "accept-task"] {
+        let (status, body) = post_envelope(
+            &agent,
+            &fixture.external_url(&format!("/application/work/{retired}")),
+            &fixture,
+            &serde_json::json!({}),
+        );
+        assert_eq!(status, 404, "retired daemon Work route {retired}: {body}");
+        let (status, body) = post_dashboard_envelope(
+            &agent,
+            &format!("{}/api/work/{retired}", dashboard.base_url),
+            &serde_json::json!({}),
+        );
+        assert_eq!(
+            status, 404,
+            "retired dashboard Work route {retired}: {body}"
         );
     }
 

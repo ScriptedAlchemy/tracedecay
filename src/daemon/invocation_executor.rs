@@ -139,10 +139,7 @@ pub(super) fn extract_work_application_payload(
     outcome: &service::invocation::WorkApplicationOutcomeV1,
 ) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
     match outcome {
-        service::invocation::WorkApplicationOutcomeV1::Snapshot(outcome) => {
-            extract_application_payload(outcome)
-        }
-        service::invocation::WorkApplicationOutcomeV1::Delta(outcome) => {
+        service::invocation::WorkApplicationOutcomeV1::Views(outcome) => {
             extract_application_payload(outcome)
         }
         _ => Err(service::invocation::DaemonInvocationProblem::InvalidRequest),

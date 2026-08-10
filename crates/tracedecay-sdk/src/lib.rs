@@ -24,22 +24,19 @@ pub use tracedecay_tool_catalog as operation;
 /// Canonical Work commands, projections, and executable capability inventory.
 pub mod work {
     pub use tracedecay_application::{
-        AcceptTaskCommand, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
-        AdmitWorkSynthesisCommand, CreateWorkTaskRequestV1, DecideWorkProposalRequestV1,
-        PauseWorkRunCommand, ReleaseWorkPlacementCommand, ReplanDependenciesCommand,
-        ResumeWorkRunCommand, WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1,
-        WorkAttemptArtifactsV1, WorkAttemptEvidenceStateV1, WorkPlacementPreflightRequestV1,
-        WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProductMutationReceiptV1,
-        WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1, WorkRunControlReadingV1,
-        WorkRunControlRequestV1, WorkSynthesisAdmissionV1, WorkSynthesisAttemptV1,
-        WorkSynthesisEvidenceGroupV1, WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1,
-        WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1,
-        work_executable_binding_registry as executable_binding_registry,
+        AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand,
+        CreateWorkTaskRequestV1, DecideWorkProposalRequestV1, PauseWorkRunCommand,
+        ReleaseWorkPlacementCommand, ResumeWorkRunCommand, WorkArtifactHydrationRequestV1,
+        WorkArtifactHydrationV1, WorkAttemptArtifactsV1, WorkAttemptEvidenceStateV1,
+        WorkPlacementPreflightRequestV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1,
+        WorkProductMutationReceiptV1, WorkRunControlReadingV1, WorkRunControlRequestV1,
+        WorkSynthesisAdmissionV1, WorkSynthesisAttemptV1, WorkSynthesisEvidenceGroupV1,
+        WorkSynthesisRefusalV1, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
+        WorkSynthesisSourceSetV1, work_executable_binding_registry as executable_binding_registry,
     };
     pub use tracedecay_domain::{
         WorkPlacementBlockerV1, WorkPlacementKindV1, WorkPlacementPreflightV1,
-        WorkPlacementStateV1, WorkPlacementTargetV1, WorkPlacementV1, WorkProjection,
-        WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkRunControlReasonV1,
+        WorkPlacementStateV1, WorkPlacementTargetV1, WorkPlacementV1, WorkRunControlReasonV1,
         WorkRunControlStateV1, WorkRunControlV1,
     };
 }

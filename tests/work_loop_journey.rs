@@ -53,11 +53,12 @@ use tempfile::TempDir;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::storage::PrivateStoreIo;
 use tracedecay_domain::{
-    CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProviderId, RefId,
-    UtcMicros, WorkApprovalPolicy, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
-    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFilesystemPolicy, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkSandboxPolicy, WorkflowOperationRef,
+    CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest, ProposalId,
+    ProviderId, RefId, TaskId, UtcMicros, WorkApprovalPolicy, WorkEffectStateV1, WorkEgressPolicy,
+    WorkExecutableReference, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy, WorkGraphVersionV1,
+    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRelationReplanProposalV1, WorkSandboxPolicy, WorkflowOperationRef,
 };
 
 /// Pins the global database away from the operator's profile. The production
@@ -201,11 +202,6 @@ impl ProductionDaemon {
                 .current_dir(&project),
             "git commit",
         );
-        run_ok(
-            isolated(&root, &profile).arg("init").current_dir(&project),
-            "tracedecay init",
-        );
-
         let mut daemon = isolated(&root, &profile)
             .args(["daemon", "run"])
             .current_dir(&project)
@@ -215,6 +211,10 @@ impl ProductionDaemon {
             .spawn()
             .expect("daemon should start");
         let authority = wait_for_authority(&mut daemon, &daemon_authority_path(&profile));
+        run_ok(
+            isolated(&root, &profile).arg("init").current_dir(&project),
+            "tracedecay init",
+        );
 
         let context = run_ok(
             isolated(&root, &profile)
@@ -422,6 +422,104 @@ fn now_micros() -> i64 {
     .expect("microsecond clock fits i64")
 }
 
+fn product_selection() -> Value {
+    json!({ "selection": "profile_owned_no_git" })
+}
+
+fn product_graph_request() -> Value {
+    json!({
+        "selection": product_selection(),
+        "mode": { "mode": "current" },
+        "continuation": null,
+        "observed_at": now_micros(),
+    })
+}
+
+fn product_task_create_draft() -> Value {
+    let occurred_at = now_micros();
+    json!({
+        "selection": product_selection(),
+        "causation_event_id": null,
+        "evidence": [],
+        "change": {
+            "change": "create_task",
+            "initiative": {
+                "id": "initiative.work-loop-journey",
+                "title": "Work loop journey",
+                "created_at": occurred_at,
+            },
+            "plan": {
+                "id": "plan.work-loop-journey",
+                "initiative_id": "initiative.work-loop-journey",
+                "title": "Work loop journey",
+                "created_at": occurred_at,
+            },
+            "milestone": {
+                "id": "milestone.work-loop-journey",
+                "plan_id": "plan.work-loop-journey",
+                "title": "Work loop journey",
+                "created_at": occurred_at,
+            },
+            "item": {
+                "input": {
+                    "task_id": TASK_ID,
+                    "hierarchy": {
+                        "initiative_id": "initiative.work-loop-journey",
+                        "plan_id": "plan.work-loop-journey",
+                        "milestone_id": "milestone.work-loop-journey",
+                    },
+                    "title": "Work loop journey",
+                    "dependencies": [],
+                    "informational_relations": [],
+                    "causal_candidates": [],
+                    "acceptance_criteria": [],
+                    "effort": 1,
+                    "scheduled_at": null,
+                    "deadline": null,
+                    "created_at": occurred_at,
+                    "updated_at": occurred_at,
+                },
+                "accepted_proposal": null,
+                "accepted_route": null,
+                "execution_admitted_at": null,
+                "evidence_links": [],
+                "accepted_criteria": {},
+                "accepted_attempts": [],
+                "handoffs": [],
+                "accepted_at": null,
+                "archived_at": null,
+            },
+        },
+    })
+}
+
+fn prepare_product_mutation(fixture: &ProductionDaemon, label: &str, change: Value) -> Value {
+    fixture.payload(
+        label,
+        "/application/work/prepare-graph-mutation",
+        &json!({
+            "selection": product_selection(),
+            "change": change,
+            "causation_event_id": null,
+            "evidence": [],
+        }),
+    )
+}
+
+fn commit_product_mutation(fixture: &ProductionDaemon, label: &str, mutation: &Value) -> Value {
+    fixture.payload(label, "/application/work/mutate-graph", mutation)
+}
+
+fn product_graph(fixture: &ProductionDaemon, label: &str) -> Value {
+    fixture.payload(label, "/application/work/views", &product_graph_request())
+}
+
+fn graph_version(graph: &Value) -> u64 {
+    graph["snapshot"]["graph"]["version"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("current product graph must carry a version: {graph}"))
+}
+
 fn typed<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -544,13 +642,15 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     let scripts = tempfile::tempdir().expect("provider script directory");
 
     // ---------------------------------------------------------------------
-    // Warming. The per-project runtime binds behind the daemon's own start,
-    // and that window is a real production state: every answer inside it must
-    // be the typed retryable unavailable problem, never an empty success.
+    // Warming. Mutation preparation is the first product-authority handoff.
+    // While the per-project runtime is binding it may answer only the typed
+    // retryable unavailable problem; once mounted it supplies the exact
+    // command, graph authority, and revision pins the caller must submit.
     // ---------------------------------------------------------------------
-    let snapshot_request = json!({ "page_size": 25 });
-    poll_until("the project runtime mount", || {
-        let (status, answer) = fixture.post("/application/work/snapshot", &snapshot_request);
+    let create_draft = product_task_create_draft();
+    let prepared_create = poll_until("the project runtime mount", || {
+        let (status, answer) =
+            fixture.post("/application/work/prepare-graph-mutation", &create_draft);
         if status == 503 {
             assert_eq!(
                 answer["value"]["problem"]["kind"], "unavailable",
@@ -563,82 +663,65 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
             return Err(format!("{status} {answer}"));
         }
         assert_eq!(answer["kind"], "success", "{status} {answer}");
-        Ok(())
+        Ok(answer["value"]["outcome"]["value"]["payload"].clone())
     });
 
     // =====================================================================
     // 1. Create versioned Work, and prove the identity is content-addressed.
     // =====================================================================
-    let create = json!({
-        "task_id": TASK_ID,
-        "title": "Work loop journey",
-        "dependencies": [],
-        "command_id": "command.work-loop-journey.create",
-        "occurred_at": now_micros(),
-    });
-    let (status, created) = fixture.post("/application/work/create", &create);
-    assert_eq!(created["kind"], "success", "{status} {created}");
-    let effect = &created["value"]["outcome"]["value"];
     assert_eq!(
-        created["value"]["outcome"]["outcome"], "effect",
-        "create is an authoritative effect: {created}"
+        prepared_create["mutation"], "create_task",
+        "{prepared_create}"
     );
-    assert_eq!(effect["reconciliation"], "reconciled", "{created}");
-    assert_eq!(effect["receipt"]["outcome"], "completed", "{created}");
-    assert_eq!(effect["payload"]["task_id"], TASK_ID, "{created}");
+    let created = commit_product_mutation(&fixture, "create product task", &prepared_create);
     assert_eq!(
-        effect["payload"]["version"], 1,
+        created["event"]["payload"]["kind"], "task_created",
+        "{created}"
+    );
+    assert_eq!(
+        created["event"]["payload"]["item"]["input"]["task_id"],
+        TASK_ID
+    );
+    assert_eq!(
+        created["verified_graph_version"]["graph_version"], 1,
         "a created task starts at the initial version: {created}"
     );
 
     // Idempotent replay. The same command id is the same command: the durable
     // history must not grow, so the version must not move.
-    let replayed = fixture.payload("create replay", "/application/work/create", &create);
+    let replayed = commit_product_mutation(&fixture, "create replay", &prepared_create);
+    assert!(replayed["replayed"].as_bool().is_some_and(|value| value));
     assert_eq!(
-        replayed, effect["payload"],
-        "replaying a create must return the same projection, not a second write"
+        replayed["event"], created["event"],
+        "replaying a prepared command must return the same durable event"
     );
 
-    // Version CAS. A command against a version the task no longer has is
-    // refused; it is never re-anchored onto the current one.
-    let stale = fixture.problem(
-        "replan against a stale version",
-        "/application/work/replan-dependencies",
-        &json!({
+    // Hold one valid command at version one. A later committed proposal
+    // decision advances the graph; submitting this exact prepared command
+    // afterwards must prove the CAS rather than being silently re-anchored.
+    let stale_accept = prepare_product_mutation(
+        &fixture,
+        "prepare future stale acceptance",
+        json!({
+            "change": "accept_task",
             "task_id": TASK_ID,
-            "dependencies": [],
-            "expected_version": 99,
-            "command_id": "command.work-loop-journey.stale-replan",
-            "occurred_at": now_micros(),
+            "evidence_by_criterion": {},
         }),
-    );
-    assert_eq!(
-        stale["kind"], "conflict",
-        "a stale expected version must be a typed CAS refusal: {stale}"
-    );
-    assert_eq!(
-        stale["code"], "application.work.version-conflict",
-        "the refusal must name the version CAS, not a generic failure: {stale}"
     );
 
     // =====================================================================
     // 2. Retrieve exact authorized evidence, and expand a source anchor.
     // =====================================================================
     // The authorized Work evidence: the write above is readable in this
-    // scope's exact snapshot, with complete coverage rather than a truncation.
-    let snapshot = fixture.payload(
-        "work snapshot",
-        "/application/work/snapshot",
-        &snapshot_request,
-    );
-    assert_eq!(snapshot["coverage"]["state"], "complete", "{snapshot}");
+    // scope's exact product graph, with one verified version and no synthetic
+    // compatibility projection.
+    let graph = product_graph(&fixture, "current product graph");
+    assert_eq!(graph["mode"], "current", "{graph}");
     assert!(
-        snapshot["projections"]
+        graph["snapshot"]["graph"]["items"]
             .as_array()
-            .is_some_and(|projections| projections
-                .iter()
-                .any(|projection| projection["task_id"] == TASK_ID)),
-        "the created task must be readable as authorized evidence: {snapshot}"
+            .is_some_and(|items| items.iter().any(|item| item["input"]["task_id"] == TASK_ID)),
+        "the created task must be readable as authorized evidence: {graph}"
     );
 
     // The code anchor. The index publishes behind the write, so this polls to
@@ -705,13 +788,14 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "generate proposal",
         "/application/work/generate-proposal",
         &json!({
+            "selection": product_selection(),
             "task_id": TASK_ID,
             "proposal_id": "proposal.work-loop-journey.acceptance",
             "live_git_evidence": Value::Null,
             "occurred_at": now_micros(),
         }),
     );
-    assert_eq!(proposal["based_on_version"], 1, "{proposal}");
+    assert_eq!(proposal["proposal"]["based_on_version"], 1, "{proposal}");
     assert_eq!(
         proposal["decision"]["disposition"], "allow",
         "a ready task with no unresolved dependencies is allowed: {proposal}"
@@ -734,13 +818,9 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "the decision must bind the configuration it was made under: {proposal}"
     );
     // Generation is read-only: nothing about the task moved.
-    let after_proposal = fixture.payload(
-        "work snapshot after proposal",
-        "/application/work/snapshot",
-        &snapshot_request,
-    );
+    let after_proposal = product_graph(&fixture, "product graph after proposal");
     assert_eq!(
-        task_projection(&after_proposal)["version"],
+        graph_version(&after_proposal),
         1,
         "generating a proposal must not write: {after_proposal}"
     );
@@ -748,24 +828,39 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     // =====================================================================
     // 4. Explicit proposal acceptance.
     // =====================================================================
-    let review = json!({
-        "task_id": TASK_ID,
-        "proposal_id": proposal["proposal_id"],
-        "proposal_digest": proposal["proposal_digest"],
-        "expected_version": 1,
-        "command_id": "command.work-loop-journey.accept-proposal",
-        "occurred_at": now_micros(),
-    });
-    let accepted = fixture.payload(
-        "accept proposal",
-        "/application/work/accept-proposal",
-        &json!({ "review": review }),
+    let prepared_accept = prepare_product_mutation(
+        &fixture,
+        "prepare proposal acceptance",
+        json!({
+            "change": "decide_proposal",
+            "proposal": proposal["proposal"].clone(),
+            "disposition": "accepted",
+        }),
     );
-    assert_eq!(accepted["accepted_proposal"], proposal["proposal_id"]);
-    assert_eq!(accepted["version"], 2, "{accepted}");
+    let accepted = commit_product_mutation(&fixture, "accept proposal", &prepared_accept);
+    assert_eq!(accepted["event"]["payload"]["kind"], "proposal_decided");
+    assert_eq!(accepted["verified_graph_version"]["graph_version"], 2);
+    let accepted_graph = product_graph(&fixture, "product graph after proposal acceptance");
+    let accepted_item = task_item(&accepted_graph);
     assert_eq!(
-        accepted["execution_admitted"], false,
-        "accepting a proposal must not admit execution: {accepted}"
+        accepted_item["accepted_proposal"],
+        proposal["proposal"]["proposal_id"]
+    );
+    assert_eq!(
+        accepted_item["execution_admitted_at"],
+        Value::Null,
+        "accepting a proposal must not admit execution: {accepted_graph}"
+    );
+
+    let stale = fixture.problem(
+        "submit a prepared command after its graph head moved",
+        "/application/work/mutate-graph",
+        &stale_accept,
+    );
+    assert_eq!(stale["kind"], "conflict", "{stale}");
+    assert_eq!(
+        stale["code"], "work.graph_version_conflict",
+        "the refusal must name the product graph CAS: {stale}"
     );
 
     // Acceptance is not admission: a start refuses until admission happens.
@@ -800,6 +895,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "generate proposal after acceptance",
         "/application/work/generate-proposal",
         &json!({
+            "selection": product_selection(),
             "task_id": TASK_ID,
             "proposal_id": "proposal.work-loop-journey.admission",
             "live_git_evidence": Value::Null,
@@ -814,21 +910,23 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     // =====================================================================
     // 5. Separate execution admission, then one real provider step.
     // =====================================================================
-    let admitted = fixture.payload(
-        "admit execution",
-        "/application/work/admit-execution",
-        &json!({
-            "task_id": TASK_ID,
-            "expected_version": 2,
-            "command_id": "command.work-loop-journey.admit-execution",
-            "occurred_at": now_micros(),
-        }),
+    let prepared_admission = prepare_product_mutation(
+        &fixture,
+        "prepare execution admission",
+        json!({ "change": "admit_execution", "task_id": TASK_ID }),
     );
-    assert_eq!(admitted["execution_admitted"], true, "{admitted}");
-    assert_eq!(admitted["version"], 3, "{admitted}");
+    let admitted = commit_product_mutation(&fixture, "admit execution", &prepared_admission);
+    assert_eq!(admitted["verified_graph_version"]["graph_version"], 3);
+    let admitted_graph = product_graph(&fixture, "product graph after execution admission");
+    let admitted_item = task_item(&admitted_graph);
+    assert!(
+        admitted_item["execution_admitted_at"].is_number(),
+        "{admitted_graph}"
+    );
     assert_eq!(
-        admitted["task_accepted"], false,
-        "admitting execution must not accept the task: {admitted}"
+        admitted_item["accepted_at"],
+        Value::Null,
+        "admitting execution must not accept the task: {admitted_graph}"
     );
 
     // Pin two provider executables through the production control plane. The
@@ -1167,34 +1265,38 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     // evidence is attached to the projection, and the task stays unaccepted
     // until a separate explicit command says otherwise.
     let with_evidence = poll_until("the attached terminal runtime evidence", || {
-        let snapshot = fixture.payload(
-            "work snapshot with runtime evidence",
-            "/application/work/snapshot",
-            &snapshot_request,
-        );
-        let projection = task_projection(&snapshot);
-        if projection["runtime_evidence"]
+        let graph = product_graph(&fixture, "product graph with runtime evidence");
+        let terminal = graph["snapshot"]["runtime"]["attempts"]
             .as_array()
-            .is_some_and(|evidence| evidence.iter().any(|entry| entry["terminal"] == true))
-        {
-            Ok(projection)
+            .is_some_and(|attempts| {
+                attempts.iter().any(|attempt| {
+                    matches!(
+                        attempt["state"].as_str(),
+                        Some("cancelled" | "failed" | "succeeded" | "timed_out")
+                    )
+                })
+            });
+        if terminal {
+            Ok(graph)
         } else {
-            Err(format!("{projection}"))
+            Err(format!("{graph}"))
         }
     });
     assert_eq!(
-        with_evidence["task_accepted"], false,
+        task_item(&with_evidence)["accepted_at"],
+        Value::Null,
         "terminal runtime evidence must never accept the task: {with_evidence}"
     );
 
     // =====================================================================
     // 7. A justified replan, recommended and never applied.
     // =====================================================================
-    let version_before_replan = with_evidence["version"].clone();
+    let version_before_replan = graph_version(&with_evidence);
     let replan = fixture.payload(
         "generate a replan proposal",
         "/application/work/generate-proposal",
         &json!({
+            "selection": product_selection(),
             "task_id": TASK_ID,
             "proposal_id": "proposal.work-loop-journey.replan",
             "live_git_evidence": Value::Null,
@@ -1220,13 +1322,9 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
 
     // The recommendation changed nothing. Graph and runtime state are exactly
     // where they were until another explicit command moves them.
-    let after_replan_proposal = fixture.payload(
-        "work snapshot after the replan proposal",
-        "/application/work/snapshot",
-        &snapshot_request,
-    );
+    let after_replan_proposal = product_graph(&fixture, "graph after the replan proposal");
     assert_eq!(
-        task_projection(&after_replan_proposal)["version"],
+        graph_version(&after_replan_proposal),
         version_before_replan,
         "a replan recommendation must not be applied: {after_replan_proposal}"
     );
@@ -1240,40 +1338,78 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "a replan recommendation must not disturb runtime receipts: {attempts_after_replan}"
     );
 
-    // Applying it is a separate, version-checked command.
-    let applied = fixture.payload(
-        "apply the recommended replan",
-        "/application/work/replan-dependencies",
-        &json!({
-            "task_id": TASK_ID,
-            "dependencies": [],
-            "expected_version": version_before_replan,
-            "command_id": "command.work-loop-journey.replan",
-            "occurred_at": now_micros(),
+    // Applying it is a two-event, version-checked product mutation: first the
+    // relation proposal is explicitly accepted, then that accepted proposal is
+    // applied. No direct dependency command survives this authority boundary.
+    let relation_proposal = WorkRelationReplanProposalV1::new(
+        typed::<ProposalId>("proposal.work-loop-journey.relation-replan"),
+        typed::<TaskId>(TASK_ID),
+        WorkGraphVersionV1::new(version_before_replan).expect("current graph version"),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("valid relation replan proposal");
+    let prepared_replan_decision = prepare_product_mutation(
+        &fixture,
+        "prepare relation replan decision",
+        json!({
+            "change": "decide_relation_replan",
+            "proposal": serde_json::to_value(&relation_proposal).expect("relation proposal JSON"),
+            "disposition": "accepted",
         }),
     );
+    let decided_replan = commit_product_mutation(
+        &fixture,
+        "accept relation replan",
+        &prepared_replan_decision,
+    );
     assert_eq!(
-        applied["version"].as_i64(),
-        version_before_replan.as_i64().map(|version| version + 1),
-        "applying the replan advances exactly one version: {applied}"
+        decided_replan["verified_graph_version"]["graph_version"],
+        version_before_replan + 1,
+        "accepting the replan proposal advances one graph version: {decided_replan}"
+    );
+    let prepared_replan = prepare_product_mutation(
+        &fixture,
+        "prepare accepted relation replan",
+        json!({
+            "change": "apply_relation_replan",
+            "proposal_id": "proposal.work-loop-journey.relation-replan",
+        }),
+    );
+    let applied = commit_product_mutation(
+        &fixture,
+        "apply the accepted relation replan",
+        &prepared_replan,
+    );
+    assert_eq!(
+        applied["verified_graph_version"]["graph_version"],
+        version_before_replan + 2,
+        "applying the accepted replan advances the next graph version: {applied}"
     );
 
     // Acceptance closes the loop, and only acceptance does.
-    let accepted_task = fixture.payload(
-        "accept the task",
-        "/application/work/accept-task",
-        &json!({
+    let prepared_task_acceptance = prepare_product_mutation(
+        &fixture,
+        "prepare task acceptance",
+        json!({
+            "change": "accept_task",
             "task_id": TASK_ID,
-            "expected_version": applied["version"],
-            "command_id": "command.work-loop-journey.accept-task",
-            "occurred_at": now_micros(),
+            "evidence_by_criterion": {},
         }),
     );
-    assert_eq!(accepted_task["task_accepted"], true, "{accepted_task}");
+    let accepted_task =
+        commit_product_mutation(&fixture, "accept the task", &prepared_task_acceptance);
+    let accepted_task_graph = product_graph(&fixture, "graph after task acceptance");
+    assert!(
+        task_item(&accepted_task_graph)["accepted_at"].is_number(),
+        "{accepted_task}"
+    );
     let closed = fixture.payload(
         "generate a proposal against the accepted task",
         "/application/work/generate-proposal",
         &json!({
+            "selection": product_selection(),
             "task_id": TASK_ID,
             "proposal_id": "proposal.work-loop-journey.closed",
             "live_git_evidence": Value::Null,
@@ -1291,15 +1427,15 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     );
 }
 
-/// The journey's task, out of a Work projection snapshot payload.
-fn task_projection(snapshot: &Value) -> Value {
-    snapshot["projections"]
+/// The journey's task, out of the current product graph payload.
+fn task_item(graph: &Value) -> Value {
+    graph["snapshot"]["graph"]["items"]
         .as_array()
-        .and_then(|projections| {
-            projections
+        .and_then(|items| {
+            items
                 .iter()
-                .find(|projection| projection["task_id"] == TASK_ID)
+                .find(|item| item["input"]["task_id"] == TASK_ID)
         })
         .cloned()
-        .unwrap_or_else(|| panic!("the journey task must be in the snapshot: {snapshot}"))
+        .unwrap_or_else(|| panic!("the journey task must be in the product graph: {graph}"))
 }

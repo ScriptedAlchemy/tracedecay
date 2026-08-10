@@ -25,10 +25,14 @@ const client = createClient({
   token: process.env.TRACEDECAY_APPLICATION_TOKEN!,
 });
 
-const snapshot = await client.operations.work_snapshot(
-  { page_size: 25 },
+const graph = await client.operations.work_views(
   {
-    page: { size: 25 },
+    selection: { selection: "profile_owned_no_git" },
+    mode: { mode: "current" },
+    continuation: null,
+    observed_at: 1_800_000_000_000_000,
+  },
+  {
     deadlineMicros: 1_800_000_000_000_000,
   },
 );

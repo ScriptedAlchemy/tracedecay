@@ -245,13 +245,29 @@ mod tests {
             assert_eq!(work_operation_for_tool(&name), Some(operation));
         }
         assert_eq!(work_operation_for_tool("tracedecay_work_missing"), None);
+        for retired in [
+            "tracedecay_work_snapshot",
+            "tracedecay_work_delta",
+            "tracedecay_work_replan_dependencies",
+            "tracedecay_work_accept_task",
+        ] {
+            assert_eq!(work_operation_for_tool(retired), None, "{retired}");
+        }
     }
 
     #[tokio::test]
     async fn read_mutation_and_evidence_preserve_the_typed_http_work_envelope() {
         let executor = RecordingWorkExecutor::default();
         let requests = [
-            ("tracedecay_work_snapshot", json!({"page_size": 10})),
+            (
+                "tracedecay_work_views",
+                json!({
+                    "selection": {"selection": "profile_owned_no_git"},
+                    "mode": {"mode": "current"},
+                    "continuation": null,
+                    "observed_at": 1
+                }),
+            ),
             ("tracedecay_work_resume_attempts", json!({"occurred_at": 1})),
             (
                 "tracedecay_work_retrieve_evidence",

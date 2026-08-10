@@ -65,20 +65,71 @@ macro_rules! typed_operation {
     };
 }
 
-pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[];
+pub const UNAVAILABLE_OPERATIONS: &[UnavailableOperationCapability] = &[
+    UnavailableOperationCapability {
+        operation: "application_callees",
+        operation_id: "operation.application.callees",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_context",
+        operation_id: "operation.application.context",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_impact",
+        operation_id: "operation.application.impact",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_node",
+        operation_id: "operation.application.node",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_port_order",
+        operation_id: "operation.application.port_order",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_port_status",
+        operation_id: "operation.application.port_status",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_redundancy",
+        operation_id: "operation.application.redundancy",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_rename_preview",
+        operation_id: "operation.application.rename_preview",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_similar",
+        operation_id: "operation.application.similar",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+    UnavailableOperationCapability {
+        operation: "application_todos",
+        operation_id: "operation.application.todos",
+        disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
+    },
+];
 
-pub mod affected_tests {
+pub mod application_affected_tests {
     pub type Request = tracedecay_application::feedback::FeedbackHandleRequestV1;
     pub type Result = tracedecay_application::feedback::CanonicalAffectedTestsProjectionV1;
 }
 typed_operation!(
-    AffectedTests,
-    affected_tests,
+    ApplicationAffectedTests,
+    application_affected_tests,
     "operation.application.affected_tests",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_affected_tests"
+    OperationTransport::Http {
+        route: "/application/tests/affected"
     },
-    "binding.mcp.affected_tests.v1",
+    "binding.http.affected_tests.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -214,18 +265,18 @@ typed_operation!(
     1
 );
 
-pub mod call_chain {
+pub mod application_call_chain {
     pub type Request = tracedecay_application::retrieval::CallChainPrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::CallChainPrimitiveResult;
 }
 typed_operation!(
-    CallChain,
-    call_chain,
+    ApplicationCallChain,
+    application_call_chain,
     "operation.application.call_chain",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_call_chain"
+    OperationTransport::Http {
+        route: "/application/primitives/call_chain"
     },
-    "binding.mcp.call_chain.v1",
+    "binding.http.call_chain.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -1615,18 +1666,18 @@ typed_operation!(
     1
 );
 
-pub mod diagnostics_read {
+pub mod application_diagnostics_read {
     pub type Request = tracedecay_application::retrieval::DiagnosticsPrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::DiagnosticsPrimitiveResult;
 }
 typed_operation!(
-    DiagnosticsRead,
-    diagnostics_read,
+    ApplicationDiagnosticsRead,
+    application_diagnostics_read,
     "operation.application.diagnostics_read",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_diagnostics_read"
+    OperationTransport::Http {
+        route: "/application/primitives/diagnostics_read"
     },
-    "binding.mcp.diagnostics_read.v1",
+    "binding.http.diagnostics_read.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2059,18 +2110,18 @@ typed_operation!(
     1
 );
 
-pub mod feedback_advisory_cycle {
+pub mod application_feedback_advisory_cycle {
     pub type Request = tracedecay_application::feedback::FeedbackAdvisoryCycleSurfaceRequestV1;
     pub type Result = tracedecay_application::feedback::FeedbackAdvisoryCycleSurfaceResultV1;
 }
 typed_operation!(
-    FeedbackAdvisoryCycle,
-    feedback_advisory_cycle,
+    ApplicationFeedbackAdvisoryCycle,
+    application_feedback_advisory_cycle,
     "operation.application.feedback_advisory_cycle",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_feedback_advisory_cycle"
+    OperationTransport::Http {
+        route: "/application/feedback/advisory_cycle"
     },
-    "binding.mcp.feedback_advisory_cycle.v1",
+    "binding.http.feedback_advisory_cycle.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2095,18 +2146,18 @@ typed_operation!(
     1
 );
 
-pub mod feedback_diagnostics {
+pub mod application_feedback_diagnostics {
     pub type Request = tracedecay_application::feedback::FeedbackHandleRequestV1;
     pub type Result = tracedecay_application::feedback::FeedbackDiagnosticsReadResultV1;
 }
 typed_operation!(
-    FeedbackDiagnostics,
-    feedback_diagnostics,
+    ApplicationFeedbackDiagnostics,
+    application_feedback_diagnostics,
     "operation.application.feedback_diagnostics",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_feedback_diagnostics"
+    OperationTransport::Http {
+        route: "/application/feedback/diagnostics"
     },
-    "binding.mcp.feedback_diagnostics.v1",
+    "binding.http.feedback_diagnostics.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2131,18 +2182,18 @@ typed_operation!(
     1
 );
 
-pub mod feedback_expand {
+pub mod application_feedback_expand {
     pub type Request = tracedecay_application::feedback::FeedbackHandleRequestV1;
     pub type Result = tracedecay_application::feedback::FeedbackExpandResultV1;
 }
 typed_operation!(
-    FeedbackExpand,
-    feedback_expand,
+    ApplicationFeedbackExpand,
+    application_feedback_expand,
     "operation.application.feedback_expand",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_feedback_expand"
+    OperationTransport::Http {
+        route: "/application/feedback/expand"
     },
-    "binding.mcp.feedback_expand.v1",
+    "binding.http.feedback_expand.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2167,18 +2218,18 @@ typed_operation!(
     1
 );
 
-pub mod feedback_get {
+pub mod application_feedback_get {
     pub type Request = tracedecay_application::feedback::FeedbackHandleRequestV1;
     pub type Result = tracedecay_application::feedback::FeedbackGetResultV1;
 }
 typed_operation!(
-    FeedbackGet,
-    feedback_get,
+    ApplicationFeedbackGet,
+    application_feedback_get,
     "operation.application.feedback_get",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_feedback_get"
+    OperationTransport::Http {
+        route: "/application/feedback/get"
     },
-    "binding.mcp.feedback_get.v1",
+    "binding.http.feedback_get.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2203,18 +2254,18 @@ typed_operation!(
     1
 );
 
-pub mod feedback_impact {
+pub mod application_feedback_impact {
     pub type Request = tracedecay_application::feedback::FeedbackHandleRequestV1;
     pub type Result = tracedecay_application::feedback::CanonicalFeedbackImpactProjectionV1;
 }
 typed_operation!(
-    FeedbackImpact,
-    feedback_impact,
+    ApplicationFeedbackImpact,
+    application_feedback_impact,
     "operation.application.feedback_impact",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_feedback_impact"
+    OperationTransport::Http {
+        route: "/application/feedback/impact"
     },
-    "binding.mcp.feedback_impact.v1",
+    "binding.http.feedback_impact.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2239,18 +2290,18 @@ typed_operation!(
     1
 );
 
-pub mod feedback_list {
+pub mod application_feedback_list {
     pub type Request = tracedecay_application::feedback::FeedbackHandleRequestV1;
     pub type Result = tracedecay_application::feedback::FeedbackListResultV1;
 }
 typed_operation!(
-    FeedbackList,
-    feedback_list,
+    ApplicationFeedbackList,
+    application_feedback_list,
     "operation.application.feedback_list",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_feedback_list"
+    OperationTransport::Http {
+        route: "/application/feedback/list"
     },
-    "binding.mcp.feedback_list.v1",
+    "binding.http.feedback_list.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2275,18 +2326,18 @@ typed_operation!(
     1
 );
 
-pub mod file_dependents {
+pub mod application_file_dependents {
     pub type Request = tracedecay_application::retrieval::FileDependentsPrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::FileDependentsPrimitiveResult;
 }
 typed_operation!(
-    FileDependents,
-    file_dependents,
+    ApplicationFileDependents,
+    application_file_dependents,
     "operation.application.file_dependents",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_file_dependents"
+    OperationTransport::Http {
+        route: "/application/primitives/file_dependents"
     },
-    "binding.mcp.file_dependents.v1",
+    "binding.http.file_dependents.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2311,18 +2362,18 @@ typed_operation!(
     1
 );
 
-pub mod file_metadata {
+pub mod application_file_metadata {
     pub type Request = tracedecay_application::retrieval::FileMetadataPrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::FileMetadataPrimitiveResult;
 }
 typed_operation!(
-    FileMetadata,
-    file_metadata,
+    ApplicationFileMetadata,
+    application_file_metadata,
     "operation.application.file_metadata",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_file_metadata"
+    OperationTransport::Http {
+        route: "/application/primitives/file_metadata"
     },
-    "binding.mcp.file_metadata.v1",
+    "binding.http.file_metadata.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2629,18 +2680,18 @@ typed_operation!(
     1
 );
 
-pub mod health_delta {
+pub mod application_health_delta {
     pub type Request = tracedecay_application::retrieval::HealthDeltaRequest;
     pub type Result = tracedecay_application::retrieval::HealthDeltaResult;
 }
 typed_operation!(
-    HealthDelta,
-    health_delta,
+    ApplicationHealthDelta,
+    application_health_delta,
     "operation.application.health_delta",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_health_delta"
+    OperationTransport::Http {
+        route: "/application/primitives/health_delta"
     },
-    "binding.mcp.health_delta.v1",
+    "binding.http.health_delta.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -2665,18 +2716,18 @@ typed_operation!(
     1
 );
 
-pub mod health_read {
+pub mod application_health_read {
     pub type Request = tracedecay_application::retrieval::HealthReadRequest;
     pub type Result = tracedecay_application::retrieval::HealthReadResult;
 }
 typed_operation!(
-    HealthRead,
-    health_read,
+    ApplicationHealthRead,
+    application_health_read,
     "operation.application.health_read",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_health_read"
+    OperationTransport::Http {
+        route: "/application/primitives/health_read"
     },
-    "binding.mcp.health_read.v1",
+    "binding.http.health_read.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -3099,18 +3150,18 @@ typed_operation!(
     1
 );
 
-pub mod module_api {
+pub mod application_module_api {
     pub type Request = tracedecay_application::retrieval::ModuleApiPrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::ModuleApiPrimitiveResult;
 }
 typed_operation!(
-    ModuleApi,
-    module_api,
+    ApplicationModuleApi,
+    application_module_api,
     "operation.application.module_api",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_module_api"
+    OperationTransport::Http {
+        route: "/application/primitives/module_api"
     },
-    "binding.mcp.module_api.v1",
+    "binding.http.module_api.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -3315,18 +3366,18 @@ typed_operation!(
     1
 );
 
-pub mod qualified_name {
+pub mod application_qualified_name {
     pub type Request = tracedecay_application::retrieval::QualifiedNamePrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::QualifiedNamePrimitiveResult;
 }
 typed_operation!(
-    QualifiedName,
-    qualified_name,
+    ApplicationQualifiedName,
+    application_qualified_name,
     "operation.application.qualified_name",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_qualified_name"
+    OperationTransport::Http {
+        route: "/application/primitives/qualified_name"
     },
-    "binding.mcp.qualified_name.v1",
+    "binding.http.qualified_name.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -3881,18 +3932,18 @@ typed_operation!(
     1
 );
 
-pub mod source_body {
+pub mod application_source_body {
     pub type Request = tracedecay_application::retrieval::SourceBodyPrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::SourceBodyPrimitiveResult;
 }
 typed_operation!(
-    SourceBody,
-    source_body,
+    ApplicationSourceBody,
+    application_source_body,
     "operation.application.source_body",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_source_body"
+    OperationTransport::Http {
+        route: "/application/primitives/source_body"
     },
-    "binding.mcp.source_body.v1",
+    "binding.http.source_body.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -3991,18 +4042,18 @@ typed_operation!(
     1
 );
 
-pub mod source_lines {
+pub mod application_source_lines {
     pub type Request = tracedecay_application::retrieval::SourceLinesRequest;
     pub type Result = tracedecay_application::retrieval::SourceLinesResult;
 }
 typed_operation!(
-    SourceLines,
-    source_lines,
+    ApplicationSourceLines,
+    application_source_lines,
     "operation.application.source_lines",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_source_lines"
+    OperationTransport::Http {
+        route: "/application/primitives/source_lines"
     },
-    "binding.mcp.source_lines.v1",
+    "binding.http.source_lines.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -4027,18 +4078,18 @@ typed_operation!(
     1
 );
 
-pub mod source_outline {
+pub mod application_source_outline {
     pub type Request = tracedecay_application::retrieval::SourceOutlinePrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::SourceOutlinePrimitiveResult;
 }
 typed_operation!(
-    SourceOutline,
-    source_outline,
+    ApplicationSourceOutline,
+    application_source_outline,
     "operation.application.source_outline",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_source_outline"
+    OperationTransport::Http {
+        route: "/application/primitives/source_outline"
     },
-    "binding.mcp.source_outline.v1",
+    "binding.http.source_outline.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -4098,18 +4149,18 @@ typed_operation!(
     1
 );
 
-pub mod storage_status {
+pub mod application_storage_status {
     pub type Request = tracedecay_application::retrieval::StorageStatusPrimitiveRequest;
     pub type Result = tracedecay_application::retrieval::StorageStatusPrimitiveResult;
 }
 typed_operation!(
-    StorageStatus,
-    storage_status,
+    ApplicationStorageStatus,
+    application_storage_status,
     "operation.application.storage_status",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_storage_status"
+    OperationTransport::Http {
+        route: "/application/primitives/storage_status"
     },
-    "binding.mcp.storage_status.v1",
+    "binding.http.storage_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -4171,18 +4222,18 @@ typed_operation!(
     1
 );
 
-pub mod test_results {
+pub mod application_test_results {
     pub type Request = tracedecay_application::feedback::TestResultsSurfaceRequestV1;
     pub type Result = tracedecay_application::feedback::TestResultsResultV1;
 }
 typed_operation!(
-    TestResults,
-    test_results,
+    ApplicationTestResults,
+    application_test_results,
     "operation.application.test_results",
-    OperationTransport::McpTool {
-        tool_name: "tracedecay_test_results"
+    OperationTransport::Http {
+        route: "/application/tests/results"
     },
-    "binding.mcp.test_results.v1",
+    "binding.http.test_results.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
     true,
@@ -4657,43 +4708,6 @@ typed_operation!(
     1
 );
 
-pub mod work_accept_task {
-    pub type Request = tracedecay_application::AcceptTaskCommand;
-    pub type Result = tracedecay_domain::WorkProjection;
-}
-typed_operation!(
-    WorkAcceptTask,
-    work_accept_task,
-    "operation.work.accept_task",
-    OperationTransport::Http {
-        route: "/application/work/accept-task"
-    },
-    "binding.http.work.accept_task",
-    EffectClass::Administrative,
-    IdempotencyContract::Required,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeEffect,
-        CancellationPoint::EffectInFlight,
-        CancellationPoint::AfterCommit
-    ],
-    30000,
-    DeadlineBehavior::ReturnEffectReceipt,
-    ReconciliationContract::Required,
-    ReceiptContract::DurableEffect,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::EffectUnknown,
-        TerminalState::Partial
-    ],
-    "schema.work.accept_task.result",
-    1
-);
-
 pub mod work_adjudicate_duplicate {
     pub type Request = tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
     pub type Result = tracedecay_application::WorkDuplicateAdjudicationAppendOutcomeV1;
@@ -4983,41 +4997,6 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.work.create.result",
-    1
-);
-
-pub mod work_delta {
-    pub type Request = tracedecay_application::WorkProjectionDeltaRequestV1;
-    pub type Result = tracedecay_domain::WorkProjectionDeltaV1;
-}
-typed_operation!(
-    WorkDelta,
-    work_delta,
-    "operation.work.delta",
-    OperationTransport::Http {
-        route: "/application/work/delta"
-    },
-    "binding.http.work.delta",
-    EffectClass::Read,
-    IdempotencyContract::NotRequired,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeRead,
-        CancellationPoint::DuringRead
-    ],
-    30000,
-    DeadlineBehavior::ReturnOperationReceipt,
-    ReconciliationContract::NotRequired,
-    ReceiptContract::Operation,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::Partial
-    ],
-    "schema.work.delta.result",
     1
 );
 
@@ -5447,43 +5426,6 @@ typed_operation!(
     1
 );
 
-pub mod work_replan_dependencies {
-    pub type Request = tracedecay_application::ReplanDependenciesCommand;
-    pub type Result = tracedecay_domain::WorkProjection;
-}
-typed_operation!(
-    WorkReplanDependencies,
-    work_replan_dependencies,
-    "operation.work.replan_dependencies",
-    OperationTransport::Http {
-        route: "/application/work/replan-dependencies"
-    },
-    "binding.http.work.replan_dependencies",
-    EffectClass::Administrative,
-    IdempotencyContract::Required,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeEffect,
-        CancellationPoint::EffectInFlight,
-        CancellationPoint::AfterCommit
-    ],
-    30000,
-    DeadlineBehavior::ReturnEffectReceipt,
-    ReconciliationContract::Required,
-    ReceiptContract::DurableEffect,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::EffectUnknown,
-        TerminalState::Partial
-    ],
-    "schema.work.replan_dependencies.result",
-    1
-);
-
 pub mod work_resume_attempts {
     pub type Request = tracedecay_application::ResumeWorkAttemptsCommand;
     pub type Result = tracedecay_application::WorkAttemptRecoveryReportV1;
@@ -5699,41 +5641,6 @@ typed_operation!(
         TerminalState::Partial
     ],
     "schema.work.run_control.result",
-    1
-);
-
-pub mod work_snapshot {
-    pub type Request = tracedecay_application::WorkProjectionSnapshotRequestV1;
-    pub type Result = tracedecay_domain::WorkProjectionSnapshotV1;
-}
-typed_operation!(
-    WorkSnapshot,
-    work_snapshot,
-    "operation.work.snapshot",
-    OperationTransport::Http {
-        route: "/application/work/snapshot"
-    },
-    "binding.http.work.snapshot",
-    EffectClass::Read,
-    IdempotencyContract::NotRequired,
-    true,
-    &[
-        CancellationPoint::BeforeAdmission,
-        CancellationPoint::BeforeRead,
-        CancellationPoint::DuringRead
-    ],
-    30000,
-    DeadlineBehavior::ReturnOperationReceipt,
-    ReconciliationContract::NotRequired,
-    ReceiptContract::Operation,
-    &[
-        TerminalState::Completed,
-        TerminalState::Cancelled,
-        TerminalState::TimedOut,
-        TerminalState::Failed,
-        TerminalState::Partial
-    ],
-    "schema.work.snapshot.result",
     1
 );
 
