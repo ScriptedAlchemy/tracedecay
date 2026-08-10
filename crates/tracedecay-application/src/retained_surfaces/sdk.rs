@@ -569,7 +569,7 @@ mod session_refresh_request_tests {
             },
             "source": { "scope": "cursor" },
             "target": {
-                "temporal_mode": "current",
+                "temporal_mode": { "kind": "current" },
                 "grain": "session",
                 "frontier": { "observed_through": 0, "committed_through": 0 }
             },
@@ -610,6 +610,19 @@ mod session_refresh_request_tests {
         assert!(matches!(
             request.action,
             super::SessionRefreshActionV1::Status
+        ));
+    }
+
+    #[test]
+    fn application_owner_accepts_an_as_of_cutoff() {
+        let mut body = route_body();
+        body["action"] = json!("status");
+        body["target"]["temporal_mode"] = json!({ "kind": "as_of", "cutoff": 42 });
+        let request = serde_json::from_value::<SessionRefreshRequestV1>(body)
+            .expect("canonical as-of request");
+        assert!(matches!(
+            request.request.target.temporal_mode,
+            super::SessionRefreshTemporalModeV1::AsOf { cutoff: 42 }
         ));
     }
 }
