@@ -13,7 +13,7 @@ use tracedecay_domain::{
     ActorId, HydrationStateV1, ProjectId, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1,
     TemporalModeV1,
 };
-#[cfg(any(test, feature = "test-transport"))]
+#[cfg(test)]
 use tracedecay_domain::{RepositoryId, WorktreeId};
 use tracedecay_store::StoreShardIdV1;
 use tracedecay_usecases::context::{
@@ -154,12 +154,15 @@ impl DaemonSessionRetrievalRoot {
             SessionRootId::new("root.project.test")
                 .unwrap_or_else(|error| panic!("test root identity: {error}")),
             ResolvedGitRoute::new(
-                RepositoryId::new("repository.project.test")
+                crate::daemon::code_index_scheduler::identity::repository_id_for(&project_root)
                     .unwrap_or_else(|error| panic!("test repository identity: {error}")),
-                WorktreeId::new(project_root.display().to_string())
+                crate::daemon::code_index_scheduler::identity::worktree_id_for(&project_root)
                     .unwrap_or_else(|error| panic!("test worktree identity: {error}")),
-                BranchId::new("branch.project.test")
-                    .unwrap_or_else(|error| panic!("test branch identity: {error}")),
+                BranchId::new(
+                    crate::branch::current_branch(&project_root)
+                        .unwrap_or_else(|| "detached".to_owned()),
+                )
+                .unwrap_or_else(|error| panic!("test branch identity: {error}")),
             ),
         );
         Self {

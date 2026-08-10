@@ -79,3 +79,19 @@ fn concrete_work_evidence_mount_accepts_only_its_exact_project_scope() {
         "a different project scope must not receive the mounted session authority",
     );
 }
+
+#[test]
+fn concrete_work_evidence_mount_accepts_reference_free_matching_coordinates() {
+    let (mounted, exact_scope) = mounted_scope("project.work-evidence-mount");
+    let reference_free = ResolvedScope::new(
+        exact_scope.project_id,
+        exact_scope.repository_id,
+        exact_scope.worktree_id,
+        None,
+    )
+    .unwrap();
+
+    mounted
+        .work_evidence_retrieval(&reference_free, Arc::new(MissingFederatedAuthority))
+        .expect("a non-git scope must bind by its exact project and worktree coordinates");
+}

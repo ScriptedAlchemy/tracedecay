@@ -495,7 +495,12 @@ impl MountedProjectApplicationRetrievalV1 {
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("mounted project session identity is invalid: {error}"),
                 })?;
-        if &mounted_scope != expected_scope {
+        let same_coordinates = mounted_scope.project_id == expected_scope.project_id
+            && mounted_scope.repository_id == expected_scope.repository_id
+            && mounted_scope.worktree_id == expected_scope.worktree_id;
+        let reference_matches = expected_scope.reference.is_none()
+            || mounted_scope.reference == expected_scope.reference;
+        if !same_coordinates || !reference_matches {
             return Err(TraceDecayError::Config {
                 message: "Work evidence retrieval scope does not match the mounted project session authority"
                     .to_owned(),
