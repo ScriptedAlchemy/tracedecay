@@ -2,7 +2,7 @@ use std::fmt;
 
 use tracedecay_application::RequestContext;
 use tracedecay_domain::{
-    ActorId, CursorManifestLimitKindV1, RetrievalGrainV1, SessionId, TemporalModeV1,
+    ActorId, CursorManifestLimitKindV1, ManifestDigest, RetrievalGrainV1, SessionId, TemporalModeV1,
 };
 pub use tracedecay_global_db::session_temporal::execution::SessionDataFreshness;
 pub use tracedecay_sessions::{
@@ -45,6 +45,7 @@ pub struct SessionRequestBinding {
     configuration_digest: ConfigurationDigest,
     cancellation: CancellationToken,
     budgets: RequestBudgets,
+    admitted_grant_digest: Option<ManifestDigest>,
 }
 
 impl SessionRequestBinding {
@@ -63,6 +64,30 @@ impl SessionRequestBinding {
             configuration_digest,
             cancellation,
             budgets,
+            admitted_grant_digest: None,
+        }
+    }
+
+    /// Binds supplemental session authority to an immutable application grant
+    /// that was admitted before this binding was constructed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_admitted_context(
+        identity: ResolvedSessionIdentity,
+        capability_digest: CapabilityDigest,
+        policy_digest: PolicyDigest,
+        configuration_digest: ConfigurationDigest,
+        cancellation: CancellationToken,
+        budgets: RequestBudgets,
+        admitted_grant_digest: ManifestDigest,
+    ) -> Self {
+        Self {
+            identity,
+            capability_digest,
+            policy_digest,
+            configuration_digest,
+            cancellation,
+            budgets,
+            admitted_grant_digest: Some(admitted_grant_digest),
         }
     }
 
@@ -82,15 +107,18 @@ impl SessionRequestBinding {
         {
             return Err(SessionAuthorizationError::WrongContext);
         }
-        let digest = session_application_grant_digest(
-            self.capability_digest,
-            self.policy_digest,
-            self.configuration_digest,
-            &self.cancellation,
-            self.budgets,
-        )
-        .map_err(|_| SessionAuthorizationError::WrongContext)?;
-        if digest != context.grant().digest {
+        let grant_matches = match &self.admitted_grant_digest {
+            Some(admitted_grant_digest) => admitted_grant_digest == &context.grant().digest,
+            None => session_application_grant_digest(
+                self.capability_digest,
+                self.policy_digest,
+                self.configuration_digest,
+                &self.cancellation,
+                self.budgets,
+            )
+            .is_ok_and(|digest| digest == context.grant().digest),
+        };
+        if !grant_matches {
             return Err(SessionAuthorizationError::WrongContext);
         }
         Ok(())
@@ -120,6 +148,10 @@ impl SessionRequestBinding {
         self.budgets
     }
 
+    pub fn admitted_grant_digest(&self) -> Option<&ManifestDigest> {
+        self.admitted_grant_digest.as_ref()
+    }
+
     fn matches(&self, other: &Self) -> bool {
         self.identity == other.identity
             && self.capability_digest == other.capability_digest
@@ -127,6 +159,7 @@ impl SessionRequestBinding {
             && self.configuration_digest == other.configuration_digest
             && self.cancellation.is_same_token(&other.cancellation)
             && self.budgets == other.budgets
+            && self.admitted_grant_digest == other.admitted_grant_digest
     }
 }
 
@@ -749,6 +782,21 @@ mod tests {
         .unwrap()
     }
 
+    fn admitted_binding(
+        context: &TestRequestContext,
+        admitted_grant_digest: ManifestDigest,
+    ) -> SessionRequestBinding {
+        SessionRequestBinding::for_admitted_context(
+            context.identity().clone(),
+            context.capability_digest(),
+            context.policy_digest(),
+            context.configuration_digest(),
+            context.binding.cancellation.clone(),
+            context.binding.budgets,
+            admitted_grant_digest,
+        )
+    }
+
     #[test]
     fn grant_binds_the_exact_typed_retrieval_target_without_serialization() {
         let context = context();
@@ -1162,6 +1210,36 @@ mod tests {
             wrong_grant.validate_context(&context),
             Err(SessionAuthorizationError::WrongContext)
         );
+    }
+
+    #[test]
+    fn admitted_binding_accepts_only_the_exact_outer_grant() {
+        let context = context();
+        let exact = admitted_binding(&context, context.grant().digest.clone());
+        let different_digest = ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap();
+        assert_ne!(different_digest, context.grant().digest);
+        let different = admitted_binding(&context, different_digest);
+
+        assert_eq!(exact.validate_context(&context), Ok(()));
+        assert_eq!(
+            different.validate_context(&context),
+            Err(SessionAuthorizationError::WrongContext)
+        );
+    }
+
+    #[test]
+    fn admitted_binding_identity_includes_the_outer_grant_digest() {
+        let context = context();
+        let exact = admitted_binding(&context, context.grant().digest.clone());
+        let same = exact.clone();
+        let different_digest = ManifestDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap();
+        assert_ne!(different_digest, context.grant().digest);
+        let different = admitted_binding(&context, different_digest.clone());
+
+        assert!(exact.matches(&same));
+        assert!(!exact.matches(&different));
+        assert_eq!(exact.admitted_grant_digest(), Some(&context.grant().digest));
+        assert_eq!(different.admitted_grant_digest(), Some(&different_digest));
     }
 
     #[test]

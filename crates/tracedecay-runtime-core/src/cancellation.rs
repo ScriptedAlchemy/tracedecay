@@ -71,6 +71,27 @@ impl CancellationToken {
         }
     }
 
+    /// Adopts the exact cancellation identity from an already-admitted
+    /// application context.
+    ///
+    /// Unlike [`Self::for_application_request`], this does not mint a new
+    /// identity. The application boundary has already validated the token, but
+    /// the kernel repeats the bounded-string invariant before retaining it.
+    #[must_use]
+    pub fn for_admitted_application_request(token_id: &str) -> Option<Self> {
+        if token_id.is_empty()
+            || token_id.trim() != token_id
+            || token_id.len() > 512
+            || token_id.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(Self {
+            token_id: Some(Arc::from(token_id)),
+            ..Self::default()
+        })
+    }
+
     #[must_use]
     pub fn application_token_id(&self) -> Option<&str> {
         self.token_id.as_deref()
@@ -116,6 +137,22 @@ mod tests {
             independent.application_token_id()
         );
         assert!(!token.is_same_token(&independent));
+    }
+
+    #[test]
+    fn admitted_application_identity_is_preserved_exactly() {
+        let token =
+            CancellationToken::for_admitted_application_request("cancellation.already-admitted")
+                .expect("valid admitted cancellation identity");
+
+        assert_eq!(
+            token.application_token_id(),
+            Some("cancellation.already-admitted")
+        );
+        assert!(CancellationToken::for_admitted_application_request("").is_none());
+        assert!(
+            CancellationToken::for_admitted_application_request(" cancellation.invalid").is_none()
+        );
     }
 
     #[tokio::test]
