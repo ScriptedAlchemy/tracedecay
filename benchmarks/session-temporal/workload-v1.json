@@ -7,15 +7,15 @@
     },
     {
       "path": "src/session_temporal_benchmark.rs",
-      "sha256": "da8dd097d4cec7b372619247907d6f895e29fe6e0b9214c60e6724975e8dbb89"
+      "sha256": "81bd3d90d67b02c63f7f07ffe68eb4491b435cc2a28e0e17152fd2ec8e1306fe"
     },
     {
       "path": "src/session_temporal_benchmark/root_relation_fixture.rs",
-      "sha256": "5016c09cfbaf979447d6c031a2af96753380302b86bd848be593de9423383ca9"
+      "sha256": "0a425aaabe0fe0f89795453aba3603a182b0e2ae9d098fd0ca53a4615c9709fb"
     },
     {
       "path": "scripts/run-session-temporal-benchmark.sh",
-      "sha256": "0dc2e8ea058e1b0b9e33567e9898970d887205f0b4f57e1b3dfa17c8ce9a44ec"
+      "sha256": "6cd688cdcb71dc425d7a60cefb2f69bb65d12748ae080a6002b994770af85636"
     },
     {
       "path": "benchmarks/session-temporal/fixtures/codex-sanitization-receipt.json",
@@ -35,7 +35,7 @@
     },
     {
       "path": "benchmarks/session-temporal/README.md",
-      "sha256": "da7ca937f11261a54c024e9665715f7e43be1c5a047f0e3aaf490d3fe94eb597"
+      "sha256": "d59a05426a926268b34641c5e0e1269f1fb91b89a150a917f3be0a6eb7b5547c"
     }
   ],
   "fixture_evidence": {
@@ -58,7 +58,7 @@
   },
   "implementation": {
     "path": "src/session_temporal_benchmark.rs",
-    "sha256": "da8dd097d4cec7b372619247907d6f895e29fe6e0b9214c60e6724975e8dbb89"
+    "sha256": "81bd3d90d67b02c63f7f07ffe68eb4491b435cc2a28e0e17152fd2ec8e1306fe"
   },
   "measurement_contract": {
     "measured_repetitions": 30,
@@ -80,6 +80,12 @@
         "phase": "late_hydrate"
       }
     ],
+    "request_budgets": {
+      "max_context_bytes": 67108864,
+      "max_results": 64,
+      "max_work_units": 100000,
+      "reason": "the 64-participant root-wide production journey exceeds the former 10000-unit ceiling; this bounded limit matches the production retrieval ceiling"
+    },
     "warmup_repetitions": 3
   },
   "production_path": {
@@ -104,7 +110,7 @@
   },
   "runner": {
     "path": "scripts/run-session-temporal-benchmark.sh",
-    "sha256": "0dc2e8ea058e1b0b9e33567e9898970d887205f0b4f57e1b3dfa17c8ce9a44ec"
+    "sha256": "6cd688cdcb71dc425d7a60cefb2f69bb65d12748ae080a6002b994770af85636"
   },
   "schema_version": 2,
   "statistics": {

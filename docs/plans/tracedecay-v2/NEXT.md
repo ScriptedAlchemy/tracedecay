@@ -287,6 +287,15 @@ the commit as attribution evidence.
   stale open-document content, equal-generation identity replacement and
   subscription invalidation, same-generation feedback revision notification,
   session-local unsaved edits, and retained standard LSP behavior.
+- The session-temporal diagnostic benchmark now runs through the optimized
+  bench profile on Linux and macOS while checked-in contract publication
+  remains Linux-only. The root-wide fixture binds retrieval to the canonical
+  observation-capture policy, names typed hydration failures, and uses the
+  production 100,000-work-unit ceiling for its 64 authorized participants.
+  The macOS/aarch64 run completed 3 warmups and 30 measured repetitions over
+  1,920 records; all-root hydration completed on every repetition. The
+  Cargo-free contract check, focused 64-session regression, two host-policy
+  tests, and two black-box runner tests are green.
 
 ## Remaining work by lane
 
@@ -391,11 +400,11 @@ the commit as attribution evidence.
 
 ### Backend performance and final verification
 
-- Refresh the stale performance evidence on the current tree. Run the
-  same-host release `perf-gate.sh`, repair the session benchmark hash, execute
-  the session temporal benchmark with meaningful repetitions, and add real
-  Work rollup latency/throughput evidence. Backend performance is higher
-  priority than frontend micro-optimization.
+- Refresh the remaining stale performance evidence on the current tree. Run
+  the same-host release `perf-gate.sh`, publish the repaired session benchmark
+  from a clean Linux `--refresh-contract` run, and add real Work rollup
+  latency/throughput evidence. Backend performance is higher priority than
+  frontend micro-optimization.
 - Build the real dashboard first so `dashboard/app-dist` exists. Then run
   focused package checks followed by
   `cargo nextest run --workspace --all-features --no-fail-fast`, dashboard

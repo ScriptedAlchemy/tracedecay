@@ -27,6 +27,8 @@ mod observation_store;
 mod observation_workflow_projection;
 mod temporal_application;
 mod temporal_benchmark;
+#[cfg(unix)]
+mod temporal_benchmark_runner;
 mod temporal_derived_evidence;
 mod temporal_projection;
 mod temporal_refresh;

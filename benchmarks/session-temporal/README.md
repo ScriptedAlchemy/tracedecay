@@ -6,7 +6,7 @@
 > commands, test names/counts, snapshots, receipts, attestations, PR packets,
 > and gates below are not rebuild instructions. Validate current behavior directly.
 
-Linux measurement harness for session-temporal retrieval latency phases.
+Linux/macOS diagnostic harness for session-temporal retrieval latency phases.
 This directory records descriptive sample quantiles and directly executed
 behavioral test outcomes only. It is not an acceptance snapshot, receipt,
 manifest, or gate.
@@ -35,19 +35,20 @@ Runtime sanitizer provenance for those fixtures is in
 
 ```bash
 scripts/run-session-temporal-benchmark.sh --dry-run
-scripts/run-session-temporal-benchmark.sh --run   # Linux only; exit 64 elsewhere
-scripts/run-session-temporal-benchmark.sh --refresh-contract
+scripts/run-session-temporal-benchmark.sh --run   # diagnostic on Linux or macOS
+scripts/run-session-temporal-benchmark.sh --refresh-contract  # Linux only
 cargo bench --bench session_temporal --all-features -- --run
 ```
 
 Dry-run is Cargo-free. `--run` isolates `HOME` and `TRACEDECAY_DATA_DIR` and
 measures: `rebuild_activate`, `exact_replay`, `compact_rank`, and `late_hydrate`.
 `--run` prints diagnostic samples but never changes checked-in evidence.
-`--refresh-contract` requires a clean source commit, performs that same real
-measurement without accepting caller-supplied values, and publishes the
-workload and result as one hash-checked pair before pointing the evidence index
-at it. The refreshed provenance records the source commit and mode, warmups,
-measured repetitions, and record counts.
+`--refresh-contract` is Linux-only and the only publishing path: it requires a
+clean source commit, performs that same real measurement without accepting
+caller-supplied values, and publishes the workload and result as one
+hash-checked pair before pointing the evidence index at it. The refreshed
+provenance records the source commit and mode, warmups, measured repetitions,
+and record counts.
 
 ## Observed focused tests
 

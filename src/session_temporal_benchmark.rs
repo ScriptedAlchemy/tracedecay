@@ -3,7 +3,7 @@
 //! Drives production Codex admission, `CanonicalSessionTemporalProjector`
 //! materialization through the registered session database,
 //! [`SessionRefreshService`], and [`SessionRetrievalService`]. Output is a
-//! Linux measurement capture with descriptive sample quantiles only.
+//! Linux/macOS diagnostic measurement capture with descriptive sample quantiles only.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -75,6 +75,7 @@ const P95_LABEL: &str = "descriptive nearest-rank sample p95";
 const P99_LABEL: &str = "descriptive nearest-rank sample p99 (sample maximum when n=30)";
 const WARMUP_REPETITIONS: usize = 3;
 const MEASURED_REPETITIONS: usize = 30;
+const BENCHMARK_REQUEST_WORK_UNIT_LIMIT: u64 = 100_000;
 const PROJECTOR_VERSION: &str = "session-temporal-projector.v1";
 const CONFIG_VERSION: &str = "session-refresh-config.v1";
 const BENCHMARK_PROJECT_ID: &str = "proj_session_temporal_benchmark";
@@ -92,6 +93,31 @@ const NATIVE_CODEX_FIXTURES: &[(&str, &str)] = &[
 ];
 
 type BenchResult<T> = Result<T, String>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchmarkHostPolicy {
+    Linux,
+    Macos,
+    Unsupported,
+}
+
+impl BenchmarkHostPolicy {
+    fn for_target_os(target_os: &str) -> Self {
+        match target_os {
+            "linux" => Self::Linux,
+            "macos" => Self::Macos,
+            _ => Self::Unsupported,
+        }
+    }
+
+    const fn allows_diagnostic_measurement(self) -> bool {
+        matches!(self, Self::Linux | Self::Macos)
+    }
+
+    const fn allows_contract_refresh(self) -> bool {
+        matches!(self, Self::Linux)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -368,21 +394,6 @@ pub fn validate_contract() -> BenchResult<()> {
         Some(value) => return Err(format!("unexpected provisional result pointer: {value}")),
     }
 
-    let runner = fs::read_to_string(root.join(RUNNER_PATH))
-        .map_err(|error| format!("read runner: {error}"))?;
-    for token in [
-        "--dry-run",
-        "--run",
-        "--refresh-contract",
-        "Linux-hosted",
-        "CI nextest durable coverage",
-        "HOME",
-        "TRACEDECAY_DATA_DIR",
-    ] {
-        if !runner.contains(token) {
-            return Err(format!("runner is missing required token {token:?}"));
-        }
-    }
     Ok(())
 }
 
@@ -568,9 +579,10 @@ fn validate_refresh_inputs(root: &Path, workload: &Value) -> BenchResult<()> {
 /// A current result requires the clean-source provenance guaranteed by
 /// [`refresh_contract`]; this mode prints diagnostic samples only.
 pub async fn run_measurement() -> BenchResult<Value> {
-    if !cfg!(target_os = "linux") {
+    let host_policy = BenchmarkHostPolicy::for_target_os(std::env::consts::OS);
+    if !host_policy.allows_diagnostic_measurement() {
         return Err(
-            "Session-temporal --run measurement harness is Linux-hosted; use CI nextest durable coverage on Windows/macOS".into(),
+            "Session-temporal --run diagnostic measurement is supported on Linux/macOS".to_owned(),
         );
     }
     validate_contract()?;
@@ -592,7 +604,8 @@ pub async fn run_measurement() -> BenchResult<Value> {
 /// No caller-provided measurements or hashes are accepted. Both artifacts are
 /// derived after the run and published as one consistency-checked pair.
 pub async fn refresh_contract() -> BenchResult<Value> {
-    if !cfg!(target_os = "linux") {
+    let host_policy = BenchmarkHostPolicy::for_target_os(std::env::consts::OS);
+    if !host_policy.allows_contract_refresh() {
         return Err("Session-temporal contract refresh is Linux-hosted".to_owned());
     }
     validate_bench_profile_enforced()?;
@@ -705,7 +718,7 @@ fn measurement_result(
         "workload_id": WORKLOAD_ID,
         "capture_status": "provisional",
         "acceptance_eligible": false,
-        "provisional_reason": "linux_measurement_capture",
+        "provisional_reason": "diagnostic_measurement_capture",
         "workload_manifest": WORKLOAD_PATH,
         "workload_manifest_sha256": workload_manifest_sha256,
         "source_identity": source_identity,
@@ -754,7 +767,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     let root_sessions = root_relation_fixture::session_ids(repetition)?;
     let admission = HostAdmissionFacade::new(HostAdmissionAuthorities::for_project(
         brain_id,
-        profile_id,
+        profile_id.clone(),
         project_id.clone(),
         registered.as_ref(),
     ));
@@ -809,7 +822,8 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     let (context, binding) = request_context(
         &format!("request.session-temporal.{repetition}"),
         &project_id,
-    );
+        profile_id.as_str(),
+    )?;
     let started = Instant::now();
     let root_fixture = root_relation_fixture::refresh_sessions(
         db,
@@ -1016,11 +1030,13 @@ fn require_retrieval_success<T: std::fmt::Debug>(
 fn request_context(
     request: &str,
     project_id: &ProjectId,
-) -> (RequestContext, SessionRequestBinding) {
+    profile_id: &str,
+) -> BenchResult<(RequestContext, SessionRequestBinding)> {
     let actor = ActorId::new("actor.session-temporal.benchmark").unwrap();
     let request_id = RequestId::new(request).unwrap();
     let identity = ResolvedSessionIdentity::for_project(
-        ProfileId::new("profile.session-temporal-benchmark").unwrap(),
+        ProfileId::new(profile_id.to_owned())
+            .map_err(|error| format!("bind benchmark profile identity: {error}"))?,
         project_id.clone(),
         SessionStoreId::new(format!("store.{}", project_id.as_str())).unwrap(),
         SessionRootId::new("root.session-temporal.benchmark").unwrap(),
@@ -1032,10 +1048,14 @@ fn request_context(
     );
     let scope = identity.application_scope().unwrap();
     let capability = CapabilityDigest::new(DIGEST);
-    let policy = PolicyDigest::new(DIGEST);
+    let access_policy = tracedecay_store::observation_capture_access_policy_digest_v1()
+        .map_err(|error| format!("resolve benchmark observation access policy: {error}"))?;
+    let policy = PolicyDigest::from_access_policy_digest(&access_policy)
+        .map_err(|error| format!("bind benchmark observation access policy: {error}"))?;
     let configuration = ConfigurationDigest::new(DIGEST);
     let cancellation = CancellationToken::for_application_request(request_id.as_str());
-    let budgets = RequestBudgets::new(64, 64 * 1024 * 1024, 10_000).unwrap();
+    let budgets =
+        RequestBudgets::new(64, 64 * 1024 * 1024, BENCHMARK_REQUEST_WORK_UNIT_LIMIT).unwrap();
     let observed_at = application_observed_at();
     let expires_at = UtcMicros(observed_at.0.saturating_add(30_000_000));
     let grant = CapabilityGrantSnapshot::new(
@@ -1069,7 +1089,7 @@ fn request_context(
         cancellation,
         budgets,
     );
-    (context, binding)
+    Ok((context, binding))
 }
 
 fn current_state_identity(root: &Path, workload_manifest_sha256: &str) -> BenchResult<Value> {
@@ -1433,6 +1453,18 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_measurement_host_policy_allows_linux_and_macos() {
+        assert!(BenchmarkHostPolicy::for_target_os("linux").allows_diagnostic_measurement());
+        assert!(BenchmarkHostPolicy::for_target_os("macos").allows_diagnostic_measurement());
+    }
+
+    #[test]
+    fn contract_refresh_host_policy_is_linux_only() {
+        assert!(BenchmarkHostPolicy::for_target_os("linux").allows_contract_refresh());
+        assert!(!BenchmarkHostPolicy::for_target_os("macos").allows_contract_refresh());
+    }
+
+    #[test]
     fn nearest_rank_uses_descriptive_sample_labels() {
         let samples = [10_u64, 20, 30, 40, 50];
         assert_eq!(nearest_rank(&samples, 50), Some(30));
@@ -1577,13 +1609,5 @@ mod tests {
         drop(isolated);
         assert_eq!(env::var_os("HOME"), prior_home);
         assert_eq!(env::var_os("TRACEDECAY_DATA_DIR"), prior_data);
-    }
-
-    #[test]
-    fn runner_keeps_linux_hosted_measurement_entrypoint() {
-        let runner = fs::read_to_string(repository_root().join(RUNNER_PATH)).unwrap();
-        assert!(runner.contains("exit 64"));
-        assert!(runner.contains("Linux-hosted"));
-        assert!(runner.contains("CI nextest durable coverage"));
     }
 }

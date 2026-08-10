@@ -7,13 +7,13 @@ Usage: scripts/run-session-temporal-benchmark.sh --dry-run|--run|--refresh-contr
 
   --dry-run  Read-only, Cargo-free validation of harness artifacts and
              Codex fixture provenance. Does not mutate the checkout.
-  --run      Measurement through the optimized bench profile (Linux preferred).
+  --run      Diagnostic measurement through the optimized bench profile on
+             Linux and macOS.
              Isolates HOME and TRACEDECAY_DATA_DIR for the child process.
-             Windows/macOS CI prove temporal durability via nextest; this
-             measurement entrypoint remains Linux-hosted for bench tooling.
+             Windows CI proves temporal durability via nextest.
   --refresh-contract
              Run the same real measurement from a clean source commit, then
-             regenerate the workload manifest and result together.
+             regenerate the workload manifest and result together (Linux-hosted).
 EOF
 }
 
@@ -198,10 +198,19 @@ PY
 
 run_benchmark() {
   local mode="$1"
-  if [[ "$(uname -s)" != "Linux" ]]; then
-    printf '%s\n' "Session-temporal ${mode} measurement harness is Linux-hosted; use CI nextest durable coverage on Windows/macOS" >&2
-    exit 64
-  fi
+  local host_os
+  host_os="$(uname -s)"
+  case "$mode:$host_os" in
+    --run:Linux|--run:Darwin|--refresh-contract:Linux) ;;
+    --refresh-contract:*)
+      printf '%s\n' "Session-temporal contract refresh is Linux-hosted" >&2
+      exit 64
+      ;;
+    *)
+      printf '%s\n' "Session-temporal ${mode} measurement harness supports Linux and macOS; use CI nextest durable coverage on other platforms" >&2
+      exit 64
+      ;;
+  esac
   isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/session-temporal-bench.XXXXXX")"
   cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"

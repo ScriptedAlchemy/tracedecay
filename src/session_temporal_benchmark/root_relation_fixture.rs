@@ -202,7 +202,9 @@ pub(super) fn require_root_relation_hydration(
         ));
     }
     let SessionRetrievalOutcome::Complete { mut items, .. } = outcome else {
-        return Err("root relation hydration did not complete".to_owned());
+        return Err(format!(
+            "root relation hydration did not complete: {outcome:?}"
+        ));
     };
     if items.len() != 1 {
         return Err(format!(
@@ -300,6 +302,19 @@ mod tests {
                 .collect::<BTreeSet<_>>()
                 .len(),
             ROOT_RELATION_PARTICIPANT_COUNT
+        );
+    }
+
+    #[test]
+    fn root_relation_hydration_error_names_locked_outcome() {
+        let sessions = session_ids(7).expect("fixture session ids");
+
+        let error = require_root_relation_hydration(SessionRetrievalOutcome::Locked, &sessions)
+            .expect_err("locked root retrieval must not satisfy hydration");
+
+        assert!(
+            error.contains("Locked"),
+            "non-complete root hydration error must name its typed outcome: {error}"
         );
     }
 }
