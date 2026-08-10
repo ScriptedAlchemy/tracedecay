@@ -19,8 +19,8 @@ mod work_registered_store;
 use std::collections::BTreeSet;
 
 use tracedecay_application::{
-    CancellationContext, CapabilityGrantSnapshot, CreateWorkProductRequestV1, Deadline,
-    DisclosureClass, RequestContext, RequestId, ResolvedScope, WorkGraphReadRequestV1,
+    AddWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot, CreateWorkProductRequestV1,
+    Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, WorkGraphReadRequestV1,
     WorkGraphReadV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
     WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationServiceV1,
     WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
@@ -448,6 +448,48 @@ fn a_second_creation_cannot_claim_there_is_no_prior_graph() {
     assert_eq!(conflict, WorkProductApplicationErrorV1::VersionConflict);
     assert_eq!(store.count("work_product_events_v1"), 1);
     assert_eq!(store.count("work_product_graph_versions_v1"), 1);
+}
+
+#[test]
+fn current_read_at_an_earlier_observation_excludes_later_published_versions() {
+    let store = RegisteredWorkStore::start("work-product-observation-cutoff");
+    let first = create(
+        &store,
+        "command.work-product.observation-cutoff.create",
+        UtcMicros(100),
+        vec![item("task.first", &[], 2)],
+    )
+    .expect("create the first graph version");
+    let mut second_mutation = mutation(
+        "command.work-product.observation-cutoff.add",
+        UtcMicros(200),
+    );
+    second_mutation.expected_authority = WorkProductExpectedAuthorityV1::Verified {
+        verified_version: first.verified_graph_version().clone(),
+    };
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.second", &[], 3),
+                mutation: second_mutation,
+            },
+        )
+        .expect("publish the later graph version");
+
+    let WorkGraphReadV1::Current { snapshot, .. } = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(repository_selection(), UtcMicros(150)),
+        )
+        .expect("read the head visible at the earlier observation")
+    else {
+        panic!("a current read must answer with a current snapshot");
+    };
+    assert_eq!(snapshot.graph().version(), WorkGraphVersionV1::initial());
+    assert_eq!(snapshot.graph().items().len(), 1);
 }
 
 #[test]

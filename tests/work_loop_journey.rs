@@ -134,6 +134,7 @@ struct ProductionDaemon {
     daemon: Child,
     project: PathBuf,
     project_id: String,
+    repository_id: String,
     base_url: String,
     origin: String,
     authorization: String,
@@ -229,6 +230,12 @@ impl ProductionDaemon {
             .as_str()
             .expect("registered project id")
             .to_owned();
+        let git_common_dir = tracedecay::worktree::git_common_dir(&project)
+            .expect("registered Git common directory");
+        let repository_id = format!(
+            "repository.daemon.{}",
+            hex::encode(Sha256::digest(git_common_dir.to_string_lossy().as_bytes()))
+        );
 
         let endpoint = authority["http_application_endpoint"]
             .as_str()
@@ -243,6 +250,7 @@ impl ProductionDaemon {
             daemon,
             project,
             project_id,
+            repository_id,
             base_url: format!("http://{endpoint}"),
             origin: format!("http://{endpoint}"),
             authorization: format!("Bearer {token}"),
@@ -286,11 +294,28 @@ impl ProductionDaemon {
         (status, parsed)
     }
 
+    /// Follows only the daemon's explicit same-request warming contract. A
+    /// terminal problem or malformed retry response is returned immediately,
+    /// so callers still prove their exact success or refusal below.
+    fn post_settled(&self, label: &str, route_path: &str, body: &Value) -> (u16, Value) {
+        poll_until(label, || {
+            let (status, answer) = self.post(route_path, body);
+            if status == 503
+                && answer["kind"] == "problem"
+                && answer["value"]["problem"]["retryable"] == true
+                && answer["value"]["problem"]["retry_scope"] == "same_request"
+            {
+                return Err(format!("{status} {answer}"));
+            }
+            Ok((status, answer))
+        })
+    }
+
     /// Posts and requires the canonical success envelope, returning the
     /// operation payload. Every step of the journey that must succeed goes
     /// through here, so a refusal is reported with its whole envelope.
     fn payload(&self, label: &str, route_path: &str, body: &Value) -> Value {
-        let (status, answer) = self.post(route_path, body);
+        let (status, answer) = self.post_settled(label, route_path, body);
         assert_eq!(
             answer["kind"], "success",
             "{label} must succeed at {route_path}: {status} {answer}"
@@ -301,7 +326,7 @@ impl ProductionDaemon {
 
     /// Posts and requires a typed refusal, returning the problem record.
     fn problem(&self, label: &str, route_path: &str, body: &Value) -> Value {
-        let (status, answer) = self.post(route_path, body);
+        let (status, answer) = self.post_settled(label, route_path, body);
         assert_eq!(
             answer["kind"], "problem",
             "{label} must be refused at {route_path}: {status} {answer}"
@@ -397,17 +422,20 @@ fn wait_for_authority(daemon: &mut Child, path: &Path) -> Value {
 /// expires. The last observation is reported so a timeout says what it saw.
 fn poll_until<T>(label: &str, mut probe: impl FnMut() -> Result<T, String>) -> T {
     let deadline = Instant::now() + POLL_BUDGET;
-    let mut last = String::new();
+    let mut last = match probe() {
+        Ok(value) => return value,
+        Err(observation) => observation,
+    };
     loop {
-        match probe() {
-            Ok(value) => return value,
-            Err(observation) => last = observation,
-        }
         assert!(
             Instant::now() < deadline,
             "{label} never settled within {POLL_BUDGET:?}; last observation: {last}"
         );
         std::thread::sleep(Duration::from_millis(250));
+        match probe() {
+            Ok(value) => return value,
+            Err(observation) => last = observation,
+        }
     }
 }
 
@@ -422,23 +450,30 @@ fn now_micros() -> i64 {
     .expect("microsecond clock fits i64")
 }
 
-fn product_selection() -> Value {
-    json!({ "selection": "profile_owned_no_git" })
+fn product_selection(fixture: &ProductionDaemon) -> Value {
+    json!({
+        "selection": "relations",
+        "relation_scopes": [{
+            "kind": "repository",
+            "project_id": fixture.project_id,
+            "repository_id": fixture.repository_id,
+        }],
+    })
 }
 
-fn product_graph_request() -> Value {
+fn product_graph_request(fixture: &ProductionDaemon) -> Value {
     json!({
-        "selection": product_selection(),
+        "selection": product_selection(fixture),
         "mode": { "mode": "current" },
         "continuation": null,
         "observed_at": now_micros(),
     })
 }
 
-fn product_task_create_draft() -> Value {
+fn product_task_create_draft(fixture: &ProductionDaemon) -> Value {
     let occurred_at = now_micros();
     json!({
-        "selection": product_selection(),
+        "selection": product_selection(fixture),
         "causation_event_id": null,
         "evidence": [],
         "change": {
@@ -498,7 +533,7 @@ fn prepare_product_mutation(fixture: &ProductionDaemon, label: &str, change: Val
         label,
         "/application/work/prepare-graph-mutation",
         &json!({
-            "selection": product_selection(),
+            "selection": product_selection(fixture),
             "change": change,
             "causation_event_id": null,
             "evidence": [],
@@ -511,7 +546,11 @@ fn commit_product_mutation(fixture: &ProductionDaemon, label: &str, mutation: &V
 }
 
 fn product_graph(fixture: &ProductionDaemon, label: &str) -> Value {
-    fixture.payload(label, "/application/work/views", &product_graph_request())
+    fixture.payload(
+        label,
+        "/application/work/views",
+        &product_graph_request(fixture),
+    )
 }
 
 fn graph_version(graph: &Value) -> u64 {
@@ -568,7 +607,7 @@ fn execution_snapshot(
     configuration: &PinnedConfiguration,
     executable_id: &str,
     artifact_digest: &ManifestDigest,
-    deadline_seconds: i64,
+    deadline: UtcMicros,
 ) -> Value {
     let snapshot = WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: typed::<ConfigurationRevisionId>(&configuration.revision_id),
@@ -595,7 +634,7 @@ fn execution_snapshot(
         credential_references: BTreeSet::new(),
         limits: WorkExecutionLimits::new(128_000, 8_192, 65_536, 65_536, 65_536, 1)
             .expect("execution limits"),
-        deadline: UtcMicros(now_micros().saturating_add(deadline_seconds * 1_000_000)),
+        deadline,
         fallback: WorkFallbackTopology::Disabled,
         topology: tracedecay_domain::safe_work_topology_policy_v1(),
     })
@@ -647,7 +686,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     // retryable unavailable problem; once mounted it supplies the exact
     // command, graph authority, and revision pins the caller must submit.
     // ---------------------------------------------------------------------
-    let create_draft = product_task_create_draft();
+    let create_draft = product_task_create_draft(&fixture);
     let prepared_create = poll_until("the project runtime mount", || {
         let (status, answer) =
             fixture.post("/application/work/prepare-graph-mutation", &create_draft);
@@ -674,12 +713,9 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "{prepared_create}"
     );
     let created = commit_product_mutation(&fixture, "create product task", &prepared_create);
+    assert_eq!(created["event"]["payload"]["kind"], "created", "{created}");
     assert_eq!(
-        created["event"]["payload"]["kind"], "task_created",
-        "{created}"
-    );
-    assert_eq!(
-        created["event"]["payload"]["item"]["input"]["task_id"],
+        created["event"]["payload"]["graph"]["items"][0]["input"]["task_id"],
         TASK_ID
     );
     assert_eq!(
@@ -788,7 +824,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "generate proposal",
         "/application/work/generate-proposal",
         &json!({
-            "selection": product_selection(),
+            "selection": product_selection(&fixture),
             "task_id": TASK_ID,
             "proposal_id": "proposal.work-loop-journey.acceptance",
             "live_git_evidence": Value::Null,
@@ -838,7 +874,11 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         }),
     );
     let accepted = commit_product_mutation(&fixture, "accept proposal", &prepared_accept);
-    assert_eq!(accepted["event"]["payload"]["kind"], "proposal_decided");
+    assert_eq!(accepted["event"]["payload"]["kind"], "changed");
+    assert_eq!(
+        accepted["event"]["payload"]["change"]["kind"],
+        "proposal_accepted"
+    );
     assert_eq!(accepted["verified_graph_version"]["graph_version"], 2);
     let accepted_graph = product_graph(&fixture, "product graph after proposal acceptance");
     let accepted_item = task_item(&accepted_graph);
@@ -857,11 +897,13 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "/application/work/mutate-graph",
         &stale_accept,
     );
-    assert_eq!(stale["kind"], "conflict", "{stale}");
+    assert_eq!(stale["kind"], "stale", "{stale}");
     assert_eq!(
         stale["code"], "work.graph_version_conflict",
         "the refusal must name the product graph CAS: {stale}"
     );
+    assert_eq!(stale["retry"], "after_revalidate", "{stale}");
+    assert_eq!(stale["retry_scope"], "fresh_request", "{stale}");
 
     // Acceptance is not admission: a start refuses until admission happens.
     let unadmitted = fixture.problem(
@@ -879,7 +921,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
                 },
                 FAST_EXECUTABLE_ID,
                 &ManifestDigest::new(format!("sha256:{}", "3".repeat(64))).expect("probe digest"),
-                120,
+                UtcMicros(now_micros().saturating_add(120 * 1_000_000)),
             ),
             now_micros(),
         ),
@@ -895,7 +937,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "generate proposal after acceptance",
         "/application/work/generate-proposal",
         &json!({
-            "selection": product_selection(),
+            "selection": product_selection(&fixture),
             "task_id": TASK_ID,
             "proposal_id": "proposal.work-loop-journey.admission",
             "live_git_evidence": Value::Null,
@@ -1032,10 +1074,14 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
             .to_owned(),
     };
 
+    // A run's first attempt seals its immutable deadline and topology. Every
+    // later attempt in the same run must carry that exact authority rather
+    // than silently extending the run by minting a fresh relative deadline.
+    let run_deadline = UtcMicros(now_micros().saturating_add(600 * 1_000_000));
     let start = start_attempt_body(
         &fixture.project,
         SETTLED_ATTEMPT_ID,
-        execution_snapshot(&pinned, FAST_EXECUTABLE_ID, &fast_digest, 120),
+        execution_snapshot(&pinned, FAST_EXECUTABLE_ID, &fast_digest, run_deadline),
         now_micros(),
     );
     let leased = fixture.payload("start attempt", "/application/work/start-attempt", &start);
@@ -1196,7 +1242,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     let slow_start = start_attempt_body(
         &fixture.project,
         CANCELLED_ATTEMPT_ID,
-        execution_snapshot(&pinned, SLOW_EXECUTABLE_ID, &slow_digest, 600),
+        execution_snapshot(&pinned, SLOW_EXECUTABLE_ID, &slow_digest, run_deadline),
         now_micros(),
     );
     fixture.payload(
@@ -1209,21 +1255,17 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "run_id": RUN_ID,
         "attempt_id": CANCELLED_ATTEMPT_ID,
     });
-    // Only a *running* attempt is cancellable, and the daemon marks the state
-    // itself once the child is alive. Waiting on the durable state rather than
-    // on the script's own marker keeps the request off the race between spawn
-    // and the running transition.
+    // Only a *running* attempt is cancellable. Process creation precedes the
+    // durable Running transition, but the child may not have executed its
+    // first instruction when that transition becomes observable, so require
+    // both sides of the asynchronous spawn boundary before cancelling it.
     poll_until("the cancellable provider process", || {
         let attempt = fixture.payload(
             "cancellable attempt status",
             "/application/work/attempt-status",
             &cancel_status,
         );
-        if attempt["state"] == "running" {
-            assert!(
-                started_marker.exists(),
-                "a running attempt must have a live provider process: {attempt}"
-            );
+        if attempt["state"] == "running" && started_marker.exists() {
             Ok(())
         } else {
             Err(format!("{attempt}"))
@@ -1261,27 +1303,22 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "a cancelled attempt seals a cancelled receipt, never a success: {cancelled}"
     );
 
-    // A completed *runtime* is not an accepted *task*. Terminal provider
-    // evidence is attached to the projection, and the task stays unaccepted
-    // until a separate explicit command says otherwise.
-    let with_evidence = poll_until("the attached terminal runtime evidence", || {
-        let graph = product_graph(&fixture, "product graph with runtime evidence");
-        let terminal = graph["snapshot"]["runtime"]["attempts"]
-            .as_array()
-            .is_some_and(|attempts| {
-                attempts.iter().any(|attempt| {
-                    matches!(
-                        attempt["state"].as_str(),
-                        Some("cancelled" | "failed" | "succeeded" | "timed_out")
-                    )
-                })
-            });
-        if terminal {
-            Ok(graph)
-        } else {
-            Err(format!("{graph}"))
-        }
-    });
+    // A completed *runtime* is not an accepted *task*. The product graph read
+    // does not own a verified executor-topology join to the attempt rows, so it
+    // reports that runtime projection as unavailable instead of joining by a
+    // matching-looking identity. The exact attempt authority above remains the
+    // terminal-evidence source.
+    let with_evidence = product_graph(&fixture, "product graph after terminal runtime evidence");
+    assert_eq!(
+        with_evidence["snapshot"]["runtime"]["coverage"],
+        json!({ "coverage": "unavailable" }),
+        "an unjoinable runtime projection must be named unavailable: {with_evidence}"
+    );
+    assert_eq!(
+        with_evidence["snapshot"]["runtime"]["attempts"],
+        json!([]),
+        "the product graph must not fabricate attempt hydration: {with_evidence}"
+    );
     assert_eq!(
         task_item(&with_evidence)["accepted_at"],
         Value::Null,
@@ -1289,14 +1326,14 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     );
 
     // =====================================================================
-    // 7. A justified replan, recommended and never applied.
+    // 7. Unavailable runtime coverage blocks an automated recommendation.
     // =====================================================================
     let version_before_replan = graph_version(&with_evidence);
     let replan = fixture.payload(
         "generate a replan proposal",
         "/application/work/generate-proposal",
         &json!({
-            "selection": product_selection(),
+            "selection": product_selection(&fixture),
             "task_id": TASK_ID,
             "proposal_id": "proposal.work-loop-journey.replan",
             "live_git_evidence": Value::Null,
@@ -1304,29 +1341,34 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         }),
     );
     assert_eq!(
-        replan["decision"]["recommended_action"], "replan",
-        "terminal evidence must recommend a replan: {replan}"
+        replan["decision"]["disposition"], "indeterminate",
+        "unavailable runtime coverage cannot support a product decision: {replan}"
+    );
+    assert_eq!(
+        replan["decision"]["recommended_action"],
+        Value::Null,
+        "an indeterminate decision must recommend no action: {replan}"
     );
     assert!(
         replan["decision"]["ordered_reason_codes"]
             .as_array()
             .is_some_and(|reasons| reasons
                 .iter()
-                .any(|reason| reason == "terminal_evidence_observed")),
-        "the replan must be justified by the evidence that produced it: {replan}"
+                .any(|reason| reason == "runtime_coverage_unavailable")),
+        "the decision must name the unavailable runtime authority: {replan}"
     );
     assert_eq!(
         replan["decision"]["deterministic_fallback"], false,
-        "an evidence-backed replan is not the declared fallback: {replan}"
+        "an unavailable authority must not trigger a fallback decision: {replan}"
     );
 
-    // The recommendation changed nothing. Graph and runtime state are exactly
-    // where they were until another explicit command moves them.
+    // The indeterminate proposal changed nothing. Graph and runtime state are
+    // exactly where they were until another explicit command moves them.
     let after_replan_proposal = product_graph(&fixture, "graph after the replan proposal");
     assert_eq!(
         graph_version(&after_replan_proposal),
         version_before_replan,
-        "a replan recommendation must not be applied: {after_replan_proposal}"
+        "an indeterminate proposal must not be applied: {after_replan_proposal}"
     );
     let attempts_after_replan = fixture.payload(
         "attempt status after the replan proposal",
@@ -1335,7 +1377,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     );
     assert_eq!(
         attempts_after_replan["terminal"], settled["terminal"],
-        "a replan recommendation must not disturb runtime receipts: {attempts_after_replan}"
+        "an indeterminate proposal must not disturb runtime receipts: {attempts_after_replan}"
     );
 
     // Applying it is a two-event, version-checked product mutation: first the
@@ -1409,7 +1451,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "generate a proposal against the accepted task",
         "/application/work/generate-proposal",
         &json!({
-            "selection": product_selection(),
+            "selection": product_selection(&fixture),
             "task_id": TASK_ID,
             "proposal_id": "proposal.work-loop-journey.closed",
             "live_git_evidence": Value::Null,

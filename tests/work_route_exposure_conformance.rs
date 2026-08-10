@@ -421,12 +421,12 @@ fn product_selection() -> Value {
     serde_json::json!({ "selection": "profile_owned_no_git" })
 }
 
-fn current_product_graph_request() -> Value {
+fn current_product_graph_request(observed_at: i64) -> Value {
     serde_json::json!({
         "selection": product_selection(),
         "mode": { "mode": "current" },
         "continuation": null,
-        "observed_at": 1_700_000_000_000_100i64,
+        "observed_at": observed_at,
     })
 }
 
@@ -617,33 +617,6 @@ fn poll_past_warming(label: &str, post: &mut dyn FnMut() -> (u16, Value)) -> (u1
     }
 }
 
-/// Polls one list read past warming *and* past the typed absent window while
-/// the verified topology publication catches up with a write, holding every
-/// intermediate answer to its typed state.
-fn poll_terminal_list(label: &str, post: &mut dyn FnMut() -> (u16, Value)) -> (u16, Value) {
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let (status, body) = poll_past_warming(label, post);
-        assert_eq!(status, 200, "{label}: {body}");
-        assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
-        let state = &body["value"]["outcome"]["value"]["payload"]["state"];
-        if state.as_str() == Some("listed") {
-            return (status, body);
-        }
-        assert_eq!(
-            *state,
-            Value::String("absent".to_owned()),
-            "{label} may only answer the typed absent state before the \
-             topology publication catches up: {body}"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "{label} never served the verified topology after the write: {body}"
-        );
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
-
 /// Grades one refused answer: the canonical problem envelope, the exact typed
 /// problem kind, the HTTP status that kind maps to, and its retry disposition.
 ///
@@ -783,7 +756,7 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         eprintln!("{label} -> {status} {body}");
         assert_typed_problem(label, status, &body, (400, "invalid_request", false));
     }
-    let mut malformed_views = current_product_graph_request();
+    let mut malformed_views = current_product_graph_request(1_700_000_000_000_100);
     malformed_views["observed_at"] = serde_json::json!("not-a-number");
     let (status, body) = post_envelope(
         &agent,
@@ -843,7 +816,7 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     assert_eq!(effect["reconciliation"], "reconciled", "{created}");
     assert_eq!(effect["receipt"]["outcome"], "completed", "{created}");
     assert_eq!(
-        effect["payload"]["event"]["payload"]["kind"], "task_created",
+        effect["payload"]["event"]["payload"]["kind"], "created",
         "{created}"
     );
 
@@ -851,7 +824,11 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
     // to be visible through both mounts. This is the leg that proves the
     // operations share one store through the daemon rather than each answering
     // plausibly.
-    let graph_request = current_product_graph_request();
+    let graph_request = current_product_graph_request(
+        effect["payload"]["event"]["occurred_at"]
+            .as_i64()
+            .expect("created event observation time"),
+    );
     for (label, (status, graph_read)) in [
         (
             "daemon work/views",
@@ -909,87 +886,31 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
         );
     }
 
-    // -- The list bound to the verified topology the write produced. ---------
-    // With Work now in scope, the list must leave `absent`: the terminal answer
-    // is one page bound to a named verified topology generation, whose empty
-    // attempt set is the explicit zero-complete coverage — an authorized empty
-    // result, distinct from both absence and concealment. The window while the
-    // topology publication catches up must stay typed.
-    let mut generations = Vec::new();
+    // -- Product publication does not fabricate executor topology. -----------
+    // Product graph state and executor topology have distinct authorities. A
+    // committed task is readable through Work views, but cannot by itself mint
+    // a topology generation or an authorized empty attempts page.
     for (label, post) in [
         (
-            "daemon work/list-attempts (verified topology)",
+            "daemon work/list-attempts (product graph only)",
             &mut (|| post_envelope(&agent, &daemon_list, &fixture, &list_request))
                 as &mut dyn FnMut() -> (u16, Value),
         ),
         (
-            "dashboard api/work/list-attempts (verified topology)",
+            "dashboard api/work/list-attempts (product graph only)",
             &mut || post_dashboard_envelope(&agent, &dashboard_list, &list_request),
         ),
     ] {
-        let (status, body) = poll_terminal_list(label, post);
+        let (status, body) = poll_past_warming(label, post);
         eprintln!("{label} -> {status} {body}");
+        assert_eq!(status, 200, "{label}: {body}");
+        assert_eq!(body["value"]["outcome"]["outcome"], "evidence", "{body}");
         let payload = &body["value"]["outcome"]["value"]["payload"];
         assert_eq!(
-            payload["topology"]["task_count"], 1,
-            "{label} must bind the one created task: {body}"
+            payload["state"], "absent",
+            "{label} must not alias product graph tasks into executor topology: {body}"
         );
-        assert!(
-            payload["topology"]["generation"].is_string(),
-            "{label} must name the verified topology generation: {body}"
-        );
-        assert_eq!(
-            payload["attempts"].as_array().map(Vec::len),
-            Some(0),
-            "{label} must return the explicit empty authorized page: {body}"
-        );
-        assert_eq!(
-            payload["coverage"]["coverage"], "complete",
-            "{label} empty page must be complete coverage, not a truncation: {body}"
-        );
-        assert_eq!(payload["coverage"]["returned"], 0, "{label}: {body}");
-        generations.push(payload["topology"]["generation"].clone());
     }
-    assert_eq!(
-        generations[0], generations[1],
-        "the two mounts must serve the same verified topology generation"
-    );
-
-    // -- Staleness against a superseded generation. --------------------------
-    // The verified topology now exists, so a cursor minted under any other
-    // generation is refused as stale rather than silently re-anchored.
-    let (status, body) =
-        post_envelope(&agent, &daemon_list, &fixture, &superseded_cursor_request());
-    eprintln!("DAEMON work/list-attempts superseded cursor -> {status} {body}");
-    assert_typed_problem(
-        "daemon work/list-attempts (superseded cursor)",
-        status,
-        &body,
-        (409, "stale", true),
-    );
-
-    // A cursor minted under the live generation resumes: strictly after the
-    // named identity there is nothing, and the answer says so as complete
-    // coverage rather than re-serving the page or refusing.
-    let live_cursor = serde_json::json!({
-        "page_size": 25,
-        "cursor": {
-            "generation": generations[0],
-            "start_after": {
-                "task_id": "task.work-surface-conformance",
-                "run_id": "run.work-surface-conformance",
-                "attempt_id": "attempt.work-surface-conformance.1",
-            },
-        },
-    });
-    let (status, body) = post_envelope(&agent, &daemon_list, &fixture, &live_cursor);
-    eprintln!("DAEMON work/list-attempts live cursor -> {status} {body}");
-    assert_canonical_envelope("daemon work/list-attempts (live cursor)", status, &body);
-    assert_eq!(status, 200, "{body}");
-    let payload = &body["value"]["outcome"]["value"]["payload"];
-    assert_eq!(payload["state"], "listed", "{body}");
-    assert_eq!(payload["coverage"]["coverage"], "complete", "{body}");
-    assert_eq!(payload["coverage"]["returned"], 0, "{body}");
 }
 
 #[test]

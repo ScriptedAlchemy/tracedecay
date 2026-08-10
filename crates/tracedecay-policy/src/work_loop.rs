@@ -273,7 +273,6 @@ pub enum WorkProposalReasonV1 {
 pub enum WorkTaskShapeKindV1 {
     Investigation,
     Change,
-    Verification,
     Synthesis,
     Unclassified,
 }
@@ -470,7 +469,7 @@ impl WorkProposalEvaluatorV1 {
     /// Revision of this reviewed implementation, recorded with every decision
     /// so replay can refuse a substituted evaluator. It is a property of the
     /// code, not of an instance.
-    const EVALUATOR_REVISION: u64 = 2;
+    const EVALUATOR_REVISION: u64 = 3;
 
     /// Assemble a decision that carries no planner claim. Reserved for the
     /// invalid, cancelled, and deadline short-circuits.
@@ -569,9 +568,7 @@ fn derive_shape(
     attempt_count: u32,
     terminal_attempt_count: u32,
 ) -> WorkTaskShapeV1 {
-    let kind = if input.task_accepted {
-        WorkTaskShapeKindV1::Verification
-    } else if terminal_attempt_count > 0 {
+    let kind = if terminal_attempt_count > 0 {
         WorkTaskShapeKindV1::Synthesis
     } else if input.execution_admitted || input.accepted_proposal_present {
         WorkTaskShapeKindV1::Change
@@ -977,6 +974,21 @@ impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
                 comparison,
             );
         }
+        if input.task_accepted {
+            // Closure is authoritative without runtime hydration: missing
+            // executor coverage cannot reopen an explicitly accepted task.
+            return self.decision(
+                input,
+                WorkProposalDispositionV1::Deny,
+                None,
+                false,
+                vec![
+                    comparison_reason(comparison),
+                    WorkProposalReasonV1::TaskAccepted,
+                ],
+                comparison,
+            );
+        }
         let (attempt_count, terminal_attempt_count) = match input.runtime {
             WorkProposalRuntimeCoverageV1::Complete {
                 attempt_count,
@@ -1015,20 +1027,6 @@ impl WorkProposalEvaluator for WorkProposalEvaluatorV1 {
             return self.planned_decision(
                 input,
                 WorkProposalDispositionV1::Abstain,
-                None,
-                false,
-                reasons,
-                comparison,
-                plan,
-            );
-        }
-        if input.task_accepted {
-            // The task is complete: further proposals against it are refused,
-            // not merely out of scope, so acceptance cannot be re-litigated.
-            reasons.push(WorkProposalReasonV1::TaskAccepted);
-            return self.planned_decision(
-                input,
-                WorkProposalDispositionV1::Deny,
                 None,
                 false,
                 reasons,
@@ -1252,6 +1250,7 @@ mod tests {
     fn an_accepted_task_denies_further_proposals() {
         let mut request = input();
         request.task_accepted = true;
+        request.runtime = WorkProposalRuntimeCoverageV1::Unavailable;
         let decision = WorkProposalEvaluatorV1::default().evaluate(&request);
         assert_eq!(decision.disposition, WorkProposalDispositionV1::Deny);
         assert_eq!(decision.recommended_action, None);
@@ -1259,6 +1258,11 @@ mod tests {
             decision
                 .ordered_reason_codes
                 .contains(&WorkProposalReasonV1::TaskAccepted)
+        );
+        assert!(
+            !decision
+                .ordered_reason_codes
+                .contains(&WorkProposalReasonV1::RuntimeCoverageUnavailable)
         );
     }
 

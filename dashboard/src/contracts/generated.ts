@@ -5489,7 +5489,7 @@ export type WorkTaskSessionRankedAnchorV1 = z.infer<typeof WorkTaskSessionRanked
 
 /** Kind of work the snapshot facts describe. Derived only from facts already in
 the input; `Unclassified` when those facts do not distinguish a kind. */
-export const WorkTaskShapeKindV1Schema = z.enum(["change", "investigation", "synthesis", "unclassified", "verification"]);
+export const WorkTaskShapeKindV1Schema = z.enum(["change", "investigation", "synthesis", "unclassified"]);
 export type WorkTaskShapeKindV1 = z.infer<typeof WorkTaskShapeKindV1Schema>;
 
 /** The derived shape of the task: what kind of work it is and how large the

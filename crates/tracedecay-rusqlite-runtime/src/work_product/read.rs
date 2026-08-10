@@ -143,6 +143,12 @@ fn build_entries(
 ) -> Result<Vec<WorkGraphVersionEntryV1>, PortError> {
     published
         .iter()
+        // A read cannot include a version this authority had not observed at
+        // the caller's observation instant. Besides preserving forensic
+        // truth, this lets a prepared mutation read its former head and reach
+        // the event journal's authoritative compare-and-swap conflict when a
+        // later version has already committed.
+        .filter(|version| version.observed_at <= projected_at)
         .map(|version| {
             let entry = journal
                 .iter()

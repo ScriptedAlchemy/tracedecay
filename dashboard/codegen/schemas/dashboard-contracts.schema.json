@@ -21932,7 +21932,6 @@
       "enum": [
         "investigation",
         "change",
-        "verification",
         "synthesis",
         "unclassified"
       ],

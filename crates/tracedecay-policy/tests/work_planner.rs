@@ -568,16 +568,6 @@ fn shape_is_derived_only_from_facts_already_in_the_snapshot() {
     let shape = evaluate(&synthesis).shape.expect("shape is present");
     assert_eq!(shape.kind, WorkTaskShapeKindV1::Synthesis);
     assert_eq!(shape.band, WorkOrdinalBandV1::High);
-
-    let mut verification = base_input();
-    verification.task_accepted = true;
-    assert_eq!(
-        evaluate(&verification)
-            .shape
-            .expect("shape is present")
-            .kind,
-        WorkTaskShapeKindV1::Verification
-    );
 }
 
 #[test]
@@ -600,7 +590,7 @@ fn planner_reasons_are_appended_after_the_gate_reasons() {
 
 #[test]
 fn the_evaluator_revision_records_the_planner_implementation() {
-    assert_eq!(evaluate(&base_input()).evaluator_revision, 2);
+    assert_eq!(evaluate(&base_input()).evaluator_revision, 3);
 }
 
 #[test]
@@ -648,6 +638,17 @@ fn the_short_circuit_paths_carry_no_planner_claim() {
             "{label} claims no baseline"
         );
     }
+
+    let mut accepted = base_input();
+    accepted.task_accepted = true;
+    accepted.runtime = WorkProposalRuntimeCoverageV1::Unavailable;
+    let decision = evaluate(&accepted);
+    assert_eq!(decision.disposition, WorkProposalDispositionV1::Deny);
+    assert_eq!(decision.shape, None);
+    assert_eq!(decision.sizing, None);
+    assert_eq!(decision.decomposition, None);
+    assert_eq!(decision.route_plan, None);
+    assert!(!decision.deterministic_fallback);
 }
 
 #[test]
