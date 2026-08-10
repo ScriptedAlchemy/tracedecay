@@ -77,7 +77,7 @@ const READING_BANDS: readonly {
   {
     legend: 'What the evidence orders',
     kinds: ['dependent_ahead', 'consistent'],
-    note: 'One end carries terminal runtime evidence and the other does not, so these edges read as an order. Consistent means consistent so far — the dependent has not finished, and nothing has been proved about it.',
+    note: 'One end has a terminal attempt in the exact graph and the other does not, so these edges read as an order. Consistent means consistent so far — the dependent has not finished, and nothing has been proved about it.',
   },
   {
     legend: 'What nothing here orders',
@@ -488,7 +488,7 @@ function DeclaredEdges({
           <table className="w-full min-w-0 border-collapse text-2xs">
             <caption className="sr-only">
               Every dependency the returned tasks declare, with the task it names, the task that
-              declares it, and what the terminal runtime evidence at the two ends reads as.
+              declares it, and what the terminal attempt state at the two ends reads as.
             </caption>
             <thead>
               <tr className="border-b border-edge text-text-muted">

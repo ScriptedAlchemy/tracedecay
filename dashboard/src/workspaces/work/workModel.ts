@@ -5,8 +5,9 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
  * What a Work projection says about itself.
  *
  * Every stage below is read off a field the contract actually carries —
- * `accepted_proposal`, `task_accepted`, `execution_admitted`, and whether any
- * `runtime_evidence` entry is terminal. Nothing here is a lane.
+ * `accepted_proposal`, `task_accepted`, `execution_admitted`, and whether the
+ * graph version's runtime projection contains a terminal attempt. Nothing here
+ * is a lane.
  *
  * That distinction is the whole point. This page previously promised a Kanban
  * board with triage, ready, running, blocked, review and done columns, and
@@ -34,8 +35,8 @@ export const WORK_STAGES: readonly WorkStage[] = [
 /** Read in reverse: the furthest gate a task has passed is its stage. The
  * fields are cumulative in the domain — execution is not admitted before the
  * task is accepted — so the first match walking back is the true one. */
-export function workStage(projection: WorkProjection): WorkStage {
-  if (projection.runtime_evidence.some((evidence) => evidence.terminal)) return 'evidence_terminal';
+export function workStage(projection: WorkProjection, terminal = false): WorkStage {
+  if (terminal) return 'evidence_terminal';
   if (projection.execution_admitted) return 'execution_admitted';
   if (projection.task_accepted) return 'task_accepted';
   if (projection.accepted_proposal !== null) return 'proposal_accepted';

@@ -10,6 +10,12 @@ import {
   workStage,
   type WorkStage,
 } from './workModel.ts';
+import {
+  graphRuntimeAttempts,
+  graphEntryOf,
+  terminalWorkAttempt,
+  type WorkGraphReading,
+} from './workGraphModel.ts';
 
 /**
  * The Work board.
@@ -18,8 +24,8 @@ import {
  * cosmetic: a lane needs a status field to sort tasks into, `WorkProjection`
  * has none, and the stage each group here names is read directly off
  * `accepted_proposal`, `task_accepted`, `execution_admitted` and terminal
- * runtime evidence. Every column below is likewise a field the daemon sent —
- * there is no derived progress, no elapsed time, no health.
+ * attempts in the exact Work graph. Every column below is likewise a field the
+ * daemon sent — there is no derived progress, no elapsed time, no health.
  *
  * Empty groups are drawn, with a count of zero. A stage with no tasks in it is
  * a fact the snapshot supports; hiding it would leave a reader unable to tell an
@@ -44,24 +50,82 @@ export function useSelectedTask(): [string | null, (taskId: string | null) => vo
   return [selected, select];
 }
 
+function AttemptCoverage({ graph }: { graph: WorkGraphReading }) {
+  if (graph.state === 'pending') {
+    return (
+      <span data-work-board-attempts="pending">
+        <StateChip kind="loading" detail="reading exact graph attempts" />
+      </span>
+    );
+  }
+  if (graph.state === 'refused') {
+    return (
+      <span data-work-board-attempts="refused">
+        <StateChip kind={graph.chip} detail={graph.detail} />
+      </span>
+    );
+  }
+  const entry = graphEntryOf(graph);
+  if (entry === null) {
+    return (
+      <span data-work-board-attempts="absent">
+        <StateChip kind="complete_zero_findings" detail="no graph version in the window" />
+      </span>
+    );
+  }
+  const coverage = entry.runtime.coverage;
+  if (coverage.coverage === 'unavailable') {
+    return (
+      <span data-work-board-attempts="unavailable">
+        <StateChip kind="unavailable" detail="attempt stages are unmeasured, not zero" />
+      </span>
+    );
+  }
+  const returned = entry.runtime.attempts.length;
+  if (coverage.coverage === 'partial') {
+    return (
+      <span data-work-board-attempts="partial">
+        <StateChip
+          kind="partial"
+          detail={`${returned} returned · ${coverage.unavailable_attempts.length} unavailable · graph v${entry.runtime.graph_version}`}
+        />
+      </span>
+    );
+  }
+  return (
+    <span data-work-board-attempts="complete">
+      <StateChip kind="ready" detail={`${returned} attempts · graph v${entry.runtime.graph_version}`} />
+    </span>
+  );
+}
+
 function byStage(
   projections: readonly WorkProjection[],
+  graph: WorkGraphReading,
 ): ReadonlyMap<WorkStage, readonly WorkProjection[]> {
   const grouped = new Map<WorkStage, WorkProjection[]>(WORK_STAGES.map((stage) => [stage, []]));
-  for (const projection of projections) grouped.get(workStage(projection))?.push(projection);
+  const terminal = new Set(
+    graphRuntimeAttempts(graph)
+      .filter((attempt) => terminalWorkAttempt(attempt.state))
+      .map((attempt) => attempt.identity.task_id),
+  );
+  for (const projection of projections) {
+    grouped.get(workStage(projection, terminal.has(projection.task_id)))?.push(projection);
+  }
   return grouped;
 }
 
 function TaskRow({
   projection,
+  attempts,
   selected,
   onSelect,
 }: {
   projection: WorkProjection;
+  attempts: number;
   selected: boolean;
   onSelect: (taskId: string) => void;
 }) {
-  const terminal = projection.runtime_evidence.filter((evidence) => evidence.terminal).length;
   return (
     <tr
       data-work-task={projection.task_id}
@@ -108,8 +172,7 @@ function TaskRow({
         {projection.history_len}
       </td>
       <td className="px-2 py-1.5 text-right tabular-nums text-text-secondary">
-        {projection.runtime_evidence.length}
-        {terminal > 0 ? ` (${terminal} terminal)` : ''}
+        {attempts}
       </td>
     </tr>
   );
@@ -118,11 +181,13 @@ function TaskRow({
 function StageGroup({
   stage,
   projections,
+  attemptsByTask,
   selected,
   onSelect,
 }: {
   stage: WorkStage;
   projections: readonly WorkProjection[];
+  attemptsByTask: ReadonlyMap<string, number>;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
@@ -143,8 +208,8 @@ function StageGroup({
         <table className="w-full min-w-0 border-collapse text-2xs">
           <caption className="sr-only">
             Tasks whose furthest recorded gate is {legend.toLowerCase()}, with the identity,
-            version, dependency count, history length and runtime evidence the snapshot reports for
-            each.
+            version, dependency count and history length from the snapshot, plus the attempts in the
+            exact Work graph.
           </caption>
           <thead>
             <tr className="border-b border-edge text-text-muted">
@@ -164,7 +229,7 @@ function StageGroup({
                 History
               </th>
               <th scope="col" className="px-2 py-1 text-right font-medium">
-                Evidence
+                Attempts
               </th>
             </tr>
           </thead>
@@ -180,6 +245,7 @@ function StageGroup({
                 <TaskRow
                   key={projection.task_id}
                   projection={projection}
+                  attempts={attemptsByTask.get(projection.task_id) ?? 0}
                   selected={projection.task_id === selected}
                   onSelect={onSelect}
                 />
@@ -194,20 +260,30 @@ function StageGroup({
 
 export function WorkBoard({
   snapshot,
+  graph,
   selected,
   onSelect,
 }: {
   snapshot: WorkProjectionSnapshotV1;
+  graph: WorkGraphReading;
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
-  const grouped = byStage(snapshot.projections);
+  const grouped = byStage(snapshot.projections, graph);
+  const attemptsByTask = new Map<string, number>();
+  for (const attempt of graphRuntimeAttempts(graph)) {
+    attemptsByTask.set(
+      attempt.identity.task_id,
+      (attemptsByTask.get(attempt.identity.task_id) ?? 0) + 1,
+    );
+  }
   const coverage = coverageReading(snapshot.coverage);
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-work-board="snapshot">
       <div className="flex flex-wrap items-center gap-2 text-3xs text-text-muted">
         <StateChip kind={coverage.state} detail={coverage.detail} />
+        <AttemptCoverage graph={graph} />
         {/* Sequence and generation are the snapshot's identity. Printed because
           * they are what makes a later delta legible, and because a board with
           * no stated position cannot be told apart from a stale one. */}
@@ -221,6 +297,7 @@ export function WorkBoard({
             key={stage}
             stage={stage}
             projections={grouped.get(stage) ?? []}
+            attemptsByTask={attemptsByTask}
             selected={selected}
             onSelect={onSelect}
           />

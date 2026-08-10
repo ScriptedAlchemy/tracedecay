@@ -8,6 +8,7 @@ import { Corners, Panel, Ticks, WorkspaceHeader } from '../../ui/instrument.tsx'
 import { type DashboardScope, useScope } from '../../data/scope/store.ts';
 import { WorkBoard, useSelectedTask } from './WorkBoard.tsx';
 import { WorkCommands, WorkCreate } from './WorkCommands.tsx';
+import { WorkEvidencePanel } from './WorkEvidencePanel.tsx';
 import { WorkTaskActivity } from './WorkTaskActivity.tsx';
 import { resumeCursor, useWorkDelta, useWorkSnapshot } from './workQueries.ts';
 import { useWorkAttempts, useWorkGraphViews, useWorkTopology } from './workViewsQueries.ts';
@@ -107,7 +108,7 @@ function WorkProjectionView({
 }) {
   switch (kind) {
     case 'board':
-      return <WorkBoard snapshot={snapshot} selected={selected} onSelect={onSelect} />;
+      return <WorkBoard snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} />;
     case 'dag':
       return (
         <WorkDagView snapshot={snapshot} graph={graph} selected={selected} onSelect={onSelect} />
@@ -289,7 +290,10 @@ export function WorkPage() {
                     </p>
                   </Panel>
                 ) : (
-                  <WorkCommands projection={selectedProjection} snapshot={value} />
+                  <div className="grid min-w-0 gap-3">
+                    <WorkCommands projection={selectedProjection} snapshot={value} />
+                    <WorkEvidencePanel taskId={selectedProjection.task_id} graph={graph.data} />
+                  </div>
                 )}
                 <WorkCreate graph={graph.data} />
               </div>

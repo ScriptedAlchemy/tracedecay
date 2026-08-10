@@ -29,7 +29,6 @@ function projection(overrides: Partial<WorkProjection> = {}): WorkProjection {
     dependencies: [],
     execution_admitted: false,
     history_len: 1,
-    runtime_evidence: [],
     task_accepted: false,
     task_id: 'task-1',
     title: 'A task',
@@ -37,12 +36,6 @@ function projection(overrides: Partial<WorkProjection> = {}): WorkProjection {
     ...overrides,
   };
 }
-
-const evidence = (terminal: boolean) => ({
-  evidence_digest: 'digest',
-  run_id: 'run-1',
-  terminal,
-});
 
 describe('the stage a projection reads as', () => {
   it('reads each gate the contract records', () => {
@@ -65,8 +58,8 @@ describe('the stage a projection reads as', () => {
           accepted_proposal: 'p',
           task_accepted: true,
           execution_admitted: true,
-          runtime_evidence: [evidence(false), evidence(true)],
         }),
+        true,
       ),
     ).toBe('evidence_terminal');
   });
@@ -75,7 +68,8 @@ describe('the stage a projection reads as', () => {
   it('does not treat non-terminal evidence as a result', () => {
     expect(
       workStage(
-        projection({ execution_admitted: true, task_accepted: true, runtime_evidence: [evidence(false)] }),
+        projection({ execution_admitted: true, task_accepted: true }),
+        false,
       ),
     ).toBe('execution_admitted');
   });

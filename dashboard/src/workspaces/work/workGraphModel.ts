@@ -4,6 +4,7 @@ import type {
   WorkGraphReadV1,
   WorkGraphTimelineCoverageV1,
   WorkGraphVersionEntryV1,
+  WorkRuntimeAttemptProjectionV1,
   WorkRuntimeProjectionV1,
 } from '../../contracts/index.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
@@ -137,6 +138,39 @@ export function graphPageOf(reading: WorkGraphReading): WorkGraphPage | null {
  * read has not produced one. */
 export function graphEntryOf(reading: WorkGraphReading): WorkGraphVersionEntryV1 | null {
   return reading.state === 'read' ? reading.page.entry : null;
+}
+
+/** Runtime attempts from the same immutable graph version as the product
+ * projections. Unavailable coverage remains visible through `runtimeReading`;
+ * callers receive no synthetic attempts for it. */
+export function graphRuntimeAttempts(
+  reading: WorkGraphReading,
+): readonly WorkRuntimeAttemptProjectionV1[] {
+  const entry = graphEntryOf(reading);
+  return entry === null || entry.runtime.coverage.coverage === 'unavailable'
+    ? []
+    : entry.runtime.attempts;
+}
+
+export function terminalWorkAttempt(state: WorkAttemptStateV1): boolean {
+  switch (state) {
+    case 'cancelled':
+    case 'failed':
+    case 'succeeded':
+    case 'timed_out':
+      return true;
+    case 'cancellation_acknowledged':
+    case 'cancellation_escalated':
+    case 'cancellation_requested':
+    case 'leased':
+    case 'recovery_required':
+    case 'running':
+      return false;
+    default: {
+      const unhandled: never = state;
+      return unhandled;
+    }
+  }
 }
 
 /**

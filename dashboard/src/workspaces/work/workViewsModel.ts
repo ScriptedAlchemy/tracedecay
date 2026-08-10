@@ -18,7 +18,9 @@ import {
   graphChannel,
   graphChannelGap,
   graphEntryOf,
+  graphRuntimeAttempts,
   runtimeReading,
+  terminalWorkAttempt,
   timelineInstants,
   type WorkChurnReading,
   type WorkConcurrencyReading,
@@ -39,9 +41,8 @@ import {
  * The data arrives from three reads, and which read a channel comes from is the
  * thing to keep straight:
  *
- *   the snapshot        `WorkProjection` — the declared dependency graph, its
- *                       strata and cycles, the run/task incidence, the evidence
- *                       each task carries, which tasks no run has touched
+ *   the snapshot        `WorkProjection` — task command gates and the declared
+ *                       dependency graph used for snapshot paging
  *   the attempt list    `WorkAttemptV1` — the execution record: who ran what
  *                       (`requested_route`/`actual_route`), the retry chains,
  *                       the typed cancellation ladder, and the instant each
@@ -396,9 +397,9 @@ export function workDagReading(
 
 // --- Timeline / attempts: loom weave ----------------------------------------
 
-/** One crossing of a run over a task. `crossings` counts the evidence records
- * the run attached to that task — a repeated crossing of the same landing,
- * which is the weave's rendering of a retry. */
+/** One crossing of a run over a task. `crossings` counts the attempts the exact
+ * graph attributes to that run and task — a repeated crossing of the same
+ * landing, which is the weave's rendering of a retry. */
 export interface WorkWeaveLanding {
   readonly taskId: string;
   readonly title: string;
@@ -498,11 +499,11 @@ function attemptChannel<T>(
 /**
  * The run/task weave, with the execution record bound onto it.
  *
- * Warp threads stay runs and landings stay tasks: that incidence is the
- * snapshot's reading and the attempt list does not replace it. What the attempt
- * list replaces is the inference around it. A thread's executor is now read
+ * Warp threads stay runs and landings stay tasks: that incidence comes from the
+ * exact graph's runtime attempts. The attempt list adds the execution record
+ * around it. A thread's executor is now read
  * from `actual_route` instead of being refused, and a retry is now a link in a
- * recovery chain instead of a second evidence row that merely looked like one —
+ * recovery chain instead of a repeated reference that merely looked like one —
  * `retryWeave` is the measured version of `WorkWeaveLanding.crossings`, and the
  * two are kept side by side rather than one overwriting the other, because they
  * count different things and disagreeing is informative.
@@ -524,19 +525,21 @@ export function workWeaveReading(
   const threads = new Map<string, Map<string, { crossings: number; terminal: boolean }>>();
   const unwoven: { taskId: string; title: string }[] = [];
 
+  const runtimeAttempts = graphRuntimeAttempts(graph);
+  const touched = new Set<string>();
+  for (const attempt of runtimeAttempts) {
+    touched.add(attempt.identity.task_id);
+    const landings = threads.get(attempt.identity.run_id) ?? new Map();
+    threads.set(attempt.identity.run_id, landings);
+    const landing = landings.get(attempt.identity.task_id);
+    landings.set(attempt.identity.task_id, {
+      crossings: (landing?.crossings ?? 0) + 1,
+      terminal: (landing?.terminal ?? false) || terminalWorkAttempt(attempt.state),
+    });
+  }
   for (const projection of projections) {
-    if (projection.runtime_evidence.length === 0) {
+    if (!touched.has(projection.task_id)) {
       unwoven.push({ taskId: projection.task_id, title: projection.title });
-      continue;
-    }
-    for (const evidence of projection.runtime_evidence) {
-      const landings = threads.get(evidence.run_id) ?? new Map();
-      threads.set(evidence.run_id, landings);
-      const landing = landings.get(projection.task_id);
-      landings.set(projection.task_id, {
-        crossings: (landing?.crossings ?? 0) + 1,
-        terminal: (landing?.terminal ?? false) || evidence.terminal,
-      });
     }
   }
 
@@ -593,11 +596,11 @@ export function workWeaveReading(
 // --- Causal: disagreement field ---------------------------------------------
 
 /**
- * What one declared dependency edge reads as against the evidence attached to
- * its two ends.
+ * What one declared dependency edge reads as against the terminal attempt state
+ * at its two ends.
  *
- * `dependent_ahead` is the loud state: a task carries terminal evidence while
- * the task it declares a dependency on carries none. The dependency either did
+ * `dependent_ahead` is the loud state: a task has a terminal attempt while the
+ * task it declares a dependency on has none. The dependency either did
  * not gate the work or is not the dependency the plan says it is, and 11c
  * names that hidden coupling in the plan itself.
  *
@@ -687,9 +690,10 @@ export function workCausalReading(
   graph: WorkGraphReading = { state: 'pending' },
 ): WorkCausalReading {
   const entry = graphEntryOf(graph);
-  const terminal = new Map(
-    projections.map((p) => [p.task_id, p.runtime_evidence.some((e) => e.terminal)]),
-  );
+  const terminal = new Map(projections.map((projection) => [projection.task_id, false]));
+  for (const attempt of graphRuntimeAttempts(graph)) {
+    if (terminalWorkAttempt(attempt.state)) terminal.set(attempt.identity.task_id, true);
+  }
 
   const edges: WorkCausalEdge[] = [];
   for (const projection of projections) {
@@ -742,7 +746,7 @@ export function workCausalReading(
 export interface WorkloadRegion {
   readonly runId: string;
   readonly taskCount: number;
-  readonly evidenceCount: number;
+  readonly attemptCount: number;
   readonly terminalCount: number;
 }
 
@@ -752,7 +756,7 @@ export interface WorkloadReading {
    * rather than guessing who did it. */
   readonly unattributed: readonly { readonly taskId: string; readonly title: string }[];
   readonly taskCount: number;
-  readonly evidenceCount: number;
+  readonly attemptCount: number;
   /** Declared effort mass over the whole work-product graph, with its runtime
    * split nested inside as its own channel. */
   readonly effortMass: WorkChannel<WorkEffortMassReading>;
@@ -774,10 +778,10 @@ export interface WorkloadReading {
  *
  * The aggregation ratio a cortex view must print is `taskCount` against
  * `regions.length`. Area stays TASK COUNT and says so: the regions are the
- * snapshot's run/task incidence, and `effortMass` — the measurement 11c
+ * exact graph's run/task attempt incidence, and `effortMass` — the measurement 11c
  * actually asks for — is a property of the whole work-product graph rather than
  * of any run. The two are kept as separate readings instead of one being
- * rescaled by the other, because the graph read and the snapshot page need not
+ * rescaled by the other, because the graph version and snapshot page need not
  * cover the same tasks and a bar weighted across that seam would be a number
  * neither read holds.
  *
@@ -790,26 +794,28 @@ export function workloadReading(
   churnWindow: number = WORK_CHURN_WINDOW_MICROS,
 ): WorkloadReading {
   const entry = graphEntryOf(graph);
-  const regions = new Map<string, { tasks: Set<string>; evidence: number; terminal: number }>();
+  const regions = new Map<string, { tasks: Set<string>; attempts: number; terminal: number }>();
   const unattributed: { taskId: string; title: string }[] = [];
-  let evidenceCount = 0;
+  let attemptCount = 0;
 
+  const runtimeAttempts = graphRuntimeAttempts(graph);
+  const attributed = new Set<string>();
+  for (const attempt of runtimeAttempts) {
+    attemptCount += 1;
+    attributed.add(attempt.identity.task_id);
+    const region = regions.get(attempt.identity.run_id) ?? {
+      tasks: new Set<string>(),
+      attempts: 0,
+      terminal: 0,
+    };
+    regions.set(attempt.identity.run_id, region);
+    region.tasks.add(attempt.identity.task_id);
+    region.attempts += 1;
+    if (terminalWorkAttempt(attempt.state)) region.terminal += 1;
+  }
   for (const projection of projections) {
-    if (projection.runtime_evidence.length === 0) {
+    if (!attributed.has(projection.task_id)) {
       unattributed.push({ taskId: projection.task_id, title: projection.title });
-      continue;
-    }
-    for (const evidence of projection.runtime_evidence) {
-      evidenceCount += 1;
-      const region = regions.get(evidence.run_id) ?? {
-        tasks: new Set<string>(),
-        evidence: 0,
-        terminal: 0,
-      };
-      regions.set(evidence.run_id, region);
-      region.tasks.add(projection.task_id);
-      region.evidence += 1;
-      if (evidence.terminal) region.terminal += 1;
     }
   }
 
@@ -818,13 +824,13 @@ export function workloadReading(
       .map(([runId, region]) => ({
         runId,
         taskCount: region.tasks.size,
-        evidenceCount: region.evidence,
+        attemptCount: region.attempts,
         terminalCount: region.terminal,
       }))
       .sort((a, b) => b.taskCount - a.taskCount || a.runId.localeCompare(b.runId)),
     unattributed: unattributed.sort((a, b) => a.taskId.localeCompare(b.taskId)),
     taskCount: projections.length,
-    evidenceCount,
+    attemptCount,
     effortMass: graphChannel(
       graph,
       'declared effort mass',

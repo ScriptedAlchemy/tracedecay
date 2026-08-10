@@ -3,6 +3,24 @@ import { describe, expect, it } from "vitest";
 import type { SseEventEnvelope } from "./types.ts";
 import { invalidationKeysForBatch, targetedInvalidationKeys } from "./useEvents.tsx";
 
+const WORK_READ_PARTS = [
+  "snapshot",
+  "delta",
+  "list-attempts",
+  "topology",
+  "topology-metrics",
+  "views",
+  "retrieve-evidence",
+  "attempt-status",
+  "hydrate-artifacts",
+  "run-control",
+  "placement-status",
+] as const;
+
+function workKeys(scope: string): ReadonlyArray<ReadonlyArray<string>> {
+  return WORK_READ_PARTS.map((part) => ["work", part, scope]);
+}
+
 function event(
   family: string,
   projectId?: string,
@@ -80,18 +98,7 @@ describe("SSE query invalidation", () => {
         },
         "project.alpha",
       ),
-    ).toEqual([
-      ["work", "snapshot", "project:project.alpha"],
-      ["work", "delta", "project:project.alpha"],
-      ["work", "list-attempts", "project:project.alpha"],
-      ["work", "topology", "project:project.alpha"],
-      ["work", "views", "project:project.alpha"],
-      ["work", "snapshot", "all"],
-      ["work", "delta", "all"],
-      ["work", "list-attempts", "all"],
-      ["work", "topology", "all"],
-      ["work", "views", "all"],
-    ]);
+    ).toEqual([...workKeys("project:project.alpha"), ...workKeys("all")]);
   });
 
   it("targets a selected project without refreshing the active-project alias", () => {
@@ -104,13 +111,7 @@ describe("SSE query invalidation", () => {
         },
         "project.alpha",
       ),
-    ).toEqual([
-      ["work", "snapshot", "project:project.beta"],
-      ["work", "delta", "project:project.beta"],
-      ["work", "list-attempts", "project:project.beta"],
-      ["work", "topology", "project:project.beta"],
-      ["work", "views", "project:project.beta"],
-    ]);
+    ).toEqual(workKeys("project:project.beta"));
   });
 
   it("keeps unrelated project invalidations project-exact", () => {
@@ -128,18 +129,7 @@ describe("SSE query invalidation", () => {
         },
         "project.gamma",
       ),
-    ).toEqual([
-      ["work", "snapshot", "project:project.alpha"],
-      ["work", "delta", "project:project.alpha"],
-      ["work", "list-attempts", "project:project.alpha"],
-      ["work", "topology", "project:project.alpha"],
-      ["work", "views", "project:project.alpha"],
-      ["work", "snapshot", "project:project.beta"],
-      ["work", "delta", "project:project.beta"],
-      ["work", "list-attempts", "project:project.beta"],
-      ["work", "topology", "project:project.beta"],
-      ["work", "views", "project:project.beta"],
-    ]);
+    ).toEqual([...workKeys("project:project.alpha"), ...workKeys("project:project.beta")]);
   });
 
   it("does not invent a Work target for task activity without a project", () => {

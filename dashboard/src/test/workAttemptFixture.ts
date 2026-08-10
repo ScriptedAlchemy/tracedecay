@@ -1,11 +1,13 @@
 import type {
   WorkAttemptListCoverageV1,
   WorkAttemptStateV1,
+  WorkAttemptProjectionBindingV1,
   WorkCancellationStateV1,
   WorkEffectStateV1,
   WorkProviderRouteV1,
   WorkRecoveryStateV1,
   WorkTerminalEvidenceV1,
+  WorkTopologyPolicyV1,
 } from '../contracts/index.ts';
 
 /**
@@ -25,11 +27,71 @@ export function workRoute(providerId: string, routeId: string): WorkProviderRout
   return { provider_id: providerId, route_id: routeId };
 }
 
-const BINDING = {
+const BINDING: WorkAttemptProjectionBindingV1 = {
   accepted_proposal: 'proposal-1',
-  generation_id: 'generation-7',
-  sequence: 12,
-  work_version: 4,
+  event_sequence: 12,
+  graph_version: 4,
+  recovered_graph_digest: 'digest-graph',
+  source_watermark: {},
+};
+
+/** The domain's fail-closed topology default, pinned into each execution. */
+const TOPOLOGY: WorkTopologyPolicyV1 = {
+  branch_naming: {
+    collision: { kind: 'append_monotonic_ordinal', maximum_attempts: 32 },
+    components: [
+      { bytes: 10, kind: 'task_id_digest_prefix' },
+      { kind: 'work_class' },
+      { kind: 'monotonic_collision_ordinal' },
+    ],
+    maximum_bytes: 200,
+    prefix: 'tracedecay/',
+    separator: 'slash',
+  },
+  branch_topology: {
+    allowed: ['no_branches', 'unbranched', 'independent_branches'],
+  },
+  concurrency: {
+    maximum_active_per_repository: 1,
+    maximum_global_active: 1,
+    maximum_parallel_per_task: 1,
+    maximum_stack_depth: 1,
+  },
+  cross_merge: {
+    allow_cross_repository: false,
+    allowed_modes: ['disabled'],
+    default_mode: 'disabled',
+  },
+  escalation: 'reject',
+  gates: {
+    cleanliness: 'require_clean',
+    maximum_preflight_age_seconds: 300,
+    require_fresh_preflight: true,
+    review: { count: 1, kind: 'independent_review_count' },
+    tests: [],
+  },
+  history_rewrite: 'forbid_force_and_rebase',
+  notifications: 'critical_only',
+  placement: { kind: 'existing_worktree_only' },
+  protected_refs: [
+    { disposition: 'reject', selector: { kind: 'native_default_branch' } },
+    { disposition: 'reject', selector: { kind: 'exact', value: 'refs/heads/main' } },
+    { disposition: 'reject', selector: { kind: 'exact', value: 'refs/heads/master' } },
+    { disposition: 'reject', selector: { kind: 'prefix', value: 'refs/tags/' } },
+    { disposition: 'reject', selector: { kind: 'prefix', value: 'refs/remotes/' } },
+  ],
+  retention: {
+    abandoned_retention_seconds: null,
+    automatic_gc: { kind: 'disabled' },
+    maximum_retained_per_repository: null,
+    terminal_retention_seconds: null,
+  },
+  review_topology: {
+    allowed: ['no_review', 'independent_review', 'standard_pull_requests'],
+    github_stacked_prs: 'disabled',
+  },
+  roots: [],
+  schema_version: 1,
 };
 
 const EXECUTION_SNAPSHOT = {
@@ -58,7 +120,7 @@ const EXECUTION_SNAPSHOT = {
   resolution_provenance_digest: 'digest-resolution',
   route: workRoute('codex', 'route-primary'),
   sandbox: 'required',
-  topology_policy_digest: 'digest-topology',
+  topology: TOPOLOGY,
 };
 
 export interface WorkAttemptSpec {

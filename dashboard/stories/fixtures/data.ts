@@ -2688,12 +2688,13 @@ function workGraphItem(spec: {
 }): Record<string, unknown> {
   return {
     accepted_at: null,
-    accepted_attempts: {},
+    accepted_attempts: [],
     accepted_criteria: {},
     accepted_proposal: null,
     accepted_route: null,
     archived_at: null,
     evidence_links: [],
+    execution_admitted_at: null,
     handoffs: spec.handoffs ?? [],
     input: {
       acceptance_criteria: [],

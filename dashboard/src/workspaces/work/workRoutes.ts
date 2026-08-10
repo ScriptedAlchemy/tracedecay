@@ -10,6 +10,8 @@ import {
   WorkAttemptListV1Schema,
   WorkGraphReadRequestV1Schema,
   WorkGraphReadV1Schema,
+  WorkEvidenceRetrieveRequestV1Schema,
+  WorkEvidenceRetrievalV1Schema,
   PrepareWorkProductMutationRequestV1Schema,
   WorkProductMutationReceiptV1Schema,
   WorkProductMutationRequestV1Schema,
@@ -118,6 +120,19 @@ export const WORK_VIEWS_ROUTE = {
   path: "/api/work/views",
   request: WorkGraphReadRequestV1Schema,
   response: WorkGraphReadV1Schema,
+} as const satisfies WorkRoute<unknown, unknown>;
+
+/**
+ * Task-rooted evidence from the exact graph version selected by a Work view.
+ * The response may contain sealed attempt receipts, provider-qualified
+ * TaskSession evidence, and typed omissions. Continuations remain bound to
+ * the same graph version and source relation.
+ */
+export const WORK_RETRIEVE_EVIDENCE_ROUTE = {
+  operation: "operation.work.retrieve_evidence",
+  path: "/api/work/retrieve-evidence",
+  request: WorkEvidenceRetrieveRequestV1Schema,
+  response: WorkEvidenceRetrievalV1Schema,
 } as const satisfies WorkRoute<unknown, unknown>;
 
 /**

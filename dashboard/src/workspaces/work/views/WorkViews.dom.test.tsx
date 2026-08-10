@@ -44,17 +44,12 @@ function projection(overrides: Record<string, unknown> = {}) {
     dependencies: [],
     execution_admitted: false,
     history_len: 2,
-    runtime_evidence: [],
     task_accepted: false,
     task_id: 'task-alpha',
     title: 'Alpha task',
     version: 4,
     ...overrides,
   };
-}
-
-function evidence(runId: string, terminal: boolean) {
-  return { run_id: runId, evidence_digest: `digest-${runId}`, terminal };
 }
 
 /**
@@ -69,13 +64,11 @@ const GRAPH = [
     task_id: 'middle',
     title: 'Middle task',
     dependencies: ['root'],
-    runtime_evidence: [evidence('run-1', false), evidence('run-1', true)],
   }),
   projection({
     task_id: 'leaf',
     title: 'Leaf task',
     dependencies: ['middle', 'offpage'],
-    runtime_evidence: [evidence('run-1', true)],
   }),
   projection({ task_id: 'loop-a', title: 'Loop A', dependencies: ['loop-b'] }),
   projection({ task_id: 'loop-b', title: 'Loop B', dependencies: ['loop-a'] }),
@@ -661,6 +654,25 @@ describe('the graph-fed channels', () => {
       container.querySelector('[data-work-runtime="unavailable"]')?.textContent ?? '',
     ).toContain('not a reading of zero attempts');
     expect(container.querySelector('[data-work-runtime-attempts]')).toBeNull();
+    expect(container.querySelector('[data-work-aggregation]')).toBeNull();
+    expect(container.querySelector('[data-work-unattributed]')).toBeNull();
+    expect(container.textContent).not.toContain('No run has attached evidence');
+  });
+
+  it('does not render unavailable board attempt stages as zero attempts', async () => {
+    serveWork(undefined, GRAPH, viewsBody({
+      ...VIEWS_GRAPH,
+      runtimeAttempts: [],
+      runtimeCoverage: { coverage: 'unavailable' },
+    }));
+    const { container } = renderPage('/work?view=board');
+    await waitFor(() =>
+      expect(container.querySelector('[data-work-board-attempts="unavailable"]')).not.toBeNull(),
+    );
+
+    expect(
+      container.querySelector('[data-work-board-attempts="unavailable"]')?.textContent ?? '',
+    ).toContain('unmeasured, not zero');
   });
 
   it('draws the declared causal candidates from the wire', async () => {

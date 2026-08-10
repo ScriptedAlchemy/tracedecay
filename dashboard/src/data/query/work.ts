@@ -7,6 +7,7 @@ export type WorkReadPart =
   | 'topology'
   | 'topology-metrics'
   | 'views'
+  | 'retrieve-evidence'
   | 'attempt-status'
   | 'hydrate-artifacts'
   | 'run-control'
@@ -36,6 +37,7 @@ export function workScopeInvalidationKeys(
     [WORK_QUERY_ROOT, 'topology', scope],
     [WORK_QUERY_ROOT, 'topology-metrics', scope],
     [WORK_QUERY_ROOT, 'views', scope],
+    [WORK_QUERY_ROOT, 'retrieve-evidence', scope],
     [WORK_QUERY_ROOT, 'attempt-status', scope],
     [WORK_QUERY_ROOT, 'hydrate-artifacts', scope],
     [WORK_QUERY_ROOT, 'run-control', scope],

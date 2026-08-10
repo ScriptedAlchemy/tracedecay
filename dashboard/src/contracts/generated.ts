@@ -484,6 +484,7 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   sealed_at_micros: z.number().int().nullable(),
   snapshot_content_identity: z.string().nullable(),
   source_reference: z.string().nullable(),
+  source_revision: z.string().nullable(),
   staleness_state: z.string().nullable(),
   worktree_id: z.string().nullable(),
   worktree_root: z.string(),
@@ -4102,7 +4103,7 @@ export const WorkEvidenceFrontierV1Schema = z.object({
 });
 export type WorkEvidenceFrontierV1 = z.infer<typeof WorkEvidenceFrontierV1Schema>;
 
-export const WorkEvidenceOmissionReasonV1Schema = z.enum(["cancelled", "limit_reached", "not_found_or_not_authorized", "pending", "redacted", "stale", "timed_out", "unavailable"]);
+export const WorkEvidenceOmissionReasonV1Schema = z.enum(["cancelled", "limit_reached", "not_found_or_not_authorized", "pending", "redacted", "reset_required", "stale", "timed_out", "unavailable"]);
 export type WorkEvidenceOmissionReasonV1 = z.infer<typeof WorkEvidenceOmissionReasonV1Schema>;
 
 export const WorkEvidenceOmissionV1Schema = z.object({

@@ -1598,6 +1598,13 @@
             "null"
           ]
         },
+        "source_revision": {
+          "description": "Exact source revision captured by the sealed generation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "staleness_state": {
           "description": "Staleness-ladder state from the last scheduler execution. `fresh` means\nthe scheduler most recently observed a fresh source; the status read\ndoes not probe the worktree to revalidate that observation.",
           "type": [
@@ -1622,6 +1629,7 @@
         "repository_id",
         "worktree_id",
         "source_reference",
+        "source_revision",
         "latest_generation_id",
         "snapshot_content_identity",
         "sealed_at_micros",
@@ -16529,6 +16537,7 @@
         "pending",
         "not_found_or_not_authorized",
         "unavailable",
+        "reset_required",
         "stale",
         "cancelled",
         "timed_out",

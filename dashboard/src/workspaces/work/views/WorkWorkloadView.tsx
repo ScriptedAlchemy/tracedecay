@@ -5,7 +5,11 @@ import { cn } from '../../../ui/cn.ts';
 import { relativeAge } from '../../../ui/time.ts';
 import { kindColorVars } from '../../../viz/graph/kindColor.ts';
 import { coverageReading } from '../workModel.ts';
-import type { WorkGraphReading } from '../workGraphModel.ts';
+import {
+  graphRuntimeAttempts,
+  terminalWorkAttempt,
+  type WorkGraphReading,
+} from '../workGraphModel.ts';
 import {
   type WorkloadReading,
   type WorkloadRegion,
@@ -22,11 +26,11 @@ import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './Work
  * change instants — and it still does not draw them ONTO the regions, which is
  * the decision worth stating.
  *
- * The regions are the snapshot's run/task incidence, so a region's length stays
+ * The regions are the exact graph's run/task attempt incidence, so a region's length stays
  * TASK COUNT: captioned as that, printed as that beside every bar, never called
  * mass, cost or load. Effort, concurrency and churn are properties of the whole
  * work-product graph read at one version, over a task set that need not be the
- * task set this snapshot page returned. Rescaling a run's bar by the graph's
+ * task set this snapshot page returned. Rescaling a run's bar by declared graph
  * effort would draw a figure across that seam that neither read holds, so the
  * measurements are printed as figures of their own, beside the aggregation and
  * captioned with the read they came from.
@@ -49,11 +53,11 @@ import { ChannelAbsence, ChannelLedger, EmptyReading, ViewCaption } from './Work
  * figure printed beside it and stays out of the accessibility tree.
  */
 
-/** One task inside one region, with the evidence that run attached to it. */
+/** One task inside one region, with the attempts that run made for it. */
 interface RegionMember {
   readonly taskId: string;
   readonly title: string;
-  readonly evidenceCount: number;
+  readonly attemptCount: number;
   readonly terminal: boolean;
 }
 
@@ -62,29 +66,33 @@ interface RegionMember {
  *
  * `WorkloadRegion` carries counts rather than members, and membership is
  * exactly the incidence those counts were taken over: a task falls in a run's
- * region when that run attached any evidence to it. One task can fall in
+ * region when the exact graph attributes an attempt to that run. One task can fall in
  * several regions, so the region counts are a reading per run and not a
  * partition of the board — which is why the bars are ranked against the
  * largest region rather than drawn as shares of a whole.
  */
 function regionMembers(
   projections: readonly WorkProjection[],
+  graph: WorkGraphReading,
 ): ReadonlyMap<string, readonly RegionMember[]> {
   const members = new Map<string, RegionMember[]>();
-  for (const projection of projections) {
-    const perRun = new Map<string, { evidenceCount: number; terminal: boolean }>();
-    for (const evidence of projection.runtime_evidence) {
-      const tally = perRun.get(evidence.run_id);
-      perRun.set(evidence.run_id, {
-        evidenceCount: (tally?.evidenceCount ?? 0) + 1,
-        terminal: (tally?.terminal ?? false) || evidence.terminal,
-      });
-    }
+  const titles = new Map(projections.map((projection) => [projection.task_id, projection.title]));
+  const perTask = new Map<string, Map<string, { attemptCount: number; terminal: boolean }>>();
+  for (const attempt of graphRuntimeAttempts(graph)) {
+    const perRun = perTask.get(attempt.identity.task_id) ?? new Map();
+    perTask.set(attempt.identity.task_id, perRun);
+    const tally = perRun.get(attempt.identity.run_id);
+    perRun.set(attempt.identity.run_id, {
+      attemptCount: (tally?.attemptCount ?? 0) + 1,
+      terminal: (tally?.terminal ?? false) || terminalWorkAttempt(attempt.state),
+    });
+  }
+  for (const [taskId, perRun] of perTask) {
     for (const [runId, tally] of perRun) {
       const member: RegionMember = {
-        taskId: projection.task_id,
-        title: projection.title,
-        evidenceCount: tally.evidenceCount,
+        taskId,
+        title: titles.get(taskId) ?? taskId,
+        attemptCount: tally.attemptCount,
         terminal: tally.terminal,
       };
       const bucket = members.get(runId);
@@ -93,7 +101,7 @@ function regionMembers(
     }
   }
   for (const bucket of members.values()) {
-    bucket.sort((a, b) => b.evidenceCount - a.evidenceCount || a.taskId.localeCompare(b.taskId));
+    bucket.sort((a, b) => b.attemptCount - a.attemptCount || a.taskId.localeCompare(b.taskId));
   }
   return members;
 }
@@ -111,23 +119,39 @@ export function WorkWorkloadView({
 }) {
   const reading = workloadReading(snapshot.projections, graph);
   const coverage = coverageReading(snapshot.coverage);
-  const members = regionMembers(snapshot.projections);
+  const members = regionMembers(snapshot.projections, graph);
   const attributed = reading.taskCount - reading.unattributed.length;
+  const runtime = reading.runtime;
 
   return (
     <div className="flex min-w-0 flex-col gap-3" data-work-view="workload">
       <Panel
         legend="Runs as regions"
-        actions={<StateChip kind={coverage.state} detail={coverage.detail} />}
+        actions={
+          <div className="flex flex-wrap gap-1">
+            <StateChip kind={coverage.state} detail={coverage.detail} />
+            {runtime.available ? (
+              <StateChip
+                kind={runtime.value.complete ? 'ready' : 'partial'}
+                detail={runtime.value.complete ? 'attempt coverage complete' : 'attempt counts are floors'}
+              />
+            ) : (
+              <StateChip kind={runtime.state} detail="attempt attribution unavailable" />
+            )}
+          </div>
+        }
         elevation="well"
       >
-        <div className="flex min-w-0 flex-col gap-3">
+        {!runtime.available ? (
+          <ChannelAbsence measure="run and task attempt attribution" channel={runtime} />
+        ) : (
+          <div className="flex min-w-0 flex-col gap-3">
           {/* The aggregation ratio leads the panel, because a cortex that does
             * not print how many things it folded into how few is a picture of
             * a number nobody can recover. */}
           <ViewCaption
             population={`${reading.taskCount} tasks ⟵ ${reading.regions.length} regions`}
-            note={`${attributed} of ${reading.taskCount} in a region · ${reading.evidenceCount} evidence records`}
+            note={`${runtime.value.complete ? '' : 'at least '}${attributed} of ${reading.taskCount} in a region · ${reading.attemptCount} returned attempts`}
           >
             <span data-work-aggregation={`${reading.taskCount}:${reading.regions.length}`}>
               region length is task count, not effort
@@ -140,7 +164,8 @@ export function WorkWorkloadView({
             selected={selected}
             onSelect={onSelect}
           />
-        </div>
+          </div>
+        )}
       </Panel>
 
       <div className="grid min-w-0 gap-3 lg:grid-cols-2">
@@ -463,7 +488,7 @@ function Aggregation({
   if (reading.regions.length === 0) {
     return (
       <EmptyReading>
-        No run has attached evidence to any task the snapshot returned, so no region exists
+        The exact graph attributes no attempt to any task the snapshot returned, so no region exists
         to aggregate into and every task sits in the unattributed band below. A degenerate
         distribution is said rather than drawn.
       </EmptyReading>
@@ -526,8 +551,8 @@ function Region({
         fraction={fraction}
       />
       <p className="text-3xs leading-snug text-text-muted">
-        {region.taskCount} {region.taskCount === 1 ? 'task' : 'tasks'} · {region.evidenceCount}{' '}
-        evidence · {region.terminalCount} terminal · executor unnamed
+        {region.taskCount} {region.taskCount === 1 ? 'task' : 'tasks'} · {region.attemptCount}{' '}
+        attempts · {region.terminalCount} terminal · executor unnamed
       </p>
       <ul className="flex min-w-0 flex-wrap gap-1.5">
         {members.map((member) => (
@@ -569,11 +594,11 @@ function TaskMark({
           : 'border-edge-subtle bg-surface-2 hover:bg-surface-3',
       )}
       data-work-task={member.taskId}
-      data-work-evidence={member.evidenceCount}
+      data-work-attempts={member.attemptCount}
     >
       <span className="min-w-0 truncate text-2xs text-text-primary">{member.title}</span>
       <span className="truncate text-3xs text-text-muted">
-        {member.evidenceCount} evidence in this region
+        {member.attemptCount} attempts in this region
         {member.terminal ? ' · terminal' : ''}
       </span>
     </button>
@@ -583,7 +608,7 @@ function TaskMark({
 /**
  * Work no run claims.
  *
- * These tasks carry no runtime evidence at all, so no region can hold them
+ * The exact graph attributes no runtime attempt to these tasks, so no region can hold them
  * without the drawing choosing an executor for them. They keep their own band
  * and are drawn hollow — outlined, unfilled — which is what "the executor the
  * store cannot name is not guessed" looks like on the page.
@@ -597,6 +622,30 @@ function Unattributed({
   selected: string | null;
   onSelect: (taskId: string) => void;
 }) {
+  const runtime = reading.runtime;
+  if (!runtime.available) {
+    return (
+      <Panel
+        legend="Unattributed work"
+        actions={<StateChip kind={runtime.state} detail="attempt attribution unavailable" />}
+      >
+        <ChannelAbsence measure="tasks with no attributed attempt" channel={runtime} />
+      </Panel>
+    );
+  }
+  if (!runtime.value.complete) {
+    return (
+      <Panel
+        legend="Unattributed work"
+        actions={<StateChip kind="partial" detail={`${runtime.value.unavailable} unavailable attempts`} />}
+      >
+        <p className="text-3xs leading-snug text-text-muted">
+          Attempt coverage is partial, so tasks without a returned attempt cannot be called
+          unattributed. The region counts above are lower bounds.
+        </p>
+      </Panel>
+    );
+  }
   return (
     <Panel
       legend="Unattributed work"
@@ -611,7 +660,7 @@ function Unattributed({
         <EmptyReading>
           {reading.taskCount === 0
             ? 'The snapshot returned no tasks, so there is no unattributed work to hold.'
-            : 'Every task the snapshot returned carries evidence from at least one run, so the regions account for the whole page.'}
+            : 'Every task the snapshot returned has at least one attributed attempt, so the regions account for the whole page.'}
         </EmptyReading>
       ) : (
         <div
@@ -619,7 +668,7 @@ function Unattributed({
           data-work-unattributed={reading.unattributed.length}
         >
           <p className="text-3xs leading-snug text-text-muted">
-            No run has attached evidence to these tasks. They are held outside every region
+            The exact graph attributes no attempt to these tasks. They are held outside every region
             rather than assigned to one, and drawn hollow because the run that would name an
             executor for them does not exist in this read.
           </p>

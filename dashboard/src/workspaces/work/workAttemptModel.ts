@@ -13,12 +13,11 @@ import type { WorkResult } from './workApi.ts';
 /**
  * One page of the attempt list, read into the facts the Work projections need.
  *
- * `WorkProjection` carries `runtime_evidence` — a run id and a terminal flag —
- * and for a long time that was the only execution-shaped thing the dashboard
- * could see. It is not an execution record: a run is not an executor, a second
- * evidence row is not provably a retry, and a reference is not an event. The
- * attempt list is the execution record, so everything this module derives is
- * read off `WorkAttemptV1` rather than inferred from evidence incidence.
+ * The retired snapshot projection exposed only a run id and a terminal flag.
+ * That was not an execution record: a run is not an executor, a second row was
+ * not provably a retry, and a reference was not an event. The attempt list is
+ * the execution record, so everything this module derives is read off
+ * `WorkAttemptV1` rather than inferred from incidence.
  *
  * Three readings come out of it, and they are exactly the three the timeline
  * previously drew as named absences:
@@ -27,7 +26,7 @@ import type { WorkResult } from './workApi.ts';
  *               asked (`requested_route`) — a fallback that took over is a
  *               divergence between the two and is counted as one
  *   lineages    the retry chain, followed through `recovery.source_attempt_id`
- *               rather than counted from repeated evidence rows
+ *               rather than counted from repeated references
  *   ladder      the typed cancellation rungs, including attempts whose recorded
  *               state claims a cancellation their cancellation record does not
  *

@@ -36,7 +36,6 @@ function projection(overrides: Partial<WorkProjection> = {}): WorkProjection {
     dependencies: [],
     execution_admitted: false,
     history_len: 1,
-    runtime_evidence: [],
     task_accepted: false,
     task_id: 'task',
     title: 'Task',
@@ -45,8 +44,29 @@ function projection(overrides: Partial<WorkProjection> = {}): WorkProjection {
   };
 }
 
-function evidence(runId: string, terminal: boolean) {
-  return { run_id: runId, evidence_digest: `digest-${runId}`, terminal };
+function runtimeGraph(
+  tasks: readonly string[],
+  attempts: readonly {
+    attemptId: string;
+    taskId: string;
+    runId: string;
+    terminal: boolean;
+  }[],
+) {
+  return workGraphReading({
+    outcome: 'value',
+    value: WorkGraphReadV1Schema.parse(
+      workGraphRead({
+        tasks: tasks.map((taskId) => ({ taskId })),
+        runtimeAttempts: attempts.map((attempt) => ({
+          attemptId: attempt.attemptId,
+          taskId: attempt.taskId,
+          runId: attempt.runId,
+          state: attempt.terminal ? 'succeeded' : 'running',
+        })),
+      }),
+    ),
+  });
 }
 
 describe('the declared dependency strata', () => {
@@ -153,14 +173,15 @@ describe('the declared dependency strata', () => {
 
 describe('the attempt weave', () => {
   it('weaves runs across the tasks they attached evidence to', () => {
-    const reading = workWeaveReading([
-      projection({ task_id: 'a', title: 'A', runtime_evidence: [evidence('run-1', true)] }),
-      projection({
-        task_id: 'b',
-        title: 'B',
-        runtime_evidence: [evidence('run-1', false), evidence('run-2', true)],
-      }),
-    ]);
+    const reading = workWeaveReading(
+      [projection({ task_id: 'a', title: 'A' }), projection({ task_id: 'b', title: 'B' })],
+      { state: 'pending' },
+      runtimeGraph(['a', 'b'], [
+        { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', terminal: true },
+        { attemptId: 'attempt-2', taskId: 'b', runId: 'run-1', terminal: false },
+        { attemptId: 'attempt-3', taskId: 'b', runId: 'run-2', terminal: true },
+      ]),
+    );
 
     expect(reading.threads.map((thread) => thread.runId)).toEqual(['run-1', 'run-2']);
     expect(reading.threads[0]?.landings.map((landing) => landing.taskId)).toEqual(['a', 'b']);
@@ -170,12 +191,14 @@ describe('the attempt weave', () => {
   /** A retry is a repeated crossing of the same landing, and the count is the
    * only thing that says so — there is no second timestamp to separate them. */
   it('counts a repeated crossing of one landing as a retry', () => {
-    const reading = workWeaveReading([
-      projection({
-        task_id: 'a',
-        runtime_evidence: [evidence('run-1', false), evidence('run-1', true)],
-      }),
-    ]);
+    const reading = workWeaveReading(
+      [projection({ task_id: 'a' })],
+      { state: 'pending' },
+      runtimeGraph(['a'], [
+        { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', terminal: false },
+        { attemptId: 'attempt-2', taskId: 'a', runId: 'run-1', terminal: true },
+      ]),
+    );
 
     expect(reading.threads[0]?.landings).toHaveLength(1);
     expect(reading.threads[0]?.landings[0]?.crossings).toBe(2);
@@ -184,10 +207,13 @@ describe('the attempt weave', () => {
   });
 
   it('bands a task no run has landed on rather than omitting it', () => {
-    const reading = workWeaveReading([
-      projection({ task_id: 'a', title: 'A', runtime_evidence: [evidence('run-1', true)] }),
-      projection({ task_id: 'z', title: 'Z' }),
-    ]);
+    const reading = workWeaveReading(
+      [projection({ task_id: 'a', title: 'A' }), projection({ task_id: 'z', title: 'Z' })],
+      { state: 'pending' },
+      runtimeGraph(['a', 'z'], [
+        { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', terminal: true },
+      ]),
+    );
 
     expect(reading.unwoven).toEqual([{ taskId: 'z', title: 'Z' }]);
     expect(reading.threads.flatMap((thread) => thread.landings)).toHaveLength(1);
@@ -203,15 +229,15 @@ describe('the attempt weave', () => {
 
 describe('the causal disagreement field', () => {
   it('calls out a dependent that finished while its dependency had not', () => {
-    const reading = workCausalReading([
-      projection({ task_id: 'a', title: 'A' }),
-      projection({
-        task_id: 'b',
-        title: 'B',
-        dependencies: ['a'],
-        runtime_evidence: [evidence('run-1', true)],
-      }),
-    ]);
+    const reading = workCausalReading(
+      [
+        projection({ task_id: 'a', title: 'A' }),
+        projection({ task_id: 'b', title: 'B', dependencies: ['a'] }),
+      ],
+      runtimeGraph(['a', 'b'], [
+        { attemptId: 'attempt-1', taskId: 'b', runId: 'run-1', terminal: true },
+      ]),
+    );
 
     expect(reading.disagreements).toEqual([
       { dependency: 'a', dependent: 'b', kind: 'dependent_ahead' },
@@ -225,14 +251,13 @@ describe('the causal disagreement field', () => {
    * would be the projection inventing the very measurement it lacks.
    */
   it('keeps two finished ends unordered rather than calling them consistent', () => {
-    const reading = workCausalReading([
-      projection({ task_id: 'a', runtime_evidence: [evidence('run-1', true)] }),
-      projection({
-        task_id: 'b',
-        dependencies: ['a'],
-        runtime_evidence: [evidence('run-2', true)],
-      }),
-    ]);
+    const reading = workCausalReading(
+      [projection({ task_id: 'a' }), projection({ task_id: 'b', dependencies: ['a'] })],
+      runtimeGraph(['a', 'b'], [
+        { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', terminal: true },
+        { attemptId: 'attempt-2', taskId: 'b', runId: 'run-2', terminal: true },
+      ]),
+    );
 
     expect(reading.counts.order_unread).toBe(1);
     expect(reading.counts.consistent).toBe(0);
@@ -240,10 +265,12 @@ describe('the causal disagreement field', () => {
   });
 
   it('reads a finished dependency and an unfinished dependent as consistent so far', () => {
-    const reading = workCausalReading([
-      projection({ task_id: 'a', runtime_evidence: [evidence('run-1', true)] }),
-      projection({ task_id: 'b', dependencies: ['a'] }),
-    ]);
+    const reading = workCausalReading(
+      [projection({ task_id: 'a' }), projection({ task_id: 'b', dependencies: ['a'] })],
+      runtimeGraph(['a', 'b'], [
+        { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', terminal: true },
+      ]),
+    );
 
     expect(reading.counts.consistent).toBe(1);
   });
@@ -271,11 +298,7 @@ describe('the causal disagreement field', () => {
   it('does not treat non-terminal evidence as a finish', () => {
     const reading = workCausalReading([
       projection({ task_id: 'a' }),
-      projection({
-        task_id: 'b',
-        dependencies: ['a'],
-        runtime_evidence: [evidence('run-1', false)],
-      }),
+      projection({ task_id: 'b', dependencies: ['a'] }),
     ]);
 
     expect(reading.counts.unobserved).toBe(1);
@@ -293,27 +316,30 @@ describe('the causal disagreement field', () => {
 
 describe('the workload aggregation', () => {
   it('aggregates runs into regions sized by the tasks they touched', () => {
-    const reading = workloadReading([
-      projection({ task_id: 'a', runtime_evidence: [evidence('run-1', true)] }),
-      projection({
-        task_id: 'b',
-        runtime_evidence: [evidence('run-1', false), evidence('run-2', true)],
-      }),
-    ]);
+    const reading = workloadReading(
+      [projection({ task_id: 'a' }), projection({ task_id: 'b' })],
+      runtimeGraph(['a', 'b'], [
+        { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', terminal: true },
+        { attemptId: 'attempt-2', taskId: 'b', runId: 'run-1', terminal: false },
+        { attemptId: 'attempt-3', taskId: 'b', runId: 'run-2', terminal: true },
+      ]),
+    );
 
     expect(reading.regions).toEqual([
-      { runId: 'run-1', taskCount: 2, evidenceCount: 2, terminalCount: 1 },
-      { runId: 'run-2', taskCount: 1, evidenceCount: 1, terminalCount: 1 },
+      { runId: 'run-1', taskCount: 2, attemptCount: 2, terminalCount: 1 },
+      { runId: 'run-2', taskCount: 1, attemptCount: 1, terminalCount: 1 },
     ]);
     expect(reading.taskCount).toBe(2);
-    expect(reading.evidenceCount).toBe(3);
+    expect(reading.attemptCount).toBe(3);
   });
 
   it('holds a task no run can be named for in the unattributed band', () => {
-    const reading = workloadReading([
-      projection({ task_id: 'a', runtime_evidence: [evidence('run-1', true)] }),
-      projection({ task_id: 'z', title: 'Z' }),
-    ]);
+    const reading = workloadReading(
+      [projection({ task_id: 'a' }), projection({ task_id: 'z', title: 'Z' })],
+      runtimeGraph(['a', 'z'], [
+        { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', terminal: true },
+      ]),
+    );
 
     expect(reading.unattributed).toEqual([{ taskId: 'z', title: 'Z' }]);
     expect(reading.regions).toHaveLength(1);
@@ -364,12 +390,13 @@ describe('the absent channels', () => {
  * contract plainly carries.
  */
 describe('the attempt channels bound onto the weave', () => {
-  const GRAPH = [
-    projection({ task_id: 'a', title: 'A', runtime_evidence: [evidence('run-1', true)] }),
-  ];
+  const GRAPH = [projection({ task_id: 'a', title: 'A' })];
+  const RUNTIME_GRAPH = runtimeGraph(['a'], [
+    { attemptId: 'attempt-1', taskId: 'a', runId: 'run-1', terminal: true },
+  ]);
 
   it('reports a read that has not answered as loading, not as unsupported', () => {
-    const reading = workWeaveReading(GRAPH);
+    const reading = workWeaveReading(GRAPH, { state: 'pending' }, RUNTIME_GRAPH);
 
     expect(reading.executorIdentity.available).toBe(false);
     expect(reading.executorIdentity.available === false && reading.executorIdentity.state).toBe(
@@ -380,11 +407,15 @@ describe('the attempt channels bound onto the weave', () => {
   });
 
   it('carries a refusal through to every channel it fed, with its own state', () => {
-    const reading = workWeaveReading(GRAPH, {
-      state: 'refused',
-      chip: 'conflicting',
-      detail: 'the task moved since it was read',
-    });
+    const reading = workWeaveReading(
+      GRAPH,
+      {
+        state: 'refused',
+        chip: 'conflicting',
+        detail: 'the task moved since it was read',
+      },
+      RUNTIME_GRAPH,
+    );
 
     for (const channel of [
       reading.executorIdentity,

@@ -99,12 +99,13 @@ function taskEffort(task: WorkGraphTaskSpec): number {
 function workItem(task: WorkGraphTaskSpec, observedAt: number) {
   return {
     accepted_at: null,
-    accepted_attempts: {},
+    accepted_attempts: [],
     accepted_criteria: {},
     accepted_proposal: null,
     accepted_route: null,
     archived_at: null,
     evidence_links: [],
+    execution_admitted_at: null,
     handoffs: (task.handoffs ?? []).map((handoff) => ({
       evidence_frontier: [...(handoff.evidenceFrontier ?? [])],
       from_actor: handoff.fromActor,

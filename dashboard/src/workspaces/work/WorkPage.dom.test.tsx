@@ -33,7 +33,6 @@ function projection(overrides: Record<string, unknown> = {}) {
     dependencies: [],
     execution_admitted: false,
     history_len: 2,
-    runtime_evidence: [],
     task_accepted: false,
     task_id: 'task-alpha',
     title: 'Alpha task',
