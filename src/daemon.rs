@@ -179,9 +179,13 @@ mod core_proxy;
 mod database_owner_registry;
 use database_owner_registry::DatabaseOwnerRegistry;
 pub(crate) mod dashboard_automation;
+#[cfg(feature = "test-transport")]
+mod dashboard_configuration_test_runtime;
 pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;
 pub(crate) mod project_open_owners;
+#[cfg(feature = "test-transport")]
+pub(crate) use dashboard_configuration_test_runtime::dashboard_configuration_runtime_for_test;
 pub(crate) mod query_authority_provider;
 mod semantic_activation_reconciler;
 mod semantic_evaluation;

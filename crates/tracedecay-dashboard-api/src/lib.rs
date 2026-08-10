@@ -426,6 +426,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
     code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
+    application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 }
 
 impl DashboardHostAdmissionTestAuthorityV1 {
@@ -447,7 +448,19 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             code_graph_read_admission: None,
             code_graph_projection_read_port: None,
             git_correlation_read_authority: None,
+            application_invocation_executor: None,
         }
+    }
+
+    /// Attaches the daemon-owned application runtime used by mutating
+    /// dashboard routes in an integration-test transport.
+    #[must_use]
+    pub fn with_application_invocation_executor(
+        mut self,
+        executor: Arc<dyn DashboardApplicationRuntime>,
+    ) -> Self {
+        self.application_invocation_executor = Some(executor);
+        self
     }
 
     /// Attaches the same exact-profile automation authority production retains
@@ -962,7 +975,8 @@ where
             code_index_freshness_reader: None,
             feedback_status_reader: None,
             code_diagnostics_broker: Some(code_diagnostics_broker),
-            application_invocation_executor: None,
+            application_invocation_executor: test_authority
+                .and_then(|authority| authority.application_invocation_executor.clone()),
             delivery_settlement_authority: None,
         },
     )

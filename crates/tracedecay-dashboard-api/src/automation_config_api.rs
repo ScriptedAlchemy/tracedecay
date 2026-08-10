@@ -7,6 +7,7 @@
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_api::configuration::{
@@ -55,8 +56,14 @@ pub async fn get_config(State(state): State<DashboardState>) -> ApiResult {
 
 pub async fn patch_config(
     State(state): State<DashboardState>,
-    Json(request): Json<AutomationConfigMutationRequest>,
+    request: std::result::Result<Json<AutomationConfigMutationRequest>, JsonRejection>,
 ) -> ApiResult {
+    let Json(request) = request.map_err(|error| {
+        settings_validation_error(json!([{
+            "field": "request",
+            "message": error.body_text(),
+        }]))
+    })?;
     let expected_revision =
         ConfigurationRevisionId::new(request.expected_revision_id).map_err(|_| {
             settings_validation_error(json!([{

@@ -108,6 +108,16 @@ pub fn dashboard_automation_authority_for_test(
     Ok((authority, writer))
 }
 
+/// Mounts the canonical daemon configuration mutation service for dashboard
+/// integration tests that exercise HTTP writes and pinned-snapshot refresh.
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub async fn dashboard_configuration_application_runtime_for_test(
+    cg: std::sync::Arc<crate::tracedecay::TraceDecay>,
+) -> crate::errors::Result<std::sync::Arc<dyn DashboardApplicationRuntime>> {
+    crate::daemon::dashboard_configuration_runtime_for_test(cg).await
+}
+
 /// Root-owned graph composition used by dashboard integration tests.
 ///
 /// The dashboard API crate cannot own daemon session registration or graph

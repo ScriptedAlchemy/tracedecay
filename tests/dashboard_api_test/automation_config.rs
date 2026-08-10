@@ -7,7 +7,7 @@ fn automation_config_uses_revisioned_current_contract() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture(false).await;
+        let fixture = start_dashboard_configuration_fixture().await;
         let agent = http_agent();
         let config_url = format!(
             "{}/api/plugins/holographic/curation/config",
@@ -107,7 +107,7 @@ fn automation_config_rejects_retired_policy_fields() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let fixture = start_dashboard_fixture(false).await;
+        let fixture = start_dashboard_configuration_fixture().await;
         let agent = http_agent();
         let config_url = format!(
             "{}/api/plugins/holographic/curation/config",

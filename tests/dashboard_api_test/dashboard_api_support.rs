@@ -101,11 +101,11 @@ impl Drop for DashboardServer {
 }
 
 pub(crate) fn spawn_dashboard_server(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, None, port)
+    spawn_dashboard_server_with_runner(cg, None, false, port)
 }
 
 pub(crate) fn spawn_dashboard_server_lightweight(cg: TraceDecay, port: u16) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, None, port)
+    spawn_dashboard_server_with_runner(cg, None, false, port)
 }
 
 pub(crate) fn spawn_dashboard_server_with_host_runtime(
@@ -114,7 +114,7 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
     project_graphs: dashboard::DashboardTestProjectGraphsV1,
     port: u16,
 ) -> DashboardServer {
-    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), port)
+    spawn_dashboard_server_with_runner(cg, Some((host_runtime, project_graphs)), false, port)
 }
 
 fn spawn_dashboard_server_with_runner(
@@ -123,6 +123,7 @@ fn spawn_dashboard_server_with_runner(
         Arc<DashboardTestRuntimeV1>,
         dashboard::DashboardTestProjectGraphsV1,
     )>,
+    mount_configuration_runtime: bool,
     port: u16,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -137,10 +138,16 @@ fn spawn_dashboard_server_with_runner(
                     dashboard::DashboardTestProjectGraphsV1::default(),
                 ),
             };
-            let authority = host_runtime
-                .dashboard_test_authority_with_session_reads(&cg)
-                .await
-                .expect("dashboard test authority");
+            let authority = if mount_configuration_runtime {
+                host_runtime
+                    .dashboard_test_authority_with_configuration(&cg)
+                    .await
+            } else {
+                host_runtime
+                    .dashboard_test_authority_with_session_reads(&cg)
+                    .await
+            }
+            .expect("dashboard test authority");
             let result = dashboard::run_until_shutdown_for_tests_with_host_admission(
                 cg.clone(),
                 authority,
@@ -719,16 +726,21 @@ for line in sys.stdin:
 }
 
 pub(crate) async fn start_dashboard_fixture(seed_lcm: bool) -> DashboardFixture {
-    start_dashboard_fixture_with_options(seed_lcm, true).await
+    start_dashboard_fixture_with_options(seed_lcm, true, false).await
 }
 
 pub(crate) async fn start_dashboard_fixture_without_memory() -> DashboardFixture {
-    start_dashboard_fixture_with_options(false, false).await
+    start_dashboard_fixture_with_options(false, false, false).await
+}
+
+pub(crate) async fn start_dashboard_configuration_fixture() -> DashboardFixture {
+    start_dashboard_fixture_with_options(false, false, true).await
 }
 
 async fn start_dashboard_fixture_with_options(
     seed_lcm: bool,
     seed_memory: bool,
+    mount_configuration_runtime: bool,
 ) -> DashboardFixture {
     let tmp = tempdir_or_panic();
     let tmp_root = tmp
@@ -775,10 +787,10 @@ async fn start_dashboard_fixture_with_options(
     }
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
-    let server = spawn_dashboard_server_with_host_runtime(
+    let server = spawn_dashboard_server_with_runner(
         cg,
-        Arc::clone(&host_runtime),
-        project_graphs.clone(),
+        Some((Arc::clone(&host_runtime), project_graphs.clone())),
+        mount_configuration_runtime,
         port,
     );
 

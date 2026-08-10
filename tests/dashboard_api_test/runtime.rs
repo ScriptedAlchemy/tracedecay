@@ -146,6 +146,18 @@ impl DashboardTestRuntimeV1 {
         Ok(authority)
     }
 
+    /// Adds the real daemon configuration mutation service for endpoint tests
+    /// that exercise revision-fenced dashboard writes.
+    pub(crate) async fn dashboard_test_authority_with_configuration(
+        self: &Arc<Self>,
+        cg: &Arc<TraceDecay>,
+    ) -> Result<dashboard::DashboardHostAdmissionTestAuthorityV1> {
+        let authority = self.dashboard_test_authority_with_session_reads(cg).await?;
+        let application_runtime =
+            dashboard::dashboard_configuration_application_runtime_for_test(Arc::clone(cg)).await?;
+        Ok(authority.with_application_invocation_executor(application_runtime))
+    }
+
     /// The registered project identity this fixture runtime was opened for.
     pub(crate) fn project_id(&self) -> &ProjectId {
         &self.project_id
