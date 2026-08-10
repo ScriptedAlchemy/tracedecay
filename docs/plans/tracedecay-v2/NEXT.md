@@ -1,12 +1,12 @@
 # V2 RC reboot handoff
 
-**Status:** active product delivery, intentionally wound down for an operator
-reboot on 2026-08-09.
+**Status:** active product delivery; local reboot recovery and the live Work
+product journey are complete as of 2026-08-09.
 
 `00-plan-set-index.md` remains the sole roadmap and acceptance authority. This
-file is the current operational handoff assembled from the final reports of
-the active implementation and review lanes. Resume from this file and the
-current branch; do not reconstruct intent from commit subjects alone.
+file is the current operational handoff updated from direct branch, test, and
+live-daemon evidence. Resume from this file and the current branch; do not
+reconstruct intent from commit subjects alone.
 
 ## Resume invariants
 
@@ -95,6 +95,21 @@ the commit as attribution evidence.
   contracts in `1be58ce45`. The root library, dashboard contract drift check,
   SDK codegen drift check, dashboard route tests, and migrated live-journey
   source compile passed.
+- The complete 403-binding default application profile is admitted under the
+  reviewed 448-binding budget in `a4ce95c0b`. Established tool primitives and
+  Observatory pair CLI with MCP, the missing GitHub stack binding is restored,
+  retained HTTP bindings publish their real routes, and fresh init uses the
+  admission-only status path. The complete catalog composition contract passed
+  10/10 and the serialized default discovery payload remains under its measured
+  640 KiB regression ceiling.
+- The real two-attempt Work product journey is restored in `e51e57469` with
+  exact repository selection, one immutable run deadline, canonical product
+  events, typed stale CAS, accepted-task closure even when runtime coverage is
+  unavailable, and observation-bounded graph reads. The live daemon journey
+  passed 1/1; Work route conformance passed 2/2; the policy suite, product graph
+  authority suite, generated dashboard contract check, Rust formatting, and
+  diff hygiene are green. Product publication remains distinct from executor
+  topology and cannot fabricate attempt hydration.
 - Recovered daemon session retrieval authority is byte-exact in
   `7e5812db71`.
 - Automatic fact application and receipts are checkpointed in `b1da03fbfc`,
@@ -124,9 +139,6 @@ the commit as attribution evidence.
   correlation, who worked on a task, provider-qualified session evidence,
   continuation, revocation, restart, stale graph, denied/unavailable, and
   current/as-of/evolution/forensic retrieval.
-- Re-run the migrated live Work loop after catalog composition admits the
-  profile. The current binary refuses `tracedecay init` before Work dispatch
-  because `profile.default` has 403 bindings against a 320-binding budget.
 - Repair the independent `test-transport` dashboard graph fixture before using
   the normal integration target: it still imports the private daemon service,
   calls removed relational `get_all_nodes`/`get_all_edges` APIs, and uses the
