@@ -13,14 +13,12 @@ use tracedecay_domain::{
     ProvenanceId, SanitizationReceiptV1, UtcMicros,
 };
 use tracedecay_store::{
-    FactStoreError, FactStoreResult, ProjectMemoryAutomaticFactEffectV1,
-    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
-    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1,
-    ProjectMemoryResult,
+    FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
+    ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
+    ProjectMemoryAutomaticFactReceiptPageV1, ProjectMemoryAutomaticFactReceiptV1,
+    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactMappingV1, ProjectMemoryResult,
 };
-
-pub(super) const PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPT_PAGE_LIMIT: usize = 100;
 
 fn automatic_fact_required_string(
     object: &serde_json::Map<String, Value>,
@@ -332,10 +330,10 @@ pub(in crate::store::memory) async fn list_project_memory_automatic_fact_receipt
     after_apply_id: Option<&ProvenanceId>,
     limit: usize,
 ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactReceiptPageV1> {
-    if limit == 0 || limit > PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPT_PAGE_LIMIT {
+    if limit == 0 || limit > MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS {
         return Err(FactStoreError::InvalidQueryLimit {
             limit,
-            max: PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPT_PAGE_LIMIT,
+            max: MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
         }
         .into());
     }
@@ -343,7 +341,7 @@ pub(in crate::store::memory) async fn list_project_memory_automatic_fact_receipt
     let fetch_limit =
         i64::try_from(limit.saturating_add(1)).map_err(|_| FactStoreError::InvalidQueryLimit {
             limit,
-            max: PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPT_PAGE_LIMIT,
+            max: MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
         })?;
     let state = state.map(project_memory_automatic_fact_state_label);
     let mut rows = match (state, after_apply_id) {

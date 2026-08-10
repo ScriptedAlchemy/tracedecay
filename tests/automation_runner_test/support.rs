@@ -795,7 +795,7 @@ impl AgentTaskBackend for SessionJsonBackend {
         request: &AgentTaskRequest,
     ) -> std::result::Result<AgentTaskResponse, tracedecay_automation::backend::AgentTaskError>
     {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.task, AgentTaskKind::SessionReflector);
         assert_request_contract(
             request,
@@ -803,8 +803,16 @@ impl AgentTaskBackend for SessionJsonBackend {
             "session_reflector:v2",
             "facts",
         );
-        assert!(request.prompt.contains("durable memory facts"));
-        assert_eq!(request.context["apply"], json!(false));
+        if call_index == 0 {
+            assert!(request.prompt.contains("durable memory facts"));
+        } else {
+            assert!(
+                request
+                    .prompt
+                    .contains("Repair the previous session fact JSON")
+            );
+        }
+        assert_eq!(request.context["apply"], json!(true));
         assert!(
             request.context["session_reflection_evidence"]["hits"]
                 .as_array()
@@ -1160,7 +1168,8 @@ pub(crate) fn fixture_open_options(project_root: &Path) -> TraceDecayOpenOptions
 pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
     fs::create_dir_all(project_root.join("src")).unwrap();
     fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n").unwrap();
-    TraceDecay::init_with_options(project_root, fixture_open_options(project_root))
+    let project_root = fs::canonicalize(project_root).unwrap();
+    TraceDecay::init_with_options(&project_root, fixture_open_options(&project_root))
         .await
         .unwrap()
 }

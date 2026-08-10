@@ -19,10 +19,10 @@ pub(super) mod dashboard;
 mod search;
 
 pub use automatic_facts::{
-    ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
-    ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
-    ProjectMemoryAutomaticFactReceiptPageV1, ProjectMemoryAutomaticFactReceiptV1,
-    ProjectMemoryAutomaticFactStateV1,
+    MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS, ProjectMemoryAutomaticFactApplyDispositionV1,
+    ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryAutomaticFactEffectV1,
+    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
 };
 pub use curation::{
     ProjectMemoryFactAddAliasV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,

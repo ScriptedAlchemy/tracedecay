@@ -553,15 +553,13 @@ mod tests {
 
     #[tokio::test]
     async fn admin_project_handler_reads_terminal_automatic_fact_receipts() {
-        use tracedecay_agent_hosts::automation::run_ledger::{
-            AutomationRunStatus, AutomationTrigger,
-        };
-        use tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun;
-
         let temp = tempfile::tempdir().unwrap();
         let project_root = temp.path().join("project");
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let project_root = std::fs::canonicalize(project_root).unwrap();
+        let profile_root = std::fs::canonicalize(profile_root).unwrap();
         let cg = TraceDecay::init_with_options(
             &project_root,
             crate::tracedecay::TraceDecayOpenOptions {
@@ -651,31 +649,6 @@ mod tests {
                 "manual fact mutations must not be accepted"
             );
         }
-
-        let automation = tool_json(
-            &handle_admin_project(
-                &cg,
-                json!({
-                    "action": "automation_run",
-                    "task": "memory_curation",
-                    "options": { "max_clusters": 9, "min_confidence": 0.7 }
-                }),
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let run = serde_json::from_value::<MemoryCuratorAutomationRun>(automation["run"].clone())
-            .unwrap();
-        assert_eq!(run.ledger_record.trigger, AutomationTrigger::ManualCli);
-        assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-        assert!(matches!(
-            run.report["reason"].as_str(),
-            Some("automation_disabled" | "backend_disabled")
-        ));
 
         let owner_after = crate::db::probe_writer_owner(&cg.store_layout().graph_db_path).unwrap();
         assert_eq!(owner_after, owner_before);

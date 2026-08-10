@@ -14,7 +14,7 @@ use super::super::envelope::{
 };
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION,
-    compatibility_legacy_timestamp, from_json, project_memory_now, project_memory_source_label,
+    compatibility_legacy_timestamp, from_json, project_memory_event_time, project_memory_now,
     row_f64, row_i64, row_optional_string, row_string, storage_error, storage_message,
 };
 use super::super::projection::{
@@ -24,10 +24,9 @@ use super::super::projection::{
 };
 use super::super::scoring::project_memory_millionths;
 use super::{
-    CompatibilityMirrorInsertV1, compatibility_commit_batch_tx, compatibility_initial_batch,
-    compatibility_legacy_mapping_for_new_fact, compatibility_mirror_feedback_tx,
-    compatibility_mirror_insert_tx, compatibility_payload_metadata, compatibility_sanitize_payload,
-    load_current_fact_tx, project_memory_feedback_action_label, project_memory_feedback_delta,
+    DEFAULT_TRUST, compatibility_commit_batch_tx, compatibility_mirror_feedback_tx,
+    compatibility_payload_metadata, compatibility_sanitize_payload, load_current_fact_tx,
+    project_memory_feedback_action_label, project_memory_feedback_delta,
     project_memory_update_feedback_projection_tx, query_fact_lineage_tx,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
@@ -36,8 +35,10 @@ use crate::db::publish_fact_feedback_finding_tx;
 use crate::privacy::sanitize_provider_metadata_text;
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
-    FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2, UtcMicros,
+    ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCurationActionV1, FactEventId,
+    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, PayloadAccessState, ProvenanceId, RetrievalAnchorRecordV2,
+    UtcMicros,
 };
 use tracedecay_store::{
     FactCommitOutcome, FactLineageCursor, FactLineageQuery, FactStoreError, FactStoreResult,
@@ -179,6 +180,78 @@ fn project_memory_feedback_details_availability(
             format!("unknown compatibility feedback detail availability {value:?}"),
         )),
     }
+}
+
+fn automatic_fact_initial_batch(
+    request: &ProjectMemoryFactAddCommandV1,
+    payload: tracedecay_domain::FactPayloadV1,
+    access: PayloadAccessState,
+    now: UtcMicros,
+) -> FactStoreResult<FactWriteBatch> {
+    let identity = FactIdentityMaterialV1::new(
+        request.owner().clone(),
+        FactIdentitySourceV1::Application {
+            operation_id: request.operation_id().clone(),
+        },
+    )?;
+    let fact_id = FactId::derive(&identity)?;
+    let assertion = FactAssertionV1::new(
+        fact_id.clone(),
+        request.owner().clone(),
+        FactAssertionKindV1::Initial,
+        payload,
+        Vec::new(),
+        now,
+        request.actor().cloned(),
+    )?;
+    let mut events = vec![FactLineageEventV1::new(
+        fact_id.clone(),
+        request.owner().clone(),
+        FactLineageEventKindV1::AssertionRecorded {
+            assertion_id: assertion.assertion_id().clone(),
+        },
+        now,
+        request.actor().cloned(),
+    )?];
+    let mut next_offset = 1;
+    if access != PayloadAccessState::Eligible {
+        events.push(FactLineageEventV1::new(
+            fact_id.clone(),
+            request.owner().clone(),
+            FactLineageEventKindV1::PayloadAccessChanged {
+                previous: PayloadAccessState::Eligible,
+                current: access,
+            },
+            project_memory_event_time(now, next_offset)?,
+            request.actor().cloned(),
+        )?);
+        next_offset += 1;
+    }
+    let default_trust = Confidence::new(DEFAULT_TRUST)?;
+    if request.default_trust() != default_trust {
+        events.push(FactLineageEventV1::new(
+            fact_id.clone(),
+            request.owner().clone(),
+            FactLineageEventKindV1::TrustChanged {
+                previous: default_trust,
+                current: request.default_trust(),
+                evidence_ids: Vec::new(),
+            },
+            project_memory_event_time(now, next_offset)?,
+            request.actor().cloned(),
+        )?);
+    }
+    FactWriteBatch::new(
+        fact_id,
+        request.owner().clone(),
+        Some(assertion),
+        events,
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+    )?
+    .with_identity_material(identity)
 }
 
 fn project_memory_feedback_action(
@@ -695,60 +768,19 @@ pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
             ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined,
         );
     };
-    let source = project_memory_source_label(request.source())?;
-    let (fact_id, assertion_id, event_id) = match compatibility_mirror_insert_tx(
-        transaction,
-        request.owner(),
-        &sanitized.payload,
-        &source,
-        request.default_trust(),
-        now,
-    )
-    .await?
-    {
-        CompatibilityMirrorInsertV1::Existing { fact_id, .. } => {
-            let key = OwnerKey::new(request.owner())?;
-            let fact = load_current_fact_tx(transaction, &key, request.owner(), &fact_id)
-                .await?
-                .ok_or_else(|| {
-                    storage_message(
-                        PROJECT_MEMORY_WRITE_OPERATION,
-                        "existing compatibility mirror has no canonical current fact",
-                    )
-                })?;
-            (
-                fact_id,
-                fact.active_assertion_id().clone(),
-                fact.last_event_id().clone(),
+    let batch = automatic_fact_initial_batch(request, sanitized.payload, sanitized.access, now)?;
+    let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
+    let fact_id = canonical_receipt.fact_id().clone();
+    let assertion_id = canonical_receipt
+        .active_assertion_id()
+        .cloned()
+        .ok_or_else(|| {
+            storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "applied automatic fact has no active assertion",
             )
-        }
-        CompatibilityMirrorInsertV1::Inserted(legacy_fact_id) => {
-            let (identity, mapping) =
-                compatibility_legacy_mapping_for_new_fact(request.owner(), legacy_fact_id, now)?;
-            let batch = compatibility_initial_batch(
-                request.owner(),
-                identity,
-                mapping.clone(),
-                sanitized.payload,
-                sanitized.access,
-                request.default_trust(),
-                request.actor().cloned(),
-                now,
-            )?;
-            let (receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-            let assertion_id = receipt.active_assertion_id().cloned().ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "applied compatibility fact has no active assertion",
-                )
-            })?;
-            (
-                mapping.fact_id().clone(),
-                assertion_id,
-                receipt.last_event_id().clone(),
-            )
-        }
-    };
+        })?;
+    let event_id = canonical_receipt.last_event_id().clone();
     let mapping = ProjectMemoryFactMappingV1::new(
         ProjectMemoryFactIdV1::new(request.owner().clone(), fact_id.clone())?,
         None,

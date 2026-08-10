@@ -23,9 +23,9 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_store::{
-    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
-    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactStore, ProjectMemoryFactTargetV1,
+    MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS, ProjectMemoryAutomaticFactReceiptV1,
+    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactAvailabilityV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactStore, ProjectMemoryFactTargetV1,
 };
 
 use super::backend::AgentTaskKind;
@@ -36,8 +36,6 @@ use crate::application::memory::MemoryApplication;
 use crate::errors::{Result, TraceDecayError};
 
 const AUTOMATION_OUTCOMES_FILENAME: &str = "automation_outcomes.json";
-const FACT_OUTCOME_PAGE_LIMIT: usize = 200;
-
 /// Outcome refreshes update independent halves of one snapshot. This lock
 /// serializes their read-modify-write critical sections for one dashboard.
 static AUTOMATION_OUTCOMES_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
@@ -420,7 +418,7 @@ pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
             .list_project_memory_automatic_fact_receipts(
                 None,
                 after_apply_id.clone(),
-                FACT_OUTCOME_PAGE_LIMIT,
+                MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
             )
             .await
             .map_err(|error| config_error(format!("list automatic fact receipts: {error}")))?;

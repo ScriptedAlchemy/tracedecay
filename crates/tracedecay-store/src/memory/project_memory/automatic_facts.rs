@@ -4,11 +4,12 @@ use tracedecay_domain::{
     DomainError, FactAssertionId, FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros,
 };
 
-use super::super::queries::MAX_CURRENT_LIMIT;
 use super::super::{
     FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_REASON_BYTES, validate_owned_fact_id,
 };
 use super::{ProjectMemoryFactAddCommandV1, ProjectMemoryFactMappingV1};
+
+pub const MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS: usize = 200;
 
 /// The only durable outcomes of an automatic fact apply. Candidate discovery
 /// and in-flight work are owned by the automation run receipt, never this
@@ -315,10 +316,10 @@ impl ProjectMemoryAutomaticFactReceiptPageV1 {
         next_after_apply_id: Option<ProvenanceId>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
-        if receipts.len() > MAX_CURRENT_LIMIT {
+        if receipts.len() > MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS {
             return Err(FactStoreError::InvalidQueryLimit {
                 limit: receipts.len(),
-                max: MAX_CURRENT_LIMIT,
+                max: MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
             });
         }
         let mut previous: Option<&ProvenanceId> = None;

@@ -5,6 +5,7 @@ use crate::application::memory::MemoryApplication;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::FactOwnerV1;
+use tracedecay_store::{ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1};
 
 async fn database(path: &Path, mode: TestDatabaseRuntimeMode) -> Database {
     crate::register_test_schema_installer();
@@ -32,6 +33,20 @@ fn admitted_fact(content: &str, validation: serde_json::Value) -> serde_json::Va
         "add_fact_request": request(content),
         "validation": validation,
     })
+}
+
+async fn canonical_fact_count(memory: &MemoryApplication<DatabaseFactStore<'_>>) -> usize {
+    memory
+        .list_project_memory_facts(
+            ProjectMemoryFactListQueryV1::new(memory.owner().clone(), None, None, None, 10)
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .facts()
+        .iter()
+        .filter(|projection| matches!(projection, ProjectMemoryFactProjectionV1::Available(_)))
+        .count()
 }
 
 #[tokio::test]
@@ -68,7 +83,7 @@ async fn automatic_apply_commits_a_terminal_receipt_with_canonical_evidence() {
         Some(serde_json::json!({"dedupe": {"source_index": 3}}))
     );
     assert!(receipt.applied_canonical_fact_id.is_some());
-    assert!(receipt.applied_fact_id.is_some());
+    assert!(receipt.applied_fact_id.is_none());
 
     let loaded = load_automatic_fact_receipt(&memory, &receipt.apply_id)
         .await
@@ -125,14 +140,7 @@ async fn automatic_apply_replays_the_exact_terminal_effect_without_another_fact(
     assert!(first.retry_error.is_none());
     assert!(replay.retry_error.is_none());
     assert_eq!(replay.receipts, first.receipts);
-    assert_eq!(
-        memory
-            .list_facts_untracked(None, None, 10)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(canonical_fact_count(&memory).await, 1);
 }
 
 #[tokio::test]
@@ -175,14 +183,7 @@ async fn automatic_apply_collapses_semantic_duplicates_without_losing_first_evid
             .len(),
         1
     );
-    assert_eq!(
-        memory
-            .list_facts_untracked(None, None, 10)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(canonical_fact_count(&memory).await, 1);
 }
 
 #[tokio::test]

@@ -11,6 +11,7 @@ use tracedecay_agent_hosts::automation::automatic_facts::{
     AutomaticFactReceipt, AutomaticFactState, list_automatic_fact_receipts,
     load_automatic_fact_receipt,
 };
+use tracedecay_store::MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS;
 
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
@@ -29,7 +30,11 @@ pub async fn list(
         },
         None => None,
     };
-    let limit = coerce_limit(params.limit, 50, 200) as usize;
+    let limit = coerce_limit(
+        params.limit,
+        50,
+        MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS as i64,
+    ) as usize;
     let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
     {
         Ok(memory) => memory,

@@ -10,8 +10,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
-    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptV1,
-    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactStore,
+    MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS, ProjectMemoryAutomaticFactEvidenceV1,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactStore,
 };
 
 use super::config_error;
@@ -21,8 +21,6 @@ use crate::application::memory::{
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::types::{AddFactRequest, MemoryCategory};
 use crate::privacy::sanitize_provider_metadata_text;
-
-const MAX_AUTOMATIC_FACT_RECEIPT_PAGE_SIZE: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,7 +150,7 @@ pub async fn list_automatic_fact_receipts<A: ProjectMemoryFactStore>(
         .list_project_memory_automatic_fact_receipts(
             state.map(authority_state),
             None,
-            limit.min(MAX_AUTOMATIC_FACT_RECEIPT_PAGE_SIZE),
+            limit.min(MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS),
         )
         .await
         .map_err(memory_application_error)?;

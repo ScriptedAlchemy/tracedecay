@@ -1904,6 +1904,8 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 mod authority_tests {
     use super::*;
 
+    mod automatic_fact_receipts_routes;
+
     struct UnavailableCodeGraphPort;
 
     impl crate::graph::CodeGraphReadAdmissionPort for UnavailableCodeGraphPort {

@@ -1,15 +1,17 @@
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
-use tracedecay_domain::PayloadAccessState;
+use tracedecay_domain::{FactCategoryV1, PayloadAccessState};
 use tracedecay_store::{
-    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
+    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery,
+    ProjectMemoryFactStore,
 };
 
 use crate::application::memory::MemoryApplication;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
-use crate::memory::types::{AddFactRequest, MemoryCategory, SearchFactsRequest};
+use crate::memory::types::{AddFactRequest, MemoryCategory};
 
 pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
@@ -221,14 +223,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             })? {
             None => None,
             Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
-                let Some(fact_id) = fact.legacy_fact_id() else {
-                    return Ok(quarantined_unavailable_exact_duplicate(
-                        proposal,
-                        "unavailable",
-                        "unknown",
-                    ));
-                };
-                Some(fact_id)
+                Some(fact.fact_id().as_str().to_owned())
             }
             Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
                 return Ok(quarantined_unavailable_exact_duplicate(
@@ -239,7 +234,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             }
         };
     if let Some(fact_id) = exact_duplicate_id {
-        let reason = format!("exact duplicate of fact #{fact_id}");
+        let reason = format!("exact duplicate of canonical fact {fact_id}");
         return Ok(quarantined_fact_with_validation(
             proposal,
             &reason,
@@ -247,19 +242,35 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
                 "status": "quarantined",
                 "reason": reason,
                 "dedupe": {
-                    "exact_duplicate_fact_id": fact_id,
+                    "exact_duplicate_canonical_fact_id": fact_id,
                 },
             }),
         ));
     }
+    let filter =
+        ProjectMemoryFactSearchFilterV1::new(Some(session_fact_category(category)), None, None)
+            .map_err(|error| {
+                TraceDecayError::database_operation(
+                    "construct session reflector canonical dedupe filter",
+                    error,
+                )
+            })?;
+    let query = ProjectMemoryFactSearchQuery::with_filter(
+        memory.owner().clone(),
+        ProjectMemoryFactSearchKindV1::Search,
+        Some(content.clone()),
+        filter,
+        None,
+        1,
+    )
+    .map_err(|error| {
+        TraceDecayError::database_operation(
+            "construct session reflector canonical dedupe query",
+            error,
+        )
+    })?;
     let matches = memory
-        .search_facts_untracked(SearchFactsRequest {
-            query: content.clone(),
-            category: Some(category),
-            limit: Some(1),
-            min_trust: None,
-            include_why: false,
-        })
+        .search_project_memory_facts(query)
         .await
         .map_err(|error| {
             TraceDecayError::database_operation(
@@ -267,17 +278,22 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
                 error,
             )
         })?;
-    let nearest = matches.first().map(|existing| {
+    let nearest = matches.hits().first().map(|existing| {
         json!({
-            "fact_id": existing.fact.fact_id,
-            "score": existing.score,
-            "category": existing.fact.category,
+            "canonical_fact_id": existing.fact().fact_id().as_str(),
+            "score": f64::from(existing.score_millionths()) / 1_000_000.0,
+            "category": existing.fact().category(),
         })
     });
-    if let Some(existing) = matches.first().filter(|result| result.score >= 0.90) {
+    if let Some(existing) = matches
+        .hits()
+        .first()
+        .filter(|result| result.score_millionths() >= 900_000)
+    {
+        let score = f64::from(existing.score_millionths()) / 1_000_000.0;
         let reason = format!(
-            "near duplicate of fact #{} with score {:.3}",
-            existing.fact.fact_id, existing.score
+            "near duplicate of canonical fact {} with score {score:.3}",
+            existing.fact().fact_id().as_str(),
         );
         return Ok(quarantined_fact_with_validation(
             proposal,
@@ -321,6 +337,17 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             },
         },
     })))
+}
+
+const fn session_fact_category(category: MemoryCategory) -> FactCategoryV1 {
+    match category {
+        MemoryCategory::General => FactCategoryV1::General,
+        MemoryCategory::UserPref => FactCategoryV1::UserPref,
+        MemoryCategory::Project => FactCategoryV1::Project,
+        MemoryCategory::Tool => FactCategoryV1::Tool,
+        MemoryCategory::Decision => FactCategoryV1::Decision,
+        MemoryCategory::CodeArea => FactCategoryV1::CodeArea,
+    }
 }
 
 /// Accepts numeric trust in `[0, 1]` plus the `low`/`medium`/`high` bucket

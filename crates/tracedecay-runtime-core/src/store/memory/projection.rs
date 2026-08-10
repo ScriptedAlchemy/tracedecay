@@ -254,7 +254,6 @@ pub(super) async fn load_project_memory_projections_tx(
         return Ok(Vec::new());
     }
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut projections = BTreeMap::new();
 
     for batch in fact_ids.chunks(PROJECT_MEMORY_PROJECTION_BATCH_SIZE) {
@@ -274,7 +273,7 @@ pub(super) async fn load_project_memory_projections_tx(
                     current_facts.projection_state,
                     current_facts.updated_at,
                     current_facts.vector_watermark_json,
-                    legacy_facts.fact_id,
+                    NULL AS legacy_fact_id,
                     facts.owner_json,
                     current_facts.trust_score,
                     current_facts.active_assertion_id,
@@ -289,7 +288,7 @@ pub(super) async fn load_project_memory_projections_tx(
                     current_facts.last_retrieved_at,
                     current_facts.last_recalled_at,
                     current_facts.last_feedback_at,
-                    legacy_facts.source
+                    NULL AS legacy_source
              FROM memory_v2_current_facts AS current_facts
              JOIN memory_v2_facts AS facts
                ON facts.fact_id = current_facts.fact_id
@@ -300,8 +299,6 @@ pub(super) async fn load_project_memory_projections_tx(
               AND payloads.fact_id = current_facts.fact_id
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
-             LEFT JOIN memory_facts AS legacy_facts
-               ON legacy_facts.canonical_fact_id = current_facts.fact_id
              WHERE current_facts.owner_kind = ?1
                AND current_facts.project_id = ?2
                AND facts.owner_json = ?3
@@ -330,24 +327,7 @@ pub(super) async fn load_project_memory_projections_tx(
                     .map(|value| from_json::<VectorWatermark>(value, QUERY_OPERATION))
                     .transpose()?,
             )?;
-            let legacy_mapping = match row_optional_i64(&row, 5, QUERY_OPERATION)? {
-                Some(legacy_fact_id) => {
-                    if row_optional_string(&row, 6, QUERY_OPERATION)?.as_deref()
-                        != Some(key.json.as_str())
-                    {
-                        return Err(FactStoreError::OwnerMismatch);
-                    }
-                    Some(LegacyFactMappingV1::new(
-                        owner.clone(),
-                        source_store_id.clone(),
-                        legacy_fact_id,
-                        fact_id.clone(),
-                        LegacyHistoryCoverageV1::Complete,
-                        UtcMicros(row_i64(&row, 12, QUERY_OPERATION)?),
-                    )?)
-                }
-                None => None,
-            };
+            let legacy_mapping = None;
             let compatibility_id = ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?;
             let mapping =
                 ProjectMemoryFactMappingV1::new(compatibility_id.clone(), legacy_mapping.clone())?;

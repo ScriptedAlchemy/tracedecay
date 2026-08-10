@@ -1,6 +1,8 @@
 use crate::support::*;
 #[cfg(feature = "test-transport")]
 use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
+#[cfg(feature = "test-transport")]
+use tracedecay_store::{ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery};
 
 #[test]
 fn session_reflector_options_have_no_storage_selector() {
@@ -26,6 +28,13 @@ async fn session_reflector_runner_skips_when_task_is_disabled() {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
         host_mode: AutomationHostMode::Standalone,
+        tasks: AutomationTaskSet {
+            session_reflector: AutomationTaskConfig {
+                enabled: false,
+                ..AutomationTaskConfig::default()
+            },
+            ..AutomationTaskSet::default()
+        },
         ..AutomationConfig::default()
     };
 
@@ -248,7 +257,32 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_session_evidence(&cg).await;
-    seed_duplicate_facts(&cg).await;
+    let seed_memory = tracedecay::application::memory::MemoryApplication::new(
+        project_memory_owner(&cg),
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
+    let seeded = record_session_automatic_facts(
+        &seed_memory,
+        "run.session-reflector-duplicate-seed",
+        Some("evidence.session-reflector-duplicate-seed"),
+        &[json!({
+            "add_fact_request": {
+                "content": "Cache invalidation policy must be explicit",
+                "category": "project",
+                "source": "session-reflector-test-seed",
+                "tags": ["cache", "policy"],
+                "entities": [],
+                "trust": 0.97,
+                "metadata": {},
+            }
+        })],
+    )
+    .await
+    .unwrap();
+    assert!(seeded.retry_error.is_none());
+    assert_eq!(seeded.receipts.len(), 1);
+    drop(seed_memory);
     let backend = SessionJsonBackend::new(json!({
         "facts": [
             {
@@ -376,7 +410,11 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 1);
+    assert_eq!(
+        backend.calls(),
+        2,
+        "invalid candidates receive one repair turn"
+    );
     assert_eq!(run.ledger_record.task, AgentTaskKind::SessionReflector);
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
     assert_eq!(run.ledger_record.accepted_count, 3);
@@ -433,11 +471,14 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
         tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
     )
     .unwrap();
-    let receipts = list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Applied), 10)
-        .await
-        .unwrap();
+    let receipts: Vec<_> =
+        list_automatic_fact_receipts(&memory, Some(AutomaticFactState::Applied), 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|receipt| receipt.run_id == run.run_id)
+            .collect();
     assert_eq!(receipts.len(), 3);
-    assert!(receipts.iter().all(|receipt| receipt.run_id == run.run_id));
     assert_eq!(
         receipts
             .iter()
@@ -519,7 +560,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     assert_eq!(handoff_payload["task"], json!("session_reflector"));
     assert_eq!(
         handoff_payload["next_actions"][0],
-        json!("inspect fact automation outcomes")
+        json!("inspect automatically applied fact receipts and canonical fact ids")
     );
     assert_eq!(
         handoff_payload["eval_replay"]["commands"]
@@ -528,20 +569,26 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
             .len(),
         1
     );
-    let after_apply = cg
-        .search_facts(tracedecay::memory::types::SearchFactsRequest {
-            query: "TraceDecay automation durable session reflection facts".to_string(),
-            category: Some(tracedecay::memory::types::MemoryCategory::Project),
-            limit: Some(10),
-            min_trust: Some(0.1),
-            include_why: false,
-        })
+    let after_apply = memory
+        .search_project_memory_facts(
+            ProjectMemoryFactSearchQuery::new(
+                memory.owner().clone(),
+                ProjectMemoryFactSearchKindV1::Search,
+                Some("TraceDecay automation durable session reflection facts".to_owned()),
+                None,
+                10,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert!(
         after_apply
+            .hits()
             .iter()
-            .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
+            .any(|hit| hit.fact().content().is_some_and(|content| {
+                content.contains("manage durable session reflection facts directly")
+            })),
         "session reflector should persist terminal automatic effects"
     );
 
@@ -632,7 +679,7 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
     assert_eq!(receipts.len(), 1);
     assert_eq!(receipts[0].run_id, HIGH_ENTROPY_RUN_ID);
     assert!(receipts[0].applied_canonical_fact_id.is_some());
-    assert!(receipts[0].applied_fact_id.is_some());
+    assert!(receipts[0].applied_fact_id.is_none());
     assert_eq!(
         load_automatic_fact_receipt(&memory, &receipts[0].apply_id)
             .await
@@ -641,20 +688,26 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
         Some(&receipts[0])
     );
 
-    let facts = cg
-        .search_facts(tracedecay::memory::types::SearchFactsRequest {
-            query: "automatic durable memory capture".to_string(),
-            category: Some(tracedecay::memory::types::MemoryCategory::Project),
-            limit: Some(10),
-            min_trust: Some(0.1),
-            include_why: false,
-        })
+    let facts = memory
+        .search_project_memory_facts(
+            ProjectMemoryFactSearchQuery::new(
+                memory.owner().clone(),
+                ProjectMemoryFactSearchKindV1::Search,
+                Some("automatic durable memory capture".to_owned()),
+                None,
+                10,
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     assert!(
         facts
+            .hits()
             .iter()
-            .any(|hit| hit.fact.source.as_deref() == Some("session_reflector")),
+            .any(|hit| hit.fact().content().is_some_and(|content| {
+                content.contains("accepted session memories automatically")
+            })),
         "the terminal receipt must correspond to a searchable canonical fact"
     );
 }

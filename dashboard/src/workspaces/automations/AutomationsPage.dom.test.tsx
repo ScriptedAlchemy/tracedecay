@@ -14,7 +14,9 @@ describe("AutomationsPage automatic outcomes", () => {
 
     expect(await screen.findByText("configuration revision")).toBeTruthy();
     const outcomes = await settledPanel("Fact application outcomes");
-    expect(within(outcomes).getByText("A recorded project fact.")).toBeTruthy();
+    expect(
+      within(outcomes).getAllByText("A recorded project fact."),
+    ).toHaveLength(2);
     expect(within(outcomes).getByText("applied")).toBeTruthy();
     expect(within(outcomes).getByText("quarantined")).toBeTruthy();
     expect(
