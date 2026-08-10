@@ -218,8 +218,19 @@ the commit as attribution evidence.
   contaminated `4e4715c09` checkpoint is preserved without its TaskSession
   reversions.
 - Duplicate receipt/revision identity is approved through `642b0221ae`.
-- Native topology recovery is checkpointed in `5e3f72b738`, but its review is
-  still rejected on the exact issues below.
+- Native topology recovery now matches its persisted authority. `11f77208f`
+  replaces all projected rows for one project/repository/scope-set identity,
+  so a newer scope-set revision makes the prior exact read stale instead of
+  retaining parallel revisions. `426c235ab` deletes the hand-written native
+  MCP request schemas and generates all six from the canonical Rust request
+  types already used by the TypeScript SDK. `166e8212a` mounts the exact
+  branch-revision and worktree-occupancy readers in session-sync restart
+  validation and adds a real registered-store close/reopen journey. The exact
+  replacement regression passed 1/1, the linked-worktree topology suite passed
+  6/6, MCP schema parity and exact-selection checks passed 1/1 each, and the
+  complete session-sync focused module passed 12/12. The cleanup recovery
+  owner/caller, executable registry reexport/SDK mount, and extracted native
+  MCP modules were verified present and compiling rather than recreated.
 - Remote transferred-frame quota enforcement already exists in `6642b45803`.
 - The P0 GitHub stack coordinator and anchored corpus remain restored in
   `c70556fe38` and `ec35c90497`; native stack transition producers are in
@@ -260,23 +271,6 @@ the commit as attribution evidence.
   receipts, reset-required, and post-restart reconciliation as externally
   observed typed terminals. The focused owner/application tests prove their
   internal mappings but are not a restart or end-to-end transport receipt.
-
-### Native topology and executable projection
-
-- Restore or replace the missing `cleanup_recovery_roots` caller/owner contract
-  so the daemon invocation compiles.
-- Make topology retention match persisted authority: the store keeps one
-  revision per scope-set ID, while the current projector retains multiple
-  revisions and becomes stale after restart.
-- Generate TypeScript/MCP projection schemas from the canonical Rust source;
-  include scope-set ID/revision and `declared_revision`, and delete the manual
-  duplicate schema.
-- Mount real production callers/reexports for the native executable binding
-  registry and exact topology readers; they remain contract/test-only.
-- Extract the native MCP definition from the already oversized
-  `src/mcp/tools/definitions.rs` rather than growing it.
-- Add persisted registry plus session-sync restart evidence. Preserve the
-  repaired blocking boundary and typed stale/denied/unavailable outcomes.
 
 ### Source edit and graph evidence
 
