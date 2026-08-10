@@ -14,22 +14,30 @@
  * real accounting state, and the plate
  * renders it as one instead of as `$0.00`.
  */
-import { CostsReadModelV1Schema, type CostsReadModelV1 } from '../../contracts/generated.ts';
+import {
+  CostsReadModelV1Schema,
+  type CostsReadModelV1,
+  type MetricValueV1,
+  type ProviderLatencyReadModelV1,
+} from '../../contracts/generated.ts';
 import { CanonicalReadModelSection } from '../../ui/CanonicalReadModelSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
-import { StateChip } from '../../ui/StateChip';
+import { MetricPlate } from '../../ui/MetricPlate.tsx';
+
+const COSTS_QUERY_KEY = ['costs', 'canonical'] as const;
+const COSTS_URL = '/api/costs';
 
 export function CanonicalCosts() {
   return (
     <CanonicalReadModelSection<CostsReadModelV1>
       title="Canonical cost observations"
       blurb={
-        'usage and estimated cost with their eligible populations, coverage, and pricing' +
-        ' provenance — the same Plan 26 read model the CLI and MCP serve'
+        'usage, estimated cost, and provider latency with their eligible populations,' +
+        ' coverage, and provenance — the same Plan 26 read model the CLI and MCP serve'
       }
-      queryKey={['costs', 'canonical']}
-      url="/api/costs"
+      queryKey={COSTS_QUERY_KEY}
+      url={COSTS_URL}
       schema={CostsReadModelV1Schema}
       refetchInterval={60_000}
       loadingDetail="requesting canonical cost observations"
@@ -38,9 +46,98 @@ export function CanonicalCosts() {
       emptyLabel="the read model carried no cost measurements — this is a payload with no metrics, not a zero bill"
       horizonAttributes={(model) => ({ 'data-costs-current': model.current ? 'true' : 'false' })}
       horizonFields={(model) => <HorizonFields model={model} />}
-      footer={<LatencyBreakdown />}
+      footer={(model) => <ProviderLatencyCohorts cohorts={model.latency} />}
     />
   );
+}
+
+/**
+ * Provider/model identity belongs to the cohort, not to its percentile cells.
+ * Keep each cohort around its own canonical metric list from the model already
+ * decoded by `CanonicalReadModelSection`.
+ */
+function ProviderLatencyCohorts({
+  cohorts,
+}: {
+  cohorts: ProviderLatencyReadModelV1[];
+}) {
+  return (
+    <section className="flex min-w-0 flex-col gap-3" aria-label="Provider latency cohorts">
+      <div className="flex min-w-0 items-center gap-2">
+        <h3 className="td-legend truncate">provider latency cohorts</h3>
+        <span aria-hidden className="td-rule" />
+        <span className="shrink-0 text-3xs text-text-muted tabular">
+          {cohorts.length.toLocaleString()} reported
+        </span>
+      </div>
+      {cohorts.length === 0 ? (
+        <p className="text-2xs text-text-secondary">
+          the canonical read returned no provider latency cohorts
+        </p>
+      ) : (
+        cohorts.map((cohort, index) => {
+          const cohortKey = providerLatencyCohortKey(cohort, index);
+          return (
+            <section
+              key={cohortKey}
+              className="flex min-w-0 flex-col gap-2 border border-edge-subtle bg-surface-0 p-3"
+              data-provider-latency-cohort={cohortKey}
+            >
+              <div className="flex min-w-0 flex-col gap-1">
+                <h4 className="text-xs font-semibold text-text-primary">
+                  {providerLatencyHeading(cohort)}
+                </h4>
+                <p className="text-3xs text-text-muted">
+                  identity provenance {cohort.identity_provenance.source} ·{' '}
+                  {cohort.identity_provenance.source_revision} ·{' '}
+                  {cohort.identity_provenance.watermark}
+                </p>
+              </div>
+              <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                {latencyMetrics(cohort).map((metric) => (
+                  <MetricPlate key={`${cohortKey}:${metric.metric}`} metric={metric} />
+                ))}
+              </ul>
+            </section>
+          );
+        })
+      )}
+    </section>
+  );
+}
+
+function latencyMetrics(cohort: ProviderLatencyReadModelV1): MetricValueV1[] {
+  return [
+    cohort.queue,
+    cohort.start,
+    cohort.first_progress,
+    cohort.service,
+    cohort.terminal,
+  ].flatMap((distribution) => [distribution.p50, distribution.p95, distribution.p99]);
+}
+
+function providerLatencyHeading(cohort: ProviderLatencyReadModelV1): string {
+  const identity =
+    cohort.provider === null && cohort.model === null
+      ? 'provider/model unavailable'
+      : `${cohort.provider ?? 'provider unavailable'} · ${cohort.model ?? 'model unavailable'}`;
+  return cohort.identity_unavailable_reason === null
+    ? identity
+    : `${identity} · ${cohort.identity_unavailable_reason}`;
+}
+
+function providerLatencyCohortKey(
+  cohort: ProviderLatencyReadModelV1,
+  index: number,
+): string {
+  return [
+    cohort.provider ?? 'provider-unavailable',
+    cohort.model ?? 'model-unavailable',
+    cohort.identity_unavailable_reason ?? 'identity-known',
+    cohort.identity_provenance.source,
+    cohort.identity_provenance.watermark,
+    index,
+  ].join(':');
 }
 
 /** The costs projector is asked for an all-time window, which reaches the wire
@@ -64,45 +161,5 @@ function HorizonFields({ model }: { model: CostsReadModelV1 }) {
         {model.current ? 'current' : 'not current'} · watermark {model.watermark}
       </Field>
     </>
-  );
-}
-
-/**
- * Latency, stated as absent rather than drawn.
- *
- * Plan 11 asks Costs for a latency breakdown alongside tokens and cost. The
- * canonical cost projection has no latency measurement in it: `CostsReadModelV1`
- * carries `usage` and `estimated_cost` only, and neither provider-usage
- * observations nor the savings ledger record a per-call duration for the projector
- * to measure. There is therefore no provider or model latency anywhere behind
- * this surface.
- *
- * The one latency TraceDecay does measure is retrieval-side — the Plan 37
- * feedback percentiles — and it answers a different question about a different
- * population. Borrowing it to fill this panel would be a fabricated provider
- * latency, so this says where the real measurement lives instead and leaves the
- * gap named.
- */
-function LatencyBreakdown() {
-  return (
-    <section
-      className="flex flex-col gap-1.5 border border-edge-subtle bg-surface-1 px-3 py-2.5"
-      aria-label="Latency breakdown"
-      data-costs-latency="unavailable"
-    >
-      <div className="flex min-w-0 items-center gap-2">
-        <h3 className="td-legend truncate">latency breakdown</h3>
-        <span aria-hidden className="td-rule" />
-      </div>
-      <StateChip kind="unsupported" detail="no provider latency is measured" />
-      <p className="text-3xs leading-snug text-text-muted">
-        The canonical cost projection measures usage and estimated cost only. Neither the
-        provider-usage observations nor the savings ledger record a per-call duration, so no
-        provider or model latency exists to break down here. Retrieval-side latency is
-        measured, and is reported by Observatory as{' '}
-        <span className="td-value">feedback latency p95</span> over its own population — it is
-        not a provider timing and is not shown here as one.
-      </p>
-    </section>
   );
 }

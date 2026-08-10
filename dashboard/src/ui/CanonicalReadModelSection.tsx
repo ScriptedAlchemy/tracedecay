@@ -56,9 +56,9 @@ export function CanonicalReadModelSection<T>({
   /** `data-*` markers the horizon line carries for this projection. */
   horizonAttributes: (model: T) => Record<string, string>;
   horizonFields: (model: T) => ReactNode;
-  /** Rendered under the metrics, for a surface that has something further to
-   * state about what it does not measure. */
-  footer?: ReactNode;
+  /** Rendered under the metrics from the same decoded model, for a projection
+   * with additional typed evidence that does not belong in the flat metric list. */
+  footer?: (model: T) => ReactNode;
 }) {
   const scope = useScope((s) => s.scope);
   const read = useQuery({
@@ -94,7 +94,7 @@ export function CanonicalReadModelSection<T>({
             </dl>
             <div className={cn('px-4 py-3', footer && 'flex flex-col gap-4')}>
               <MetricGroups metrics={metrics(model)} emptyLabel={emptyLabel} />
-              {footer}
+              {footer?.(model)}
             </div>
           </>
         );

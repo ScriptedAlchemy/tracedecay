@@ -1,7 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { MetricValueV1 } from '../../contracts/generated.ts';
+import type {
+  MetricValueV1,
+  ProviderLatencyReadModelV1,
+} from '../../contracts/generated.ts';
 import { CanonicalCosts } from './CanonicalCosts.tsx';
 
 /**
@@ -10,15 +13,17 @@ import { CanonicalCosts } from './CanonicalCosts.tsx';
  * `provider_cost: null` and `pricing_revision_unavailable` — and $0.00 is the
  * single most damaging thing this surface could print in its place.
  *
- * Latency is the other assertion class here. The projection carries no latency
- * measurement at all, so the panel must say that rather than borrowing the
- * retrieval-side percentile Observatory reports over a different population.
+ * Latency is the other assertion class here. The projection carries retained
+ * operation-resource percentiles per provider/model cohort; when the route has
+ * no authorized project scope it emits one typed unavailable cohort instead of
+ * omitting latency or borrowing Observatory's retrieval-side percentile.
  */
 
 const NOW_MICROS = 1_753_003_600_000_000;
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe('Canonical cost observations', () => {
@@ -85,20 +90,45 @@ describe('Canonical cost observations', () => {
     expect(screen.queryByText(/1970-01-01/)).toBeNull();
   });
 
-  it('states that no provider latency is measured instead of borrowing one', async () => {
+  it('renders typed scope-unavailable provider latency without a zero or borrowed value', async () => {
     renderCosts(
       readModel({ usage: [], estimated_cost: [pricedCost()] }),
     );
 
-    expect(await screen.findByText('latency breakdown')).toBeTruthy();
-    const panel = document.querySelector('[data-costs-latency="unavailable"]');
-    expect(panel?.textContent).toContain('no provider latency is measured');
-    expect(panel?.textContent).toContain(
-      'Neither the provider-usage observations nor the savings ledger record a per-call duration',
+    expect(await screen.findByText('provider queue latency p50')).toBeTruthy();
+    const plate = document.querySelector('[data-metric="provider_queue_latency_p50"]');
+    expect(plate?.getAttribute('data-metric-available')).toBe('false');
+    expect(plate?.textContent).toContain('provider_latency_scope_unavailable');
+    expect(plate?.textContent).toContain('provider operation resource observations');
+    expect(plate?.textContent).not.toContain('0 microseconds');
+    expect(screen.queryByText('feedback latency p95')).toBeNull();
+  });
+
+  it('keeps repeated latency metrics separated by provider cohort and names unresolved identity', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    renderCosts(
+      readModel({
+        usage: [],
+        estimated_cost: [pricedCost()],
+        latency: [
+          measuredLatency('anthropic', 'claude-sonnet-4', null),
+          measuredLatency(null, null, 'provider_model_identity_unavailable'),
+        ],
+      }),
     );
-    // Retrieval latency is named as living elsewhere, not shown as a figure.
-    expect(panel?.textContent).toContain('feedback latency p95');
-    expect(panel?.textContent).not.toMatch(/\dms/);
+
+    expect(
+      await screen.findByRole('heading', { name: 'anthropic · claude-sonnet-4' }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('heading', {
+        name: 'provider/model unavailable · provider_model_identity_unavailable',
+      }),
+    ).toBeTruthy();
+    expect(document.querySelectorAll('[data-metric="provider_queue_latency_p50"]')).toHaveLength(2);
+    expect(consoleError.mock.calls.flat().join(' ')).not.toContain(
+      'Encountered two children with the same key',
+    );
   });
 
   it('reports an unreachable daemon as offline rather than as a zero bill', async () => {
@@ -137,15 +167,18 @@ function readModel(overrides: {
   estimated_cost: MetricValueV1[];
   pricing_revision?: string | null;
   horizon?: { since_micros: number; until_micros: number };
+  latency?: ProviderLatencyReadModelV1[];
 }) {
+  const horizon = overrides.horizon ?? { since_micros: 0, until_micros: NOW_MICROS };
   return {
     authorized_scope_ref: 'all',
-    horizon: overrides.horizon ?? { since_micros: 0, until_micros: NOW_MICROS },
+    horizon,
     watermark: 'provider-usage:8412;savings:1753000000',
     observed_at_micros: NOW_MICROS,
     current: false,
     usage: overrides.usage,
     estimated_cost: overrides.estimated_cost,
+    latency: overrides.latency ?? [scopeUnavailableLatency(horizon)],
     pricing_revision: overrides.pricing_revision ?? null,
   };
 }
@@ -226,5 +259,131 @@ function pricedCost(): MetricValueV1 {
     ...costMetric('provider_cost', null, 'usd', 'priced_provider_usage_events', null),
     unavailable_reason: 'pricing_revision_unavailable',
     uncertainty: { lower: null, upper: null, reason: 'pricing_revision_unavailable' },
+  };
+}
+
+/** The exact cohort emitted by `unavailable_provider_latency` when the Costs
+ * route has no project scope to authorize an observability read. */
+function scopeUnavailableLatency(horizon: {
+  since_micros: number;
+  until_micros: number;
+}): ProviderLatencyReadModelV1 {
+  const reason = 'provider_latency_scope_unavailable';
+  const provenance = {
+    source: 'observability_envelope' as const,
+    source_revision: 'operation-resource-observation.v1',
+    projector_revision: 'costs-provider-latency-projector.v1',
+    watermark: 'analytics:unavailable',
+  };
+  const metric = (stage: string, percentile: number): MetricValueV1 => ({
+    descriptor_revision: 'provider-latency.v1',
+    metric: `provider_${stage}_latency_p${percentile}`,
+    value: null,
+    unit: 'microseconds',
+    denominator: 'provider_operation_resource_observations',
+    denominator_value: null,
+    coverage: {
+      state: 'unknown',
+      eligible: null,
+      observed: 0,
+      completed: 0,
+      censored: 0,
+      excluded: 0,
+      unknown: 1,
+    },
+    evidence_class: 'measurement',
+    provenance,
+    cohort: {
+      descriptor_revision: 'provider_operation_resource_observations.v1',
+      eligible_population: 'provider_operation_resource_observations',
+    },
+    temporal: { horizon, baseline_watermark: null, delta: null },
+    uncertainty: { lower: null, upper: null, reason },
+    calibration: null,
+    unavailable_reason: reason,
+  });
+  const distribution = (stage: string) => ({
+    p50: metric(stage, 50),
+    p95: metric(stage, 95),
+    p99: metric(stage, 99),
+  });
+  return {
+    provider: null,
+    model: null,
+    identity_provenance: provenance,
+    identity_unavailable_reason: reason,
+    queue: distribution('queue'),
+    start: distribution('start'),
+    first_progress: distribution('first_progress'),
+    service: distribution('service'),
+    terminal: distribution('terminal'),
+  };
+}
+
+function measuredLatency(
+  provider: string | null,
+  model: string | null,
+  identityReason: string | null,
+): ProviderLatencyReadModelV1 {
+  const horizon = { since_micros: 0, until_micros: NOW_MICROS };
+  const metricProvenance = {
+    source: 'observability_envelope' as const,
+    source_revision: 'operation-resource-observation.v1',
+    projector_revision: 'costs-provider-latency-projector.v1',
+    watermark: 'operations:42',
+  };
+  const metric = (stage: string, percentile: number): MetricValueV1 => {
+    const value = 1_000 + percentile;
+    return {
+      descriptor_revision: 'provider-latency.v1',
+      metric: `provider_${stage}_latency_p${percentile}`,
+      value,
+      unit: 'microseconds',
+      denominator: 'provider_operation_resource_observations',
+      denominator_value: 4,
+      coverage: {
+        state: 'known',
+        eligible: 4,
+        observed: 4,
+        completed: 4,
+        censored: 0,
+        excluded: 0,
+        unknown: 0,
+      },
+      evidence_class: 'measurement',
+      provenance: metricProvenance,
+      cohort: {
+        descriptor_revision: 'provider_operation_resource_observations.v1',
+        eligible_population: 'provider_operation_resource_observations',
+      },
+      temporal: { horizon, baseline_watermark: null, delta: null },
+      uncertainty: { lower: value, upper: value, reason: null },
+      calibration: null,
+      unavailable_reason: null,
+    };
+  };
+  const distribution = (stage: string) => ({
+    p50: metric(stage, 50),
+    p95: metric(stage, 95),
+    p99: metric(stage, 99),
+  });
+  return {
+    provider,
+    model,
+    identity_provenance: {
+      source: provider === null ? 'observability_envelope' : 'provider_usage_observation',
+      source_revision:
+        provider === null
+          ? 'operation-resource-observation.v1'
+          : 'provider-usage-observation.v1',
+      projector_revision: 'costs-provider-latency-projector.v1',
+      watermark: 'operations:42',
+    },
+    identity_unavailable_reason: identityReason,
+    queue: distribution('queue'),
+    start: distribution('start'),
+    first_progress: distribution('first_progress'),
+    service: distribution('service'),
+    terminal: distribution('terminal'),
   };
 }

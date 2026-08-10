@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { FIXTURES, resolveFixture } from '../../../stories/fixtures/data.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { CostsPage } from './CostsPage.tsx';
@@ -113,7 +114,8 @@ describe('CostsPage truth claims', () => {
     // ...and the independent canonical projection still renders its own
     // measurements rather than being blanked by its neighbour.
     expect(await screen.findByText('provider tokens')).toBeTruthy();
-    expect(screen.getByText('latency breakdown')).toBeTruthy();
+    expect(screen.getByText('provider queue latency p50')).toBeTruthy();
+    expect(screen.getAllByText('provider_latency_scope_unavailable').length).toBeGreaterThan(0);
   });
 
   it('discloses that project savings are a capped top slice', async () => {
@@ -132,6 +134,9 @@ describe('CostsPage truth claims', () => {
   it('renders topology accounting from the canonical descriptor read without inventing a zero', async () => {
     const payload = savingsOverviewPayload();
     const topology = topologyMetricsPayload();
+    expect(resolvedWorkScope().scope_digest).toBe(
+      'sha256:e0f55213520e40ec75c565c7e153a8d6452d09ac4abac1a4a4312ca4abcd3bcb',
+    );
 
     const fetch = renderCosts(payload, topology);
 
@@ -210,7 +215,33 @@ function savingsOverviewPayload(): Record<string, unknown> {
 function workEnvelope(payload: unknown) {
   return {
     kind: 'success',
-    value: { outcome: { outcome: 'evidence', value: { payload } } },
+    value: {
+      scope: resolvedWorkScope(),
+      outcome: { outcome: 'evidence', value: { payload } },
+    },
+  };
+}
+
+/** Test equivalent of `ResolvedScope::compute_digest`: transparent domain ids
+ * and the optional ref serialize as one canonical JSON tuple. */
+function resolvedWorkScope() {
+  const project_id = 'project.tracedecay';
+  const repository_id = 'repository.tracedecay';
+  const worktree_id = 'worktree.tracedecay';
+  const reference = null;
+  const canonical = JSON.stringify([
+    'tracedecay.application.scope.v1',
+    project_id,
+    repository_id,
+    worktree_id,
+    reference,
+  ]);
+  return {
+    project_id,
+    repository_id,
+    worktree_id,
+    reference,
+    scope_digest: `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
   };
 }
 
