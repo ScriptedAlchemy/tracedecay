@@ -53,7 +53,7 @@ pub(super) fn validate_catalog_bindings() -> Result<(), ApplicationSurfaceAdapte
         let RouteExposureV1::Public { route_path, .. } = binding.exposure() else {
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         };
-        if route_path != operation.route_path() {
+        if route_path != operation.application_route_path() {
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         }
     }
@@ -221,8 +221,8 @@ mod tests {
     use tower::ServiceExt;
     use tracedecay_domain::ProjectId;
 
-    use crate::application::operation_stream::OperationEventAuthority;
     use crate::application_surface::http_application_router_with_executor;
+    use tracedecay_usecases::operation_stream::OperationEventAuthority;
 
     /// Records the daemon operation every mounted multi-root route reaches,
     /// then refuses it. The refusal is the point: it proves the HTTP path
@@ -273,7 +273,7 @@ mod tests {
             &self,
             _subject_digest: tracedecay_domain::ManifestDigest,
             _observed_at: tracedecay_domain::UtcMicros,
-            _event: crate::application::feedback::observations::FeedbackSourceEventV1,
+            _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
         ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>>
         {
             Box::pin(async { Ok(()) })

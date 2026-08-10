@@ -1,9 +1,10 @@
 //! Blocking local/remote client for the canonical HTTP and SSE lifecycle.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::io::{BufRead, BufReader};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -14,7 +15,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracedecay_tool_catalog::{
-    CancellationPoint, ReceiptContract, ReconciliationContract, TerminalState,
+    CancellationPoint, ReceiptContract, ReconciliationContract, SdkTransportBindingV1,
+    TerminalState,
 };
 
 use crate::operations::{OperationTransport, TypedOperation};
@@ -248,7 +250,13 @@ impl Client {
                 transport: "mcp_tool",
             });
         };
-        let response = self.request_route(route, &request, options)?;
+        let response = self.request_route(
+            Operation::OPERATION_ID,
+            Operation::BINDING_ID,
+            route,
+            &request,
+            options,
+        )?;
         let binding = response
             .envelope()
             .get("binding_id")
@@ -414,10 +422,13 @@ impl Client {
 
     fn request_route(
         &self,
+        operation_id: &str,
+        binding_id: &str,
         route: &str,
         request: &Value,
         options: OperationRequestOptions,
     ) -> Result<ApplicationResponse, ClientError> {
+        admit_canonical_sdk_http_binding(operation_id, binding_id, route)?;
         let route = route.strip_prefix("/application").ok_or_else(|| {
             ClientError::InvalidConfiguration(
                 "typed operation route must begin with /application".into(),
@@ -579,6 +590,56 @@ impl Client {
                 message: "daemon returned an inconsistent HTTP envelope".into(),
             }),
         }
+    }
+}
+
+type CanonicalSdkHttpBindings = BTreeMap<String, (String, String)>;
+
+fn admit_canonical_sdk_http_binding(
+    operation_id: &str,
+    binding_id: &str,
+    route: &str,
+) -> Result<(), ClientError> {
+    static BINDINGS: OnceLock<Result<CanonicalSdkHttpBindings, String>> = OnceLock::new();
+    let bindings = BINDINGS
+        .get_or_init(|| {
+            let registry = tracedecay_application::sdk_executable_binding_registry()
+                .map_err(|error| error.to_string())?;
+            Ok(registry
+                .iter()
+                .filter_map(|availability| {
+                    let binding = availability.binding()?;
+                    let SdkTransportBindingV1::Http { route_path } = binding.transport() else {
+                        return None;
+                    };
+                    Some((
+                        binding.operation_id().as_str().to_owned(),
+                        (
+                            binding.binding_id().as_str().to_owned(),
+                            route_path.to_owned(),
+                        ),
+                    ))
+                })
+                .collect())
+        })
+        .as_ref()
+        .map_err(|error| {
+            ClientError::InvalidConfiguration(format!(
+                "canonical SDK registry is unavailable: {error}"
+            ))
+        })?;
+    let admitted =
+        bindings
+            .get(operation_id)
+            .is_some_and(|(canonical_binding_id, canonical_route)| {
+                canonical_binding_id == binding_id && canonical_route == route
+            });
+    if admitted {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidConfiguration(format!(
+            "{operation_id} is not an HTTP binding in the canonical SDK registry"
+        )))
     }
 }
 

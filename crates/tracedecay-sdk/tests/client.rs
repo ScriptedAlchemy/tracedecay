@@ -1,7 +1,8 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedecay_sdk::client::{
@@ -10,7 +11,8 @@ use tracedecay_sdk::client::{
 };
 use tracedecay_sdk::operation::DeadlineBehavior;
 use tracedecay_sdk::operations::{
-    ApplicationGitStatus, CodeExactOccurrence, TypedOperation, WorkRetrieveEvidence,
+    ApplicationGitStatus, CodeExactOccurrence, MultiRootExecute, MultiRootScopeSetCompareAndSwap,
+    MultiRootScopeSetRead, OperationTransport, TypedOperation, WorkRetrieveEvidence,
     WorkflowListDefinitions, WorkflowRegisterDefinition,
 };
 
@@ -74,6 +76,36 @@ fn serve(responses: Vec<String>) -> (String, thread::JoinHandle<Vec<String>>) {
         requests
     });
     (format!("http://{address}"), task)
+}
+
+fn serve_until_stopped(
+    responses: Vec<String>,
+) -> (String, mpsc::Sender<()>, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = mpsc::channel();
+    let task = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for response in responses {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if !matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                            return requests;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("test HTTP listener failed: {error}"),
+                }
+            };
+            requests.push(request(&mut stream));
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        requests
+    });
+    (format!("http://{address}"), stop, task)
 }
 
 fn json_response(status: &str, value: serde_json::Value) -> String {
@@ -368,6 +400,117 @@ fn callable_code_uses_the_mounted_http_route_without_an_mcp_transport() {
             .contains("POST /projects/project.sdk/application/code/code_exact_occurrence HTTP/1.1")
     );
     assert!(requests[0].contains("sdk_executable_binding_registry"));
+}
+
+#[test]
+fn multi_root_operations_reach_their_exact_project_application_routes() {
+    let response = json_response("200 OK", json!({}));
+    let (base_url, stop_server, server) =
+        serve_until_stopped(vec![response.clone(), response.clone(), response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+
+    let read = serde_json::from_value::<<MultiRootScopeSetRead as TypedOperation>::Request>(
+        json!({"scope_set_id": "scope-set.sdk"}),
+    )
+    .expect("canonical scope-set read request");
+    let compare_and_swap = serde_json::from_value::<
+        <MultiRootScopeSetCompareAndSwap as TypedOperation>::Request,
+    >(json!({
+        "scope_set_id": "scope-set.sdk",
+        "expected_revision": null,
+        "roots": [{"project_id": "project.sdk-root", "root": "/project/sdk-root"}]
+    }))
+    .expect("canonical scope-set compare-and-swap request");
+    let execute = serde_json::from_value::<<MultiRootExecute as TypedOperation>::Request>(json!({
+        "scope_set_id": "scope-set.sdk",
+        "scope_set_revision": 1,
+        "scope_set_digest": format!("sha256:{}", "a".repeat(64)),
+        "operation": {"kind": "query", "request": {}},
+        "page": 0,
+        "continuation": null
+    }))
+    .expect("canonical multi-root execute request");
+
+    for result in [
+        client.execute::<MultiRootScopeSetRead>(&read).map(|_| ()),
+        client
+            .execute::<MultiRootScopeSetCompareAndSwap>(&compare_and_swap)
+            .map(|_| ()),
+        client.execute::<MultiRootExecute>(&execute).map(|_| ()),
+    ] {
+        assert!(
+            matches!(result, Err(ClientError::Protocol { .. })),
+            "the malformed fixture response must fail only after HTTP admission"
+        );
+    }
+
+    let _ = stop_server.send(());
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3, "every typed operation must issue HTTP");
+    assert!(
+        requests[0].starts_with(
+            "POST /projects/project.sdk/application/multi-root/scope-set/read HTTP/1.1"
+        )
+    );
+    assert!(requests[1].starts_with(
+        "POST /projects/project.sdk/application/multi-root/scope-set/compare-and-swap HTTP/1.1"
+    ));
+    assert!(
+        requests[2]
+            .starts_with("POST /projects/project.sdk/application/multi-root/execute HTTP/1.1")
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NonSdkHttpOperation;
+
+impl TypedOperation for NonSdkHttpOperation {
+    type Request = <MultiRootScopeSetRead as TypedOperation>::Request;
+    type Result = <MultiRootScopeSetRead as TypedOperation>::Result;
+
+    const OPERATION_ID: &'static str = "operation.non_sdk.arbitrary";
+    const TRANSPORT: OperationTransport = OperationTransport::Http {
+        route: "/application/not-a-canonical-sdk-route",
+    };
+    const BINDING_ID: &'static str = "binding.http.non_sdk.arbitrary";
+    const EFFECT: tracedecay_tool_catalog::EffectClass = MultiRootScopeSetRead::EFFECT;
+    const IDEMPOTENCY: tracedecay_tool_catalog::IdempotencyContract =
+        MultiRootScopeSetRead::IDEMPOTENCY;
+    const CANCELLABLE: bool = MultiRootScopeSetRead::CANCELLABLE;
+    const CANCELLATION_POINTS: &'static [tracedecay_tool_catalog::CancellationPoint] =
+        MultiRootScopeSetRead::CANCELLATION_POINTS;
+    const MAXIMUM_DEADLINE_MILLIS: u64 = MultiRootScopeSetRead::MAXIMUM_DEADLINE_MILLIS;
+    const DEADLINE_BEHAVIOR: tracedecay_tool_catalog::DeadlineBehavior =
+        MultiRootScopeSetRead::DEADLINE_BEHAVIOR;
+    const RECONCILIATION: tracedecay_tool_catalog::ReconciliationContract =
+        MultiRootScopeSetRead::RECONCILIATION;
+    const RECEIPT: tracedecay_tool_catalog::ReceiptContract = MultiRootScopeSetRead::RECEIPT;
+    const TERMINAL_STATES: &'static [tracedecay_tool_catalog::TerminalState] =
+        MultiRootScopeSetRead::TERMINAL_STATES;
+    const RESULT_SCHEMA_ID: &'static str = MultiRootScopeSetRead::RESULT_SCHEMA_ID;
+    const RESULT_SCHEMA_REVISION: u32 = MultiRootScopeSetRead::RESULT_SCHEMA_REVISION;
+}
+
+#[test]
+fn client_denies_an_arbitrary_route_absent_from_the_canonical_sdk_registry() {
+    let client = Client::builder(ConnectionMode::local(
+        "http://127.0.0.1:1",
+        "project.sdk",
+        "sdk-token",
+    ))
+    .build()
+    .unwrap();
+    let request = serde_json::from_value::<<NonSdkHttpOperation as TypedOperation>::Request>(
+        json!({"scope_set_id": "scope-set.sdk"}),
+    )
+    .unwrap();
+
+    let error = client.execute::<NonSdkHttpOperation>(&request).unwrap_err();
+
+    assert!(matches!(error, ClientError::InvalidConfiguration(message)
+            if message.contains("canonical SDK registry")));
 }
 
 #[test]

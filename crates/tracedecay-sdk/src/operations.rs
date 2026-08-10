@@ -4573,7 +4573,7 @@ typed_operation!(
     multi_root_execute,
     "operation.multi_root.execute",
     OperationTransport::Http {
-        route: "/multi-root/execute"
+        route: "/application/multi-root/execute"
     },
     "binding.http.multi_root.execute.v1",
     EffectClass::Read,
@@ -4608,7 +4608,7 @@ typed_operation!(
     multi_root_scope_set_compare_and_swap,
     "operation.multi_root.scope_set_compare_and_swap",
     OperationTransport::Http {
-        route: "/multi-root/scope-set/compare-and-swap"
+        route: "/application/multi-root/scope-set/compare-and-swap"
     },
     "binding.http.multi_root.scope_set_compare_and_swap.v1",
     EffectClass::Administrative,
@@ -4645,7 +4645,7 @@ typed_operation!(
     multi_root_scope_set_read,
     "operation.multi_root.scope_set_read",
     OperationTransport::Http {
-        route: "/multi-root/scope-set/read"
+        route: "/application/multi-root/scope-set/read"
     },
     "binding.http.multi_root.scope_set_read.v1",
     EffectClass::Read,

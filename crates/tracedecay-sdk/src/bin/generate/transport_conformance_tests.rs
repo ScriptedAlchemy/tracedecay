@@ -1,6 +1,36 @@
 use super::{OperationTransport, canonical_application_registry, canonical_operations};
 
 #[test]
+fn generated_multi_root_operations_use_the_project_application_mount() {
+    let registry = canonical_application_registry().expect("canonical SDK registry");
+    let operations = canonical_operations(&registry).expect("canonical generated operations");
+
+    for (operation_id, expected_route) in [
+        (
+            "operation.multi_root.scope_set_read",
+            "/application/multi-root/scope-set/read",
+        ),
+        (
+            "operation.multi_root.scope_set_compare_and_swap",
+            "/application/multi-root/scope-set/compare-and-swap",
+        ),
+        (
+            "operation.multi_root.execute",
+            "/application/multi-root/execute",
+        ),
+    ] {
+        let generated = operations
+            .iter()
+            .find(|candidate| candidate.operation_id == operation_id)
+            .unwrap_or_else(|| panic!("{operation_id} must be generated"));
+        assert!(matches!(
+            &generated.transport,
+            OperationTransport::Http { route } if route == expected_route
+        ));
+    }
+}
+
+#[test]
 fn generated_feedback_and_non_session_primitive_operations_use_live_http_routes() {
     let registry = canonical_application_registry().expect("canonical SDK registry");
     let operations = canonical_operations(&registry).expect("canonical generated operations");

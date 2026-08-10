@@ -58,6 +58,14 @@ impl MultiRootApplicationOperation {
         }
     }
 
+    pub const fn application_route_path(self) -> &'static str {
+        match self {
+            Self::ScopeSetRead => "/application/multi-root/scope-set/read",
+            Self::ScopeSetCompareAndSwap => "/application/multi-root/scope-set/compare-and-swap",
+            Self::Execute => "/application/multi-root/execute",
+        }
+    }
+
     const fn effect(self) -> EffectClass {
         match self {
             Self::ScopeSetCompareAndSwap => EffectClass::Administrative,
@@ -134,7 +142,7 @@ where
         codec_key(operation)?,
         RouteExposureV1::Public {
             binding_id: binding_id(operation)?,
-            route_path: operation.route_path().to_owned(),
+            route_path: operation.application_route_path().to_owned(),
         },
     )?;
     Ok(ExecutableBindingAvailabilityV1::available(binding))
@@ -344,7 +352,7 @@ mod tests {
             else {
                 panic!("multi-root binding must be public");
             };
-            assert_eq!(route_path, operation.route_path());
+            assert_eq!(route_path, operation.application_route_path());
             assert_eq!(
                 binding_id.as_str(),
                 format!("binding.http.multi_root.{}.v1", operation.operation_key())
