@@ -135,11 +135,6 @@ impl DashboardTestRuntimeV1 {
         .ok_or_else(|| TraceDecayError::Config {
             message: "dashboard fixture could not compose the LCM read authority".to_owned(),
         })?;
-        let graph_read_authority = dashboard::dashboard_graph_read_authority_for_test(
-            cg.as_ref(),
-            self.project_database.as_ref(),
-        )
-        .await;
         let git_correlation_read_authority =
             dashboard::dashboard_git_correlation_read_authority_for_test(Arc::clone(
                 &self.project_database,
@@ -148,10 +143,7 @@ impl DashboardTestRuntimeV1 {
             .with_automation_authority(automation_authority, automation_writer)
             .with_lcm_read_authority(lcm_read_authority)
             .with_git_correlation_read_authority(git_correlation_read_authority);
-        Ok(match graph_read_authority {
-            Some(graph_read_authority) => authority.with_graph_read_authority(graph_read_authority),
-            None => authority,
-        })
+        Ok(authority)
     }
 
     /// The registered project identity this fixture runtime was opened for.

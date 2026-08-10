@@ -943,7 +943,6 @@ pub(crate) async fn dashboard_state_fixture(
             &project_root,
             Some(project_identity.as_str()),
         ),
-        graph_read_authority: None,
         code_graph_read_admission: None,
         code_graph_projection_read_port: None,
         project_graph: None,

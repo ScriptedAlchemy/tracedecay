@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::common::{
     EnvVarGuard, GLOBAL_DB_ENV, GLOBAL_DB_ENV_LOCK, create_runtime, get_json, http_agent,
@@ -17,16 +19,38 @@ fn assert_ready_verified_generation(body: &Value) {
     assert!(
         body["version"]["graph_version"]
             .as_str()
-            .is_some_and(|generation| generation.starts_with("code-dashboard:")),
+            .is_some_and(|generation| generation.starts_with("generation.dashboard-graph")),
         "graph reads must carry their verified generation: {body}"
     );
 }
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::dashboard;
-use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::{Edge, EdgeKind, FileRecord, Node, NodeKind, Visibility};
-use tracedecay_domain::ProjectId;
+use tracedecay_application::{
+    CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, RequestAdmission, RequestContext,
+    ResolvedScope,
+};
+use tracedecay_code_index::graph_projection::{
+    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
+};
+use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_domain::{
+    ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
+    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
+    ContentDigest, EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId,
+    LanguageDescriptorRevision, LanguageId, ManifestDigest, PolicyRevisionId, ProjectId,
+    RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest,
+    SymbolOccurrenceId, canonical_sha256,
+};
+use tracedecay_graph_db::NeverCancelled;
+use tracedecay_usecases::context::RegisteredScopeResolver;
+use tracedecay_usecases::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadAdmissionFuture, CodeGraphReadAdmissionPort,
+    CodeGraphReadAdmissionRequest, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
+    VerifiedCodeGraphRead,
+};
 
 struct DashboardFixture {
     _tmp: TempDir,
@@ -34,6 +58,90 @@ struct DashboardFixture {
     _data_dir_guard: EnvVarGuard,
     base_url: String,
     server: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct GraphFixtureSeedV1 {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    files: Vec<FileRecord>,
+}
+
+#[derive(Clone)]
+struct FixtureGraphProjectionV1 {
+    scope: ResolvedScope,
+    store: Arc<CodeGraphProjectionStore>,
+}
+
+impl CodeGraphProjectionReadPort for FixtureGraphProjectionV1 {
+    fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            if request.context.scope() != &self.scope {
+                return Err(CodeGraphReadError::Denied);
+            }
+            match request.context.admission_at(request.observed_at) {
+                RequestAdmission::Admitted => {
+                    VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store))
+                }
+                RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
+                RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+struct FixtureGraphAdmissionV1 {
+    scope: ResolvedScope,
+}
+
+impl CodeGraphReadAdmissionPort for FixtureGraphAdmissionV1 {
+    fn admit<'a>(
+        &'a self,
+        request: CodeGraphReadAdmissionRequest<'a>,
+    ) -> CodeGraphReadAdmissionFuture<'a> {
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(CodeGraphReadError::Cancelled);
+            }
+            if request.deadline.is_elapsed_at(request.observed_at) {
+                return Err(CodeGraphReadError::TimedOut);
+            }
+            let actor = ActorId::new("actor.dashboard-graph-fixture")
+                .unwrap_or_else(|error| panic!("fixture actor: {error}"));
+            let grant = CapabilityGrantSnapshot::new(
+                CapabilityGrantId::new("grant.dashboard-graph-fixture")
+                    .unwrap_or_else(|error| panic!("fixture grant: {error}")),
+                1,
+                ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .unwrap_or_else(|error| panic!("fixture grant digest: {error}")),
+                actor.clone(),
+                request.observed_at,
+                request.deadline.expires_at,
+                self.scope.clone(),
+                BTreeSet::from([request.operation.capability_id().clone()]),
+                BTreeSet::from([request.operation.use_case_id().clone()]),
+                DisclosureClass::Evidence,
+            )
+            .map_err(|error| CodeGraphReadError::InvalidRequest {
+                detail: error.to_string(),
+            })?;
+            RequestContext::new(
+                actor,
+                self.scope.clone(),
+                grant,
+                request.request_id,
+                request.deadline,
+                request.cancellation.context(),
+            )
+            .map_err(|error| CodeGraphReadError::InvalidRequest {
+                detail: error.to_string(),
+            })
+        })
+    }
 }
 
 impl Drop for DashboardFixture {
@@ -76,7 +184,15 @@ async fn setup_project(
 ) -> (TraceDecay, std::sync::Arc<DashboardTestRuntimeV1>) {
     write_file(
         &project_root.join("src/dashboard/mod.rs"),
-        "pub fn dashboard() {}\npub fn route_graph() {}\npub fn render_graph() {}\n",
+        "pub fn dashboard() {}\n\n\n\n\n\n\npub fn route_graph() {}\n\n\n\n\n\n\n\n\n\n\n\npub struct GraphState;\n",
+    );
+    write_file(
+        &project_root.join("src/dashboard/view.tsx"),
+        "\n\nexport function render_graph() {}\n",
+    );
+    write_file(
+        &project_root.join("tests/dashboard_graph.rs"),
+        "\n\n\n\n\n\n\n\n\n\n\nfn route_graph_test() {}\n",
     );
     let runtime = std::sync::Arc::new(
         DashboardTestRuntimeV1::project(
@@ -101,23 +217,26 @@ async fn setup_project(
 }
 
 /// Extra node with no edges, for exercising the default-mode prune/fill rules.
-async fn seed_orphan_node(cg: &TraceDecay) {
-    let db = cg.db();
-    let orphan = make_node(
+fn seed_orphan_node(seed: &mut GraphFixtureSeedV1) {
+    seed.nodes.push(make_node(
         "n-orphan",
         NodeKind::Function,
         "orphan_helper",
         "src/dashboard/orphan.rs",
         1,
-    );
-    if let Err(err) = db.insert_nodes(std::slice::from_ref(&orphan)).await {
-        panic!("failed to seed orphan node: {err}");
-    }
+    ));
+    seed.files.push(FileRecord {
+        path: "src/dashboard/orphan.rs".to_owned(),
+        content_hash: "hash-orphan".to_owned(),
+        size: 32,
+        modified_at: 1_700_000_000,
+        indexed_at: 1_700_000_010,
+        node_count: 1,
+    });
 }
 
-async fn seed_graph_fixture(cg: &TraceDecay) {
-    let db = cg.db();
-    let nodes = [
+fn seed_graph_fixture() -> GraphFixtureSeedV1 {
+    let nodes = vec![
         make_node(
             "n-dashboard",
             NodeKind::Function,
@@ -147,11 +266,8 @@ async fn seed_graph_fixture(cg: &TraceDecay) {
             20,
         ),
     ];
-    if let Err(err) = db.insert_nodes(&nodes).await {
-        panic!("failed to seed graph nodes: {err}");
-    }
 
-    let edges = [
+    let edges = vec![
         Edge {
             source: "n-dashboard".to_string(),
             target: "n-route".to_string(),
@@ -171,11 +287,8 @@ async fn seed_graph_fixture(cg: &TraceDecay) {
             line: Some(12),
         },
     ];
-    if let Err(err) = db.insert_edges(&edges).await {
-        panic!("failed to seed graph edges: {err}");
-    }
 
-    let files = [
+    let files = vec![
         FileRecord {
             path: "src/dashboard/mod.rs".to_string(),
             content_hash: "hash-rust".to_string(),
@@ -193,14 +306,15 @@ async fn seed_graph_fixture(cg: &TraceDecay) {
             node_count: 1,
         },
     ];
-    if let Err(err) = db.upsert_files(&files).await {
-        panic!("failed to seed graph files: {err}");
+    GraphFixtureSeedV1 {
+        nodes,
+        edges,
+        files,
     }
 }
 
-async fn seed_neighbor_symmetry_fixture(cg: &TraceDecay) {
-    let db = cg.db();
-    let nodes = [
+fn seed_neighbor_symmetry_fixture(seed: &mut GraphFixtureSeedV1) {
+    seed.nodes.extend([
         make_node(
             "n-sym-center",
             NodeKind::Function,
@@ -229,32 +343,35 @@ async fn seed_neighbor_symmetry_fixture(cg: &TraceDecay) {
             "src/dashboard/symmetry.rs",
             60,
         ),
-    ];
-    if let Err(err) = db.insert_nodes(&nodes).await {
-        panic!("failed to seed symmetric graph nodes: {err}");
-    }
-
-    let edges = [
-        ("n-sym-alpha", "n-sym-center", 101),
-        ("n-sym-center", "n-sym-alpha", 101),
-        ("n-sym-beta", "n-sym-center", 102),
-        ("n-sym-center", "n-sym-beta", 102),
-        ("n-sym-gamma", "n-sym-center", 103),
-        ("n-sym-center", "n-sym-gamma", 103),
-    ]
-    .map(|(source, target, line)| Edge {
-        source: source.to_string(),
-        target: target.to_string(),
-        kind: EdgeKind::Calls,
-        line: Some(line),
+    ]);
+    seed.files.push(FileRecord {
+        path: "src/dashboard/symmetry.rs".to_owned(),
+        content_hash: "hash-symmetry".to_owned(),
+        size: 128,
+        modified_at: 1_700_000_000,
+        indexed_at: 1_700_000_010,
+        node_count: 4,
     });
-    if let Err(err) = db.insert_edges(&edges).await {
-        panic!("failed to seed symmetric graph edges: {err}");
-    }
+
+    seed.edges.extend(
+        [
+            ("n-sym-alpha", "n-sym-center", 101),
+            ("n-sym-center", "n-sym-alpha", 101),
+            ("n-sym-beta", "n-sym-center", 102),
+            ("n-sym-center", "n-sym-beta", 102),
+            ("n-sym-gamma", "n-sym-center", 103),
+            ("n-sym-center", "n-sym-gamma", 103),
+        ]
+        .map(|(source, target, line)| Edge {
+            source: source.to_string(),
+            target: target.to_string(),
+            kind: EdgeKind::Calls,
+            line: Some(line),
+        }),
+    );
 }
 
-async fn seed_structure_fixture(cg: &TraceDecay) {
-    let db = cg.db();
+fn seed_structure_fixture(seed: &mut GraphFixtureSeedV1) {
     let test_node = make_node(
         "n-route-test",
         NodeKind::Function,
@@ -262,45 +379,218 @@ async fn seed_structure_fixture(cg: &TraceDecay) {
         "tests/dashboard_graph.rs",
         12,
     );
-    if let Err(err) = db.insert_nodes(std::slice::from_ref(&test_node)).await {
-        panic!("failed to seed covering test node: {err}");
-    }
-    if let Err(err) = db
-        .insert_edge(&Edge {
-            source: test_node.id.clone(),
-            target: "n-route".to_string(),
-            kind: EdgeKind::Calls,
-            line: Some(13),
-        })
-        .await
-    {
-        panic!("failed to seed covering test edge: {err}");
-    }
-    if let Err(err) = db
-        .upsert_files(&[FileRecord {
-            path: "tests/dashboard_graph.rs".to_string(),
-            content_hash: "hash-test".to_string(),
-            size: 64,
-            modified_at: 1_700_000_000,
-            indexed_at: 1_700_000_010,
-            node_count: 1,
-        }])
-        .await
-    {
-        panic!("failed to seed covering test file: {err}");
-    }
+    seed.edges.push(Edge {
+        source: test_node.id.clone(),
+        target: "n-route".to_string(),
+        kind: EdgeKind::Calls,
+        line: Some(13),
+    });
+    seed.nodes.push(test_node);
+    seed.files.push(FileRecord {
+        path: "tests/dashboard_graph.rs".to_string(),
+        content_hash: "hash-test".to_string(),
+        size: 64,
+        modified_at: 1_700_000_000,
+        indexed_at: 1_700_000_010,
+        node_count: 1,
+    });
+}
 
-    cg.add_fact(AddFactRequest {
-        content: "route_graph must preserve directed call semantics".to_string(),
-        category: MemoryCategory::CodeArea,
-        source: Some("dashboard-graph-fixture".to_string()),
-        tags: vec!["graph".to_string()],
-        entities: vec!["route_graph".to_string()],
-        trust: Some(0.9),
-        metadata: serde_json::json!({}),
-    })
-    .await
-    .unwrap_or_else(|error| panic!("failed to seed graph fact: {error}"));
+fn fixture_digest(domain: &str, value: &str) -> String {
+    canonical_sha256(&(domain, value))
+        .unwrap_or_else(|error| panic!("fixture digest: {error}"))
+        .as_str()
+        .to_owned()
+}
+
+fn fixture_language(path: &str) -> LanguageId {
+    let language = if path.ends_with(".tsx") {
+        "typescript"
+    } else {
+        "rust"
+    };
+    LanguageId::new(language).unwrap_or_else(|error| panic!("fixture language: {error}"))
+}
+
+fn relation_kind(kind: &EdgeKind) -> RelationEdgeKindV1 {
+    match kind {
+        EdgeKind::Contains => RelationEdgeKindV1::Contains,
+        EdgeKind::Calls => RelationEdgeKindV1::Calls,
+        EdgeKind::Uses => RelationEdgeKindV1::Uses,
+        EdgeKind::Implements => RelationEdgeKindV1::Implements,
+        EdgeKind::TypeOf => RelationEdgeKindV1::TypeOf,
+        EdgeKind::Returns => RelationEdgeKindV1::Returns,
+        EdgeKind::Extends => RelationEdgeKindV1::Extends,
+        EdgeKind::Annotates | EdgeKind::DerivesMacro => RelationEdgeKindV1::Annotates,
+        EdgeKind::Receives => RelationEdgeKindV1::Receives,
+    }
+}
+
+fn compose_graph_authority(
+    cg: &TraceDecay,
+    seed: GraphFixtureSeedV1,
+) -> (
+    Arc<dyn CodeGraphReadAdmissionPort>,
+    Arc<dyn CodeGraphProjectionReadPort>,
+) {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| ProjectId::new(value.to_owned()).ok())
+        .unwrap_or_else(|| panic!("fixture project identity is registered"));
+    let scope = RegisteredScopeResolver::resolve(cg.project_root(), cg.project_root(), &project_id)
+        .unwrap_or_else(|error| panic!("fixture graph scope: {error}"));
+    let generation = CodeGenerationId::new("generation.dashboard-graph-fixture.1")
+        .unwrap_or_else(|error| panic!("fixture generation: {error}"));
+
+    let files: Vec<_> = seed
+        .files
+        .iter()
+        .map(|file| SanitizedCodeFileV1 {
+            file_occurrence_id: FileOccurrenceId::new(format!("file:dashboard:{}", file.path))
+                .unwrap_or_else(|error| panic!("fixture file occurrence: {error}")),
+            logical_path: file.path.clone(),
+            language: Some(fixture_language(&file.path)),
+            content_digest: ContentDigest::new(fixture_digest("dashboard-file", &file.path))
+                .unwrap_or_else(|error| panic!("fixture file digest: {error}")),
+            disposition: SnapshotFileDispositionV1::Present,
+        })
+        .collect();
+    let file_occurrences: std::collections::BTreeMap<_, _> = files
+        .iter()
+        .map(|file| (file.logical_path.clone(), file.file_occurrence_id.clone()))
+        .collect();
+    let symbols = GenerationSymbolIndexV1::new(
+        generation.clone(),
+        seed.nodes
+            .iter()
+            .map(|node| LineageSymbolRecordV1 {
+                occurrence: SymbolOccurrenceId::new(node.id.clone())
+                    .unwrap_or_else(|error| panic!("fixture symbol occurrence: {error}")),
+                identity: SymbolIdentityDigest::new(fixture_digest(
+                    "dashboard-symbol-identity",
+                    &node.id,
+                ))
+                .unwrap_or_else(|error| panic!("fixture symbol identity: {error}")),
+                qualified_name: node.qualified_name.clone(),
+                simple_name: node.name.clone(),
+                kind: node.kind.as_str().to_owned(),
+                visibility: node.visibility.as_str().to_owned(),
+                branches: node.branches,
+                loops: node.loops,
+                max_nesting: node.max_nesting,
+                line_span: node
+                    .end_line
+                    .saturating_sub(node.start_line)
+                    .saturating_add(1),
+                start_line: node.start_line,
+                signature: node.signature.clone(),
+                skip_test_coverage: false,
+                file_identity: FileIdentityDigest::new(fixture_digest(
+                    "dashboard-file-identity",
+                    &node.file_path,
+                ))
+                .unwrap_or_else(|error| panic!("fixture file identity: {error}")),
+                content_digest: ContentDigest::new(fixture_digest(
+                    "dashboard-symbol-content",
+                    &node.id,
+                ))
+                .unwrap_or_else(|error| panic!("fixture symbol digest: {error}")),
+            })
+            .collect(),
+    )
+    .unwrap_or_else(|error| panic!("fixture symbol index: {error}"));
+    let chunks: Vec<_> = seed
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(ordinal, node)| {
+            let occurrence = SymbolOccurrenceId::new(node.id.clone())
+                .unwrap_or_else(|error| panic!("fixture chunk occurrence: {error}"));
+            let file = file_occurrences
+                .get(&node.file_path)
+                .unwrap_or_else(|| panic!("fixture node file is registered: {}", node.file_path));
+            CodeSearchChunkV1 {
+                id: CodeSearchChunkId::new(format!("chunk:dashboard:{}", node.id))
+                    .unwrap_or_else(|error| panic!("fixture chunk identity: {error}")),
+                anchor: CodeSearchChunkAnchorV1 {
+                    generation_id: generation.clone(),
+                    file_occurrence_id: file.clone(),
+                    symbol_occurrence_id: Some(occurrence),
+                    parent_chunk_id: None,
+                    source_span: SourceSpan {
+                        start_byte: u64::try_from(ordinal).unwrap_or(0),
+                        end_byte: u64::try_from(ordinal.saturating_add(1)).unwrap_or(u64::MAX),
+                    },
+                    grain: CodeSearchChunkGrainV1::SymbolBody,
+                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                },
+                content_digest: ContentDigest::new(fixture_digest("dashboard-chunk", &node.id))
+                    .unwrap_or_else(|error| panic!("fixture chunk digest: {error}")),
+                language_descriptor_revision: LanguageDescriptorRevision::new(
+                    "language.dashboard-fixture.v1",
+                )
+                .unwrap_or_else(|error| panic!("fixture language revision: {error}")),
+                chunker_revision: ChunkerRevision::new("chunker.dashboard-fixture.v1")
+                    .unwrap_or_else(|error| panic!("fixture chunker revision: {error}")),
+                sanitizer_revision: SanitizerRevision::new("sanitizer.dashboard-fixture.v1")
+                    .unwrap_or_else(|error| panic!("fixture sanitizer revision: {error}")),
+                sensitivity: SensitivityDecision {
+                    level: SensitivityLevelV1::Public,
+                    policy_revision: PolicyRevisionId::new("policy.dashboard-fixture.v1")
+                        .unwrap_or_else(|error| panic!("fixture policy revision: {error}")),
+                },
+                exact_terms: Vec::new(),
+                subtokens: Vec::new(),
+                sanitized_text: BoundedSanitizedText::new("fixture")
+                    .unwrap_or_else(|error| panic!("fixture sanitized text: {error}")),
+            }
+        })
+        .collect();
+    let edges: Vec<_> = seed
+        .edges
+        .iter()
+        .map(|edge| CanonicalRelationEdgeV1 {
+            from_occurrence: SymbolOccurrenceId::new(edge.source.clone())
+                .unwrap_or_else(|error| panic!("fixture edge source: {error}")),
+            to_occurrence: SymbolOccurrenceId::new(edge.target.clone())
+                .unwrap_or_else(|error| panic!("fixture edge target: {error}")),
+            kind: relation_kind(&edge.kind),
+            authority: EdgeAuthorityV1::SyntaxExact,
+            evidence_span: SourceSpan {
+                start_byte: edge.line.unwrap_or(0).into(),
+                end_byte: edge.line.unwrap_or(0).saturating_add(1).into(),
+            },
+        })
+        .collect();
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancel.dashboard-graph-fixture")
+            .unwrap_or_else(|error| panic!("fixture graph cancellation: {error}"));
+    let projection = HermeticCodeGraphProjectionStore::memory(&cancellation)
+        .unwrap_or_else(|error| panic!("fixture graph projection: {error}"));
+    projection
+        .publish_indexed_with_cancellation(
+            &generation,
+            &edges,
+            &chunks,
+            &files,
+            &symbols,
+            Arc::new(NeverCancelled),
+        )
+        .unwrap_or_else(|error| panic!("publish fixture graph: {error}"));
+    let store = Arc::new(
+        projection
+            .verified_store(&generation)
+            .unwrap_or_else(|error| panic!("verify fixture graph: {error}")),
+    );
+    (
+        Arc::new(FixtureGraphAdmissionV1 {
+            scope: scope.clone(),
+        }),
+        Arc::new(FixtureGraphProjectionV1 { scope, store }),
+    )
 }
 
 async fn start_dashboard_fixture() -> DashboardFixture {
@@ -319,16 +609,17 @@ async fn start_dashboard_fixture_with(
     let env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
     let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
     let (cg, host_runtime) = setup_project(&project_root, &profile_root).await;
-    seed_graph_fixture(&cg).await;
+    let mut graph_seed = seed_graph_fixture();
     if with_orphan {
-        seed_orphan_node(&cg).await;
+        seed_orphan_node(&mut graph_seed);
     }
     if with_structure_fixture {
-        seed_structure_fixture(&cg).await;
+        seed_structure_fixture(&mut graph_seed);
     }
     if with_neighbor_symmetry_fixture {
-        seed_neighbor_symmetry_fixture(&cg).await;
+        seed_neighbor_symmetry_fixture(&mut graph_seed);
     }
+    let (code_graph_admission, code_graph_projection) = compose_graph_authority(&cg, graph_seed);
 
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
@@ -336,7 +627,8 @@ async fn start_dashboard_fixture_with(
     let authority = host_runtime
         .dashboard_test_authority_with_session_reads(&server_graph)
         .await
-        .unwrap_or_else(|error| panic!("compose dashboard graph authority: {error}"));
+        .unwrap_or_else(|error| panic!("compose dashboard graph authority: {error}"))
+        .with_code_graph_authority(code_graph_admission, code_graph_projection);
     let server = tokio::spawn(async move {
         let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
             server_graph,
@@ -436,7 +728,8 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
         assert_eq!(node["payload"]["node"]["span"]["start_line"], 8);
         assert_eq!(
             node["payload"]["node"]["doc"],
-            "Fixture documentation for route_graph"
+            Value::Null,
+            "the verified projection does not publish documentation text"
         );
 
         let (status, neighbors) = get_json(
@@ -551,13 +844,15 @@ fn graph_api_caller_and_callee_traversal_are_behaviorally_symmetric() {
             "both directions must use qualified-name ordering before limiting"
         );
 
-        for (row, (expected_line, expected_start_line)) in
-            callers.iter().zip([(101, 40), (102, 50)])
-        {
+        for (row, expected_start_line) in callers.iter().zip([40, 50]) {
             assert_eq!(row["kind"], "function");
             assert_eq!(row["file_path"], "src/dashboard/symmetry.rs");
             assert_eq!(row["edge_kind"], "calls");
-            assert_eq!(row["edge_line"], expected_line);
+            assert_eq!(
+                row["edge_line"],
+                Value::Null,
+                "canonical edges carry byte spans, not fabricated line numbers"
+            );
             assert_eq!(row["degree"], 2);
             assert_eq!(row["span"]["start_line"], expected_start_line);
         }
@@ -826,13 +1121,15 @@ fn structure_visualization_endpoints_report_measured_data() {
             facts["payload"]["measurement"]["caption"],
             "citing this name"
         );
-        assert!(
-            facts["payload"]["measurement"]["entity_matches"]
-                .as_array()
-                .is_some_and(|matches| matches.iter().any(|fact| {
-                    fact["content"] == "route_graph must preserve directed call semantics"
-                })),
-            "facts should include the exact normalized-name match: {facts}"
+        assert_eq!(
+            facts["payload"]["measurement"]["entity_matches"],
+            serde_json::json!([]),
+            "removed compatibility entity tables are not a fact source"
+        );
+        assert_eq!(
+            facts["payload"]["measurement"]["arms"][0]["match_basis"],
+            "memory_v2_assertion_payloads_fts",
+            "the fact join must use the canonical assertion payload projection"
         );
 
         let (status, tests) = get_json(

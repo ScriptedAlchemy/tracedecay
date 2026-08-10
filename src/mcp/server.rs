@@ -125,27 +125,6 @@ pub(crate) type CodeIndexHookSink =
 pub(crate) type CodeIndexReconcileSink =
     Arc<dyn Fn(PathBuf) -> CodeIndexHookNotifyFuture + Send + Sync + 'static>;
 
-/// Future returned by a [`DashboardGraphInteractiveResolver`] invocation.
-/// Resolves to the retained interactive projection store for a mounted root,
-/// or `None` when the root is unmounted or its persistent graph activation
-/// has not completed — the typed unavailable state for interactive reads.
-pub(crate) type DashboardGraphInteractiveFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = Option<Arc<crate::code_index::graph_projection::CodeGraphProjectionStore>>,
-            > + Send
-            + 'static,
-    >,
->;
-
-/// Type-erased bridge from the dashboard graph read authority to the
-/// daemon-owned code-index scheduler registry. The daemon constructs this
-/// closing over its cloneable `CodeIndexSchedulerRegistryV1`; direct
-/// (non-daemon) servers leave it `None` and every interactive graph read
-/// answers its typed unavailable envelope.
-pub(crate) type DashboardGraphInteractiveResolver =
-    Arc<dyn Fn(PathBuf) -> DashboardGraphInteractiveFuture + Send + Sync + 'static>;
-
 /// Type-erased bridge from a tool handler to the daemon-owned code-index
 /// generation authority. The daemon constructs this from its cloneable
 /// `CodeIndexSchedulerRegistryV1`; direct (non-daemon) servers leave it `None`,
@@ -384,9 +363,6 @@ pub struct McpServer {
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
     retained_project_graph_resolver: Option<RetainedProjectGraphResolver>,
-    /// Daemon-owned per-request resolver of the retained interactive code
-    /// graph store for a mounted root.
-    dashboard_graph_interactive_resolver: Option<DashboardGraphInteractiveResolver>,
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
     initialize_root_routing_enabled: AtomicBool,
@@ -792,7 +768,6 @@ impl McpServer {
             code_graph_read_admission_port,
             code_index_search_authority,
             retained_project_graph_resolver,
-            dashboard_graph_interactive_resolver,
             project_routes,
             application_invocation_executor,
             daemon_invocation_service,
@@ -1027,7 +1002,6 @@ impl McpServer {
             source_edit_rollback_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             retained_project_graph_resolver,
-            dashboard_graph_interactive_resolver,
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),

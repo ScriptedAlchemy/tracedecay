@@ -22,7 +22,6 @@ mod dashboard_git_correlation;
 // so the default production build does not carry it as an unused re-export.
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_git_correlation::DashboardGitCorrelationReadAdapter;
-mod dashboard_graph;
 mod dashboard_lcm;
 // Only reached by the test-transport dashboard LCM fixture
 // (`dashboard::dashboard_lcm_read_authority_for_test`); gate it so the
@@ -261,10 +260,6 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     pub(crate) retained_project_graph_resolver:
         Option<crate::mcp::server::RetainedProjectGraphResolver>,
-    /// Daemon-owned per-request resolver of the retained interactive code
-    /// graph store; absence is the typed unavailable interactive graph.
-    pub(crate) dashboard_graph_interactive_resolver:
-        Option<crate::mcp::server::DashboardGraphInteractiveResolver>,
     /// Daemon-owned bounded native transcript and session/Git convergence.
     /// Absence is a typed unavailable authority, never a local store fallback.
     pub(crate) session_sync_service:
@@ -312,7 +307,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
             retained_project_graph_resolver: None,
-            dashboard_graph_interactive_resolver: None,
             session_sync_service: None,
             preselected_project_reader: false,
             session_authorities: SessionAuthorities::default(),

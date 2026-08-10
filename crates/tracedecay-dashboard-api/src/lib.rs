@@ -248,9 +248,6 @@ pub type DoctorReportReader = Arc<dyn Fn() -> DoctorReportReadFuture + Send + Sy
 #[derive(Clone)]
 pub struct DashboardStateCompositionV1 {
     pub project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
-    /// Daemon/application-owned verified graph read authority. HTTP adapters
-    /// receive bounded read models and never a graph store handle.
-    pub graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
     /// Exact-project admission for generation-pinned code-graph reads. This
     /// stays separate from the projection port so the HTTP boundary must
     /// present real request identity, deadline, and live cancellation on each
@@ -322,8 +319,6 @@ pub struct DashboardState {
     /// unavailable states from it and never re-resolve scope from paths or
     /// the CWD per request.
     pub resolved_scope: Option<tracedecay_application::ResolvedScope>,
-    /// Exact verified-generation graph reader retained by the daemon.
-    pub graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
     /// Canonical per-request admission for the verified code graph.
     pub code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
     /// Canonical exact-project verified projection resolver.
@@ -428,7 +423,8 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     automation_authority: Option<DashboardAutomationAuthorityV1>,
     automation_writer: Option<DashboardAutomationWriter>,
     lcm_read_authority: Option<Arc<dyn DashboardLcmReadPortV1>>,
-    graph_read_authority: Option<Arc<dyn tracedecay_application::DashboardGraphReadPortV1>>,
+    code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
+    code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
 }
 
@@ -448,7 +444,8 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             automation_authority: None,
             automation_writer: None,
             lcm_read_authority: None,
-            graph_read_authority: None,
+            code_graph_read_admission: None,
+            code_graph_projection_read_port: None,
             git_correlation_read_authority: None,
         }
     }
@@ -477,14 +474,16 @@ impl DashboardHostAdmissionTestAuthorityV1 {
         self
     }
 
-    /// Attaches the daemon-owned verified graph read authority so the test
-    /// transport serves the same graph/explorer code reads production mounts.
+    /// Attaches the exact-project admission and verified projection ports used
+    /// by production dashboard code reads.
     #[must_use]
-    pub fn with_graph_read_authority(
+    pub fn with_code_graph_authority(
         mut self,
-        graph_read_authority: Arc<dyn tracedecay_application::DashboardGraphReadPortV1>,
+        admission: Arc<dyn crate::graph::CodeGraphReadAdmissionPort>,
+        projection: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     ) -> Self {
-        self.graph_read_authority = Some(graph_read_authority);
+        self.code_graph_read_admission = Some(admission);
+        self.code_graph_projection_read_port = Some(projection);
         self
     }
 
@@ -625,7 +624,6 @@ async fn build_state_inner(
 ) -> Result<DashboardState> {
     let DashboardStateCompositionV1 {
         project_graph_resolver,
-        graph_read_authority,
         code_graph_read_admission,
         code_graph_projection_read_port,
         registered_project_session_db,
@@ -683,7 +681,6 @@ async fn build_state_inner(
             cg.project_root(),
             cg.store_layout().identity.project_id.as_deref(),
         ),
-        graph_read_authority,
         code_graph_read_admission,
         code_graph_projection_read_port,
         project_graph,
@@ -751,7 +748,6 @@ pub async fn build_selected_project_state(
         false,
         DashboardStateCompositionV1 {
             project_graph_resolver: active.project_graph_resolver.clone(),
-            graph_read_authority: active.graph_read_authority.clone(),
             // Both verified code-graph ports are exact-project authorities;
             // the active project's admission must never be reused for a
             // selected project.
@@ -943,10 +939,10 @@ where
         options.warm_token_counts,
         DashboardStateCompositionV1 {
             project_graph_resolver: test_project_graph_resolver,
-            graph_read_authority: test_authority
-                .and_then(|authority| authority.graph_read_authority.clone()),
-            code_graph_read_admission: None,
-            code_graph_projection_read_port: None,
+            code_graph_read_admission: test_authority
+                .and_then(|authority| authority.code_graph_read_admission.clone()),
+            code_graph_projection_read_port: test_authority
+                .and_then(|authority| authority.code_graph_projection_read_port.clone()),
             registered_project_session_db: test_authority
                 .map(|authority| Arc::clone(&authority.project_sessions)),
             lcm_read_authority: test_authority
@@ -2038,7 +2034,6 @@ mod authority_tests {
                     &project_root,
                     layout.identity.project_id.as_deref(),
                 ),
-                graph_read_authority: None,
                 code_graph_read_admission: None,
                 code_graph_projection_read_port: None,
                 project_graph: None,

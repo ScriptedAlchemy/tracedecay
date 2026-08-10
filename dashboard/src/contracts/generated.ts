@@ -1582,7 +1582,6 @@ export type GraphLanguageCountV1 = z.infer<typeof GraphLanguageCountV1Schema>;
 export const GraphLargestFileV1Schema = z.object({
   node_count: z.number().int(),
   path: z.string(),
-  size: z.number().int(),
 });
 export type GraphLargestFileV1 = z.infer<typeof GraphLargestFileV1Schema>;
 
@@ -1672,10 +1671,10 @@ export const GraphSearchPayloadV1Schema = z.object({
 export type GraphSearchPayloadV1 = z.infer<typeof GraphSearchPayloadV1Schema>;
 
 export const GraphSpanV1Schema = z.object({
-  attrs_start_line: z.number().int(),
-  end_column: z.number().int(),
+  attrs_start_line: z.number().int().nullable(),
+  end_column: z.number().int().nullable(),
   end_line: z.number().int(),
-  start_column: z.number().int(),
+  start_column: z.number().int().nullable(),
   start_line: z.number().int(),
 });
 export type GraphSpanV1 = z.infer<typeof GraphSpanV1Schema>;

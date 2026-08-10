@@ -324,9 +324,6 @@ pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,
     retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
-    dashboard_graph_interactive_resolver: Option<
-        crate::mcp::server::DashboardGraphInteractiveResolver,
-    >,
     code_graph_read_admission: Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     code_graph_projection_read_port: Option<crate::mcp::server::CodeGraphProjectionReadPort>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
@@ -476,22 +473,6 @@ pub(super) async fn handle_dashboard(
                 .map(|adapter| {
                     Arc::new(adapter) as Arc<dyn crate::dashboard::DashboardLcmReadPortV1>
                 });
-            // The verified graph read authority requires the registered
-            // project-sessions store with its bound project graph runtime;
-            // without them the state keeps the typed absent port and every
-            // graph route reports its unavailable envelope.
-            let graph_read_authority = registered_project_session_db
-                .as_ref()
-                .and_then(|database| {
-                    super::dashboard_graph::DashboardGraphReadAdapter::for_project(
-                        retained_cg.as_ref(),
-                        database,
-                        dashboard_graph_interactive_resolver.clone(),
-                    )
-                })
-                .map(|adapter| {
-                    Arc::new(adapter) as Arc<dyn tracedecay_application::DashboardGraphReadPortV1>
-                });
             // Loom's git sources read the verified session-git-evidence
             // projection through the same registered store; a state composed
             // without it reports those sources unavailable.
@@ -509,7 +490,6 @@ pub(super) async fn handle_dashboard(
                 retained_cg.clone(),
                 DashboardStateCompositionV1 {
                     project_graph_resolver: dashboard_project_graph_resolver,
-                    graph_read_authority,
                     code_graph_read_admission,
                     code_graph_projection_read_port,
                     registered_project_session_db,

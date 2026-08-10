@@ -12,7 +12,6 @@ pub mod configuration;
 mod configuration_wire;
 pub mod context;
 pub mod context_scout;
-pub mod dashboard_graph;
 pub mod diagnostics;
 pub mod doctor;
 pub mod execution_topology_metrics;
@@ -110,15 +109,6 @@ pub use context::{
 pub use context_scout::{
     context_scout_executable_binding_registry, context_scout_surface_catalog_contribution,
     context_scout_surface_handler_descriptors, context_scout_surface_operation,
-};
-pub use dashboard_graph::{
-    DashboardGraphEdgeV1, DashboardGraphKindCountV1, DashboardGraphLanguageCountV1,
-    DashboardGraphLargestFileV1, DashboardGraphNeighborsV1, DashboardGraphNodeV1,
-    DashboardGraphOverviewV1, DashboardGraphPathV1, DashboardGraphReadErrorV1,
-    DashboardGraphReadFutureV1, DashboardGraphReadOperationV1, DashboardGraphReadPayloadV1,
-    DashboardGraphReadPortV1, DashboardGraphReadRequestV1, DashboardGraphReadV1,
-    DashboardGraphSearchV1, DashboardGraphSpanV1, DashboardGraphSubgraphV1, DashboardGraphTotalsV1,
-    VerifiedDashboardGraphGenerationV1,
 };
 pub use diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,

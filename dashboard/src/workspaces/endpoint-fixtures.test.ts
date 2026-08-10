@@ -491,14 +491,9 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     const env = parse(DashboardEnvelopeV1Schema(GraphOverviewPayloadV1Schema), '/api/plugins/graph/overview');
     const data = env.payload;
     const hubs = (data.top_connected ?? []) as Array<Record<string, unknown>>;
-    // `graph_queries::top_connected_rows` is a `LIMIT 12` subquery selecting
-    // exactly five columns, so the fixture must serve twelve rows and no more.
-    // The route decodes those rows into `GraphNodeV1`, whose other fields are
-    // `Option` and serialize as explicit nulls — so the five selected columns
-    // must be the only ones carrying a value. Asserting that, rather than the
-    // key set, keeps the original guarantee: the Code workspace cannot be
-    // designed or audited against `qualified_name`, `signature` or
-    // `start_line`, because this route never populates them.
+    // The verified projection returns at most twelve generation-pinned degree
+    // leaders. Optional evidence stays explicit instead of being backfilled
+    // from the removed relational graph tables.
     expect(hubs.length).toBe(12);
     const SELECTED = ['id', 'name', 'kind', 'file_path', 'degree'];
     for (const hub of hubs) {

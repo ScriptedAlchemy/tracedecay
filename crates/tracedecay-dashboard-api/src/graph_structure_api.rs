@@ -567,35 +567,6 @@ async fn node_facts(
     let normalized_name = normalize_entity(&node.name).to_ascii_lowercase();
     let row_limit = i64::try_from(FACT_MATCH_LIMIT + 1).unwrap_or(i64::MAX);
     let connection = state.mem_db.engine_conn();
-    let entity_sql = "
-        SELECT CAST(f.fact_id AS TEXT) AS fact_id, f.content, f.category,
-               f.trust_score, f.updated_at, f.source
-        FROM memory_entities entity
-        JOIN memory_fact_entities relation ON relation.entity_id = entity.entity_id
-        JOIN memory_facts f ON f.fact_id = relation.fact_id
-        WHERE entity.normalized_name = ?1
-        ORDER BY f.updated_at DESC, f.fact_id DESC
-        LIMIT ?2";
-    let mut entity_rows = match query_rows(
-        &connection,
-        entity_sql,
-        params![normalized_name.as_str(), row_limit],
-    )
-    .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            return failed_response::<FactMatchesMeasurementV1>(
-                &state,
-                "fact_entity_read_failed",
-                error,
-                true,
-            );
-        }
-    };
-    let entity_truncated = entity_rows.len() > FACT_MATCH_LIMIT;
-    entity_rows.truncate(FACT_MATCH_LIMIT);
-
     let fts_query = format!("\"{}\"", node.name.replace('"', "\"\""));
     let fts_sql = "
         SELECT current.fact_id, payload.content, current.trust_score,
@@ -624,7 +595,6 @@ async fn node_facts(
     };
     let fts_truncated = fts_rows.len() > FACT_MATCH_LIMIT;
     fts_rows.truncate(FACT_MATCH_LIMIT);
-    let entity_coverage = fact_arm_coverage(entity_rows.len(), entity_truncated);
     let fts_coverage = fact_arm_coverage(fts_rows.len(), fts_truncated);
     let node_name = node.name.clone();
     let measurement = FactMatchesMeasurementV1 {
@@ -635,30 +605,21 @@ async fn node_facts(
         identity_semantics: "not_symbol_identity",
         caption: "citing this name",
         same_name_collision_possible: true,
-        entity_matches: entity_rows.clone(),
+        entity_matches: Vec::new(),
         payload_fts_matches: fts_rows.clone(),
-        arms: vec![
-            FactMatchArmV1 {
-                match_basis: "memory_entities.normalized_name",
-                strength: "exact_normalized_name",
-                collision_warning: "same-name symbols can share this match",
-                coverage: entity_coverage,
-                facts: entity_rows,
-            },
-            FactMatchArmV1 {
-                match_basis: "memory_v2_assertion_payloads_fts",
-                strength: "free_text_phrase",
-                collision_warning: "text mentions are not symbol identity",
-                coverage: fts_coverage,
-                facts: fts_rows,
-            },
-        ],
+        arms: vec![FactMatchArmV1 {
+            match_basis: "memory_v2_assertion_payloads_fts",
+            strength: "free_text_phrase",
+            collision_warning: "text mentions are not symbol identity",
+            coverage: fts_coverage,
+            facts: fts_rows,
+        }],
     };
     measured_response(
         &state,
         measurement,
-        2,
-        "name-match arms",
+        1,
+        "canonical fact-match arms",
         Some(graph.reader.generation().as_str().to_owned()),
     )
 }

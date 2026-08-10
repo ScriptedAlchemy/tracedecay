@@ -7147,17 +7147,11 @@
         },
         "path": {
           "type": "string"
-        },
-        "size": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
         }
       },
       "required": [
         "path",
-        "node_count",
-        "size"
+        "node_count"
       ],
       "type": "object"
     },
@@ -7586,11 +7580,17 @@
       "properties": {
         "attrs_start_line": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "end_column": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "end_line": {
           "format": "int64",
@@ -7598,7 +7598,10 @@
         },
         "start_column": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "start_line": {
           "format": "int64",

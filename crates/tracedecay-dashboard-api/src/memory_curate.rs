@@ -134,7 +134,6 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
             cg.project_root(),
             store_layout.identity.project_id.as_deref(),
         ),
-        graph_read_authority: None,
         code_graph_read_admission: None,
         code_graph_projection_read_port: None,
         project_graph: None,
@@ -189,7 +188,6 @@ fn user_state(
         // A profile-owned state has no exact project root; scope resolution
         // fails closed rather than fabricating one from the profile path.
         resolved_scope: None,
-        graph_read_authority: None,
         code_graph_read_admission: None,
         code_graph_projection_read_port: None,
         project_graph: None,

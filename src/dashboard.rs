@@ -304,21 +304,6 @@ pub async fn dashboard_lcm_read_authority_for_test(
     Some(std::sync::Arc::new(adapter))
 }
 
-/// Reports the verified graph authority available to the standalone fixture.
-/// This composition does not own the daemon code-index scheduler
-/// that publishes a verified code-graph projection. The removed SQLite graph
-/// tables are not a fallback authority, so the fixture truthfully withholds
-/// the port and graph routes answer their typed unavailable envelope until the
-/// production projection port is injected.
-#[cfg(feature = "test-transport")]
-#[doc(hidden)]
-pub async fn dashboard_graph_read_authority_for_test(
-    _cg: &crate::tracedecay::TraceDecay,
-    _project_database: &crate::global_db::RegisteredGlobalDb,
-) -> Option<std::sync::Arc<dyn tracedecay_application::DashboardGraphReadPortV1>> {
-    None
-}
-
 /// Composes the daemon-owned git-correlation read authority over the
 /// fixture's registered project-sessions store — the same
 /// `DashboardGitCorrelationReadAdapter` the MCP dashboard composition mounts

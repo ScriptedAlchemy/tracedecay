@@ -585,7 +585,7 @@ async fn execute_source(
     control: DashboardHttpRequestControlV1,
 ) -> ExplorerSourceProgressV1 {
     match source_id {
-        ExplorerSourceIdV1::CodeGraph => code_source(&state, &request).await,
+        ExplorerSourceIdV1::CodeGraph => code_source(&state, &request, &control).await,
         ExplorerSourceIdV1::Sessions => session_source(&state, &request, control).await,
         ExplorerSourceIdV1::Knowledge => knowledge_source(&state, &request).await,
     }
@@ -594,16 +594,22 @@ async fn execute_source(
 async fn code_source(
     state: &DashboardState,
     request: &ExplorerQueryRequestV1,
+    control: &DashboardHttpRequestControlV1,
 ) -> ExplorerSourceProgressV1 {
-    let read =
-        match graph_service::search_payload(state, &request.query, request.limit, request.offset)
-            .await
-        {
-            Ok(read) => read,
-            Err(error) => {
-                return code_graph_error(error);
-            }
-        };
+    let read = match graph_service::search_payload(
+        state,
+        control,
+        &request.query,
+        request.limit,
+        request.offset,
+    )
+    .await
+    {
+        Ok(read) => read,
+        Err(error) => {
+            return code_graph_error(error);
+        }
+    };
     let payload = read.payload;
     let Ok(total) = u64::try_from(payload.total) else {
         return ExplorerSourceProgressV1::error(
@@ -637,32 +643,30 @@ async fn code_source(
         Vec::new(),
     );
     source.freshness = "fresh";
-    source.watermark = Some(read.generation.graph_generation_id);
+    source.watermark = Some(read.generation);
     source
 }
 
-fn code_graph_error(
-    error: tracedecay_application::DashboardGraphReadErrorV1,
-) -> ExplorerSourceProgressV1 {
-    use tracedecay_application::DashboardGraphReadErrorV1;
+fn code_graph_error(error: crate::graph::CodeGraphReadError) -> ExplorerSourceProgressV1 {
+    use crate::graph::CodeGraphReadError;
 
     match error {
-        DashboardGraphReadErrorV1::MissingRegistry => ExplorerSourceProgressV1::unavailable(
+        CodeGraphReadError::MissingRegistry => ExplorerSourceProgressV1::unavailable(
             ExplorerSourceIdV1::CodeGraph,
             "missing_registry",
             "the exact project graph registry is missing",
         ),
-        DashboardGraphReadErrorV1::Unavailable { detail } => ExplorerSourceProgressV1::unavailable(
+        CodeGraphReadError::Unavailable { detail } => ExplorerSourceProgressV1::unavailable(
             ExplorerSourceIdV1::CodeGraph,
             "graph_authority_unavailable",
             detail,
         ),
-        DashboardGraphReadErrorV1::Stale { detail } => ExplorerSourceProgressV1::unavailable(
+        CodeGraphReadError::Stale { detail } => ExplorerSourceProgressV1::unavailable(
             ExplorerSourceIdV1::CodeGraph,
             "graph_generation_stale",
             detail,
         ),
-        DashboardGraphReadErrorV1::Cancelled => {
+        CodeGraphReadError::Cancelled => {
             let mut source = ExplorerSourceProgressV1::unavailable(
                 ExplorerSourceIdV1::CodeGraph,
                 "graph_read_cancelled",
@@ -672,24 +676,34 @@ fn code_graph_error(
             source.outcome = ExplorerSourceOutcomeV1::Cancelled;
             source
         }
-        DashboardGraphReadErrorV1::TimedOut => ExplorerSourceProgressV1::unavailable(
+        CodeGraphReadError::TimedOut => ExplorerSourceProgressV1::unavailable(
             ExplorerSourceIdV1::CodeGraph,
             "graph_read_timed_out",
             "the graph read timed out",
         ),
-        DashboardGraphReadErrorV1::Denied => ExplorerSourceProgressV1::unavailable(
+        CodeGraphReadError::Denied => ExplorerSourceProgressV1::unavailable(
             ExplorerSourceIdV1::CodeGraph,
             "graph_read_denied",
             "the graph read is not authorized",
         ),
-        DashboardGraphReadErrorV1::InvalidRequest { detail } => ExplorerSourceProgressV1::error(
+        CodeGraphReadError::InvalidRequest { detail } => ExplorerSourceProgressV1::error(
             ExplorerSourceIdV1::CodeGraph,
             "graph_request_invalid",
             detail,
         ),
-        DashboardGraphReadErrorV1::Corrupt { detail } => ExplorerSourceProgressV1::error(
+        CodeGraphReadError::Corrupt { detail } => ExplorerSourceProgressV1::error(
             ExplorerSourceIdV1::CodeGraph,
             "verified_graph_corrupt",
+            detail,
+        ),
+        CodeGraphReadError::ResetRequired { detail } => ExplorerSourceProgressV1::unavailable(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_reset_required",
+            detail,
+        ),
+        CodeGraphReadError::BudgetExhausted { detail } => ExplorerSourceProgressV1::error(
+            ExplorerSourceIdV1::CodeGraph,
+            "graph_budget_exhausted",
             detail,
         ),
     }

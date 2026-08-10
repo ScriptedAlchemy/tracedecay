@@ -591,11 +591,10 @@ function SymbolMatches({
  *               size falls with rank — magnitude read as typography, costing
  *               no horizontal column.
  *
- * The endpoint (`graph_queries::top_connected_rows`) serves the top twelve rows
- * and five fields. So the spine is captioned as those hubs only, its axis is
- * anchored at zero and labelled with the real extremes, and nothing here claims
- * to be the whole graph's degree distribution — which this payload does not
- * contain. Search reaches everything else. */
+ * The endpoint serves at most twelve generation-pinned degree leaders. So the
+ * spine is captioned as those hubs only, its axis is anchored at zero and
+ * labelled with the real extremes, and nothing here claims to be the whole
+ * graph's degree distribution. Search reaches everything else. */
 function TopConnectedList({
   overviewPending,
   overviewResult,

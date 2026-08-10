@@ -1037,7 +1037,6 @@ pub(super) async fn dispatch_session_workflow_tools(
                 cg,
                 args,
                 options.retained_project_graph_resolver.clone(),
-                options.dashboard_graph_interactive_resolver.clone(),
                 options.code_graph_read_admission_port.clone(),
                 options.code_graph_projection_read_port.clone(),
                 options.registered_project_session_db.clone(),

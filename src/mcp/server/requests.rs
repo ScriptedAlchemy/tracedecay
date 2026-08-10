@@ -886,9 +886,6 @@ impl McpServer {
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
                 code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
-                dashboard_graph_interactive_resolver: self
-                    .dashboard_graph_interactive_resolver
-                    .clone(),
                 session_sync_service: session_sync_service.as_deref(),
                 preselected_project_reader,
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
