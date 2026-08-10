@@ -129,7 +129,7 @@ function envelope(value: unknown) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('selected task evidence', () => {
-  it('shows provider-qualified content and continues only with the sealed relation', async () => {
+  it('retrieves explicitly, continues only with the sealed relation, and resets it on mode change', async () => {
     const requests: unknown[] = [];
     vi.stubGlobal(
       'fetch',
@@ -150,6 +150,8 @@ describe('selected task evidence', () => {
       </QueryClientProvider>,
     );
 
+    expect(requests).toHaveLength(0);
+    await userEvent.click(screen.getByRole('button', { name: 'Retrieve evidence' }));
     expect((await screen.findAllByText('codex / session.1')).length).toBeGreaterThan(0);
     expect(screen.getByText('Provider completed the task')).toBeTruthy();
     expect(requests[0]).toMatchObject({
@@ -166,5 +168,68 @@ describe('selected task evidence', () => {
       expansion: { kind: 'task_session', attempt: ATTEMPT },
       continuation: CONTINUATION,
     });
+
+    await userEvent.selectOptions(screen.getByLabelText('Evidence time'), 'current');
+    await userEvent.click(screen.getByRole('button', { name: 'Retrieve evidence' }));
+    await waitFor(() => expect(requests).toHaveLength(3));
+    expect(requests[2]).toMatchObject({
+      temporal: { kind: 'current' },
+      expansion: null,
+      continuation: null,
+    });
+    expect(screen.queryByRole('button', { name: 'Return to task evidence root' })).toBeNull();
+  });
+
+  it('executes every supported temporal mode and refuses an as-of request without a UTC cutoff', async () => {
+    const requests: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        requests.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify(envelope(payload(false))), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <WorkEvidencePanel taskId="task.alpha" graph={graph} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    const mode = screen.getByLabelText('Evidence time');
+    const retrieve = screen.getByRole('button', { name: 'Retrieve evidence' });
+
+    await userEvent.selectOptions(mode, 'current');
+    await userEvent.click(retrieve);
+    await waitFor(() => expect(requests).toHaveLength(1));
+
+    await userEvent.selectOptions(mode, 'evolution');
+    await userEvent.click(retrieve);
+    await waitFor(() => expect(requests).toHaveLength(2));
+
+    await userEvent.selectOptions(mode, 'forensic');
+    await userEvent.click(retrieve);
+    await waitFor(() => expect(requests).toHaveLength(3));
+
+    await userEvent.selectOptions(mode, 'as_of');
+    await userEvent.click(retrieve);
+    expect(requests).toHaveLength(3);
+    expect(screen.getByText(/UTC cutoff is required/)).toBeTruthy();
+
+    await userEvent.type(screen.getByLabelText('As-of cutoff (UTC)'), '2026-08-10T12:34:56.789');
+    await userEvent.click(retrieve);
+    await waitFor(() => expect(requests).toHaveLength(4));
+
+    expect(requests.map((request) => (request as { temporal: unknown }).temporal)).toEqual([
+      { kind: 'current' },
+      { kind: 'evolution' },
+      { kind: 'forensic' },
+      { kind: 'as_of', cutoff: 1_786_365_296_789_000 },
+    ]);
   });
 });

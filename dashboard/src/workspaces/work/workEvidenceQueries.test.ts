@@ -6,6 +6,7 @@ import {
   WORK_EVIDENCE_PAGE_SIZE,
   workEvidenceAuthorityKey,
   workEvidenceRequest,
+  workEvidenceTemporalMode,
 } from './workEvidenceQueries.ts';
 
 function current(): WorkResult<WorkGraphReadV1> {
@@ -16,9 +17,9 @@ function current(): WorkResult<WorkGraphReadV1> {
 }
 
 describe('TaskSession evidence requests', () => {
-  it('binds the task to the exact current graph authority', () => {
+  it('binds the task and selected temporal mode to the exact current graph authority', () => {
     const graph = current();
-    const request = workEvidenceRequest(graph, 'task.alpha', null, 123);
+    const request = workEvidenceRequest(graph, 'task.alpha', { kind: 'evolution' }, null, 123);
     expect(request).toEqual({
       selection: { selection: 'profile_owned_no_git' },
       task_id: 'task.alpha',
@@ -26,7 +27,7 @@ describe('TaskSession evidence requests', () => {
         graph.outcome === 'value' && graph.value.mode === 'current'
           ? graph.value.snapshot.verified_version
           : undefined,
-      temporal: { kind: 'forensic' },
+      temporal: { kind: 'evolution' },
       page_size: WORK_EVIDENCE_PAGE_SIZE,
       expansion: null,
       continuation: null,
@@ -46,9 +47,33 @@ describe('TaskSession evidence requests', () => {
       ),
     };
 
-    expect(workEvidenceAuthorityKey(first, 'task.alpha')).not.toBe(
-      workEvidenceAuthorityKey(second, 'task.alpha'),
+    expect(workEvidenceAuthorityKey(first, 'task.alpha', { kind: 'current' })).not.toBe(
+      workEvidenceAuthorityKey(second, 'task.alpha', { kind: 'current' }),
     );
+  });
+
+  it('separates cache authority for every temporal mode and exact as-of cutoff', () => {
+    const graph = current();
+    const keys = [
+      workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'current' }),
+      workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'as_of', cutoff: 100 }),
+      workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'as_of', cutoff: 101 }),
+      workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'evolution' }),
+      workEvidenceAuthorityKey(graph, 'task.alpha', { kind: 'forensic' }),
+    ];
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it('converts an explicit UTC cutoff to canonical microseconds without a default', () => {
+    expect(workEvidenceTemporalMode('as_of', '')).toBeUndefined();
+    expect(workEvidenceTemporalMode('as_of', 'not-a-date')).toBeUndefined();
+    expect(workEvidenceTemporalMode('as_of', '2026-08-10T12:34:56.789')).toEqual({
+      kind: 'as_of',
+      cutoff: 1_786_365_296_789_000,
+    });
+    expect(workEvidenceTemporalMode('current', '')).toEqual({ kind: 'current' });
+    expect(workEvidenceTemporalMode('evolution', '')).toEqual({ kind: 'evolution' });
+    expect(workEvidenceTemporalMode('forensic', '')).toEqual({ kind: 'forensic' });
   });
 
   it('pairs a TaskSession continuation with its exact accepted attempt', () => {
@@ -68,7 +93,13 @@ describe('TaskSession evidence requests', () => {
         },
       },
     };
-    const request = workEvidenceRequest(current(), 'task.alpha', continuation, 123);
+    const request = workEvidenceRequest(
+      current(),
+      'task.alpha',
+      { kind: 'forensic' },
+      continuation,
+      123,
+    );
     expect(request?.continuation).toEqual(continuation);
     expect(request?.expansion).toEqual({
       kind: 'task_session',
@@ -83,11 +114,14 @@ describe('TaskSession evidence requests', () => {
         workGraphTimeline([{ tasks: [{ taskId: 'task.alpha' }] }]),
       ),
     };
-    expect(workEvidenceRequest(timeline, 'task.alpha', null, 123)).toBeUndefined();
+    expect(
+      workEvidenceRequest(timeline, 'task.alpha', { kind: 'current' }, null, 123),
+    ).toBeUndefined();
     expect(
       workEvidenceRequest(
         { outcome: 'refused', state: 'unavailable', detail: 'not mounted' },
         'task.alpha',
+        { kind: 'current' },
         null,
         123,
       ),

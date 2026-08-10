@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import type {
+  TemporalModeV1,
   WorkEvidenceContinuationV1,
   WorkEvidenceRetrievalV1,
   WorkEvidenceSourceV1,
@@ -8,7 +9,12 @@ import type {
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import type { WorkResult } from './workApi.ts';
-import { useWorkEvidence, workEvidenceAuthorityKey } from './workEvidenceQueries.ts';
+import {
+  useWorkEvidence,
+  workEvidenceAuthorityKey,
+  workEvidenceTemporalMode,
+  type WorkEvidenceTemporalKind,
+} from './workEvidenceQueries.ts';
 
 function qualifiedSession(source: WorkEvidenceSourceV1): string | null {
   if (source.kind !== 'task_session') return null;
@@ -101,16 +107,93 @@ export function WorkEvidencePanel({
   taskId: string;
   graph: WorkResult<WorkGraphReadV1> | undefined;
 }) {
+  const [draftKind, setDraftKind] = useState<WorkEvidenceTemporalKind>('forensic');
+  const [cutoffUtc, setCutoffUtc] = useState('');
+  const [appliedTemporal, setAppliedTemporal] = useState<TemporalModeV1 | null>(null);
+  const [invalidCutoff, setInvalidCutoff] = useState(false);
   const [continuation, setContinuation] = useState<WorkEvidenceContinuationV1 | null>(null);
-  const authorityKey = workEvidenceAuthorityKey(graph, taskId);
+  const authorityKey = workEvidenceAuthorityKey(graph, taskId, appliedTemporal);
   useEffect(() => setContinuation(null), [authorityKey]);
-  const evidence = useWorkEvidence(graph, taskId, continuation);
+  const evidence = useWorkEvidence(graph, taskId, appliedTemporal, continuation);
   const result = evidence.data;
   const value = result?.outcome === 'value' ? result.value : undefined;
 
+  function retrieve(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const temporal = workEvidenceTemporalMode(draftKind, cutoffUtc);
+    if (temporal === undefined) {
+      setInvalidCutoff(true);
+      setAppliedTemporal(null);
+      setContinuation(null);
+      return;
+    }
+    setInvalidCutoff(false);
+    setContinuation(null);
+    if (JSON.stringify(temporal) === JSON.stringify(appliedTemporal)) {
+      void evidence.refetch();
+    } else {
+      setAppliedTemporal(temporal);
+    }
+  }
+
   return (
     <Panel legend={`Evidence · ${taskId}`}>
-      {evidence.isPending ? <StateChip kind="loading" detail="retrieving exact task evidence" /> : null}
+      <form className="mb-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]" onSubmit={retrieve}>
+        <label className="grid gap-1 text-3xs text-text-muted">
+          Evidence time
+          <select
+            className="min-h-[36px] rounded-sm border border-edge bg-surface-2 px-2 text-2xs text-text-primary"
+            value={draftKind}
+            onChange={(event) => {
+              setDraftKind(event.target.value as WorkEvidenceTemporalKind);
+              setInvalidCutoff(false);
+            }}
+          >
+            <option value="current">Current</option>
+            <option value="as_of">As of</option>
+            <option value="evolution">Evolution</option>
+            <option value="forensic">Forensic</option>
+          </select>
+        </label>
+        {draftKind === 'as_of' ? (
+          <label className="grid gap-1 text-3xs text-text-muted">
+            As-of cutoff (UTC)
+            <input
+              type="datetime-local"
+              step="0.001"
+              className="min-h-[36px] rounded-sm border border-edge bg-surface-2 px-2 text-2xs text-text-primary"
+              value={cutoffUtc}
+              onChange={(event) => {
+                setCutoffUtc(event.target.value);
+                setInvalidCutoff(false);
+              }}
+            />
+          </label>
+        ) : (
+          <p className="self-end pb-2 text-3xs text-text-muted">
+            {draftKind === 'current'
+              ? 'Representative evidence at the current frontier.'
+              : draftKind === 'evolution'
+                ? 'Correction and supersession lineage in graph order.'
+                : 'Every authorized occurrence and unknown validity state.'}
+          </p>
+        )}
+        <button
+          type="submit"
+          className="min-h-[36px] self-end rounded-sm border border-edge px-2 py-1 text-2xs text-text-primary hover:bg-surface-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          Retrieve evidence
+        </button>
+      </form>
+      {invalidCutoff ? (
+        <StateChip kind="unknown" detail="UTC cutoff is required before as-of evidence can be retrieved" />
+      ) : null}
+      {appliedTemporal === null && !invalidCutoff ? (
+        <StateChip kind="unknown" detail="choose a temporal mode and retrieve exact task evidence" />
+      ) : null}
+      {appliedTemporal !== null && evidence.isPending ? (
+        <StateChip kind="loading" detail="retrieving exact task evidence" />
+      ) : null}
       {result?.outcome === 'refused' ? <StateChip kind={result.state} detail={result.detail} /> : null}
       {value === undefined ? null : <EvidenceResult value={value} />}
       {value?.continuations.map((next, index) => (
