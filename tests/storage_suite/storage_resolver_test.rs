@@ -1395,7 +1395,7 @@ async fn linked_worktree_exact_manifest_overrides_healthy_shared_identity_store(
 }
 
 #[tokio::test]
-async fn registered_healthy_exact_root_ignores_duplicate_exact_manifests() {
+async fn registered_healthy_exact_branch_ignores_duplicate_exact_manifests() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     let project = dir.path().join("repo");
@@ -1411,6 +1411,21 @@ async fn registered_healthy_exact_root_ignores_duplicate_exact_manifests() {
     let selected_project_id = selected.store_layout().identity.project_id.clone().unwrap();
     let selected_data_root = selected.store_layout().data_root.clone();
     selected.close();
+
+    git(
+        &project,
+        &["checkout", "-b", "feature/selected-exact-branch"],
+    );
+    let selected_branch = TraceDecay::open(&project)
+        .await
+        .expect("the selected store must create a healthy current-branch graph");
+    selected_branch.close();
+    remove_sqlite_family(&selected_data_root.join("tracedecay.db"));
+    fs::write(
+        selected_data_root.join("tracedecay.db"),
+        b"root graph is unavailable; current branch graph remains healthy",
+    )
+    .unwrap();
 
     for project_id in ["proj_duplicate_exact_one", "proj_duplicate_exact_two"] {
         let data_root = profile_root.join(format!("projects/{project_id}"));
@@ -1438,7 +1453,7 @@ async fn registered_healthy_exact_root_ignores_duplicate_exact_manifests() {
 
     let layout = TraceDecay::resolve_store_layout_for_identity(&project)
         .await
-        .expect("a healthy selected exact-root shard must outrank duplicate legacy manifests");
+        .expect("a healthy selected exact-branch shard must outrank duplicate legacy manifests");
 
     assert_eq!(
         layout.identity.project_id.as_deref(),

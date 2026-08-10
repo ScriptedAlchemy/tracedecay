@@ -1441,9 +1441,15 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
 /// ambiguity/cutover diagnostic; this predicate only needs to distinguish a
 /// healthy populated store from an empty or unhealthy one.
 async fn store_identity_is_healthy_non_pristine(layout: &StoreLayout) -> bool {
-    let authority = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store inventory");
+    let active_branch = branch::current_branch(&layout.project_root);
+    let (serving_graph_db_path, _, _) = TraceDecay::resolve_db_for_branch(
+        &layout.project_root,
+        &layout.data_root,
+        active_branch.as_deref(),
+    );
+    let authority = DatabaseAuthority::for_runtime(&serving_graph_db_path, "store inventory");
     let Ok((db, _)) = (match authority {
-        Ok(authority) => Database::open_read_only(&layout.graph_db_path, &authority).await,
+        Ok(authority) => Database::open_read_only(&serving_graph_db_path, &authority).await,
         Err(error) => Err(error),
     }) else {
         return false;
