@@ -260,7 +260,7 @@ async fn checked_in_codex_goal_materializes_one_generation_bound_occurrence() {
     assert_eq!(
         occurrence.valid_time,
         TemporalValidityV1::Known {
-            valid_at: UtcMicros(1_783_500_569)
+            valid_at: UtcMicros(1_783_500_569_000_000)
         }
     );
 }
