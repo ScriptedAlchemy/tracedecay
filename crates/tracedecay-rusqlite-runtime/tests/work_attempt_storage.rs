@@ -27,16 +27,17 @@ use tracedecay_application::{
 use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId,
+    ObservationSourceIdentityV1, ProjectId, ProposalId, ProviderId, RefId, RepositoryId, RunId,
     SessionId, TaskId, UtcMicros, WorkApprovalPolicy, WorkArtifactRefV1, WorkAttemptIdentityV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
     WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
     WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
     WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
-    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1,
-    WorkRunControlReasonV1, WorkRunControlV1, WorkSandboxPolicy, WorkTerminalEvidenceV1,
-    WorkVersion, WorkflowOperationRef, WorkflowOutputName, WorktreeId,
+    WorkGraphVersionV1, WorkLeaseFenceV1, WorkLeaseId, WorkProductEventSequenceV1,
+    WorkProductSourceWatermarkV1, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkRunControlReasonV1,
+    WorkRunControlV1, WorkSandboxPolicy, WorkTerminalEvidenceV1, WorkflowOperationRef,
+    WorkflowOutputName, WorktreeId,
 };
 
 use work_registered_store::RegisteredWorkStore;
@@ -734,9 +735,10 @@ fn attempt_with_effect(
     effect_state: WorkEffectStateV1,
 ) -> WorkAttemptV1 {
     let binding = WorkAttemptProjectionBindingV1::new(
-        id::<ProjectionGenerationId>("generation.attempt.storage"),
-        tracedecay_domain::WorkProjectionSequenceV1::new(7),
-        WorkVersion::new(3).unwrap(),
+        WorkGraphVersionV1::new(3).unwrap(),
+        WorkProductEventSequenceV1::new(7).unwrap(),
+        WorkProductSourceWatermarkV1::new(Default::default()).unwrap(),
+        digest('f'),
         id::<ProposalId>("proposal.attempt.storage"),
     )
     .unwrap();
@@ -796,7 +798,7 @@ fn evidence(attempt: &WorkAttemptV1) -> WorkAttemptEvidenceRecordV1 {
         outcome: WorkAttemptProviderOutcomeV1::Exited { code: 0 },
         stdout: None,
         stderr: None,
-        provider_session_id: None,
+        provider_session: None,
         provider_fallback: None,
         observed_at: UtcMicros(500),
     }
@@ -804,7 +806,13 @@ fn evidence(attempt: &WorkAttemptV1) -> WorkAttemptEvidenceRecordV1 {
 
 fn evidence_with_session(attempt: &WorkAttemptV1, session_id: &str) -> WorkAttemptEvidenceRecordV1 {
     WorkAttemptEvidenceRecordV1 {
-        provider_session_id: Some(id::<SessionId>(session_id)),
+        provider_session: Some(
+            ObservationSourceIdentityV1::for_provider(
+                id::<ProviderId>("provider.work.claude-code-cli"),
+                id::<SessionId>(session_id),
+            )
+            .unwrap(),
+        ),
         ..evidence(attempt)
     }
 }
@@ -1362,7 +1370,11 @@ fn evidence_pages_carry_artifacts_and_typed_evidence_in_identity_order() {
         .expect("the settled attempt must carry its sealed evidence record");
     assert_eq!(sealed.identity, *closed.identity());
     assert_eq!(
-        sealed.provider_session_id.as_ref().map(SessionId::as_str),
+        sealed
+            .provider_session
+            .as_ref()
+            .map(ObservationSourceIdentityV1::session_id)
+            .map(SessionId::as_str),
         Some("session.provider.reported")
     );
     assert_eq!(
@@ -1385,7 +1397,8 @@ fn evidence_pages_carry_artifacts_and_typed_evidence_in_identity_order() {
         exact
             .evidence
             .as_ref()
-            .and_then(|record| record.provider_session_id.as_ref())
+            .and_then(|record| record.provider_session.as_ref())
+            .map(ObservationSourceIdentityV1::session_id)
             .map(SessionId::as_str),
         Some("session.provider.reported"),
         "provider session identity must commit atomically with terminal evidence"

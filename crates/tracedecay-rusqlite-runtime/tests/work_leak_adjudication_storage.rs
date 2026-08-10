@@ -10,16 +10,17 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
-    CoverageStateV1, LeakOwnerClassV1, ManifestDigest, ProjectId, ProjectionGenerationId,
-    ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy,
-    WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
-    WorkAuthority, WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1, WorkEgressPolicy,
+    CoverageStateV1, LeakOwnerClassV1, ManifestDigest, ProjectId, ProposalId, ProviderId, RefId,
+    RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy, WorkAttemptIdentityV1,
+    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkCancellationStateV1, WorkCommandId, WorkEffectStateV1, WorkEgressPolicy,
     WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLeakKindV1,
     WorkExecutionLeakRecoveryV1, WorkExecutionLimits, WorkExecutionSnapshot,
-    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy, WorkLeaseFenceV1,
-    WorkLeaseId, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkRecoveryStateV1, WorkSandboxPolicy, WorkTerminalEvidenceV1,
-    WorkVersion, WorkflowOperationRef, WorktreeId, canonical_sha256,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFilesystemPolicy, WorkGraphVersionV1,
+    WorkLeaseFenceV1, WorkLeaseId, WorkProductEventSequenceV1, WorkProductSourceWatermarkV1,
+    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRecoveryStateV1, WorkSandboxPolicy, WorkTerminalEvidenceV1, WorkflowOperationRef,
+    WorktreeId, canonical_sha256,
 };
 
 use work_registered_store::RegisteredWorkStore;
@@ -55,9 +56,10 @@ fn terminal_attempt() -> WorkAttemptV1 {
     )
     .unwrap();
     let binding = WorkAttemptProjectionBindingV1::new(
-        id::<ProjectionGenerationId>("generation.leak-storage"),
-        tracedecay_domain::WorkProjectionSequenceV1::new(1),
-        WorkVersion::new(1).unwrap(),
+        WorkGraphVersionV1::new(1).unwrap(),
+        WorkProductEventSequenceV1::new(1).unwrap(),
+        WorkProductSourceWatermarkV1::new(Default::default()).unwrap(),
+        digest('f'),
         id::<ProposalId>("proposal.leak-storage"),
     )
     .unwrap();

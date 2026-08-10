@@ -41,6 +41,10 @@ fn encrypted_frame_transfer_preserves_exact_frame_and_is_idempotent() {
 
 #[test]
 fn transferred_frames_cannot_exceed_the_registered_spool_limits() {
+    let registered_limits = RemoteSpoolLimitsV1::default();
+    assert_eq!(registered_limits.maximum_events, 4_096);
+    assert_eq!(registered_limits.maximum_ciphertext_bytes, 64 * 1024 * 1024);
+
     let source_fixture = fixture();
     let source = storage(&source_fixture);
     let first_capture = admitted();

@@ -206,7 +206,7 @@ pub struct HandoffOpenExpectationV1 {
 }
 
 impl HandoffOpenExpectationV1 {
-    fn from_request(
+    pub fn from_request(
         request: &RequestContext,
         kind: HandoffOpenKindV1,
         session_id: HandoffSessionId,
