@@ -991,7 +991,11 @@ mod tests {
             .into_iter()
             .find(|definition| definition.name == "tracedecay_stack_snapshot")
             .expect("stack snapshot definition");
-        let selection = &definition.input_schema["properties"]["selection"];
+        assert_eq!(
+            definition.input_schema["properties"]["selection"]["$ref"],
+            "#/$defs/NativeIntegrationSelectionBindingV1"
+        );
+        let selection = &definition.input_schema["$defs"]["NativeIntegrationSelectionBindingV1"];
 
         assert_eq!(selection["oneOf"].as_array().map(Vec::len), Some(2));
         assert_eq!(
