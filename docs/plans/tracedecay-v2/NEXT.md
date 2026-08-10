@@ -102,6 +102,22 @@ the commit as attribution evidence.
   as not-found-or-not-authorized. The new assertions live in a focused child
   module instead of growing the already oversized route-conformance source;
   the exact live journey passed 1/1 and its integration target check passed.
+- CLI-launched native providers now preserve their sealed provider-session
+  identity through execution and settlement in `bff518403`. Recovered workflow
+  admission in `76a5da86c` verifies the original command ID and input digest
+  before resuming fan-out, rejects conflicting retries, and publishes complete
+  non-truncated provider stdout as digest-addressed attempt evidence. The
+  mounted advanced-workflow journey now drives a physical daemon process,
+  exercises ordered success/failure/cancellation fan-out, synthesizes through
+  the canonical Work graph mutation route, imports a real Claude transcript,
+  restarts the daemon, and queries current, as-of, evolution, and forensic
+  TaskSession evidence. Its live run passed 1/1 in 52.98 seconds; the focused
+  provider-artifact regression passed 1/1, the native provider execution
+  module passed 16/16, and the daemon integration target compiled. A fresh
+  project without an activated evaluated query profile truthfully returns
+  typed `Unavailable` in all four modes while retaining the exact attempt,
+  provider-session, and artifact receipts; it does not substantiate live
+  TaskSession hydration.
 - The dashboard board and commands now consume only the product graph authority
   in `d0d9f7dcb`; its complete focused Work suite passed 202/202 with typecheck
   and production build green. The public `WorkProjection` snapshot, delta,
@@ -171,10 +187,13 @@ the commit as attribution evidence.
 
 ### Work and TaskSession retrieval
 
-- Complete real MCP and typed SDK journeys for task-to-session correlation and
-  extend the dashboard journey beyond its verified task root to who worked on
-  a task, provider-qualified session evidence, continuation, revocation,
-  restart, unavailable authority, and all four temporal modes.
+- Activate a real evaluated query profile in the mounted provider-workflow
+  journey, then prove task-to-session correlation through both MCP and the
+  typed SDK after transcript import and physical daemon restart. Preserve the
+  already-proven typed `Unavailable` result when that authority is absent.
+- Extend the dashboard journey beyond its verified task root to who worked on
+  a task, provider-qualified session evidence, exact continuation, rank-final
+  revocation, restart, and all four temporal modes.
 
 ### Typed terminal problem propagation
 
