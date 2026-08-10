@@ -9,7 +9,8 @@ use tracedecay_store::ProjectMemoryFactStore;
 
 use super::user_automation_root;
 use crate::automation::automatic_facts::{
-    AutomaticFactReceipt, AutomaticFactState, record_session_automatic_facts,
+    AutomaticFactReceipt, AutomaticFactState, dispose_shipped_fact_proposals,
+    record_session_automatic_facts,
 };
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
@@ -484,6 +485,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
+    dispose_shipped_fact_proposals(memory, &dashboard_root).await?;
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
         sessions_db,

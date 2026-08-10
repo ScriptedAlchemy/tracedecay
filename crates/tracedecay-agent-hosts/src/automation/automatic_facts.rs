@@ -2,8 +2,11 @@
 //!
 //! Candidate discovery and validation belong to the automation run receipt.
 //! This module records and reads only terminal applied or quarantined effects.
+//! It also retires the independently shipped v1 proposal sidecar by committing
+//! pending items through that same terminal authority before exact archival.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,8 +22,102 @@ use crate::application::memory::{
     MemoryApplication, automatic_fact_add_command, memory_application_error,
 };
 use crate::errors::{Result, TraceDecayError};
-use crate::memory::types::{AddFactRequest, MemoryCategory};
+use crate::memory::types::{AddFactOutcome, AddFactRequest, MemoryCategory};
 use crate::privacy::sanitize_provider_metadata_text;
+
+const SHIPPED_FACT_PROPOSALS_FILENAME: &str = "fact_proposals.json";
+const SHIPPED_FACT_PROPOSALS_ARCHIVE_DIRECTORY: &str = "fact_proposals.archive";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ShippedFactProposalStateV1 {
+    PendingApproval,
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShippedAddFactRequestV1 {
+    content: String,
+    category: MemoryCategory,
+    source: Option<String>,
+    tags: Vec<String>,
+    entities: Vec<String>,
+    trust: Option<f64>,
+    metadata: Value,
+}
+
+impl From<ShippedAddFactRequestV1> for AddFactRequest {
+    fn from(request: ShippedAddFactRequestV1) -> Self {
+        Self {
+            content: request.content,
+            category: request.category,
+            source: request.source,
+            tags: request.tags,
+            entities: request.entities,
+            trust: request.trust,
+            metadata: request.metadata,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShippedFactProposalRecordV1 {
+    schema_version: u32,
+    proposal_id: String,
+    run_id: String,
+    #[serde(default)]
+    evidence_hash: Option<String>,
+    state: ShippedFactProposalStateV1,
+    #[serde(default)]
+    add_fact_request: Option<ShippedAddFactRequestV1>,
+    #[serde(default)]
+    proposal: Option<Value>,
+    #[serde(default)]
+    validation_reason: Option<String>,
+    #[serde(default)]
+    validation: Option<Value>,
+    #[serde(default)]
+    reviewer: Option<String>,
+    #[serde(default)]
+    applied_fact_id: Option<i64>,
+    #[serde(default)]
+    apply_outcome: Option<AddFactOutcome>,
+    created_at: i64,
+    updated_at: i64,
+    #[serde(default)]
+    duplicate_count: u32,
+    #[serde(default)]
+    last_duplicate_run_id: Option<String>,
+    #[serde(default)]
+    folded_contents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShippedFactProposalStoreV1 {
+    schema_version: u32,
+    #[serde(default)]
+    proposals: Vec<ShippedFactProposalRecordV1>,
+}
+
+/// One-time disposition of the independently shipped proposal sidecar.
+///
+/// The live sidecar is never a second read authority. Pending records first
+/// receive terminal canonical automatic-fact receipts; only then are the
+/// source bytes moved into the content-addressed archive.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ShippedFactProposalDisposition {
+    NotPresent,
+    Archived {
+        source_digest: String,
+        archive_path: PathBuf,
+        pending_receipts: Vec<AutomaticFactReceipt>,
+        preserved_terminal_records: usize,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,6 +233,277 @@ pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
         receipts,
         retry_error: None,
     })
+}
+
+pub(crate) async fn dispose_shipped_fact_proposals<A: ProjectMemoryFactStore>(
+    memory: &MemoryApplication<A>,
+    dashboard_root: &Path,
+) -> Result<ShippedFactProposalDisposition> {
+    let source_path = dashboard_root.join(SHIPPED_FACT_PROPOSALS_FILENAME);
+    let bytes = match tokio::fs::read(&source_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ShippedFactProposalDisposition::NotPresent);
+        }
+        Err(error) => {
+            return Err(config_error(format!(
+                "failed to read shipped fact proposal sidecar '{}': {error}",
+                source_path.display()
+            )));
+        }
+    };
+    let source_metadata = tokio::fs::symlink_metadata(&source_path)
+        .await
+        .map_err(|error| {
+            config_error(format!(
+                "failed to inspect shipped fact proposal sidecar '{}': {error}",
+                source_path.display()
+            ))
+        })?;
+    if !source_metadata.file_type().is_file() {
+        return Err(shipped_fact_proposal_reset_required(
+            &source_path,
+            "the shipped v1 sidecar is not a regular file",
+        ));
+    }
+    let store = serde_json::from_slice::<ShippedFactProposalStoreV1>(&bytes).map_err(|error| {
+        shipped_fact_proposal_reset_required(
+            &source_path,
+            format!("the shipped v1 JSON is malformed: {error}"),
+        )
+    })?;
+    if store.schema_version != 1 {
+        return Err(shipped_fact_proposal_reset_required(
+            &source_path,
+            format!(
+                "root schema version {} is not the shipped version 1",
+                store.schema_version
+            ),
+        ));
+    }
+    if let Some(record) = store
+        .proposals
+        .iter()
+        .find(|record| record.schema_version != 1)
+    {
+        return Err(shipped_fact_proposal_reset_required(
+            &source_path,
+            format!(
+                "proposal '{}' has unsupported schema version {}",
+                record.proposal_id, record.schema_version
+            ),
+        ));
+    }
+
+    let source_digest_hex = hex::encode(Sha256::digest(&bytes));
+    let source_actor_digest = source_digest_hex.chars().take(16).collect::<String>();
+    let source_digest = format!("sha256:{source_digest_hex}");
+    let mut proposal_ids = HashSet::new();
+    let mut pending = Vec::new();
+    let mut preserved_terminal_records = 0usize;
+    for record in &store.proposals {
+        if !proposal_ids.insert(record.proposal_id.as_str()) {
+            return Err(shipped_fact_proposal_reset_required(
+                &source_path,
+                format!(
+                    "proposal identity '{}' occurs more than once",
+                    record.proposal_id
+                ),
+            ));
+        }
+        if record.state != ShippedFactProposalStateV1::PendingApproval {
+            preserved_terminal_records += 1;
+            continue;
+        }
+        let request = record
+            .add_fact_request
+            .clone()
+            .map(AddFactRequest::from)
+            .ok_or_else(|| {
+                shipped_fact_proposal_reset_required(
+                    &source_path,
+                    format!(
+                        "pending proposal '{}' has no add_fact_request",
+                        record.proposal_id
+                    ),
+                )
+            })?;
+        let apply_id = ProvenanceId::new(record.proposal_id.clone()).map_err(|error| {
+            shipped_fact_proposal_reset_required(
+                &source_path,
+                format!(
+                    "pending proposal '{}' has an invalid identity: {error}",
+                    record.proposal_id
+                ),
+            )
+        })?;
+        let proposal_actor_digest = hex::encode(Sha256::digest(record.proposal_id.as_bytes()));
+        let proposal_actor_digest = proposal_actor_digest.chars().take(16).collect::<String>();
+        let actor = automatic_fact_actor(&format!(
+            "automation:shipped-fact-proposal:{}:{}",
+            source_actor_digest.as_str(),
+            proposal_actor_digest.as_str()
+        ))?;
+        let command = automatic_fact_add_command(
+            memory.owner().clone(),
+            request,
+            &record.run_id,
+            &record.proposal_id,
+            Some(actor),
+        )
+        .map_err(|error| {
+            shipped_fact_proposal_reset_required(
+                &source_path,
+                format!(
+                    "pending proposal '{}' cannot enter the canonical automatic-fact authority: {error}",
+                    record.proposal_id
+                ),
+            )
+        })?;
+        let evidence = ProjectMemoryAutomaticFactEvidenceV1::new(
+            bounded_metadata_text(record.evidence_hash.as_deref(), 160),
+            Some(serde_json::json!({
+                "source_format": "fact_proposals.json/v1",
+                "source_digest": source_digest.as_str(),
+                "proposal_id": record.proposal_id.as_str(),
+                "legacy_state": "pending_approval",
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+                "duplicate_count": record.duplicate_count,
+                "last_duplicate_run_id": record.last_duplicate_run_id.as_deref(),
+                "proposal": record.proposal.as_ref(),
+                "validation_reason": record.validation_reason.as_deref(),
+                "reviewer": record.reviewer.as_deref(),
+                "applied_fact_id": record.applied_fact_id,
+                "apply_outcome": record.apply_outcome.as_ref(),
+                "folded_contents": record.folded_contents.as_slice(),
+            })),
+            record.validation.clone(),
+        )
+        .map_err(store_error)?;
+        pending.push((apply_id, command, evidence));
+    }
+
+    let mut pending_receipts = Vec::with_capacity(pending.len());
+    for (apply_id, command, evidence) in pending {
+        let result = memory
+            .apply_project_memory_automatic_fact(apply_id, command, evidence)
+            .await
+            .map_err(memory_application_error)?;
+        pending_receipts.push(automatic_fact_receipt(result.receipt())?);
+    }
+
+    let archive_path =
+        archive_shipped_fact_proposals(dashboard_root, &source_path, &bytes, &source_digest)
+            .await?;
+    Ok(ShippedFactProposalDisposition::Archived {
+        source_digest,
+        archive_path,
+        pending_receipts,
+        preserved_terminal_records,
+    })
+}
+
+async fn archive_shipped_fact_proposals(
+    dashboard_root: &Path,
+    source_path: &Path,
+    source_bytes: &[u8],
+    source_digest: &str,
+) -> Result<PathBuf> {
+    let archive_directory = dashboard_root.join(SHIPPED_FACT_PROPOSALS_ARCHIVE_DIRECTORY);
+    tokio::fs::create_dir_all(&archive_directory)
+        .await
+        .map_err(|error| {
+            config_error(format!(
+                "failed to create shipped fact proposal archive '{}': {error}",
+                archive_directory.display()
+            ))
+        })?;
+    let archive_path = archive_directory.join(format!("{}.json", source_digest.replace(':', "-")));
+    let archive_created = match tokio::fs::hard_link(source_path, &archive_path).await {
+        Ok(()) => true,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            false
+        }
+        Err(error) => {
+            return Err(config_error(format!(
+                "failed to archive shipped fact proposal sidecar '{}' to '{}': {error}",
+                source_path.display(),
+                archive_path.display()
+            )));
+        }
+    };
+    let archived = tokio::fs::read(&archive_path).await.map_err(|read_error| {
+        config_error(format!(
+            "failed to verify shipped fact proposal archive '{}': {read_error}",
+            archive_path.display()
+        ))
+    })?;
+    if archived != source_bytes {
+        if archive_created {
+            tokio::fs::remove_file(&archive_path)
+                .await
+                .map_err(|remove_error| {
+                    config_error(format!(
+                        "failed to discard mismatched fact proposal archive '{}': {remove_error}",
+                        archive_path.display()
+                    ))
+                })?;
+        }
+        return Err(shipped_fact_proposal_reset_required(
+            source_path,
+            format!(
+                "archive '{}' conflicts with the sidecar content digest",
+                archive_path.display()
+            ),
+        ));
+    }
+    match tokio::fs::read(source_path).await {
+        Ok(current) if current != source_bytes => {
+            return Err(shipped_fact_proposal_reset_required(
+                source_path,
+                "the sidecar changed while it was being archived",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(archive_path),
+        Err(error) => {
+            return Err(config_error(format!(
+                "failed to verify shipped fact proposal sidecar '{}': {error}",
+                source_path.display()
+            )));
+        }
+    }
+    match tokio::fs::remove_file(source_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(config_error(format!(
+                "failed to retire shipped fact proposal sidecar '{}': {error}",
+                source_path.display()
+            )));
+        }
+    }
+    Ok(archive_path)
+}
+
+fn shipped_fact_proposal_reset_required(
+    source_path: &Path,
+    reason: impl Into<String>,
+) -> TraceDecayError {
+    TraceDecayError::reset_required(
+        "shipped fact proposal sidecar",
+        format!(
+            "{} at '{}'; preserve or explicitly reset this file",
+            reason.into(),
+            source_path.display()
+        ),
+    )
 }
 
 pub async fn list_automatic_fact_receipts<A: ProjectMemoryFactStore>(
