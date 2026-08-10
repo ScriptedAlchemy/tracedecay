@@ -268,6 +268,13 @@ the commit as attribution evidence.
   and TypeScript typecheck passed. `b66f0009a` additionally makes multi-root
   and Workflow settlement use their executable registries' canonical dispatch
   deadlines; the complete MCP binding suite passed 11/11.
+- The deferred production LSP surface rerun is green on the current integrated
+  tree. All 13 `lsp_gateway_protocol_test` journeys passed, covering negotiated
+  and incompatible context revisions, async correlation, deadline and explicit
+  cancellation, shutdown cancellation, expansion namespacing/currentness,
+  stale open-document content, equal-generation identity replacement and
+  subscription invalidation, same-generation feedback revision notification,
+  session-local unsaved edits, and retained standard LSP behavior.
 
 ## Remaining work by lane
 
@@ -320,11 +327,6 @@ the commit as attribution evidence.
 
 ### Additional wound-down lane handoffs
 
-- LSP readiness is implemented in `70b5ae3355`, `5be0d4ddbe`, and
-  `8f32c4576e`: dispatch waits/rejoins project-open upgrades and cancellation is
-  threaded before admission. Re-run the complete 13-test production LSP
-  surface after TaskSession, retained, topology, and memory callers compile;
-  the last pre-fix run was 12/13 and the post-fix run never reached execution.
 - Grafeo memory relations are mounted in `f0708a7fda` with profile/project
   identity, CAS projection, hydration, and dashboard consumption. The full
   daemon restart/isolation journey was terminated before execution and remains
