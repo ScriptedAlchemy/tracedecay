@@ -2,174 +2,96 @@
 
 use serde_json::{Value, json};
 
-use super::{def, def_rw, project_selector_object, project_selector_properties};
+use super::{def, def_rw, project_selector_properties};
 use crate::mcp::tools::ToolDefinition;
 
-fn memory_fact_properties() -> Value {
-    json!({
-        "memory_scope": {
-            "type": "string",
-            "enum": ["project", "user"],
-            "description": "Fact scope. project (default) uses the active project shard; user uses the profile-level store for durable preferences and projectless conversations."
-        },
-        "action": {
-            "type": "string",
-            "enum": ["add", "search", "probe", "related", "reason", "contradict", "get", "update", "remove", "list"],
-            "description": "Fact-store action to perform."
-        },
-        "content": {
-            "type": "string",
-            "description": "Fact content for add/update actions."
-        },
-        "query": {
-            "type": "string",
-            "description": "Search query for search actions."
-        },
-        "entity": {
-            "type": "string",
-            "description": "Single entity name for probe/related actions, or extra add entity."
-        },
-        "entities": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Entity names for add/update/reason actions."
-        },
-        "fact_id": {
-            "oneOf": [{ "type": "number" }, { "type": "string" }],
-            "description": "Fact id for update/remove/feedback; numeric strings are accepted."
-        },
-        "category": {
-            "type": "string",
-            "enum": ["general", "user_pref", "project", "tool", "decision", "code_area"],
-            "description": "Optional fact category."
-        },
-        "tags": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Free-form tags stored with fact metadata."
-        },
-        "min_trust": {
-            "type": "number",
-            "description": "Minimum trust score for search/list actions."
-        },
-        "trust": {
-            "type": "number",
-            "minimum": 0,
-            "maximum": 1,
-            "description": "Initial or replacement trust score for add/update actions."
-        },
-        "trust_delta": {
-            "type": "number",
-            "description": "Hermes-compatible trust delta field. Current feedback actions apply the built-in helpful/unhelpful deltas."
-        },
-        "threshold": {
-            "type": "number",
-            "description": "Threshold for contradiction scans."
-        },
-        "limit": {
-            "type": "number",
-            "description": "Maximum number of facts to return (default: 20, max: 200)."
-        },
-        "source": {
-            "type": "string",
-            "description": "Source label for facts or feedback."
-        },
-        "metadata": {
-            "type": "object",
-            "description": "Arbitrary structured metadata stored with the fact."
-        },
-        "note": {
-            "type": "string",
-            "description": "Human-readable feedback note or action context."
-        },
-        "project_selector": project_selector_object(
-            "Advanced optional registered project selector. Omit to use the active project.",
-            "query",
-        ),
-        "project_id": {
-            "type": "string",
-            "description": "Optional registered project id to query instead of the active project."
-        },
-        "project_path": {
-            "type": "string",
-            "description": "Optional registered project root path or alias to query instead of the active project."
-        }
-    })
-}
-
-fn fact_store_action_requirements() -> Value {
-    json!([
-        {
-            "if": {
-                "properties": { "action": { "const": "add" } },
-                "required": ["action"]
-            },
-            "then": { "required": ["content"] }
-        },
-        {
-            "if": {
-                "properties": { "action": { "const": "search" } },
-                "required": ["action"]
-            },
-            "then": { "required": ["query"] }
-        },
-        {
-            "if": {
-                "properties": { "action": { "const": "probe" } },
-                "required": ["action"]
-            },
-            "then": { "required": ["entity"] }
-        },
-        {
-            "if": {
-                "properties": { "action": { "const": "related" } },
-                "required": ["action"]
-            },
-            "then": { "required": ["entity"] }
-        },
-        {
-            "if": {
-                "properties": { "action": { "const": "get" } },
-                "required": ["action"]
-            },
-            "then": { "required": ["fact_id"] }
-        },
-        {
-            "if": {
-                "properties": { "action": { "const": "update" } },
-                "required": ["action"]
-            },
-            "then": { "required": ["fact_id"] }
-        },
-        {
-            "if": {
-                "properties": { "action": { "const": "remove" } },
-                "required": ["action"]
-            },
-            "then": { "required": ["fact_id"] }
-        }
-    ])
-}
-
-pub(super) fn def_fact_store() -> ToolDefinition {
+pub(super) fn def_fact_store_add(input_schema: Value) -> ToolDefinition {
     def_rw(
-        "tracedecay_fact_store",
-        "Fact Store",
-        "Add, search, probe, relate, reason over, get, update, remove, or list holographic memory facts. The action field selects the operation. \
-         Defaults to the active project; project_id/project_path selectors are supported for read-only retrieval actions only (search/probe/related/reason/contradict/get/list). \
-         The add result carries a write-time diff report (diff/closest_fact_id/similarity/reason): near_duplicate = a very similar fact exists \
-         (prefer updating it), possible_conflict = a negation/state-change cue suggests supersession (confirm which fact is current), \
-         rejected_secret_like = credential-like content was NOT stored. The get action returns the full fact plus trust_history so operators can answer \
-         why a trust score changed. Calibrate trust on add instead of defaulting high \
-         (>=0.85 verified/durable, ~0.7 ordinary, ~0.5 unsure — aim for a spread), and search memory before external lookups. \
-         Use it proactively, without waiting to be asked: when the user states a durable preference, decision, or correction, add or update a fact for it; \
-         and before answering a question about this project or the user, search or probe memory first rather than guessing.",
-        json!({
-            "type": "object",
-            "properties": memory_fact_properties(),
-            "allOf": fact_store_action_requirements(),
-            "required": ["action"]
-        }),
+        "tracedecay_fact_store_add",
+        "Fact Store Add",
+        "Add one holographic memory fact. The result includes a write-time diff report for near duplicates, possible conflicts, and rejected secret-like content. Calibrate trust to the evidence instead of defaulting high.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_search(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_fact_store_search",
+        "Fact Store Search",
+        "Search holographic memory facts by text and trust. Search durable project or user memory before guessing or repeating external research.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_probe(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_fact_store_probe",
+        "Fact Store Probe",
+        "Find holographic memory facts connected to one entity.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_related(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_fact_store_related",
+        "Fact Store Related",
+        "List entities related to one entity through holographic memory facts.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_reason(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_fact_store_reason",
+        "Fact Store Reason",
+        "Reason over holographic memory facts connecting multiple entities.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_contradict(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_fact_store_contradict",
+        "Fact Store Contradict",
+        "Find potentially contradictory holographic memory facts above an optional threshold.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_get(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_fact_store_get",
+        "Fact Store Get",
+        "Get one holographic memory fact, including trust history explaining score changes.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_update(input_schema: Value) -> ToolDefinition {
+    def_rw(
+        "tracedecay_fact_store_update",
+        "Fact Store Update",
+        "Update one existing holographic memory fact without changing its identity.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_remove(input_schema: Value) -> ToolDefinition {
+    def_rw(
+        "tracedecay_fact_store_remove",
+        "Fact Store Remove",
+        "Remove one holographic memory fact by exact fact id.",
+        input_schema,
+    )
+}
+
+pub(super) fn def_fact_store_list(input_schema: Value) -> ToolDefinition {
+    def(
+        "tracedecay_fact_store_list",
+        "Fact Store List",
+        "List holographic memory facts with optional category, trust, and project selectors.",
+        input_schema,
     )
 }
 
@@ -177,7 +99,7 @@ pub(super) fn def_fact_feedback() -> ToolDefinition {
     def_rw(
         "tracedecay_fact_feedback",
         "Fact Feedback",
-        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score. Call this on the fact_id values surfaced in tracedecay_context's Memory Matches (or from fact_store search) whenever a recalled fact materially helped or misled you -- feedback is how trust is earned, and recalled facts are almost never rated.",
+        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score. Call this on fact_id values surfaced in tracedecay_context's Memory Matches or tracedecay_fact_store_search whenever a recalled fact materially helped or misled you -- feedback is how trust is earned, and recalled facts are almost never rated.",
         json!({
             "type": "object",
             "properties": {

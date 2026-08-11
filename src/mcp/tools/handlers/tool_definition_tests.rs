@@ -83,7 +83,27 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_diagnose"));
     assert!(tool_names.contains(&"tracedecay_run_affected_tests"));
     assert!(tool_names.contains(&"tracedecay_derives"));
-    assert!(tool_names.contains(&"tracedecay_fact_store"));
+    for tool_name in [
+        "tracedecay_fact_store_add",
+        "tracedecay_fact_store_search",
+        "tracedecay_fact_store_probe",
+        "tracedecay_fact_store_related",
+        "tracedecay_fact_store_reason",
+        "tracedecay_fact_store_contradict",
+        "tracedecay_fact_store_get",
+        "tracedecay_fact_store_update",
+        "tracedecay_fact_store_remove",
+        "tracedecay_fact_store_list",
+    ] {
+        assert!(
+            tool_names.contains(&tool_name),
+            "{tool_name} must be advertised"
+        );
+    }
+    assert!(
+        !tool_names.contains(&"tracedecay_fact_store"),
+        "the broad fact-store translator must not be advertised"
+    );
     assert!(tool_names.contains(&"tracedecay_fact_feedback"));
     assert!(tool_names.contains(&"tracedecay_memory_status"));
     assert!(tool_names.contains(&"tracedecay_session_refresh"));
@@ -148,7 +168,6 @@ fn test_tool_definitions_complete() {
     assert!(!tool_names.contains(&"tracedecay_session_end"));
     assert!(tool_names.contains(&"tracedecay_body"));
     assert!(tool_names.contains(&"tracedecay_todos"));
-    assert!(tool_names.contains(&"tracedecay_fact_store"));
     assert!(tool_names.contains(&"tracedecay_fact_feedback"));
     assert!(tool_names.contains(&"tracedecay_memory_status"));
     assert!(tool_names.contains(&"tracedecay_dashboard"));
@@ -364,7 +383,9 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_apply_native_integration",
         "tracedecay_cancel_native_integration",
         "tracedecay_run_affected_tests",
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
+        "tracedecay_fact_store_update",
+        "tracedecay_fact_store_remove",
         "tracedecay_fact_feedback",
         "tracedecay_session_refresh",
         "tracedecay_configuration_set",

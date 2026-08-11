@@ -476,20 +476,18 @@ class MutationJourneyTests(unittest.TestCase):
         state = {"trust": 0.5, "removed": False}
 
         def call(tool, arguments, _deadline_ms):
-            self.assertEqual(tool, "tracedecay_fact_store")
-            action = arguments["action"]
-            if action == "add":
+            if tool == "tracedecay_fact_store_add":
                 return self.response(
                     '{"fact":{"fact_id":7,"content":"' + arguments["content"] + '"}}'
                 )
-            if action == "get":
+            if tool == "tracedecay_fact_store_get":
                 return self.response(
                     '{"fact":{"fact_id":7,"trust_score":' + str(state["trust"]) + "}}"
                 )
-            if action == "remove":
+            if tool == "tracedecay_fact_store_remove":
                 state["removed"] = True
                 return self.response('{"removed":true}')
-            raise AssertionError(action)
+            raise AssertionError(tool)
 
         prepared = runner.prepare_journey(
             "tracedecay_fact_feedback", object(), {}, lambda _tool: 1_000, call
@@ -511,11 +509,11 @@ class MutationJourneyTests(unittest.TestCase):
         runner = load_runner()
 
         def call(tool, arguments, _deadline_ms):
-            self.assertEqual(tool, "tracedecay_fact_store")
-            if arguments["action"] == "add":
+            if tool == "tracedecay_fact_store_add":
                 return self.response(
                     '{"fact":{"fact_id":3,"content":"' + arguments["content"] + '"}}'
                 )
+            self.assertEqual(tool, "tracedecay_fact_store_remove")
             return self.response('{"removed":true}')
 
         prepared = runner.prepare_journey(

@@ -304,7 +304,11 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
         }
     }
 
-    for tool_name in ["tracedecay_not_registered", "tracedecay_lcm_not_registered"] {
+    for tool_name in [
+        "tracedecay_not_registered",
+        "tracedecay_lcm_not_registered",
+        "tracedecay_fact_store",
+    ] {
         assert!(!advertised.contains(tool_name));
         for executor_available in [true, false] {
             assert_eq!(
@@ -331,18 +335,6 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
 
 fn retained_operations_for_advertised_tool(tool_name: &str) -> Vec<RetainedSurfaceOperation> {
     match tool_name {
-        "tracedecay_fact_store" => vec![
-            RetainedSurfaceOperation::FactStoreAdd,
-            RetainedSurfaceOperation::FactStoreSearch,
-            RetainedSurfaceOperation::FactStoreProbe,
-            RetainedSurfaceOperation::FactStoreRelated,
-            RetainedSurfaceOperation::FactStoreReason,
-            RetainedSurfaceOperation::FactStoreContradict,
-            RetainedSurfaceOperation::FactStoreGet,
-            RetainedSurfaceOperation::FactStoreUpdate,
-            RetainedSurfaceOperation::FactStoreRemove,
-            RetainedSurfaceOperation::FactStoreList,
-        ],
         "tracedecay_session_refresh" => vec![
             RetainedSurfaceOperation::SessionRefreshStatus,
             RetainedSurfaceOperation::SessionRefreshCancel,
@@ -1075,7 +1067,7 @@ const DISPATCH_GROUP_SPOT_CHECKS: &[&str] = &[
     "tracedecay_diagnose",
     "tracedecay_hook_runtime",
     "tracedecay_str_replace",
-    "tracedecay_fact_store",
+    "tracedecay_fact_store_search",
 ];
 
 /// Absent a carried deadline every tool still dispatches under a bound. Before

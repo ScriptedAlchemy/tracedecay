@@ -137,14 +137,12 @@ pub(super) fn mcp_tool_analytics_event(input: McpToolAnalyticsEvent<'_>) -> Anal
             "arguments": input.arguments,
         });
     }
-    // Fact-store adoption is currently invisible in analytics: add/search/list
-    // (tracedecay_fact_store) and helpful/unhelpful (tracedecay_fact_feedback)
-    // calls all look identical without this. Record only the bounded action
-    // string — never the fact content/arguments body.
-    if matches!(
-        input.tool_name,
-        "tracedecay_fact_store" | "tracedecay_fact_feedback"
-    ) && let Some(action) = input.arguments.get("action").and_then(Value::as_str)
+    // Record the exact fact route as a bounded action without retaining fact
+    // content or the arguments body. Feedback keeps its bounded action field.
+    if let Some(action) = input.tool_name.strip_prefix("tracedecay_fact_store_") {
+        metadata["action"] = json!(action);
+    } else if input.tool_name == "tracedecay_fact_feedback"
+        && let Some(action) = input.arguments.get("action").and_then(Value::as_str)
     {
         metadata["action"] = json!(action);
     }
@@ -469,13 +467,13 @@ mod tests {
     }
 
     #[test]
-    fn mcp_tool_analytics_event_records_action_and_client_for_fact_store() {
+    fn mcp_tool_analytics_event_records_action_and_client_for_exact_fact_route() {
         let request_id = json!(1);
-        let arguments = json!({"action": "add", "content": "secret fact body"});
+        let arguments = json!({"content": "secret fact body"});
         let event = mcp_tool_analytics_event(McpToolAnalyticsEvent {
             project_root: Path::new("/repo"),
             session_id: Some("session-abc".to_string()),
-            tool_name: "tracedecay_fact_store",
+            tool_name: "tracedecay_fact_store_add",
             outcome: "success",
             raw_file_tokens: 0,
             response_tokens: 0,
@@ -494,7 +492,10 @@ mod tests {
             serde_json::from_str(event.metadata_json.as_deref().unwrap_or("{}"))
                 .expect("metadata should parse");
 
-        assert_eq!(event.tool_name.as_deref(), Some("tracedecay_fact_store"));
+        assert_eq!(
+            event.tool_name.as_deref(),
+            Some("tracedecay_fact_store_add")
+        );
         assert_eq!(metadata["action"], "add");
         assert_eq!(metadata["client_name"], "claude-code");
         // The action string is recorded, but never the fact content/arguments body.

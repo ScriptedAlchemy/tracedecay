@@ -59,24 +59,46 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
     )
     .await;
 
-    // Action-dependent parser style: fact_store requires different arguments per action.
-    assert_schema_requires(&tools, "tracedecay_fact_store", &["action"]);
-    for (action, required_arg, expected_message) in [
-        ("add", "content", "missing required parameter: content"),
-        ("search", "query", "missing required parameter: query"),
-        ("probe", "entity", "missing required parameter: entity"),
-        ("related", "entity", "missing required parameter: entity"),
-        ("update", "fact_id", "missing required parameter: fact_id"),
-        ("remove", "fact_id", "missing required parameter: fact_id"),
+    // Exact fact routes project only their operation-specific required fields.
+    for (tool_name, required_arg, expected_message) in [
+        (
+            "tracedecay_fact_store_add",
+            "content",
+            "missing required parameter: content",
+        ),
+        (
+            "tracedecay_fact_store_search",
+            "query",
+            "missing required parameter: query",
+        ),
+        (
+            "tracedecay_fact_store_probe",
+            "entity",
+            "missing required parameter: entity",
+        ),
+        (
+            "tracedecay_fact_store_related",
+            "entity",
+            "missing required parameter: entity",
+        ),
+        (
+            "tracedecay_fact_store_get",
+            "fact_id",
+            "missing required parameter: fact_id",
+        ),
+        (
+            "tracedecay_fact_store_update",
+            "fact_id",
+            "missing required parameter: fact_id",
+        ),
+        (
+            "tracedecay_fact_store_remove",
+            "fact_id",
+            "missing required parameter: fact_id",
+        ),
     ] {
-        assert_action_schema_requires(&tools, "tracedecay_fact_store", action, &[required_arg]);
-        expect_missing_argument_error(
-            &cg,
-            "tracedecay_fact_store",
-            json!({ "action": action }),
-            expected_message,
-        )
-        .await;
+        assert_schema_requires(&tools, tool_name, &[required_arg]);
+        expect_missing_argument_error(&cg, tool_name, json!({}), expected_message).await;
     }
 
     // Alternative parser style: fact_feedback accepts action/helpful/unhelpful, but one is required.
@@ -370,14 +392,62 @@ fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
 }
 
 #[test]
-fn memory_tool_definitions_include_hermes_payload_fields() {
+fn exact_fact_store_definitions_project_canonical_request_schemas() {
+    let registry = tracedecay_application::mcp_executable_binding_registry()
+        .expect("MCP executable binding registry");
+    let tools = get_tool_definitions().expect("tool definitions");
+    for operation in [
+        "fact_store_add",
+        "fact_store_search",
+        "fact_store_probe",
+        "fact_store_related",
+        "fact_store_reason",
+        "fact_store_contradict",
+        "fact_store_get",
+        "fact_store_update",
+        "fact_store_remove",
+        "fact_store_list",
+    ] {
+        let operation_id =
+            tracedecay_tool_catalog::OperationId::new(format!("operation.application.{operation}"))
+                .expect("fact-store operation id");
+        let mut canonical = registry
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .unwrap_or_else(|| panic!("{operation} executable binding"))
+            .request_schema()
+            .body()
+            .clone();
+        let tool_name = format!("tracedecay_{operation}");
+        let mut advertised = tool_schema(&tools, &tool_name).clone();
+        for schema in [&mut canonical, &mut advertised] {
+            let properties = schema["properties"]
+                .as_object_mut()
+                .unwrap_or_else(|| panic!("{tool_name} properties"));
+            for transport_field in ["format", "project_selector", "project_id", "project_path"] {
+                properties.remove(transport_field);
+            }
+        }
+        assert_eq!(
+            advertised, canonical,
+            "{tool_name} must project its canonical operation-specific request schema"
+        );
+    }
+}
+
+#[test]
+fn exact_memory_tool_definitions_include_hermes_payload_fields() {
     let tools = get_tool_definitions().expect("tool definitions");
     let tool_names: std::collections::HashSet<_> =
         tools.iter().map(|tool| tool.name.as_str()).collect();
-    let fact_store = tools
+    let fact_add = tools
         .iter()
-        .find(|tool| tool.name == "tracedecay_fact_store")
-        .expect("tracedecay_fact_store definition");
+        .find(|tool| tool.name == "tracedecay_fact_store_add")
+        .expect("tracedecay_fact_store_add definition");
+    let fact_search = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_fact_store_search")
+        .expect("tracedecay_fact_store_search definition");
     let feedback = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_fact_feedback")
@@ -388,48 +458,48 @@ fn memory_tool_definitions_include_hermes_payload_fields() {
         .expect("tracedecay_memory_status definition");
 
     assert_eq!(
-        fact_store.annotations.as_ref().unwrap()["readOnlyHint"],
+        fact_add.annotations.as_ref().unwrap()["readOnlyHint"],
         false
+    );
+    assert_eq!(
+        fact_search.annotations.as_ref().unwrap()["readOnlyHint"],
+        true
     );
     assert_eq!(
         feedback.annotations.as_ref().unwrap()["readOnlyHint"],
         false
     );
-    assert_eq!(status.annotations.as_ref().unwrap()["readOnlyHint"], false);
+    assert_eq!(status.annotations.as_ref().unwrap()["readOnlyHint"], true);
 
     for field in [
-        "action",
-        "content",
-        "query",
-        "entity",
-        "entities",
-        "fact_id",
-        "category",
-        "tags",
-        "min_trust",
-        "trust",
-        "trust_delta",
-        "threshold",
-        "limit",
-        "source",
-        "metadata",
-        "note",
+        "content", "entity", "entities", "category", "tags", "trust", "source", "metadata",
     ] {
         assert!(
-            fact_store.input_schema["properties"].get(field).is_some(),
-            "fact_store schema missing Hermes field {field}"
+            fact_add.input_schema["properties"].get(field).is_some(),
+            "fact_store_add schema missing Hermes field {field}"
         );
     }
+    assert!(fact_add.input_schema["properties"].get("action").is_none());
+    assert!(
+        fact_search.input_schema["properties"]
+            .get("action")
+            .is_none()
+    );
+    assert!(
+        fact_search.input_schema["properties"]
+            .get("content")
+            .is_none()
+    );
     assert_eq!(
         feedback.input_schema["required"],
         serde_json::json!(["fact_id"])
     );
     assert_eq!(
-        fact_store.input_schema["properties"]["trust"]["type"],
+        fact_add.input_schema["properties"]["trust"]["type"],
         "number"
     );
-    assert_eq!(fact_store.input_schema["properties"]["trust"]["minimum"], 0);
-    assert_eq!(fact_store.input_schema["properties"]["trust"]["maximum"], 1);
+    assert_eq!(fact_add.input_schema["properties"]["trust"]["minimum"], 0);
+    assert_eq!(fact_add.input_schema["properties"]["trust"]["maximum"], 1);
 
     assert!(
         !tool_names.contains("tracedecay_record_decision"),
@@ -580,38 +650,6 @@ pub(crate) fn assert_schema_requires(
     assert_eq!(
         actual, expected,
         "{tool_name} schema required arguments drifted from handler parser expectations"
-    );
-}
-
-pub(crate) fn assert_action_schema_requires(
-    tools: &[tracedecay::mcp::ToolDefinition],
-    tool_name: &str,
-    action: &str,
-    expected_required: &[&str],
-) {
-    let schema = tool_schema(tools, tool_name);
-    let all_of = schema["allOf"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{tool_name} schema is missing allOf action requirements"));
-    let matching = all_of
-        .iter()
-        .find(|entry| entry["if"]["properties"]["action"]["const"].as_str() == Some(action));
-    let entry = matching.unwrap_or_else(|| {
-        panic!("{tool_name} schema is missing conditional requirements for action={action}")
-    });
-    let actual: Vec<&str> = entry["then"]["required"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{tool_name} action={action} is missing then.required"))
-        .iter()
-        .map(|value| {
-            value.as_str().unwrap_or_else(|| {
-                panic!("{tool_name} action={action} has non-string required entry")
-            })
-        })
-        .collect();
-    assert_eq!(
-        actual, expected_required,
-        "{tool_name} schema conditional requirements for action={action} drifted from handler parser expectations"
     );
 }
 

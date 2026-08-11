@@ -353,8 +353,21 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
         }
         if args.get("memory_scope").and_then(Value::as_str) == Some("user")
             && matches!(
-                tool_name,
-                "tracedecay_fact_store" | "tracedecay_fact_feedback" | "tracedecay_memory_status"
+                RetainedSurfaceOperation::from_name(tool_name),
+                Some(
+                    RetainedSurfaceOperation::FactStoreAdd
+                        | RetainedSurfaceOperation::FactStoreSearch
+                        | RetainedSurfaceOperation::FactStoreProbe
+                        | RetainedSurfaceOperation::FactStoreRelated
+                        | RetainedSurfaceOperation::FactStoreReason
+                        | RetainedSurfaceOperation::FactStoreContradict
+                        | RetainedSurfaceOperation::FactStoreGet
+                        | RetainedSurfaceOperation::FactStoreUpdate
+                        | RetainedSurfaceOperation::FactStoreRemove
+                        | RetainedSurfaceOperation::FactStoreList
+                        | RetainedSurfaceOperation::FactFeedback
+                        | RetainedSurfaceOperation::MemoryStatus
+                )
             )
         {
             if args.get("storage_scope").is_some() {
@@ -700,6 +713,7 @@ fn classify_mcp_tool_dispatch_group(
         return Some(group);
     }
     RetainedSurfaceOperation::from_name(tool_name)
+        .filter(|operation| *operation != RetainedSurfaceOperation::FactStore)
         .map(|_| McpToolDispatchGroup::RetainedApplication)
 }
 

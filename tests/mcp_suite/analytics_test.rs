@@ -104,7 +104,7 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
         failed_grep["error"].is_object(),
         "missing grep pattern must fail over production MCP: {failed_grep}"
     );
-    handle_real_server_tool_call(&server, "tracedecay_fact_store", json!({"action": "list"})).await;
+    handle_real_server_tool_call(&server, "tracedecay_fact_store_list", json!({})).await;
     server.ledger_writes_settled().await;
 
     // JSON response carries the same data in the typed shape the markdown
@@ -170,7 +170,7 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     assert!(
         !sample
             .iter()
-            .any(|name| name == "tracedecay_grep" || name == "tracedecay_fact_store"),
+            .any(|name| name == "tracedecay_grep" || name == "tracedecay_fact_store_list"),
         "called tools must not appear in the zero-call sample: {sample:?}"
     );
 

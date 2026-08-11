@@ -259,7 +259,12 @@ substitutes for batch lookups.
 
 token-savior maintains a project-keyed memory store (`memory_search`,
 `memory_save`) so notes from one project surface in another. tracedecay uses
-project-local holographic fact memory via `tracedecay_fact_store`,
+project-local holographic fact memory via the exact `tracedecay_fact_store_add`,
+`tracedecay_fact_store_search`, `tracedecay_fact_store_probe`,
+`tracedecay_fact_store_related`, `tracedecay_fact_store_reason`,
+`tracedecay_fact_store_contradict`, `tracedecay_fact_store_get`,
+`tracedecay_fact_store_update`, `tracedecay_fact_store_remove`, and
+`tracedecay_fact_store_list` routes,
 `tracedecay_fact_feedback`, and `tracedecay_memory_status`; cross-project memory
 recall remains out of scope.
 

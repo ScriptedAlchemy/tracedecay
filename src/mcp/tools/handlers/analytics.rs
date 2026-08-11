@@ -121,7 +121,20 @@ const SESSION_TOOLS: &[&str] = &[
     "lcm_expand",
     "lcm_expand_query",
 ];
-const MEMORY_TOOLS: &[&str] = &["memory_status", "fact_store", "fact_feedback"];
+const MEMORY_TOOLS: &[&str] = &[
+    "memory_status",
+    "fact_feedback",
+    "fact_store_add",
+    "fact_store_search",
+    "fact_store_probe",
+    "fact_store_related",
+    "fact_store_reason",
+    "fact_store_contradict",
+    "fact_store_get",
+    "fact_store_update",
+    "fact_store_remove",
+    "fact_store_list",
+];
 const EDIT_TOOLS: &[&str] = &[
     "str_replace",
     "multi_str_replace",
@@ -169,6 +182,34 @@ fn tool_tier(tool_name: &str) -> &'static str {
         }
     }
     "other"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_tier;
+
+    #[test]
+    fn exact_fact_store_routes_remain_in_the_memory_tier() {
+        for route in [
+            "add",
+            "search",
+            "probe",
+            "related",
+            "reason",
+            "contradict",
+            "get",
+            "update",
+            "remove",
+            "list",
+        ] {
+            assert_eq!(
+                tool_tier(&format!("tracedecay_fact_store_{route}")),
+                "memory"
+            );
+        }
+        assert_eq!(tool_tier("tracedecay_fact_store"), "other");
+        assert_eq!(tool_tier("tracedecay_fact_store_unknown"), "other");
+    }
 }
 
 #[derive(Default)]

@@ -118,7 +118,7 @@ The MCP server exposes tools grouped around normal coding workflows:
 - Code health: `tracedecay_complexity`, `tracedecay_dead_code`, `tracedecay_coupling`, `tracedecay_test_risk`
 - Git workflow: `tracedecay_diff_context`, `tracedecay_pr_context`, `tracedecay_changelog`, `tracedecay_test_map`
 - Editing: `tracedecay_str_replace`, `tracedecay_multi_str_replace`, `tracedecay_insert_at`, `tracedecay_ast_grep_rewrite`
-- Memory: `tracedecay_fact_store`, `tracedecay_fact_feedback`, `tracedecay_memory_status`
+- Memory: exact `tracedecay_fact_store_add|search|probe|related|reason|contradict|get|update|remove|list` routes, plus `tracedecay_fact_feedback` and `tracedecay_memory_status`
 
 Most read tools are safe to call in parallel. Edit tools are single-file, anchored, and re-index after writing.
 

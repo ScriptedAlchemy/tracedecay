@@ -747,10 +747,8 @@ pub(super) async fn dispatch_retained_application_tools(
             message: error.to_string(),
         })?
         .ok_or_else(|| unknown_tool_error(tool_name))?;
-    if matches!(
-        tool_name,
-        "tracedecay_fact_store" | "tracedecay_session_refresh"
-    ) && let Some(arguments) = args.as_object_mut()
+    if tool_name == "tracedecay_session_refresh"
+        && let Some(arguments) = args.as_object_mut()
     {
         arguments.remove("action");
     }
@@ -920,7 +918,7 @@ pub(super) async fn dispatch_retained_application_tools(
     )
 }
 
-/// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store`,
+/// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store_add`,
 /// `tracedecay_skill_list`, `tracedecay_analytics`, ...).
 pub(super) async fn dispatch_memory_tools(
     tool_name: &str,

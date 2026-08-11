@@ -34,7 +34,7 @@ class PreparedJourney:
 
 
 def _fact_trust(response: dict[str, Any], fact_id: int) -> float | None:
-    """Read the exact fact's trust score from a fact_store get response."""
+    """Read the exact fact's trust score from a fact-store get response."""
     for value in objects(response):
         if value.get("fact_id") != fact_id:
             continue
@@ -47,16 +47,15 @@ def _fact_trust(response: dict[str, Any], fact_id: int) -> float | None:
 def _seeded_fact(call: Call, deadline: Deadline, content: str) -> int:
     """Produce one real isolated fact and return its structured identity."""
     added = call(
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         {
-            "action": "add",
             "content": content,
             "category": "tool",
             "trust": 0.5,
             "source": "catalog_sweep",
             "format": "json",
         },
-        deadline("tracedecay_fact_store"),
+        deadline("tracedecay_fact_store_add"),
     )
     fact_id = fact_id_with_content(added, content)
     if fact_id is None:
@@ -66,9 +65,9 @@ def _seeded_fact(call: Call, deadline: Deadline, content: str) -> int:
 
 def _remove_seeded_fact(call: Call, deadline: Deadline, fact_id: int) -> None:
     removed = call(
-        "tracedecay_fact_store",
-        {"action": "remove", "fact_id": fact_id, "format": "json"},
-        deadline("tracedecay_fact_store"),
+        "tracedecay_fact_store_remove",
+        {"fact_id": fact_id, "format": "json"},
+        deadline("tracedecay_fact_store_remove"),
     )
     if not has_true(removed, "removed"):
         raise JourneyError("fact rollback did not confirm removal")
@@ -444,31 +443,36 @@ def prepare(
             {"action": "start", "host": "127.0.0.1", "port": 0, "format": "json"},
             cleanup,
         )
-    if name == "tracedecay_fact_store":
+    if name == "tracedecay_fact_store_add":
         content = "catalog sweep temporary isolated fact"
         def cleanup(response: dict[str, Any]) -> str:
             fact_id = fact_id_with_content(response, content)
             if fact_id is None:
                 raise JourneyError("fact add omitted its structured fact identity")
             fetched = call(
-                name, {"action": "get", "fact_id": fact_id, "format": "json"}, deadline(name)
+                "tracedecay_fact_store_get",
+                {"fact_id": fact_id, "format": "json"},
+                deadline("tracedecay_fact_store_get"),
             )
             if fact_id_with_content(fetched, content) != fact_id:
                 raise JourneyError("fact get did not consume the added fact identity")
             removed = call(
-                name, {"action": "remove", "fact_id": fact_id, "format": "json"}, deadline(name)
+                "tracedecay_fact_store_remove",
+                {"fact_id": fact_id, "format": "json"},
+                deadline("tracedecay_fact_store_remove"),
             )
             if not has_true(removed, "removed"):
                 raise JourneyError("fact rollback did not confirm removal")
             listed = call(
-                name, {"action": "list", "limit": 5, "format": "json"}, deadline(name)
+                "tracedecay_fact_store_list",
+                {"limit": 5, "format": "json"},
+                deadline("tracedecay_fact_store_list"),
             )
             if fact_id_with_content(listed, content) == fact_id:
                 raise JourneyError("fact rollback did not verify absence")
             return "fact add/get/remove/absence verified"
         return PreparedJourney(
             {
-                "action": "add",
                 "content": content,
                 "category": "tool",
                 "trust": 0.5,
@@ -477,6 +481,45 @@ def prepare(
             },
             cleanup,
         )
+    if name == "tracedecay_fact_store_update":
+        original = "catalog sweep temporary fact before update"
+        updated = "catalog sweep temporary fact after update"
+        fact_id = _seeded_fact(call, deadline, original)
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if fact_id_with_content(response, updated) != fact_id:
+                raise JourneyError("fact update did not preserve the seeded fact identity")
+            fetched = call(
+                "tracedecay_fact_store_get",
+                {"fact_id": fact_id, "format": "json"},
+                deadline("tracedecay_fact_store_get"),
+            )
+            if fact_id_with_content(fetched, updated) != fact_id:
+                raise JourneyError("fact get did not observe the updated content")
+            _remove_seeded_fact(call, deadline, fact_id)
+            return "fact update/get verified; seeded fact removed"
+
+        return PreparedJourney(
+            {"fact_id": fact_id, "content": updated, "format": "json"},
+            cleanup,
+        )
+    if name == "tracedecay_fact_store_remove":
+        content = "catalog sweep temporary fact for removal"
+        fact_id = _seeded_fact(call, deadline, content)
+
+        def cleanup(response: dict[str, Any]) -> str:
+            if not has_true(response, "removed"):
+                raise JourneyError("fact remove did not confirm removal")
+            listed = call(
+                "tracedecay_fact_store_list",
+                {"limit": 200, "format": "json"},
+                deadline("tracedecay_fact_store_list"),
+            )
+            if fact_id_with_content(listed, content) == fact_id:
+                raise JourneyError("fact remove did not verify absence")
+            return "fact remove/absence verified"
+
+        return PreparedJourney({"fact_id": fact_id, "format": "json"}, cleanup)
     if name == "tracedecay_fact_feedback":
         content = "catalog sweep temporary feedback fact"
         fact_id = _seeded_fact(call, deadline, content)
@@ -485,9 +528,9 @@ def prepare(
             if not has_status(response, "recorded"):
                 raise JourneyError("fact feedback did not confirm a recorded receipt")
             fetched = call(
-                "tracedecay_fact_store",
-                {"action": "get", "fact_id": fact_id, "format": "json"},
-                deadline("tracedecay_fact_store"),
+                "tracedecay_fact_store_get",
+                {"fact_id": fact_id, "format": "json"},
+                deadline("tracedecay_fact_store_get"),
             )
             trust = _fact_trust(fetched, fact_id)
             if trust is None or trust <= 0.5:

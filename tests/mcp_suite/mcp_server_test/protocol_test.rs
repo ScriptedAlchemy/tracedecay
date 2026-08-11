@@ -1244,9 +1244,8 @@ async fn test_server_stats_include_response_handle_metrics() {
     for i in 0..35 {
         let added = handle_tool_call(
             &cg,
-            "tracedecay_fact_store",
+            "tracedecay_fact_store_add",
             json!({
-                "action": "add",
                 "content": format!(
                     "SERVER_STATS_HANDLE_METRIC_{i:02}: {}",
                     "response handle telemetry should survive truncation ".repeat(80)
@@ -1268,9 +1267,8 @@ async fn test_server_stats_include_response_handle_metrics() {
 
     let listed = handle_tool_call(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_list",
         json!({
-            "action": "list",
             "category": "project",
             "min_trust": 0.0,
             "limit": 200,
@@ -1416,8 +1414,8 @@ async fn test_server_stats_include_response_handle_metrics() {
     if let Some(fact_id) = last_fact_id {
         let _ = handle_tool_call(
             &cg,
-            "tracedecay_fact_store",
-            json!({ "action": "remove", "fact_id": fact_id }),
+            "tracedecay_fact_store_remove",
+            json!({ "fact_id": fact_id }),
             None,
             None,
         )

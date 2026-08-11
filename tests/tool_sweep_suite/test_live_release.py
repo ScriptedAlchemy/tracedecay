@@ -29,22 +29,22 @@ class ReleaseBinaryJourneyTests(unittest.TestCase):
             )
             self.assertEqual(discovery.outcome.returncode, 0, (discovery.root / "stderr.log").read_text())
             manifest = orchestrator.load_manifest(discovery.root / "catalog.json")
-            self.assertIn("tracedecay_fact_store", orchestrator.effect_targets(manifest))
+            self.assertIn("tracedecay_fact_store_add", orchestrator.effect_targets(manifest))
             effect = orchestrator.run_phase(
                 repo=repo,
                 binary=binary,
                 out=out,
                 deadline=deadline,
-                label="effects/fact-store",
+                label="effects/fact-store-add",
                 phase="effect",
-                effect="tracedecay_fact_store",
+                effect="tracedecay_fact_store_add",
                 catalog=discovery.root / "catalog.json",
             )
             self.assertEqual(effect.outcome.returncode, 0, (effect.root / "stderr.log").read_text())
             report = orchestrator.load_report(effect.root / "results.json")
         self.assertEqual(len(report["entries"]), 1)
         row = report["entries"][0]
-        self.assertEqual(row["name"], "tracedecay_fact_store")
+        self.assertEqual(row["name"], "tracedecay_fact_store_add")
         self.assertEqual(row["verdict"], "PASS")
         self.assertEqual(row.get("rollback"), "verified")
 

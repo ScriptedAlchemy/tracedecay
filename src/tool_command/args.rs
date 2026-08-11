@@ -180,7 +180,6 @@ pub(super) fn parse_invocation_with_stdin(
             });
         }
         if let Some(payload) = value.as_object_mut() {
-            normalize_legacy_tool_args(def, payload)?;
             validate_tool_args(def, payload)?;
         }
         out.tool_args = value;
@@ -197,30 +196,9 @@ pub(super) fn parse_invocation_with_stdin(
     )?;
 
     finalize_arrays(def, &mut collected);
-    normalize_legacy_tool_args(def, &mut collected)?;
     validate_tool_args(def, &collected)?;
     out.tool_args = Value::Object(collected);
     Ok(out)
-}
-
-fn normalize_legacy_tool_args(def: &ToolDefinition, args: &mut Map<String, Value>) -> Result<()> {
-    if def.name != "tracedecay_fact_store" {
-        return Ok(());
-    }
-    let Some(fact_type) = args.remove("fact_type") else {
-        return Ok(());
-    };
-    if let Some(category) = args.get("category") {
-        if category != &fact_type {
-            return Err(TraceDecayError::Config {
-                message: "`fact_type` is a legacy alias for `category`; pass only `category`"
-                    .to_string(),
-            });
-        }
-    } else {
-        args.insert("category".to_string(), fact_type);
-    }
-    Ok(())
 }
 
 /// Keys that integration layers inject into tool arguments for routing, read

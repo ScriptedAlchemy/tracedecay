@@ -590,7 +590,16 @@ pub(super) fn get_maximal_tool_definitions()
         def_diagnose(),
         def_derives(),
         def_run_affected_tests(),
-        def_fact_store(),
+        def_fact_store_add(request_schema("fact_store_add")?),
+        def_fact_store_search(request_schema("fact_store_search")?),
+        def_fact_store_probe(request_schema("fact_store_probe")?),
+        def_fact_store_related(request_schema("fact_store_related")?),
+        def_fact_store_reason(request_schema("fact_store_reason")?),
+        def_fact_store_contradict(request_schema("fact_store_contradict")?),
+        def_fact_store_get(request_schema("fact_store_get")?),
+        def_fact_store_update(request_schema("fact_store_update")?),
+        def_fact_store_remove(request_schema("fact_store_remove")?),
+        def_fact_store_list(request_schema("fact_store_list")?),
         def_fact_feedback(),
         def_memory_status(),
         def_automation_run_artifact_view(),
@@ -857,7 +866,16 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_redundancy",
     // memory
     "tracedecay_memory_status",
-    "tracedecay_fact_store",
+    "tracedecay_fact_store_add",
+    "tracedecay_fact_store_search",
+    "tracedecay_fact_store_probe",
+    "tracedecay_fact_store_related",
+    "tracedecay_fact_store_reason",
+    "tracedecay_fact_store_contradict",
+    "tracedecay_fact_store_get",
+    "tracedecay_fact_store_update",
+    "tracedecay_fact_store_remove",
+    "tracedecay_fact_store_list",
     "tracedecay_fact_feedback",
     // workflow
     "tracedecay_diagnose",
@@ -911,7 +929,16 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
             | "tracedecay_automation_run_artifact_view"
             | "tracedecay_dsm"
             | "tracedecay_fact_feedback"
-            | "tracedecay_fact_store"
+            | "tracedecay_fact_store_add"
+            | "tracedecay_fact_store_search"
+            | "tracedecay_fact_store_probe"
+            | "tracedecay_fact_store_related"
+            | "tracedecay_fact_store_reason"
+            | "tracedecay_fact_store_contradict"
+            | "tracedecay_fact_store_get"
+            | "tracedecay_fact_store_update"
+            | "tracedecay_fact_store_remove"
+            | "tracedecay_fact_store_list"
             | "tracedecay_files"
             | "tracedecay_read"
             | "tracedecay_skill_list"

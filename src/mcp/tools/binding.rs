@@ -258,7 +258,16 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_workflows", group: None, project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_call_chain", group: None, project: RegisteredProjectAccess::Reader },
     McpToolBinding { name: "tracedecay_file_dependents", group: None, project: RegisteredProjectAccess::Reader },
-    McpToolBinding { name: "tracedecay_fact_store", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_add", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_probe", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_related", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_reason", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_contradict", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_get", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_update", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_remove", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_list", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_memory_status", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_message_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
 ];
@@ -306,7 +315,9 @@ fn direct_effect(tool_name: &str) -> EffectClass {
     match tool_name {
         "tracedecay_multi_root_scope_set_compare_and_swap"
         | "tracedecay_dashboard"
-        | "tracedecay_fact_store"
+        | "tracedecay_fact_store_add"
+        | "tracedecay_fact_store_update"
+        | "tracedecay_fact_store_remove"
         | "tracedecay_fact_feedback"
         | "tracedecay_session_refresh"
         | "tracedecay_run_affected_tests" => EffectClass::Administrative,
@@ -476,7 +487,9 @@ fn verified_effect_journey(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "tracedecay_dashboard"
-            | "tracedecay_fact_store"
+            | "tracedecay_fact_store_add"
+            | "tracedecay_fact_store_update"
+            | "tracedecay_fact_store_remove"
             | "tracedecay_fact_feedback"
             | "tracedecay_session_refresh"
             | "tracedecay_run_affected_tests"
@@ -528,9 +541,6 @@ fn inverse_for_tool(tool_name: &str, effect: EffectClass) -> McpInverseContract 
         match tool_name {
             "tracedecay_dashboard" => McpInverseContract::SameTool {
                 action: "stop".to_owned(),
-            },
-            "tracedecay_fact_store" => McpInverseContract::SameTool {
-                action: "remove".to_owned(),
             },
             _ => McpInverseContract::Unavailable {
                 reason: McpInverseUnavailableReason::NoVerifiedInverse,
@@ -896,6 +906,26 @@ mod tests {
         );
         assert!(!tool_accepts_registered_project_selector(tool_name));
         assert!(!tool_dispatches_registered_project_reader(tool_name));
+    }
+
+    #[test]
+    fn exact_fact_routes_accept_selectors_without_registered_reader_dispatch() {
+        for tool_name in [
+            "tracedecay_fact_store_add",
+            "tracedecay_fact_store_search",
+            "tracedecay_fact_store_probe",
+            "tracedecay_fact_store_related",
+            "tracedecay_fact_store_reason",
+            "tracedecay_fact_store_contradict",
+            "tracedecay_fact_store_get",
+            "tracedecay_fact_store_update",
+            "tracedecay_fact_store_remove",
+            "tracedecay_fact_store_list",
+            "tracedecay_memory_status",
+        ] {
+            assert!(tool_accepts_registered_project_selector(tool_name));
+            assert!(!tool_dispatches_registered_project_reader(tool_name));
+        }
     }
 
     /// A row without a group must be claimed by one of the surface predicates,

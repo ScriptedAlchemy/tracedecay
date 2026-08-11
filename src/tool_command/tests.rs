@@ -18,6 +18,36 @@ fn def(name: &str) -> ToolDefinition {
 }
 
 #[test]
+fn fact_store_tool_lookup_rejects_broad_and_accepts_exact_routes() {
+    let definitions = defs();
+    assert!(
+        definitions
+            .iter()
+            .all(|definition| definition.name != "tracedecay_fact_store")
+    );
+    for name in [
+        "fact_store_add",
+        "fact_store_search",
+        "fact_store_probe",
+        "fact_store_related",
+        "fact_store_reason",
+        "fact_store_contradict",
+        "fact_store_get",
+        "fact_store_update",
+        "fact_store_remove",
+        "fact_store_list",
+    ] {
+        let canonical = canonical_tool_name(name);
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == canonical),
+            "{canonical} must resolve through the CLI catalog"
+        );
+    }
+}
+
+#[test]
 fn canonicalizes_alias_and_strip_prefix() {
     assert_eq!(canonical_tool_name("query"), "tracedecay_search");
     assert_eq!(
@@ -283,9 +313,8 @@ fn user_storage_scope_dispatch_never_invents_a_project_from_cwd() {
 fn user_memory_scope_dispatch_is_projectless() {
     let dispatch = DaemonToolDispatch::for_tool(
         None,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_list",
         &json!({
-            "action": "list",
             "memory_scope": "user",
         }),
     );
@@ -408,24 +437,24 @@ fn args_payload_optional_null_is_absent() {
 fn dispatch_routing_keys_bypass_unknown_key_gate() {
     // Dispatch reads top-level project_root, and LCM response handles can
     // target a separate live project; these must keep flowing through the gate.
-    let d = def("fact_store");
+    let d = def("fact_store_list");
     let parsed = parse_invocation(
         &d,
         &[
             "--args".to_string(),
-            r#"{"action":"list","project_root":"/tmp/p","response_handle_project_root":"/tmp/r","cwd":"/tmp"}"#
+            r#"{"project_root":"/tmp/p","response_handle_project_root":"/tmp/r","cwd":"/tmp"}"#
                 .to_string(),
         ],
     )
     .unwrap();
-    assert_eq!(parsed.tool_args["action"], json!("list"));
+    assert_eq!(parsed.tool_args["project_root"], json!("/tmp/p"));
 }
 
 #[test]
 fn removed_storage_routing_keys_fail_validation() {
-    let d = def("fact_store");
+    let d = def("fact_store_list");
     for removed in ["storage_scope", "hermes_home"] {
-        let payload = format!(r#"{{"action":"list","{removed}":"removed"}}"#);
+        let payload = format!(r#"{{"{removed}":"removed"}}"#);
         let error = parse_invocation(&d, &["--args".to_string(), payload]).unwrap_err();
         let flag = format!("--{}", removed.replace('_', "-"));
         assert!(
@@ -454,37 +483,6 @@ fn lcm_cli_help_exposes_scope_without_hermes_profile_routing() {
         assert!(!help.contains("--hermes-home"), "{tool_name}: {help}");
         assert!(!help.contains("hermes_profile"), "{tool_name}: {help}");
     }
-}
-
-#[test]
-fn fact_type_alias_maps_to_category() {
-    let d = def("fact_store");
-    let parsed = parse_invocation(
-        &d,
-        &[
-            "--args".to_string(),
-            r#"{"action":"add","content":"hello","fact_type":"decision"}"#.to_string(),
-        ],
-    )
-    .unwrap();
-    assert_eq!(parsed.tool_args["category"], json!("decision"));
-    assert!(parsed.tool_args.get("fact_type").is_none());
-}
-
-#[test]
-fn fact_type_alias_conflict_errors() {
-    let d = def("fact_store");
-    let err = parse_invocation(
-        &d,
-        &[
-            "--args".to_string(),
-            r#"{"action":"add","content":"hello","category":"decision","fact_type":"project"}"#
-                .to_string(),
-        ],
-    )
-    .unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("legacy alias"), "got: {msg}");
 }
 
 #[test]

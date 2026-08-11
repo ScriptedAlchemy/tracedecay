@@ -1216,18 +1216,30 @@ fn tool_cli_rejects_removed_hermes_home_argument() {
 }
 
 #[test]
-fn first_touch_store_tool_cli_invokes_daemon_with_init_permission() {
+fn fact_store_cli_accepts_exact_route_and_rejects_broad_router() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
 
+    let broad = tracedecay_command_with_home(&home_path)
+        .current_dir(&project_path)
+        .args(["tool", "fact_store", "--help"])
+        .output()
+        .expect("broad fact-store lookup should return");
+    assert!(!broad.status.success(), "broad fact-store route must fail");
+    assert!(
+        String::from_utf8_lossy(&broad.stderr).contains("unknown tool: 'fact_store'"),
+        "broad lookup must fail as unknown:\n{}",
+        String::from_utf8_lossy(&broad.stderr)
+    );
+
     let sentinel = "first-touch daemon response";
     let socket_path = socket_dir.path().join("tracedecay.sock");
     let observed_request = spawn_sentinel_daemon(
         socket_path.clone(),
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         true,
         true,
         sentinel,
@@ -1240,10 +1252,10 @@ fn first_touch_store_tool_cli_invokes_daemon_with_init_permission() {
             "tool",
             "--project",
             &project_arg,
-            "fact_store",
+            "fact_store_add",
             "--json",
             "--args",
-            r#"{"action":"add","content":"first touch via daemon","category":"decision"}"#,
+            r#"{"content":"first touch via daemon","category":"decision"}"#,
         ])
         .output()
         .expect("tracedecay tool should run");
@@ -1262,7 +1274,15 @@ fn first_touch_store_tool_cli_invokes_daemon_with_init_permission() {
     let request = observed_request
         .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
         .expect("fake daemon should receive first-touch tools/call request");
-    assert_eq!(request["params"]["arguments"]["action"], "add");
+    assert_eq!(request["params"]["name"], "tracedecay_fact_store_add");
+    assert_eq!(
+        request["params"]["arguments"]["content"],
+        "first touch via daemon"
+    );
+    assert!(
+        request["params"]["arguments"].get("action").is_none(),
+        "exact route payload must not carry the deleted broad action selector"
+    );
 }
 
 #[test]
@@ -1520,10 +1540,10 @@ fn daemon_first_touch_uses_registered_runtime_without_rewriting_legacy_config() 
             "tool",
             "--project",
             &project_arg,
-            "fact_store",
+            "fact_store_add",
             "--json",
             "--args",
-            r#"{"action":"add","content":"do not hide config errors","category":"decision"}"#,
+            r#"{"content":"do not hide config errors","category":"decision"}"#,
         ])
         .output()
         .expect("tracedecay tool should run");

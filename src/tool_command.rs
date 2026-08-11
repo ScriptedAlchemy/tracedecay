@@ -73,7 +73,16 @@ use serde_json::Map;
 /// Bare invocations from an uninitialized cwd still get the
 /// "run tracedecay init" guidance rather than a silent store.
 const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
-    "tracedecay_fact_store",
+    "tracedecay_fact_store_add",
+    "tracedecay_fact_store_search",
+    "tracedecay_fact_store_probe",
+    "tracedecay_fact_store_related",
+    "tracedecay_fact_store_reason",
+    "tracedecay_fact_store_contradict",
+    "tracedecay_fact_store_get",
+    "tracedecay_fact_store_update",
+    "tracedecay_fact_store_remove",
+    "tracedecay_fact_store_list",
     "tracedecay_fact_feedback",
     "tracedecay_memory_status",
     "tracedecay_message_search",
@@ -689,7 +698,7 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_rename_symbol"
     {
         "edit"
-    } else if n == "tracedecay_fact_store"
+    } else if n.starts_with("tracedecay_fact_store_")
         || n == "tracedecay_fact_feedback"
         || n == "tracedecay_memory_status"
     {

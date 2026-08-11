@@ -144,9 +144,8 @@ async fn context_includes_matching_memory_facts() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let added = handle_tool_call(
         &cg,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "format": "json",
             "content": "Helper function reviews should check durable memory before broad file search.",
             "category": "decision",
@@ -219,9 +218,8 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     let long_content = format!("Long memory control fact {}", "x".repeat(320));
     call_production_tool(
         &fixture,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "content": long_content,
             "category": "decision",
             "entity": "long memory control",
@@ -234,9 +232,8 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     .unwrap();
     call_production_tool(
         &fixture,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "content": "Low trust memory control fact should stay filtered.",
             "category": "decision",
             "entity": "low trust memory control",

@@ -78,19 +78,6 @@ pub(crate) fn retained_mcp_operation(
     arguments: &Value,
 ) -> Option<RetainedSurfaceOperation> {
     match tool_name {
-        "tracedecay_fact_store" => match arguments.get("action").and_then(Value::as_str) {
-            Some("add") => Some(RetainedSurfaceOperation::FactStoreAdd),
-            Some("search") => Some(RetainedSurfaceOperation::FactStoreSearch),
-            Some("probe") => Some(RetainedSurfaceOperation::FactStoreProbe),
-            Some("related") => Some(RetainedSurfaceOperation::FactStoreRelated),
-            Some("reason") => Some(RetainedSurfaceOperation::FactStoreReason),
-            Some("contradict") => Some(RetainedSurfaceOperation::FactStoreContradict),
-            Some("get") => Some(RetainedSurfaceOperation::FactStoreGet),
-            Some("update") => Some(RetainedSurfaceOperation::FactStoreUpdate),
-            Some("remove") => Some(RetainedSurfaceOperation::FactStoreRemove),
-            Some("list") => Some(RetainedSurfaceOperation::FactStoreList),
-            _ => None,
-        },
         "tracedecay_session_refresh" => match arguments.get("action").and_then(Value::as_str) {
             Some("status") => Some(RetainedSurfaceOperation::SessionRefreshStatus),
             Some("start" | "join" | "resume" | "begin") => {
@@ -99,7 +86,8 @@ pub(crate) fn retained_mcp_operation(
             Some("cancel") => Some(RetainedSurfaceOperation::SessionRefreshCancel),
             _ => None,
         },
-        _ => RetainedSurfaceOperation::from_name(tool_name),
+        _ => RetainedSurfaceOperation::from_name(tool_name)
+            .filter(|operation| *operation != RetainedSurfaceOperation::FactStore),
     }
 }
 
@@ -152,10 +140,7 @@ pub(crate) async fn execute_profile_retained_mcp_tool(
         if tool_name.starts_with("tracedecay_lcm_") || tool_name == "tracedecay_message_search" {
             arguments.remove("storage_scope");
         }
-        if matches!(
-            tool_name,
-            "tracedecay_fact_store" | "tracedecay_session_refresh"
-        ) {
+        if tool_name == "tracedecay_session_refresh" {
             arguments.remove("action");
         }
     }

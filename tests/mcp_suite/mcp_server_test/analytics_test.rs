@@ -163,9 +163,8 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
     let added = call_tool(
         Arc::clone(&server),
         9005,
-        "tracedecay_fact_store",
+        "tracedecay_fact_store_add",
         json!({
-            "action": "add",
             "content": fact_content,
             "category": "decision",
             "entity": "context memory analytics",

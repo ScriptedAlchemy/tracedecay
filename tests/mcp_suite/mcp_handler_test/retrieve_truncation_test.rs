@@ -160,9 +160,8 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
     for index in 0..4 {
         let added = handle_tool_call(
             &cg,
-            "tracedecay_fact_store",
+            "tracedecay_fact_store_add",
             json!({
-                "action": "add",
                 "format": "json",
                 "content": format!(
                     "LONG_FACT_MARKER_{index:02}: {}",
@@ -183,8 +182,8 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
 
     let markdown_list = handle_tool_call(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "list", "category": "project", "min_trust": 0.0, "limit": 200}),
+        "tracedecay_fact_store_list",
+        json!({"category": "project", "min_trust": 0.0, "limit": 200}),
         None,
         None,
     )
@@ -224,8 +223,8 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
 
     let listed = handle_tool_call(
         &cg,
-        "tracedecay_fact_store",
-        json!({"action": "list", "format": "json", "category": "project", "min_trust": 0.0, "limit": 200}),
+        "tracedecay_fact_store_list",
+        json!({"format": "json", "category": "project", "min_trust": 0.0, "limit": 200}),
         None,
         None,
     )
@@ -252,8 +251,8 @@ async fn fact_store_large_list_response_uses_retrieve_handle() {
 
     let removed = handle_tool_call(
         &cg,
-        "tracedecay_fact_store",
-        json!({ "action": "remove", "format": "json", "fact_id": last_fact_id }),
+        "tracedecay_fact_store_remove",
+        json!({ "format": "json", "fact_id": last_fact_id }),
         None,
         None,
     )
