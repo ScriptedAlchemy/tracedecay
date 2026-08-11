@@ -83,7 +83,7 @@ mod wipe_target_tests {
             )
         };
 
-        let runtime = crate::host_admission::HostAdmissionTestRuntimeV1::profile(dir.path())
+        let runtime = tracedecay::host_admission::HostAdmissionTestRuntimeV1::profile(dir.path())
             .await
             .expect("open global database");
         runtime
