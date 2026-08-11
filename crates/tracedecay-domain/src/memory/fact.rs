@@ -7,12 +7,13 @@ use super::derive_memory_id;
 use crate::observation::{ObservationScopeV1, PayloadReferenceV1, SanitizationReceiptV1};
 use crate::research::{
     ActorId, Confidence, DomainError, EvidenceClass, FactAssertionId, FactEvidenceId, FactId,
-    LocatorDigest, ProjectId, ProvenanceId, RetentionClass, RetrievalAnchorId, SourceStoreId,
-    UtcMicros, validate_evidence_confidence,
+    LocatorDigest, ProjectId, ProvenanceId, RetentionClass, RetrievalAnchorId, UtcMicros,
+    validate_evidence_confidence,
 };
 
 const MAX_FACT_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_FACT_METADATA_BYTES: usize = 64 * 1024;
+const MAX_FACT_SOURCE_LABEL_BYTES: usize = 4 * 1024;
 const MAX_FACT_LABELS: usize = 64;
 const MAX_FACT_LABEL_BYTES: usize = 512;
 const MAX_FACT_EVIDENCE_REFS: usize = 256;
@@ -79,10 +80,6 @@ pub enum FactIdentitySourceV1 {
     Application {
         operation_id: ProvenanceId,
     },
-    Legacy {
-        source_store_id: SourceStoreId,
-        legacy_fact_id: i64,
-    },
 }
 
 impl FactIdentitySourceV1 {
@@ -96,18 +93,6 @@ impl FactIdentitySourceV1 {
                 stable_key.validate()
             }
             Self::Application { operation_id } => operation_id.validate(),
-            Self::Legacy {
-                source_store_id,
-                legacy_fact_id,
-            } => {
-                source_store_id.validate()?;
-                if *legacy_fact_id <= 0 {
-                    return Err(DomainError::NonCanonical {
-                        field: "legacy fact id",
-                    });
-                }
-                Ok(())
-            }
         }
     }
 }
@@ -182,25 +167,27 @@ fn validate_fact_owner(fact_id: &FactId, owner: &FactOwnerV1) -> Result<(), Doma
 
 /// Receipt-bound payload for one immutable assertion.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct FactPayloadV1 {
     content: String,
     category: FactCategoryV1,
     tags: Vec<String>,
     entities: Vec<String>,
     metadata: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_label: Option<String>,
     receipt: SanitizationReceiptV1,
     retention_class: RetentionClass,
 }
 
 #[derive(Serialize)]
-#[serde(deny_unknown_fields)]
 struct FactPayloadMaterial<'a> {
     content: &'a str,
     category: FactCategoryV1,
     tags: &'a [String],
     entities: &'a [String],
     metadata: &'a Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_label: Option<&'a str>,
 }
 
 impl FactPayloadMaterial<'_> {
@@ -215,6 +202,46 @@ impl FactPayloadMaterial<'_> {
 }
 
 impl FactPayloadV1 {
+    /// Validates and canonicalizes the exact receipt-bound payload material.
+    /// Tags and entities are sorted in place so every caller hashes and stores
+    /// the same material rather than accepting order-dependent identities.
+    pub fn canonicalize_material(
+        content: &str,
+        category: FactCategoryV1,
+        tags: &mut Vec<String>,
+        entities: &mut Vec<String>,
+        metadata: &Value,
+        source_label: Option<&str>,
+    ) -> Result<PayloadReferenceV1, DomainError> {
+        validate_content(content)?;
+        validate_labels(tags, "fact tags")?;
+        validate_labels(entities, "fact entities")?;
+        tags.sort_unstable();
+        entities.sort_unstable();
+        let metadata_bytes = crate::research::canonical_json_bytes(metadata)?;
+        if metadata_bytes.len() > MAX_FACT_METADATA_BYTES {
+            return Err(DomainError::NonCanonical {
+                field: "fact metadata",
+            });
+        }
+        if source_label.is_some_and(|value| {
+            !crate::canonical_text::is_canonical_text_within(value, MAX_FACT_SOURCE_LABEL_BYTES)
+        }) {
+            return Err(DomainError::NonCanonical {
+                field: "fact source label",
+            });
+        }
+        FactPayloadMaterial {
+            content,
+            category,
+            tags,
+            entities,
+            metadata,
+            source_label,
+        }
+        .payload_reference()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         content: String,
@@ -222,28 +249,18 @@ impl FactPayloadV1 {
         mut tags: Vec<String>,
         mut entities: Vec<String>,
         metadata: Value,
+        source_label: Option<String>,
         receipt: SanitizationReceiptV1,
         retention_class: RetentionClass,
     ) -> Result<Self, DomainError> {
-        validate_content(&content)?;
-        validate_labels(&tags, "fact tags")?;
-        validate_labels(&entities, "fact entities")?;
-        tags.sort_unstable();
-        entities.sort_unstable();
-        let metadata_bytes = crate::research::canonical_json_bytes(&metadata)?;
-        if metadata_bytes.len() > MAX_FACT_METADATA_BYTES {
-            return Err(DomainError::NonCanonical {
-                field: "fact metadata",
-            });
-        }
-        let material = FactPayloadMaterial {
-            content: &content,
+        let payload_reference = Self::canonicalize_material(
+            &content,
             category,
-            tags: &tags,
-            entities: &entities,
-            metadata: &metadata,
-        };
-        let payload_reference = material.payload_reference()?;
+            &mut tags,
+            &mut entities,
+            &metadata,
+            source_label.as_deref(),
+        )?;
         if receipt.payload() != Some(&payload_reference) {
             return Err(DomainError::SnapshotMismatch {
                 field: "fact sanitization receipt payload",
@@ -255,6 +272,7 @@ impl FactPayloadV1 {
             tags,
             entities,
             metadata,
+            source_label,
             receipt,
             retention_class,
         })
@@ -280,6 +298,10 @@ impl FactPayloadV1 {
         &self.metadata
     }
 
+    pub fn source_label(&self) -> Option<&str> {
+        self.source_label.as_deref()
+    }
+
     pub fn receipt(&self) -> &SanitizationReceiptV1 {
         &self.receipt
     }
@@ -295,6 +317,7 @@ impl FactPayloadV1 {
             tags: &self.tags,
             entities: &self.entities,
             metadata: &self.metadata,
+            source_label: self.source_label.as_deref(),
         }
         .payload_reference()
     }
@@ -313,6 +336,8 @@ impl<'de> Deserialize<'de> for FactPayloadV1 {
             tags: Vec<String>,
             entities: Vec<String>,
             metadata: Value,
+            #[serde(default)]
+            source_label: Option<String>,
             receipt: SanitizationReceiptV1,
             retention_class: RetentionClass,
         }
@@ -324,6 +349,7 @@ impl<'de> Deserialize<'de> for FactPayloadV1 {
             wire.tags,
             wire.entities,
             wire.metadata,
+            wire.source_label,
             wire.receipt,
             wire.retention_class,
         )
@@ -456,7 +482,6 @@ pub enum FactAssertionKindV1 {
     Initial,
     Correction { supersedes: FactAssertionId },
     Merge { supersedes: Vec<FactAssertionId> },
-    LegacyImport,
 }
 
 impl FactAssertionKindV1 {
@@ -481,7 +506,7 @@ impl FactAssertionKindV1 {
                 }
                 Ok(())
             }
-            Self::Initial | Self::LegacyImport => Ok(()),
+            Self::Initial => Ok(()),
         }?;
         Ok(self)
     }
@@ -566,7 +591,7 @@ impl FactAssertionV1 {
         if match &kind {
             FactAssertionKindV1::Correction { supersedes } => supersedes == &assertion_id,
             FactAssertionKindV1::Merge { supersedes } => supersedes.contains(&assertion_id),
-            FactAssertionKindV1::Initial | FactAssertionKindV1::LegacyImport => false,
+            FactAssertionKindV1::Initial => false,
         } {
             return Err(DomainError::SelfSupersession);
         }
@@ -708,290 +733,5 @@ fn validate_sha256_hex(value: &str, field: &'static str) -> Result<(), DomainErr
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::observation::{SanitizerDispositionV1, SensitivityV1};
-    use crate::research::{ComponentVersion, SanitizationReceiptId, SanitizationReceiptRefV1};
-
-    const ZERO_DIGEST: &str =
-        "sha256:0000000000000000000000000000000000000000000000000000000000000000";
-
-    fn id<T>(value: &str) -> T
-    where
-        T: TryFrom<String, Error = DomainError>,
-    {
-        T::try_from(value.to_owned()).unwrap()
-    }
-
-    fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
-        FactId::derive(
-            &FactIdentityMaterialV1::new(
-                owner,
-                FactIdentitySourceV1::Application {
-                    operation_id: id(operation),
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn payload() -> FactPayloadV1 {
-        let material = json!({
-            "content": "The daemon is the only writer.",
-            "category": "project",
-            "tags": ["daemon", "database"],
-            "entities": ["TraceDecay"],
-            "metadata": {"source": "fixture"},
-        });
-        let receipt = SanitizationReceiptV1::new(
-            SanitizationReceiptRefV1::new(
-                id::<SanitizationReceiptId>("receipt.fact.fixture"),
-                id::<ComponentVersion>("sanitizer.fixture.v1"),
-            )
-            .unwrap(),
-            SanitizerDispositionV1::Accepted,
-            SensitivityV1::NonSensitive,
-            Some(PayloadReferenceV1::for_payload(&material).unwrap()),
-        )
-        .unwrap();
-        FactPayloadV1::new(
-            "The daemon is the only writer.".to_owned(),
-            FactCategoryV1::Project,
-            vec!["daemon".to_owned(), "database".to_owned()],
-            vec!["TraceDecay".to_owned()],
-            json!({"source": "fixture"}),
-            receipt,
-            RetentionClass::new("durable.fact").unwrap(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn fact_and_evidence_ids_are_deterministic_and_owner_scoped() {
-        let project_owner = FactOwnerV1::Project {
-            project_id: id("project.fixture"),
-        };
-        let first = fact_id(project_owner.clone(), "operation.fixture");
-        let replay = fact_id(project_owner, "operation.fixture");
-        let profile = fact_id(FactOwnerV1::Profile, "operation.fixture");
-        assert_eq!(first, replay);
-        assert_ne!(first, profile);
-
-        let evidence = FactEvidenceRefV1::new(
-            first.clone(),
-            id("retrieval.fixture"),
-            FactEvidenceRelationV1::Supports,
-            EvidenceClass::Observed,
-            Confidence::new(1.0).unwrap(),
-        )
-        .unwrap();
-        let replayed = FactEvidenceRefV1::new(
-            first.clone(),
-            id("retrieval.fixture"),
-            FactEvidenceRelationV1::Supports,
-            EvidenceClass::Observed,
-            Confidence::new(1.0).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(evidence.evidence_id(), replayed.evidence_id());
-
-        let lower_confidence = FactEvidenceRefV1::new(
-            first,
-            id("retrieval.fixture"),
-            FactEvidenceRelationV1::Supports,
-            EvidenceClass::Inferred,
-            Confidence::new(0.8).unwrap(),
-        )
-        .unwrap();
-        assert_ne!(evidence.evidence_id(), lower_confidence.evidence_id());
-    }
-
-    #[test]
-    fn assertion_identity_changes_with_owner_payload_and_lineage() {
-        let owner = FactOwnerV1::Project {
-            project_id: id("project.fixture"),
-        };
-        let fact_id = fact_id(owner.clone(), "operation.fixture");
-        let evidence = FactEvidenceRefV1::new(
-            fact_id.clone(),
-            id("retrieval.fixture"),
-            FactEvidenceRelationV1::Supports,
-            EvidenceClass::Observed,
-            Confidence::new(1.0).unwrap(),
-        )
-        .unwrap();
-        let first = FactAssertionV1::new(
-            fact_id.clone(),
-            owner.clone(),
-            FactAssertionKindV1::Initial,
-            payload(),
-            vec![evidence.clone()],
-            UtcMicros(10),
-            None,
-        )
-        .unwrap();
-        let replay = FactAssertionV1::new(
-            fact_id,
-            owner,
-            FactAssertionKindV1::Initial,
-            payload(),
-            vec![evidence],
-            UtcMicros(10),
-            None,
-        )
-        .unwrap();
-        assert_eq!(first.assertion_id(), replay.assertion_id());
-    }
-
-    #[test]
-    fn payload_rejects_an_unbound_receipt() {
-        let wrong_reference = PayloadReferenceV1::for_payload(&json!({"different": true})).unwrap();
-        let receipt = SanitizationReceiptV1::new(
-            SanitizationReceiptRefV1::new(
-                id::<SanitizationReceiptId>("receipt.fact.wrong"),
-                id::<ComponentVersion>("sanitizer.fixture.v1"),
-            )
-            .unwrap(),
-            SanitizerDispositionV1::Accepted,
-            SensitivityV1::NonSensitive,
-            Some(wrong_reference),
-        )
-        .unwrap();
-        assert!(
-            FactPayloadV1::new(
-                "safe".to_owned(),
-                FactCategoryV1::General,
-                vec![],
-                vec![],
-                json!({}),
-                receipt,
-                RetentionClass::new("durable.fact").unwrap(),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn evidence_cannot_be_attached_to_another_fact() {
-        let owner = FactOwnerV1::Profile;
-        let first = fact_id(owner.clone(), "operation.first");
-        let second = fact_id(owner.clone(), "operation.second");
-        let evidence = FactEvidenceRefV1::new(
-            first,
-            id("retrieval.fixture"),
-            FactEvidenceRelationV1::Supports,
-            EvidenceClass::Observed,
-            Confidence::new(1.0).unwrap(),
-        )
-        .unwrap();
-        assert!(
-            FactAssertionV1::new(
-                second,
-                owner,
-                FactAssertionKindV1::Initial,
-                payload(),
-                vec![evidence],
-                UtcMicros(10),
-                None,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn identity_bearing_wire_values_reject_tampering() {
-        let owner = FactOwnerV1::Profile;
-        let fact_id = fact_id(owner.clone(), "operation.wire");
-        let evidence = FactEvidenceRefV1::new(
-            fact_id.clone(),
-            id("retrieval.wire"),
-            FactEvidenceRelationV1::Supports,
-            EvidenceClass::Observed,
-            Confidence::new(1.0).unwrap(),
-        )
-        .unwrap();
-        let mut evidence_wire = serde_json::to_value(&evidence).unwrap();
-        evidence_wire["evidence_id"] = json!("fact-evidence.v1.forged");
-        assert!(serde_json::from_value::<FactEvidenceRefV1>(evidence_wire).is_err());
-
-        let assertion = FactAssertionV1::new(
-            fact_id,
-            owner,
-            FactAssertionKindV1::Initial,
-            payload(),
-            vec![evidence],
-            UtcMicros(10),
-            None,
-        )
-        .unwrap();
-        let mut assertion_wire = serde_json::to_value(&assertion).unwrap();
-        assertion_wire["assertion_id"] = json!("fact-assertion.v1.forged");
-        assert!(serde_json::from_value::<FactAssertionV1>(assertion_wire).is_err());
-
-        let mut owner_wire = serde_json::to_value(&assertion).unwrap();
-        owner_wire["owner"] = json!({"kind": "project", "project_id": "project.other"});
-        assert!(serde_json::from_value::<FactAssertionV1>(owner_wire).is_err());
-    }
-
-    #[test]
-    fn assertion_set_order_is_canonical() {
-        let owner = FactOwnerV1::Profile;
-        let fact_id = fact_id(owner.clone(), "operation.order");
-        let first_evidence = FactEvidenceRefV1::new(
-            fact_id.clone(),
-            id("retrieval.order.a"),
-            FactEvidenceRelationV1::Supports,
-            EvidenceClass::Observed,
-            Confidence::new(1.0).unwrap(),
-        )
-        .unwrap();
-        let second_evidence = FactEvidenceRefV1::new(
-            fact_id.clone(),
-            id("retrieval.order.b"),
-            FactEvidenceRelationV1::Supports,
-            EvidenceClass::Observed,
-            Confidence::new(1.0).unwrap(),
-        )
-        .unwrap();
-        let first = FactAssertionV1::new(
-            fact_id.clone(),
-            owner.clone(),
-            FactAssertionKindV1::Initial,
-            payload(),
-            vec![first_evidence.clone(), second_evidence.clone()],
-            UtcMicros(10),
-            None,
-        )
-        .unwrap();
-        let second = FactAssertionV1::new(
-            fact_id,
-            owner,
-            FactAssertionKindV1::Initial,
-            payload(),
-            vec![second_evidence, first_evidence],
-            UtcMicros(10),
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn legacy_identity_rejects_non_positive_row_ids() {
-        assert!(
-            FactIdentityMaterialV1::new(
-                FactOwnerV1::Profile,
-                FactIdentitySourceV1::Legacy {
-                    source_store_id: id("store.fixture"),
-                    legacy_fact_id: 0,
-                },
-            )
-            .is_err()
-        );
-        assert!(LocatorDigest::new(ZERO_DIGEST).is_ok());
-    }
-}
+#[path = "fact_tests.rs"]
+mod tests;
