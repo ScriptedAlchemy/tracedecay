@@ -148,7 +148,6 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{any, get, patch, post};
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use tracedecay_api::WorkOperation;
@@ -387,8 +386,6 @@ pub struct DashboardState {
     /// Daemon-owned user-profile settings authority. Dashboard routes never
     /// load or mutate `config.toml` directly.
     pub user_settings: Arc<dyn crate::application::configuration::UserSettingsDaemonClient>,
-    /// Recent deterministic curation activity emitted by the standalone dashboard.
-    pub curation_activity: Arc<RwLock<Vec<Value>>>,
     /// Process-local derived BPE token-count cache for the Savings & Cost tab.
     pub token_counts: Arc<token_count::TokenCountCache>,
     /// Admitted daemon/application diagnostics authority. `None` keeps all
@@ -721,7 +718,6 @@ async fn build_state_inner(
         dashboard_root,
         retention_config: cg.retention_config(),
         user_settings: cg.user_settings_client(),
-        curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority,
@@ -1396,14 +1392,6 @@ fn project_api_router() -> Router<DashboardState> {
             get(memory_api::similarity),
         )
         .route(
-            "/api/plugins/holographic/curation/status",
-            get(memory_api::curation_status),
-        )
-        .route(
-            "/api/plugins/holographic/curation/activity",
-            get(memory_api::curation_activity),
-        )
-        .route(
             "/api/plugins/holographic/curation/plan",
             get(memory_api::curation_plan),
         )
@@ -1493,10 +1481,6 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/automation/runs/{run_id}/artifacts/{kind}",
             get(automation_run_api::artifact_payload),
-        )
-        .route(
-            "/api/plugins/holographic/curate/apply",
-            post(memory_api::curate_apply),
         )
         .route("/api/plugins/holographic/oplog", get(memory_api::oplog))
         // LCM plugin API (mirrors hermes-lcm dashboard/plugin_api.py)
@@ -1660,6 +1644,83 @@ async fn project_scoped_api_gateway(
         .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
+    if is_project_scoped_retained_curation(req.method(), &tail) {
+        let Some(project_graph) = selected.state.project_graph.as_deref() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "unavailable",
+                    "detail": "active project retained curation authority is unavailable",
+                    "project_id": project_id,
+                })),
+            )
+                .into_response();
+        };
+        let application = match ActiveProjectApplicationRoutes::for_active_project(
+            project_graph,
+            selected.state.application_invocation_executor.clone(),
+        ) {
+            Ok(application) => application,
+            Err(err) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "status": "unavailable",
+                        "detail": format!(
+                            "active project retained curation authority is unavailable: {err}"
+                        ),
+                        "project_id": project_id,
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        let rewritten = format!(
+            "{}{}",
+            tracedecay_api::retained_route_path(
+                tracedecay_application::RetainedSurfaceOperation::FactStoreCurate,
+            ),
+            query
+        );
+        return match rewritten.parse::<Uri>() {
+            Ok(uri) => {
+                *req.uri_mut() = uri;
+                let (mut parts, body) = req.into_parts();
+                let request_control = parts
+                    .extensions
+                    .get::<DashboardHttpRequestControlV1>()
+                    .cloned();
+                parts.extensions.clear();
+                if let Some(request_control) = request_control {
+                    parts.extensions.insert(request_control);
+                }
+                let req = Request::from_parts(parts, body);
+                match application.http_router.oneshot(req).await {
+                    Ok(response) => response,
+                    Err(err) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "status": "error",
+                            "detail": format!(
+                                "dashboard retained curation route failed: {err}"
+                            ),
+                        })),
+                    )
+                        .into_response(),
+                }
+            }
+            Err(err) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "bad_request",
+                    "detail": format!(
+                        "invalid project-scoped retained curation path: {err}"
+                    ),
+                })),
+            )
+                .into_response(),
+        };
+    }
     if let Some(read) = application_read {
         let Some(project_graph) = selected.state.project_graph.as_deref() else {
             return (
@@ -1790,6 +1851,15 @@ fn selected_project_application_read(
     }
 }
 
+fn is_project_scoped_retained_curation(method: &Method, tail: &str) -> bool {
+    method == Method::POST
+        && tail
+            == tracedecay_api::retained_application_route_path(
+                tracedecay_application::RetainedSurfaceOperation::FactStoreCurate,
+            )
+            .trim_start_matches('/')
+}
+
 async fn forward_project_request(
     project_api: Router<DashboardState>,
     state: DashboardState,
@@ -1894,8 +1964,8 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "feedback": state.feedback_status_reader.is_some(),
             "code_diagnostics": state.code_diagnostics_authority.is_some(),
             // Memory curation/refinement is served by the configured
-            // standalone automation backend. Explicit agent ops apply through
-            // /curate/apply.
+            // standalone automation backend. Explicit operations use the
+            // canonical retained application surface.
             "curation": true,
             "automation": automation_configured,
             "llm_curation": standalone_automation,
@@ -2080,7 +2150,6 @@ mod authority_tests {
                     crate::application::configuration::ProductionUserSettingsDaemonClient::default(
                     ),
                 ),
-                curation_activity: Arc::new(RwLock::new(Vec::new())),
                 token_counts: Arc::new(token_count::TokenCountCache::new()),
                 code_diagnostics_authority: None,
                 automation_authority: None,

@@ -11,14 +11,21 @@ afterEach(() => {
   useScope.getState().selectAllProjects();
 });
 
-describe("automatic curation console", () => {
-  it("reports status, activity, receipts, and outcomes without manual plan/apply controls", async () => {
+describe("curation console", () => {
+  it("shows automatic runs and outcomes without a shadow manual-effect ledger", async () => {
     const fetchMock = stubRoutes();
     renderConsole();
 
     expect(
-      await screen.findByText(/validate → apply automatically/),
+      await screen.findByText(/scheduler-owned automatic runs/),
     ).toBeTruthy();
+    expect(await screen.findByText(/future scheduler runs/)).toBeTruthy();
+    expect(
+      screen.queryByRole("region", { name: "Retained curation effects" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("region", { name: "Retained curation activity" }),
+    ).toBeNull();
     expect(await screen.findByText(/deployment complete/)).toBeTruthy();
     expect(await screen.findByText(/recalled and helpful/)).toBeTruthy();
     expect(
@@ -34,6 +41,16 @@ describe("automatic curation console", () => {
     expect(
       fetchMock.mock.calls.some(([url]) =>
         String(url).includes("/curate/apply"),
+      ),
+    ).toBe(false);
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/curation/status"),
+      ),
+    ).toBe(false);
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/curation/activity"),
       ),
     ).toBe(false);
   });
@@ -84,25 +101,6 @@ function renderConsole() {
 }
 
 function stubRoutes() {
-  const status = {
-    provider: "tracedecay",
-    state: {
-      paused: false,
-      last_run_at: "2026-08-08T12:00:00Z",
-      run_count: 2,
-      last_run_summary: "automatic curation completed",
-      last_run_id: "run-1",
-    },
-    config: {
-      enabled: true,
-      interval_hours: 6,
-      min_idle_hours: 2,
-      mode: "automatic",
-      dry_run_first: false,
-    },
-    snapshots: [],
-  };
-  const activity = { events: [], count: 0, limit: 100, error: "" };
   const runs = {
     records: [
       {
@@ -217,24 +215,20 @@ function stubRoutes() {
   const fetchMock = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      const body = url.includes("/curation/status")
-        ? status
-        : url.includes("/curation/activity")
-          ? activity
-          : url.includes("/curation/runs")
-            ? runs
-            : url.includes("/automation/outcomes")
-              ? outcomes
-              : url.includes("/automatic-fact-receipts")
-                ? {
-                    receipts: [automaticReceipt],
-                    count: 1,
-                    limit: 50,
-                    error: "",
-                  }
-                : url.includes("/curation/config")
-                  ? config
-                  : {};
+      const body = url.includes("/curation/runs")
+        ? runs
+        : url.includes("/automation/outcomes")
+          ? outcomes
+          : url.includes("/automatic-fact-receipts")
+            ? {
+                receipts: [automaticReceipt],
+                count: 1,
+                limit: 50,
+                error: "",
+              }
+            : url.includes("/curation/config")
+              ? config
+              : {};
       void init;
       return new Response(JSON.stringify(body), {
         status: 200,

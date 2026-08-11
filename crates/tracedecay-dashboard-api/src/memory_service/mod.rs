@@ -7,10 +7,7 @@ mod oplog;
 mod projection;
 mod similarity;
 
-pub use curation::{
-    apply_delete_op, apply_merge_op, build_delete_plan, curate_apply_payload,
-    curation_activity_payload, curation_status_payload, delete_fact,
-};
+pub use curation::build_delete_plan;
 pub use facts::{
     fact_detail_payload, fetch_entities, fetch_facts, overview_payload, providers_payload,
 };

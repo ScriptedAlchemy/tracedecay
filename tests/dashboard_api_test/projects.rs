@@ -314,12 +314,60 @@ fn project_scoped_mutations_are_rejected_for_non_active_projects() {
         let (status, body) = post_json_body(
             &agent,
             &format!(
-                "{}/api/projects/{}/plugins/holographic/curate/apply",
+                "{}/api/projects/{}/application/retained/fact_store_curate",
                 fixture.base_url, target_project_id
             ),
-            &serde_json::json!({ "ops": [] }),
+            &serde_json::json!({
+                "memory_scope": "project",
+                "min_confidence": 0.9,
+                "operations": []
+            }),
         );
         assert_eq!(status, 405);
         assert_eq!(body["status"], "read_only_project");
+    });
+}
+
+#[test]
+fn active_project_scoped_curation_uses_the_canonical_retained_route() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_memory_curation_fixture().await;
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
+        let fact_id = fixture_fact_id(
+            &agent,
+            &fixture,
+            "Cache invalidation policy must be explicit",
+        );
+        let active_project_id = fixture.host_runtime.project_id().as_str();
+
+        let (status, body) = post_json_body(
+            &agent,
+            &format!(
+                "{}/api/projects/{}/application/retained/fact_store_curate",
+                fixture.base_url, active_project_id
+            ),
+            &serde_json::json!({
+                "memory_scope": "project",
+                "min_confidence": 0.9,
+                "operations": [{
+                    "kind": "normalize_tags",
+                    "fact_id": fact_id.as_str(),
+                    "tags": ["canonical", "scoped"],
+                    "evidence_fact_ids": [fact_id.as_str()],
+                    "confidence": 0.95
+                }]
+            }),
+        );
+
+        assert_eq!(status, 200, "active scoped curation failed: {body}");
+        assert_eq!(body["value"]["outcome"]["outcome"], "effect");
+        assert_eq!(
+            body["value"]["outcome"]["value"]["payload"]["normalized_tags"],
+            1
+        );
     });
 }

@@ -522,26 +522,6 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             "fixture vectors should produce a likely_duplicate pair"
         );
 
-        let (status, curation_status) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/holographic/curation/status",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(curation_status["config"]["enabled"], true);
-
-        let (status, curation_activity) = get_json(
-            &agent,
-            &format!(
-                "{}/api/plugins/holographic/curation/activity?limit=75",
-                fixture.base_url
-            ),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(curation_activity["count"], 0);
-        assert_eq!(curation_activity["events"], Value::Array(Vec::new()));
 
     });
 }

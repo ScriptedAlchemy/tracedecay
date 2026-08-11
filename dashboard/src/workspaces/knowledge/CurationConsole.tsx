@@ -1,9 +1,4 @@
-/** Read-only observability for daemon-owned automatic memory curation.
- *
- * Validation, fact application, and skill activation happen in the scheduler.
- * This console reports the receipts and adoption outcomes that survive those
- * decisions, and exposes only the daemon setting that enables future runs.
- */
+/** Read-only observability and configuration for scheduler-owned curation. */
 import { mintBrowserIdempotencyKey } from "../../data/identity.ts";
 import {
   useAutomationOutcomes,
@@ -17,24 +12,18 @@ import {
   type ScopeWritability,
 } from "../../data/scope/store.ts";
 import {
-  useCurationActivity,
   useCurationConfig,
   useCurationConfigPatch,
   useCurationRuns,
-  useCurationStatus,
-  type CurationActivityPayload,
   type CurationConfigMutation,
   type CurationConfigPayload,
   type CurationConfigWriteResult,
   type CurationRunRecord,
   type CurationRunsPayload,
-  type CurationStatusPayload,
 } from "../../data/query/memory.ts";
 import { runStatusState } from "./memoryModel.ts";
 
 export function CurationConsole() {
-  const status = useCurationStatus();
-  const activity = useCurationActivity();
   const runs = useCurationRuns();
   const outcomes = useAutomationOutcomes();
   const config = useCurationConfig();
@@ -47,24 +36,6 @@ export function CurationConsole() {
       tabIndex={0}
       className="flex h-full flex-col gap-3 overflow-auto p-3"
     >
-      <Panel legend="Automatic curation status" elevation="well">
-        <PayloadBoundary
-          title="Automatic curation status"
-          pending={status.isPending}
-          result={status.data}
-        >
-          {(data) => <StatusBody data={data} />}
-        </PayloadBoundary>
-      </Panel>
-      <Panel legend="Curator activity" elevation="well">
-        <PayloadBoundary
-          title="Curator activity"
-          pending={activity.isPending}
-          result={activity.data}
-        >
-          {(data) => <ActivityBody data={data} />}
-        </PayloadBoundary>
-      </Panel>
       <Panel legend="Automatic run history" elevation="well">
         <PayloadBoundary
           title="Automatic run history"
@@ -104,129 +75,6 @@ export function CurationConsole() {
   );
 }
 
-function StatusBody({ data }: { data: CurationStatusPayload }) {
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <StateChip
-          kind={data.config.enabled ? "ready" : "unsupported"}
-          detail={data.config.enabled ? "enabled" : "disabled"}
-        />
-        <span className="text-2xs text-text-secondary">
-          provider {data.provider} · mode {data.config.mode}
-          {data.config.interval_hours == null
-            ? ""
-            : ` · every ${data.config.interval_hours}h`}
-          {data.config.min_idle_hours == null
-            ? ""
-            : ` · min idle ${data.config.min_idle_hours}h`}
-        </span>
-      </div>
-      <p className="text-3xs leading-relaxed text-text-muted">
-        memory policy: validate → apply automatically; skill policy: validate →
-        activate automatically. This console reports the daemon&apos;s receipts
-        and sends no browser action for individual outcomes.
-      </p>
-      <dl className="grid grid-cols-2 gap-2 text-2xs sm:grid-cols-4">
-        <Readout
-          label="runs"
-          size="sm"
-          value={data.state.run_count.toLocaleString()}
-        />
-        <Readout
-          label="paused"
-          size="sm"
-          value={data.state.paused ? "yes" : "no"}
-        />
-        <Readout
-          label="last run"
-          size="sm"
-          value={data.state.last_run_at ?? "not recorded"}
-        />
-        <Readout
-          label="last run id"
-          size="sm"
-          value={data.state.last_run_id ?? "not recorded"}
-        />
-      </dl>
-      {data.state.last_run_summary ? (
-        <p className="text-2xs leading-relaxed text-text-secondary">
-          {data.state.last_run_summary}
-        </p>
-      ) : null}
-      {data.snapshots.length > 0 ? (
-        <ul className="flex flex-col gap-1 border-t border-edge-subtle pt-2">
-          {data.snapshots.map((snapshot) => (
-            <li
-              key={snapshot.id}
-              className="flex flex-wrap gap-x-2 text-3xs text-text-secondary"
-            >
-              <span className="text-text-primary">{snapshot.name}</span>
-              <span>{snapshot.mode}</span>
-              {snapshot.ts ? <span>{snapshot.ts}</span> : null}
-              {snapshot.summary ? <span>{snapshot.summary}</span> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
-function ActivityBody({ data }: { data: CurationActivityPayload }) {
-  if (data.error !== "") {
-    return (
-      <p role="status" className="text-2xs leading-relaxed text-state-error">
-        curator activity could not be read: {data.error}
-      </p>
-    );
-  }
-  if (data.events.length === 0) {
-    return (
-      <p className="text-2xs leading-relaxed text-text-muted">
-        no curator events are held in memory. This stream is ephemeral after a
-        daemon restart; the durable account is the automatic run history below.
-      </p>
-    );
-  }
-  return (
-    <div className="flex flex-col gap-2">
-      <p className="text-3xs leading-relaxed text-text-muted">
-        the {data.events.length.toLocaleString()} most recent of the last{" "}
-        {data.limit.toLocaleString()} events this daemon holds in memory, newest
-        first
-      </p>
-      <ol
-        role="region"
-        aria-label="Curator activity events"
-        tabIndex={0}
-        className="flex max-h-72 flex-col gap-1 overflow-auto"
-      >
-        {[...data.events].reverse().map((event, index) => (
-          <li
-            key={`${event.ts}-${index}`}
-            className="flex flex-wrap items-baseline gap-x-2 border-l-2 border-edge-subtle pl-2 text-3xs"
-          >
-            <span className="td-value text-text-muted" data-cell="numeric">
-              {event.ts}
-            </span>
-            <span className="text-text-muted">{event.phase}</span>
-            {event.dry_run ? (
-              <span className="text-state-partial">dry run</span>
-            ) : null}
-            {event.level !== "info" ? (
-              <span className="text-state-partial">{event.level}</span>
-            ) : null}
-            <span className="min-w-0 text-2xs leading-relaxed text-text-secondary">
-              {event.message}
-            </span>
-          </li>
-        ))}
-      </ol>
-    </div>
-  );
-}
-
 function RunsBody({ data }: { data: CurationRunsPayload }) {
   if (data.error !== "") {
     return (
@@ -244,6 +92,10 @@ function RunsBody({ data }: { data: CurationRunsPayload }) {
   }
   return (
     <div className="flex flex-col gap-2">
+      <p className="text-3xs leading-relaxed text-text-muted">
+        These are scheduler-owned automatic runs recorded by the automation
+        authority.
+      </p>
       <div className="flex flex-wrap items-end gap-4">
         <Readout
           label="runs"

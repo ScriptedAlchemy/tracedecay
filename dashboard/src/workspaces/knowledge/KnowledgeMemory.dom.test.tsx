@@ -206,21 +206,6 @@ const RUNS = {
   ],
 };
 
-const ACTIVITY = {
-  count: 1,
-  limit: 100,
-  error: "",
-  events: [
-    {
-      ts: "2026-08-03T00:00:00Z",
-      phase: "finish",
-      message: "similarity dedup: 2 deletes applied",
-      level: "info",
-      dry_run: false,
-    },
-  ],
-};
-
 function config(overrides: Record<string, unknown> = {}) {
   const automation = {
     schema_version: 1,
@@ -307,7 +292,6 @@ const ROUTES: readonly (readonly [string, unknown])[] = [
   ["/trust-history", TRUST_HISTORY],
   ["/projection", PROJECTION],
   ["/similarity", SIMILARITY],
-  ["/curation/activity", ACTIVITY],
   ["/curation/runs", RUNS],
   [
     "/automation/outcomes",
@@ -321,27 +305,6 @@ const ROUTES: readonly (readonly [string, unknown])[] = [
         facts_refreshed_at: null,
       },
       error: "",
-    },
-  ],
-  [
-    "/curation/status",
-    {
-      provider: "tracedecay",
-      state: {
-        paused: false,
-        run_count: 1,
-        last_run_at: null,
-        last_run_summary: "automatic curation completed",
-        last_run_id: "run-1",
-      },
-      config: {
-        enabled: true,
-        interval_hours: 6,
-        min_idle_hours: 2,
-        mode: "automatic",
-        dry_run_first: false,
-      },
-      snapshots: [],
     },
   ],
   ["/oplog", OPLOG],
@@ -681,27 +644,6 @@ describe("Curation console", () => {
     expect(list.querySelector('[data-state="ready"]')).toBeTruthy();
   });
 
-  it("says an empty activity stream is the daemon’s memory, not an idle curator", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        const path = url.split("?")[0] ?? url;
-        if (path.endsWith("/curation/activity")) {
-          return json({ events: [], count: 0, limit: 100, error: "" });
-        }
-        for (const [suffix, body] of ROUTES) {
-          if (path.endsWith(suffix)) return json(body);
-        }
-        if (path.endsWith("/curation/config")) return json(config());
-        return json(OVERVIEW_ENVELOPE);
-      }),
-    );
-    renderPage("/knowledge?view=curation");
-    expect(
-      await screen.findByText(/ephemeral after a daemon restart/),
-    ).toBeTruthy();
-  });
 
   it("states which project a configuration write would reach", async () => {
     stubRoutes();

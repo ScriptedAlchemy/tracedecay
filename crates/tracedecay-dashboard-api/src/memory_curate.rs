@@ -15,7 +15,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
-use tokio::sync::RwLock;
 
 use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
@@ -161,7 +160,6 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         dashboard_root: store_layout.dashboard_root.clone(),
         retention_config: cg.retention_config(),
         user_settings: cg.user_settings_client(),
-        curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority: None,
@@ -215,7 +213,6 @@ fn user_state(
         dashboard_root: dashboard_root.to_path_buf(),
         retention_config: crate::config::RetentionConfig::default(),
         user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
-        curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority: None,

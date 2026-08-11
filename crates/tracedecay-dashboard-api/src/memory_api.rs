@@ -5,10 +5,6 @@
 //! original routes so the ported UI bundle works unchanged.
 //!
 //! Differences from the Hermes backend, by design:
-//! - `POST /curate/apply` is a generic curation-ops endpoint (`delete` /
-//!   `merge`) for validated agent operations.
-//! - There is no fact archive: deletion is permanent (the original
-//!   `holographic_plus` soft-archived facts; tracedecay does not).
 //! - Banks are named after their category directly (no `cat:` prefix).
 
 use std::collections::BTreeMap;
@@ -57,11 +53,6 @@ pub struct SimilarityParams {
 #[derive(Deserialize)]
 pub struct LimitParams {
     limit: Option<i64>,
-}
-
-#[derive(Deserialize)]
-pub struct CurateApplyBody {
-    ops: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -578,20 +569,6 @@ pub async fn similarity(
     Json(memory_service::similarity_payload(&state, min_similarity, pair_cap).await)
 }
 
-/// `GET /api/plugins/holographic/curation/status` — similarity-dedup curator status.
-pub async fn curation_status(State(state): State<DashboardState>) -> Json<Value> {
-    Json(memory_service::curation_status_payload(&state).await)
-}
-
-/// `GET /api/plugins/holographic/curation/activity` — recent deterministic curator events.
-pub async fn curation_activity(
-    State(state): State<DashboardState>,
-    JsonQuery(params): JsonQuery<LimitParams>,
-) -> Json<Value> {
-    let limit = coerce_limit(params.limit, 100, 300);
-    Json(memory_service::curation_activity_payload(&state, limit).await)
-}
-
 /// `GET /api/plugins/holographic/curation/plan` — the deterministic curation
 /// plan the similarity curator would review: dedup delete proposals plus
 /// hygiene candidates (secret-like, transient, and possible-supersession
@@ -646,33 +623,6 @@ pub async fn curation_runs(
             "error": err.to_string(),
         })),
     }
-}
-
-/// `POST /api/plugins/holographic/curate/apply` — generic curation-ops apply
-/// endpoint. Body: `{"ops": [...]}` where each op is one of:
-///
-/// - `{"op": "delete", "fact_id": <id>, "reason": <string?>}` — hard-deletes
-///   the fact (entity links cascade, FTS rows drop via trigger).
-/// - `{"op": "merge", "winner_id": <id>, "loser_ids": [<id>...],
-///   "merged_content": <string?>}` — optionally rewrites the winner's content
-///   with `merged_content`, then hard-deletes the losers.
-///
-/// Per-op failures are reported in `results` (status stays 200); the request
-/// only fails wholesale on a malformed body. External planners (e.g. the
-/// LLM-backed Hermes wrapper) build against this contract.
-pub async fn curate_apply(
-    State(state): State<DashboardState>,
-    body: Option<axum::extract::Json<CurateApplyBody>>,
-) -> (StatusCode, Json<Value>) {
-    let Some(axum::extract::Json(body)) = body else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(http_detail("Request body must be JSON: {\"ops\": [...]}")),
-        );
-    };
-
-    let payload = memory_service::curate_apply_payload(&state, &body.ops).await;
-    (StatusCode::OK, Json(payload))
 }
 
 /// `GET /api/plugins/holographic/oplog` — recent memory operations, newest

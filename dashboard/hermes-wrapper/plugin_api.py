@@ -469,8 +469,8 @@ def get_holographic(path: str, request: Request) -> JSONResponse:
 
     Maps ``/holographic/<path>`` to upstream
     ``GET /api/plugins/holographic/<path>`` (e.g. ``projection``,
-    ``similarity``, ``fact/{id}``, ``curation/status``, ``curation/activity``),
-    preserving the query string.
+    ``similarity``, ``fact/{id}``, ``curation/plan``), preserving the query
+    string.
     """
     return _proxy("GET", f"/api/plugins/holographic/{path}", request, None)
 
@@ -480,9 +480,8 @@ async def post_holographic(path: str, request: Request) -> JSONResponse:
     """Catch-all POST proxy for the holographic memory API.
 
     Maps ``/holographic/<path>`` to upstream
-    ``POST /api/plugins/holographic/<path>`` (e.g. ``curate/apply``),
-    forwarding the JSON request body unmodified.
-    (There is no archive/restore: curation deletes are permanent.)
+    ``POST /api/plugins/holographic/<path>``. Request bodies are forwarded
+    unmodified.
 
     ``_proxy`` blocks (urllib + possible spawn/ready wait), so it runs on the
     threadpool so a slow apply round-trip does not stall the event loop.

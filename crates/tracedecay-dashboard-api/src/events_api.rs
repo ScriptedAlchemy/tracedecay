@@ -895,7 +895,6 @@ pub(crate) async fn dashboard_state_fixture(
 ) -> (tempfile::TempDir, DashboardState) {
     use std::sync::Arc;
 
-    use tokio::sync::RwLock;
     use tracedecay_domain::{FactOwnerV1, ProjectId};
     use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_usecases::configuration::ProductionUserSettingsDaemonClient;
@@ -972,7 +971,6 @@ pub(crate) async fn dashboard_state_fixture(
         dashboard_root,
         retention_config: crate::config::RetentionConfig::default(),
         user_settings: Arc::new(ProductionUserSettingsDaemonClient::default()),
-        curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(crate::token_count::TokenCountCache::new()),
         code_diagnostics_authority: None,
         automation_authority: None,
