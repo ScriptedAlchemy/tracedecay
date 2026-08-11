@@ -6,7 +6,7 @@
 //! statistics and bounded opaque joins needed to finalize once.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::CoverageStateV1;
+use tracedecay_domain::{CoverageStateV1, canonical_json_bytes};
 
 use crate::observability::{ObservabilityHorizonV1, ObservabilityPageV1};
 
@@ -220,7 +220,7 @@ impl ExecutionTopologyRollupFragmentV1 {
     }
 
     fn canonical_bytes(&self) -> Result<Vec<u8>, ExecutionTopologyRollupErrorV1> {
-        serde_json::to_vec(self).map_err(|_| ExecutionTopologyRollupErrorV1::PageUnavailable)
+        canonical_execution_topology_rollup_fragment_bytes(self)
     }
 
     fn reduced_state(&self) -> Option<&ExecutionTopologyReducedRollupStateV1> {
@@ -265,6 +265,14 @@ impl ExecutionTopologyRollupFragmentV1 {
     }
 }
 
+/// Serializes one typed rollup fragment into the canonical bytes shared by
+/// application readers and persistence adapters.
+pub fn canonical_execution_topology_rollup_fragment_bytes(
+    fragment: &ExecutionTopologyRollupFragmentV1,
+) -> Result<Vec<u8>, ExecutionTopologyRollupErrorV1> {
+    canonical_json_bytes(fragment).map_err(|_| ExecutionTopologyRollupErrorV1::PageUnavailable)
+}
+
 /// Canonically validates and evaluates retention for one fragment document.
 /// Storage CAS-publishes `Updated` against the exact generation/content digest;
 /// it never parses or reinterprets the opaque reduced state itself.
@@ -277,19 +285,19 @@ pub fn check_execution_topology_rollup_retention_json(
     }
     let mut fragment = serde_json::from_str::<ExecutionTopologyRollupFragmentV1>(fragment_json)
         .map_err(|_| ExecutionTopologyRollupErrorV1::PageUnavailable)?;
-    let canonical = serde_json::to_string(&fragment)
-        .map_err(|_| ExecutionTopologyRollupErrorV1::PageUnavailable)?;
-    if canonical != fragment_json || !fragment.valid_for(fragment.authorized_scope_ref()) {
+    let canonical = canonical_execution_topology_rollup_fragment_bytes(&fragment)?;
+    if canonical != fragment_json.as_bytes() || !fragment.valid_for(fragment.authorized_scope_ref())
+    {
         return Err(ExecutionTopologyRollupErrorV1::IncompatibleFragments);
     }
     fragment.check_retention(now_micros)?;
-    let compacted = serde_json::to_string(&fragment)
-        .map_err(|_| ExecutionTopologyRollupErrorV1::PageUnavailable)?;
-    if compacted == fragment_json {
+    let compacted = canonical_execution_topology_rollup_fragment_bytes(&fragment)?;
+    if compacted == fragment_json.as_bytes() {
         Ok(ExecutionTopologyRollupRetentionV1::Unchanged)
     } else {
         Ok(ExecutionTopologyRollupRetentionV1::Updated {
-            fragment_json: compacted,
+            fragment_json: String::from_utf8(compacted)
+                .map_err(|_| ExecutionTopologyRollupErrorV1::PageUnavailable)?,
         })
     }
 }

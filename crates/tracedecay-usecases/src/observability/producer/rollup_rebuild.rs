@@ -386,12 +386,6 @@ async fn publish_rollup(
     db: &RegisteredGlobalDb,
     publication: RollupPublicationV1,
 ) -> Result<(), String> {
-    // The application builder serializes its typed fragment directly, while
-    // the registered store makes the canonical JSON document format its
-    // byte-level storage boundary. Normalize at the adapter boundary so the
-    // opaque fragment accepted by the store has the same object-key ordering
-    // the store validates before it commits a dirty-day claim.
-    let fragment_json = canonicalize_rollup_fragment_json(&publication.fragment_json)?;
     db.rebuild_observability_rollup(ObservabilityRollupRebuildV1 {
         authorized_scope_ref: publication.authorized_scope_ref,
         day_start_seconds: publication.day_start_seconds,
@@ -406,18 +400,10 @@ async fn publish_rollup(
         ),
         dirty_claim: publication.dirty_claim,
         empty_day_claim: publication.empty_day_claim,
-        fragment_json,
+        fragment_json: publication.fragment_json,
     })
     .await
     .map(|_| ())
-}
-
-fn canonicalize_rollup_fragment_json(fragment_json: &str) -> Result<String, String> {
-    let fragment = serde_json::from_str::<serde_json::Value>(fragment_json).map_err(|error| {
-        format!("observability rollup application emitted invalid JSON: {error}")
-    })?;
-    serde_json::to_string(&fragment)
-        .map_err(|error| format!("failed to canonicalize observability rollup fragment: {error}"))
 }
 
 #[cfg(test)]
@@ -435,15 +421,12 @@ mod tests {
             1,
         )
         .expect("empty application rollup fragment builds");
-        let storage_fragment =
-            canonicalize_rollup_fragment_json(&application_fragment.fragment_json)
-                .expect("application fragment normalizes for registered storage");
         let expected = serde_json::to_string(
             &serde_json::from_str::<serde_json::Value>(&application_fragment.fragment_json)
                 .expect("application fragment is JSON"),
         )
         .expect("registered storage canonical form serializes");
 
-        assert_eq!(storage_fragment, expected);
+        assert_eq!(application_fragment.fragment_json, expected);
     }
 }

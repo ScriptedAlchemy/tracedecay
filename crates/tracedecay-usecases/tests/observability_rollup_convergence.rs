@@ -1,16 +1,57 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_application::ObservabilityRecordPort;
-use tracedecay_domain::{
-    CoverageStateV1, ExecutionPlacementV1, ExecutionTopologyKindV1, ExecutionTopologySampledV1,
-    IntegrationStrategyV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, ReviewTopologyV1,
-    WorkTopologyBranchV1,
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    ExecutionTopologyMetricsRequestV1, ObservabilityHorizonV1, ObservabilityRecordPort,
+    RequestContext, RequestId, ResolvedScope, execution_topology_rollup_metrics,
 };
+use tracedecay_domain::{
+    ActorId, CoverageStateV1, ExecutionPlacementV1, ExecutionTopologyKindV1,
+    ExecutionTopologySampledV1, IntegrationStrategyV1, ManifestDigest, ObservabilityEnvelopeV1,
+    ObservabilityPayloadV1, ObservabilityRetentionClassV1, ObservabilityTerminalResultV1,
+    ProjectId, RepositoryId, ReviewTopologyV1, UtcMicros, WorkTopologyBranchV1, WorktreeId,
+};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::observability::{
     BoundedObservabilityProducerV1, ObservabilityProducerIdentityV1, RegisteredObservabilityPortV1,
 };
+
+fn read_context(scope_ref: &str) -> RequestContext {
+    let scope = ResolvedScope::new(
+        ProjectId::new(scope_ref).expect("project id"),
+        RepositoryId::new("repository.observability.rollup-convergence").expect("repository id"),
+        WorktreeId::new("worktree.observability.rollup-convergence").expect("worktree id"),
+        None,
+    )
+    .expect("resolved scope");
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.observability.rollup-convergence").expect("grant id"),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("grant digest"),
+        ActorId::new("actor.observability.rollup-convergence.issuer").expect("issuer"),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        BTreeSet::from(
+            [CapabilityId::new("capability.work.topology_metrics").expect("capability")],
+        ),
+        BTreeSet::from([UseCaseId::new("use-case.work.topology_metrics").expect("use case")]),
+        DisclosureClass::Sensitive,
+    )
+    .expect("grant snapshot");
+    RequestContext::new(
+        ActorId::new("actor.observability.rollup-convergence.reader").expect("reader"),
+        scope,
+        grant,
+        RequestId::new("request.observability.rollup-convergence").expect("request id"),
+        Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+        CancellationContext::active("cancel.observability.rollup-convergence")
+            .expect("cancellation"),
+    )
+    .expect("request context")
+}
 
 fn topology_envelope(scope: &str, id: u64, event_time_micros: i64) -> ObservabilityEnvelopeV1 {
     let payload = ObservabilityPayloadV1::ExecutionTopology(ExecutionTopologySampledV1 {
@@ -64,7 +105,7 @@ fn topology_envelope(scope: &str, id: u64, event_time_micros: i64) -> Observabil
 }
 
 #[tokio::test]
-async fn idle_producer_converges_multiple_dirty_days_without_new_traffic() {
+async fn idle_producer_converges_dirty_days_into_application_readable_fragments() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let project = tempfile::tempdir().expect("project");
     let scope = "project.observability.rollup-convergence.v2";
@@ -123,5 +164,24 @@ async fn idle_producer_converges_multiple_dirty_days_without_new_traffic() {
     })
     .await
     .expect("idle producer must converge every dirty day");
+
+    let horizon = ObservabilityHorizonV1 {
+        since_micros: first_day * 1_000_000,
+        until_micros: (first_day + 2 * 86_400) * 1_000_000,
+    };
+    let model = execution_topology_rollup_metrics(
+        &port,
+        &port,
+        &read_context(scope),
+        &ExecutionTopologyMetricsRequestV1 {
+            horizon,
+            max_events: 10_000,
+        },
+    )
+    .await
+    .expect("registered application rollup read");
+    assert_eq!(model.coverage.state, CoverageStateV1::Known);
+    assert_ne!(model.watermark, "execution-topology:rollup-unavailable");
+
     producer.shutdown().await.expect("idle producer shutdown");
 }

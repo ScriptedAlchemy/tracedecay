@@ -35,8 +35,9 @@ pub use rollup::{
     ExecutionTopologyRollupFragmentV1, ExecutionTopologyRollupRetentionV1,
     MAX_EXECUTION_TOPOLOGY_ROLLUP_DAYS_V1, MAX_EXECUTION_TOPOLOGY_ROLLUP_FRAGMENT_BYTES_V1,
     MAX_EXECUTION_TOPOLOGY_ROLLUP_READ_BYTES_V1, build_execution_topology_boundary_fragment,
-    build_execution_topology_rollup_fragment, check_execution_topology_rollup_retention_json,
-    project_execution_topology_fragments, project_execution_topology_fragments_with_boundaries,
+    build_execution_topology_rollup_fragment, canonical_execution_topology_rollup_fragment_bytes,
+    check_execution_topology_rollup_retention_json, project_execution_topology_fragments,
+    project_execution_topology_fragments_with_boundaries,
 };
 pub use rollup_build::{
     ExecutionTopologyRollupBuildErrorV1, ExecutionTopologyRollupBuildV1,

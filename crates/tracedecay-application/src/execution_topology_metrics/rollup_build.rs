@@ -11,6 +11,7 @@ use crate::observability::{ObservabilityHorizonV1, ObservabilityPageV1};
 use super::rollup::{
     ExecutionTopologyRollupErrorV1, ExecutionTopologyRollupFragmentV1,
     MAX_EXECUTION_TOPOLOGY_ROLLUP_FRAGMENT_BYTES_V1, build_execution_topology_rollup_fragment,
+    canonical_execution_topology_rollup_fragment_bytes,
 };
 
 /// Complete application artifact for publishing one retained UTC-day rollup.
@@ -81,11 +82,12 @@ pub fn build_execution_topology_daily_rollup(
         observed_at_micros,
         page,
     )?;
-    let fragment_json = serde_json::to_string(&fragment)
-        .map_err(|_| ExecutionTopologyRollupBuildErrorV1::FragmentSerialization)?;
-    if fragment_json.len() > MAX_EXECUTION_TOPOLOGY_ROLLUP_FRAGMENT_BYTES_V1 {
+    let fragment_bytes = canonical_execution_topology_rollup_fragment_bytes(&fragment)?;
+    if fragment_bytes.len() > MAX_EXECUTION_TOPOLOGY_ROLLUP_FRAGMENT_BYTES_V1 {
         return Err(ExecutionTopologyRollupBuildErrorV1::StorageBudgetExceeded);
     }
+    let fragment_json = String::from_utf8(fragment_bytes)
+        .map_err(|_| ExecutionTopologyRollupBuildErrorV1::FragmentSerialization)?;
     // A capped source page is retained only as its exact watermark and typed
     // coverage fact. Publishing values or cells from its prefix would turn a
     // bounded observation into a misleading complete-day aggregate.

@@ -8,8 +8,9 @@ use tracedecay_application::{
     ObservabilityPageV1, ObservabilityQueryPort, ObservabilityQueryV1, RequestContext, RequestId,
     ResolvedScope, build_empty_execution_topology_daily_rollup,
     build_execution_topology_boundary_fragment, build_execution_topology_daily_rollup,
-    build_execution_topology_rollup_fragment, execution_topology_rollup_metrics,
-    project_execution_topology_fragments, project_execution_topology_fragments_with_boundaries,
+    build_execution_topology_rollup_fragment, canonical_execution_topology_rollup_fragment_bytes,
+    execution_topology_rollup_metrics, project_execution_topology_fragments,
+    project_execution_topology_fragments_with_boundaries,
 };
 use tracedecay_domain::{
     ActorId, BlockedCauseV1, ConflictAdjudicatorV1, ConflictKindV1, ConflictOutcomeV1,
@@ -841,7 +842,9 @@ async fn retained_read_preserves_stale_missing_malformed_and_capped_source_state
         ),
     )
     .expect("read-state fixture fragment builds");
-    let canonical = serde_json::to_string(&fragment).unwrap();
+    let canonical =
+        String::from_utf8(canonical_execution_topology_rollup_fragment_bytes(&fragment).unwrap())
+            .unwrap();
 
     let cases = [
         (
@@ -1059,7 +1062,7 @@ fn empty_known_day_uses_canonical_known_fragment() {
     assert_eq!(build.coverage, CoverageStateV1::Known);
     assert!(build.fragment_json.contains("\"kind\":\"reduced\""));
     assert_eq!(
-        serde_json::to_string(&build.fragment).unwrap(),
-        build.fragment_json
+        canonical_execution_topology_rollup_fragment_bytes(&build.fragment).unwrap(),
+        build.fragment_json.as_bytes()
     );
 }

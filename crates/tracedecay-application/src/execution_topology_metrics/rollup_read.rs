@@ -17,6 +17,7 @@ use super::rollup::{
     ExecutionTopologyRollupErrorV1, ExecutionTopologyRollupFragmentV1,
     MAX_EXECUTION_TOPOLOGY_ROLLUP_DAYS_V1, MAX_EXECUTION_TOPOLOGY_ROLLUP_FRAGMENT_BYTES_V1,
     MAX_EXECUTION_TOPOLOGY_ROLLUP_READ_BYTES_V1, build_execution_topology_boundary_fragment,
+    canonical_execution_topology_rollup_fragment_bytes,
     project_execution_topology_fragments_with_boundaries,
 };
 use super::support::{invalid_problem, unavailable_model, unavailable_model_with_state_at};
@@ -314,9 +315,9 @@ fn deserialize_complete_interiors(
             }
             let fragment = serde_json::from_str::<ExecutionTopologyRollupFragmentV1>(&document)
                 .map_err(|_| InteriorFailureV1::unknown())?;
-            let canonical =
-                serde_json::to_string(&fragment).map_err(|_| InteriorFailureV1::unknown())?;
-            if canonical != document {
+            let canonical = canonical_execution_topology_rollup_fragment_bytes(&fragment)
+                .map_err(|_| InteriorFailureV1::unknown())?;
+            if canonical != document.as_bytes() {
                 return Err(InteriorFailureV1::unknown());
             }
             Ok(fragment)
