@@ -1,13 +1,13 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     Confidence, DomainError, FactCategoryV1, FactEventId, FactId, FactLineageEventV1, FactOwnerV1,
-    LocatorDigest, RetrievalAnchorId, SourceStoreId, UtcMicros,
+    LocatorDigest, RetrievalAnchorId, UtcMicros,
 };
 
 use super::{
-    FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_SEARCH_BYTES,
+    FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_SEARCH_BYTES, ProjectMemoryFactIdV1,
     ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchFilterV1,
-    ProjectMemoryFactSearchKindV1, ProjectMemoryFactTargetV1, StoredFactV1, validate_owned_fact_id,
+    ProjectMemoryFactSearchKindV1, StoredFactV1, validate_owned_fact_id,
 };
 
 pub(super) const MAX_CURRENT_LIMIT: usize = 1_000;
@@ -321,50 +321,6 @@ pub struct FactLineageQuery {
     limit: usize,
 }
 
-/// Compatibility lookup for one V1 integer identity in its original store.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LegacyFactQuery {
-    owner: FactOwnerV1,
-    source_store_id: SourceStoreId,
-    legacy_fact_id: i64,
-}
-
-impl LegacyFactQuery {
-    pub fn new(
-        owner: FactOwnerV1,
-        source_store_id: SourceStoreId,
-        legacy_fact_id: i64,
-    ) -> FactStoreResult<Self> {
-        owner.validate()?;
-        source_store_id.validate()?;
-        if legacy_fact_id <= 0 {
-            return Err(FactStoreError::InvalidLegacyFactId { legacy_fact_id });
-        }
-        Ok(Self {
-            owner,
-            source_store_id,
-            legacy_fact_id,
-        })
-    }
-
-    pub fn owner(&self) -> &FactOwnerV1 {
-        &self.owner
-    }
-
-    pub fn source_store_id(&self) -> &SourceStoreId {
-        &self.source_store_id
-    }
-
-    pub fn legacy_fact_id(&self) -> i64 {
-        self.legacy_fact_id
-    }
-
-    /// Validate the canonical result returned for this legacy lookup.
-    pub fn validate_resolved_fact_id(&self, fact_id: &FactId) -> FactStoreResult<()> {
-        validate_owned_fact_id(fact_id, &self.owner)
-    }
-}
-
 impl FactLineageQuery {
     pub fn new(
         owner: FactOwnerV1,
@@ -502,7 +458,7 @@ impl ProjectMemoryFactSearchQuery {
         if let Some(query) = &query {
             if query.trim().is_empty() || query.len() > MAX_PROJECT_MEMORY_SEARCH_BYTES {
                 return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                    field: "compatibility fact search query",
+                    field: "fact search query",
                 }));
             }
         } else if matches!(
@@ -510,7 +466,7 @@ impl ProjectMemoryFactSearchQuery {
             ProjectMemoryFactSearchKindV1::Search | ProjectMemoryFactSearchKindV1::Probe
         ) {
             return Err(FactStoreError::Contract(DomainError::Empty {
-                field: "compatibility fact search query",
+                field: "fact search query",
             }));
         }
         if let Some(cursor) = &after {
@@ -547,7 +503,7 @@ impl ProjectMemoryFactSearchQuery {
     }
 }
 
-/// Deterministic compatibility list filters without exposing raw SQL fields.
+/// Deterministic project-memory list filters without exposing raw SQL fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactListQueryV1 {
     owner: FactOwnerV1,
@@ -598,14 +554,14 @@ impl ProjectMemoryFactListQueryV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactHistoryQueryV1 {
-    target: ProjectMemoryFactTargetV1,
+    target: ProjectMemoryFactIdV1,
     after: Option<FactLineageCursor>,
     limit: usize,
 }
 
 impl ProjectMemoryFactHistoryQueryV1 {
     pub fn new(
-        target: ProjectMemoryFactTargetV1,
+        target: ProjectMemoryFactIdV1,
         after: Option<FactLineageCursor>,
         limit: usize,
     ) -> FactStoreResult<Self> {
@@ -617,7 +573,7 @@ impl ProjectMemoryFactHistoryQueryV1 {
         })
     }
 
-    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactIdV1 {
         &self.target
     }
     pub fn after(&self) -> Option<&FactLineageCursor> {
@@ -630,14 +586,14 @@ impl ProjectMemoryFactHistoryQueryV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactFeedbackHistoryQueryV1 {
-    target: ProjectMemoryFactTargetV1,
+    target: ProjectMemoryFactIdV1,
     after: Option<FactLineageCursor>,
     limit: usize,
 }
 
 impl ProjectMemoryFactFeedbackHistoryQueryV1 {
     pub fn new(
-        target: ProjectMemoryFactTargetV1,
+        target: ProjectMemoryFactIdV1,
         after: Option<FactLineageCursor>,
         limit: usize,
     ) -> FactStoreResult<Self> {
@@ -649,7 +605,7 @@ impl ProjectMemoryFactFeedbackHistoryQueryV1 {
         })
     }
 
-    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
+    pub fn target(&self) -> &ProjectMemoryFactIdV1 {
         &self.target
     }
     pub fn after(&self) -> Option<&FactLineageCursor> {

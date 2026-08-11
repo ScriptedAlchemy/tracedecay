@@ -1,6 +1,5 @@
 use tracedecay_domain::{
     Confidence, DomainError, FactEventId, FactId, FactOwnerV1, PayloadAccessState, UtcMicros,
-    VectorWatermark,
 };
 
 use super::queries::MAX_LINEAGE_LIMIT;
@@ -9,7 +8,7 @@ use super::{
     MAX_PROJECT_MEMORY_SEARCH_BYTES, validate_owned_fact_id,
 };
 
-/// Counters and timestamps V1 clients expose.  They are non-negative by type
+/// Counters and timestamps project-memory clients expose. They are non-negative by type
 /// and stay separate from the immutable fact payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactTelemetryV1 {
@@ -43,7 +42,7 @@ impl ProjectMemoryFactTelemetryV1 {
             || last_feedback_at.is_some_and(|value| value < created_at)
         {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility fact telemetry timestamps",
+                field: "fact telemetry timestamps",
             }));
         }
         Ok(Self {
@@ -88,44 +87,28 @@ impl ProjectMemoryFactTelemetryV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectMemoryProjectionStateV1 {
-    Ready,
-    Rebuilding,
-    Stale,
-    Unavailable,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactStatusV1 {
     owner: FactOwnerV1,
-    fact_id: Option<FactId>,
-    payload_access: Option<PayloadAccessState>,
-    projection_state: ProjectMemoryProjectionStateV1,
-    projected_as_of: Option<UtcMicros>,
-    vector_watermark: Option<VectorWatermark>,
+    fact_id: FactId,
+    payload_access: PayloadAccessState,
+    projected_as_of: UtcMicros,
 }
 
 impl ProjectMemoryFactStatusV1 {
     pub fn new(
         owner: FactOwnerV1,
-        fact_id: Option<FactId>,
-        payload_access: Option<PayloadAccessState>,
-        projection_state: ProjectMemoryProjectionStateV1,
-        projected_as_of: Option<UtcMicros>,
-        vector_watermark: Option<VectorWatermark>,
+        fact_id: FactId,
+        payload_access: PayloadAccessState,
+        projected_as_of: UtcMicros,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
-        if let Some(fact_id) = &fact_id {
-            validate_owned_fact_id(fact_id, &owner)?;
-        }
+        validate_owned_fact_id(&fact_id, &owner)?;
         Ok(Self {
             owner,
             fact_id,
             payload_access,
-            projection_state,
             projected_as_of,
-            vector_watermark,
         })
     }
 
@@ -138,24 +121,18 @@ impl ProjectMemoryFactStatusV1 {
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
-    pub fn fact_id(&self) -> Option<&FactId> {
-        self.fact_id.as_ref()
+    pub fn fact_id(&self) -> &FactId {
+        &self.fact_id
     }
-    pub fn payload_access(&self) -> Option<PayloadAccessState> {
+    pub fn payload_access(&self) -> PayloadAccessState {
         self.payload_access
     }
-    pub fn projection_state(&self) -> ProjectMemoryProjectionStateV1 {
-        self.projection_state
-    }
-    pub fn projected_as_of(&self) -> Option<UtcMicros> {
+    pub fn projected_as_of(&self) -> UtcMicros {
         self.projected_as_of
-    }
-    pub fn vector_watermark(&self) -> Option<&VectorWatermark> {
-        self.vector_watermark.as_ref()
     }
 }
 
-/// Owner aggregate for the legacy memory-status response.  Counts originate
+/// Owner aggregate for the project-memory status response. Counts originate
 /// from one authority snapshot rather than handler-side joins.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryMemoryFeedbackFunnelV1 {
@@ -211,7 +188,6 @@ pub struct ProjectMemoryMemoryStatusV1 {
     owner: FactOwnerV1,
     fact_count: u64,
     entity_count: u64,
-    bank_count: u64,
     algebra: ProjectMemoryMemoryAlgebraV1,
     trust_0_025_count: u64,
     trust_025_050_count: u64,
@@ -220,66 +196,7 @@ pub struct ProjectMemoryMemoryStatusV1 {
     below_default_recall_threshold_count: u64,
     helpful_count: u64,
     unhelpful_count: u64,
-    missing_vector_count: u64,
-    projection_state: ProjectMemoryProjectionStateV1,
-    repair: ProjectMemoryMemoryRepairStatsV1,
-    feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
     feedback_funnel: ProjectMemoryMemoryFeedbackFunnelV1,
-}
-
-/// Bounded migration/repair state for V1 feedback history. A request may report
-/// incomplete work, but never hides it by returning an empty or fabricated
-/// history while the daemon continues the remaining batches.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ProjectMemoryFeedbackRepairProgressV1 {
-    /// No V2 history projection exists for this owner yet.
-    #[default]
-    Unknown,
-    /// No repair is needed for this owner.
-    NotRequired,
-    /// Repair is complete. `processed` is the work done by the observed run.
-    Complete { processed: u64 },
-    /// One bounded repair call advanced `processed` items; remaining count may
-    /// be deliberately unknown without a costly full scan.
-    Incomplete {
-        processed: u64,
-        remaining: Option<u64>,
-    },
-}
-
-impl ProjectMemoryFeedbackRepairProgressV1 {
-    pub fn is_complete(self) -> bool {
-        matches!(self, Self::NotRequired | Self::Complete { .. })
-    }
-
-    pub fn processed(self) -> u64 {
-        match self {
-            Self::Unknown | Self::NotRequired => 0,
-            Self::Complete { processed } | Self::Incomplete { processed, .. } => processed,
-        }
-    }
-
-    pub fn remaining(self) -> Option<u64> {
-        match self {
-            Self::Incomplete { remaining, .. } => remaining,
-            Self::Unknown => None,
-            Self::NotRequired | Self::Complete { .. } => Some(0),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ProjectMemoryMemoryRepairStatsV1 {
-    missing_vectors_repaired: u64,
-    banks_rebuilt: u64,
-    /// Exact feedback-history batch outcome when this is an explicit repair
-    /// receipt. Other repair-producing paths leave this `Unknown`.
-    feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
-    /// Whether the producing repair pass filled a per-pass batch cap and may
-    /// have more backlog behind it. Computed by the store, which alone knows
-    /// the caps; consumers (e.g. the daemon scheduler) read [`Self::saturated`]
-    /// instead of comparing counters against store-internal batch constants.
-    saturated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,7 +210,7 @@ impl ProjectMemoryMemoryAlgebraV1 {
     pub fn new(name: String, hrr_dim: u64, estimated_capacity: u64) -> FactStoreResult<Self> {
         if name.trim().is_empty() || name.len() > MAX_PROJECT_MEMORY_SEARCH_BYTES {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility memory algebra name",
+                field: "memory algebra name",
             }));
         }
         Ok(Self {
@@ -314,55 +231,12 @@ impl ProjectMemoryMemoryAlgebraV1 {
     }
 }
 
-impl ProjectMemoryMemoryRepairStatsV1 {
-    pub fn new(missing_vectors_repaired: u64, banks_rebuilt: u64) -> Self {
-        Self {
-            missing_vectors_repaired,
-            banks_rebuilt,
-            feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1::Unknown,
-            saturated: false,
-        }
-    }
-
-    pub fn with_feedback_history_repair(
-        mut self,
-        feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
-    ) -> Self {
-        self.feedback_history_repair = feedback_history_repair;
-        self
-    }
-
-    /// Records whether the producing repair pass filled a per-pass batch cap.
-    /// Only the store computes this, since it alone knows the batch caps.
-    pub fn with_saturated(mut self, saturated: bool) -> Self {
-        self.saturated = saturated;
-        self
-    }
-
-    pub fn missing_vectors_repaired(&self) -> u64 {
-        self.missing_vectors_repaired
-    }
-    pub fn banks_rebuilt(&self) -> u64 {
-        self.banks_rebuilt
-    }
-    pub fn feedback_history_repair(&self) -> ProjectMemoryFeedbackRepairProgressV1 {
-        self.feedback_history_repair
-    }
-    /// True when the producing repair pass filled a per-pass batch cap and may
-    /// have more backlog behind it. Lets the daemon scheduler keep ticking
-    /// without depending on store-internal batch constants.
-    pub fn saturated(&self) -> bool {
-        self.saturated
-    }
-}
-
 impl ProjectMemoryMemoryStatusV1 {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: FactOwnerV1,
         fact_count: u64,
         entity_count: u64,
-        bank_count: u64,
         algebra: ProjectMemoryMemoryAlgebraV1,
         trust_0_025_count: u64,
         trust_025_050_count: u64,
@@ -371,9 +245,6 @@ impl ProjectMemoryMemoryStatusV1 {
         below_default_recall_threshold_count: u64,
         helpful_count: u64,
         unhelpful_count: u64,
-        missing_vector_count: u64,
-        projection_state: ProjectMemoryProjectionStateV1,
-        repair: ProjectMemoryMemoryRepairStatsV1,
         feedback_funnel: ProjectMemoryMemoryFeedbackFunnelV1,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
@@ -381,7 +252,6 @@ impl ProjectMemoryMemoryStatusV1 {
             owner,
             fact_count,
             entity_count,
-            bank_count,
             algebra,
             trust_0_025_count,
             trust_025_050_count,
@@ -390,20 +260,8 @@ impl ProjectMemoryMemoryStatusV1 {
             below_default_recall_threshold_count,
             helpful_count,
             unhelpful_count,
-            missing_vector_count,
-            projection_state,
-            repair,
-            feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1::Unknown,
             feedback_funnel,
         })
-    }
-
-    pub fn with_feedback_history_repair(
-        mut self,
-        feedback_history_repair: ProjectMemoryFeedbackRepairProgressV1,
-    ) -> Self {
-        self.feedback_history_repair = feedback_history_repair;
-        self
     }
 
     pub fn owner(&self) -> &FactOwnerV1 {
@@ -414,9 +272,6 @@ impl ProjectMemoryMemoryStatusV1 {
     }
     pub fn entity_count(&self) -> u64 {
         self.entity_count
-    }
-    pub fn bank_count(&self) -> u64 {
-        self.bank_count
     }
     pub fn algebra(&self) -> &ProjectMemoryMemoryAlgebraV1 {
         &self.algebra
@@ -442,18 +297,6 @@ impl ProjectMemoryMemoryStatusV1 {
     pub fn unhelpful_count(&self) -> u64 {
         self.unhelpful_count
     }
-    pub fn missing_vector_count(&self) -> u64 {
-        self.missing_vector_count
-    }
-    pub fn feedback_history_repair(&self) -> ProjectMemoryFeedbackRepairProgressV1 {
-        self.feedback_history_repair
-    }
-    pub fn projection_state(&self) -> ProjectMemoryProjectionStateV1 {
-        self.projection_state
-    }
-    pub fn repair(&self) -> ProjectMemoryMemoryRepairStatsV1 {
-        self.repair
-    }
     pub fn feedback_funnel(&self) -> &ProjectMemoryMemoryFeedbackFunnelV1 {
         &self.feedback_funnel
     }
@@ -468,7 +311,7 @@ pub enum ProjectMemoryFactFeedbackActionV1 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectMemoryFactFeedbackDetailsAvailabilityV1 {
     Available,
-    LegacyRedacted,
+    Redacted,
     Unknown,
 }
 
@@ -503,14 +346,15 @@ impl ProjectMemoryFactFeedbackHistoryEntryV1 {
             value.trim().is_empty() || value.len() > MAX_PROJECT_MEMORY_REASON_BYTES
         }) {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility fact feedback history details",
+                field: "fact feedback history details",
             }));
         }
-        if details_availability != ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available
-            && (source.is_some() || note.is_some())
+        let has_details = source.is_some() || note.is_some();
+        if (details_availability == ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available)
+            != has_details
         {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility fact feedback redacted details",
+                field: "fact feedback details availability",
             }));
         }
         Ok(Self {
@@ -556,7 +400,6 @@ pub struct ProjectMemoryFactFeedbackHistoryV1 {
     owner: FactOwnerV1,
     events: Vec<ProjectMemoryFactFeedbackHistoryEntryV1>,
     next_after: Option<FactLineageCursor>,
-    repair_progress: ProjectMemoryFeedbackRepairProgressV1,
 }
 
 impl ProjectMemoryFactFeedbackHistoryV1 {
@@ -564,20 +407,6 @@ impl ProjectMemoryFactFeedbackHistoryV1 {
         owner: FactOwnerV1,
         events: Vec<ProjectMemoryFactFeedbackHistoryEntryV1>,
         next_after: Option<FactLineageCursor>,
-    ) -> FactStoreResult<Self> {
-        Self::new_with_repair_progress(
-            owner,
-            events,
-            next_after,
-            ProjectMemoryFeedbackRepairProgressV1::Unknown,
-        )
-    }
-
-    pub fn new_with_repair_progress(
-        owner: FactOwnerV1,
-        events: Vec<ProjectMemoryFactFeedbackHistoryEntryV1>,
-        next_after: Option<FactLineageCursor>,
-        repair_progress: ProjectMemoryFeedbackRepairProgressV1,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         if events.len() > MAX_LINEAGE_LIMIT {
@@ -599,7 +428,6 @@ impl ProjectMemoryFactFeedbackHistoryV1 {
             owner,
             events,
             next_after,
-            repair_progress,
         })
     }
 
@@ -611,8 +439,5 @@ impl ProjectMemoryFactFeedbackHistoryV1 {
     }
     pub fn next_after(&self) -> Option<&FactLineageCursor> {
         self.next_after.as_ref()
-    }
-    pub fn repair_progress(&self) -> ProjectMemoryFeedbackRepairProgressV1 {
-        self.repair_progress
     }
 }

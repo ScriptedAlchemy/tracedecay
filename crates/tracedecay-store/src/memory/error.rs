@@ -1,6 +1,10 @@
 use std::error::Error;
 
-use tracedecay_domain::{DomainError, FactAssertionId, FactEventId, RetrievalAnchorId};
+use tracedecay_domain::{
+    DomainError, FactAssertionId, FactEventId, FactId, FactRelationKindV1, RetrievalAnchorId,
+};
+
+use super::write::FactCommitConflict;
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -33,12 +37,41 @@ pub enum FactStoreError {
     CyclicAnchorLineage { anchor_id: RetrievalAnchorId },
     #[error("fact projection payload presence disagrees with its access state")]
     PayloadAccessMismatch,
-    #[error("legacy fact id {legacy_fact_id} must be positive")]
-    InvalidLegacyFactId { legacy_fact_id: i64 },
+    #[error("canonical fact {fact_id} was not found")]
+    FactNotFound { fact_id: FactId },
+    #[error("canonical fact {fact_id} is unavailable for mutation")]
+    FactUnavailable { fact_id: FactId },
+    #[error("canonical fact {fact_id} was deleted")]
+    FactDeleted { fact_id: FactId },
     #[error("fact query limit {limit} must be between 1 and {max}")]
     InvalidQueryLimit { limit: usize, max: usize },
     #[error("fact commit receipt is inconsistent with its event list")]
     InvalidCommitReceipt,
+    #[error("canonical fact commit conflicted")]
+    CommitConflict { conflict: FactCommitConflict },
+    #[error("project-memory operation identity was reused with different input")]
+    OperationConflict,
+    #[error("canonical fact relation conflicts with an existing relation")]
+    RelationConflict {
+        source_fact_id: FactId,
+        target_fact_id: FactId,
+        existing: FactRelationKindV1,
+        requested: FactRelationKindV1,
+    },
+    #[error("verified memory graph publication conflicted")]
+    GraphConflict,
+    #[error("verified memory graph authority is unavailable")]
+    GraphUnavailable,
+    #[error("verified memory graph operation was cancelled")]
+    GraphCancelled,
+    #[error("verified memory graph operation exceeded its budget")]
+    GraphBudgetExhausted,
+    #[error("verified memory graph operation exceeded its deadline")]
+    GraphDeadlineExceeded,
+    #[error("fact read operation was cancelled")]
+    ReadCancelled,
+    #[error("holographic vector has dimension {actual}; expected {expected}")]
+    HolographicDimensionMismatch { expected: usize, actual: usize },
     #[error("fact contract validation failed")]
     Contract(#[from] DomainError),
     #[error("fact storage operation {operation} failed")]
@@ -50,11 +83,3 @@ pub enum FactStoreError {
 }
 
 pub type FactStoreResult<T> = Result<T, FactStoreError>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum ProjectMemoryStoreError {
-    #[error(transparent)]
-    Store(#[from] FactStoreError),
-}
-
-pub type ProjectMemoryResult<T> = Result<T, ProjectMemoryStoreError>;

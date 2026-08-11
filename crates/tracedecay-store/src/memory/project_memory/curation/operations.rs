@@ -1,87 +1,62 @@
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use std::collections::BTreeSet;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracedecay_domain::{
-    ActorId, Confidence, DomainError, FactOwnerV1, PayloadReferenceV1, ProvenanceId,
-    SanitizationReceiptV1, SanitizerDispositionV1,
+    ActorId, Confidence, DomainError, FactEventId, FactId, FactOwnerV1, FactRelationV1,
+    ProvenanceId,
 };
 
 use super::super::super::queries::validate_limit;
-use super::super::super::{FactStoreError, FactStoreResult, ProjectMemoryMemoryRepairStatsV1};
+use super::super::super::{FactCommitReceipt, FactStoreError, FactStoreResult};
 use super::super::{
-    ProjectMemoryFactMappingV1, ProjectMemoryFactTargetV1, validate_project_memory_metadata,
-    validate_project_memory_text,
+    ProjectMemoryFactIdV1, validate_project_memory_entity, validate_project_memory_text,
 };
 use super::validate::{
-    validate_curation_confidence, validate_curation_entity_target, validate_curation_evidence,
-    validate_curation_fact_target,
+    validate_curation_confidence, validate_curation_evidence, validate_curation_fact_target,
 };
 use super::{MAX_PROJECT_MEMORY_CURATION_OPERATIONS, MAX_PROJECT_MEMORY_CURATION_TARGETS};
 
-/// Stable, owner-scoped identity for a historical integer entity row. This is
-/// only a compatibility target; it is never derived from a path or label.
+/// Stable owner-scoped identity for a canonical entity projection.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ProjectMemoryLegacyEntityTargetV1 {
+pub struct ProjectMemoryEntityIdV1 {
     owner: FactOwnerV1,
-    legacy_entity_id: i64,
+    entity: String,
 }
 
-impl ProjectMemoryLegacyEntityTargetV1 {
-    pub fn new(owner: FactOwnerV1, legacy_entity_id: i64) -> FactStoreResult<Self> {
+impl ProjectMemoryEntityIdV1 {
+    pub fn new(owner: FactOwnerV1, entity: String) -> FactStoreResult<Self> {
         owner.validate()?;
-        if legacy_entity_id <= 0 {
-            return Err(FactStoreError::InvalidLegacyFactId {
-                legacy_fact_id: legacy_entity_id,
-            });
-        }
-        Ok(Self {
-            owner,
-            legacy_entity_id,
-        })
+        validate_project_memory_entity(&entity)?;
+        Ok(Self { owner, entity })
     }
 
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
 
-    pub fn legacy_entity_id(&self) -> i64 {
-        self.legacy_entity_id
+    pub fn entity(&self) -> &str {
+        &self.entity
     }
 
     pub(in crate::memory::project_memory) fn validate(&self) -> FactStoreResult<()> {
         self.owner.validate()?;
-        if self.legacy_entity_id <= 0 {
-            return Err(FactStoreError::InvalidLegacyFactId {
-                legacy_fact_id: self.legacy_entity_id,
-            });
-        }
-        Ok(())
+        validate_project_memory_entity(&self.entity)
     }
-}
-
-/// The finite relationship vocabulary supported by legacy dashboard curation.
-/// `Supports` and `DerivedFrom` are persisted as typed relations rather than
-/// being misrepresented as a canonical lineage action.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectMemoryFactRelationV1 {
-    Supports,
-    Contradicts,
-    Supersedes,
-    DerivedFrom,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactNormalizeTagsV1 {
-    fact: ProjectMemoryFactTargetV1,
+    fact: ProjectMemoryFactIdV1,
     tags: Vec<String>,
-    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
+    evidence_facts: Vec<ProjectMemoryFactIdV1>,
     confidence: Confidence,
 }
 
 impl ProjectMemoryFactNormalizeTagsV1 {
     pub fn new(
-        fact: ProjectMemoryFactTargetV1,
+        fact: ProjectMemoryFactIdV1,
         tags: Vec<String>,
-        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
+        evidence_facts: Vec<ProjectMemoryFactIdV1>,
         confidence: Confidence,
     ) -> FactStoreResult<Self> {
         if tags.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS {
@@ -91,7 +66,7 @@ impl ProjectMemoryFactNormalizeTagsV1 {
             });
         }
         for tag in &tags {
-            validate_project_memory_text(tag, "compatibility curation tag")?;
+            validate_project_memory_text(tag, "curation tag")?;
         }
         Ok(Self {
             fact,
@@ -101,7 +76,7 @@ impl ProjectMemoryFactNormalizeTagsV1 {
         })
     }
 
-    pub fn fact(&self) -> &ProjectMemoryFactTargetV1 {
+    pub fn fact(&self) -> &ProjectMemoryFactIdV1 {
         &self.fact
     }
 
@@ -109,7 +84,7 @@ impl ProjectMemoryFactNormalizeTagsV1 {
         &self.tags
     }
 
-    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
+    pub fn evidence_facts(&self) -> &[ProjectMemoryFactIdV1] {
         &self.evidence_facts
     }
 
@@ -118,258 +93,20 @@ impl ProjectMemoryFactNormalizeTagsV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProjectMemoryFactMergeEntitiesV1 {
-    winner: ProjectMemoryLegacyEntityTargetV1,
-    losers: Vec<ProjectMemoryLegacyEntityTargetV1>,
-    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
-    confidence: Confidence,
-}
-
-impl ProjectMemoryFactMergeEntitiesV1 {
-    pub fn new(
-        winner: ProjectMemoryLegacyEntityTargetV1,
-        losers: Vec<ProjectMemoryLegacyEntityTargetV1>,
-        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
-        confidence: Confidence,
-    ) -> FactStoreResult<Self> {
-        validate_entity_merge(&winner, &losers)?;
-        Ok(Self {
-            winner,
-            losers,
-            evidence_facts,
-            confidence,
-        })
-    }
-
-    pub fn winner(&self) -> &ProjectMemoryLegacyEntityTargetV1 {
-        &self.winner
-    }
-
-    pub fn losers(&self) -> &[ProjectMemoryLegacyEntityTargetV1] {
-        &self.losers
-    }
-
-    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
-        &self.evidence_facts
-    }
-
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProjectMemoryFactAddAliasV1 {
-    entity: ProjectMemoryLegacyEntityTargetV1,
-    alias: String,
-    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
-    confidence: Confidence,
-}
-
-impl ProjectMemoryFactAddAliasV1 {
-    pub fn new(
-        entity: ProjectMemoryLegacyEntityTargetV1,
-        alias: String,
-        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
-        confidence: Confidence,
-    ) -> FactStoreResult<Self> {
-        validate_project_memory_text(&alias, "compatibility curation alias")?;
-        Ok(Self {
-            entity,
-            alias,
-            evidence_facts,
-            confidence,
-        })
-    }
-
-    pub fn entity(&self) -> &ProjectMemoryLegacyEntityTargetV1 {
-        &self.entity
-    }
-
-    pub fn alias(&self) -> &str {
-        &self.alias
-    }
-
-    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
-        &self.evidence_facts
-    }
-
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
-    }
-}
-
-/// Receipt-bound sanitized relation metadata.
-///
-/// This complete value is the canonical relation provenance. Persistence
-/// stores it once, rather than maintaining independent metadata and receipt
-/// JSON authorities that can drift.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectMemoryRelationProvenanceV1 {
-    metadata: Value,
-    sanitization_receipt: SanitizationReceiptV1,
-}
-
-impl ProjectMemoryRelationProvenanceV1 {
-    pub fn new(
-        metadata: Value,
-        sanitization_receipt: SanitizationReceiptV1,
-    ) -> FactStoreResult<Self> {
-        validate_project_memory_metadata(&metadata, "compatibility relation provenance metadata")?;
-        if !matches!(
-            sanitization_receipt.disposition(),
-            SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
-        ) {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility relation provenance sanitization disposition",
-            }));
-        }
-        let payload_reference = PayloadReferenceV1::for_payload(&metadata).map_err(|_| {
-            FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility relation provenance metadata",
-            })
-        })?;
-        if sanitization_receipt.payload() != Some(&payload_reference) {
-            return Err(FactStoreError::Contract(DomainError::SnapshotMismatch {
-                field: "compatibility relation provenance sanitization receipt",
-            }));
-        }
-        Ok(Self {
-            metadata,
-            sanitization_receipt,
-        })
-    }
-
-    pub fn metadata(&self) -> &Value {
-        &self.metadata
-    }
-
-    pub fn sanitization_receipt(&self) -> &SanitizationReceiptV1 {
-        &self.sanitization_receipt
-    }
-}
-
-impl<'de> Deserialize<'de> for ProjectMemoryRelationProvenanceV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            metadata: Value,
-            sanitization_receipt: SanitizationReceiptV1,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.metadata, wire.sanitization_receipt).map_err(serde::de::Error::custom)
-    }
-}
-
+/// Thin curation input over immutable, receipt-bound domain relation material.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactLinkV1 {
-    source: ProjectMemoryFactTargetV1,
-    target: ProjectMemoryFactTargetV1,
-    relation: ProjectMemoryFactRelationV1,
-    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
-    confidence: Confidence,
-    source_label: String,
-    provenance: ProjectMemoryRelationProvenanceV1,
+    relation: FactRelationV1,
 }
 
 impl ProjectMemoryFactLinkV1 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        source: ProjectMemoryFactTargetV1,
-        target: ProjectMemoryFactTargetV1,
-        relation: ProjectMemoryFactRelationV1,
-        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
-        confidence: Confidence,
-        source_label: String,
-        provenance: ProjectMemoryRelationProvenanceV1,
-    ) -> FactStoreResult<Self> {
-        if source == target {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility curation relation endpoints",
-            }));
-        }
-        validate_project_memory_text(&source_label, "compatibility curation relation source")?;
-        Ok(Self {
-            source,
-            target,
-            relation,
-            evidence_facts,
-            confidence,
-            source_label,
-            provenance,
-        })
+    pub fn new(relation: FactRelationV1) -> FactStoreResult<Self> {
+        relation.owner().validate()?;
+        Ok(Self { relation })
     }
 
-    pub fn source(&self) -> &ProjectMemoryFactTargetV1 {
-        &self.source
-    }
-
-    pub fn target(&self) -> &ProjectMemoryFactTargetV1 {
-        &self.target
-    }
-
-    pub fn relation(&self) -> ProjectMemoryFactRelationV1 {
-        self.relation
-    }
-
-    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
-        &self.evidence_facts
-    }
-
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
-    }
-
-    pub fn source_label(&self) -> &str {
-        &self.source_label
-    }
-
-    pub fn metadata(&self) -> &Value {
-        self.provenance.metadata()
-    }
-
-    pub fn provenance(&self) -> &ProjectMemoryRelationProvenanceV1 {
-        &self.provenance
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProjectMemoryFactRepairVectorV1 {
-    fact: ProjectMemoryFactTargetV1,
-    evidence_facts: Vec<ProjectMemoryFactTargetV1>,
-    confidence: Confidence,
-}
-
-impl ProjectMemoryFactRepairVectorV1 {
-    pub fn new(
-        fact: ProjectMemoryFactTargetV1,
-        evidence_facts: Vec<ProjectMemoryFactTargetV1>,
-        confidence: Confidence,
-    ) -> Self {
-        Self {
-            fact,
-            evidence_facts,
-            confidence,
-        }
-    }
-
-    pub fn fact(&self) -> &ProjectMemoryFactTargetV1 {
-        &self.fact
-    }
-
-    pub fn evidence_facts(&self) -> &[ProjectMemoryFactTargetV1] {
-        &self.evidence_facts
-    }
-
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
+    pub fn relation(&self) -> &FactRelationV1 {
+        &self.relation
     }
 }
 
@@ -378,10 +115,7 @@ impl ProjectMemoryFactRepairVectorV1 {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProjectMemoryFactCurationOperationV1 {
     NormalizeTags(ProjectMemoryFactNormalizeTagsV1),
-    MergeEntities(ProjectMemoryFactMergeEntitiesV1),
-    AddAlias(ProjectMemoryFactAddAliasV1),
     LinkFacts(ProjectMemoryFactLinkV1),
-    RepairVector(ProjectMemoryFactRepairVectorV1),
 }
 
 impl ProjectMemoryFactCurationOperationV1 {
@@ -392,29 +126,11 @@ impl ProjectMemoryFactCurationOperationV1 {
                 validate_curation_evidence(owner, operation.evidence_facts())?;
                 validate_curation_confidence(operation.confidence(), min_confidence)
             }
-            Self::MergeEntities(operation) => {
-                validate_curation_entity_target(owner, operation.winner())?;
-                for loser in operation.losers() {
-                    validate_curation_entity_target(owner, loser)?;
-                }
-                validate_curation_evidence(owner, operation.evidence_facts())?;
-                validate_curation_confidence(operation.confidence(), min_confidence)
-            }
-            Self::AddAlias(operation) => {
-                validate_curation_entity_target(owner, operation.entity())?;
-                validate_curation_evidence(owner, operation.evidence_facts())?;
-                validate_curation_confidence(operation.confidence(), min_confidence)
-            }
             Self::LinkFacts(operation) => {
-                validate_curation_fact_target(owner, operation.source())?;
-                validate_curation_fact_target(owner, operation.target())?;
-                validate_curation_evidence(owner, operation.evidence_facts())?;
-                validate_curation_confidence(operation.confidence(), min_confidence)
-            }
-            Self::RepairVector(operation) => {
-                validate_curation_fact_target(owner, operation.fact())?;
-                validate_curation_evidence(owner, operation.evidence_facts())?;
-                validate_curation_confidence(operation.confidence(), min_confidence)
+                if operation.relation().owner() != owner {
+                    return Err(FactStoreError::OwnerMismatch);
+                }
+                validate_curation_confidence(operation.relation().confidence(), min_confidence)
             }
         }
     }
@@ -479,28 +195,149 @@ impl ProjectMemoryFactCurationBatchV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactCurationReceiptV1 {
     owner: FactOwnerV1,
-    changed_facts: Vec<ProjectMemoryFactMappingV1>,
+    operation_id: ProvenanceId,
+    input_digest: String,
+    commit_receipts: Vec<FactCommitReceipt>,
+    replay_fact_id: FactId,
+    replay_event_id: FactEventId,
+    changed_facts: Vec<ProjectMemoryFactIdV1>,
     normalized_tags: u64,
-    merged_entities: u64,
-    aliases_added: u64,
     facts_linked: u64,
-    vectors_repaired: u64,
-    derived_repair: ProjectMemoryMemoryRepairStatsV1,
+    // Delivery disposition is derived at the operation boundary and is not
+    // part of the durable receipt identity serialized below.
+    replayed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectMemoryFactCurationReceiptRef<'a> {
+    owner: &'a FactOwnerV1,
+    operation_id: &'a ProvenanceId,
+    input_digest: &'a str,
+    commit_receipts: &'a [FactCommitReceipt],
+    replay_fact_id: &'a FactId,
+    replay_event_id: &'a FactEventId,
+    changed_fact_ids: Vec<&'a FactId>,
+    normalized_tags: u64,
+    facts_linked: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectMemoryFactCurationReceiptWire {
+    owner: FactOwnerV1,
+    operation_id: ProvenanceId,
+    input_digest: String,
+    commit_receipts: Vec<FactCommitReceipt>,
+    replay_fact_id: FactId,
+    replay_event_id: FactEventId,
+    changed_fact_ids: Vec<FactId>,
+    normalized_tags: u64,
+    facts_linked: u64,
+}
+
+impl Serialize for ProjectMemoryFactCurationReceiptV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        ProjectMemoryFactCurationReceiptRef {
+            owner: self.owner(),
+            operation_id: self.operation_id(),
+            input_digest: self.input_digest(),
+            commit_receipts: self.commit_receipts(),
+            replay_fact_id: self.replay_fact_id(),
+            replay_event_id: self.replay_event_id(),
+            changed_fact_ids: self
+                .changed_facts()
+                .iter()
+                .map(ProjectMemoryFactIdV1::fact_id)
+                .collect(),
+            normalized_tags: self.normalized_tags(),
+            facts_linked: self.facts_linked(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectMemoryFactCurationReceiptV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ProjectMemoryFactCurationReceiptWire::deserialize(deserializer)?;
+        let changed_facts = wire
+            .changed_fact_ids
+            .into_iter()
+            .map(|fact_id| ProjectMemoryFactIdV1::new(wire.owner.clone(), fact_id))
+            .collect::<FactStoreResult<Vec<_>>>()
+            .map_err(serde::de::Error::custom)?;
+        let receipt = Self::new(
+            wire.owner,
+            wire.operation_id,
+            wire.input_digest,
+            wire.commit_receipts,
+            changed_facts,
+            wire.normalized_tags,
+            wire.facts_linked,
+        )
+        .map_err(serde::de::Error::custom)?;
+        if receipt.replay_fact_id() != &wire.replay_fact_id
+            || receipt.replay_event_id() != &wire.replay_event_id
+        {
+            return Err(serde::de::Error::custom(
+                "curation receipt replay pointers do not match its first commit",
+            ));
+        }
+        Ok(receipt)
+    }
 }
 
 impl ProjectMemoryFactCurationReceiptV1 {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         owner: FactOwnerV1,
-        changed_facts: Vec<ProjectMemoryFactMappingV1>,
+        operation_id: ProvenanceId,
+        input_digest: String,
+        commit_receipts: Vec<FactCommitReceipt>,
+        changed_facts: Vec<ProjectMemoryFactIdV1>,
         normalized_tags: u64,
-        merged_entities: u64,
-        aliases_added: u64,
         facts_linked: u64,
-        vectors_repaired: u64,
-        derived_repair: ProjectMemoryMemoryRepairStatsV1,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
+        operation_id.validate()?;
+        if input_digest.len() != 64
+            || !input_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "curation receipt input digest",
+            }));
+        }
+        let first_commit = commit_receipts.first().ok_or_else(|| {
+            FactStoreError::Contract(DomainError::Empty {
+                field: "curation receipt commit receipts",
+            })
+        })?;
+        if commit_receipts.len() > MAX_PROJECT_MEMORY_CURATION_OPERATIONS
+            || commit_receipts
+                .iter()
+                .any(|receipt| receipt.owner() != &owner)
+        {
+            return Err(FactStoreError::Contract(DomainError::NonCanonical {
+                field: "curation receipt commit receipts",
+            }));
+        }
+        let mut committed_event_ids = BTreeSet::new();
+        for receipt in &commit_receipts {
+            for event_id in receipt.committed_event_ids() {
+                if !committed_event_ids.insert(event_id) {
+                    return Err(FactStoreError::Contract(DomainError::DuplicateId {
+                        field: "curation receipt committed events",
+                    }));
+                }
+            }
+        }
         if changed_facts.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS
             || changed_facts
                 .iter()
@@ -512,26 +349,55 @@ impl ProjectMemoryFactCurationReceiptV1 {
             })
         {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility curation receipt mappings",
+                field: "curation receipt fact identities",
             }));
         }
+        let replay_fact_id = first_commit.fact_id().clone();
+        let replay_event_id = first_commit.last_event_id().clone();
         Ok(Self {
             owner,
+            operation_id,
+            input_digest,
+            commit_receipts,
+            replay_fact_id,
+            replay_event_id,
             changed_facts,
             normalized_tags,
-            merged_entities,
-            aliases_added,
             facts_linked,
-            vectors_repaired,
-            derived_repair,
+            replayed: false,
         })
+    }
+
+    pub fn into_replayed(mut self) -> Self {
+        self.replayed = true;
+        self
     }
 
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }
 
-    pub fn changed_facts(&self) -> &[ProjectMemoryFactMappingV1] {
+    pub fn operation_id(&self) -> &ProvenanceId {
+        &self.operation_id
+    }
+
+    pub fn input_digest(&self) -> &str {
+        &self.input_digest
+    }
+
+    pub fn commit_receipts(&self) -> &[FactCommitReceipt] {
+        &self.commit_receipts
+    }
+
+    pub fn replay_fact_id(&self) -> &FactId {
+        &self.replay_fact_id
+    }
+
+    pub fn replay_event_id(&self) -> &FactEventId {
+        &self.replay_event_id
+    }
+
+    pub fn changed_facts(&self) -> &[ProjectMemoryFactIdV1] {
         &self.changed_facts
     }
 
@@ -539,46 +405,11 @@ impl ProjectMemoryFactCurationReceiptV1 {
         self.normalized_tags
     }
 
-    pub fn merged_entities(&self) -> u64 {
-        self.merged_entities
-    }
-
-    pub fn aliases_added(&self) -> u64 {
-        self.aliases_added
-    }
-
     pub fn facts_linked(&self) -> u64 {
         self.facts_linked
     }
 
-    pub fn vectors_repaired(&self) -> u64 {
-        self.vectors_repaired
+    pub fn replayed(&self) -> bool {
+        self.replayed
     }
-
-    pub fn derived_repair(&self) -> &ProjectMemoryMemoryRepairStatsV1 {
-        &self.derived_repair
-    }
-}
-
-fn validate_entity_merge(
-    winner: &ProjectMemoryLegacyEntityTargetV1,
-    losers: &[ProjectMemoryLegacyEntityTargetV1],
-) -> FactStoreResult<()> {
-    if losers.is_empty() || losers.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS {
-        return Err(FactStoreError::InvalidQueryLimit {
-            limit: losers.len(),
-            max: MAX_PROJECT_MEMORY_CURATION_TARGETS,
-        });
-    }
-    for (index, loser) in losers.iter().enumerate() {
-        if loser.owner() != winner.owner()
-            || loser == winner
-            || losers[..index].iter().any(|previous| previous == loser)
-        {
-            return Err(FactStoreError::Contract(DomainError::NonCanonical {
-                field: "compatibility curation entity merge",
-            }));
-        }
-    }
-    Ok(())
 }

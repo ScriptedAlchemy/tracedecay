@@ -1,11 +1,14 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 
-use tracedecay_domain::{DomainError, FactAssertionId, FactId, FactOwnerV1, RetrievalAnchorId};
+use tracedecay_domain::{
+    DomainError, FactAssertionId, FactId, FactOwnerV1, ProjectMemoryGraphRelationKindV1,
+    RetrievalAnchorId,
+};
 
 use super::{
-    FactStoreError, FactStoreResult, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryLegacyEntityTargetV1, ProjectMemoryResult,
+    FactReadControl, FactStoreError, FactStoreResult, ProjectMemoryEntityIdV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
 };
 
 pub const MAX_PROJECT_MEMORY_GRAPH_RELATIONS: usize = 4_096;
@@ -66,21 +69,10 @@ impl ProjectMemoryGraphQueryV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ProjectMemoryGraphRelationKindV1 {
-    Supports,
-    Contradicts,
-    Supersedes,
-    DerivedFrom,
-    Mentions,
-    ActiveAssertion,
-    EvidenceAnchor,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProjectMemoryGraphTargetV1 {
     Fact(ProjectMemoryFactIdV1),
-    Entity(ProjectMemoryLegacyEntityTargetV1),
+    Entity(ProjectMemoryEntityIdV1),
     Assertion {
         owner: FactOwnerV1,
         fact_id: FactId,
@@ -214,5 +206,6 @@ pub trait ProjectMemoryGraphStore: Send + Sync {
     fn project_memory_graph(
         &self,
         query: ProjectMemoryGraphQueryV1,
-    ) -> impl Future<Output = ProjectMemoryResult<ProjectMemoryGraphPageV1>> + Send;
+        read_control: &FactReadControl,
+    ) -> impl Future<Output = FactStoreResult<ProjectMemoryGraphPageV1>> + Send;
 }

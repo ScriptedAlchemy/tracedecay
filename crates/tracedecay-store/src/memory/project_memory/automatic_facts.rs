@@ -7,7 +7,7 @@ use tracedecay_domain::{
 use super::super::{
     FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_REASON_BYTES, validate_owned_fact_id,
 };
-use super::{ProjectMemoryFactAddCommandV1, ProjectMemoryFactMappingV1};
+use super::{ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1};
 
 pub const MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS: usize = 200;
 
@@ -77,7 +77,7 @@ impl ProjectMemoryAutomaticFactEvidenceV1 {
 pub enum ProjectMemoryAutomaticFactEffectV1 {
     Applied {
         fact_id: FactId,
-        mapping: ProjectMemoryFactMappingV1,
+        target: ProjectMemoryFactIdV1,
         assertion_id: FactAssertionId,
         event_id: FactEventId,
     },
@@ -90,10 +90,10 @@ impl ProjectMemoryAutomaticFactEffectV1 {
     fn validate(&self, owner: &FactOwnerV1) -> FactStoreResult<()> {
         match self {
             Self::Applied {
-                fact_id, mapping, ..
+                fact_id, target, ..
             } => {
                 validate_owned_fact_id(fact_id, owner)?;
-                if mapping.owner() != owner || mapping.fact_id() != fact_id {
+                if target.owner() != owner || target.fact_id() != fact_id {
                     return Err(FactStoreError::FactMismatch);
                 }
             }
@@ -122,9 +122,9 @@ impl ProjectMemoryAutomaticFactEffectV1 {
         }
     }
 
-    pub fn applied_mapping(&self) -> Option<&ProjectMemoryFactMappingV1> {
+    pub fn applied_target(&self) -> Option<&ProjectMemoryFactIdV1> {
         match self {
-            Self::Applied { mapping, .. } => Some(mapping),
+            Self::Applied { target, .. } => Some(target),
             Self::Quarantined { .. } => None,
         }
     }
@@ -229,8 +229,8 @@ impl ProjectMemoryAutomaticFactReceiptV1 {
         self.effect.applied_fact_id()
     }
 
-    pub fn applied_mapping(&self) -> Option<&ProjectMemoryFactMappingV1> {
-        self.effect.applied_mapping()
+    pub fn applied_target(&self) -> Option<&ProjectMemoryFactIdV1> {
+        self.effect.applied_target()
     }
 
     pub fn applied_assertion_id(&self) -> Option<&FactAssertionId> {
