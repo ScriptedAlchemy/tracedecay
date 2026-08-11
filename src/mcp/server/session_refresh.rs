@@ -61,8 +61,10 @@ struct DaemonSessionRefreshWake(
 
 impl SessionRefreshSchedulerPort for DaemonSessionRefreshWake {
     fn wake(&self) -> std::result::Result<(), SessionRefreshSchedulerError> {
-        self.0.wake();
-        Ok(())
+        self.0
+            .wake()
+            .then_some(())
+            .ok_or(SessionRefreshSchedulerError)
     }
 }
 
@@ -205,9 +207,25 @@ impl DaemonSessionRefreshService {
                     accepted_at: utc_micros_value(handle.accepted_at()),
                 }
             }
+            SessionRefreshOutcome::StartedReconciliationRequired(handle) => {
+                let token = self.remember(&handle);
+                SessionRefreshServiceOutcome::StartedReconciliationRequired {
+                    operation_id: handle.operation_id().as_str().to_string(),
+                    handle: token,
+                    accepted_at: utc_micros_value(handle.accepted_at()),
+                }
+            }
             SessionRefreshOutcome::Joined(handle) => {
                 let token = self.remember(&handle);
                 SessionRefreshServiceOutcome::Joined {
+                    operation_id: handle.operation_id().as_str().to_string(),
+                    handle: token,
+                    accepted_at: utc_micros_value(handle.accepted_at()),
+                }
+            }
+            SessionRefreshOutcome::JoinedReconciliationRequired(handle) => {
+                let token = self.remember(&handle);
+                SessionRefreshServiceOutcome::JoinedReconciliationRequired {
                     operation_id: handle.operation_id().as_str().to_string(),
                     handle: token,
                     accepted_at: utc_micros_value(handle.accepted_at()),
@@ -225,6 +243,11 @@ impl DaemonSessionRefreshService {
             }
             SessionRefreshOutcome::Cancelled(receipt) => {
                 SessionRefreshServiceOutcome::Cancelled(refresh_receipt_view(&receipt))
+            }
+            SessionRefreshOutcome::CancelledReconciliationRequired(receipt) => {
+                SessionRefreshServiceOutcome::CancelledReconciliationRequired(refresh_receipt_view(
+                    &receipt,
+                ))
             }
             SessionRefreshOutcome::Denied => SessionRefreshServiceOutcome::Denied,
             SessionRefreshOutcome::WrongScope => SessionRefreshServiceOutcome::WrongScope,

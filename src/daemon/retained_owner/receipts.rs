@@ -98,6 +98,7 @@ pub(super) fn session_refresh_effect_outcome<T: Serialize>(
     request: &T,
     durable_operation_id: &str,
     result: RetainedSurfaceResultV1,
+    reconciliation_required: bool,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     if !matches!(
         operation,
@@ -124,8 +125,8 @@ pub(super) fn session_refresh_effect_outcome<T: Serialize>(
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
     let committed_state = canonical_sha256(&(
         "tracedecay.retained.effect.committed-state.v1",
+        operation.as_str(),
         durable_operation_id,
-        &result,
     ))
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
     let catalog_digest = canonical_sha256(&(
@@ -147,13 +148,11 @@ pub(super) fn session_refresh_effect_outcome<T: Serialize>(
         operation.as_str()
     ))
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let execution = OperationReceipt::completed(
-        context.observed_at,
-        finished_at,
-        context.request_context.deadline().clone(),
-        measured_budget(context.observed_at, finished_at, &result)?,
-    )
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let termination = if reconciliation_required {
+        EffectTermination::Partial
+    } else {
+        EffectTermination::Completed
+    };
     let receipt = EffectReceipt {
         operation: context.operation.use_case_id().clone(),
         request_id: context.request_context.request_id().clone(),
@@ -167,10 +166,28 @@ pub(super) fn session_refresh_effect_outcome<T: Serialize>(
         configuration_digest: configuration_digest.clone(),
         catalog_digest,
         privacy_digest,
-        outcome: EffectTermination::Completed,
+        outcome: termination,
         committed_state: Some(committed_state),
         external_proof: None,
     };
+    receipt
+        .validate()
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    if reconciliation_required {
+        return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
+            reason_code: "application.retained.session-refresh.delivery-failed".to_owned(),
+            committed_receipt: receipt,
+            detail: "The session refresh committed, but required scheduler delivery failed."
+                .to_owned(),
+        });
+    }
+    let execution = OperationReceipt::completed(
+        context.observed_at,
+        finished_at,
+        context.request_context.deadline().clone(),
+        measured_budget(context.observed_at, finished_at, &result)?,
+    )
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
     let effect = EffectResult::new(
         EffectId::new(format!(
             "effect.retained.{}.{}",
@@ -326,14 +343,16 @@ mod tests {
     use tracedecay_application::{
         ApplicationOutcome, CancellationContext, CancellationSignal, CapabilityGrantId,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
-        RetainedSurfaceExecutionContextV1, retained_surface_application_operation,
+        RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+        retained_surface_application_operation,
     };
     use tracedecay_domain::{
-        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
     };
 
     use super::{
-        RetainedSurfaceOperation, RetainedSurfaceResultV1, session_refresh_effect_outcome,
+        EffectTermination, RetainedSurfaceOperation, RetainedSurfaceResultV1,
+        session_refresh_effect_outcome,
     };
 
     fn digest(byte: char) -> ManifestDigest {
@@ -341,8 +360,13 @@ mod tests {
             .expect("valid digest")
     }
 
-    #[test]
-    fn refresh_effect_receipt_binds_the_durable_operation() {
+    fn refresh_effect_settlement(
+        reconciliation_required: bool,
+    ) -> (
+        Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1>,
+        tracedecay_tool_catalog::UseCaseId,
+        RequestId,
+    ) {
         let operation =
             retained_surface_application_operation(RetainedSurfaceOperation::SessionRefreshBegin)
                 .expect("begin operation");
@@ -394,6 +418,8 @@ mod tests {
             error: None,
         });
 
+        let expected_operation = operation.use_case_id().clone();
+        let expected_request = context.request_id().clone();
         let outcome = session_refresh_effect_outcome(
             &execution,
             RetainedSurfaceOperation::SessionRefreshBegin,
@@ -401,8 +427,15 @@ mod tests {
             &"request fixture",
             "refresh.operation.fixture",
             result,
-        )
-        .expect("effect outcome");
+            reconciliation_required,
+        );
+        (outcome, expected_operation, expected_request)
+    }
+
+    #[test]
+    fn refresh_effect_receipt_binds_the_durable_operation() {
+        let (outcome, expected_operation, expected_request) = refresh_effect_settlement(false);
+        let outcome = outcome.expect("effect outcome");
         let ApplicationOutcome::Effect(effect) = outcome else {
             panic!("refresh begin must be an effect");
         };
@@ -412,9 +445,43 @@ mod tests {
                 .as_str()
                 .ends_with("refresh.operation.fixture")
         );
-        assert_eq!(&effect.receipt.operation, operation.use_case_id());
-        assert_eq!(&effect.receipt.request_id, context.request_id());
+        assert_eq!(effect.receipt.operation, expected_operation);
+        assert_eq!(effect.receipt.request_id, expected_request);
         assert!(effect.receipt.committed_state.is_some());
         assert!(effect.payload.is_some());
+    }
+
+    #[test]
+    fn delivery_failure_preserves_the_committed_state_for_reconciliation() {
+        let (completed, _, _) = refresh_effect_settlement(false);
+        let ApplicationOutcome::Effect(completed) = completed.expect("completed settlement") else {
+            panic!("refresh begin must be an effect");
+        };
+        let (partial, _, _) = refresh_effect_settlement(true);
+        let RetainedSurfaceExecutionErrorV1::PartialEffect {
+            reason_code,
+            committed_receipt,
+            ..
+        } = partial.expect_err("failed delivery must be a partial effect")
+        else {
+            panic!("failed delivery must retain its committed receipt");
+        };
+
+        assert_eq!(
+            reason_code,
+            "application.retained.session-refresh.delivery-failed"
+        );
+        assert_eq!(committed_receipt.outcome, EffectTermination::Partial);
+        let durable_commit = canonical_sha256(&(
+            "tracedecay.retained.effect.committed-state.v1",
+            RetainedSurfaceOperation::SessionRefreshBegin.as_str(),
+            "refresh.operation.fixture",
+        ))
+        .expect("canonical durable operation digest");
+        assert_eq!(committed_receipt.committed_state, Some(durable_commit));
+        assert_eq!(
+            committed_receipt.committed_state,
+            completed.receipt.committed_state
+        );
     }
 }

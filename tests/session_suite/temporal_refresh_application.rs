@@ -588,18 +588,17 @@ async fn wake_failure_leaves_recoverable_operation_that_joins_after_restart() {
         "root.project",
     );
     let target = target("session.refresh.wake-failure", 4);
-    let first = {
-        let service = SessionRefreshService::new(
-            AllowAuthorizer,
-            session_temporal_store(&db),
-            failing_wake.clone(),
-            configuration(),
-        );
-        started(
-            service
-                .begin_or_join(&context, context.binding(), target.clone())
-                .await,
-        )
+    let first = match SessionRefreshService::new(
+        AllowAuthorizer,
+        session_temporal_store(&db),
+        failing_wake.clone(),
+        configuration(),
+    )
+    .begin_or_join(&context, context.binding(), target.clone())
+    .await
+    {
+        SessionRefreshOutcome::StartedReconciliationRequired(handle) => handle,
+        other => panic!("expected committed refresh requiring reconciliation, got {other:?}"),
     };
 
     let recovery = session_temporal_store(&db)

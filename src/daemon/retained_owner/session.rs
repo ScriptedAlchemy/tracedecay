@@ -50,6 +50,8 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::timeutil::{SearchTimeBound, parse_search_time_filter_bound};
 
 mod refresh;
+#[cfg(test)]
+mod retained_effect_tests;
 
 const MESSAGE_SEARCH_ROOT_SESSION_ID: &str = "session.message-search.root";
 const MESSAGE_SEARCH_CONTEXT_BYTES: u64 = 64 * 1024;
@@ -140,6 +142,7 @@ impl DirectRetainedSessionPortV1 {
             request,
             &projected.operation_id,
             projected.result,
+            projected.reconciliation_required,
         )
     }
 

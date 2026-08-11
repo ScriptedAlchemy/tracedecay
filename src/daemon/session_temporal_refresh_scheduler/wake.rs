@@ -638,10 +638,20 @@ impl SessionTemporalRefreshWake {
         Arc::ptr_eq(&self.route, &other.route)
     }
 
-    pub(crate) fn wake(&self) {
-        if let Some(state) = self.target() {
-            state.wake();
+    /// Delivers a wake to the currently bound production worker.
+    ///
+    /// `false` means the route has no live target (including a retired owner)
+    /// or the target is already cancelled. Callers crossing a durable effect
+    /// boundary must preserve that distinction for reconciliation.
+    pub(crate) fn wake(&self) -> bool {
+        let Some(state) = self.target() else {
+            return false;
+        };
+        if state.cancelled.load(Ordering::Acquire) {
+            return false;
         }
+        state.wake();
+        true
     }
 
     /// Wake the refresh worker and wait until it finishes the resulting pass.

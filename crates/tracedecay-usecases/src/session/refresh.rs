@@ -162,12 +162,15 @@ impl SessionRefreshHandle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionRefreshOutcome {
     Started(SessionRefreshHandle),
+    StartedReconciliationRequired(SessionRefreshHandle),
     Joined(SessionRefreshHandle),
+    JoinedReconciliationRequired(SessionRefreshHandle),
     Busy,
     Running(Option<SessionRefreshProgressV1>),
     Complete(SessionRefreshReceiptV1),
     Failed(SessionRefreshReceiptV1),
     Cancelled(SessionRefreshReceiptV1),
+    CancelledReconciliationRequired(SessionRefreshReceiptV1),
     Denied,
     WrongScope,
     Stale,
@@ -322,12 +325,19 @@ where
         };
 
         // The durable operation is authoritative once the store call returns.
-        // A failed wake is recoverable by the daemon's restart scan or a later
-        // equivalent caller, so it must not erase or misreport acceptance.
-        let _ = self.scheduler.wake();
-        match receipt.disposition() {
-            SessionRefreshDispositionV1::Started => SessionRefreshOutcome::Started(handle),
-            SessionRefreshDispositionV1::Joined => SessionRefreshOutcome::Joined(handle),
+        // Delivery failure must preserve that commit and require reconciliation
+        // through the persisted recovery row rather than report plain acceptance.
+        match (receipt.disposition(), self.scheduler.wake()) {
+            (SessionRefreshDispositionV1::Started, Ok(())) => {
+                SessionRefreshOutcome::Started(handle)
+            }
+            (SessionRefreshDispositionV1::Started, Err(_)) => {
+                SessionRefreshOutcome::StartedReconciliationRequired(handle)
+            }
+            (SessionRefreshDispositionV1::Joined, Ok(())) => SessionRefreshOutcome::Joined(handle),
+            (SessionRefreshDispositionV1::Joined, Err(_)) => {
+                SessionRefreshOutcome::JoinedReconciliationRequired(handle)
+            }
         }
     }
 
@@ -434,8 +444,11 @@ where
         .await
         {
             Ok(Ok(receipt)) => {
-                let _ = self.scheduler.wake();
-                terminal_outcome(receipt)
+                if self.scheduler.wake().is_err() {
+                    SessionRefreshOutcome::CancelledReconciliationRequired(receipt)
+                } else {
+                    terminal_outcome(receipt)
+                }
             }
             Ok(Err(
                 SessionStoreError::InvalidRefreshState { .. }

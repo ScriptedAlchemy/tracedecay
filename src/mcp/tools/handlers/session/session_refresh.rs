@@ -80,7 +80,17 @@ pub(crate) enum SessionRefreshServiceOutcome {
         handle: String,
         accepted_at: i64,
     },
+    StartedReconciliationRequired {
+        operation_id: String,
+        handle: String,
+        accepted_at: i64,
+    },
     Joined {
+        operation_id: String,
+        handle: String,
+        accepted_at: i64,
+    },
+    JoinedReconciliationRequired {
         operation_id: String,
         handle: String,
         accepted_at: i64,
@@ -90,6 +100,7 @@ pub(crate) enum SessionRefreshServiceOutcome {
     Complete(SessionRefreshReceiptView),
     Failed(SessionRefreshReceiptView),
     Cancelled(SessionRefreshReceiptView),
+    CancelledReconciliationRequired(SessionRefreshReceiptView),
     Denied,
     WrongScope,
     Stale,

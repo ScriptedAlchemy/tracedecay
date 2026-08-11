@@ -32,6 +32,9 @@ use crate::mcp::tools::{SessionRefreshAction, SessionRefreshCommand};
 const REQUEST_MAX_RESULTS: u64 = 64;
 const REQUEST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const REQUEST_MAX_WORK_UNITS: u64 = 10_000;
+// One opaque handle crosses the action-specific begin, status, and cancel operations.
+const SESSION_REFRESH_LIFECYCLE_CAPABILITY: &[u8] =
+    b"application.retained.session-refresh-lifecycle.v1";
 
 pub(crate) fn admitted_session_refresh_command(
     request: &SessionRefreshRequestV1,
@@ -72,7 +75,7 @@ pub(crate) fn admitted_session_refresh_command(
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unsupported)?;
     let capability_digest = CapabilityDigest::new(admitted_digest(
         b"tracedecay.retained.session-refresh.capability.v1\0",
-        operation.capability_id().as_str().as_bytes(),
+        SESSION_REFRESH_LIFECYCLE_CAPABILITY,
     ));
     let policy_digest = PolicyDigest::new(admitted_digest(
         b"tracedecay.retained.session-refresh.policy.v1\0",

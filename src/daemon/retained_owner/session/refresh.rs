@@ -83,7 +83,10 @@ pub(super) fn status_result(
             "a conflicting refresh target is already running",
         ),
         SessionRefreshServiceOutcome::Started { .. }
-        | SessionRefreshServiceOutcome::Joined { .. } => refresh_problem(
+        | SessionRefreshServiceOutcome::StartedReconciliationRequired { .. }
+        | SessionRefreshServiceOutcome::Joined { .. }
+        | SessionRefreshServiceOutcome::JoinedReconciliationRequired { .. }
+        | SessionRefreshServiceOutcome::CancelledReconciliationRequired(_) => refresh_problem(
             RetainedOutcomeStatusV1::Unavailable,
             "refresh_contract_violation",
             "the refresh status authority returned a begin outcome",
@@ -104,12 +107,13 @@ pub(super) fn status_result(
 pub(super) struct EffectProjection {
     pub(super) operation_id: String,
     pub(super) result: RetainedSurfaceResultV1,
+    pub(super) reconciliation_required: bool,
 }
 
 pub(super) fn begin_result(
     outcome: SessionRefreshServiceOutcome,
 ) -> Result<EffectProjection, RetainedSurfaceExecutionErrorV1> {
-    let (outcome, operation_id, handle, accepted_at) = match outcome {
+    let (outcome, operation_id, handle, accepted_at, reconciliation_required) = match outcome {
         SessionRefreshServiceOutcome::Started {
             operation_id,
             handle,
@@ -119,6 +123,18 @@ pub(super) fn begin_result(
             operation_id,
             handle,
             accepted_at,
+            false,
+        ),
+        SessionRefreshServiceOutcome::StartedReconciliationRequired {
+            operation_id,
+            handle,
+            accepted_at,
+        } => (
+            RetainedOutcomeStatusV1::Started,
+            operation_id,
+            handle,
+            accepted_at,
+            true,
         ),
         SessionRefreshServiceOutcome::Joined {
             operation_id,
@@ -129,6 +145,18 @@ pub(super) fn begin_result(
             operation_id,
             handle,
             accepted_at,
+            false,
+        ),
+        SessionRefreshServiceOutcome::JoinedReconciliationRequired {
+            operation_id,
+            handle,
+            accepted_at,
+        } => (
+            RetainedOutcomeStatusV1::Joined,
+            operation_id,
+            handle,
+            accepted_at,
+            true,
         ),
         outcome => return Err(effect_error(outcome)),
     };
@@ -146,6 +174,7 @@ pub(super) fn begin_result(
     Ok(EffectProjection {
         operation_id,
         result,
+        reconciliation_required,
     })
 }
 
@@ -153,12 +182,15 @@ pub(super) fn cancel_result(
     outcome: SessionRefreshServiceOutcome,
     handle: Option<&str>,
 ) -> Result<EffectProjection, RetainedSurfaceExecutionErrorV1> {
-    let (outcome, receipt, error) = match outcome {
+    let (outcome, receipt, error, reconciliation_required) = match outcome {
         SessionRefreshServiceOutcome::Cancelled(receipt) => {
-            (RetainedOutcomeStatusV1::Cancelled, receipt, None)
+            (RetainedOutcomeStatusV1::Cancelled, receipt, None, false)
+        }
+        SessionRefreshServiceOutcome::CancelledReconciliationRequired(receipt) => {
+            (RetainedOutcomeStatusV1::Cancelled, receipt, None, true)
         }
         SessionRefreshServiceOutcome::Complete(receipt) => {
-            (RetainedOutcomeStatusV1::Complete, receipt, None)
+            (RetainedOutcomeStatusV1::Complete, receipt, None, false)
         }
         SessionRefreshServiceOutcome::Failed(receipt) => (
             RetainedOutcomeStatusV1::Failed,
@@ -167,6 +199,7 @@ pub(super) fn cancel_result(
                 "refresh_failed",
                 "the durable session refresh had already failed",
             )),
+            false,
         ),
         outcome => return Err(effect_error(outcome)),
     };
@@ -185,6 +218,7 @@ pub(super) fn cancel_result(
     Ok(EffectProjection {
         operation_id,
         result,
+        reconciliation_required,
     })
 }
 
@@ -204,8 +238,11 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
         | SessionRefreshServiceOutcome::Complete(_)
         | SessionRefreshServiceOutcome::Failed(_)
         | SessionRefreshServiceOutcome::Cancelled(_)
+        | SessionRefreshServiceOutcome::CancelledReconciliationRequired(_)
         | SessionRefreshServiceOutcome::Started { .. }
-        | SessionRefreshServiceOutcome::Joined { .. } => {
+        | SessionRefreshServiceOutcome::StartedReconciliationRequired { .. }
+        | SessionRefreshServiceOutcome::Joined { .. }
+        | SessionRefreshServiceOutcome::JoinedReconciliationRequired { .. } => {
             RetainedSurfaceExecutionErrorV1::Unavailable
         }
     }
@@ -266,12 +303,28 @@ mod tests {
         .expect("begin projection");
 
         assert_eq!(projected.operation_id, "refresh.operation.fixture");
+        assert!(!projected.reconciliation_required);
         let RetainedSurfaceResultV1::SessionRefreshBegin(result) = projected.result else {
             panic!("expected begin result");
         };
         assert_eq!(result.outcome, RetainedOutcomeStatusV1::Started);
         assert_eq!(result.handle.as_deref(), Some("srh_fixture"));
         assert_eq!(result.accepted_at, Some(42));
+    }
+
+    #[test]
+    fn begin_preserves_committed_delivery_failure_for_reconciliation() {
+        let projected = begin_result(
+            SessionRefreshServiceOutcome::StartedReconciliationRequired {
+                operation_id: "refresh.operation.fixture".to_owned(),
+                handle: "srh_fixture".to_owned(),
+                accepted_at: 42,
+            },
+        )
+        .expect("begin projection");
+
+        assert!(projected.reconciliation_required);
+        assert_eq!(projected.operation_id, "refresh.operation.fixture");
     }
 
     #[test]
