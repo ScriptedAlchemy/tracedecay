@@ -19,6 +19,22 @@ use tracedecay_usecases::host_admission::HostAdmissionScope;
 // 8. tracedecay_status
 // ---------------------------------------------------------------------------
 
+fn assert_sealed_graph_statistics_are_unavailable(text: &str) {
+    let status: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        status["graph_statistics"],
+        json!({
+            "status": "unavailable",
+            "reason": "sealed_generation_statistics_not_published",
+        }),
+        "status must not fabricate graph counts without sealed-generation statistics"
+    );
+    assert!(
+        status.get("node_count").is_none(),
+        "status must not restore the legacy unsealed node count"
+    );
+}
+
 #[tokio::test]
 async fn test_status() {
     let (cg, _env, _dir) = setup_empty_project().await;
@@ -32,10 +48,7 @@ async fn test_status() {
     .await
     .unwrap();
     let text = extract_text(&result.value);
-    assert!(
-        text.contains("node_count"),
-        "status should include node_count"
-    );
+    assert_sealed_graph_statistics_are_unavailable(text);
     assert!(
         text.contains("server"),
         "status should include server stats"
@@ -60,10 +73,7 @@ async fn status_can_omit_verbose_branch_diagnostics() {
     .unwrap();
     let text = extract_text(&result.value);
 
-    assert!(
-        text.contains("node_count"),
-        "status must retain graph stats"
-    );
+    assert_sealed_graph_statistics_are_unavailable(text);
     assert!(
         !text.contains("branch_diagnostics"),
         "compact status must omit the unbounded branch payload"
@@ -223,10 +233,7 @@ async fn test_status_without_server_stats() {
         .await
         .unwrap();
     let text = extract_text(&result.value);
-    assert!(
-        text.contains("node_count"),
-        "status should include node_count"
-    );
+    assert_sealed_graph_statistics_are_unavailable(text);
     // Should NOT contain "server" key when None is passed
     assert!(
         !text.contains("\"server\""),
