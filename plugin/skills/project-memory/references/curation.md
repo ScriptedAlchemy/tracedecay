@@ -17,12 +17,15 @@ write only narrow durable changes.
 1. **Resolve scope:** confirm the active project root/store before touching
    memory. Project-bound profiles use the user-level TraceDecay store scoped to
    the current project by default.
-2. **Start read-mostly:** `tracedecay_fact_store` with `action: "get"`,
-   `"contradict"`, `"search"`, `"list"`, `"probe"`, `"related"`, or `"reason"`;
-   note that search/list/probe/related/reason may update retrieval/access
-   metadata. Use `tracedecay_memory_status` only when the user asks for memory
-   counts/health because it may repair vectors/banks. Use `tracedecay_dashboard`
-   (`action: "start"`) only when they want visual curation.
+2. **Start read-only:** `tracedecay_fact_store_get`,
+   `tracedecay_fact_store_contradict`, `tracedecay_fact_store_search`,
+   `tracedecay_fact_store_list`, `tracedecay_fact_store_probe`,
+   `tracedecay_fact_store_related`, or `tracedecay_fact_store_reason`. Search, probe, related, and
+   reason preserve derived holographic retrieval and scoring semantics. Use
+   `tracedecay_memory_status` only when the user asks for its read-only
+   canonical fact/entity/trust/feedback/holographic-algebra status snapshot.
+   Use `tracedecay_dashboard` (`action: "start"`) only when they want visual
+   curation.
 3. **Run native dry-run:** prefer `tracedecay memory curate` or
    `POST /api/plugins/holographic/curate` with `{"dry_run": true}`. Dry-run is
    the default and returns `actions`, `hygiene_candidates`, `counts`,
@@ -39,8 +42,9 @@ write only narrow durable changes.
 6. **Propose changes:** summarize durable additions, stale-fact updates,
    trust/tag/source changes, dedupe merges, and delete candidates. Prefer
    update/merge over removal when useful provenance should survive.
-7. **Apply narrowly → `tracedecay_fact_store`** `action: "add"` / `"update"` /
-   `"remove"` for reviewed operations (or `POST
+7. **Apply narrowly → `tracedecay_fact_store_add`,
+   `tracedecay_fact_store_update`, or `tracedecay_fact_store_remove`**
+   for reviewed operations (or `POST
    /api/plugins/holographic/curate/apply` / `tracedecay memory curate
    --llm-ops <file> --apply`). Require explicit approval immediately before
    every `remove`, dashboard hard delete, or merge loser removal, showing fact
@@ -51,12 +55,15 @@ write only narrow durable changes.
 
 ## Curation guardrails
 
-- `tracedecay_message_search` and `fact_store` search/get/contradict are
-  read-only recall. Search/list/probe/related/reason are read-mostly but can
-  update access/retrieval counters. `fact_store` add/update/remove,
-  `fact_feedback`, and `dashboard` start/stop mutate state or launch a local
-  process; respect host approval/run-mode. `memory_status` only reads the
-  current state and daemon-owned repair backlog.
+- `tracedecay_message_search`, `tracedecay_fact_store_search`,
+  `tracedecay_fact_store_get`, and `tracedecay_fact_store_contradict` are
+   read-only recall. `tracedecay_fact_store_list`, `tracedecay_fact_store_probe`,
+  `tracedecay_fact_store_related`, and `tracedecay_fact_store_reason` provide canonical/derived retrieval, including holographic search
+  and scoring semantics. `tracedecay_fact_store_add`, `tracedecay_fact_store_update`, `tracedecay_fact_store_remove`,
+  `tracedecay_fact_feedback`, and `tracedecay_dashboard` start/stop mutate
+  state or launch a local process; respect host approval/run-mode.
+  `tracedecay_memory_status` is a read-only canonical
+  fact/entity/trust/feedback/holographic-algebra status snapshot.
 - Deletion is permanent: there is no archive, soft-delete, restore, or undo
   path. Prefer update/merge when useful provenance should survive; delete only
   approved stale, duplicate, wrong, secret-like, or user-requested facts.
@@ -68,7 +75,7 @@ write only narrow durable changes.
   deterministic duplicate deletion; `POST /api/plugins/holographic/curate/apply`
   applies explicit delete/merge ops.
 - Do not let subagents call add/update/remove/feedback tools, apply curation
-  ops, start dashboard mutation flows, or run memory health repair. Ask them for
+  ops, or start dashboard mutation flows. Ask them for
   cited evidence, candidate facts, suspected duplicates, and stale/conflicting
   claims, then perform parent-agent validation before writing.
 - Hygiene candidates (`secret_like`, `transient`, `supersession`) are review
@@ -89,10 +96,10 @@ area, branch, PR, or decision set.
 3. **Calibrate trust:** `0.85+` for independently verified decisions, about
    `0.7` for ordinary well-sourced facts, about `0.5` for plausible but
    uncertain facts. Do not ask for approval solely because trust is low.
-4. **Dedupe before writing:** search `tracedecay_fact_store` with the subject
+4. **Dedupe before writing:** search `tracedecay_fact_store_search` with the subject
    plus candidate, matching category, `limit: 10`, `min_trust: 0.5`; skip
    near-duplicates and ask before replacing contradictory facts.
-5. **Store accepted facts → `tracedecay_fact_store`** `action: "add"` with
+5. **Store accepted facts → `tracedecay_fact_store_add`** with
    content, category, source, tags, entities, trust, and metadata containing
    subject/confidence/citations. Act on `near_duplicate`, `possible_conflict`,
    and `rejected_secret_like`; never rephrase a rejected secret to bypass
