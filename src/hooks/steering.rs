@@ -36,7 +36,7 @@ pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
          tracedecay_impact, tracedecay_affected, or tracedecay_test_map. Use \
          tracedecay_message_search or \
          tracedecay_lcm_expand_query for prior-session context, and \
-         tracedecay_fact_store only for durable non-secret facts. If workflow \
+         tracedecay_fact_store_add only for durable non-secret facts. If workflow \
          details are needed, open the bundled tracedecay skill for that task \
          instead of relying on repeated session-start instructions.\n",
     );
@@ -165,7 +165,7 @@ pub fn build_codex_session_context_for_workspace(
                  recovery, use tracedecay_lcm_expand_query, tracedecay_message_search, and \
                  tracedecay_lcm_describe before asking the user to repeat themselves. When \
                  a durable preference, decision, correction, or pitfall surfaces, store it \
-                 proactively with tracedecay_fact_store (action \"add\") and \
+                 proactively with tracedecay_fact_store_add and \
                  memory_scope \"user\". The CLI fallback supports this user scope even \
                  without an initialized project. Do NOT store \
                  secrets or credentials, transient errors, environment-specific failures, \
@@ -188,7 +188,7 @@ fn append_codex_recall_and_registry_guidance(s: &mut String) {
          missing context, use tracedecay_message_search or tracedecay_lcm_expand_query \
          before asking the user to repeat themselves. When a durable decision, user \
          preference, correction, or pitfall surfaces, store it proactively with \
-         tracedecay_fact_store (action \"add\") with calibrated trust — do not wait \
+         tracedecay_fact_store_add with calibrated trust — do not wait \
          to be asked. Do NOT store secrets or credentials, transient errors, \
          environment-specific failures, one-off narratives, task progress, or \
          soon-stale session outcomes; recover those from transcripts instead.\n",

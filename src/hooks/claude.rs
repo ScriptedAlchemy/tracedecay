@@ -728,8 +728,8 @@ mod tests {
             let hint = decide_post_tool_use_hint(&event)
                 .unwrap_or_else(|| panic!("{tool} {path} must produce a memory-store hint"));
             assert!(
-                format_tool_hint(&hint).contains("tracedecay_fact_store"),
-                "{tool} {path} hint must route durable facts to tracedecay_fact_store"
+                format_tool_hint(&hint).contains("tracedecay_fact_store_add"),
+                "{tool} {path} hint must route durable facts to tracedecay_fact_store_add"
             );
         }
     }

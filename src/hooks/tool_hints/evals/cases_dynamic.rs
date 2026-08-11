@@ -128,7 +128,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::MemoryStore),
-            &["tracedecay_fact_store"],
+            &["tracedecay_fact_store_add"],
         ),
         input_eval(
             "claude-memory-edit-action",
@@ -138,7 +138,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::MemoryStore),
-            &["tracedecay_fact_store"],
+            &["tracedecay_fact_store_add"],
         ),
         input_eval(
             "write-claude-md-action",
@@ -148,7 +148,7 @@ pub(super) fn dynamic_action_context_cases() -> Vec<HintEval> {
                 ..ToolHintInput::default()
             },
             Some(HintCategory::MemoryStore),
-            &["tracedecay_fact_store"],
+            &["tracedecay_fact_store_add"],
         ),
         input_eval(
             "generic-git-status-action",

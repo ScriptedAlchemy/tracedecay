@@ -782,8 +782,8 @@ fn memory_file_edits_get_a_fact_store_hint() {
             .unwrap_or_else(|| panic!("{tool} {path} must produce a memory-store hint"));
         assert_eq!(hint.category, HintCategory::MemoryStore, "{tool} {path}");
         assert!(
-            hint.message.contains("tracedecay_fact_store"),
-            "{tool} {path} hint must point at tracedecay_fact_store"
+            hint.message.contains("tracedecay_fact_store_add"),
+            "{tool} {path} hint must point at tracedecay_fact_store_add"
         );
     }
 }

@@ -238,7 +238,7 @@ pub(super) fn is_memory_store_edit(input: &ToolHintInput) -> bool {
 }
 
 /// Matches the harness-memory file locations that should route durable facts to
-/// `tracedecay_fact_store`. Normalizes `\\` to `/` so Windows paths match too.
+/// `tracedecay_fact_store_add`. Normalizes `\\` to `/` so Windows paths match too.
 pub(in crate::hooks) fn is_harness_memory_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     let file_name = normalized.rsplit('/').next().unwrap_or(&normalized);

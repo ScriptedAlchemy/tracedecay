@@ -345,7 +345,7 @@ pub(super) fn expanded_transcript_host_evals() -> Vec<HintEval> {
             "Write",
             Some("/home/zack/.claude/projects/foo/memory/notes.md"),
             Some(HintCategory::MemoryStore),
-            &["tracedecay_fact_store"],
+            &["tracedecay_fact_store_add"],
         )
         .with_families(&[ScenarioFamily::ClaudePrompt]),
         tool_eval(
