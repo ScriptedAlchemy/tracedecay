@@ -681,37 +681,34 @@ impl CodeIndexSchedulerRegistryV1 {
         let mounted = self.mounted.lock().await;
         if let Some(existing) = mounted.get(&project_root) {
             let scheduler = Arc::clone(&existing.scheduler);
+            let serving_generation = Arc::clone(&existing.serving_generation);
             drop(mounted);
             drop(retiring);
-            // The scheduler mutex is held for the full duration of any
-            // in-flight reconcile. Waiting for it on a runtime worker — while
-            // also holding the mount-admission permit — parked that worker and
-            // starved mount admission for every other lane whenever a rebuild
-            // was running. Pay the wait on the blocking pool instead.
-            let remount_project_id = project_id.clone();
-            let remount_hook = semantic_schedule.clone();
-            let latest = tokio::task::spawn_blocking(move || {
+            // Reconcile holds this mutex; wait in the blocking pool so remount
+            // never parks a runtime worker or admission for other lanes.
+            tokio::task::spawn_blocking(move || {
                 let mut scheduler = scheduler
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if scheduler.project_id() != &remount_project_id {
+                if scheduler.project_id() != &project_id {
                     return Err(CodeIndexSchedulerErrorV1::Identity(
                         "mounted worktree belongs to a different project identity".to_owned(),
                     ));
                 }
-                let latest = scheduler.latest_complete().map(|latest| latest.generation);
-                scheduler.replace_semantic_schedule_hook(remount_hook);
-                Ok(latest)
+                scheduler.replace_semantic_schedule_hook(semantic_schedule);
+                if let Some(latest) = serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    let _ = scheduler.schedule_semantic_generation(latest.generation());
+                }
+                Ok(())
             })
             .await
-            .map_err(|error| {
-                CodeIndexSchedulerErrorV1::Identity(format!(
-                    "code-index remount task failed: {error}"
-                ))
+            .map_err(|_error| {
+                CodeIndexSchedulerErrorV1::SemanticSchedule("hook task failed".to_owned())
             })??;
-            if let (Some(hook), Some(generation)) = (semantic_schedule, latest) {
-                let _ = hook(&generation);
-            }
             return Ok(false);
         }
         if mounted.len() >= self.max_worktrees {
@@ -721,17 +718,11 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         drop(mounted);
         drop(retiring);
-        // Opening a worktree restores the sealed generation: an O(store) decode
-        // that re-mints every file's exact-extraction authority and repeats the
-        // full canonical validation sweep. That is CPU, not I/O, and it must not
-        // occupy an async runtime worker — mount is exactly the activation point
-        // where this work is supposed to be paid, on a blocking thread, so no
-        // request ever pays it.
+        // Keep CPU-bound cold-open identity setup off runtime workers.
         let scoped_store_root = super::scoped_code_index_store_root(&store_root, &project_root);
         let open_project_id = project_id.clone();
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
-        let open_semantic_schedule = semantic_schedule.clone();
         let opened = tokio::task::spawn_blocking(move || {
             let mut opened = CodeIndexWorktreeSchedulerV1::open(
                 open_project_id,
@@ -739,9 +730,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 scoped_store_root,
                 open_byte_pool,
             )?;
-            if let Some(hook) = open_semantic_schedule {
-                opened.replace_semantic_schedule_hook(Some(hook));
-            }
+            opened.replace_semantic_schedule_hook(semantic_schedule);
             Ok::<_, CodeIndexSchedulerErrorV1>(opened)
         })
         .await
@@ -800,15 +789,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
-                // Hold the in-progress signal for the entire pass — from the
-                // moment the pending wake is claimed until a failed pass has
-                // restored its arrival — so query admission never observes a
-                // claimed-but-flagless gap and misreads in-flight owner work
-                // as plain unavailability.
+                // Cover wake claim through failed-arrival restoration so admission
+                // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
                     super::ReconcilePassGuard::enter(&worker_reconcile_in_progress);
-                // Dequeue instant: admission is held and the reconcile is about
-                // to start, so queue wait ends here and service time begins.
+                // Admission is held: queue wait ends and service time begins.
                 let started_micros = now_micros().0;
                 let (arrival, trigger) = Self::take_pending_arrival(
                     &worker_pending_wake_micros,
@@ -820,9 +805,8 @@ impl CodeIndexSchedulerRegistryV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let mut result = scheduler.activate_or_reconcile();
-                    // A retained seal can decode even when source-authority
-                    // verification fails. Only a terminal activation/reconcile
-                    // outcome may mint serving state from it.
+                    // Decoding a retained seal alone cannot mint serving state;
+                    // activation/reconcile must reach a terminal outcome.
                     let mut latest = result
                         .as_ref()
                         .ok()
@@ -893,9 +877,30 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                 }
                 if let Ok((Ok(_), Some(latest), _)) = &result {
-                    *worker_serving_generation
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+                    let scheduler = Arc::clone(&worker_scheduler);
+                    let serving_generation = Arc::clone(&worker_serving_generation);
+                    let latest = latest.clone();
+                    if let Err(_error) = tokio::task::spawn_blocking(move || {
+                        let scheduler = scheduler
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        *serving_generation
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(latest.clone());
+                        let _ = scheduler.schedule_semantic_generation(latest.generation());
+                    })
+                    .await
+                    {
+                        let error = CodeIndexSchedulerErrorV1::SemanticSchedule(
+                            "hook task failed".to_owned(),
+                        );
+                        tracing::warn!(
+                            event = "code_index_semantic_schedule_failed",
+                            error = %error,
+                            "code-index generation is serving but semantic scheduling failed"
+                        );
+                    }
                 }
                 if let Ok((Ok(outcome), _, _)) = &result {
                     if let CodeIndexReconcileOutcomeV1::Published(evidence) = outcome {
@@ -914,10 +919,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         outcome,
                     );
                 } else {
-                    // A reconcile that never reaches a terminal outcome is the
-                    // failure mode that leaves search stale indefinitely, and it
-                    // used to be entirely silent. Surface it: bounded, redacted,
-                    // no project path beyond what cadence events already carry.
+                    // Surface bounded non-terminal failure without new project-path data.
                     match &result {
                         Ok((Err(error), _, _)) => tracing::warn!(
                             event = "code_index_reconcile_failed",
@@ -933,9 +935,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         ),
                         Ok((Ok(_), _, _)) => {}
                     }
-                    // No terminal outcome, so no receipt is owed. Give the
-                    // arrival back or the next pass would measure from its own
-                    // dequeue and under-report the wait this wake really took.
+                    // Restore arrival so the next pass measures this wake's full queue wait.
                     Self::restore_pending_arrival(
                         &worker_pending_wake_micros,
                         &worker_pending_wake_trigger,
@@ -946,8 +946,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
-                // A task panic must not permanently retire the mounted
-                // worktree. The next coalesced hint wakes this worker again.
+                // The next coalesced hint wakes this worker after a contained panic.
                 let _ = result;
             }
         });
@@ -984,9 +983,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
-        // Decode and truth verification are retained background work. Until
-        // this wake completes, every query observes the mounted route as
-        // warming/unverified instead of serving unproven bytes.
+        // Until retained decode/truth verification completes, reads see warming
+        // instead of serving unproven bytes.
         Self::note_wake(
             &pending_wake_micros,
             &pending_wake_trigger,

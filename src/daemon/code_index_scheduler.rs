@@ -1578,6 +1578,8 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     GraphProjection(#[from] CodeGraphProjectionError),
     #[error("code-index graph activation failed: {0}")]
     GraphActivation(String),
+    #[error("code-index semantic scheduling failed: {0}")]
+    SemanticSchedule(String),
 }
 
 /// Counts in-flight owner passes (retained activation or reconcile). A
@@ -1762,6 +1764,17 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.semantic_schedule = hook;
     }
 
+    /// Schedule semantics only after the registry has activated and published
+    /// this exact generation as serving state.
+    pub(super) fn schedule_semantic_generation(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> bool {
+        self.semantic_schedule
+            .as_ref()
+            .is_some_and(|schedule| schedule(generation))
+    }
+
     pub fn notify_path(&self, path: PathBuf) {
         self.hints
             .lock()
@@ -1861,9 +1874,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         let snapshot_content_identity = generation.snapshot().content_identity.clone();
         self.latest_content_identity = Some(snapshot_content_identity.clone());
         self.mark_reconciled(metadata, Some(stat_signature));
-        if let Some(schedule) = &self.semantic_schedule {
-            let _ = schedule(&generation);
-        }
         Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
             CodeIndexNoopEvidenceV1 {
                 snapshot_content_identity,
@@ -1949,11 +1959,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             {
                 self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
                 self.mark_reconciled(sampled_metadata, sampled_signature);
-                if let (Some(schedule), Some(generation)) =
-                    (&self.semantic_schedule, active_generation.as_ref())
-                {
-                    let _ = schedule(generation);
-                }
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
                     overflow_reconciled,
@@ -2018,11 +2023,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             let generation = published_generation;
             self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
             self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
-
-            // SEMANTIC: enqueue FastEmbed projection without waiting on download/index.
-            if let Some(schedule) = &self.semantic_schedule {
-                let _scheduled = schedule(&generation);
-            }
 
             let changes = &generation.projection().request().changes;
             let lane_digest = canonical_sha256(&(

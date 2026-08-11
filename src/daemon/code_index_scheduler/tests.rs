@@ -59,6 +59,8 @@ use tracedecay_query::retrieval::rerank::{
     LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
 };
 
+mod semantic_schedule_order_tests;
+
 struct GitFixture {
     root: TempDir,
 }
@@ -3125,114 +3127,6 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
     let second = wait_for_generation_change(&registry, fixture.path(), &first).await;
 
     assert_ne!(first, second);
-    registry.shutdown().await;
-}
-
-#[tokio::test]
-async fn remount_replaces_semantic_hook_and_replays_latest_generation() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
-    let first_calls = Arc::new(AtomicUsize::new(0));
-    let first_hook = {
-        let calls = Arc::clone(&first_calls);
-        Arc::new(move |_: &super::CodeIndexPublishedGenerationV1| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            true
-        }) as tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1
-    };
-    assert!(
-        registry
-            .mount_worktree(
-                test_project_id(),
-                fixture.path(),
-                store.path().to_path_buf(),
-                Some(first_hook),
-            )
-            .await
-            .expect("mount scheduler")
-    );
-    let first_generation = wait_for_initial_generation(&registry, fixture.path()).await;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while first_calls.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("initial semantic schedule");
-
-    let second_calls = Arc::new(AtomicUsize::new(0));
-    let second_hook = {
-        let calls = Arc::clone(&second_calls);
-        Arc::new(move |_: &super::CodeIndexPublishedGenerationV1| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            true
-        }) as tracedecay_usecases::semantic_runtime::SavedCodeGenerationScheduleHookV1
-    };
-    assert!(
-        !registry
-            .mount_worktree(
-                test_project_id(),
-                fixture.path(),
-                store.path().to_path_buf(),
-                Some(second_hook),
-            )
-            .await
-            .expect("remount scheduler")
-    );
-    assert_eq!(
-        second_calls.load(Ordering::SeqCst),
-        1,
-        "remount must replay the already-published generation"
-    );
-    let retired_calls = first_calls.load(Ordering::SeqCst);
-
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    assert!(
-        registry
-            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
-            .await
-    );
-    let second_generation =
-        wait_for_generation_change(&registry, fixture.path(), &first_generation).await;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while second_calls.load(Ordering::SeqCst) < 2 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("replacement hook scheduled edited generation");
-    assert_eq!(
-        first_calls.load(Ordering::SeqCst),
-        retired_calls,
-        "retired hook must not receive later generations"
-    );
-    let disabled_calls = second_calls.load(Ordering::SeqCst);
-    assert!(
-        !registry
-            .mount_worktree(
-                test_project_id(),
-                fixture.path(),
-                store.path().to_path_buf(),
-                None,
-            )
-            .await
-            .expect("remount without semantics")
-    );
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 3 }\n");
-    assert!(
-        registry
-            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
-            .await
-    );
-    let _ = wait_for_generation_change(&registry, fixture.path(), &second_generation).await;
-    assert_eq!(
-        second_calls.load(Ordering::SeqCst),
-        disabled_calls,
-        "remount without a semantic runtime must clear the stale hook"
-    );
     registry.shutdown().await;
 }
 
