@@ -6,9 +6,17 @@
 
 mod fact;
 mod lineage;
+mod relation;
 
-pub use fact::*;
-pub use lineage::*;
+pub use fact::{
+    FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEvidenceRefV1,
+    FactEvidenceRelationV1, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
+    FactPayloadV1,
+};
+pub use lineage::{FactCurationActionV1, FactLineageEventKindV1, FactLineageEventV1};
+pub use relation::{
+    FactRelationKindV1, FactRelationProvenanceV1, FactRelationV1, ProjectMemoryGraphRelationKindV1,
+};
 
 use serde::Serialize;
 
