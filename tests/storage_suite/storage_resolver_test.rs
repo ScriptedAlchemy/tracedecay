@@ -1126,6 +1126,9 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     old.add_fact(fact_request("legacy split identity fact"))
         .await
         .unwrap();
+    old.add_fact(fact_request("second legacy split identity fact"))
+        .await
+        .unwrap();
     let original_root = old.store_layout().data_root.clone();
     old.checkpoint().await.unwrap();
     old.close();
@@ -1160,6 +1163,25 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
             })
             .await
     );
+    assert!(
+        sessions
+            .upsert_session(&SessionRecord {
+                provider: "codex".to_string(),
+                session_id: "second-cutover-session".to_string(),
+                project_key: cutover_project_id.clone(),
+                project_path: project.to_string_lossy().to_string(),
+                title: Some("second cutover session".to_string()),
+                started_at: Some(1_800_000_011),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+    );
     sessions.checkpoint().await;
     sessions.close();
     write_repository_identity_marker(&project, &cutover_project_id).unwrap();
@@ -1172,6 +1194,7 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     assert!(message.contains(&cutover_project_id), "{message}");
     assert!(message.contains(legacy_project_id), "{message}");
     assert!(message.contains("graph_health=corrupt"), "{message}");
+    assert!(message.contains("count_mode=presence_only"), "{message}");
     assert!(message.contains("sessions=1"), "{message}");
     assert!(message.contains("facts=1"), "{message}");
     assert!(message.contains("no files changed"), "{message}");

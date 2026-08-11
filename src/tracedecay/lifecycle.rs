@@ -301,6 +301,14 @@ impl TraceDecay {
                     "safe empty-store repair is available during a writable open",
                 ));
             }
+            if !store_identity_integrity_is_healthy(&candidate).await {
+                return Err(identity_cutover_conflict(
+                    project_root,
+                    &selected_inventory,
+                    &candidate_inventory,
+                    "candidate failed full integrity validation; no repair was attempted",
+                ));
+            }
             let candidate_id = candidate.identity.project_id.as_deref().ok_or_else(|| {
                 TraceDecayError::Config {
                     message: "legacy candidate has no project id".to_string(),
@@ -312,6 +320,14 @@ impl TraceDecay {
         }
         if candidate_inventory.is_pristine() && selected_inventory.is_healthy() {
             if allow_repair {
+                if !store_identity_integrity_is_healthy(&selected).await {
+                    return Err(identity_cutover_conflict(
+                        project_root,
+                        &selected_inventory,
+                        &candidate_inventory,
+                        "selected store failed full integrity validation; no repair was attempted",
+                    ));
+                }
                 let selected_id = selected.identity.project_id.as_deref().ok_or_else(|| {
                     TraceDecayError::Config {
                         message: "selected store has no project id".to_string(),
@@ -1361,7 +1377,7 @@ impl std::fmt::Display for StoreIdentityInventory {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "project_id={} path='{}' graph_health={} nodes={} files={} facts={} sessions={} messages={} lcm={} branches={} automation_files={} payload_files={} response_files={}",
+            "project_id={} path='{}' graph_health={} count_mode=presence_only nodes={} files={} facts={} sessions={} messages={} lcm={} branches={} automation_files={} payload_files={} response_files={}",
             self.project_id,
             self.data_root.display(),
             self.graph_health,
@@ -1382,18 +1398,27 @@ impl std::fmt::Display for StoreIdentityInventory {
 async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventory {
     let authority = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store inventory");
     let open_result = match authority {
-        Ok(authority) => Database::open_read_only(&layout.graph_db_path, &authority).await,
+        Ok(authority) => {
+            Database::open_read_only_for_presence_probe(&layout.graph_db_path, &authority).await
+        }
         Err(error) => Err(error),
     };
     let (graph_health, nodes, files, facts) = match open_result {
-        Ok((db, _)) => {
-            if let Ok(stats) = db.get_stats().await {
-                let facts = count_rows(db.conn(), "memory_facts").await;
-                db.close();
-                ("healthy", stats.node_count, stats.file_count, facts)
-            } else {
-                db.close();
-                ("corrupt", 0, 0, 0)
+        Ok(db) => {
+            let presence = (
+                table_presence(db.conn(), "nodes").await,
+                table_presence(db.conn(), "files").await,
+                table_presence(db.conn(), "memory_facts").await,
+            );
+            db.close();
+            match presence {
+                (Ok(nodes), Ok(files), Ok(facts)) => (
+                    "healthy",
+                    u64::from(nodes),
+                    u64::from(files),
+                    u64::from(facts),
+                ),
+                _ => ("corrupt", 0, 0, 0),
             }
         }
         Err(_) if layout.graph_db_path.exists() => ("corrupt", 0, 0, 0),
@@ -1405,10 +1430,12 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
     {
         let conn = db.dashboard_connection();
         let counts = (
-            count_rows(&conn, "sessions").await,
-            count_rows(&conn, "session_messages").await,
-            count_rows(&conn, "lcm_raw_messages").await
-                + count_rows(&conn, "lcm_summary_nodes").await,
+            u64::from(table_has_rows(&conn, "sessions").await),
+            u64::from(table_has_rows(&conn, "session_messages").await),
+            u64::from(
+                table_has_rows(&conn, "lcm_raw_messages").await
+                    || table_has_rows(&conn, "lcm_summary_nodes").await,
+            ),
         );
         db.close();
         counts
@@ -1432,10 +1459,22 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
         lcm_rows,
         branches: branch_meta::load_branch_meta(&layout.data_root)
             .map_or(0, |meta| meta.branches.len()),
-        automation_files: count_tree_files(&layout.dashboard_root),
-        payload_files: count_tree_files(&layout.lcm_payload_root),
-        response_files: count_tree_files(&layout.response_handle_root),
+        automation_files: u64::from(tree_has_files(&layout.dashboard_root)),
+        payload_files: u64::from(tree_has_files(&layout.lcm_payload_root)),
+        response_files: u64::from(tree_has_files(&layout.response_handle_root)),
     }
+}
+
+async fn store_identity_integrity_is_healthy(layout: &StoreLayout) -> bool {
+    let Ok(authority) = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store repair")
+    else {
+        return false;
+    };
+    let Ok((db, _)) = Database::open_read_only(&layout.graph_db_path, &authority).await else {
+        return false;
+    };
+    db.close();
+    true
 }
 
 /// Check the common exact-root case without counting every row in large
@@ -1480,50 +1519,38 @@ async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) ->
     }
 
     branch_meta::load_branch_meta(&layout.data_root).is_some_and(|meta| meta.branches.len() > 1)
-        || count_tree_files(&layout.dashboard_root) > 0
-        || count_tree_files(&layout.lcm_payload_root) > 0
-        || count_tree_files(&layout.response_handle_root) > 0
+        || tree_has_files(&layout.dashboard_root)
+        || tree_has_files(&layout.lcm_payload_root)
+        || tree_has_files(&layout.response_handle_root)
 }
 
 async fn table_has_rows(connection: &libsql::Connection, table: &str) -> bool {
-    let Ok(mut rows) = connection
+    table_presence(connection, table).await.unwrap_or(false)
+}
+
+async fn table_presence(connection: &libsql::Connection, table: &str) -> Result<bool> {
+    let mut rows = connection
         .query(&format!("SELECT 1 FROM {table} LIMIT 1"), ())
-        .await
-    else {
-        return false;
-    };
-    rows.next().await.ok().flatten().is_some()
+        .await?;
+    Ok(rows.next().await?.is_some())
 }
 
-async fn count_rows(connection: &libsql::Connection, table: &str) -> u64 {
-    let Ok(mut rows) = connection
-        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-        .await
-    else {
-        return 0;
-    };
-    rows.next()
-        .await
-        .ok()
-        .flatten()
-        .and_then(|row| row.get::<i64>(0).ok())
-        .and_then(|count| u64::try_from(count).ok())
-        .unwrap_or(0)
-}
-
-fn count_tree_files(root: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .map(|path| match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_file() => 1,
-            Ok(metadata) if metadata.is_dir() => count_tree_files(&path),
-            _ => 0,
-        })
-        .sum()
+fn tree_has_files(root: &Path) -> bool {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() => return true,
+                Ok(metadata) if metadata.is_dir() => pending.push(path),
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 fn identity_cutover_conflict(
