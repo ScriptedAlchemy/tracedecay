@@ -560,6 +560,20 @@ pub(super) fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
 }
 
 #[cfg(unix)]
+fn remove_stale_socket(socket_path: &Path) -> Result<()> {
+    match std::fs::remove_file(socket_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!(
+                "failed to remove stale daemon socket '{}': {error}",
+                socket_path.display()
+            ),
+        }),
+    }
+}
+
+#[cfg(unix)]
 async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<()> {
     authority.ensure_current()?;
     let socket_path = match authority.endpoint() {
@@ -579,12 +593,7 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
             ),
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => std::fs::remove_file(socket_path).map_err(|remove_err| TraceDecayError::Config {
-            message: format!(
-                "failed to remove stale daemon socket '{}': {remove_err}",
-                socket_path.display()
-            ),
-        }),
+        Err(_) => remove_stale_socket(socket_path),
     }
 }
 
@@ -592,6 +601,15 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
 mod tests {
     #[cfg(unix)]
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn an_already_absent_stale_socket_is_prepared() {
+        let root = tempfile::tempdir().expect("temporary fixture root");
+        let socket = root.path().join("daemon.sock");
+
+        remove_stale_socket(&socket).expect("a concurrently removed stale socket is already safe");
+    }
 
     #[cfg(unix)]
     #[tokio::test]
