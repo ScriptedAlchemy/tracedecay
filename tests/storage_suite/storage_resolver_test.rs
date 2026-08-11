@@ -1054,6 +1054,60 @@ async fn empty_cutover_store_is_atomically_replaced_by_healthy_legacy_store() {
 }
 
 #[tokio::test]
+async fn unreadable_cutover_sessions_block_identity_repair() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn guarded_cutover() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+
+    let old = TraceDecay::init(&project).await.unwrap();
+    old.add_fact(fact_request("healthy guarded legacy fact"))
+        .await
+        .unwrap();
+    let original_root = old.store_layout().data_root.clone();
+    old.checkpoint().await.unwrap();
+    old.close();
+    fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
+    remove_sqlite_family(&profile_root.join("global.db"));
+
+    let legacy_project_id = "proj_guarded_legacy";
+    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
+    relocate_store_as_legacy(&original_root, &legacy_root, &project, legacy_project_id);
+
+    let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
+    let cutover_project_id = cutover.identity.project_id.clone().unwrap();
+    initialize_empty_profile_layout(&cutover).await;
+    remove_sqlite_family(&cutover.sessions_db_path);
+    fs::create_dir_all(&cutover.sessions_db_path).unwrap();
+    write_repository_identity_marker(&project, &cutover_project_id).unwrap();
+
+    let error = match TraceDecay::open(&project).await {
+        Ok(graph) => {
+            graph.close();
+            panic!("unreadable auxiliary state must block identity repair");
+        }
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("identity cutover conflict"), "{message}");
+    assert!(message.contains("auxiliary_health=unreadable"), "{message}");
+    assert!(message.contains("no files changed"), "{message}");
+    assert_eq!(
+        read_repository_identity_marker(&project)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        cutover_project_id
+    );
+    assert!(cutover.data_root.join(STORE_MANIFEST_FILENAME).is_file());
+}
+
+#[tokio::test]
 async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();

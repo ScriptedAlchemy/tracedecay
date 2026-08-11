@@ -1341,6 +1341,7 @@ struct StoreIdentityInventory {
     project_id: String,
     data_root: PathBuf,
     graph_health: &'static str,
+    auxiliary_health: &'static str,
     nodes: u64,
     files: u64,
     facts: u64,
@@ -1355,7 +1356,7 @@ struct StoreIdentityInventory {
 
 impl StoreIdentityInventory {
     fn is_healthy(&self) -> bool {
-        self.graph_health == "healthy"
+        self.graph_health == "healthy" && self.auxiliary_health == "healthy"
     }
 
     fn is_pristine(&self) -> bool {
@@ -1377,10 +1378,11 @@ impl std::fmt::Display for StoreIdentityInventory {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "project_id={} path='{}' graph_health={} count_mode=presence_only nodes={} files={} facts={} sessions={} messages={} lcm={} branches={} automation_files={} payload_files={} response_files={}",
+            "project_id={} path='{}' graph_health={} auxiliary_health={} count_mode=presence_only nodes={} files={} facts={} sessions={} messages={} lcm={} branches={} automation_files={} payload_files={} response_files={}",
             self.project_id,
             self.data_root.display(),
             self.graph_health,
+            self.auxiliary_health,
             self.nodes,
             self.files,
             self.facts,
@@ -1425,23 +1427,48 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
         Err(_) => ("missing", 0, 0, 0),
     };
 
-    let (sessions, messages, lcm_rows) = if let Some(db) =
-        crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await
-    {
-        let conn = db.dashboard_connection();
-        let counts = (
-            u64::from(table_has_rows(&conn, "sessions").await),
-            u64::from(table_has_rows(&conn, "session_messages").await),
-            u64::from(
-                table_has_rows(&conn, "lcm_raw_messages").await
-                    || table_has_rows(&conn, "lcm_summary_nodes").await,
-            ),
-        );
-        db.close();
-        counts
-    } else {
-        (0, 0, 0)
-    };
+    let session_presence: Result<(u64, u64, u64)> =
+        match crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await {
+            Some(db) => {
+                let conn = db.dashboard_connection();
+                let presence = async {
+                    let sessions = table_presence(&conn, "sessions").await?;
+                    let messages = table_presence(&conn, "session_messages").await?;
+                    let raw_lcm = table_presence(&conn, "lcm_raw_messages").await?;
+                    let summary_lcm = table_presence(&conn, "lcm_summary_nodes").await?;
+                    Ok((
+                        u64::from(sessions),
+                        u64::from(messages),
+                        u64::from(raw_lcm || summary_lcm),
+                    ))
+                }
+                .await;
+                db.close();
+                presence
+            }
+            None if layout.sessions_db_path.exists() => Err(TraceDecayError::Config {
+                message: "store session inventory is unreadable".to_string(),
+            }),
+            None => Ok((0, 0, 0)),
+        };
+
+    let branch_presence = branch_inventory(&layout.data_root);
+    let tree_presence: std::io::Result<(u64, u64, u64)> = (|| {
+        Ok((
+            u64::from(tree_has_files(&layout.dashboard_root)?),
+            u64::from(tree_has_files(&layout.lcm_payload_root)?),
+            u64::from(tree_has_files(&layout.response_handle_root)?),
+        ))
+    })();
+    let auxiliary_health =
+        if session_presence.is_ok() && branch_presence.is_ok() && tree_presence.is_ok() {
+            "healthy"
+        } else {
+            "unreadable"
+        };
+    let (sessions, messages, lcm_rows) = session_presence.unwrap_or((0, 0, 0));
+    let branches = branch_presence.unwrap_or(0);
+    let (automation_files, payload_files, response_files) = tree_presence.unwrap_or((0, 0, 0));
 
     StoreIdentityInventory {
         project_id: layout
@@ -1451,17 +1478,17 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
             .unwrap_or_else(|| "unknown".to_string()),
         data_root: layout.data_root.clone(),
         graph_health,
+        auxiliary_health,
         nodes,
         files,
         facts,
         sessions,
         messages,
         lcm_rows,
-        branches: branch_meta::load_branch_meta(&layout.data_root)
-            .map_or(0, |meta| meta.branches.len()),
-        automation_files: u64::from(tree_has_files(&layout.dashboard_root)),
-        payload_files: u64::from(tree_has_files(&layout.lcm_payload_root)),
-        response_files: u64::from(tree_has_files(&layout.response_handle_root)),
+        branches,
+        automation_files,
+        payload_files,
+        response_files,
     }
 }
 
@@ -1519,9 +1546,9 @@ async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) ->
     }
 
     branch_meta::load_branch_meta(&layout.data_root).is_some_and(|meta| meta.branches.len() > 1)
-        || tree_has_files(&layout.dashboard_root)
-        || tree_has_files(&layout.lcm_payload_root)
-        || tree_has_files(&layout.response_handle_root)
+        || tree_has_files(&layout.dashboard_root).unwrap_or(true)
+        || tree_has_files(&layout.lcm_payload_root).unwrap_or(true)
+        || tree_has_files(&layout.response_handle_root).unwrap_or(true)
 }
 
 async fn table_has_rows(connection: &libsql::Connection, table: &str) -> bool {
@@ -1535,22 +1562,42 @@ async fn table_presence(connection: &libsql::Connection, table: &str) -> Result<
     Ok(rows.next().await?.is_some())
 }
 
-fn tree_has_files(root: &Path) -> bool {
+fn branch_inventory(data_root: &Path) -> std::result::Result<usize, ()> {
+    let path = data_root.join(storage::BRANCH_META_FILENAME);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(_) => Err(()),
+        Ok(metadata) if metadata.file_type().is_file() => branch_meta::load_branch_meta(data_root)
+            .map(|meta| meta.branches.len())
+            .ok_or(()),
+        Ok(_) => Err(()),
+    }
+}
+
+fn tree_has_files(root: &Path) -> std::io::Result<bool> {
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(directory) else {
-            continue;
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
             match std::fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.is_file() => return true,
+                Ok(metadata) if metadata.is_file() => return Ok(true),
                 Ok(metadata) if metadata.is_dir() => pending.push(path),
-                _ => {}
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
         }
     }
-    false
+    Ok(false)
 }
 
 fn identity_cutover_conflict(
