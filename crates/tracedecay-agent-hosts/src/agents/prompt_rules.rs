@@ -31,8 +31,9 @@ const STANDARD_PARAGRAPHS: &[&str] = &[
      inspection, use the resolved graph DB path reported by `tracedecay_storage_status` \
      rather than a hardcoded repo-local path. Use SQL to answer complex structural \
      queries that go beyond what the built-in tools expose.",
-    "For durable project/user facts, prefer `tracedecay_fact_store`, \
-     `tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. \
+    "For durable project/user facts, use `tracedecay_fact_store_add` to persist them and \
+     `tracedecay_fact_store_search` to recall or deduplicate them; use \
+     `tracedecay_fact_feedback` and read-only `tracedecay_memory_status` over ad-hoc notes. \
      Use `memory_scope=user` for durable preferences or projectless chat and \
      `memory_scope=project` for active-codebase facts. \
      Use `tracedecay_message_search` for active-project transcript recall when \

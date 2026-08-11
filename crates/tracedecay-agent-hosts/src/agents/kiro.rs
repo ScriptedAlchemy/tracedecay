@@ -794,8 +794,9 @@ Do not use Kiro's `delegate` tool for codebase exploration, architecture mapping
 call graph work, symbol lookup, or other code research until tracedecay MCP tools \
 have been tried. Delegation is still appropriate for long-running execution work \
 such as builds, tests, generated reports, or independent implementation tasks.\n\n\
-For durable project/user facts, prefer `tracedecay_fact_store`, \
-`tracedecay_fact_feedback`, and `tracedecay_memory_status` over ad-hoc notes. Do not \
+For durable project/user facts, use `tracedecay_fact_store_add` to persist them and \
+`tracedecay_fact_store_search` to recall or deduplicate them; use \
+`tracedecay_fact_feedback` and read-only `tracedecay_memory_status` over ad-hoc notes. Do not \
 store secrets, credentials, or unnecessary PII in persistent facts. Use \
 `memory_scope=user` for durable preferences or projectless chat and \
 `memory_scope=project` for active-codebase facts.\n\n\

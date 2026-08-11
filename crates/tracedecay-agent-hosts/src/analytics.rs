@@ -97,7 +97,8 @@ pub fn is_skill_view_tool(raw: &str) -> bool {
 
 fn categorize_normalized_tool(normalized: &str, command_hint: Option<&str>) -> UsageCategory {
     if normalized.starts_with("tracedecay_memory")
-        || normalized == "tracedecay_fact_store"
+        || normalized.starts_with("tracedecay_fact_store_")
+        || normalized == "tracedecay_fact_feedback"
         || normalized == "tracedecay_memory_status"
     {
         return UsageCategory::Memory;
@@ -648,6 +649,22 @@ mod tests {
             "read",
             UsageCategory::BroadFileSearch,
         );
+    }
+
+    #[test]
+    fn classifies_exact_fact_memory_operations_as_memory() {
+        let events = infer_usage_events(
+            Some("tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_fact_feedback"),
+            None,
+            None,
+        );
+        for name in [
+            "tracedecay_fact_store_search",
+            "tracedecay_fact_store_add",
+            "tracedecay_fact_feedback",
+        ] {
+            assert_usage_event(&events, UsageKind::Tool, name, UsageCategory::Memory);
+        }
     }
 
     #[test]
