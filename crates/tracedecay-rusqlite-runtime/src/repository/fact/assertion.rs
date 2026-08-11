@@ -213,7 +213,7 @@ fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
     match kind {
         FactAssertionKindV1::Correction { supersedes } => vec![supersedes],
         FactAssertionKindV1::Merge { supersedes } => supersedes.iter().collect(),
-        FactAssertionKindV1::Initial | FactAssertionKindV1::LegacyImport => Vec::new(),
+        FactAssertionKindV1::Initial => Vec::new(),
     }
 }
 
