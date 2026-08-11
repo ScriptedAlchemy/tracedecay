@@ -254,6 +254,7 @@ fn topology_event_with(
 fn duplicate_event(
     sequence: u64,
     event_time_micros: i64,
+    adjudication_ref: &str,
     revision: u64,
     wall_micros: u64,
     anchor: &str,
@@ -263,7 +264,7 @@ fn duplicate_event(
         event_time_micros,
         &format!("trace.duplicate.{sequence}"),
         ObservabilityPayloadV1::WorkDuplicateEffort(WorkDuplicateEffortObservedV1 {
-            adjudication_ref: "receipt.duplicate.boundary".to_owned(),
+            adjudication_ref: adjudication_ref.to_owned(),
             adjudication_revision: revision,
             kind: DuplicateEffortKindV1::ExactDuplicate,
             wall_micros: Some(wall_micros),
@@ -596,22 +597,22 @@ fn late_conflict_leak_and_blocked_corrections_choose_highest_revision_across_day
     };
     assert_eq!(conflict(ExecutionConflictOutcomeV1::Conflict), Some(5.0));
     assert_eq!(conflict(ExecutionConflictOutcomeV1::NoConflict), None);
-    let leak = |outcome| {
-        find(
-            &merged,
-            "work_execution_leaks_total",
-            &[
-                ExecutionTopologyDimensionV1::LeakKind(
-                    ExecutionLeakKindV1::AttemptWithoutLiveOwner,
-                ),
-                ExecutionTopologyDimensionV1::LeakOutcome(outcome),
-            ],
-        )
-        .value
-        .value
-    };
-    assert_eq!(leak(ExecutionLeakOutcomeV1::Pending), Some(5.0));
-    assert_eq!(leak(ExecutionLeakOutcomeV1::Recovered), None);
+    let pending_dimensions = [
+        ExecutionTopologyDimensionV1::LeakKind(ExecutionLeakKindV1::AttemptWithoutLiveOwner),
+        ExecutionTopologyDimensionV1::LeakOutcome(ExecutionLeakOutcomeV1::Pending),
+    ];
+    let pending = find(&merged, "work_execution_leaks_total", &pending_dimensions);
+    assert_eq!(pending.value.value, Some(5.0));
+    assert_eq!(pending.value.coverage.eligible, Some(6));
+    assert_eq!(pending.value.coverage.unknown, 1);
+    let recovered_dimensions = [
+        ExecutionTopologyDimensionV1::LeakKind(ExecutionLeakKindV1::AttemptWithoutLiveOwner),
+        ExecutionTopologyDimensionV1::LeakOutcome(ExecutionLeakOutcomeV1::Recovered),
+    ];
+    assert!(merged.measurements.iter().all(|measurement| {
+        measurement.value.metric != "work_execution_leaks_total"
+            || measurement.dimensions != recovered_dimensions
+    }));
     let blocked = find(&merged, "work_blocked_wall_seconds", &[]);
     assert_eq!(blocked.value.value, Some(12.0));
     assert_eq!(blocked.value.coverage.eligible, Some(6));
@@ -735,17 +736,30 @@ fn arbitrary_partial_boundaries_merge_with_full_day_interior_without_changing_pr
 #[test]
 fn duplicate_corrections_round_trip_through_boundary_classification() {
     let requested = horizon(0, DAY_MICROS / 2);
+    let mut events = Vec::new();
+    for index in 0..5_u64 {
+        let reference = format!("receipt.duplicate.boundary.{index}");
+        events.push(duplicate_event(
+            430 + index * 2,
+            1_000_000 + index as i64,
+            &reference,
+            1,
+            10,
+            &format!("anchor.duplicate.origin.{index}"),
+        ));
+        events.push(duplicate_event(
+            431 + index * 2,
+            2_000_000 + index as i64,
+            &reference,
+            2,
+            20,
+            &format!("anchor.duplicate.correction.{index}"),
+        ));
+    }
     let boundary = build_execution_topology_boundary_fragment(
         SCOPE,
         &requested,
-        page(
-            vec![
-                duplicate_event(430, 1_000_000, 1, 10, "anchor.duplicate.origin"),
-                duplicate_event(431, 2_000_000, 2, 20, "anchor.duplicate.correction"),
-            ],
-            "duplicate-boundary",
-            CoverageStateV1::Known,
-        ),
+        page(events, "duplicate-boundary", CoverageStateV1::Known),
     )
     .expect("duplicate evidence serializes through the boundary fragment");
     let projected = project_execution_topology_fragments_with_boundaries(
@@ -768,9 +782,9 @@ fn duplicate_corrections_round_trip_through_boundary_classification() {
         ],
     );
     assert!(projected.current);
-    assert_eq!(duplicate_wall_micros.value.value, Some(20.0));
-    assert_eq!(duplicate_wall_micros.value.coverage.eligible, Some(1));
-    assert_eq!(duplicate_wall_micros.value.coverage.observed, 1);
+    assert_eq!(duplicate_wall_micros.value.value, Some(100.0));
+    assert_eq!(duplicate_wall_micros.value.coverage.eligible, Some(5));
+    assert_eq!(duplicate_wall_micros.value.coverage.observed, 5);
     assert_eq!(duplicate_wall_micros.value.coverage.unknown, 0);
 }
 #[test]
