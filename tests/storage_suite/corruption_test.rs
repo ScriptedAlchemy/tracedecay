@@ -565,6 +565,49 @@ async fn dirty_open_checks_integrity_before_writable_migration()
 }
 
 #[tokio::test]
+async fn dirty_open_rejects_zero_length_database_before_writable_initialization()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.close();
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&layout.graph_db_path)?;
+    let marker = b"pid=99999\nversion=test";
+    std::fs::write(&layout.dirty_path, marker)?;
+
+    let error = match TraceDecay::open_with_options(&project_root, open_options).await {
+        Ok(_) => panic!("a dirty zero-length database must require explicit recovery"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("database recovery required"),
+        "truncated stores must use the existing recovery-required path: {error}"
+    );
+    assert_eq!(
+        std::fs::metadata(&layout.graph_db_path)?.len(),
+        0,
+        "recovery detection must not initialize or migrate the truncated database"
+    );
+    assert_eq!(
+        std::fs::read(&layout.dirty_path)?,
+        marker,
+        "recovery evidence must remain until explicit repair"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn dirty_open_reuses_recovery_lock_for_migration_reindex()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;

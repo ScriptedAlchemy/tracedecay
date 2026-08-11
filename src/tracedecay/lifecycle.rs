@@ -433,6 +433,29 @@ impl TraceDecay {
         } else {
             None
         };
+        if crashed {
+            let invalid_recovery_set = match std::fs::metadata(&db_path) {
+                Ok(metadata) if metadata.len() > 0 => None,
+                Ok(_) => Some(
+                    "dirty database is zero-length; refusing writable initialization".to_string(),
+                ),
+                Err(error) => Some(format!(
+                    "failed to inspect dirty database before writable open: {error}"
+                )),
+            };
+            if let Some(detail) = invalid_recovery_set {
+                drop(recovery_lock);
+                return Self::recover_corrupt_branch_or_fail(
+                    project_root,
+                    open_options,
+                    &store_layout,
+                    &db_path,
+                    detail,
+                    repair_corrupt_branch,
+                )
+                .await;
+            }
+        }
 
         // Ordinary opens never replace database files. A daemon or another MCP
         // process may still hold the current DB/WAL/SHM inodes, and deleting
