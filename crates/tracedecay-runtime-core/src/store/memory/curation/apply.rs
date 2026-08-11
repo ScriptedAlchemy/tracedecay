@@ -1,223 +1,604 @@
-//! The curation apply entry point and the compatibility fact-merge path.
+//! Canonical tag curation and fact merge commands.
 
-use super::super::crud::{
-    compatibility_commit_batch_tx, compatibility_mirror_delete_tx, compatibility_mirror_update_tx,
-    compatibility_sanitize_payload, load_current_projection,
+use std::collections::BTreeSet;
+
+use serde_json::{Value, json};
+use tracedecay_domain::{
+    ActorId, FactAssertionId, FactAssertionKindV1, FactCurationActionV1, FactEventId, FactId,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
+    UtcMicros,
 };
+use tracedecay_store::{
+    FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
+    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1,
+    ProjectMemoryFactMergeOutcomeV1,
+};
+
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
+
+use super::super::crud::{commit_batch_tx, sanitize_payload};
 use super::super::envelope::{
     ProjectMemoryOperationReceiptV1, project_memory_digest,
     project_memory_lookup_operation_receipt_tx, project_memory_record_operation_receipt_tx,
-    project_memory_target_digest,
 };
 use super::super::primitives::{
-    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp, from_json,
-    project_memory_event_time, project_memory_now, project_memory_source_label, row_f64, row_i64,
-    row_string, storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_event_time, project_memory_now,
+    row_i64, row_optional_string, row_string, storage_error, storage_message,
 };
-use super::super::projection::{
-    project_memory_fact_for_legacy_id_tx, project_memory_required_mapping_tx,
-    project_memory_source_for_fact_tx, resolve_project_memory_target_tx,
-};
-use super::super::repair::{
-    COMPATIBILITY_REPAIR_VECTOR_BATCH, compatibility_repair_missing_vectors_tx,
-    compatibility_repair_vector_for_fact_tx,
-};
+use super::relations::normalize_tags;
 use super::{
-    project_memory_add_entity_alias_tx, project_memory_available_curation_fact_tx,
-    project_memory_curated_correction_batch, project_memory_curation_mappings_from_ids_tx,
-    project_memory_curation_operation_digest, project_memory_legacy_relation_provenance,
-    project_memory_link_facts_tx, project_memory_merge_entities_tx,
-    project_memory_normalize_tags_tx, project_memory_record_oplog_tx,
-    project_memory_replay_curation_tx, project_memory_upsert_legacy_relation_tx,
+    available_curation_fact_tx, curated_correction_batch, link_facts_tx, normalize_tags_tx,
 };
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
-use serde_json::{Value, json};
-use std::collections::BTreeSet;
-use tracedecay_domain::{
-    ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
-    FactLineageEventV1, FactOwnerV1, PayloadAccessState, UtcMicros,
-};
-use tracedecay_store::{
-    FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactCurationBatchV1,
-    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
-    ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1, ProjectMemoryFactMergeCommandV1,
-    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactRelationV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryResult,
-};
+
+fn fact_identity(target: &ProjectMemoryFactIdV1) -> Value {
+    json!({ "fact_id": target.fact_id().as_str() })
+}
+
+fn curation_operation_digest(operation: &ProjectMemoryFactCurationOperationV1) -> Value {
+    match operation {
+        ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => json!({
+            "kind": "normalize_tags",
+            "fact": fact_identity(operation.fact()),
+            "tags": operation.tags(),
+            "evidence": operation
+                .evidence_facts()
+                .iter()
+                .map(fact_identity)
+                .collect::<Vec<_>>(),
+            "confidence": operation.confidence().as_f64(),
+        }),
+        ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => json!({
+            "kind": "link_facts",
+            "relation": operation.relation(),
+        }),
+    }
+}
+
+fn canonical_fact_ids(
+    owner: &FactOwnerV1,
+    values: &[Value],
+    field: &'static str,
+) -> FactStoreResult<Vec<ProjectMemoryFactIdV1>> {
+    let mut facts = Vec::with_capacity(values.len());
+    let mut seen = BTreeSet::new();
+    for value in values {
+        let fact_id = value.as_str().ok_or_else(|| {
+            storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                format!("operation receipt {field} contains a non-string fact id"),
+            )
+        })?;
+        let fact_id = FactId::new(fact_id.to_owned())?;
+        if !seen.insert(fact_id.clone()) {
+            return Err(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                format!("operation receipt {field} contains duplicate fact ids"),
+            ));
+        }
+        facts.push(ProjectMemoryFactIdV1::new(owner.clone(), fact_id)?);
+    }
+    Ok(facts)
+}
+
+fn curation_receipt_value(receipt: &ProjectMemoryFactCurationReceiptV1) -> FactStoreResult<Value> {
+    serde_json::to_value(receipt)
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))
+}
+
+pub(super) fn curation_receipt_from_value(
+    value: &Value,
+) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
+    serde_json::from_value(value.clone())
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))
+}
+
+async fn replay_curation(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactCurationBatchV1,
+    envelope: &ProjectMemoryOperationReceiptV1,
+    input_digest: &str,
+) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
+    let receipt = curation_receipt_from_value(&envelope.receipt)?;
+    if receipt.owner() != request.owner()
+        || receipt.operation_id() != request.operation_id()
+        || receipt.input_digest() != input_digest
+        || envelope.fact_id.as_ref() != Some(receipt.replay_fact_id())
+        || envelope.event_id.as_ref() != Some(receipt.replay_event_id())
+    {
+        return Err(storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "curation operation receipt material does not match the request",
+        ));
+    }
+    let (changed, normalized_tags, facts_linked) = curation_receipt_material(request)?;
+    if receipt.changed_facts() != changed
+        || receipt.normalized_tags() != normalized_tags
+        || receipt.facts_linked() != facts_linked
+    {
+        return Err(storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "curation operation receipt summary does not match the immutable request",
+        ));
+    }
+    verify_curation_replay_events_tx(transaction, request, &receipt).await?;
+    Ok(receipt.into_replayed())
+}
+
+fn curation_receipt_material(
+    request: &ProjectMemoryFactCurationBatchV1,
+) -> FactStoreResult<(Vec<ProjectMemoryFactIdV1>, u64, u64)> {
+    let mut changed = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut normalized_tags = 0_u64;
+    let mut facts_linked = 0_u64;
+    for operation in request.operations() {
+        match operation {
+            ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
+                if seen.insert(operation.fact().fact_id().clone()) {
+                    changed.push(operation.fact().clone());
+                }
+                normalized_tags += 1;
+            }
+            ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
+                let relation = operation.relation();
+                for fact_id in [relation.source_fact_id(), relation.target_fact_id()] {
+                    if seen.insert(fact_id.clone()) {
+                        changed.push(ProjectMemoryFactIdV1::new(
+                            request.owner().clone(),
+                            fact_id.clone(),
+                        )?);
+                    }
+                }
+                facts_linked += 1;
+            }
+        }
+    }
+    Ok((changed, normalized_tags, facts_linked))
+}
+
+async fn verify_curation_replay_events_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactCurationBatchV1,
+    receipt: &ProjectMemoryFactCurationReceiptV1,
+) -> FactStoreResult<()> {
+    if receipt.commit_receipts().len() != request.operations().len() {
+        return Err(storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "curation commit receipt count does not match the immutable request",
+        ));
+    }
+    let key = OwnerKey::new(request.owner())?;
+    for (operation, commit) in request.operations().iter().zip(receipt.commit_receipts()) {
+        let (expected_fact_id, expected_event_count) = match operation {
+            ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
+                (operation.fact().fact_id(), 2_usize)
+            }
+            ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
+                (operation.relation().source_fact_id(), 1_usize)
+            }
+        };
+        if commit.owner() != request.owner()
+            || commit.fact_id() != expected_fact_id
+            || commit.committed_event_ids().len() != expected_event_count
+        {
+            return Err(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "curation commit receipt boundary does not match the immutable operation",
+            ));
+        }
+        let events = load_commit_events_tx(transaction, &key, commit).await?;
+        let last_sequence = events
+            .last()
+            .map(|(sequence, _)| *sequence)
+            .ok_or_else(|| {
+                storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "curation commit receipt has no canonical events",
+                )
+            })?;
+        if events.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+            || active_assertion_at_event_tx(
+                transaction,
+                &key,
+                request.owner(),
+                commit.fact_id(),
+                last_sequence,
+            )
+            .await?
+            .as_ref()
+                != commit.active_assertion_id()
+        {
+            return Err(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "curation commit receipt does not match canonical projection history",
+            ));
+        }
+        match (operation, events.as_slice()) {
+            (
+                ProjectMemoryFactCurationOperationV1::NormalizeTags(operation),
+                [(_, recorded), (_, normalized)],
+            ) => {
+                let mut expected_evidence_fact_ids = operation
+                    .evidence_facts()
+                    .iter()
+                    .map(|evidence| evidence.fact_id().clone())
+                    .collect::<Vec<_>>();
+                expected_evidence_fact_ids.sort_unstable();
+                let assertion_id = match recorded.kind() {
+                    FactLineageEventKindV1::AssertionRecorded { assertion_id }
+                        if Some(assertion_id) == commit.active_assertion_id() =>
+                    {
+                        assertion_id
+                    }
+                    _ => {
+                        return Err(storage_message(
+                            PROJECT_MEMORY_WRITE_OPERATION,
+                            "curation receipt is not bound to the committed normalization events",
+                        ));
+                    }
+                };
+                if recorded.fact_id() != operation.fact().fact_id()
+                    || normalized.fact_id() != operation.fact().fact_id()
+                    || recorded.actor_id() != request.actor()
+                    || normalized.actor_id() != request.actor()
+                    || recorded.occurred_at().0.checked_add(1) != Some(normalized.occurred_at().0)
+                    || !matches!(
+                        normalized.kind(),
+                        FactLineageEventKindV1::Curated {
+                            action: FactCurationActionV1::TagsNormalized {
+                                evidence_fact_ids,
+                                confidence,
+                            },
+                            evidence_ids,
+                        } if evidence_fact_ids == &expected_evidence_fact_ids
+                            && *confidence == operation.confidence()
+                            && evidence_ids.is_empty()
+                    )
+                {
+                    return Err(storage_message(
+                        PROJECT_MEMORY_WRITE_OPERATION,
+                        "curation receipt is not bound to the committed normalization events",
+                    ));
+                }
+                let payload = correction_assertion_payload_tx(
+                    transaction,
+                    &key,
+                    operation.fact().fact_id(),
+                    assertion_id,
+                    request.actor(),
+                    recorded.occurred_at(),
+                )
+                .await?;
+                if payload.tags() != normalize_tags(operation.tags()) {
+                    return Err(storage_message(
+                        PROJECT_MEMORY_WRITE_OPERATION,
+                        "curation correction payload tags do not match the immutable request",
+                    ));
+                }
+            }
+            (ProjectMemoryFactCurationOperationV1::LinkFacts(operation), [(_, event)]) => {
+                if event.fact_id() != operation.relation().source_fact_id()
+                    || event.actor_id() != request.actor()
+                    || !matches!(
+                        event.kind(),
+                        FactLineageEventKindV1::Curated {
+                            action: FactCurationActionV1::Linked { relation },
+                            evidence_ids,
+                        } if relation == operation.relation() && evidence_ids.is_empty()
+                    )
+                {
+                    return Err(storage_message(
+                        PROJECT_MEMORY_WRITE_OPERATION,
+                        "curation receipt is not bound to the committed relation event",
+                    ));
+                }
+            }
+            _ => {
+                return Err(storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "curation commit receipt event partition is malformed",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn load_commit_events_tx(
+    transaction: &Transaction<'_>,
+    owner: &OwnerKey,
+    receipt: &FactCommitReceipt,
+) -> FactStoreResult<Vec<(i64, FactLineageEventV1)>> {
+    let mut events = Vec::with_capacity(receipt.committed_event_ids().len());
+    for event_id in receipt.committed_event_ids() {
+        let mut rows = transaction
+            .query(
+                "SELECT fact_id, event_json, event_sequence
+                 FROM memory_v2_lineage_events
+                 WHERE owner_kind = ?1 AND project_id = ?2 AND event_id = ?3
+                 LIMIT 1",
+                params![owner.kind, owner.project_id.as_str(), event_id.as_str()],
+            )
+            .await
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+            .ok_or_else(|| {
+                storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "curation receipt references a missing canonical event",
+                )
+            })?;
+        let stored_fact_id = FactId::new(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)?;
+        let event = serde_json::from_str::<FactLineageEventV1>(&row_string(
+            &row,
+            1,
+            PROJECT_MEMORY_WRITE_OPERATION,
+        )?)
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+        if event.event_id() != event_id
+            || event.fact_id() != &stored_fact_id
+            || event.fact_id() != receipt.fact_id()
+            || event.owner() != receipt.owner()
+        {
+            return Err(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "curation receipt event does not match canonical storage",
+            ));
+        }
+        events.push((row_i64(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?, event));
+    }
+    Ok(events)
+}
+
+async fn active_assertion_at_event_tx(
+    transaction: &Transaction<'_>,
+    owner: &OwnerKey,
+    expected_owner: &FactOwnerV1,
+    fact_id: &FactId,
+    last_sequence: i64,
+) -> FactStoreResult<Option<FactAssertionId>> {
+    let mut rows = transaction
+        .query(
+            "SELECT event_json
+             FROM memory_v2_lineage_events
+             WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id = ?3
+               AND event_sequence <= ?4
+             ORDER BY event_sequence",
+            params![
+                owner.kind,
+                owner.project_id.as_str(),
+                fact_id.as_str(),
+                last_sequence,
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let mut active = None;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+    {
+        let event = serde_json::from_str::<FactLineageEventV1>(&row_string(
+            &row,
+            0,
+            PROJECT_MEMORY_WRITE_OPERATION,
+        )?)
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+        if event.owner() != expected_owner || event.fact_id() != fact_id {
+            return Err(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "curation projection history does not match canonical storage",
+            ));
+        }
+        match event.kind() {
+            FactLineageEventKindV1::AssertionRecorded { assertion_id } => {
+                active = Some(assertion_id.clone());
+            }
+            FactLineageEventKindV1::PayloadAccessChanged { current, .. }
+                if matches!(
+                    current,
+                    PayloadAccessState::Quarantined | PayloadAccessState::Deleted
+                ) =>
+            {
+                active = None;
+            }
+            _ => {}
+        }
+    }
+    Ok(active)
+}
+
+async fn correction_assertion_payload_tx(
+    transaction: &Transaction<'_>,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    assertion_id: &FactAssertionId,
+    actor: Option<&ActorId>,
+    asserted_at: UtcMicros,
+) -> FactStoreResult<FactPayloadV1> {
+    let mut rows = transaction
+        .query(
+            "SELECT assertions.kind_json, assertions.asserted_at, assertions.actor_id,
+                    payloads.payload_json
+             FROM memory_v2_assertions AS assertions
+             JOIN memory_v2_assertion_payloads AS payloads
+               ON payloads.assertion_id = assertions.assertion_id
+              AND payloads.fact_id = assertions.fact_id
+              AND payloads.owner_kind = assertions.owner_kind
+              AND payloads.project_id = assertions.project_id
+             WHERE assertions.assertion_id = ?1
+               AND assertions.fact_id = ?2
+               AND assertions.owner_kind = ?3
+               AND assertions.project_id = ?4
+               AND assertions.owner_json = ?5",
+            params![
+                assertion_id.as_str(),
+                fact_id.as_str(),
+                owner.kind,
+                owner.project_id.as_str(),
+                owner.json.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+        .ok_or_else(|| {
+            storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "curation correction assertion payload is missing",
+            )
+        })?;
+    let kind = serde_json::from_str::<FactAssertionKindV1>(&row_string(
+        &row,
+        0,
+        PROJECT_MEMORY_WRITE_OPERATION,
+    )?)
+    .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let stored_actor = row_optional_string(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?;
+    if !matches!(kind, FactAssertionKindV1::Correction { .. })
+        || row_i64(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)? != asserted_at.0
+        || stored_actor.as_deref() != actor.map(ActorId::as_str)
+    {
+        return Err(storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "curation correction assertion does not match its recorded event",
+        ));
+    }
+    let payload = serde_json::from_str::<FactPayloadV1>(&row_string(
+        &row,
+        3,
+        PROJECT_MEMORY_WRITE_OPERATION,
+    )?)
+    .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    Ok(payload)
+}
+
 pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactCurationBatchV1,
-) -> ProjectMemoryResult<ProjectMemoryFactCurationReceiptV1> {
-    let request_digest = project_memory_digest(json!({
+) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
+    let operations = request
+        .operations()
+        .iter()
+        .map(curation_operation_digest)
+        .collect::<Vec<_>>();
+    let input_digest = project_memory_digest(json!({
         "owner": request.owner(),
         "actor": request.actor().map(ActorId::as_str),
         "min_confidence": request.min_confidence().as_f64(),
-        "operations": request
-            .operations()
-            .iter()
-            .map(project_memory_curation_operation_digest)
-            .collect::<FactStoreResult<Vec<_>>>()?,
+        "operations": operations,
     }))?;
     if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
         "curation",
-        &request_digest,
+        &input_digest,
     )
     .await?
     {
-        return project_memory_replay_curation_tx(transaction, request.owner(), &receipt).await;
+        return replay_curation(transaction, request, &receipt, &input_digest).await;
     }
+
     let now = project_memory_now()?;
-    let mut changed = Vec::new();
+    let mut changed_ids = Vec::new();
+    let mut commits = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut normalized_tags = 0_u64;
-    let mut merged_entities = 0_u64;
-    let mut aliases_added = 0_u64;
     let mut facts_linked = 0_u64;
-    let mut vectors_repaired = 0_u64;
-    for operation in request.operations() {
+    for (index, operation) in request.operations().iter().enumerate() {
+        let offset = i64::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_mul(2))
+            .ok_or_else(|| {
+                storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "curation event timestamp offset overflowed",
+                )
+            })?;
+        let operation_time = project_memory_event_time(now, offset)?;
         match operation {
             ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
-                changed.push(
-                    project_memory_normalize_tags_tx(
-                        transaction,
-                        request.owner(),
-                        request.actor(),
-                        operation,
-                        now,
-                    )
-                    .await?,
-                );
-                normalized_tags = normalized_tags.saturating_add(1);
-            }
-            ProjectMemoryFactCurationOperationV1::MergeEntities(operation) => {
-                changed.extend(
-                    project_memory_merge_entities_tx(
-                        transaction,
-                        request.owner(),
-                        request.actor(),
-                        operation,
-                        now,
-                    )
-                    .await?,
-                );
-                merged_entities = merged_entities.saturating_add(1);
-            }
-            ProjectMemoryFactCurationOperationV1::AddAlias(operation) => {
-                changed.extend(
-                    project_memory_add_entity_alias_tx(
-                        transaction,
-                        request.owner(),
-                        operation,
-                        now,
-                    )
-                    .await?,
-                );
-                aliases_added = aliases_added.saturating_add(1);
-            }
-            ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
-                let (fact_ids, _) = project_memory_link_facts_tx(
+                let (fact_id, receipt) = normalize_tags_tx(
                     transaction,
                     request.owner(),
                     request.actor(),
                     operation,
-                    now,
+                    operation_time,
                 )
                 .await?;
-                changed.extend(fact_ids);
-                facts_linked = facts_linked.saturating_add(1);
+                if seen.insert(fact_id.clone()) {
+                    changed_ids.push(fact_id);
+                }
+                commits.push(receipt);
+                normalized_tags += 1;
             }
-            ProjectMemoryFactCurationOperationV1::RepairVector(operation) => {
-                changed.push(
-                    compatibility_repair_vector_for_fact_tx(
-                        transaction,
-                        request.owner(),
-                        operation,
-                        now,
-                    )
-                    .await?,
-                );
-                vectors_repaired = vectors_repaired.saturating_add(1);
+            ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
+                let (fact_ids, receipt) = link_facts_tx(
+                    transaction,
+                    request.owner(),
+                    request.actor(),
+                    operation,
+                    operation_time,
+                )
+                .await?;
+                for fact_id in fact_ids {
+                    if seen.insert(fact_id.clone()) {
+                        changed_ids.push(fact_id);
+                    }
+                }
+                commits.push(receipt);
+                facts_linked += 1;
             }
         }
     }
-    let missing_vectors_repaired = compatibility_repair_missing_vectors_tx(
-        transaction,
+    let changed = canonical_fact_ids(
         request.owner(),
-        COMPATIBILITY_REPAIR_VECTOR_BATCH,
-    )
-    .await?;
-    // Plan 39 Task 7 (owner decision 2026-08-07, second): the derived bank
-    // projection is deleted, so a curation pass never rebuilds bank rows.
-    let banks_rebuilt = 0_u64;
-    let mappings =
-        project_memory_curation_mappings_from_ids_tx(transaction, request.owner(), &changed)
-            .await?;
-    if mappings.len() > 256 {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility curation changes exceed the fixed 256-fact receipt bound",
-        )
-        .into());
-    }
-    let receipt = json!({
-        "changed_fact_ids": mappings.iter().map(|mapping| mapping.fact_id().as_str()).collect::<Vec<_>>(),
-        "normalized_tags": normalized_tags,
-        "merged_entities": merged_entities,
-        "aliases_added": aliases_added,
-        "facts_linked": facts_linked,
-        "vectors_repaired": vectors_repaired,
-        "missing_vectors_repaired": missing_vectors_repaired,
-        "banks_rebuilt": banks_rebuilt,
-    });
+        &changed_ids
+            .iter()
+            .map(|fact_id| Value::String(fact_id.as_str().to_owned()))
+            .collect::<Vec<_>>(),
+        "changed_fact_ids",
+    )?;
+    let receipt = ProjectMemoryFactCurationReceiptV1::new(
+        request.owner().clone(),
+        request.operation_id().clone(),
+        input_digest.clone(),
+        commits,
+        changed,
+        normalized_tags,
+        facts_linked,
+    )?;
+    let durable_receipt = curation_receipt_value(&receipt)?;
     project_memory_record_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
         "curation",
-        &request_digest,
-        None,
-        None,
-        &receipt,
+        &input_digest,
+        Some(receipt.replay_fact_id()),
+        Some(receipt.replay_event_id()),
+        &durable_receipt,
         now,
     )
     .await?;
-    if let Some(mapping) = mappings.first() {
-        project_memory_record_oplog_tx(
-            transaction,
-            "curate_apply",
-            Some(mapping),
-            &json!({
-                "normalized_tags": normalized_tags,
-                "merged_entities": merged_entities,
-                "aliases_added": aliases_added,
-                "facts_linked": facts_linked,
-                "vectors_repaired": vectors_repaired,
-            }),
-            now,
-        )
-        .await?;
-    }
-    ProjectMemoryFactCurationReceiptV1::new(
-        request.owner().clone(),
-        mappings,
-        normalized_tags,
-        merged_entities,
-        aliases_added,
-        facts_linked,
-        vectors_repaired,
-        ProjectMemoryMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt),
-    )
-    .map_err(Into::into)
+    Ok(receipt)
 }
 
-fn project_memory_merge_removal_batch(
-    owner: &FactOwnerV1,
+fn merge_removal_batch(
     fact_id: &FactId,
+    owner: &FactOwnerV1,
     previous: PayloadAccessState,
-    expected_last_event_id: Option<FactEventId>,
+    expected_last_event_id: &FactEventId,
     winner: &FactId,
     actor: Option<ActorId>,
     now: UtcMicros,
@@ -251,377 +632,168 @@ fn project_memory_merge_removal_batch(
         vec![curated, deleted],
         Vec::new(),
         Vec::new(),
-        None,
-        expected_last_event_id,
+        Some(expected_last_event_id.clone()),
     )
 }
 
-async fn project_memory_replay_merge_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    receipt: &ProjectMemoryOperationReceiptV1,
-) -> ProjectMemoryResult<ProjectMemoryFactMergeOutcomeV1> {
-    let winner_id = receipt.fact_id.as_ref().ok_or_else(|| {
-        storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility merge receipt winner is missing",
-        )
-    })?;
-    let winner = project_memory_curation_mappings_from_ids_tx(
-        transaction,
-        owner,
-        std::slice::from_ref(winner_id),
-    )
-    .await?
-    .into_iter()
-    .next()
-    .ok_or_else(|| {
-        storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility merge receipt winner mapping is missing",
-        )
-    })?;
-    let deleted_ids = receipt
-        .receipt
-        .get("deleted_loser_fact_ids")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility merge receipt deleted losers are malformed",
-            )
-        })?;
-    let mut ids = Vec::with_capacity(deleted_ids.len());
-    for id in deleted_ids {
-        ids.push(
-            FactId::new(id.as_str().ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility merge receipt loser id is malformed",
-                )
-            })?)
-            .map_err(FactStoreError::from)?,
-        );
-    }
-    // The original merge already retired each loser's fixed legacy mapping;
-    // at replay time only the canonical identity survives, so the replayed
-    // outcome carries the mapping in its retired shape (no legacy binding)
-    // rather than demanding a projection row the deletion removed.
-    let mut deleted_losers = Vec::with_capacity(ids.len());
-    for fact_id in &ids {
-        deleted_losers.push(ProjectMemoryFactMappingV1::new(
-            ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
-            None,
-        )?);
-    }
-    let content_updated = receipt
-        .receipt
-        .get("content_updated")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility merge receipt content flag is malformed",
-            )
-        })?;
-    ProjectMemoryFactMergeOutcomeV1::new(owner.clone(), winner, content_updated, deleted_losers)
-        .map_err(Into::into)
+fn merge_outcome_value(outcome: &ProjectMemoryFactMergeOutcomeV1) -> FactStoreResult<Value> {
+    serde_json::to_value(outcome)
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))
 }
 
-async fn project_memory_rewire_merge_relations_tx(
+fn merge_outcome_from_value(value: &Value) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
+    serde_json::from_value(value.clone())
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))
+}
+
+async fn verified_merge_commit_events_tx(
     transaction: &Transaction<'_>,
+    key: &OwnerKey,
     owner: &FactOwnerV1,
-    winner_fact_id: &FactId,
-    winner_legacy_fact_id: i64,
-    loser_fact_ids: &[FactId],
-    loser_legacy_fact_ids: &[i64],
-    now: UtcMicros,
-) -> FactStoreResult<()> {
-    if loser_fact_ids.is_empty() {
-        return Ok(());
-    }
-    let legacy_placeholders = std::iter::repeat_n("?", loser_legacy_fact_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let legacy_sql = format!(
-        "SELECT source_fact_id, target_fact_id, relation, confidence, source, metadata
-         FROM memory_fact_relations
-         WHERE source_fact_id IN ({legacy_placeholders})
-            OR target_fact_id IN ({legacy_placeholders})
-         ORDER BY source_fact_id ASC, target_fact_id ASC, relation ASC
-         LIMIT 257"
-    );
-    let mut legacy_values = Vec::with_capacity(loser_legacy_fact_ids.len() * 2);
-    legacy_values.extend(
-        loser_legacy_fact_ids
-            .iter()
-            .copied()
-            .map(crate::db::engine::Value::Integer),
-    );
-    legacy_values.extend(
-        loser_legacy_fact_ids
-            .iter()
-            .copied()
-            .map(crate::db::engine::Value::Integer),
-    );
-    let mut legacy_rows = transaction
-        .query(&legacy_sql, legacy_values)
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let mut legacy_relations = Vec::new();
-    while let Some(row) = legacy_rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+    commit: &FactCommitReceipt,
+) -> FactStoreResult<Vec<(i64, FactLineageEventV1)>> {
+    let events = load_commit_events_tx(transaction, key, commit).await?;
+    let last_sequence = events
+        .last()
+        .map(|(sequence, _)| *sequence)
+        .ok_or_else(|| {
+            storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "merge commit receipt has no canonical events",
+            )
+        })?;
+    if events.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        || active_assertion_at_event_tx(transaction, key, owner, commit.fact_id(), last_sequence)
+            .await?
+            .as_ref()
+            != commit.active_assertion_id()
     {
-        legacy_relations.push((
-            row_i64(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?,
-            row_i64(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?,
-            row_string(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?,
-            Confidence::new(row_f64(&row, 3, PROJECT_MEMORY_WRITE_OPERATION)?)?,
-            row_string(&row, 4, PROJECT_MEMORY_WRITE_OPERATION)?,
-            from_json::<Value>(
-                &row_string(&row, 5, PROJECT_MEMORY_WRITE_OPERATION)?,
-                PROJECT_MEMORY_WRITE_OPERATION,
-            )?,
-        ));
-    }
-    drop(legacy_rows);
-    if legacy_relations.len() > 256 {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility merge relation rewiring exceeds the fixed 256-relation bound",
+            "merge commit receipt does not match canonical projection history",
         ));
     }
-    let loser_legacy = loser_legacy_fact_ids
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-    for (source, target, _, _, _, _) in &legacy_relations {
-        for endpoint in [source, target] {
-            if project_memory_fact_for_legacy_id_tx(transaction, owner, *endpoint)
-                .await?
-                .is_none()
-            {
-                return Err(storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility merge relation crosses an owner boundary",
-                ));
-            }
-        }
-    }
-    transaction
-        .execute(
-            &format!(
-                "DELETE FROM memory_fact_relations
-                 WHERE source_fact_id IN ({legacy_placeholders})
-                    OR target_fact_id IN ({legacy_placeholders})"
-            ),
-            {
-                let mut values = Vec::with_capacity(loser_legacy_fact_ids.len() * 2);
-                values.extend(
-                    loser_legacy_fact_ids
-                        .iter()
-                        .copied()
-                        .map(crate::db::engine::Value::Integer),
-                );
-                values.extend(
-                    loser_legacy_fact_ids
-                        .iter()
-                        .copied()
-                        .map(crate::db::engine::Value::Integer),
-                );
-                values
-            },
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    for (source, target, relation, confidence, source_label, metadata) in legacy_relations {
-        let source = if loser_legacy.contains(&source) {
-            winner_legacy_fact_id
-        } else {
-            source
-        };
-        let target = if loser_legacy.contains(&target) {
-            winner_legacy_fact_id
-        } else {
-            target
-        };
-        if source == target {
-            continue;
-        }
-        let relation = match relation.as_str() {
-            "supports" => ProjectMemoryFactRelationV1::Supports,
-            "contradicts" => ProjectMemoryFactRelationV1::Contradicts,
-            "supersedes" => ProjectMemoryFactRelationV1::Supersedes,
-            "derived_from" => ProjectMemoryFactRelationV1::DerivedFrom,
+    Ok(events)
+}
+
+async fn verify_merge_replay_events_tx(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactMergeCommandV1,
+    outcome: &ProjectMemoryFactMergeOutcomeV1,
+) -> FactStoreResult<()> {
+    let key = OwnerKey::new(request.owner())?;
+    let mut commits = outcome.commit_receipts().iter();
+    if request.merged_content().is_some() {
+        let commit = commits.next().ok_or_else(|| {
+            storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "merge winner commit receipt is missing",
+            )
+        })?;
+        let events =
+            verified_merge_commit_events_tx(transaction, &key, request.owner(), commit).await?;
+        match events.as_slice() {
+            [(_, recorded), (_, retained)]
+                if recorded.fact_id() == request.winner().fact_id()
+                    && retained.fact_id() == request.winner().fact_id()
+                    && recorded.actor_id() == request.actor()
+                    && retained.actor_id() == request.actor()
+                    && matches!(
+                        recorded.kind(),
+                        FactLineageEventKindV1::AssertionRecorded { assertion_id }
+                            if Some(assertion_id) == commit.active_assertion_id()
+                    )
+                    && matches!(
+                        retained.kind(),
+                        FactLineageEventKindV1::Curated {
+                            action: FactCurationActionV1::Retained,
+                            evidence_ids,
+                        } if evidence_ids.is_empty()
+                    ) => {}
             _ => {
                 return Err(storage_message(
                     PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility merge found an unsupported legacy relation",
+                    "merge winner receipt is not bound to its canonical correction events",
                 ));
             }
-        };
-        project_memory_upsert_legacy_relation_tx(
-            transaction,
-            source,
-            target,
-            relation,
-            confidence,
-            &project_memory_source_label(Some(&source_label))?,
-            &project_memory_legacy_relation_provenance(&metadata).await?,
-            compatibility_legacy_timestamp(now),
-        )
-        .await?;
+        }
     }
-
-    let key = OwnerKey::new(owner)?;
-    let canonical_placeholders = std::iter::repeat_n("?", loser_fact_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let canonical_sql = format!(
-        "SELECT source_fact_id, target_fact_id, relation, confidence, source_label,
-                provenance_json, evidence_fact_ids_json, occurred_at
-         FROM memory_v2_fact_relations
-         WHERE owner_kind = ? AND project_id = ?
-           AND (source_fact_id IN ({canonical_placeholders})
-                OR target_fact_id IN ({canonical_placeholders}))
-         ORDER BY source_fact_id ASC, target_fact_id ASC, relation ASC
-         LIMIT 257"
-    );
-    let mut canonical_values = Vec::with_capacity(loser_fact_ids.len() * 2 + 2);
-    canonical_values.push(crate::db::engine::Value::Text(key.kind.to_string()));
-    canonical_values.push(crate::db::engine::Value::Text(key.project_id.clone()));
-    for _ in 0..2 {
-        canonical_values.extend(
-            loser_fact_ids
-                .iter()
-                .map(|fact_id| crate::db::engine::Value::Text(fact_id.as_str().to_owned())),
-        );
+    for (loser, commit) in request.losers().iter().zip(commits.by_ref()) {
+        let events =
+            verified_merge_commit_events_tx(transaction, &key, request.owner(), commit).await?;
+        match events.as_slice() {
+            [(_, merged), (_, deleted)]
+                if merged.fact_id() == loser.fact_id()
+                    && deleted.fact_id() == loser.fact_id()
+                    && merged.actor_id() == request.actor()
+                    && deleted.actor_id() == request.actor()
+                    && matches!(
+                        merged.kind(),
+                        FactLineageEventKindV1::Curated {
+                            action: FactCurationActionV1::MergedInto { fact_id },
+                            evidence_ids,
+                        } if fact_id == request.winner().fact_id() && evidence_ids.is_empty()
+                    )
+                    && matches!(
+                        deleted.kind(),
+                        FactLineageEventKindV1::PayloadAccessChanged {
+                            previous,
+                            current: PayloadAccessState::Deleted,
+                        } if previous != &PayloadAccessState::Deleted
+                    ) => {}
+            _ => {
+                return Err(storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "merge loser receipt is not bound to its canonical removal events",
+                ));
+            }
+        }
     }
-    let mut canonical_rows = transaction
-        .query(&canonical_sql, canonical_values)
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let mut canonical_relations = Vec::new();
-    while let Some(row) = canonical_rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-    {
-        canonical_relations.push((
-            FactId::new(row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?)?,
-            FactId::new(row_string(&row, 1, PROJECT_MEMORY_WRITE_OPERATION)?)?,
-            row_string(&row, 2, PROJECT_MEMORY_WRITE_OPERATION)?,
-            Confidence::new(row_f64(&row, 3, PROJECT_MEMORY_WRITE_OPERATION)?)?,
-            row_string(&row, 4, PROJECT_MEMORY_WRITE_OPERATION)?,
-            row_string(&row, 5, PROJECT_MEMORY_WRITE_OPERATION)?,
-            row_string(&row, 6, PROJECT_MEMORY_WRITE_OPERATION)?,
-            row_i64(&row, 7, PROJECT_MEMORY_WRITE_OPERATION)?,
-        ));
-    }
-    drop(canonical_rows);
-    if canonical_relations.len() > 256 {
+    if commits.next().is_some() {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "canonical merge relation rewiring exceeds the fixed 256-relation bound",
+            "merge receipt contains excess canonical commits",
         ));
     }
-    let loser_canonical = loser_fact_ids.iter().cloned().collect::<BTreeSet<_>>();
-    transaction
-        .execute(
-            &format!(
-                "DELETE FROM memory_v2_fact_relations
-                 WHERE owner_kind = ? AND project_id = ?
-                   AND (source_fact_id IN ({canonical_placeholders})
-                        OR target_fact_id IN ({canonical_placeholders}))"
-            ),
-            {
-                let mut values = Vec::with_capacity(loser_fact_ids.len() * 2 + 2);
-                values.push(crate::db::engine::Value::Text(key.kind.to_string()));
-                values.push(crate::db::engine::Value::Text(key.project_id.clone()));
-                for _ in 0..2 {
-                    values.extend(loser_fact_ids.iter().map(|fact_id| {
-                        crate::db::engine::Value::Text(fact_id.as_str().to_owned())
-                    }));
-                }
-                values
-            },
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    for (
-        source,
-        target,
-        relation,
-        confidence,
-        source_label,
-        provenance_json,
-        evidence_json,
-        occurred_at,
-    ) in canonical_relations
-    {
-        let source = if loser_canonical.contains(&source) {
-            winner_fact_id
-        } else {
-            &source
-        };
-        let target = if loser_canonical.contains(&target) {
-            winner_fact_id
-        } else {
-            &target
-        };
-        if source == target {
-            continue;
-        }
-        transaction
-            .execute(
-                "INSERT INTO memory_v2_fact_relations(
-                    owner_kind, project_id, source_fact_id, target_fact_id, relation,
-                    confidence, source_label, provenance_json, evidence_fact_ids_json,
-                    occurred_at, updated_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                 ON CONFLICT(owner_kind, project_id, source_fact_id, target_fact_id, relation)
-                 DO UPDATE SET confidence = excluded.confidence,
-                               source_label = excluded.source_label,
-                               provenance_json = excluded.provenance_json,
-                               evidence_fact_ids_json = excluded.evidence_fact_ids_json,
-                               updated_at = excluded.updated_at",
-                params![
-                    key.kind,
-                    key.project_id.as_str(),
-                    source.as_str(),
-                    target.as_str(),
-                    relation,
-                    confidence.as_f64(),
-                    project_memory_source_label(Some(&source_label))?,
-                    provenance_json,
-                    evidence_json,
-                    occurred_at,
-                    now.0,
-                ],
-            )
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    }
     Ok(())
+}
+
+async fn replay_merge(
+    transaction: &Transaction<'_>,
+    request: &ProjectMemoryFactMergeCommandV1,
+    envelope: &ProjectMemoryOperationReceiptV1,
+    input_digest: &str,
+) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
+    let outcome = merge_outcome_from_value(&envelope.receipt)?;
+    let first_commit = outcome.commit_receipts().first().ok_or_else(|| {
+        storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "merge receipt has no canonical commit",
+        )
+    })?;
+    if outcome.owner() != request.owner()
+        || outcome.operation_id() != request.operation_id()
+        || outcome.input_digest() != input_digest
+        || outcome.winner() != request.winner()
+        || outcome.deleted_losers() != request.losers()
+        || outcome.content_updated() != request.merged_content().is_some()
+        || envelope.fact_id.as_ref() != Some(first_commit.fact_id())
+        || envelope.event_id.as_ref() != Some(first_commit.last_event_id())
+    {
+        return Err(storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "merge operation receipt material does not match the immutable request",
+        ));
+    }
+    verify_merge_replay_events_tx(transaction, request, &outcome).await?;
+    Ok(outcome.into_replayed())
 }
 
 pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactMergeCommandV1,
-) -> ProjectMemoryResult<ProjectMemoryFactMergeOutcomeV1> {
-    let request_digest = project_memory_digest(json!({
-        "owner": request.owner(),
-        "winner": project_memory_target_digest(request.winner())?,
-        "losers": request
-            .losers()
-            .iter()
-            .map(project_memory_target_digest)
-            .collect::<FactStoreResult<Vec<_>>>()?,
-        "merged_content": request.merged_content(),
-        "actor": request.actor().map(ActorId::as_str),
-    }))?;
+) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
+    let request_digest = request.input_digest()?;
     if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
@@ -631,189 +803,91 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
     )
     .await?
     {
-        return project_memory_replay_merge_tx(transaction, request.owner(), &receipt).await;
+        return replay_merge(transaction, request, &receipt, &request_digest).await;
     }
+
     let now = project_memory_now()?;
-    let (winner_id, winner_fact, winner_mapping) =
-        project_memory_available_curation_fact_tx(transaction, request.winner()).await?;
-    let mut content_updated = false;
-    if let Some(content) = request.merged_content() {
+    let winner_fact = available_curation_fact_tx(transaction, request.winner()).await?;
+    let mut commits = Vec::new();
+    let content_updated = if let Some(content) = request.merged_content() {
         let payload = winner_fact
             .payload()
             .ok_or(FactStoreError::PayloadAccessMismatch)?;
-        let Some(sanitized) = compatibility_sanitize_payload(
+        let Some(sanitized) = sanitize_payload(
             content,
             payload.category(),
             payload.tags(),
             payload.entities(),
             payload.metadata(),
+            payload.source_label(),
         )?
         else {
             return Err(storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility merged content was rejected by the privacy sanitizer",
-            )
-            .into());
+                "merged content was rejected by the privacy sanitizer",
+            ));
         };
-        let source = project_memory_source_for_fact_tx(
-            transaction,
-            winner_mapping
-                .legacy_mapping()
-                .ok_or(FactStoreError::FactMismatch)?,
-        )
-        .await?;
-        let batch = project_memory_curated_correction_batch(
+        let batch = curated_correction_batch(
             &winner_fact,
-            sanitized.payload.clone(),
+            sanitized.payload,
             request.actor().cloned(),
             now,
         )?;
-        compatibility_commit_batch_tx(transaction, &batch).await?;
-        compatibility_mirror_update_tx(
-            transaction,
-            winner_mapping
-                .legacy_fact_id()
-                .ok_or(FactStoreError::FactMismatch)?,
-            &sanitized.payload,
-            &source,
-            winner_fact.trust(),
-            now,
-        )
-        .await?;
-        content_updated = true;
-    }
-    let owner_key = OwnerKey::new(request.owner())?;
-    let mut loser_ids = Vec::with_capacity(request.losers().len());
-    let mut loser_legacy_ids = Vec::with_capacity(request.losers().len());
-    let mut pending_deletes = Vec::with_capacity(request.losers().len());
+        commits.push(commit_batch_tx(transaction, &batch).await?.0);
+        true
+    } else {
+        false
+    };
+
+    let mut deleted_losers = Vec::with_capacity(request.losers().len());
     for target in request.losers() {
-        let loser_id = resolve_project_memory_target_tx(transaction, target)
-            .await?
-            .ok_or_else(|| {
-                let loser_label = target
-                    .legacy_query()
-                    .map(|query| query.legacy_fact_id().to_string())
-                    .or_else(|| {
-                        target
-                            .canonical_fact_id()
-                            .map(|fact_id| fact_id.as_str().to_string())
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    format!("compatibility merge loser fact {loser_label} not found"),
-                )
-            })?;
-        if loser_id == winner_id {
+        let loser = available_curation_fact_tx(transaction, target).await?;
+        if loser.fact_id() == winner_fact.fact_id() {
             return Err(storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility merge winner cannot be a loser",
-            )
-            .into());
-        }
-        let projection = load_current_projection(transaction, &owner_key, &loser_id)
-            .await?
-            .ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility merge loser projection is missing",
-                )
-            })?;
-        let mapping =
-            project_memory_required_mapping_tx(transaction, request.owner(), &loser_id).await?;
-        loser_ids.push(loser_id.clone());
-        loser_legacy_ids.push(mapping.legacy_fact_id());
-        if projection.access != PayloadAccessState::Deleted {
-            pending_deletes.push((
-                loser_id,
-                projection.access,
-                projection.last_event_id.clone(),
-                mapping,
+                "merge winner cannot also be a loser",
             ));
         }
-    }
-    project_memory_rewire_merge_relations_tx(
-        transaction,
-        request.owner(),
-        &winner_id,
-        winner_mapping
-            .legacy_fact_id()
-            .ok_or(FactStoreError::FactMismatch)?,
-        &loser_ids,
-        &loser_legacy_ids,
-        now,
-    )
-    .await?;
-    let mut deleted_ids = Vec::new();
-    let mut deleted_losers = Vec::new();
-    for (loser_id, previous_access, expected_last_event_id, mapping) in pending_deletes {
-        let batch = project_memory_merge_removal_batch(
+        let batch = merge_removal_batch(
+            loser.fact_id(),
             request.owner(),
-            &loser_id,
-            previous_access,
-            expected_last_event_id,
-            &winner_id,
+            loser.payload_access(),
+            loser.last_event_id(),
+            winner_fact.fact_id(),
             request.actor().cloned(),
             now,
         )?;
-        compatibility_commit_batch_tx(transaction, &batch).await?;
-        compatibility_mirror_delete_tx(transaction, mapping.legacy_fact_id()).await?;
-        // The mirror delete just retired this loser's fixed legacy mapping;
-        // the merge outcome carries the mapping captured before the deletion
-        // (the only remaining witness of the legacy binding) instead of
-        // re-querying a row that no longer exists.
-        deleted_losers.push(ProjectMemoryFactMappingV1::new(
-            ProjectMemoryFactIdV1::new(request.owner().clone(), loser_id.clone())?,
-            Some(mapping),
-        )?);
-        deleted_ids.push(loser_id);
+        commits.push(commit_batch_tx(transaction, &batch).await?.0);
+        deleted_losers.push(target.clone());
     }
-    let winner = project_memory_curation_mappings_from_ids_tx(
-        transaction,
-        request.owner(),
-        std::slice::from_ref(&winner_id),
-    )
-    .await?
-    .into_iter()
-    .next()
-    .ok_or_else(|| {
+
+    let outcome = ProjectMemoryFactMergeOutcomeV1::new(
+        request.owner().clone(),
+        request.operation_id().clone(),
+        request_digest.clone(),
+        request.winner().clone(),
+        content_updated,
+        deleted_losers,
+        commits,
+    )?;
+    let durable_receipt = merge_outcome_value(&outcome)?;
+    let first_commit = outcome.commit_receipts().first().ok_or_else(|| {
         storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility merge winner mapping is missing",
+            "merge outcome has no canonical commit",
         )
     })?;
-    let receipt = json!({
-        "content_updated": content_updated,
-        "deleted_loser_fact_ids": deleted_ids.iter().map(FactId::as_str).collect::<Vec<_>>(),
-    });
     project_memory_record_operation_receipt_tx(
         transaction,
         request.owner(),
         request.operation_id(),
         "merge",
         &request_digest,
-        Some(&winner_id),
-        None,
-        &receipt,
+        Some(first_commit.fact_id()),
+        Some(first_commit.last_event_id()),
+        &durable_receipt,
         now,
     )
     .await?;
-    project_memory_record_oplog_tx(
-        transaction,
-        "curate_apply",
-        Some(&winner),
-        &json!({
-            "merged_fact_count": deleted_losers.len(),
-            "content_updated": content_updated,
-        }),
-        now,
-    )
-    .await?;
-    ProjectMemoryFactMergeOutcomeV1::new(
-        request.owner().clone(),
-        winner,
-        content_updated,
-        deleted_losers,
-    )
-    .map_err(Into::into)
+    Ok(outcome)
 }

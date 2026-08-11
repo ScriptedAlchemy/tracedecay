@@ -132,7 +132,9 @@ pub(super) fn validate_operation_component(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use tracedecay_domain::{ActorId, FactOwnerV1};
+
+    use super::MemoryOperationContext;
 
     #[test]
     fn request_identity_digest_matches_canonical_framed_sha256() {
@@ -182,5 +184,59 @@ mod tests {
                 .as_str()
                 .starts_with("memory-operation.effect.")
         );
+    }
+
+    #[test]
+    fn actor_is_request_material_not_operation_identity() {
+        let first_actor = ActorId::new("actor.memory.first").unwrap();
+        let second_actor = ActorId::new("actor.memory.second").unwrap();
+        let logical_effect = serde_json::json!({"content": "same fact"});
+        let logical_first = MemoryOperationContext::from_logical_effect(
+            &FactOwnerV1::Profile,
+            "add",
+            &logical_effect,
+            Some(first_actor.clone()),
+        )
+        .unwrap();
+        let logical_replay = MemoryOperationContext::from_logical_effect(
+            &FactOwnerV1::Profile,
+            "add",
+            &logical_effect,
+            Some(first_actor.clone()),
+        )
+        .unwrap();
+        let logical_other_actor = MemoryOperationContext::from_logical_effect(
+            &FactOwnerV1::Profile,
+            "add",
+            &logical_effect,
+            Some(second_actor.clone()),
+        )
+        .unwrap();
+        let request_first = MemoryOperationContext::from_request_id(
+            &FactOwnerV1::Profile,
+            "add",
+            "request.memory.actor",
+            Some(first_actor),
+        )
+        .unwrap();
+        let request_other_actor = MemoryOperationContext::from_request_id(
+            &FactOwnerV1::Profile,
+            "add",
+            "request.memory.actor",
+            Some(second_actor),
+        )
+        .unwrap();
+
+        assert_eq!(logical_first.operation_id(), logical_replay.operation_id());
+        assert_eq!(
+            logical_first.operation_id(),
+            logical_other_actor.operation_id()
+        );
+        assert_eq!(
+            request_first.operation_id(),
+            request_other_actor.operation_id()
+        );
+        assert_ne!(logical_first.actor(), logical_other_actor.actor());
+        assert_ne!(request_first.actor(), request_other_actor.actor());
     }
 }

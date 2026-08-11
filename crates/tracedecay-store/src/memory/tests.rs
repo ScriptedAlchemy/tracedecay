@@ -1,17 +1,20 @@
 use serde_json::json;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV2, AnchorProvenanceRelationV2,
-    AnchorSourceGenerationV2, CapabilityId, ComponentVersion, CoverageReportV1, EntityId,
-    EntityKind, EntityRef, EvidenceClass, FactAssertionKindV1, FactCategoryV1, FactEvidenceRefV1,
-    FactEvidenceRelationV1, FactIdentityMaterialV1, FactIdentitySourceV1, ObservationScopeV1,
-    PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId,
-    ProvenanceId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2Parts,
+    AccessPolicyDigest, ActorId, AnchorDurabilityClass, AnchorLineageRefV2,
+    AnchorProvenanceRelationV2, AnchorSourceGenerationV2, CapabilityId, ComponentVersion,
+    CoverageReportV1, EntityId, EntityKind, EntityRef, EvidenceClass, FactAssertionKindV1,
+    FactCategoryV1, FactCurationActionV1, FactEvidenceRefV1, FactEvidenceRelationV1,
+    FactIdentityMaterialV1, FactIdentitySourceV1, ObservationScopeV1, PayloadReferenceV1,
+    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId, ProvenanceId,
+    ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2Parts,
     RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
     SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1,
     VectorWatermark,
 };
 
 use super::*;
+
+mod add_material;
 
 fn id<T>(value: &str) -> T
 where
@@ -33,14 +36,34 @@ fn fact_id(owner: FactOwnerV1, operation: &str) -> FactId {
     .unwrap()
 }
 
+#[test]
+fn fact_read_control_observes_live_interruption_state() {
+    let interrupted = std::sync::Arc::new(std::sync::RwLock::new(false));
+    let observed = std::sync::Arc::clone(&interrupted);
+    let control = FactReadControl::new(std::sync::Arc::new(move || {
+        *observed.read().expect("read interruption fixture")
+    }));
+
+    assert!(!control.interrupted());
+    *interrupted.write().expect("write interruption fixture") = true;
+    assert!(control.interrupted());
+}
+
 fn receipt_for(material: &serde_json::Value) -> SanitizationReceiptV1 {
+    receipt_for_disposition(material, SanitizerDispositionV1::Accepted)
+}
+
+fn receipt_for_disposition(
+    material: &serde_json::Value,
+    disposition: SanitizerDispositionV1,
+) -> SanitizationReceiptV1 {
     SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
             id::<SanitizationReceiptId>("receipt.fact.store.fixture"),
             id::<ComponentVersion>("sanitizer.fixture.v1"),
         )
         .unwrap(),
-        SanitizerDispositionV1::Accepted,
+        disposition,
         SensitivityV1::NonSensitive,
         Some(PayloadReferenceV1::for_payload(material).unwrap()),
     )
@@ -62,6 +85,7 @@ fn payload() -> FactPayloadV1 {
         vec!["database".to_owned()],
         vec!["TraceDecay".to_owned()],
         json!({}),
+        None,
         receipt,
         RetentionClass::new("durable.fact").unwrap(),
     )
@@ -78,6 +102,95 @@ fn payload_event(fact_id: FactId, owner: FactOwnerV1, occurred_at: i64) -> FactL
         },
         UtcMicros(occurred_at),
         None,
+    )
+    .unwrap()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn normalized_tag_batch(
+    owner: FactOwnerV1,
+    fact_id: FactId,
+    evidence_fact_ids: Vec<FactId>,
+    assertion_kind: FactAssertionKindV1,
+    asserted_at: i64,
+    recorded_at: i64,
+    normalized_at: i64,
+) -> FactStoreResult<FactWriteBatch> {
+    let actor = Some(id::<ActorId>("actor.normalized-tags"));
+    let assertion = FactAssertionV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        assertion_kind,
+        payload(),
+        vec![],
+        UtcMicros(asserted_at),
+        actor.clone(),
+    )?;
+    let recorded = FactLineageEventV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::AssertionRecorded {
+            assertion_id: assertion.assertion_id().clone(),
+        },
+        UtcMicros(recorded_at),
+        actor.clone(),
+    )?;
+    let normalized = FactLineageEventV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::TagsNormalized {
+                evidence_fact_ids,
+                confidence: Confidence::new(0.8)?,
+            },
+            evidence_ids: vec![],
+        },
+        UtcMicros(normalized_at),
+        actor,
+    )?;
+    FactWriteBatch::new(
+        fact_id,
+        owner,
+        Some(assertion),
+        vec![recorded, normalized],
+        vec![],
+        vec![],
+        None,
+    )
+}
+
+fn projected_fact(
+    projected_as_of: UtcMicros,
+    telemetry_updated_at: UtcMicros,
+) -> ProjectMemoryFactV1 {
+    let owner = FactOwnerV1::Profile;
+    let source = FactIdentitySourceV1::Application {
+        operation_id: id("operation.projected-fact"),
+    };
+    let fact_id =
+        FactId::derive(&FactIdentityMaterialV1::new(owner.clone(), source.clone()).unwrap())
+            .unwrap();
+    ProjectMemoryFactV1::new(
+        fact_id,
+        owner,
+        payload(),
+        Confidence::new(0.5).unwrap(),
+        id("assertion.projected-fact"),
+        id("event.projected-fact"),
+        projected_as_of,
+        source,
+        ProjectMemoryFactTelemetryV1::new(
+            0,
+            0,
+            0,
+            0,
+            UtcMicros(1),
+            telemetry_updated_at,
+            None,
+            None,
+            None,
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -140,7 +253,6 @@ fn batch_rejects_owner_mismatch() {
         vec![],
         vec![],
         None,
-        None,
     )
     .unwrap_err();
     assert!(matches!(error, FactStoreError::OwnerMismatch));
@@ -160,7 +272,6 @@ fn batch_rejects_missing_and_cyclic_anchor_lineage() {
         vec![event.clone()],
         vec![missing],
         vec![],
-        None,
         None,
     )
     .unwrap_err();
@@ -188,7 +299,6 @@ fn batch_rejects_missing_and_cyclic_anchor_lineage() {
         vec![cycle_a, cycle_b],
         vec![],
         None,
-        None,
     )
     .unwrap_err();
     assert!(matches!(error, FactStoreError::CyclicAnchorLineage { .. }));
@@ -211,7 +321,6 @@ fn batch_accepts_order_independent_acyclic_anchor_lineage() {
         vec![payload_event(fact_id, owner, 1)],
         vec![child, root],
         vec![],
-        None,
         None,
     )
     .unwrap();
@@ -258,7 +367,6 @@ fn batch_rejects_missing_evidence_anchor() {
         vec![],
         vec![],
         None,
-        None,
     )
     .unwrap_err();
     assert!(matches!(
@@ -280,10 +388,70 @@ fn batch_rejects_duplicate_replay_shape() {
         vec![],
         vec![],
         None,
-        None,
     )
     .unwrap_err();
     assert!(matches!(error, FactStoreError::DuplicateEventId { .. }));
+}
+
+#[test]
+fn normalized_tag_batch_rejects_standalone_existing_evidence_shape() {
+    let owner = FactOwnerV1::Profile;
+    let fact_id = fact_id(owner.clone(), "operation.normalized-tag-standalone");
+    let event = FactLineageEventV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::TagsNormalized {
+                evidence_fact_ids: vec![fact_id.clone()],
+                confidence: Confidence::new(0.8).unwrap(),
+            },
+            evidence_ids: vec![],
+        },
+        UtcMicros(11),
+        None,
+    )
+    .unwrap();
+
+    let error =
+        FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap_err();
+    assert!(matches!(
+        error,
+        FactStoreError::Contract(DomainError::NonCanonical {
+            field: "normalized tag curation batch"
+        })
+    ));
+}
+
+#[test]
+fn normalized_tag_batch_rejects_non_correction_and_timestamp_mismatch() {
+    let owner = FactOwnerV1::Profile;
+    let fact_id = fact_id(owner.clone(), "operation.normalized-tag-invalid");
+    let correction = || FactAssertionKindV1::Correction {
+        supersedes: id("assertion.normalized-tags.previous"),
+    };
+    let cases = [
+        (FactAssertionKindV1::Initial, 10, 10, 11),
+        (correction(), 10, 10, 12),
+    ];
+
+    for (assertion_kind, asserted_at, recorded_at, normalized_at) in cases {
+        let error = normalized_tag_batch(
+            owner.clone(),
+            fact_id.clone(),
+            vec![fact_id.clone()],
+            assertion_kind,
+            asserted_at,
+            recorded_at,
+            normalized_at,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            FactStoreError::Contract(DomainError::NonCanonical {
+                field: "normalized tag curation batch"
+            })
+        ));
+    }
 }
 
 #[test]
@@ -297,17 +465,7 @@ fn batch_accepts_item_counts_at_the_limit() {
         .map(|index| anchor(&format!("entity.batch-limit.{index}"), vec![]))
         .collect();
 
-    FactWriteBatch::new(
-        fact_id,
-        owner,
-        None,
-        events,
-        new_anchors,
-        vec![],
-        None,
-        None,
-    )
-    .unwrap();
+    FactWriteBatch::new(fact_id, owner, None, events, new_anchors, vec![], None).unwrap();
 }
 
 #[test]
@@ -324,7 +482,6 @@ fn batch_rejects_item_counts_over_the_limit() {
         events,
         vec![],
         vec![],
-        None,
         None,
     )
     .unwrap_err();
@@ -346,7 +503,6 @@ fn batch_rejects_item_counts_over_the_limit() {
         vec![payload_event(fact_id, owner, 1)],
         new_anchors,
         vec![],
-        None,
         None,
     )
     .unwrap_err();
@@ -371,7 +527,6 @@ fn creation_identity_material_must_derive_the_batch_fact() {
         vec![event],
         vec![],
         vec![],
-        None,
         None,
     )
     .unwrap();
@@ -401,7 +556,6 @@ fn tombstone_rejects_payload() {
         Confidence::new(1.0).unwrap(),
         id("assertion.fixture"),
         id("event.fixture"),
-        None,
         UtcMicros(2),
     )
     .unwrap_err();
@@ -416,11 +570,159 @@ fn tombstone_rejects_payload() {
         Confidence::new(1.0).unwrap(),
         id("assertion.fixture"),
         id("event.fixture"),
-        None,
         UtcMicros(2),
     )
     .unwrap_err();
     assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
+}
+
+#[test]
+fn available_projections_reject_redacted_payload_receipts() {
+    let owner = FactOwnerV1::Profile;
+    let source = FactIdentitySourceV1::Application {
+        operation_id: id("operation.redacted-payload"),
+    };
+    let fact_id =
+        FactId::derive(&FactIdentityMaterialV1::new(owner.clone(), source.clone()).unwrap())
+            .unwrap();
+    let material = json!({
+        "content": "redacted payload",
+        "category": "project",
+        "tags": [],
+        "entities": [],
+        "metadata": {},
+    });
+    let payload = FactPayloadV1::new(
+        "redacted payload".to_owned(),
+        FactCategoryV1::Project,
+        vec![],
+        vec![],
+        json!({}),
+        None,
+        receipt_for_disposition(&material, SanitizerDispositionV1::Redacted),
+        RetentionClass::new("durable.fact").unwrap(),
+    )
+    .unwrap();
+
+    let stored_error = StoredFactV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        Some(payload.clone()),
+        PayloadAccessState::Eligible,
+        Confidence::new(0.5).unwrap(),
+        id("assertion.redacted-payload"),
+        id("event.redacted-payload"),
+        UtcMicros(2),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        stored_error,
+        FactStoreError::PayloadAccessMismatch
+    ));
+
+    let projection_error = ProjectMemoryFactV1::new(
+        fact_id,
+        owner,
+        payload,
+        Confidence::new(0.5).unwrap(),
+        id("assertion.redacted-payload"),
+        id("event.redacted-payload"),
+        UtcMicros(2),
+        source,
+        ProjectMemoryFactTelemetryV1::new(0, 0, 0, 0, UtcMicros(1), UtcMicros(2), None, None, None)
+            .unwrap(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        projection_error,
+        FactStoreError::PayloadAccessMismatch
+    ));
+}
+
+#[test]
+fn available_projection_requires_one_snapshot_timestamp() {
+    let owner = FactOwnerV1::Profile;
+    let source = FactIdentitySourceV1::Application {
+        operation_id: id("operation.projection-snapshot-mismatch"),
+    };
+    let fact_id =
+        FactId::derive(&FactIdentityMaterialV1::new(owner.clone(), source.clone()).unwrap())
+            .unwrap();
+    let error = ProjectMemoryFactV1::new(
+        fact_id,
+        owner,
+        payload(),
+        Confidence::new(0.5).unwrap(),
+        id("assertion.projection-snapshot-mismatch"),
+        id("event.projection-snapshot-mismatch"),
+        UtcMicros(2),
+        source,
+        ProjectMemoryFactTelemetryV1::new(0, 0, 0, 0, UtcMicros(1), UtcMicros(3), None, None, None)
+            .unwrap(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FactStoreError::Contract(DomainError::NonCanonical {
+            field: "fact projection snapshot"
+        })
+    ));
+}
+
+#[test]
+fn inspection_requires_eligible_status_from_the_same_snapshot() {
+    let fact = projected_fact(UtcMicros(2), UtcMicros(2));
+    let history =
+        ProjectMemoryFactHistoryV1::new(fact.owner().clone(), fact.fact_id().clone(), vec![], None)
+            .unwrap();
+    let deleted = ProjectMemoryFactStatusV1::new(
+        fact.owner().clone(),
+        fact.fact_id().clone(),
+        PayloadAccessState::Deleted,
+        UtcMicros(2),
+    )
+    .unwrap();
+    let error = ProjectMemoryFactInspectionV1::new(fact.clone(), history.clone(), vec![], deleted)
+        .unwrap_err();
+    assert!(matches!(error, FactStoreError::PayloadAccessMismatch));
+
+    let stale = ProjectMemoryFactStatusV1::new(
+        fact.owner().clone(),
+        fact.fact_id().clone(),
+        PayloadAccessState::Eligible,
+        UtcMicros(3),
+    )
+    .unwrap();
+    let error = ProjectMemoryFactInspectionV1::new(fact, history, vec![], stale).unwrap_err();
+    assert!(matches!(
+        error,
+        FactStoreError::Contract(DomainError::NonCanonical {
+            field: "fact inspection snapshot"
+        })
+    ));
+}
+
+#[test]
+fn feedback_history_available_requires_actual_details() {
+    let error = ProjectMemoryFactFeedbackHistoryEntryV1::new(
+        id("event.feedback-details"),
+        UtcMicros(2),
+        ProjectMemoryFactFeedbackActionV1::Helpful,
+        Confidence::new(0.5).unwrap(),
+        Confidence::new(0.55).unwrap(),
+        None,
+        None,
+        ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        FactStoreError::Contract(DomainError::NonCanonical {
+            field: "fact feedback details availability"
+        })
+    ));
 }
 
 #[test]
@@ -433,10 +735,6 @@ fn queries_enforce_bounds() {
     assert!(matches!(
         FactLineageQuery::new(FactOwnerV1::Profile, fact_id, None, MAX_LINEAGE_LIMIT + 1,),
         Err(FactStoreError::InvalidQueryLimit { .. })
-    ));
-    assert!(matches!(
-        LegacyFactQuery::new(FactOwnerV1::Profile, id("store.v1"), 0),
-        Err(FactStoreError::InvalidLegacyFactId { .. })
     ));
 }
 
@@ -480,7 +778,6 @@ fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
             Confidence::new(1.0).unwrap(),
             id("assertion.fixture"),
             id("event.fixture"),
-            None,
             UtcMicros(2),
         ),
         Err(FactStoreError::OwnerMismatch)
@@ -502,12 +799,6 @@ fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
         Err(FactStoreError::OwnerMismatch)
     ));
 
-    let legacy = LegacyFactQuery::new(project_owner.clone(), id("store.v1"), 7).unwrap();
-    assert!(matches!(
-        legacy.validate_resolved_fact_id(&profile_fact_id),
-        Err(FactStoreError::OwnerMismatch)
-    ));
-
     let event_id: FactEventId = id("event.fixture");
     assert!(matches!(
         FactCommitReceipt::new(
@@ -522,6 +813,74 @@ fn projections_queries_and_receipts_reject_cross_owner_fact_ids() {
 }
 
 #[test]
+fn durable_memory_receipts_expose_infallible_stable_state_digests() {
+    let owner = FactOwnerV1::Profile;
+    let fact_id = fact_id(owner.clone(), "operation.commit-receipt-digest");
+    let event_id: FactEventId = id("event.commit-receipt-digest");
+    let commit = FactCommitReceipt::new(
+        fact_id.clone(),
+        owner.clone(),
+        vec![event_id.clone()],
+        event_id.clone(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        commit.committed_state_digest(),
+        &tracedecay_domain::canonical_sha256(&(
+            "tracedecay.fact-commit-receipt.committed-state.v1",
+            &fact_id,
+            &owner,
+            &[event_id.clone()],
+            &event_id,
+            Option::<&FactAssertionId>::None,
+        ))
+        .unwrap()
+    );
+    let decoded = serde_json::from_slice::<FactCommitReceipt>(
+        &serde_json::to_vec(&commit).expect("serialize commit receipt"),
+    )
+    .expect("deserialize commit receipt");
+    assert_eq!(
+        decoded.committed_state_digest(),
+        commit.committed_state_digest()
+    );
+
+    let target = ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone()).unwrap();
+    let input_digest = "a".repeat(64);
+    let operation_id: ProvenanceId = id("operation.retrieval-receipt-digest");
+    let recorded = ProjectMemoryFactRetrievalReceiptV1::recorded(
+        owner.clone(),
+        operation_id.clone(),
+        input_digest.clone(),
+        vec![target.clone()],
+        true,
+    )
+    .unwrap();
+    let replayed = ProjectMemoryFactRetrievalReceiptV1::from_replay(
+        owner.clone(),
+        operation_id.clone(),
+        input_digest.clone(),
+        vec![target],
+        true,
+    )
+    .unwrap();
+    let expected = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.project-memory.fact-retrieval-receipt.committed-state.v1",
+        &owner,
+        &operation_id,
+        &input_digest,
+        vec![&fact_id],
+        true,
+    ))
+    .unwrap();
+    assert_eq!(recorded.committed_state_digest(), &expected);
+    assert_eq!(replayed.committed_state_digest(), &expected);
+    assert!(!recorded.replayed());
+    assert!(replayed.replayed());
+}
+
+#[test]
 fn automatic_fact_receipt_preserves_typed_automation_run_id() {
     let owner = FactOwnerV1::Profile;
     let material = serde_json::json!({
@@ -531,9 +890,8 @@ fn automatic_fact_receipt_preserves_typed_automation_run_id() {
         "entities": [],
         "metadata": {},
     });
-    let request = ProjectMemoryFactAddCommandV1::new(
+    let request = ProjectMemoryFactAddMaterialV1::new(
         owner.clone(),
-        id("operation.automatic-fact"),
         "durable automatic fact".to_owned(),
         FactCategoryV1::Decision,
         None,
@@ -541,11 +899,12 @@ fn automatic_fact_receipt_preserves_typed_automation_run_id() {
         vec![],
         serde_json::json!({}),
         receipt_for(&material),
+        Some("run.fixture.1".to_owned()),
         Confidence::new(0.5).unwrap(),
         None,
     )
     .unwrap()
-    .with_automation_run_id("run.fixture.1".to_owned())
+    .into_command(id("operation.automatic-fact"))
     .unwrap();
     let receipt = ProjectMemoryAutomaticFactReceiptV1::new(
         id("automatic-fact.automation.fixture"),
@@ -596,35 +955,6 @@ fn automatic_fact_evidence_rejects_unknown_persisted_fields() {
         }))
         .is_err()
     );
-}
-
-#[test]
-fn repair_stats_preserve_the_atomic_feedback_batch_outcome() {
-    let stats = ProjectMemoryMemoryRepairStatsV1::new(3, 2).with_feedback_history_repair(
-        ProjectMemoryFeedbackRepairProgressV1::Incomplete {
-            processed: 512,
-            remaining: Some(9),
-        },
-    );
-
-    assert_eq!(stats.missing_vectors_repaired(), 3);
-    assert_eq!(stats.banks_rebuilt(), 2);
-    assert_eq!(
-        stats.feedback_history_repair(),
-        ProjectMemoryFeedbackRepairProgressV1::Incomplete {
-            processed: 512,
-            remaining: Some(9),
-        }
-    );
-    assert_eq!(
-        ProjectMemoryMemoryRepairStatsV1::default().feedback_history_repair(),
-        ProjectMemoryFeedbackRepairProgressV1::Unknown
-    );
-    // Saturation defaults off and round-trips through the builder without
-    // disturbing the feedback-history outcome.
-    assert!(!stats.saturated());
-    assert!(!ProjectMemoryMemoryRepairStatsV1::default().saturated());
-    assert!(stats.with_saturated(true).saturated());
 }
 
 #[test]

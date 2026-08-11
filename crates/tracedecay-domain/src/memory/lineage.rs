@@ -2,133 +2,34 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, derive_memory_id};
+use super::{derive_memory_id, fact::FactOwnerV1, relation::FactRelationV1};
 use crate::research::{
     ActorId, Confidence, DomainError, FactAssertionId, FactEventId, FactEvidenceId, FactId,
-    PayloadAccessState, SourceStoreId, UtcMicros,
+    PayloadAccessState, UtcMicros,
 };
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum LegacyHistoryCoverageV1 {
-    Complete,
-    Unknown,
-}
-
 const MAX_LINEAGE_EVIDENCE_REFS: usize = 256;
-
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct LegacyFactMappingV1 {
-    owner: FactOwnerV1,
-    source_store_id: SourceStoreId,
-    legacy_fact_id: i64,
-    fact_id: FactId,
-    history_coverage: LegacyHistoryCoverageV1,
-    migrated_at: UtcMicros,
-}
-
-impl LegacyFactMappingV1 {
-    pub fn new(
-        owner: FactOwnerV1,
-        source_store_id: SourceStoreId,
-        legacy_fact_id: i64,
-        fact_id: FactId,
-        history_coverage: LegacyHistoryCoverageV1,
-        migrated_at: UtcMicros,
-    ) -> Result<Self, DomainError> {
-        owner.validate()?;
-        source_store_id.validate()?;
-        fact_id.validate()?;
-        fact_id.validate_owner(&owner)?;
-        if legacy_fact_id <= 0 {
-            return Err(DomainError::NonCanonical {
-                field: "legacy fact id",
-            });
-        }
-        let expected_fact_id = FactId::derive(&FactIdentityMaterialV1::new(
-            owner.clone(),
-            FactIdentitySourceV1::Legacy {
-                source_store_id: source_store_id.clone(),
-                legacy_fact_id,
-            },
-        )?)?;
-        if fact_id != expected_fact_id {
-            return Err(DomainError::UnknownReference {
-                field: "legacy mapping fact identity",
-            });
-        }
-        Ok(Self {
-            owner,
-            source_store_id,
-            legacy_fact_id,
-            fact_id,
-            history_coverage,
-            migrated_at,
-        })
-    }
-
-    pub fn owner(&self) -> &FactOwnerV1 {
-        &self.owner
-    }
-
-    pub fn source_store_id(&self) -> &SourceStoreId {
-        &self.source_store_id
-    }
-
-    pub fn legacy_fact_id(&self) -> i64 {
-        self.legacy_fact_id
-    }
-
-    pub fn fact_id(&self) -> &FactId {
-        &self.fact_id
-    }
-
-    pub fn history_coverage(&self) -> LegacyHistoryCoverageV1 {
-        self.history_coverage
-    }
-
-    pub fn migrated_at(&self) -> UtcMicros {
-        self.migrated_at
-    }
-}
-
-impl<'de> Deserialize<'de> for LegacyFactMappingV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            owner: FactOwnerV1,
-            source_store_id: SourceStoreId,
-            legacy_fact_id: i64,
-            fact_id: FactId,
-            history_coverage: LegacyHistoryCoverageV1,
-            migrated_at: UtcMicros,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(
-            wire.owner,
-            wire.source_store_id,
-            wire.legacy_fact_id,
-            wire.fact_id,
-            wire.history_coverage,
-            wire.migrated_at,
-        )
-        .map_err(serde::de::Error::custom)
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FactCurationActionV1 {
     Retained,
-    ContradictedBy { fact_id: FactId },
-    SupersededBy { fact_id: FactId },
-    MergedInto { fact_id: FactId },
+    TagsNormalized {
+        evidence_fact_ids: Vec<FactId>,
+        confidence: Confidence,
+    },
+    ContradictedBy {
+        fact_id: FactId,
+    },
+    SupersededBy {
+        fact_id: FactId,
+    },
+    MergedInto {
+        fact_id: FactId,
+    },
+    Linked {
+        relation: FactRelationV1,
+    },
     Forgotten,
 }
 
@@ -150,9 +51,6 @@ pub enum FactLineageEventKindV1 {
     PayloadAccessChanged {
         previous: PayloadAccessState,
         current: PayloadAccessState,
-    },
-    LegacyImported {
-        mapping: LegacyFactMappingV1,
     },
 }
 
@@ -186,6 +84,26 @@ impl FactLineageEventKindV1 {
                             return Err(DomainError::SelfSupersession);
                         }
                     }
+                    FactCurationActionV1::Linked { relation } => {
+                        relation.validate()?;
+                        if relation.owner() != owner {
+                            return Err(DomainError::UnknownReference {
+                                field: "fact relation owner",
+                            });
+                        }
+                        if relation.source_fact_id() != fact_id {
+                            return Err(DomainError::UnknownReference {
+                                field: "fact relation source",
+                            });
+                        }
+                    }
+                    FactCurationActionV1::TagsNormalized {
+                        evidence_fact_ids,
+                        confidence,
+                    } => {
+                        canonicalize_evidence_fact_ids(evidence_fact_ids, owner)?;
+                        Confidence::new(confidence.as_f64())?;
+                    }
                     FactCurationActionV1::Retained | FactCurationActionV1::Forgotten => {}
                 }
                 canonicalize_evidence_ids(evidence_ids)
@@ -199,19 +117,6 @@ impl FactLineageEventKindV1 {
                 if *previous == PayloadAccessState::Deleted {
                     return Err(DomainError::NonCanonical {
                         field: "terminal fact payload deletion",
-                    });
-                }
-                Ok(())
-            }
-            Self::LegacyImported { mapping } => {
-                if mapping.fact_id() != fact_id {
-                    return Err(DomainError::UnknownReference {
-                        field: "legacy mapping fact",
-                    });
-                }
-                if mapping.owner() != owner {
-                    return Err(DomainError::UnknownReference {
-                        field: "legacy mapping owner",
                     });
                 }
                 Ok(())
@@ -353,10 +258,35 @@ fn canonicalize_evidence_ids(evidence_ids: &mut [FactEvidenceId]) -> Result<(), 
     Ok(())
 }
 
+fn canonicalize_evidence_fact_ids(
+    evidence_fact_ids: &mut [FactId],
+    owner: &FactOwnerV1,
+) -> Result<(), DomainError> {
+    if evidence_fact_ids.is_empty() || evidence_fact_ids.len() > MAX_LINEAGE_EVIDENCE_REFS {
+        return Err(DomainError::NonCanonical {
+            field: "normalized tag evidence facts",
+        });
+    }
+    evidence_fact_ids.sort_unstable();
+    let mut seen = BTreeSet::new();
+    for fact_id in evidence_fact_ids.iter() {
+        fact_id.validate()?;
+        fact_id.validate_owner(owner)?;
+        if !seen.insert(fact_id) {
+            return Err(DomainError::DuplicateId {
+                field: "normalized tag evidence facts",
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::relation::{
+        FactRelationKindV1, fact_id_for, new_relation, relation_evidence,
+    };
     use super::*;
-    use crate::research::ProvenanceId;
 
     fn id<T>(value: &str) -> T
     where
@@ -366,16 +296,7 @@ mod tests {
     }
 
     fn fact_id(operation: &str) -> FactId {
-        FactId::derive(
-            &FactIdentityMaterialV1::new(
-                FactOwnerV1::Profile,
-                FactIdentitySourceV1::Application {
-                    operation_id: id::<ProvenanceId>(operation),
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap()
+        fact_id_for(&FactOwnerV1::Profile, operation)
     }
 
     #[test]
@@ -425,44 +346,259 @@ mod tests {
     }
 
     #[test]
-    fn legacy_mapping_preserves_explicit_unknown_history() {
-        let source_store_id: SourceStoreId = id("store.v1");
-        let fact_id = FactId::derive(
-            &FactIdentityMaterialV1::new(
-                FactOwnerV1::Profile,
-                FactIdentitySourceV1::Legacy {
-                    source_store_id: source_store_id.clone(),
-                    legacy_fact_id: 7,
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let mapping = LegacyFactMappingV1::new(
-            FactOwnerV1::Profile,
-            source_store_id,
-            7,
-            fact_id.clone(),
-            LegacyHistoryCoverageV1::Unknown,
-            UtcMicros(30),
-        )
-        .unwrap();
-        let mut mapping_wire = serde_json::to_value(&mapping).unwrap();
-        mapping_wire["fact_id"] = serde_json::json!("fact.v1.forged");
-        assert!(serde_json::from_value::<LegacyFactMappingV1>(mapping_wire).is_err());
+    fn normalized_tag_evidence_is_canonical_and_preserves_self_evidence() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id_for(&owner, "operation.normalize.subject");
+        let first_evidence = fact_id_for(&owner, "operation.normalize.first-evidence");
+        let second_evidence = fact_id_for(&owner, "operation.normalize.second-evidence");
+        let confidence = Confidence::new(0.91).expect("normalized-tag confidence");
+        let action = FactCurationActionV1::TagsNormalized {
+            evidence_fact_ids: vec![second_evidence, fact_id.clone(), first_evidence],
+            confidence,
+        };
+
         let event = FactLineageEventV1::new(
-            fact_id,
-            FactOwnerV1::Profile,
-            FactLineageEventKindV1::LegacyImported { mapping },
-            UtcMicros(30),
+            fact_id.clone(),
+            owner,
+            FactLineageEventKindV1::Curated {
+                action,
+                evidence_ids: vec![],
+            },
+            UtcMicros(23),
             None,
         )
-        .unwrap();
+        .expect("canonical normalized-tag event");
+        let FactLineageEventKindV1::Curated {
+            action:
+                FactCurationActionV1::TagsNormalized {
+                    evidence_fact_ids,
+                    confidence: persisted_confidence,
+                },
+            evidence_ids,
+        } = event.kind()
+        else {
+            panic!("normalized-tag action was not preserved");
+        };
+
+        assert!(evidence_ids.is_empty());
+        assert_eq!(*persisted_confidence, confidence);
+        assert_eq!(evidence_fact_ids.len(), 3);
+        assert!(evidence_fact_ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(evidence_fact_ids.contains(&fact_id));
+    }
+
+    #[test]
+    fn normalized_tag_evidence_rejects_duplicates_and_foreign_owners() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id_for(&owner, "operation.normalize.validation-subject");
+        let evidence = fact_id_for(&owner, "operation.normalize.duplicate-evidence");
+        let duplicate_action = FactCurationActionV1::TagsNormalized {
+            evidence_fact_ids: vec![evidence.clone(), evidence],
+            confidence: Confidence::new(0.8).expect("duplicate evidence confidence"),
+        };
         assert!(matches!(
-            event.kind(),
-            FactLineageEventKindV1::LegacyImported { mapping }
-                if mapping.history_coverage() == LegacyHistoryCoverageV1::Unknown
+            FactLineageEventV1::new(
+                fact_id.clone(),
+                owner.clone(),
+                FactLineageEventKindV1::Curated {
+                    action: duplicate_action,
+                    evidence_ids: vec![],
+                },
+                UtcMicros(24),
+                None,
+            ),
+            Err(DomainError::DuplicateId { .. })
         ));
+
+        let foreign_owner = FactOwnerV1::Project {
+            project_id: id("project.normalize.foreign"),
+        };
+        let foreign_evidence = fact_id_for(&foreign_owner, "operation.normalize.foreign-evidence");
+        let foreign_action = FactCurationActionV1::TagsNormalized {
+            evidence_fact_ids: vec![foreign_evidence],
+            confidence: Confidence::new(0.8).expect("foreign evidence confidence"),
+        };
+        assert!(
+            FactLineageEventV1::new(
+                fact_id,
+                owner,
+                FactLineageEventKindV1::Curated {
+                    action: foreign_action,
+                    evidence_ids: vec![],
+                },
+                UtcMicros(25),
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn normalized_tag_evidence_obeys_the_lineage_bound() {
+        let owner = FactOwnerV1::Profile;
+        let fact_id = fact_id_for(&owner, "operation.normalize.bound-subject");
+        let evidence = (0..=MAX_LINEAGE_EVIDENCE_REFS)
+            .map(|index| fact_id_for(&owner, &format!("operation.normalize.evidence.{index}")))
+            .collect::<Vec<_>>();
+        let action = FactCurationActionV1::TagsNormalized {
+            evidence_fact_ids: evidence,
+            confidence: Confidence::new(0.8).expect("over-bound evidence confidence"),
+        };
+
+        assert!(matches!(
+            FactLineageEventV1::new(
+                fact_id,
+                owner,
+                FactLineageEventKindV1::Curated {
+                    action,
+                    evidence_ids: vec![],
+                },
+                UtcMicros(26),
+                None,
+            ),
+            Err(DomainError::NonCanonical { .. })
+        ));
+    }
+
+    #[test]
+    fn linked_lineage_records_every_canonical_relation_kind() {
+        let owner = FactOwnerV1::Profile;
+        let source_fact_id = fact_id_for(&owner, "operation.relation.source");
+        let target_fact_id = fact_id_for(&owner, "operation.relation.target");
+        let evidence_fact_ids = relation_evidence(&owner);
+        for (kind, wire_name) in [
+            (FactRelationKindV1::Supports, "supports"),
+            (FactRelationKindV1::Contradicts, "contradicts"),
+            (FactRelationKindV1::Supersedes, "supersedes"),
+            (FactRelationKindV1::DerivedFrom, "derived_from"),
+        ] {
+            let relation = new_relation(
+                owner.clone(),
+                source_fact_id.clone(),
+                target_fact_id.clone(),
+                kind,
+                evidence_fact_ids.clone(),
+            )
+            .unwrap();
+            let event = FactLineageEventV1::new(
+                source_fact_id.clone(),
+                owner.clone(),
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::Linked { relation },
+                    evidence_ids: vec![],
+                },
+                UtcMicros(23),
+                None,
+            )
+            .unwrap();
+
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::json!(wire_name)
+            );
+            assert!(matches!(
+                event.kind(),
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::Linked { relation },
+                    ..
+                } if relation.kind() == kind
+                    && relation.target_fact_id() == &target_fact_id
+                    && relation.evidence_fact_ids() == evidence_fact_ids.as_slice()
+                    && relation.source_label() == "curation.fixture"
+            ));
+        }
+    }
+
+    #[test]
+    fn linked_relation_material_is_bound_to_the_event_identity() {
+        let owner = FactOwnerV1::Profile;
+        let source = fact_id_for(&owner, "operation.relation.identity-source");
+        let target = fact_id_for(&owner, "operation.relation.identity-target");
+        let event = |kind| {
+            FactLineageEventV1::new(
+                source.clone(),
+                owner.clone(),
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::Linked {
+                        relation: new_relation(
+                            owner.clone(),
+                            source.clone(),
+                            target.clone(),
+                            kind,
+                            relation_evidence(&owner),
+                        )
+                        .unwrap(),
+                    },
+                    evidence_ids: vec![],
+                },
+                UtcMicros(25),
+                None,
+            )
+            .unwrap()
+        };
+        let supports = event(FactRelationKindV1::Supports);
+        let contradicts = event(FactRelationKindV1::Contradicts);
+        assert_ne!(supports.event_id(), contradicts.event_id());
+
+        let mut wire = serde_json::to_value(supports).unwrap();
+        wire["kind"]["action"]["relation"]["kind"] = serde_json::json!("contradicts");
+        assert!(serde_json::from_value::<FactLineageEventV1>(wire).is_err());
+    }
+
+    #[test]
+    fn linked_lineage_rejects_another_source_or_owner() {
+        let owner = FactOwnerV1::Profile;
+        let source_fact_id = fact_id_for(&owner, "operation.relation.source");
+        let other_source_fact_id = fact_id_for(&owner, "operation.relation.other-source");
+        let target_fact_id = fact_id_for(&owner, "operation.relation.target");
+        let relation = new_relation(
+            owner.clone(),
+            source_fact_id,
+            target_fact_id,
+            FactRelationKindV1::Supersedes,
+            relation_evidence(&owner),
+        )
+        .unwrap();
+        assert!(
+            FactLineageEventV1::new(
+                other_source_fact_id,
+                owner,
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::Linked { relation },
+                    evidence_ids: vec![],
+                },
+                UtcMicros(24),
+                None,
+            )
+            .is_err()
+        );
+
+        let event_owner = FactOwnerV1::Profile;
+        let event_source = fact_id_for(&event_owner, "operation.relation.event-source");
+        let relation_owner = FactOwnerV1::Project {
+            project_id: id("project.relation"),
+        };
+        let relation = new_relation(
+            relation_owner.clone(),
+            fact_id_for(&relation_owner, "operation.relation.project-source"),
+            fact_id_for(&relation_owner, "operation.relation.project-target"),
+            FactRelationKindV1::Supersedes,
+            relation_evidence(&relation_owner),
+        )
+        .unwrap();
+        assert!(
+            FactLineageEventV1::new(
+                event_source,
+                event_owner,
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::Linked { relation },
+                    evidence_ids: vec![],
+                },
+                UtcMicros(24),
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]

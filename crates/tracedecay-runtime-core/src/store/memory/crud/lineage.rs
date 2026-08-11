@@ -1,17 +1,16 @@
-//! Legacy mapping, lineage events, and current-projection publication.
+//! Canonical lineage events and current-projection publication.
 
 use super::super::primitives::{
-    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, compatibility_source_store_id, identity_collision,
-    parse_payload_access, payload_access_label, requires_payload_purge, row_exists,
-    row_exists_params, row_f64, row_i64, row_optional_string, row_string, storage_error,
-    storage_message, to_json,
+    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, identity_collision, parse_payload_access,
+    payload_access_label, requires_payload_purge, row_exists, row_exists_params, row_f64, row_i64,
+    row_optional_string, row_string, storage_error, storage_message, to_json,
 };
 use super::DEFAULT_TRUST;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactCurationActionV1, FactEventId, FactEvidenceId, FactId,
-    FactLineageEventKindV1, FactLineageEventV1, LegacyFactMappingV1, PayloadAccessState, UtcMicros,
+    FactLineageEventKindV1, FactLineageEventV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
     FactCommitOutcome, FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
@@ -55,95 +54,6 @@ pub(super) async fn payload_is_purged_projection(
     ))
 }
 
-pub(super) async fn insert_legacy_mapping(
-    transaction: &Transaction<'_>,
-    owner: &OwnerKey,
-    mapping: &LegacyFactMappingV1,
-) -> FactStoreResult<()> {
-    if mapping.source_store_id() != &compatibility_source_store_id()? {
-        return Err(storage_message(
-            COMMIT_OPERATION,
-            "canonical holographic projection requires the fixed compatibility source",
-        ));
-    }
-    if legacy_mapping_exists(transaction, owner, mapping).await? {
-        if legacy_mapping_matches(transaction, owner, mapping).await? {
-            return Ok(());
-        }
-        return Err(storage_message(
-            COMMIT_OPERATION,
-            "legacy mapping identity collision",
-        ));
-    }
-    let changed = transaction
-        .execute(
-            "UPDATE memory_facts
-             SET canonical_fact_id = ?1
-             WHERE fact_id = ?2
-               AND (canonical_fact_id IS NULL OR canonical_fact_id = ?1)",
-            params![mapping.fact_id().as_str(), mapping.legacy_fact_id()],
-        )
-        .await
-        .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-    if changed != 1 {
-        return Err(storage_message(
-            COMMIT_OPERATION,
-            "canonical fact projection row is missing or bound to another fact",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) async fn legacy_mapping_exists(
-    transaction: &Transaction<'_>,
-    _owner: &OwnerKey,
-    mapping: &LegacyFactMappingV1,
-) -> FactStoreResult<bool> {
-    row_exists_params(
-        transaction,
-        "SELECT 1
-         FROM memory_facts
-         WHERE (fact_id = ?1 AND canonical_fact_id IS NOT NULL)
-            OR canonical_fact_id = ?2",
-        params![mapping.legacy_fact_id(), mapping.fact_id().as_str()],
-    )
-    .await
-}
-
-pub(super) async fn legacy_mapping_matches(
-    transaction: &Transaction<'_>,
-    owner: &OwnerKey,
-    mapping: &LegacyFactMappingV1,
-) -> FactStoreResult<bool> {
-    let mut rows = transaction
-        .query(
-            "SELECT facts.owner_json, projections.canonical_fact_id
-             FROM memory_facts AS projections
-             JOIN memory_v2_facts AS facts
-               ON facts.fact_id = projections.canonical_fact_id
-             WHERE projections.fact_id = ?1
-               AND facts.owner_kind = ?2 AND facts.project_id = ?3",
-            params![
-                mapping.legacy_fact_id(),
-                owner.kind,
-                owner.project_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?
-    else {
-        return Ok(false);
-    };
-    // The direct projection binding must resolve to the same canonical fact
-    // under the same owner. A different fact or owner is an identity conflict.
-    Ok(row_string(&row, 0, QUERY_OPERATION)? == owner.json
-        && row_string(&row, 1, QUERY_OPERATION)? == mapping.fact_id().as_str())
-}
-
 pub(super) async fn ensure_event_references(
     transaction: &Transaction<'_>,
     owner: &OwnerKey,
@@ -166,26 +76,51 @@ pub(super) async fn ensure_event_references(
             evidence_ids,
         } => {
             ensure_event_evidence(transaction, owner, event.fact_id(), evidence_ids).await?;
-            if let FactCurationActionV1::ContradictedBy { fact_id }
-            | FactCurationActionV1::SupersededBy { fact_id }
-            | FactCurationActionV1::MergedInto { fact_id } = action
-                && !owned_fact_exists(transaction, owner, fact_id).await?
-            {
-                return Err(storage_message(
-                    COMMIT_OPERATION,
-                    "lineage curation target is missing",
-                ));
+            match action {
+                FactCurationActionV1::ContradictedBy { fact_id }
+                | FactCurationActionV1::SupersededBy { fact_id }
+                | FactCurationActionV1::MergedInto { fact_id } => {
+                    ensure_owned_relation_fact(transaction, owner, fact_id).await?;
+                }
+                FactCurationActionV1::Linked { relation } => {
+                    if relation.owner() != event.owner() {
+                        return Err(FactStoreError::OwnerMismatch);
+                    }
+                    if relation.source_fact_id() != event.fact_id() {
+                        return Err(FactStoreError::FactMismatch);
+                    }
+                    ensure_owned_relation_fact(transaction, owner, relation.source_fact_id())
+                        .await?;
+                    ensure_owned_relation_fact(transaction, owner, relation.target_fact_id())
+                        .await?;
+                    for evidence_fact_id in relation.evidence_fact_ids() {
+                        ensure_owned_relation_fact(transaction, owner, evidence_fact_id).await?;
+                    }
+                }
+                FactCurationActionV1::TagsNormalized {
+                    evidence_fact_ids, ..
+                } => {
+                    for evidence_fact_id in evidence_fact_ids {
+                        ensure_owned_relation_fact(transaction, owner, evidence_fact_id).await?;
+                    }
+                }
+                FactCurationActionV1::Retained | FactCurationActionV1::Forgotten => {}
             }
         }
         FactLineageEventKindV1::PayloadAccessChanged { .. } => {}
-        FactLineageEventKindV1::LegacyImported { mapping } => {
-            if !legacy_mapping_matches(transaction, owner, mapping).await? {
-                return Err(storage_message(
-                    COMMIT_OPERATION,
-                    "lineage legacy mapping reference is missing",
-                ));
-            }
-        }
+    }
+    Ok(())
+}
+
+async fn ensure_owned_relation_fact(
+    transaction: &Transaction<'_>,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+) -> FactStoreResult<()> {
+    if !owned_fact_exists(transaction, owner, fact_id).await? {
+        return Err(FactStoreError::FactNotFound {
+            fact_id: fact_id.clone(),
+        });
     }
     Ok(())
 }
@@ -396,8 +331,7 @@ impl Projection {
                     self.active_assertion_id = None;
                 }
             }
-            FactLineageEventKindV1::Curated { .. }
-            | FactLineageEventKindV1::LegacyImported { .. } => {}
+            FactLineageEventKindV1::Curated { .. } => {}
         }
         self.last_event_id = Some(event.event_id().clone());
         self.updated_at = event.occurred_at();
@@ -536,6 +470,9 @@ pub(super) async fn receipt_outcome(
     batch: &FactWriteBatch,
     replay: bool,
 ) -> FactStoreResult<FactCommitOutcome> {
+    for event in batch.events() {
+        ensure_event_references(transaction, owner, event).await?;
+    }
     let projection = load_current_projection(transaction, owner, batch.fact_id())
         .await?
         .ok_or_else(|| storage_message(COMMIT_OPERATION, "committed projection is missing"))?;

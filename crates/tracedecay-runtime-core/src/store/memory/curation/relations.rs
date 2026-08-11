@@ -1,70 +1,134 @@
-//! Relation labels, tag normalization, fact links, and curation correction batches.
+//! Canonical relation and tag curation over fact lineage and assertions.
 
-use super::super::crud::{
-    compatibility_commit_batch_tx, compatibility_mirror_update_tx, compatibility_sanitize_payload,
-    load_current_fact_tx,
-};
-use super::super::primitives::{
-    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, compatibility_legacy_timestamp,
-    project_memory_event_time, project_memory_source_label, row_string, storage_error,
-    storage_message, to_json,
-};
-use super::super::projection::{
-    project_memory_required_mapping_tx, project_memory_source_for_fact_tx,
-    resolve_project_memory_target_tx,
-};
-use crate::db::DatabaseMemoryTransaction as Transaction;
-use crate::db::engine::params;
-use crate::privacy::{
-    MemoryFactSanitizationV1, sanitize_memory_fact_payload, verify_memory_fact_sanitization,
-};
-use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use thiserror::Error;
+
 use tracedecay_domain::{
-    ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCurationActionV1, FactEventId,
-    FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, UtcMicros,
+    ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCurationActionV1, FactId,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, FactRelationKindV1,
+    UtcMicros,
 };
 use tracedecay_store::{
-    FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactIdV1,
-    ProjectMemoryFactLinkV1, ProjectMemoryFactMappingV1, ProjectMemoryFactNormalizeTagsV1,
-    ProjectMemoryFactRelationV1, ProjectMemoryFactTargetV1, ProjectMemoryRelationProvenanceV1,
-    StoredFactV1,
+    FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactIdV1,
+    ProjectMemoryFactLinkV1, ProjectMemoryFactNormalizeTagsV1, StoredFactV1,
 };
 
-#[derive(Debug, Error)]
-#[error("invalid receipt-bound legacy relation provenance")]
-struct LegacyRelationProvenanceErrorV1 {
-    #[source]
-    source: serde_json::Error,
-}
+use crate::db::DatabaseMemoryTransaction as Transaction;
+use crate::db::engine::params;
 
-pub(super) fn project_memory_relation_label(relation: ProjectMemoryFactRelationV1) -> &'static str {
-    match relation {
-        ProjectMemoryFactRelationV1::Supports => "supports",
-        ProjectMemoryFactRelationV1::Contradicts => "contradicts",
-        ProjectMemoryFactRelationV1::Supersedes => "supersedes",
-        ProjectMemoryFactRelationV1::DerivedFrom => "derived_from",
-    }
-}
+use super::super::crud::{commit_batch_tx, load_current_fact_tx, sanitize_payload};
+use super::super::primitives::{
+    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_event_time, row_string, storage_error,
+    storage_message,
+};
 
-fn project_memory_relations_conflict(
-    left: ProjectMemoryFactRelationV1,
-    right: ProjectMemoryFactRelationV1,
-) -> bool {
+fn relation_kinds_conflict(left: FactRelationKindV1, right: FactRelationKindV1) -> bool {
     matches!(
         (left, right),
         (
-            ProjectMemoryFactRelationV1::Supports,
-            ProjectMemoryFactRelationV1::Contradicts
+            FactRelationKindV1::Supports,
+            FactRelationKindV1::Contradicts
         ) | (
-            ProjectMemoryFactRelationV1::Contradicts,
-            ProjectMemoryFactRelationV1::Supports
+            FactRelationKindV1::Contradicts,
+            FactRelationKindV1::Supports
         )
     )
 }
 
-fn project_memory_normalize_tags(tags: &[String]) -> Vec<String> {
+async fn ensure_relation_conflict_free_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    relation: &tracedecay_domain::FactRelationV1,
+) -> FactStoreResult<()> {
+    if !matches!(
+        relation.kind(),
+        FactRelationKindV1::Supports | FactRelationKindV1::Contradicts
+    ) {
+        return Ok(());
+    }
+    let key = OwnerKey::new(owner)?;
+    let mut rows = transaction
+        .query(
+            "SELECT event_json
+             FROM memory_v2_lineage_events
+             WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id = ?3
+               AND json_extract(event_json, '$.kind.kind') = 'curated'
+               AND (
+                 (?5 = 'supports'
+                  AND json_extract(event_json, '$.kind.action.kind') = 'contradicted_by'
+                  AND json_extract(event_json, '$.kind.action.fact_id') = ?4)
+                 OR
+                 (json_extract(event_json, '$.kind.action.kind') = 'linked'
+                  AND json_extract(event_json, '$.kind.action.relation.target_fact_id') = ?4
+                  AND (
+                    (?5 = 'supports'
+                     AND json_extract(event_json, '$.kind.action.relation.kind') = 'contradicts')
+                    OR
+                    (?5 = 'contradicts'
+                     AND json_extract(event_json, '$.kind.action.relation.kind') = 'supports')
+                  ))
+               )
+             ORDER BY event_sequence
+             LIMIT 1",
+            params![
+                key.kind,
+                key.project_id.as_str(),
+                relation.source_fact_id().as_str(),
+                relation.target_fact_id().as_str(),
+                relation.kind().as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+    else {
+        return Ok(());
+    };
+    let event = serde_json::from_str::<FactLineageEventV1>(&row_string(
+        &row,
+        0,
+        PROJECT_MEMORY_WRITE_OPERATION,
+    )?)
+    .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    if event.owner() != owner || event.fact_id() != relation.source_fact_id() {
+        return Err(storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "canonical relation event does not match its owner-scoped storage key",
+        ));
+    }
+    let existing = match event.kind() {
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::ContradictedBy { fact_id },
+            ..
+        } if fact_id == relation.target_fact_id() => FactRelationKindV1::Contradicts,
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::Linked { relation: existing },
+            ..
+        } if existing.target_fact_id() == relation.target_fact_id() => existing.kind(),
+        _ => {
+            return Err(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "canonical relation conflict query returned an unsupported event",
+            ));
+        }
+    };
+    if !relation_kinds_conflict(existing, relation.kind()) {
+        return Err(storage_message(
+            PROJECT_MEMORY_WRITE_OPERATION,
+            "canonical relation conflict query returned a non-conflicting event",
+        ));
+    }
+    Err(FactStoreError::RelationConflict {
+        source_fact_id: relation.source_fact_id().clone(),
+        target_fact_id: relation.target_fact_id().clone(),
+        existing,
+        requested: relation.kind(),
+    })
+}
+
+pub(super) fn normalize_tags(tags: &[String]) -> Vec<String> {
     tags.iter()
         .map(|tag| {
             tag.trim()
@@ -80,42 +144,29 @@ fn project_memory_normalize_tags(tags: &[String]) -> Vec<String> {
         .collect()
 }
 
-pub(in crate::store::memory) async fn project_memory_available_curation_fact_tx(
+pub(in crate::store::memory) async fn available_curation_fact_tx(
     transaction: &Transaction<'_>,
-    target: &ProjectMemoryFactTargetV1,
-) -> FactStoreResult<(FactId, StoredFactV1, ProjectMemoryFactMappingV1)> {
-    let fact_id = resolve_project_memory_target_tx(transaction, target)
+    target: &ProjectMemoryFactIdV1,
+) -> FactStoreResult<StoredFactV1> {
+    let owner = OwnerKey::new(target.owner())?;
+    let fact = load_current_fact_tx(transaction, &owner, target.owner(), target.fact_id())
         .await?
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility curation target is missing",
-            )
-        })?;
-    let owner_key = OwnerKey::new(target.owner())?;
-    let fact = load_current_fact_tx(transaction, &owner_key, target.owner(), &fact_id)
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility curation target is unavailable",
+                "canonical curation target is missing",
             )
         })?;
     if fact.payload().is_none() {
         return Err(FactStoreError::PayloadAccessMismatch);
     }
-    let mapping = project_memory_required_mapping_tx(transaction, target.owner(), &fact_id).await?;
-    let mapping = ProjectMemoryFactMappingV1::new(
-        ProjectMemoryFactIdV1::new(target.owner().clone(), fact_id.clone())?,
-        Some(mapping),
-    )?;
-    Ok((fact_id, fact, mapping))
+    Ok(fact)
 }
 
-pub(in crate::store::memory) async fn project_memory_curation_evidence_ids_tx(
+pub(in crate::store::memory) async fn curation_evidence_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    evidence: &[ProjectMemoryFactTargetV1],
+    evidence: &[ProjectMemoryFactIdV1],
 ) -> FactStoreResult<Vec<FactId>> {
     let mut ids = Vec::with_capacity(evidence.len());
     let mut seen = BTreeSet::new();
@@ -123,331 +174,111 @@ pub(in crate::store::memory) async fn project_memory_curation_evidence_ids_tx(
         if target.owner() != owner {
             return Err(FactStoreError::OwnerMismatch);
         }
-        let (fact_id, _, _) =
-            project_memory_available_curation_fact_tx(transaction, target).await?;
-        if !seen.insert(fact_id.clone()) {
+        let fact = available_curation_fact_tx(transaction, target).await?;
+        if !seen.insert(fact.fact_id().clone()) {
             return Err(storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility curation evidence resolved to duplicate facts",
+                "curation evidence contains duplicate facts",
             ));
         }
-        ids.push(fact_id);
+        ids.push(fact.fact_id().clone());
     }
     Ok(ids)
 }
 
-pub(super) async fn project_memory_record_curated_correction_provenance_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    corrected_fact_id: &FactId,
-    evidence_fact_ids: &[FactId],
-    confidence: Confidence,
-    operation: &str,
-    actor: Option<&ActorId>,
-    now: UtcMicros,
-) -> FactStoreResult<()> {
-    let key = OwnerKey::new(owner)?;
-    let evidence_json = to_json(
-        &evidence_fact_ids
-            .iter()
-            .map(FactId::as_str)
-            .collect::<Vec<_>>(),
-        "serialize curated correction evidence facts",
-    )?;
-    let source_label =
-        project_memory_source_label(Some(&format!("compatibility_curation_{operation}")))?;
-    let provenance = project_memory_sanitized_relation_provenance(&json!({
-        "actor_id": actor.map(ActorId::as_str),
-        "operation": operation,
-    }))
-    .await?;
-    let provenance_json = to_json(&provenance, "serialize curated correction provenance")?;
-    if evidence_fact_ids
-        .iter()
-        .any(|evidence_fact_id| evidence_fact_id == corrected_fact_id)
-    {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "curated correction evidence cannot be the corrected fact",
-        ));
-    }
-    for evidence_fact_id in evidence_fact_ids {
-        transaction
-            .execute(
-                "INSERT INTO memory_v2_fact_relations(
-                    owner_kind, project_id, source_fact_id, target_fact_id, relation,
-                    confidence, source_label, provenance_json, evidence_fact_ids_json,
-                    occurred_at, updated_at
-                 ) VALUES(?1, ?2, ?3, ?4, 'derived_from', ?5, ?6, ?7, ?8, ?9, ?9)
-                 ON CONFLICT(owner_kind, project_id, source_fact_id, target_fact_id, relation)
-                 DO UPDATE SET confidence = excluded.confidence,
-                               source_label = excluded.source_label,
-                               provenance_json = excluded.provenance_json,
-                               evidence_fact_ids_json = excluded.evidence_fact_ids_json,
-                               updated_at = excluded.updated_at",
-                params![
-                    key.kind,
-                    key.project_id.as_str(),
-                    corrected_fact_id.as_str(),
-                    evidence_fact_id.as_str(),
-                    confidence.as_f64(),
-                    source_label.as_str(),
-                    provenance_json.as_str(),
-                    evidence_json.as_str(),
-                    now.0,
-                ],
-            )
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    }
-    Ok(())
-}
-
-pub(super) async fn project_memory_curation_mappings_from_ids_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    ids: &[FactId],
-) -> FactStoreResult<Vec<ProjectMemoryFactMappingV1>> {
-    let mut mappings = Vec::with_capacity(ids.len());
-    let mut seen = BTreeSet::new();
-    for fact_id in ids {
-        if !seen.insert(fact_id.clone()) {
-            continue;
-        }
-        let legacy_mapping =
-            project_memory_required_mapping_tx(transaction, owner, fact_id).await?;
-        mappings.push(ProjectMemoryFactMappingV1::new(
-            ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
-            Some(legacy_mapping),
-        )?);
-    }
-    Ok(mappings)
-}
-
-pub(super) async fn project_memory_sanitized_relation_provenance(
-    metadata: &Value,
-) -> FactStoreResult<ProjectMemoryRelationProvenanceV1> {
-    match sanitize_memory_fact_payload(metadata.clone())
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-    {
-        MemoryFactSanitizationV1::Durable { payload, receipt } => {
-            ProjectMemoryRelationProvenanceV1::new(payload, receipt)
-        }
-        MemoryFactSanitizationV1::Quarantined => Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility relation metadata was rejected by the privacy sanitizer",
-        )),
-    }
-}
-
-pub(super) async fn project_memory_legacy_relation_provenance(
-    value: &Value,
-) -> FactStoreResult<ProjectMemoryRelationProvenanceV1> {
-    if value.get("metadata").is_some() || value.get("sanitization_receipt").is_some() {
-        return serde_json::from_value(value.clone()).map_err(|source| {
-            storage_error(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                LegacyRelationProvenanceErrorV1 { source },
-            )
-        });
-    }
-    project_memory_sanitized_relation_provenance(value).await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn project_memory_upsert_legacy_relation_tx(
-    transaction: &Transaction<'_>,
-    source_legacy_fact_id: i64,
-    target_legacy_fact_id: i64,
-    relation: ProjectMemoryFactRelationV1,
-    confidence: Confidence,
-    source_label: &str,
-    provenance: &ProjectMemoryRelationProvenanceV1,
-    timestamp: i64,
-) -> FactStoreResult<()> {
-    verify_memory_fact_sanitization(provenance.metadata(), provenance.sanitization_receipt())
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let mut rows = transaction
-        .query(
-            "SELECT relation FROM memory_fact_relations
-             WHERE source_fact_id = ?1 AND target_fact_id = ?2",
-            params![source_legacy_fact_id, target_legacy_fact_id],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-    {
-        let stored = match row_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION)?.as_str() {
-            "supports" => ProjectMemoryFactRelationV1::Supports,
-            "contradicts" => ProjectMemoryFactRelationV1::Contradicts,
-            "supersedes" => ProjectMemoryFactRelationV1::Supersedes,
-            "derived_from" => ProjectMemoryFactRelationV1::DerivedFrom,
-            _ => {
-                return Err(storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "legacy compatibility relation has an unsupported kind",
-                ));
-            }
-        };
-        if project_memory_relations_conflict(stored, relation) {
-            return Err(storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility relation conflicts with an existing relation",
-            ));
-        }
-    }
-    drop(rows);
-    transaction
-        .execute(
-            "INSERT INTO memory_fact_relations(
-                source_fact_id, target_fact_id, relation, confidence, source, metadata, created_at, updated_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
-             ON CONFLICT(source_fact_id, target_fact_id, relation) DO UPDATE SET
-                confidence = excluded.confidence,
-                source = excluded.source,
-                metadata = excluded.metadata,
-                updated_at = excluded.updated_at",
-            params![
-                source_legacy_fact_id,
-                target_legacy_fact_id,
-                project_memory_relation_label(relation),
-                confidence.as_f64(),
-                source_label,
-                to_json(provenance, "serialize compatibility relation provenance")?,
-                timestamp,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    Ok(())
-}
-
-pub(super) async fn project_memory_link_facts_tx(
+pub(super) async fn link_facts_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
     operation: &ProjectMemoryFactLinkV1,
     now: UtcMicros,
-) -> FactStoreResult<(Vec<FactId>, Option<FactEventId>)> {
-    verify_memory_fact_sanitization(
-        operation.provenance().metadata(),
-        operation.provenance().sanitization_receipt(),
-    )
-    .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let (source_fact_id, source_fact, source_mapping) =
-        project_memory_available_curation_fact_tx(transaction, operation.source()).await?;
-    let (target_fact_id, _, target_mapping) =
-        project_memory_available_curation_fact_tx(transaction, operation.target()).await?;
-    if source_fact_id == target_fact_id {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility curation relation cannot target itself",
-        ));
+) -> FactStoreResult<(Vec<FactId>, FactCommitReceipt)> {
+    let relation = operation.relation();
+    if relation.owner() != owner {
+        return Err(FactStoreError::OwnerMismatch);
     }
-    let evidence_fact_ids =
-        project_memory_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
-            .await?;
-    let source_label = project_memory_source_label(Some(operation.source_label()))?;
-    let provenance = operation.provenance();
-    let key = OwnerKey::new(owner)?;
-    let evidence_fact_ids_json = to_json(
-        &evidence_fact_ids
-            .iter()
-            .map(FactId::as_str)
-            .collect::<Vec<_>>(),
-        "serialize compatibility relation evidence",
-    )?;
-    let provenance_json = to_json(provenance, "serialize compatibility relation provenance")?;
-    transaction
-        .execute(
-            "INSERT INTO memory_v2_fact_relations(
-                owner_kind, project_id, source_fact_id, target_fact_id, relation,
-                confidence, source_label, provenance_json, evidence_fact_ids_json,
-                occurred_at, updated_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
-             ON CONFLICT(owner_kind, project_id, source_fact_id, target_fact_id, relation)
-             DO UPDATE SET confidence = excluded.confidence,
-                           source_label = excluded.source_label,
-                           provenance_json = excluded.provenance_json,
-                           evidence_fact_ids_json = excluded.evidence_fact_ids_json,
-                           updated_at = excluded.updated_at",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                source_fact_id.as_str(),
-                target_fact_id.as_str(),
-                project_memory_relation_label(operation.relation()),
-                operation.confidence().as_f64(),
-                source_label.clone(),
-                provenance_json,
-                evidence_fact_ids_json,
-                now.0,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let event_id = match operation.relation() {
-        ProjectMemoryFactRelationV1::Supports | ProjectMemoryFactRelationV1::DerivedFrom => None,
-        ProjectMemoryFactRelationV1::Contradicts | ProjectMemoryFactRelationV1::Supersedes => {
-            let action = match operation.relation() {
-                ProjectMemoryFactRelationV1::Contradicts => FactCurationActionV1::ContradictedBy {
-                    fact_id: target_fact_id.clone(),
-                },
-                ProjectMemoryFactRelationV1::Supersedes => FactCurationActionV1::SupersededBy {
-                    fact_id: target_fact_id.clone(),
-                },
-                _ => unreachable!("handled typed relation variants above"),
-            };
-            let event = FactLineageEventV1::new(
-                source_fact_id.clone(),
-                owner.clone(),
-                FactLineageEventKindV1::Curated {
-                    action,
-                    // LinkFacts provenance is owner-scoped FactId data above. This V1 lineage
-                    // field accepts only source-owned FactEvidenceId values.
-                    evidence_ids: Vec::new(),
-                },
-                now,
-                actor.cloned(),
-            )?;
-            let batch = FactWriteBatch::new(
-                source_fact_id.clone(),
-                owner.clone(),
-                None,
-                vec![event],
-                Vec::new(),
-                Vec::new(),
-                None,
-                Some(source_fact.last_event_id().clone()),
-            )?;
-            let (receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-            Some(receipt.last_event_id().clone())
-        }
-    };
-    project_memory_upsert_legacy_relation_tx(
+    let source = available_curation_fact_tx(
         transaction,
-        source_mapping
-            .legacy_fact_id()
-            .ok_or(FactStoreError::FactMismatch)?,
-        target_mapping
-            .legacy_fact_id()
-            .ok_or(FactStoreError::FactMismatch)?,
-        operation.relation(),
-        operation.confidence(),
-        &source_label,
-        provenance,
-        compatibility_legacy_timestamp(now),
+        &ProjectMemoryFactIdV1::new(owner.clone(), relation.source_fact_id().clone())?,
     )
     .await?;
-    Ok((vec![source_fact_id, target_fact_id], event_id))
+    available_curation_fact_tx(
+        transaction,
+        &ProjectMemoryFactIdV1::new(owner.clone(), relation.target_fact_id().clone())?,
+    )
+    .await?;
+    for fact_id in relation.evidence_fact_ids() {
+        available_curation_fact_tx(
+            transaction,
+            &ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
+        )
+        .await?;
+    }
+    ensure_relation_conflict_free_tx(transaction, owner, relation).await?;
+    let event = FactLineageEventV1::new(
+        relation.source_fact_id().clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::Linked {
+                relation: relation.clone(),
+            },
+            evidence_ids: Vec::new(),
+        },
+        now,
+        actor.cloned(),
+    )?;
+    let batch = FactWriteBatch::new(
+        relation.source_fact_id().clone(),
+        owner.clone(),
+        None,
+        vec![event],
+        Vec::new(),
+        Vec::new(),
+        Some(source.last_event_id().clone()),
+    )?;
+    let (receipt, _) = commit_batch_tx(transaction, &batch).await?;
+    Ok((
+        vec![
+            relation.source_fact_id().clone(),
+            relation.target_fact_id().clone(),
+        ],
+        receipt,
+    ))
 }
 
-pub(super) fn project_memory_curated_correction_batch(
+pub(super) fn curated_correction_batch(
     fact: &StoredFactV1,
     payload: FactPayloadV1,
+    actor: Option<ActorId>,
+    now: UtcMicros,
+) -> FactStoreResult<FactWriteBatch> {
+    correction_batch(fact, payload, FactCurationActionV1::Retained, actor, now)
+}
+
+fn normalized_tags_correction_batch(
+    fact: &StoredFactV1,
+    payload: FactPayloadV1,
+    evidence_fact_ids: Vec<FactId>,
+    confidence: Confidence,
+    actor: Option<ActorId>,
+    now: UtcMicros,
+) -> FactStoreResult<FactWriteBatch> {
+    correction_batch(
+        fact,
+        payload,
+        FactCurationActionV1::TagsNormalized {
+            evidence_fact_ids,
+            confidence,
+        },
+        actor,
+        now,
+    )
+}
+
+fn correction_batch(
+    fact: &StoredFactV1,
+    payload: FactPayloadV1,
+    action: FactCurationActionV1,
     actor: Option<ActorId>,
     now: UtcMicros,
 ) -> FactStoreResult<FactWriteBatch> {
@@ -475,7 +306,7 @@ pub(super) fn project_memory_curated_correction_batch(
         fact.fact_id().clone(),
         fact.owner().clone(),
         FactLineageEventKindV1::Curated {
-            action: FactCurationActionV1::Retained,
+            action,
             evidence_ids: Vec::new(),
         },
         project_memory_event_time(now, 1)?,
@@ -488,75 +319,45 @@ pub(super) fn project_memory_curated_correction_batch(
         vec![recorded, curated],
         Vec::new(),
         Vec::new(),
-        None,
         Some(fact.last_event_id().clone()),
     )
 }
 
-pub(super) async fn project_memory_normalize_tags_tx(
+pub(super) async fn normalize_tags_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     actor: Option<&ActorId>,
     operation: &ProjectMemoryFactNormalizeTagsV1,
     now: UtcMicros,
-) -> FactStoreResult<FactId> {
-    let evidence =
-        project_memory_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
-            .await?;
-    let (fact_id, fact, mapping) =
-        project_memory_available_curation_fact_tx(transaction, operation.fact()).await?;
+) -> FactStoreResult<(FactId, FactCommitReceipt)> {
+    let evidence_fact_ids =
+        curation_evidence_ids_tx(transaction, owner, operation.evidence_facts()).await?;
+    let fact = available_curation_fact_tx(transaction, operation.fact()).await?;
     let payload = fact
         .payload()
         .ok_or(FactStoreError::PayloadAccessMismatch)?;
-    let tags = project_memory_normalize_tags(operation.tags());
-    let Some(sanitized) = compatibility_sanitize_payload(
+    let Some(sanitized) = sanitize_payload(
         payload.content(),
         payload.category(),
-        &tags,
+        &normalize_tags(operation.tags()),
         payload.entities(),
         payload.metadata(),
+        payload.source_label(),
     )?
     else {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility normalized tags were rejected by the privacy sanitizer",
+            "normalized tags were rejected by the privacy sanitizer",
         ));
     };
-    let source = project_memory_source_for_fact_tx(
-        transaction,
-        mapping
-            .legacy_mapping()
-            .ok_or(FactStoreError::FactMismatch)?,
-    )
-    .await?;
-    let batch = project_memory_curated_correction_batch(
+    let batch = normalized_tags_correction_batch(
         &fact,
-        sanitized.payload.clone(),
+        sanitized.payload,
+        evidence_fact_ids,
+        operation.confidence(),
         actor.cloned(),
         now,
     )?;
-    compatibility_commit_batch_tx(transaction, &batch).await?;
-    project_memory_record_curated_correction_provenance_tx(
-        transaction,
-        owner,
-        &fact_id,
-        &evidence,
-        operation.confidence(),
-        "normalize_tags",
-        actor,
-        now,
-    )
-    .await?;
-    compatibility_mirror_update_tx(
-        transaction,
-        mapping
-            .legacy_fact_id()
-            .ok_or(FactStoreError::FactMismatch)?,
-        &sanitized.payload,
-        &source,
-        fact.trust(),
-        now,
-    )
-    .await?;
-    Ok(fact_id)
+    let (receipt, _) = commit_batch_tx(transaction, &batch).await?;
+    Ok((fact.fact_id().clone(), receipt))
 }

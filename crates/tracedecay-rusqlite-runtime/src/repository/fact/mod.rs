@@ -8,7 +8,9 @@
 use std::collections::HashSet;
 
 use rusqlite::{Savepoint, Transaction, params, params_from_iter};
-use tracedecay_domain::{FactOwnerV1, RetrievalAnchorId};
+use tracedecay_domain::{
+    FactCurationActionV1, FactLineageEventKindV1, FactOwnerV1, RetrievalAnchorId,
+};
 use tracedecay_store::{FactReadOperationV1, FactReadResultV1, FactWriteBatch};
 
 use super::support::{encode, invalid};
@@ -16,6 +18,9 @@ use super::support::{encode, invalid};
 /// The largest `anchor_id IN (...)` batch one referenced-anchor availability
 /// probe binds, kept clear of SQLite's default variable ceiling.
 const REFERENCED_ANCHOR_BATCH: usize = 500;
+
+/// Leaves ample room below SQLite's variable limit for the three owner keys.
+const NORMALIZED_TAG_EVIDENCE_BATCH: usize = 250;
 
 mod assertion;
 mod reads;
@@ -40,6 +45,7 @@ impl FactExecutor {
             return Err(invalid("fact lineage last-event conflict"));
         }
 
+        require_normalized_tag_evidence_available(savepoint, &owner, batch)?;
         ensure_fact(savepoint, &owner, batch)?;
         require_referenced_anchors_available(savepoint, &owner, batch.referenced_anchor_ids())?;
         for anchor in batch.new_anchors() {
@@ -82,6 +88,63 @@ impl FactExecutor {
             }
         }
     }
+}
+
+/// Confirms normalized-tag provenance points at facts already owned here.
+///
+/// This runs before any mutation. In particular, self-evidence is available
+/// only for an existing target fact; a new fact cannot make its own evidence
+/// true by being inserted later in the same write.
+fn require_normalized_tag_evidence_available(
+    connection: &rusqlite::Connection,
+    owner: &OwnerColumns,
+    batch: &FactWriteBatch,
+) -> rusqlite::Result<()> {
+    let evidence_fact_ids = batch
+        .events()
+        .iter()
+        .filter_map(|event| match event.kind() {
+            FactLineageEventKindV1::Curated {
+                action:
+                    FactCurationActionV1::TagsNormalized {
+                        evidence_fact_ids, ..
+                    },
+                ..
+            } => Some(evidence_fact_ids.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    if evidence_fact_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut present: HashSet<String> = HashSet::new();
+    for chunk in evidence_fact_ids.chunks(NORMALIZED_TAG_EVIDENCE_BATCH) {
+        let placeholders = (1..=chunk.len())
+            .map(|index| format!("?{}", index + 3))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut statement = connection.prepare(&format!(
+            "SELECT fact_id FROM memory_v2_facts
+             WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
+               AND fact_id IN ({placeholders})",
+        ))?;
+        let mut bindings: Vec<&str> = Vec::with_capacity(chunk.len() + 3);
+        bindings.extend([owner.kind, owner.project_id.as_str(), owner.json.as_str()]);
+        bindings.extend(chunk.iter().map(|fact_id| fact_id.as_str()));
+        let rows =
+            statement.query_map(params_from_iter(bindings), |row| row.get::<_, String>(0))?;
+        for row in rows {
+            present.insert(row?);
+        }
+    }
+    for fact_id in evidence_fact_ids {
+        if !present.contains(fact_id.as_str()) {
+            return Err(invalid("normalized tag evidence fact is unavailable"));
+        }
+    }
+    Ok(())
 }
 
 /// Confirms every anchor a fact references is present under the fact's owner.

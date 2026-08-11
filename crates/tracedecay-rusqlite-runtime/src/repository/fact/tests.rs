@@ -1,13 +1,14 @@
 use super::*;
 use tracedecay_domain::{
-    ComponentVersion, Confidence, EvidenceClass, FactAssertionId, FactAssertionKindV1,
-    FactAssertionV1, FactCategoryV1, FactEventId, FactEvidenceRefV1, FactEvidenceRelationV1,
-    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
-    FactLineageEventV1, FactPayloadV1, PayloadAccessState, PayloadReferenceV1, ProvenanceId,
-    RetentionClass, RetrievalAnchorId, SanitizationReceiptId, SanitizationReceiptRefV1,
-    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, UtcMicros,
+    ActorId, ComponentVersion, Confidence, EvidenceClass, FactAssertionId, FactAssertionKindV1,
+    FactAssertionV1, FactCategoryV1, FactCurationActionV1, FactEventId, FactEvidenceRefV1,
+    FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
+    FactLineageEventKindV1, FactLineageEventV1, FactPayloadV1, PayloadAccessState,
+    PayloadReferenceV1, ProvenanceId, RetentionClass, RetrievalAnchorId, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
+    UtcMicros,
 };
-use tracedecay_store::{FactCurrentQuery, FactLineageQuery};
+use tracedecay_store::{FactCurrentQuery, FactLineageQuery, FactWriteBatch};
 
 /// Every table `insert_assertion` writes or compares against, so the write
 /// path is exercised with the real column set rather than a stub.
@@ -19,6 +20,8 @@ fn assertion_schema(connection: &rusqlite::Connection) {
                     owner_kind TEXT NOT NULL,
                     project_id TEXT NOT NULL,
                     owner_json TEXT NOT NULL,
+                    identity_json TEXT,
+                    created_at INTEGER,
                     PRIMARY KEY (fact_id, owner_kind, project_id)
                  );
                  CREATE TABLE memory_v2_current_facts (
@@ -26,6 +29,10 @@ fn assertion_schema(connection: &rusqlite::Connection) {
                     owner_kind TEXT NOT NULL,
                     project_id TEXT NOT NULL,
                     payload_access TEXT NOT NULL,
+                    trust_score REAL,
+                    active_assertion_id TEXT,
+                    last_event_id TEXT,
+                    updated_at INTEGER,
                     PRIMARY KEY (fact_id, owner_kind, project_id)
                  );
                  CREATE TABLE memory_v2_assertions (
@@ -78,6 +85,20 @@ fn assertion_schema(connection: &rusqlite::Connection) {
                     project_id TEXT NOT NULL,
                     ordinal INTEGER NOT NULL,
                     PRIMARY KEY (assertion_id, fact_id, owner_kind, project_id, ordinal)
+                 );
+                 CREATE TABLE memory_v2_lineage_events (
+                    event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL,
+                    fact_id TEXT NOT NULL,
+                    owner_kind TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    event_json TEXT NOT NULL,
+                    occurred_at INTEGER NOT NULL,
+                    recorded_at INTEGER NOT NULL,
+                    UNIQUE (event_id, fact_id, owner_kind, project_id)
+                 );
+                 CREATE TABLE memory_v2_operation_receipts (
+                    operation_id TEXT PRIMARY KEY
                  );",
         )
         .unwrap();
@@ -108,6 +129,7 @@ fn payload(content: &str) -> FactPayloadV1 {
         vec!["fact-executor".to_owned()],
         vec!["TraceDecay".to_owned()],
         serde_json::json!({}),
+        None,
         receipt,
         RetentionClass::new("durable.fact-executor").unwrap(),
     )
@@ -276,6 +298,229 @@ fn profile_fact_id(operation: &str) -> FactId {
     .unwrap()
 }
 
+fn identity(operation: &str) -> (FactIdentityMaterialV1, FactId) {
+    let identity = FactIdentityMaterialV1::new(
+        FactOwnerV1::Profile,
+        FactIdentitySourceV1::Application {
+            operation_id: ProvenanceId::new(operation).unwrap(),
+        },
+    )
+    .unwrap();
+    let fact_id = FactId::derive(&identity).unwrap();
+    (identity, fact_id)
+}
+
+fn insert_owned_fact(
+    connection: &rusqlite::Connection,
+    owner: &OwnerColumns,
+    operation: &str,
+) -> FactId {
+    let (identity, fact_id) = identity(operation);
+    connection
+        .execute(
+            "INSERT INTO memory_v2_facts (
+                    fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![
+                fact_id.as_str(),
+                owner.kind,
+                owner.project_id,
+                owner.json,
+                encode(&identity).unwrap(),
+            ],
+        )
+        .unwrap();
+    fact_id
+}
+
+fn seed_normalized_tag_target(
+    connection: &rusqlite::Connection,
+) -> (OwnerColumns, FactId, FactAssertionId, FactEventId) {
+    let owner = OwnerColumns::new(&FactOwnerV1::Profile).unwrap();
+    let fact_id = insert_owned_fact(connection, &owner, "operation.normalized-tag-target");
+    let assertion_id = FactAssertionId::new("assertion.normalized-tag.previous").unwrap();
+    let event_id = FactEventId::new("event.normalized-tag.previous").unwrap();
+    connection
+        .execute(
+            "INSERT INTO memory_v2_current_facts (
+                    fact_id, owner_kind, project_id, payload_access, trust_score,
+                    active_assertion_id, last_event_id, updated_at
+                 ) VALUES (?1, ?2, ?3, 'eligible', 0.5, ?4, ?5, 1)",
+            params![
+                fact_id.as_str(),
+                owner.kind,
+                owner.project_id,
+                assertion_id.as_str(),
+                event_id.as_str(),
+            ],
+        )
+        .unwrap();
+    (owner, fact_id, assertion_id, event_id)
+}
+
+fn normalized_tag_write_batch(
+    fact_id: FactId,
+    previous_assertion_id: FactAssertionId,
+    expected_last_event_id: FactEventId,
+    evidence_fact_ids: Vec<FactId>,
+) -> FactWriteBatch {
+    let owner = FactOwnerV1::Profile;
+    let actor = Some(ActorId::new("actor.normalized-tags").unwrap());
+    let assertion = FactAssertionV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactAssertionKindV1::Correction {
+            supersedes: previous_assertion_id,
+        },
+        payload("normalized tags"),
+        vec![],
+        UtcMicros(10),
+        actor.clone(),
+    )
+    .unwrap();
+    let recorded = FactLineageEventV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::AssertionRecorded {
+            assertion_id: assertion.assertion_id().clone(),
+        },
+        UtcMicros(10),
+        actor.clone(),
+    )
+    .unwrap();
+    let normalized = FactLineageEventV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::TagsNormalized {
+                evidence_fact_ids,
+                confidence: Confidence::new(0.8).unwrap(),
+            },
+            evidence_ids: vec![],
+        },
+        UtcMicros(11),
+        actor,
+    )
+    .unwrap();
+    FactWriteBatch::new(
+        fact_id,
+        owner,
+        Some(assertion),
+        vec![recorded, normalized],
+        vec![],
+        vec![],
+        Some(expected_last_event_id),
+    )
+    .unwrap()
+}
+
+fn normalized_tag_state(
+    connection: &rusqlite::Connection,
+    fact_id: &FactId,
+) -> (i64, i64, i64, String, String, i64) {
+    let assertions = connection
+        .query_row("SELECT COUNT(*) FROM memory_v2_assertions", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let events = connection
+        .query_row("SELECT COUNT(*) FROM memory_v2_lineage_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let projections = connection
+        .query_row("SELECT COUNT(*) FROM memory_v2_current_facts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let (active, last_event) = connection
+        .query_row(
+            "SELECT active_assertion_id, last_event_id
+             FROM memory_v2_current_facts WHERE fact_id = ?1",
+            [fact_id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let receipts = connection
+        .query_row(
+            "SELECT COUNT(*) FROM memory_v2_operation_receipts",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (
+        assertions,
+        events,
+        projections,
+        active,
+        last_event,
+        receipts,
+    )
+}
+
+#[test]
+fn normalized_tag_write_rejects_missing_evidence_before_any_mutation() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    assertion_schema(&connection);
+    let (_owner, fact_id, assertion_id, event_id) = seed_normalized_tag_target(&connection);
+    let missing = profile_fact_id("operation.normalized-tag-missing-evidence");
+    let batch = normalized_tag_write_batch(
+        fact_id.clone(),
+        assertion_id,
+        event_id,
+        vec![fact_id.clone(), missing],
+    );
+    let before = normalized_tag_state(&connection, &fact_id);
+    let savepoint = connection.savepoint().unwrap();
+
+    let error = FactExecutor.execute_write(&savepoint, &batch).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("normalized tag evidence fact is unavailable")
+    );
+    assert_eq!(normalized_tag_state(&savepoint, &fact_id), before);
+    assert_eq!(before.5, 0, "the refusal fixture must begin receipt-free");
+}
+
+#[test]
+fn normalized_tag_write_accepts_256_owned_evidence_facts_including_self() {
+    let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+    assertion_schema(&connection);
+    let (owner, fact_id, assertion_id, event_id) = seed_normalized_tag_target(&connection);
+    let mut evidence_fact_ids = vec![fact_id.clone()];
+    evidence_fact_ids.extend((1..256).map(|index| {
+        insert_owned_fact(
+            &connection,
+            &owner,
+            &format!("operation.normalized-tag-evidence-{index}"),
+        )
+    }));
+    let batch =
+        normalized_tag_write_batch(fact_id.clone(), assertion_id, event_id, evidence_fact_ids);
+    let expected_assertion = batch
+        .assertion()
+        .unwrap()
+        .assertion_id()
+        .as_str()
+        .to_owned();
+    let expected_event = batch
+        .events()
+        .last()
+        .unwrap()
+        .event_id()
+        .as_str()
+        .to_owned();
+    let savepoint = connection.savepoint().unwrap();
+
+    FactExecutor.execute_write(&savepoint, &batch).unwrap();
+
+    let state = normalized_tag_state(&savepoint, &fact_id);
+    assert_eq!((state.0, state.1, state.2, state.5), (1, 2, 1, 0));
+    assert_eq!((state.3, state.4), (expected_assertion, expected_event));
+}
+
 #[test]
 fn fact_write_rejects_stored_identity_mismatch() {
     let mut connection = rusqlite::Connection::open_in_memory().unwrap();
@@ -344,7 +589,6 @@ fn fact_write_rejects_stored_identity_mismatch() {
         vec![],
         vec![],
         None,
-        None,
     )
     .unwrap()
     .with_identity_material(requested_identity)
@@ -410,17 +654,8 @@ fn fact_executor_does_not_claim_replay_without_writer_ledger() {
             ],
         )
         .unwrap();
-    let batch = FactWriteBatch::new(
-        fact_id,
-        owner,
-        None,
-        vec![event],
-        vec![],
-        vec![],
-        None,
-        None,
-    )
-    .unwrap();
+    let batch =
+        FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap();
     let savepoint = connection.savepoint().unwrap();
 
     let error = FactExecutor.execute_write(&savepoint, &batch).unwrap_err();
@@ -480,7 +715,6 @@ fn purge_access_transition_clears_active_assertion() {
             vec![event],
             vec![],
             vec![],
-            None,
             None,
         )
         .unwrap();
@@ -566,7 +800,6 @@ fn stale_projection_transitions_are_rejected() {
             vec![event],
             vec![],
             vec![],
-            None,
             None,
         )
         .unwrap();
