@@ -449,35 +449,11 @@ impl TraceDecay {
                     .await;
                 }
             };
-            let integrity = verification.quick_check().await;
+            // `open_read_only` already completes the full read-only integrity
+            // validation before returning. Repeating `quick_check` here (and
+            // again after the writable open) turns one crash-recovery scan
+            // into three identical full-store scans.
             verification.close();
-            match integrity {
-                Ok(true) => {}
-                Ok(false) => {
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        "read-only SQLite quick_check did not return ok",
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
-                Err(error) => {
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        error,
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
-            }
         }
 
         // Ordinary opens never replace database files. A daemon or another MCP
@@ -505,43 +481,13 @@ impl TraceDecay {
             == Some(FULL_REINDEX_REQUIRED_VALUE);
         let needs_reindex = migrated || reindex_pending;
 
-        // If the sentinel was set but the database opened successfully, run a
-        // quick integrity check.
-        if crashed {
-            match db.quick_check().await {
-                Ok(true) => {
-                    if !needs_reindex {
-                        clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
-                        clear_dirty_sentinel_at(&store_layout.dirty_path);
-                    }
-                }
-                Ok(false) => {
-                    db.close();
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        "SQLite quick_check did not return ok",
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
-                Err(e) => {
-                    db.close();
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        e,
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
-            }
+        // The read-only preflight above already validated the exact WAL-aware
+        // recovery set while both locks were held. A successful writable open
+        // does not need to scan the same pages again. Reindexing owns sentinel
+        // cleanup when migration requires it.
+        if crashed && !needs_reindex {
+            clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
+            clear_dirty_sentinel_at(&store_layout.dirty_path);
         }
 
         let ts = Self {
