@@ -4,10 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use super::{
-    DaemonEngine, DaemonHandshake, ProjectServerKey, StoreAdministration,
-    portable_database_owner_reconciler,
-};
+#[cfg(any(not(unix), test, feature = "test-transport"))]
+use super::portable_database_owner_reconciler;
+use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, StoreAdministration};
 
 #[derive(Clone)]
 pub(in crate::daemon) enum ProductionProjectCompositionRuntime {
@@ -23,7 +22,7 @@ pub(in crate::daemon) enum ProductionProjectCompositionRuntime {
 impl ProductionProjectCompositionRuntime {
     pub(super) fn database_owner_reconciler(
         &self,
-        store_administration: &StoreAdministration,
+        _store_administration: &StoreAdministration,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         route_registered: Arc<AtomicBool>,
@@ -39,7 +38,7 @@ impl ProductionProjectCompositionRuntime {
             ),
             #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable { .. } => portable_database_owner_reconciler(
-                store_administration.clone(),
+                _store_administration.clone(),
                 current_key,
                 route_registered,
                 handshake,
