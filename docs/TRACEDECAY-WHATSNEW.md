@@ -105,7 +105,11 @@ Version 1.7.0 embedded three safety metrics directly into every function node du
 
 ## The Agent Problem
 
-TraceDecay started as a Claude Code plugin. You ran `tracedecay claude-install`, it configured your MCP server and permissions, injected prompt rules into `CLAUDE.md`, and set up a PreToolUse hook to block wasteful Explore agents. That worked fine for exactly one agent.
+TraceDecay started as a Claude Code plugin. That original Claude-only setup
+eventually became today's `tracedecay install --agent claude`: it configures
+the MCP server and permissions, injects prompt rules into `CLAUDE.md`, and sets
+up a PreToolUse hook to block wasteful Explore agents. That worked fine for
+exactly one agent.
 
 Then the ecosystem diversified. Codex CLI, OpenCode, Gemini CLI, Copilot, Cursor, Zed, Cline, Roo Code. Each with its own configuration format, its own prompt file location, its own way of registering MCP servers. Some use JSON. Some use TOML. Zed and VS Code use JSON with comments and trailing commas, which isn't actually JSON at all.
 

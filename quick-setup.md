@@ -23,7 +23,7 @@ tracedecay --help
 ## 2. Configure Claude Code
 
 ```bash
-tracedecay claude-install
+tracedecay install --agent claude
 ```
 
 This single command configures everything — MCP server, tool permissions, PreToolUse hook, and CLAUDE.md rules. No scripts, no `jq`, works on macOS/Linux/Windows. Safe to re-run after upgrading.

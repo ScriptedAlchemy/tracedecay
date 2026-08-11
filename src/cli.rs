@@ -295,7 +295,6 @@ pub enum Commands {
     /// Configure agent integration (MCP server, permissions, hooks, prompt rules)
     #[command(
         name = "install",
-        visible_alias = "claude-install",
         long_about = INSTALL_LONG_ABOUT,
         after_help = INSTALL_AFTER_HELP
     )]
@@ -337,11 +336,7 @@ pub enum Commands {
     /// files (Hermes config.yaml, mcp.json, settings,
     /// prompt rules) are left byte-for-byte intact; use `tracedecay reinstall`
     /// to refresh those.
-    #[command(
-        name = "update-plugin",
-        visible_alias = "update-plugins",
-        after_help = UPDATE_PLUGIN_AFTER_HELP
-    )]
+    #[command(name = "update-plugin", after_help = UPDATE_PLUGIN_AFTER_HELP)]
     UpdatePlugin {
         /// Update one project-local integration in the current directory
         #[arg(long, requires = "agent")]
@@ -353,7 +348,6 @@ pub enum Commands {
     /// Remove agent integration (MCP server, permissions, hooks, prompt rules)
     #[command(
         name = "uninstall",
-        visible_alias = "claude-uninstall",
         long_about = UNINSTALL_LONG_ABOUT,
         after_help = UNINSTALL_AFTER_HELP
     )]

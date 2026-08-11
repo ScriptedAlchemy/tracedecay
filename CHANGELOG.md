@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- *(cli)* for the explicit 0.1.0 breaking release, remove the shipped
+  `claude-install`, `update-plugins`, and `claude-uninstall` host lifecycle
+  aliases. Use `install`, `update-plugin`, and `uninstall`; the old spellings
+  now fail as invalid subcommands.
 - *(storage)* retire the `tracedecay-migrate` crate and the v0.0.67
   released-shape migration exception. Operators on a v0.0.67-era store shape
   now get a typed `ResetRequired` instead of an in-place upgrade path; this

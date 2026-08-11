@@ -264,27 +264,14 @@ fn workflow_command_binds_one_closed_typed_operation() {
 }
 
 #[test]
-fn claude_install_alias_dispatches_to_install_command() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "claude-install",
-        "--agent",
-        "hermes",
-        "--no-dashboard",
-    ])
-    .expect("install alias should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Install {
-            agent,
-            local,
-            no_dashboard,
-            ..
-        }) if agent.as_deref() == Some("hermes")
-            && !local
-            && no_dashboard
-    ));
+fn removed_host_cli_aliases_are_invalid_subcommands() {
+    for alias in ["claude-install", "update-plugins", "claude-uninstall"] {
+        let error = match Cli::try_parse_from(["tracedecay", alias]) {
+            Ok(_) => panic!("removed host CLI alias must fail: {alias}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "alias: {alias}");
+    }
 }
 
 #[test]
@@ -335,20 +322,6 @@ fn removed_hermes_install_selectors_are_unknown_arguments() {
         };
         assert_eq!(error.kind(), ErrorKind::UnknownArgument, "args: {args:?}");
     }
-}
-
-#[test]
-fn update_plugins_alias_dispatches_to_update_plugin_command() {
-    let cli = Cli::try_parse_from(["tracedecay", "update-plugins"])
-        .expect("update-plugin alias should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::UpdatePlugin {
-            local: false,
-            agent: None
-        })
-    ));
 }
 
 #[test]

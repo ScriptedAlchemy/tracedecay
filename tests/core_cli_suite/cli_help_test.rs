@@ -118,6 +118,22 @@ fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
 }
 
 #[test]
+fn legacy_host_cli_aliases_are_rejected() {
+    for alias in ["claude-install", "update-plugins", "claude-uninstall"] {
+        let output = Command::new(tracedecay_bin())
+            .args([alias, "--help"])
+            .output()
+            .unwrap_or_else(|e| panic!("run tracedecay {alias} --help: {e}"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "removed tracedecay {alias} should exit nonzero\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn tool_name_help_still_prints_tool_schema() {
     assert_help_succeeds(&["tool", "search", "--help"], "tracedecay tool search");
 }
