@@ -600,6 +600,7 @@ pub(super) fn get_maximal_tool_definitions()
         def_fact_store_update(request_schema("fact_store_update")?),
         def_fact_store_remove(request_schema("fact_store_remove")?),
         def_fact_store_list(request_schema("fact_store_list")?),
+        def_fact_store_curate(request_schema("fact_store_curate")?),
         def_fact_feedback(),
         def_memory_status(),
         def_automation_run_artifact_view(),
@@ -876,6 +877,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_fact_store_update",
     "tracedecay_fact_store_remove",
     "tracedecay_fact_store_list",
+    "tracedecay_fact_store_curate",
     "tracedecay_fact_feedback",
     // workflow
     "tracedecay_diagnose",
@@ -939,6 +941,7 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
             | "tracedecay_fact_store_update"
             | "tracedecay_fact_store_remove"
             | "tracedecay_fact_store_list"
+            | "tracedecay_fact_store_curate"
             | "tracedecay_files"
             | "tracedecay_read"
             | "tracedecay_skill_list"

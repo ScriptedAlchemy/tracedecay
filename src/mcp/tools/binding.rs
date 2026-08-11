@@ -268,6 +268,7 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_fact_store_update", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_fact_store_remove", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_fact_store_list", group: None, project: RegisteredProjectAccess::SelectorOnly },
+    McpToolBinding { name: "tracedecay_fact_store_curate", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_memory_status", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_message_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
 ];
@@ -318,6 +319,7 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_fact_store_add"
         | "tracedecay_fact_store_update"
         | "tracedecay_fact_store_remove"
+        | "tracedecay_fact_store_curate"
         | "tracedecay_fact_feedback"
         | "tracedecay_session_refresh"
         | "tracedecay_run_affected_tests" => EffectClass::Administrative,
@@ -490,6 +492,7 @@ fn verified_effect_journey(tool_name: &str) -> bool {
             | "tracedecay_fact_store_add"
             | "tracedecay_fact_store_update"
             | "tracedecay_fact_store_remove"
+            | "tracedecay_fact_store_curate"
             | "tracedecay_fact_feedback"
             | "tracedecay_session_refresh"
             | "tracedecay_run_affected_tests"
@@ -844,6 +847,7 @@ mod tests {
     fn retained_administrative_effects_are_available_after_their_canonical_journeys_ship() {
         let catalog = mcp_dispatch_catalog().unwrap();
         for tool_name in [
+            "tracedecay_fact_store_curate",
             "tracedecay_fact_feedback",
             "tracedecay_session_refresh",
             "tracedecay_run_affected_tests",
@@ -921,6 +925,7 @@ mod tests {
             "tracedecay_fact_store_update",
             "tracedecay_fact_store_remove",
             "tracedecay_fact_store_list",
+            "tracedecay_fact_store_curate",
             "tracedecay_memory_status",
         ] {
             assert!(tool_accepts_registered_project_selector(tool_name));

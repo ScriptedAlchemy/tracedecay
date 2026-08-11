@@ -95,6 +95,15 @@ pub(super) fn def_fact_store_list(input_schema: Value) -> ToolDefinition {
     )
 }
 
+pub(super) fn def_fact_store_curate(input_schema: Value) -> ToolDefinition {
+    def_rw(
+        "tracedecay_fact_store_curate",
+        "Fact Store Curate",
+        "Apply one canonical batch of tag normalizations and fact links to retained project or user memory. Every operation requires explicit evidence fact ids and bounded confidence; the result carries durable commit and replay identity.",
+        input_schema,
+    )
+}
+
 pub(super) fn def_fact_feedback() -> ToolDefinition {
     def_rw(
         "tracedecay_fact_feedback",

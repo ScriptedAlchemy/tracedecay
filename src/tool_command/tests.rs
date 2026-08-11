@@ -36,6 +36,7 @@ fn fact_store_tool_lookup_rejects_broad_and_accepts_exact_routes() {
         "fact_store_update",
         "fact_store_remove",
         "fact_store_list",
+        "fact_store_curate",
     ] {
         let canonical = canonical_tool_name(name);
         assert!(

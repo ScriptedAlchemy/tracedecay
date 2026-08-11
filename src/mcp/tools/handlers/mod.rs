@@ -365,6 +365,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         | RetainedSurfaceOperation::FactStoreUpdate
                         | RetainedSurfaceOperation::FactStoreRemove
                         | RetainedSurfaceOperation::FactStoreList
+                        | RetainedSurfaceOperation::FactStoreCurate
                         | RetainedSurfaceOperation::FactFeedback
                         | RetainedSurfaceOperation::MemoryStatus
                 )
