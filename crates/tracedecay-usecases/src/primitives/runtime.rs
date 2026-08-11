@@ -55,7 +55,6 @@ use crate::operation_stream::{
 };
 use tracedecay_runtime_core::db::Database;
 
-const MAX_OPERATION_PARAMETERS_BYTES: usize = 1_048_576;
 const MAX_OPERATION_OUTPUT_BYTES: usize = 1_048_576;
 const MAX_ADMITTED_ROOT_URI_BYTES: usize = 4_096;
 const MAX_CONCURRENT_PRIMITIVES: usize = 32;
@@ -82,9 +81,6 @@ pub type PrimitiveDispatchFuture<'a> =
 pub type PrimitiveTransportDispatchFuture<'a> =
     Pin<Box<dyn Future<Output = PrimitiveResult<Value>> + Send + 'a>>;
 
-pub type OperationalPrimitiveFuture<'a> =
-    Pin<Box<dyn Future<Output = PrimitiveResult<Value>> + Send + 'a>>;
-
 pub type ExtendedPrimitiveFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<T>> + Send + 'a>>;
 
@@ -104,50 +100,6 @@ pub type ManagedTestRunCurrentIdentityFuture<'a> = Pin<
 
 pub trait ManagedTestRunCurrentScopePort: Send + Sync {
     fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_>;
-}
-
-/// Closed operational reads whose concrete owner remains Doctor,
-/// configuration, diagnostics, project, or status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationalPrimitive {
-    Project,
-    Status,
-    Files,
-    Configuration,
-    RuntimeStatus,
-}
-
-/// Canonical bounded parameters for one operational read.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperationalPrimitiveRequest {
-    pub operation: OperationalPrimitive,
-    pub parameters: Value,
-    pub maximum_output_bytes: u32,
-}
-
-impl OperationalPrimitiveRequest {
-    fn validate(&self) -> Result<(), ApplicationContractError> {
-        if !self.parameters.is_object() {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "application operational parameter object",
-            });
-        }
-        validate_no_scope_selector(&self.parameters)?;
-        validate_bounds(&self.parameters, self.maximum_output_bytes as usize)
-    }
-}
-
-/// Object-safe owner for the existing operational read families.
-pub trait OperationalPrimitivePort: Send + Sync {
-    fn read<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        operation: &'a ApplicationOperation,
-        request: &'a OperationalPrimitiveRequest,
-        observed_at: UtcMicros,
-    ) -> OperationalPrimitiveFuture<'a>;
 }
 
 // The extended-primitive wire pairs live at the application boundary
@@ -263,7 +215,6 @@ pub enum PrimitiveRequest {
     HealthDelta(HealthDeltaRequest),
     StorageStatus(StorageStatusPrimitiveRequest),
     DiagnosticsRead(DiagnosticsPrimitiveRequest),
-    Operational(OperationalPrimitiveRequest),
     RecentTestResults(PageRequest),
 }
 
@@ -296,8 +247,8 @@ pub trait PrimitiveDispatch: Send + Sync {
 
 /// Owned production authorities supplied by the daemon project-open path.
 ///
-/// The Arc fields are the existing graph/query/source/cursor/test/grep and
-/// operational services. This is an ownership boundary, not a locator:
+/// The Arc fields are the existing graph/query/source/cursor/test/grep services.
+/// This is an ownership boundary, not a locator:
 /// every dependency is explicit and no authority can be discovered at call
 /// time.
 #[derive(Clone)]
@@ -314,7 +265,6 @@ struct PrimitiveProjectServices {
     pub source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
     pub health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
     pub extended: Arc<dyn ExtendedPrimitivePort>,
-    pub operational: Arc<dyn OperationalPrimitivePort>,
 }
 
 impl PrimitiveProjectServices {
@@ -332,7 +282,6 @@ impl PrimitiveProjectServices {
         source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
         health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
         extended: Arc<dyn ExtendedPrimitivePort>,
-        operational: Arc<dyn OperationalPrimitivePort>,
     ) -> Self {
         Self {
             symbol_graph,
@@ -347,7 +296,6 @@ impl PrimitiveProjectServices {
             source_lines,
             health,
             extended,
-            operational,
         }
     }
 }
@@ -572,8 +520,7 @@ fn transport_context(
 ///
 /// `open_primitive_project_runtime(database, source_runtime, code_graph, symbol_graph_cursors,
 /// tests, lexical_grep, redundancy, temporal, source_lines, health, extended,
-/// operational, scope, access,
-/// admitted_root_uri, operation_events, test_run_scope) ->
+/// scope, access, admitted_root_uri, operation_events, test_run_scope) ->
 /// Result<PrimitiveProjectRuntime,
 /// ApplicationContractError>`
 #[allow(clippy::too_many_arguments)]
@@ -589,7 +536,6 @@ pub fn open_primitive_project_runtime(
     source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
     health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
     extended: Arc<dyn ExtendedPrimitivePort>,
-    operational: Arc<dyn OperationalPrimitivePort>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
@@ -631,7 +577,6 @@ pub fn open_primitive_project_runtime(
         source_lines,
         health,
         extended,
-        operational,
     );
     let dispatch: Arc<dyn PrimitiveDispatch> = Arc::new(OwnedPrimitiveRuntime {
         project_runtime: services,
@@ -1066,18 +1011,6 @@ async fn dispatch_admitted(
                 .await;
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
-        PrimitiveRequest::Operational(request) => {
-            if request.validate().is_err() {
-                return invalid_request(&context, &operation);
-            }
-            let maximum_output_bytes = request.maximum_output_bytes as usize;
-            let result = runtime
-                .project_runtime
-                .operational
-                .read(&context, &operation, &request, observed_at)
-                .await;
-            validate_operational_result(&context, &operation, maximum_output_bytes, result)
-        }
         PrimitiveRequest::RecentTestResults(page) => {
             recent_test_results(runtime, &context, &operation, &page, observed_at).await
         }
@@ -1178,44 +1111,6 @@ fn erase_retrieval_evidence<T: Serialize>(
         budget: evidence.budget,
         cancellation: evidence.cancellation,
     })
-}
-
-fn validate_operational_result(
-    context: &RequestContext,
-    operation: &ApplicationOperation,
-    maximum_output_bytes: usize,
-    result: Result<ApplicationResult<Value>, ApplicationContractError>,
-) -> Result<ApplicationResult<Value>, ApplicationContractError> {
-    let result = result?;
-    match result {
-        Ok(envelope)
-            if envelope.contract == *operation.result_contract()
-                && envelope.request_id == *context.request_id()
-                && envelope.scope == *context.scope() =>
-        {
-            let bounded = match &envelope.outcome {
-                tracedecay_application::ApplicationOutcome::Evidence(packet) => {
-                    packet.payload.as_ref().is_none_or(|payload| {
-                        serde_json::to_vec(payload)
-                            .is_ok_and(|bytes| bytes.len() <= maximum_output_bytes)
-                    })
-                }
-                _ => false,
-            };
-            if bounded {
-                Ok(Ok(envelope))
-            } else {
-                unavailable(context, operation)
-            }
-        }
-        Err(problem)
-            if problem.contract == *operation.result_contract()
-                && problem.request_id == *context.request_id() =>
-        {
-            Ok(Err(problem))
-        }
-        Ok(_) | Err(_) => unavailable(context, operation),
-    }
 }
 
 fn symbol_context<'a>(
@@ -1899,48 +1794,12 @@ fn contract_problem<T>(
     )
 }
 
-fn validate_no_scope_selector(value: &Value) -> Result<(), ApplicationContractError> {
-    let object = value
-        .as_object()
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "application primitive parameter object",
-        })?;
-    if object.contains_key("project_id")
-        || object.contains_key("project_path")
-        || object.contains_key("project_selector")
-    {
-        return Err(ApplicationContractError::Inconsistent {
-            field: "application primitive request scope",
-        });
-    }
-    Ok(())
-}
-
-fn validate_bounds(
-    value: &Value,
-    maximum_output_bytes: usize,
-) -> Result<(), ApplicationContractError> {
-    let parameter_bytes =
-        serde_json::to_vec(value).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "application primitive parameter serialization",
-        })?;
-    if parameter_bytes.len() > MAX_OPERATION_PARAMETERS_BYTES
-        || maximum_output_bytes == 0
-        || maximum_output_bytes > MAX_OPERATION_OUTPUT_BYTES
-    {
-        return Err(ApplicationContractError::InvalidRange {
-            field: "application primitive bounds",
-        });
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtendedPrimitivePort, OperationalPrimitiveRequest, PrimitiveCapacity, PrimitiveDispatch,
-        PrimitiveRequest, StorageStatusPrimitiveRequest, pre_admission_problem,
-        valid_owned_primitive_request, validate_admitted_root_uri,
+        ExtendedPrimitivePort, PrimitiveCapacity, PrimitiveDispatch, PrimitiveRequest,
+        StorageStatusPrimitiveRequest, pre_admission_problem, valid_owned_primitive_request,
+        validate_admitted_root_uri,
     };
     use tracedecay_application::retrieval::{
         GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,
@@ -2021,30 +1880,6 @@ mod tests {
     }
 
     #[test]
-    fn operational_parameters_reject_cross_project_selectors() {
-        let request = OperationalPrimitiveRequest {
-            operation: super::OperationalPrimitive::Project,
-            parameters: serde_json::json!({"project_path": "/other"}),
-            maximum_output_bytes: 1024,
-        };
-        assert!(request.validate().is_err());
-    }
-
-    #[test]
-    fn closed_request_round_trips_for_direct_daemon_invocation() {
-        let request = PrimitiveRequest::Operational(OperationalPrimitiveRequest {
-            operation: super::OperationalPrimitive::Status,
-            parameters: serde_json::json!({"include_runtime": true}),
-            maximum_output_bytes: 4096,
-        });
-        let encoded = serde_json::to_value(request).expect("encode closed request");
-        assert!(matches!(
-            serde_json::from_value(encoded).expect("decode closed request"),
-            PrimitiveRequest::Operational(_)
-        ));
-    }
-
-    #[test]
     fn typed_system_request_round_trips_without_value_parameters() {
         let request = PrimitiveRequest::StorageStatus(StorageStatusPrimitiveRequest {
             include_details: true,
@@ -2054,6 +1889,18 @@ mod tests {
             serde_json::from_value(encoded).expect("decode typed request"),
             PrimitiveRequest::StorageStatus(_)
         ));
+
+        let legacy_value_parameter_request = serde_json::json!({
+            "primitive": "operational",
+            "request": {
+                "operation": "status",
+                "parameters": {},
+                "maximum_output_bytes": 4096,
+            },
+        });
+        assert!(
+            serde_json::from_value::<PrimitiveRequest>(legacy_value_parameter_request).is_err()
+        );
     }
 
     #[test]

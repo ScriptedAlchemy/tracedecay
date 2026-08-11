@@ -20,10 +20,10 @@ use tracedecay_application::retrieval::{
     TestReferenceV1, UncoveredSourceV1,
 };
 use tracedecay_application::{
-    ApplicationContractError, ApplicationResult, CoverageCompleteness, CoverageDomainState,
-    EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState,
-    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission,
-    RequestContext, ResolvedScope, RetrievalEvidence, TemporalState,
+    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
+    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
+    OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission, RequestContext, ResolvedScope,
+    RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
@@ -40,11 +40,10 @@ use super::runtime::{
     FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult, FileMetadataRecord,
     ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
     ManagedTestRunCurrentScopePort, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
-    OperationalPrimitive, OperationalPrimitiveFuture, OperationalPrimitivePort,
-    OperationalPrimitiveRequest, PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest,
-    QualifiedNamePrimitiveResult, SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult,
-    SourceOutlinePrimitiveRequest, SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1,
-    StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult, open_primitive_project_runtime,
+    PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
+    SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest,
+    SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
+    StorageStatusPrimitiveResult, open_primitive_project_runtime,
 };
 use super::support::{
     BoundedSourceSearch, affected_test_proximity, collect_affected_test_files, rank_affected_tests,
@@ -1907,109 +1906,6 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
     }
 }
 
-pub struct TraceDecayOperationalPrimitivePortV1 {
-    source_runtime: Arc<SourceReadRuntime>,
-}
-
-impl TraceDecayOperationalPrimitivePortV1 {
-    pub fn new(source_runtime: Arc<SourceReadRuntime>) -> Self {
-        Self { source_runtime }
-    }
-}
-
-impl OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
-    fn read<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        operation: &'a tracedecay_application::ApplicationOperation,
-        request: &'a OperationalPrimitiveRequest,
-        observed_at: UtcMicros,
-    ) -> OperationalPrimitiveFuture<'a> {
-        Box::pin(async move {
-            use tracedecay_application::{
-                ApplicationEnvelope, AuthorityReceipt, CoverageDomainState, EvidenceAuthority,
-                EvidenceCoverage, EvidencePacket, OperationReceipt, OperationTermination,
-                PolicyDecisionRef, TemporalState,
-            };
-            use tracedecay_domain::ComponentVersion;
-            let serving_db_exists = self.source_runtime.db().canonical_database_path().is_file();
-            let status = match request.operation {
-                OperationalPrimitive::Project
-                | OperationalPrimitive::Status
-                | OperationalPrimitive::Files
-                | OperationalPrimitive::Configuration
-                | OperationalPrimitive::RuntimeStatus => {
-                    if serving_db_exists {
-                        if self.source_runtime.is_read_only() {
-                            "read_only"
-                        } else {
-                            "ok"
-                        }
-                    } else {
-                        "degraded"
-                    }
-                }
-            };
-            let payload = serde_json::json!({
-                "status": status,
-                "observed_at": observed_at.0,
-                "read_only": self.source_runtime.is_read_only(),
-                "serving_db_exists": serving_db_exists,
-            });
-            let policy = match PolicyDecisionRef::new(
-                "route.application.retrieval.operational",
-                1,
-                ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))?,
-                ComponentVersion::new("application-retrieval.operational")?,
-            ) {
-                Ok(policy) => policy,
-                Err(_) => return operational_problem(context, operation),
-            };
-            let authority = match AuthorityReceipt::from_context(context, policy, observed_at) {
-                Ok(authority) => authority,
-                Err(_) => return operational_problem(context, operation),
-            };
-            let coverage = EvidenceCoverage {
-                requested_domains: vec![EvidenceDomain::Operational],
-                visited: Some(1),
-                eligible: Some(1),
-                returned: 1,
-                completeness: CoverageCompleteness::Complete,
-                domains: vec![CoverageDomainState {
-                    domain: EvidenceDomain::Operational,
-                    completeness: CoverageCompleteness::Complete,
-                }],
-            };
-            let page = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(1), 1)?;
-            let execution = OperationReceipt {
-                started_at: observed_at,
-                ended_at: observed_at,
-                effective_deadline: context.deadline().clone(),
-                cancellation: None,
-                budget: OperationBudgetUsage::default(),
-                termination: OperationTermination::Completed,
-            };
-            Ok(Ok(ApplicationEnvelope::evidence(
-                operation.result_contract().clone(),
-                context.request_id().clone(),
-                context.scope().clone(),
-                EvidencePacket {
-                    temporal: TemporalState::current(observed_at),
-                    authority,
-                    evidence_authorities: Vec::<EvidenceAuthority>::new(),
-                    coverage,
-                    omissions: Vec::new(),
-                    scores: Vec::new(),
-                    contributions: Vec::new(),
-                    page,
-                    execution,
-                    payload: Some(payload),
-                },
-            )))
-        })
-    }
-}
-
 /// Derives symbol-graph cursor snapshots from the code index's *current*
 /// published generation.
 ///
@@ -2583,21 +2479,6 @@ fn affected_tests_evidence(
     }
 }
 
-fn operational_problem(
-    context: &RequestContext,
-    operation: &tracedecay_application::ApplicationOperation,
-) -> Result<ApplicationResult<serde_json::Value>, ApplicationContractError> {
-    use tracedecay_application::{ApplicationProblem, ApplicationProblemEnvelope, SafeDiagnostic};
-    Ok(Err(ApplicationProblemEnvelope::new(
-        operation.result_contract().clone(),
-        context.request_id().clone(),
-        ApplicationProblem::unavailable(SafeDiagnostic::new(
-            "application.retrieval.operational",
-            "The operational primitive authority could not complete.",
-        )?),
-    )?))
-}
-
 /// Owned authorities and admitted project state required to open the complete
 /// application primitive runtime.
 pub struct ProductionPrimitiveOpenRequestV1 {
@@ -2741,7 +2622,6 @@ pub async fn open_production_primitive_runtime(
         ))),
         Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&source_runtime))),
         extended,
-        Arc::new(TraceDecayOperationalPrimitivePortV1::new(source_runtime)),
         scope,
         access,
         admitted_root_uri,

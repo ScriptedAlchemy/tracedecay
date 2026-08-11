@@ -52,7 +52,6 @@ pub mod feedback;
 // adapter and its read engine; `graph`/`retention`/`request_identity`/
 // `user_config` had kernel-only closures. See SEAMS.md.
 pub mod analytics_bridge;
-pub mod application_surface;
 pub mod git_intelligence;
 pub mod git_query;
 pub mod git_reads;
