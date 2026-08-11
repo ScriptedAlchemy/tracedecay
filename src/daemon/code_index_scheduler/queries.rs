@@ -38,6 +38,7 @@ use tracedecay_tool_catalog::SortContractId;
 
 use super::{
     CodeIndexSchedulerRegistryV1, DaemonCodeIndexPublicationStoreV1, LatestCompleteCodeIndexV1,
+    registry::latest_matches_scope_identity,
 };
 use tracedecay_query::code_search;
 use tracedecay_query::retrieval::exact::{
@@ -264,7 +265,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .as_ref()
                 .filter(|generation| {
                     generation.generation.manifest().generation_id == generation_id
-                        && Self::latest_matches_scope_identity(generation, &scope)
+                        && latest_matches_scope_identity(generation, &scope)
                 })
                 .cloned()
             {
@@ -283,8 +284,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
                     _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                 })?;
-            Ok(generation
-                .filter(|generation| Self::latest_matches_scope_identity(generation, &scope)))
+            Ok(generation.filter(|generation| latest_matches_scope_identity(generation, &scope)))
         });
         match crate::daemon::park_admission(
             crate::daemon::code_index_task_support::settle_owned_blocking_task(

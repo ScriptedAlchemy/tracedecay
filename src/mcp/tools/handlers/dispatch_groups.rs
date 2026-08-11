@@ -20,8 +20,11 @@ use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
     admin_cli, admin_project, analysis, analytics, application_surface, ast_grep_search, dashboard,
-    edit, git, graph, grep, health, hook_runtime, info, redundancy, skills, workflow,
+    edit, git, graph, grep, hook_runtime, info, skills, workflow,
 };
+
+mod health_dispatch;
+pub(super) use health_dispatch::dispatch_health_tools;
 
 fn graph_read_unavailable(detail: &str) -> TraceDecayError {
     TraceDecayError::ProjectRoute {
@@ -721,59 +724,6 @@ pub(super) async fn dispatch_edit_tools(
         }
         "tracedecay_source_edit_reconcile" => {
             edit::handle_source_edit_reconcile(cg, args, invocation).await
-        }
-        _ => Err(unknown_tool_error(tool_name)),
-    }
-}
-
-/// Dispatch code-health and session-baseline tools (`tracedecay_health`,
-/// `tracedecay_test_risk`, `tracedecay_runtime`, ...).
-pub(super) async fn dispatch_health_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    args: Value,
-    scope_prefix: Option<&str>,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
-    options: ToolCallRegistryOptions<'_>,
-) -> Result<ToolResult> {
-    match tool_name {
-        "tracedecay_test_map" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_test_map(cg, &graph, args, scope_prefix).await
-        }
-        "tracedecay_gini" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_gini(cg, &graph, args, scope_prefix).await
-        }
-        "tracedecay_dependency_depth" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_dependency_depth(cg, &graph, args, scope_prefix).await
-        }
-        "tracedecay_health" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_health(cg, &graph, args, scope_prefix).await
-        }
-        "tracedecay_redundancy" => {
-            let graph = admitted_graph_query(cg, &options, "redundancy").await?;
-            redundancy::handle_redundancy(cg, &graph, args, scope_prefix).await
-        }
-        "tracedecay_runtime" => {
-            health::handle_runtime(
-                cg,
-                args,
-                options.global_db.map(std::sync::Arc::as_ref),
-                active_project_session_db.map(Arc::as_ref),
-                options.doctor_report_reader.as_ref(),
-            )
-            .await
-        }
-        "tracedecay_dsm" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_dsm(cg, &graph, args, scope_prefix).await
-        }
-        "tracedecay_test_risk" => {
-            let graph = admitted_graph_query(cg, &options, "health_read").await?;
-            health::handle_test_risk(cg, &graph, args, scope_prefix).await
         }
         _ => Err(unknown_tool_error(tool_name)),
     }

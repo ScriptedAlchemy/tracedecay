@@ -106,6 +106,15 @@ mod dispatch_tests;
     clippy::redundant_closure_for_method_calls,
     clippy::uninlined_format_args
 )]
+mod runtime_generation_census_dispatch_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
 mod tool_definition_tests;
 
 pub use session_authorities::SessionAuthorities;
@@ -258,6 +267,8 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port:
         Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
+    /// Exact-scope sealed-generation census authority for runtime telemetry.
+    pub(crate) generation_census_reader: Option<crate::runtime_telemetry::GenerationCensusReader>,
     pub(crate) retained_project_graph_resolver:
         Option<crate::mcp::server::RetainedProjectGraphResolver>,
     /// Daemon-owned bounded native transcript and session/Git convergence.
@@ -306,6 +317,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_search_authority: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            generation_census_reader: None,
             retained_project_graph_resolver: None,
             session_sync_service: None,
             preselected_project_reader: false,

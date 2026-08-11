@@ -21,6 +21,12 @@ use tracedecay_domain::{CommitId, RefId, RepositoryId, TreeId, WorktreeId};
 pub(crate) enum IdentityErrorV1 {
     #[error("code-index identity: repository open failed: {0}")]
     Git(String),
+    #[error("code-index identity: canonical worktree path unavailable: {}: {source}", path.display())]
+    CanonicalWorktreePath {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("code-index identity: canonical id construction failed: {0}")]
     Domain(String),
 }
@@ -313,6 +319,13 @@ pub(crate) fn repository_id_for_common_dir(
 }
 
 pub(crate) fn worktree_id_for(project_root: &Path) -> Result<WorktreeId, IdentityErrorV1> {
+    let project_root =
+        project_root
+            .canonicalize()
+            .map_err(|source| IdentityErrorV1::CanonicalWorktreePath {
+                path: project_root.to_path_buf(),
+                source,
+            })?;
     WorktreeId::new(format!(
         "worktree.daemon.{}",
         super::sha256_hex(project_root.to_string_lossy().as_bytes())
@@ -384,6 +397,23 @@ mod tests {
         );
         assert!(!b.authorizes_reuse_of(&a));
         assert!(a.authorizes_reuse_of(&a), "self reuse is authorized");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_identity_is_invariant_under_a_symlink_alias() {
+        use std::os::unix::fs::symlink;
+
+        let repo = init_repo(&[("src/lib.rs", "pub fn alias() {}\n")]);
+        let aliases = TempDir::new().expect("alias parent");
+        let alias = aliases.path().join("checkout-alias");
+        symlink(repo.path(), &alias).expect("create checkout alias");
+
+        assert_eq!(
+            worktree_id_for(repo.path()).expect("real checkout identity"),
+            worktree_id_for(&alias).expect("aliased checkout identity"),
+            "one physical checkout must retain one worktree identity across path spellings"
+        );
     }
 
     #[test]

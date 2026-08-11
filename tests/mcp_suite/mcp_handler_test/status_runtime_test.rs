@@ -305,9 +305,12 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
         "DB file should have non-zero size"
     );
     assert_eq!(
-        db["node_count"].as_u64(),
-        Some(0),
-        "an opened but unindexed project must report zero nodes"
+        db["generation_census"],
+        json!({
+            "state": "unavailable",
+            "reason": "authority_unavailable",
+        }),
+        "a direct runtime handler has no daemon-owned sealed-generation authority"
     );
     // journal_mode should remain visible through the canonical database status surface.
     assert!(db["journal_mode"].is_string() || db["journal_mode"].is_null());
@@ -381,4 +384,30 @@ async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
     );
     assert!(db["authority_audit_reason"].is_null());
     assert!(db["authority_audit_error"].is_null());
+
+    let census = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let response = harness
+                .call_tool(&project, "tracedecay_runtime", json!({ "format": "json" }))
+                .await
+                .expect("production runtime invocation succeeds");
+            let result = response.result.expect("production runtime result");
+            let payload: Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            let census = payload["database"]["generation_census"].clone();
+            if census["state"] == "observed" {
+                break census;
+            }
+            assert_eq!(
+                census["reason"], "exact_scope_generation_not_ready",
+                "the composed server may wait only for its exact sealed generation: {census}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("production route publishes its sealed generation census");
+    assert!(census["source_total_bytes"].is_u64());
+    assert!(census["symbol_count"].is_u64());
+    assert!(census["edge_count"].is_u64());
 }

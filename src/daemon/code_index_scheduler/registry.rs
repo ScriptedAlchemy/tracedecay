@@ -31,6 +31,11 @@ use super::{
 };
 
 mod lsp_projection;
+#[cfg(test)]
+mod runtime_generation_census_tests;
+mod scope_identity;
+
+pub(super) use scope_identity::{latest_matches_scope, latest_matches_scope_identity};
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 
@@ -1970,9 +1975,9 @@ impl CodeIndexSchedulerRegistryV1 {
         // HEAD moved, so grep/context/callers went `Unavailable` after every
         // restart-following-a-commit even though a complete generation was in
         // hand. Attribution is generation-bound (see
-        // [`Self::latest_matches_scope_identity`]), and the ladder has already
+        // [`latest_matches_scope_identity`]), and the ladder has already
         // scheduled the rebuild that will replace this generation.
-        Self::latest_matches_scope_identity(&latest, scope).then_some(latest)
+        latest_matches_scope_identity(&latest, scope).then_some(latest)
     }
 
     /// Resolve one exact scope and admit only an already-current generation.
@@ -2032,7 +2037,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
             .ok()
             .flatten()?;
-        if !Self::latest_matches_scope(&latest, scope) {
+        if !latest_matches_scope(&latest, scope) {
             return None;
         }
         *serving_generation
@@ -2094,7 +2099,7 @@ impl CodeIndexSchedulerRegistryV1 {
             matched?
         };
         let latest = self.latest_complete_ready_with(&root, admission).await?;
-        Self::latest_matches_scope(&latest, scope).then_some(latest)
+        latest_matches_scope(&latest, scope).then_some(latest)
     }
 
     /// Resolve one exact scope and serve the last complete generation already
@@ -2131,7 +2136,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .clone()?;
         // Relaxed identity gate: this arm is stale by construction, so a moved
         // reference is exactly the condition it exists to survive.
-        Self::latest_matches_scope_identity(&latest, scope).then_some(latest)
+        latest_matches_scope_identity(&latest, scope).then_some(latest)
     }
 
     /// Whether an exact mounted route has no admissible generation because its
@@ -2296,51 +2301,6 @@ impl CodeIndexSchedulerRegistryV1 {
             return None;
         }
         Some(CodeIndexSemanticEvaluationPublicationLeaseV1 { _guard: guard })
-    }
-
-    /// The exact scope gate: repository, worktree, **and** reference must all
-    /// equal the admitted scope.
-    ///
-    /// This is the gate for anything reported as *current*. A generation sealed
-    /// under a different reference is not current for this scope and must never
-    /// be presented as fresh.
-    pub(super) fn latest_matches_scope(
-        latest: &LatestCompleteCodeIndexV1,
-        scope: &tracedecay_application::ResolvedScope,
-    ) -> bool {
-        Self::latest_matches_scope_identity(latest, scope)
-            && latest.generation.snapshot().reference == scope.reference
-    }
-
-    /// The relaxed scope gate for the **stale** serving arms: the structural
-    /// identity (repository + worktree) must still match exactly, but a moved
-    /// `reference` is tolerated.
-    ///
-    /// Why this exists: `serving_generation` is in-memory and reseeded at mount
-    /// from the restored sealed generation. That generation was sealed under
-    /// whatever HEAD was current when it was published, so the ordinary
-    /// develop-then-restart cycle (commit, then restart the daemon) leaves every
-    /// restored generation with a reference the admitted scope has already moved
-    /// past. Under the exact gate that made serve-stale die with the process and
-    /// collapsed search — the one lane with no other fallback — for the entire
-    /// rebuild window, which is precisely the invariant
-    /// `docs/SERVING-PATH-PERFORMANCE.md` forbids ("await-new never preempts
-    /// serve-old").
-    ///
-    /// Attribution stays sound because it is never derived from the admitted
-    /// scope. Every hydration path builds its `RetrievalScope` from
-    /// `latest.generation.snapshot()` — the generation's own sealed identity —
-    /// so a relaxed admission answers *as the generation it actually is*, under
-    /// its own repository/worktree/reference and its own snapshot digest. The
-    /// caller is required to mark the answer stale; it is a different, older
-    /// revision of the same worktree, not a current one.
-    pub(super) fn latest_matches_scope_identity(
-        latest: &LatestCompleteCodeIndexV1,
-        scope: &tracedecay_application::ResolvedScope,
-    ) -> bool {
-        let snapshot = latest.generation.snapshot();
-        snapshot.repository == scope.repository_id
-            && snapshot.worktree.as_ref() == Some(&scope.worktree_id)
     }
 
     /// The per-worktree scheduler handle, cloned out of the registry map. Test

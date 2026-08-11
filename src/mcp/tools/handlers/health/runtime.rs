@@ -150,12 +150,18 @@ pub(crate) async fn handle_runtime(
     registry: Option<&crate::global_db::RegisteredGlobalDb>,
     project_session_db: Option<&crate::global_db::RegisteredGlobalDb>,
     doctor_report_reader: Option<&crate::dashboard::DoctorReportReader>,
+    generation_census_reader: Option<&crate::runtime_telemetry::GenerationCensusReader>,
 ) -> Result<ToolResult> {
     let authority_audit = args
         .get("authority_audit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let snap = crate::runtime_telemetry::collect_with_integrity(cg, authority_audit).await?;
+    let snap = crate::runtime_telemetry::collect_with_integrity_and_generation_census(
+        cg,
+        authority_audit,
+        generation_census_reader,
+    )
+    .await?;
     let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
     // Doctor historically keys temporal health off `authority_audit`. Keep that
     // coupling, and also allow an explicit independent opt-in.

@@ -48,6 +48,7 @@ mod hook_writes;
 mod ledger;
 mod lifecycle;
 mod live_transcript_refresh;
+mod project_open_access;
 mod project_registry;
 mod protocol;
 mod read_coalescing;
@@ -56,6 +57,7 @@ mod rmcp;
 mod routing;
 mod session_refresh;
 mod staleness;
+mod status_resource;
 mod tool_errors;
 mod workflow_index;
 
@@ -354,6 +356,10 @@ pub struct McpServer {
     code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
     code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
+    /// Exact-scope sealed-generation census authority. It is installed only
+    /// by daemon project-open after the route identity has resolved.
+    generation_census_reader:
+        tokio::sync::OnceCell<crate::runtime_telemetry::GenerationCensusReader>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -1004,6 +1010,7 @@ impl McpServer {
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
             code_graph_read_admission_port,
+            generation_census_reader: tokio::sync::OnceCell::new(),
             source_edit_executor: tokio::sync::OnceCell::new(),
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             source_edit_rollback_executor: tokio::sync::OnceCell::new(),
@@ -1160,49 +1167,6 @@ impl McpServer {
         &self,
     ) -> Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>> {
         Arc::clone(&self.diagnostics_lsp)
-    }
-
-    /// Installs the sole source-edit invocation owner resolved during
-    /// project-open admission. Reinstallation is rejected so a later caller
-    /// cannot replace the authority behind an already-serving MCP instance.
-    pub(crate) fn install_source_edit_executor(
-        &self,
-        executor: SourceEditExecutor,
-    ) -> std::result::Result<(), SourceEditExecutor> {
-        self.source_edit_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
-    }
-
-    pub(crate) fn code_graph_projection_read_port(&self) -> Option<CodeGraphProjectionReadPort> {
-        self.code_graph_projection_read_port.clone()
-    }
-
-    pub(crate) fn install_source_edit_reconciliation_executor(
-        &self,
-        executor: SourceEditReconciliationExecutor,
-    ) -> std::result::Result<(), SourceEditReconciliationExecutor> {
-        self.source_edit_reconciliation_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
-    }
-
-    pub(crate) fn install_source_edit_rollback_executor(
-        &self,
-        executor: SourceEditRollbackExecutor,
-    ) -> std::result::Result<(), SourceEditRollbackExecutor> {
-        self.source_edit_rollback_executor
-            .set(executor)
-            .map_err(|error| match error {
-                tokio::sync::SetError::AlreadyInitializedError(executor)
-                | tokio::sync::SetError::InitializingError(executor) => executor,
-            })
     }
 
     #[cfg(feature = "test-transport")]

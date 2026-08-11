@@ -445,7 +445,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .validate()
             .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
         validate_search_policy(&input)?;
-        if !Self::latest_matches_scope(&latest, scope) {
+        if !super::registry::latest_matches_scope(&latest, scope) {
             return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
         }
         execute_query_search_on_latest(self, scope, input, latest, false, graph_control).await

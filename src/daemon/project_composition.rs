@@ -6,85 +6,8 @@
 
 use super::*;
 
-#[derive(Clone)]
-pub(super) enum ProductionProjectCompositionRuntime {
-    #[cfg(unix)]
-    Unix(Box<DaemonEngine>),
-    #[cfg(any(not(unix), test, feature = "test-transport"))]
-    Portable {
-        semantic_auto_download: bool,
-        startup_catch_up: bool,
-    },
-}
-
-impl ProductionProjectCompositionRuntime {
-    fn database_owner_reconciler(
-        &self,
-        _store_administration: &StoreAdministration,
-        current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-        _current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
-        route_registered: Arc<AtomicBool>,
-        handshake: DaemonHandshake,
-    ) -> crate::mcp::DatabaseOwnerReconciler {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(engine) => engine.database_owner_reconciler(
-                current_key,
-                _current_project_path,
-                route_registered,
-                handshake,
-            ),
-            #[cfg(any(not(unix), test, feature = "test-transport"))]
-            Self::Portable { .. } => portable_database_owner_reconciler(
-                _store_administration.clone(),
-                current_key,
-                route_registered,
-                handshake,
-            ),
-        }
-    }
-
-    fn automation_scheduler_reconciler(
-        &self,
-        _current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
-        _current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
-        _handshake: DaemonHandshake,
-    ) -> Option<crate::dashboard::AutomationSchedulerReconciler> {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(engine) => Some(engine.automation_scheduler_reconciler(
-                _current_key,
-                _current_project_path,
-                _handshake,
-            )),
-            #[cfg(any(not(unix), test, feature = "test-transport"))]
-            Self::Portable { .. } => None,
-        }
-    }
-
-    const fn semantic_auto_download(&self) -> bool {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(_) => true,
-            #[cfg(any(not(unix), test, feature = "test-transport"))]
-            Self::Portable {
-                semantic_auto_download,
-                ..
-            } => *semantic_auto_download,
-        }
-    }
-
-    const fn startup_catch_up(&self) -> bool {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(_) => true,
-            #[cfg(any(not(unix), test, feature = "test-transport"))]
-            Self::Portable {
-                startup_catch_up, ..
-            } => *startup_catch_up,
-        }
-    }
-}
+mod runtime;
+pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
 
 pub(super) struct ProductionProjectComposition {
     #[cfg(unix)]
@@ -301,6 +224,11 @@ pub(super) async fn production_project_server(
             canonical_project_path.to_path_buf(),
             code_search_scope.clone(),
         );
+    let generation_census_reader = project_open_owners::project_code_index_generation_census_reader(
+        invocation.code_index_schedulers.clone(),
+        canonical_project_path.to_path_buf(),
+        code_search_scope.clone(),
+    );
     let code_graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort = Arc::new(
         crate::daemon::callable_code_authorization::DaemonCodeGraphReadAdmission::production(
             canonical_project_path.to_path_buf(),
@@ -585,6 +513,11 @@ pub(super) async fn production_project_server(
     project_open_cancellation_checkpoint(cancellation)?;
     let mcp_construction_started = Instant::now();
     let core_candidate = crate::mcp::McpServer::new_with_context(core_context).await;
+    core_candidate
+        .install_generation_census_reader(Arc::clone(&generation_census_reader))
+        .map_err(|_| TraceDecayError::Config {
+            message: "core MCP generation census authority was already installed".to_owned(),
+        })?;
     log_daemon_event(
         "project_open_phase",
         &[
@@ -954,6 +887,12 @@ pub(super) async fn production_project_server(
             project_open_cancellation_checkpoint(cancellation)?;
             let full_construction_started = Instant::now();
             let full_candidate = crate::mcp::McpServer::new_with_context(full_context).await;
+            full_candidate
+                .install_generation_census_reader(Arc::clone(&generation_census_reader))
+                .map_err(|_| TraceDecayError::Config {
+                    message: "full MCP generation census authority was already installed"
+                        .to_owned(),
+                })?;
             log_daemon_event(
                 "project_open_phase",
                 &[

@@ -250,8 +250,8 @@ impl CodeIndexSchedulerRegistryV1 {
             };
             let base = scheduler.bind_latest_complete(base);
             let head = scheduler.bind_latest_complete(head);
-            if !Self::latest_matches_scope_identity(&base, &scope)
-                || !Self::latest_matches_scope_identity(&head, &scope)
+            if !super::registry::latest_matches_scope_identity(&base, &scope)
+                || !super::registry::latest_matches_scope_identity(&head, &scope)
             {
                 return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
             }

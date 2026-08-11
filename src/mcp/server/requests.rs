@@ -612,7 +612,12 @@ impl McpServer {
     }
 
     /// Wraps a single resource body in the `resources/read` contents envelope.
-    fn resource_contents(id: Value, uri: &str, mime: &str, text: &str) -> JsonRpcResponse {
+    pub(super) fn resource_contents(
+        id: Value,
+        uri: &str,
+        mime: &str,
+        text: &str,
+    ) -> JsonRpcResponse {
         JsonRpcResponse::success(
             id,
             json!({
@@ -629,29 +634,6 @@ impl McpServer {
     /// Sourced from `src/db/migrations.rs::create_schema` — keep in sync.
     pub(crate) fn read_resource_schema(id: Value) -> JsonRpcResponse {
         Self::resource_contents(id, "tracedecay://schema", "text/markdown", SCHEMA_MARKDOWN)
-    }
-
-    /// Returns project identity and typed graph-statistics availability.
-    pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
-        let cg = self.reopen_if_branch_drifted().await;
-        let output = json!({
-            "project_root": cg.project_root(),
-            "branch_diagnostics": cg.branch_diagnostics(),
-            "graph_statistics": {
-                "status": "unavailable",
-                "reason": "sealed_generation_statistics_not_published",
-            },
-        });
-        match serde_json::to_string_pretty(&output) {
-            Ok(text) => {
-                Self::resource_contents(id, "tracedecay://status", "application/json", &text)
-            }
-            Err(error) => JsonRpcResponse::error(
-                id,
-                ErrorCode::InternalError,
-                format!("failed to serialize project status: {error}"),
-            ),
-        }
     }
 
     /// Returns typed file-inventory availability for the active project.
@@ -885,6 +867,7 @@ impl McpServer {
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
                 code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
+                generation_census_reader: self.generation_census_reader(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
                 session_sync_service: session_sync_service.as_deref(),
                 preselected_project_reader,

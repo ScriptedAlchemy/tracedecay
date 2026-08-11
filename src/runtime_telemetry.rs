@@ -12,7 +12,10 @@
 //! the refresh, sleeps for [`CPU_SAMPLE_WINDOW`], then refreshes again.
 //! Callers therefore pay ~200 ms latency per snapshot.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -26,6 +29,44 @@ pub use store_runtime::{
     RuntimeRegistryAggregateSnapshot, RuntimeRegistryShardSnapshot, RuntimeRegistrySnapshot,
     RuntimeRegistryWriterSnapshot,
 };
+
+/// Async reader for the generation census attached by an exact daemon route.
+pub(crate) type GenerationCensusFuture =
+    Pin<Box<dyn Future<Output = GenerationCensusSnapshot> + Send + 'static>>;
+pub(crate) type GenerationCensusReader =
+    Arc<dyn Fn() -> GenerationCensusFuture + Send + Sync + 'static>;
+
+/// Closed reasons for a generation census that cannot be observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationCensusUnavailableReason {
+    AuthorityUnavailable,
+    ExactScopeGenerationNotReady,
+    SealedGenerationCensusInvalid,
+}
+
+impl GenerationCensusUnavailableReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthorityUnavailable => "authority_unavailable",
+            Self::ExactScopeGenerationNotReady => "exact_scope_generation_not_ready",
+            Self::SealedGenerationCensusInvalid => "sealed_generation_census_invalid",
+        }
+    }
+}
+
+/// Runtime telemetry's truthful view of code-index census availability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GenerationCensusSnapshot {
+    Observed {
+        #[serde(flatten)]
+        statistics: tracedecay_code_index::production::CodeIndexGenerationStatisticsV1,
+    },
+    Unavailable {
+        reason: GenerationCensusUnavailableReason,
+    },
+}
 
 /// Window over which `cpu_percent` is sampled.
 const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(200);
@@ -82,13 +123,9 @@ pub struct DatabaseSnapshot {
     pub dirty_marker: DirtyMarkerSnapshot,
     /// Kernel writer lease currently observed for this database.
     pub writer_owner: WriterOwnerSnapshot,
-    /// Total source size we've indexed, from the `files` table sum, in
-    /// bytes — useful to compute the "DB / source" ratio.
-    pub source_total_bytes: u64,
-    /// Total node + edge counts. Lets the user compare DB bloat to
-    /// graph size — a 25× ratio with a tiny graph is suspicious.
-    pub node_count: u64,
-    pub edge_count: u64,
+    /// Aggregate source, symbol, and edge facts from the exact sealed code
+    /// generation, or the typed reason that authority is not mounted.
+    pub generation_census: GenerationCensusSnapshot,
     /// Live reader-pool occupancy for this store, when the pool is attached.
     ///
     /// Reader saturation is the failure users actually hit — a query reports
@@ -189,8 +226,18 @@ pub async fn collect_with_integrity(
     cg: &crate::tracedecay::TraceDecay,
     include_integrity: bool,
 ) -> Result<RuntimeSnapshot> {
+    collect_with_integrity_and_generation_census(cg, include_integrity, None).await
+}
+
+pub(crate) async fn collect_with_integrity_and_generation_census(
+    cg: &crate::tracedecay::TraceDecay,
+    include_integrity: bool,
+    generation_census_reader: Option<&GenerationCensusReader>,
+) -> Result<RuntimeSnapshot> {
     let process = sample_process()?;
-    let database = collect_database(cg, include_integrity).await?;
+    let database =
+        collect_database_with_generation_census(cg, include_integrity, generation_census_reader)
+            .await?;
     let captured_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| {
@@ -224,13 +271,25 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
     let p = &snap.process;
     let d = &snap.database;
     let pct_of_system_mem = (p.rss_bytes as f64 / p.system_total_memory_bytes as f64) * 100.0;
-    let bloat_ratio = if d.source_total_bytes > 0 {
-        format!(
-            "{:.1}×",
-            d.db_size_bytes as f64 / d.source_total_bytes as f64
-        )
-    } else {
-        "unknown (no indexed source bytes)".to_owned()
+    let generation_census = match &d.generation_census {
+        GenerationCensusSnapshot::Observed { statistics } if statistics.source_total_bytes > 0 => {
+            format!(
+                "{} source / {} symbols / {} edges; db/source {:.1}×",
+                bytes_human(statistics.source_total_bytes),
+                statistics.symbol_count,
+                statistics.edge_count,
+                d.db_size_bytes as f64 / statistics.source_total_bytes as f64,
+            )
+        }
+        GenerationCensusSnapshot::Observed { statistics } => format!(
+            "{} source / {} symbols / {} edges; db/source unavailable",
+            bytes_human(statistics.source_total_bytes),
+            statistics.symbol_count,
+            statistics.edge_count,
+        ),
+        GenerationCensusSnapshot::Unavailable { reason } => {
+            format!("unavailable: {}", reason.as_str())
+        }
     };
     let runtime_queue = format!(
         "{} shard ops / {}; global {} / {} budget",
@@ -287,9 +346,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            page size        {page_size}\n\
            quick check      {quick_check}\n\
            dirty marker     {dirty}\n\
-           source indexed   {src}\n\
-           db / source      {ratio}\n\
-           nodes / edges    {nodes} / {edges}\n\
+           generation census {generation_census}\n\
            readers general  {readers_general}\n\
            readers health   {readers_health}\n\
            runtime shards    {runtime_shards} observed ({runtime_opening} opening, {runtime_draining} draining, {runtime_omitted} detail omitted)\n\
@@ -332,10 +389,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
         } else {
             "absent"
         },
-        src = bytes_human(d.source_total_bytes),
-        ratio = bloat_ratio,
-        nodes = d.node_count,
-        edges = d.edge_count,
+        generation_census = generation_census,
         readers_general = d.reader_pool.as_ref().map_or_else(
             || "(unattached)".to_string(),
             |pool| lane_line(&pool.general)
@@ -434,6 +488,14 @@ pub(crate) async fn collect_database(
     cg: &crate::tracedecay::TraceDecay,
     include_integrity: bool,
 ) -> Result<DatabaseSnapshot> {
+    collect_database_with_generation_census(cg, include_integrity, None).await
+}
+
+async fn collect_database_with_generation_census(
+    cg: &crate::tracedecay::TraceDecay,
+    include_integrity: bool,
+    generation_census_reader: Option<&GenerationCensusReader>,
+) -> Result<DatabaseSnapshot> {
     let project_root = cg.project_root().to_path_buf();
     let db_path = cg.db_path().clone();
     let canonical_db_path = db_path.canonicalize()?;
@@ -471,8 +533,12 @@ pub(crate) async fn collect_database(
             error: error.to_string(),
         },
     };
-    let source_total_bytes = read_source_total_bytes(cg).await?;
-    let (node_count, edge_count) = read_graph_counts(cg).await?;
+    let generation_census = match generation_census_reader {
+        Some(reader) => reader().await,
+        None => GenerationCensusSnapshot::Unavailable {
+            reason: GenerationCensusUnavailableReason::AuthorityUnavailable,
+        },
+    };
     let reader_pool = cg
         .db()
         .conn()
@@ -495,9 +561,7 @@ pub(crate) async fn collect_database(
         quick_check_error,
         dirty_marker,
         writer_owner,
-        source_total_bytes,
-        node_count,
-        edge_count,
+        generation_census,
         reader_pool,
         runtime_registry,
     })
@@ -611,74 +675,6 @@ async fn read_pragma_i64(
             message: format!("failed to decode {sql}: {error}"),
             operation: operation.to_string(),
         })
-}
-
-async fn read_source_total_bytes(cg: &crate::tracedecay::TraceDecay) -> Result<u64> {
-    let mut rows = cg
-        .db()
-        .conn()
-        .query("SELECT COALESCE(SUM(size), 0) FROM files", ())
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to sum source bytes: {e}"),
-            operation: "read_source_total_bytes".to_string(),
-        })?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read source-sum row: {e}"),
-            operation: "read_source_total_bytes".to_string(),
-        })?
-        .ok_or_else(|| TraceDecayError::Database {
-            message: "no source-sum row returned".to_string(),
-            operation: "read_source_total_bytes".to_string(),
-        })?;
-    let v: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
-        message: format!("failed to decode source-sum: {e}"),
-        operation: "read_source_total_bytes".to_string(),
-    })?;
-    u64::try_from(v).map_err(|_| TraceDecayError::Database {
-        message: "source byte total was negative".to_owned(),
-        operation: "read_source_total_bytes".to_owned(),
-    })
-}
-
-async fn read_graph_counts(cg: &crate::tracedecay::TraceDecay) -> Result<(u64, u64)> {
-    let nodes = scalar_count(cg, "SELECT COUNT(*) FROM nodes").await?;
-    let edges = scalar_count(cg, "SELECT COUNT(*) FROM edges").await?;
-    Ok((nodes, edges))
-}
-
-async fn scalar_count(cg: &crate::tracedecay::TraceDecay, sql: &str) -> Result<u64> {
-    let mut rows = cg
-        .db()
-        .conn()
-        .query(sql, ())
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("scalar query failed: {e}"),
-            operation: "scalar_count".to_string(),
-        })?;
-    let row = rows
-        .next()
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("scalar row read failed: {e}"),
-            operation: "scalar_count".to_string(),
-        })?
-        .ok_or_else(|| TraceDecayError::Database {
-            message: "no scalar row".to_string(),
-            operation: "scalar_count".to_string(),
-        })?;
-    let v: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
-        message: format!("scalar decode failed: {e}"),
-        operation: "scalar_count".to_string(),
-    })?;
-    u64::try_from(v).map_err(|_| TraceDecayError::Database {
-        message: "database count was negative".to_owned(),
-        operation: "scalar_count".to_owned(),
-    })
 }
 
 // ---------------------------------------------------------------------------

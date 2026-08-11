@@ -63,6 +63,10 @@ use super::{
 
 mod helpers;
 use helpers::*;
+mod generation_attribution;
+pub use generation_attribution::PublishedGenerationTestAttributionAuthorityV1;
+mod generation_statistics;
+pub use generation_statistics::CodeIndexGenerationStatisticsV1;
 mod sealed_codec;
 pub use sealed_codec::{MAX_SEALED_CODE_GENERATION_BYTES_V1, SEALED_GENERATION_FORMAT_REVISION_V1};
 
@@ -473,34 +477,6 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// evidence digest are a pure function of the immutable generation. Only
     /// success is cached.
     attribution: OnceLock<PublishedGenerationTestAttributionAuthorityV1>,
-}
-
-/// Immutable test-attribution reader derived from one sealed production code
-/// generation. The reader owns no second graph or test store: it projects
-/// conservative candidates from the generation's canonical relation graph and
-/// retains the exact generation/test watermark produced at construction.
-#[derive(Clone, Debug)]
-pub struct PublishedGenerationTestAttributionAuthorityV1 {
-    generation_id: CodeGenerationId,
-    read: GenerationProviderReadV1<GenerationTestJoinV1>,
-}
-
-impl GenerationTestAttributionJoinReadPort for PublishedGenerationTestAttributionAuthorityV1 {
-    fn read_test_attribution(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
-        if generation == &self.generation_id {
-            self.read.clone()
-        } else {
-            GenerationProviderReadV1::new(
-                ProviderEvaluationStateV1::Stale,
-                GenerationProviderCoverageV1::Unavailable,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("static stale attribution read"))
-        }
-    }
 }
 
 impl CodeIndexPublishedGenerationV1 {
