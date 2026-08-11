@@ -989,3 +989,510 @@ async fn registered_retention_expires_detail_but_preserves_product_receipts() {
         ObservabilityRetentionClassV1::ProductReceipt
     );
 }
+
+#[tokio::test]
+async fn real_work_owner_receipts_converge_to_rollup() {
+    let report = work_rollup_harness::run_work_rollup_case().await;
+
+    assert_eq!(report.offered_sources, 512, "{report:#?}");
+    assert_eq!(report.dropped_sources, 0, "{report:#?}");
+    assert_eq!(report.durable_sources, 512, "{report:#?}");
+    assert_eq!(report.fragment_count, 1, "{report:#?}");
+    assert_eq!(report.coverage, CoverageStateV1::Known, "{report:#?}");
+    assert!(report.raw_rollup_equal, "{report:#?}");
+}
+
+pub mod work_rollup_harness {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use tracedecay_application::{
+        AdjudicateWorkLeakCommandV1, CancellationContext, CapabilityGrantId,
+        CapabilityGrantSnapshot, Deadline, DisclosureClass, ExecutionTopologyMetricsRequestV1,
+        ExecutionTopologyMetricsV1, ExecutionTopologyRollupFragmentQueryV1,
+        ExecutionTopologyRollupFragmentV1, ExecutionTopologyRollupQueryPort,
+        ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1, RequestContext,
+        RequestId, ResolvedScope, RetryWorkAttemptCommandV1, VerifiedWorkLeakEvidenceV1,
+        VerifiedWorkRetryFailureV1, WorkLeakAdjudicationReceiptV1, WorkRetryCauseV1,
+        WorkRetryFailureSelectorV1, WorkRetryReceiptV1, WorkRetrySourceV1,
+        canonical_execution_topology_rollup_fragment_bytes, execution_topology_rollup_metrics,
+    };
+    use tracedecay_domain::{
+        ActorId, AttemptId, CoverageStateV1, DuplicateEffectOutcomeV1, DuplicateEffortKindV1,
+        LeakOwnerClassV1, ManifestDigest, ProjectId, ProjectionGenerationId,
+        QuantityEvidenceClassV1, RepositoryId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1,
+        WorkAuthority, WorkBlockedIntervalCauseV1, WorkBlockedIntervalClosureV1,
+        WorkBlockedIntervalIdentityV1, WorkBlockedIntervalReceiptV1, WorkCommandId,
+        WorkDuplicateAdjudicationCommandV1, WorkDuplicateAdjudicationEvidenceV1,
+        WorkDuplicateAdjudicationQuantitiesV1, WorkDuplicateAdjudicationReceiptV1,
+        WorkDuplicateAdjudicationRevisionV1, WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1,
+        WorkRunControlAuthorityV1, WorkRunControlReasonV1, WorkTopologyGenerationRefV1,
+        WorkflowStepId, WorktreeId, canonical_sha256,
+    };
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+    use tracedecay_usecases::observability::{
+        BoundedObservabilityProducerV1, ObservabilityProducerIdentityV1,
+        RegisteredObservabilityPortV1, WorkOwnerObservationResultV1,
+        record_work_blocked_interval_observation, record_work_duplicate_observation,
+        record_work_leak_observation, record_work_retry_observation,
+    };
+
+    pub const SOURCE_COUNT: usize = 512;
+    pub const PRODUCER_CAPACITY: usize = 1_024;
+    pub const MAX_EVENTS: u32 = 10_000;
+    pub const TRIPWIRE: Duration = Duration::from_secs(2);
+    pub const READ_TRIPWIRE: Duration = Duration::from_millis(250);
+
+    const FAMILY_SOURCE_COUNT: usize = SOURCE_COUNT / 4;
+    const SCOPE: &str = "project.work-rollup.rc01";
+    const DAY_START_SECONDS: i64 = 86_400;
+    const DAY_MICROS: i64 = 86_400_000_000;
+    const DAY_START_MICROS: i64 = DAY_START_SECONDS * 1_000_000;
+
+    #[derive(Clone, Debug)]
+    pub struct WorkRollupReport {
+        pub offered_sources: usize,
+        pub dropped_sources: usize,
+        pub durable_sources: usize,
+        pub fragment_count: usize,
+        pub fragment_coverage: CoverageStateV1,
+        pub fragment_is_application_canonical: bool,
+        pub raw_coverage: CoverageStateV1,
+        pub coverage: CoverageStateV1,
+        pub raw_watermark: String,
+        pub rollup_watermark: String,
+        pub raw_rollup_equal: bool,
+        pub setup_elapsed: Duration,
+        pub offer_elapsed: Duration,
+        pub fragment_ready_elapsed: Duration,
+        pub raw_read_elapsed: Duration,
+        pub application_read_elapsed: Duration,
+        pub total_elapsed: Duration,
+    }
+
+    fn id<T>(value: impl Into<String>) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.into()).expect("valid Work rollup identifier")
+    }
+
+    fn attempt(index: usize, suffix: &str) -> WorkAttemptIdentityV1 {
+        WorkAttemptIdentityV1::new(
+            id::<TaskId>(format!("task.work-rollup.{index}")),
+            id::<RunId>(format!("run.work-rollup.{index}")),
+            id::<AttemptId>(format!("attempt.work-rollup.{index}.{suffix}")),
+        )
+        .expect("valid Work attempt identity")
+    }
+
+    fn blocked_receipt(index: usize, occurred_at: i64) -> WorkBlockedIntervalReceiptV1 {
+        WorkBlockedIntervalReceiptV1::opened(
+            WorkBlockedIntervalIdentityV1::new(
+                id::<TaskId>(format!("task.work-rollup.blocked.{index}")),
+                id::<RunId>(format!("run.work-rollup.blocked.{index}")),
+                id::<AttemptId>(format!("attempt.work-rollup.blocked.{index}")),
+                id::<WorkflowStepId>(format!("step.work-rollup.blocked.{index}")),
+            ),
+            WorkBlockedIntervalCauseV1::new(
+                WorkRunControlReasonV1::BudgetExhausted,
+                WorkRunControlAuthorityV1::FIRST,
+            ),
+            UtcMicros(occurred_at),
+        )
+        .expect("open blocked interval")
+        .close(
+            UtcMicros(occurred_at + 100),
+            WorkBlockedIntervalClosureV1::AttemptTerminal,
+        )
+        .expect("close blocked interval")
+    }
+
+    fn retry_receipt(index: usize, occurred_at: i64) -> WorkRetryReceiptV1 {
+        let original = attempt(index, "retry-original");
+        let retried = attempt(index, "retry-new");
+        let selector = WorkRetryFailureSelectorV1 {
+            source: WorkRetrySourceV1::Runtime,
+            cause: WorkRetryCauseV1::RuntimeFailure,
+            evidence_ref: format!("runtime-terminal:work-rollup-{index}"),
+        };
+        let command = RetryWorkAttemptCommandV1 {
+            original_attempt: original,
+            new_attempt_id: retried.attempt_id().clone(),
+            failure: selector.clone(),
+            command_id: id::<WorkCommandId>(format!("command.work-rollup.retry.{index}")),
+        };
+        WorkRetryReceiptV1::new(
+            command,
+            VerifiedWorkRetryFailureV1 {
+                selector,
+                evidence_digest: canonical_sha256(&("work-rollup-retry-evidence.v1", index))
+                    .expect("retry evidence digest"),
+                observed_at: UtcMicros(occurred_at),
+            },
+            retried,
+            UtcMicros(occurred_at),
+            UtcMicros(occurred_at + 100),
+        )
+        .expect("canonical retry receipt")
+    }
+
+    fn leak_receipt(index: usize, occurred_at: i64) -> WorkLeakAdjudicationReceiptV1 {
+        let leak_attempt = attempt(index, "leak");
+        let command = AdjudicateWorkLeakCommandV1 {
+            adjudication_id: format!("adjudication.work-rollup.leak.{index}"),
+            expected_revision: None,
+            attempt: leak_attempt.clone(),
+            detection_horizon_micros: 1_000,
+            command_id: id::<WorkCommandId>(format!("command.work-rollup.leak.{index}")),
+        };
+        let evidence = VerifiedWorkLeakEvidenceV1 {
+            attempt: leak_attempt,
+            kind: WorkExecutionLeakKindV1::AttemptWithoutLiveOwner,
+            recovery: WorkExecutionLeakRecoveryV1::Pending,
+            owner_class: LeakOwnerClassV1::Work,
+            coverage: CoverageStateV1::Known,
+            detection_horizon_micros: command.detection_horizon_micros,
+            scan_started_at: UtcMicros(occurred_at),
+            scan_completed_at: UtcMicros(occurred_at + 100),
+            evidence_refs: vec![format!("owner-receipt:work-rollup-leak-{index}")],
+        };
+        let scan_deadline = UtcMicros(occurred_at + 200);
+        WorkLeakAdjudicationReceiptV1 {
+            canonical_input_digest: canonical_sha256(&(
+                "tracedecay.application.work-leak-adjudication.v1",
+                &command,
+                &evidence,
+                scan_deadline,
+            ))
+            .expect("leak input digest"),
+            command,
+            revision: 1,
+            evidence,
+            scan_deadline,
+        }
+    }
+
+    fn duplicate_receipt(
+        authority: &WorkAuthority,
+        work_generation: &ProjectionGenerationId,
+        topology_generation: &WorkTopologyGenerationRefV1,
+        index: usize,
+        occurred_at: i64,
+    ) -> WorkDuplicateAdjudicationReceiptV1 {
+        let command = WorkDuplicateAdjudicationCommandV1 {
+            expected_revision: None,
+            first_attempt: attempt(index, "duplicate-a"),
+            second_attempt: attempt(index, "duplicate-b"),
+            evidence: WorkDuplicateAdjudicationEvidenceV1 {
+                work_generation: work_generation.clone(),
+                topology_generation: topology_generation.clone(),
+            },
+            verdict: DuplicateEffortKindV1::ExactDuplicate,
+            quantities: WorkDuplicateAdjudicationQuantitiesV1 {
+                wall_micros: Some(1_000),
+                token_count: Some(10),
+                cost_micros: Some(5),
+                test_count: Some(1),
+                effect_count: Some(1),
+                evidence: QuantityEvidenceClassV1::OwnerReceipt,
+                effect_outcome: DuplicateEffectOutcomeV1::NotApplicable,
+                coverage: CoverageStateV1::Known,
+            },
+            reason: "independent owner-receipt review".to_owned(),
+            command_id: id::<WorkCommandId>(format!("command.work-rollup.duplicate.{index}")),
+            occurred_at: UtcMicros(occurred_at),
+        }
+        .canonicalized();
+        let input_digest = command
+            .canonical_input_digest()
+            .expect("duplicate input digest");
+        WorkDuplicateAdjudicationReceiptV1::new(
+            authority,
+            command,
+            WorkDuplicateAdjudicationRevisionV1::initial(),
+            input_digest,
+        )
+        .expect("canonical duplicate receipt")
+    }
+
+    fn work_authority() -> WorkAuthority {
+        WorkAuthority::new(
+            id::<ProjectId>(SCOPE),
+            id::<RepositoryId>("repository.work-rollup.rc01"),
+            id::<WorktreeId>("worktree.work-rollup.rc01"),
+            id::<ActorId>("actor.work-rollup.owner"),
+            ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("policy digest"),
+        )
+        .expect("Work authority")
+    }
+
+    fn read_context() -> RequestContext {
+        let scope = ResolvedScope::new(
+            id::<ProjectId>(SCOPE),
+            id::<RepositoryId>("repository.work-rollup.rc01"),
+            id::<WorktreeId>("worktree.work-rollup.rc01"),
+            None,
+        )
+        .expect("resolved Work scope");
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.work-rollup.rc01").expect("grant id"),
+            1,
+            ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("grant digest"),
+            id::<ActorId>("actor.work-rollup.issuer"),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            BTreeSet::from([
+                CapabilityId::new("capability.work.topology_metrics").expect("capability")
+            ]),
+            BTreeSet::from([UseCaseId::new("use-case.work.topology_metrics").expect("use case")]),
+            DisclosureClass::Sensitive,
+        )
+        .expect("grant snapshot");
+        RequestContext::new(
+            id::<ActorId>("actor.work-rollup.reader"),
+            scope,
+            grant,
+            RequestId::new("request.work-rollup.read").expect("request id"),
+            Deadline::new(UtcMicros(i64::MAX)).expect("read deadline"),
+            CancellationContext::active("cancel.work-rollup.read").expect("cancellation"),
+        )
+        .expect("read context")
+    }
+
+    fn account(outcome: WorkOwnerObservationResultV1, dropped: &mut usize) {
+        match outcome {
+            WorkOwnerObservationResultV1::Enqueued => {}
+            WorkOwnerObservationResultV1::DroppedAtCapacity => *dropped += 1,
+            WorkOwnerObservationResultV1::Unavailable => {
+                panic!("real Work owner receipt was rejected by its observation adapter")
+            }
+        }
+    }
+
+    fn equivalent_metrics(
+        raw: &ExecutionTopologyMetricsV1,
+        rollup: &ExecutionTopologyMetricsV1,
+    ) -> bool {
+        let mut raw = raw.clone();
+        let mut rollup = rollup.clone();
+        let normalized_horizon = ObservabilityHorizonV1 {
+            since_micros: 0,
+            until_micros: DAY_MICROS,
+        };
+        for model in [&mut raw, &mut rollup] {
+            model.horizon = normalized_horizon.clone();
+            model.observed_at_micros = 0;
+            model.watermark = "normalized-watermark".to_owned();
+            model.drill_anchors.clear();
+            for measurement in &mut model.measurements {
+                measurement.value.provenance.watermark = "normalized-watermark".to_owned();
+                measurement.value.temporal.horizon = normalized_horizon.clone();
+            }
+        }
+        raw == rollup
+    }
+
+    pub async fn run_work_rollup_case() -> WorkRollupReport {
+        let total_started = Instant::now();
+        let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
+        let runtime = RegisteredGlobalDbTestRuntime::profile(
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+        )
+        .await
+        .expect("registered fresh-store runtime");
+        let database = runtime.profile_database_arc();
+        let producer = BoundedObservabilityProducerV1::start(
+            Arc::clone(&database),
+            ObservabilityProducerIdentityV1 {
+                authorized_scope_ref: SCOPE.to_owned(),
+                process_boot_id: "boot.work-rollup.rc01".to_owned(),
+                producer_revision: "producer.work-rollup.rc01".to_owned(),
+                configuration_revision: "configuration.work-rollup.rc01".to_owned(),
+                policy_revision: "policy.work-rollup.rc01".to_owned(),
+            },
+            PRODUCER_CAPACITY,
+        )
+        .expect("bounded observability producer");
+        let authority = work_authority();
+        let work_generation = authority
+            .projection_generation_id()
+            .expect("Work projection generation");
+        let topology_generation =
+            id::<WorkTopologyGenerationRefV1>(format!("sha256:{}", "c".repeat(64)));
+        let setup_elapsed = total_started.elapsed();
+
+        let mut dropped_sources = 0;
+        let offer_started = Instant::now();
+        for index in 0..FAMILY_SOURCE_COUNT {
+            let occurred_at = DAY_START_MICROS
+                + 1_000_000
+                + i64::try_from(index).expect("bounded receipt index") * 1_000_000;
+            account(
+                record_work_blocked_interval_observation(
+                    Some(&producer),
+                    SCOPE,
+                    &blocked_receipt(index, occurred_at),
+                ),
+                &mut dropped_sources,
+            );
+            account(
+                record_work_retry_observation(
+                    Some(&producer),
+                    SCOPE,
+                    &retry_receipt(index, occurred_at + 200),
+                ),
+                &mut dropped_sources,
+            );
+            account(
+                record_work_leak_observation(
+                    Some(&producer),
+                    SCOPE,
+                    &leak_receipt(index, occurred_at + 400),
+                ),
+                &mut dropped_sources,
+            );
+            account(
+                record_work_duplicate_observation(
+                    Some(&producer),
+                    SCOPE,
+                    &authority,
+                    &duplicate_receipt(
+                        &authority,
+                        &work_generation,
+                        &topology_generation,
+                        index,
+                        occurred_at + 700,
+                    ),
+                ),
+                &mut dropped_sources,
+            );
+        }
+        let offer_elapsed = offer_started.elapsed();
+
+        let fragment_wait_started = Instant::now();
+        producer
+            .shutdown()
+            .await
+            .expect("flush owner receipts and rebuild idle rollup");
+        let port = RegisteredObservabilityPortV1::new(database.as_ref());
+        let full_day = ObservabilityHorizonV1 {
+            since_micros: DAY_START_MICROS,
+            until_micros: DAY_START_MICROS + DAY_MICROS,
+        };
+        let fragment_page = tokio::time::timeout(TRIPWIRE, async {
+            loop {
+                let page = port
+                    .query_rollup_fragments(ExecutionTopologyRollupFragmentQueryV1 {
+                        authorized_scope_ref: SCOPE.to_owned(),
+                        horizon: full_day.clone(),
+                    })
+                    .await
+                    .expect("registered rollup fragment query");
+                if !page.fragment_documents.is_empty() {
+                    break page;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("idle rollup rebuild within two seconds");
+        let fragment_ready_elapsed = fragment_wait_started.elapsed();
+
+        let source_page = port
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: SCOPE.to_owned(),
+                event_kinds: tracedecay_application::EXECUTION_TOPOLOGY_EVENT_KINDS_V1
+                    .iter()
+                    .map(|kind| (*kind).to_owned())
+                    .collect(),
+                horizon: full_day.clone(),
+                after_watermark: None,
+                limit: MAX_EVENTS,
+            })
+            .await
+            .expect("registered durable source query");
+        assert!(source_page.next_watermark.is_none());
+        assert_eq!(source_page.coverage, CoverageStateV1::Known);
+
+        let raw_horizon = ObservabilityHorizonV1 {
+            since_micros: DAY_START_MICROS + 1,
+            until_micros: DAY_START_MICROS + DAY_MICROS - 1,
+        };
+        let context = read_context();
+        let raw_read_started = Instant::now();
+        let raw = execution_topology_rollup_metrics(
+            &port,
+            &port,
+            &context,
+            &ExecutionTopologyMetricsRequestV1 {
+                horizon: raw_horizon,
+                max_events: MAX_EVENTS,
+            },
+        )
+        .await
+        .expect("application raw-boundary metrics read");
+        let raw_read_elapsed = raw_read_started.elapsed();
+        let application_read_started = Instant::now();
+        let rollup = execution_topology_rollup_metrics(
+            &port,
+            &port,
+            &context,
+            &ExecutionTopologyMetricsRequestV1 {
+                horizon: full_day,
+                max_events: MAX_EVENTS,
+            },
+        )
+        .await
+        .expect("application retained-rollup metrics read");
+        let application_read_elapsed = application_read_started.elapsed();
+        let stored_fragment = fragment_page
+            .fragment_documents
+            .first()
+            .expect("one registered fragment document");
+        let typed_fragment =
+            serde_json::from_str::<ExecutionTopologyRollupFragmentV1>(stored_fragment)
+                .ok()
+                .and_then(|fragment| {
+                    canonical_execution_topology_rollup_fragment_bytes(&fragment).ok()
+                });
+        if let Some(directory) = std::env::var_os("TRACEDECAY_WORK_ROLLUP_DIAGNOSTICS") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).expect("create Work rollup diagnostics directory");
+            std::fs::write(directory.join("stored-fragment.json"), stored_fragment)
+                .expect("write stored fragment diagnostic");
+            std::fs::write(
+                directory.join("typed-fragment.json"),
+                typed_fragment.as_deref().unwrap_or_default(),
+            )
+            .expect("write typed fragment diagnostic");
+        }
+        let fragment_is_application_canonical = typed_fragment
+            .as_ref()
+            .is_some_and(|canonical| canonical == stored_fragment.as_bytes());
+
+        WorkRollupReport {
+            offered_sources: SOURCE_COUNT,
+            dropped_sources,
+            durable_sources: source_page.events.len(),
+            fragment_count: fragment_page.fragment_documents.len(),
+            fragment_coverage: fragment_page.coverage,
+            fragment_is_application_canonical,
+            raw_coverage: raw.coverage.state,
+            coverage: rollup.coverage.state,
+            raw_watermark: raw.watermark.clone(),
+            rollup_watermark: rollup.watermark.clone(),
+            raw_rollup_equal: equivalent_metrics(&raw, &rollup),
+            setup_elapsed,
+            offer_elapsed,
+            fragment_ready_elapsed,
+            raw_read_elapsed,
+            application_read_elapsed,
+            total_elapsed: total_started.elapsed(),
+        }
+    }
+}

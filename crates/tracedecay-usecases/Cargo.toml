@@ -87,3 +87,7 @@ tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", feat
 
 [target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
 libc = "0.2"
+
+[[bench]]
+name = "work_rollup"
+harness = false
