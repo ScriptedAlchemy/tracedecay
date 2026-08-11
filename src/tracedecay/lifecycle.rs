@@ -233,15 +233,17 @@ impl TraceDecay {
         selected_manifest_matches_exact_root: bool,
         allow_repair: bool,
     ) -> Result<Option<StoreLayout>> {
-        // A healthy populated store selected by the repository marker or
-        // registry remains authoritative when its own manifest names this
-        // exact root. Legacy duplicates stay untouched, while an empty or
-        // unhealthy selected store still reaches the fail-closed diagnostics.
+        // A populated store selected by the repository marker or registry
+        // remains authoritative when its own manifest names this exact root.
+        // This resolver uses bounded presence probes only; the subsequent
+        // serving open performs full integrity validation and fails closed.
+        // Legacy duplicates stay untouched, while an empty or unreadable
+        // selected store still reaches the fail-closed diagnostics.
         if selected_manifest_matches_exact_root
             && !candidates.is_empty()
             && let Some(selected) = selected.as_ref()
         {
-            if store_identity_is_healthy_non_pristine(selected).await {
+            if store_identity_has_bounded_population_evidence(selected).await {
                 return Ok(Some(selected.clone()));
             }
         }
@@ -1440,7 +1442,7 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
 /// session tables. Exact counts are needed only when constructing an
 /// ambiguity/cutover diagnostic; this predicate only needs to distinguish a
 /// healthy populated store from an empty or unhealthy one.
-async fn store_identity_is_healthy_non_pristine(layout: &StoreLayout) -> bool {
+async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) -> bool {
     let active_branch = branch::current_branch(&layout.project_root);
     let (serving_graph_db_path, _, _) = TraceDecay::resolve_db_for_branch(
         &layout.project_root,
@@ -1448,18 +1450,16 @@ async fn store_identity_is_healthy_non_pristine(layout: &StoreLayout) -> bool {
         active_branch.as_deref(),
     );
     let authority = DatabaseAuthority::for_runtime(&serving_graph_db_path, "store inventory");
-    let Ok((db, _)) = (match authority {
-        Ok(authority) => Database::open_read_only(&serving_graph_db_path, &authority).await,
+    let Ok(db) = (match authority {
+        Ok(authority) => {
+            Database::open_read_only_for_presence_probe(&serving_graph_db_path, &authority).await
+        }
         Err(error) => Err(error),
     }) else {
         return false;
     };
-    let Ok(stats) = db.get_stats().await else {
-        db.close();
-        return false;
-    };
-    let graph_is_populated = stats.node_count > 0
-        || stats.file_count > 0
+    let graph_is_populated = table_has_rows(db.conn(), "nodes").await
+        || table_has_rows(db.conn(), "files").await
         || table_has_rows(db.conn(), "memory_facts").await;
     db.close();
     if graph_is_populated {

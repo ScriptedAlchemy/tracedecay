@@ -2568,10 +2568,10 @@ impl DaemonEngine {
     async fn shutdown_background_tasks(&self) {
         self.shutdown_automation_schedulers().await;
 
-        self.git_watcher.shutdown().await;
+        let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, self.git_watcher.shutdown()).await;
         if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
             handle.abort();
-            let _ = handle.await;
+            let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, handle).await;
         }
     }
 
