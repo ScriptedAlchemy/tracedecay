@@ -163,7 +163,7 @@ pub struct Cli {
     /// Verify and print the exact signed lifecycle plan without mutating.
     /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
     /// `--component` pairing so this global flag never demands `--component`
-    /// from unrelated subcommands (e.g. `branch gc`, `storage storage-report`).
+    /// from unrelated subcommands (e.g. `branch gc`, `storage report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
     /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
@@ -1137,7 +1137,7 @@ pub enum ProfileStorageAction {
     /// Read-only per-store size, free-page ratio, and retention-backlog report
     /// (plan 38 §7). Never mutates anything; use `branch gc` and the daemon's
     /// automatic sweeps to reclaim what this reports.
-    #[command(name = "storage-report")]
+    #[command(name = "report")]
     StorageReport {
         /// Profile root to inspect (defaults to the resolved user data dir).
         #[arg(long = "profile-root")]
@@ -1153,7 +1153,7 @@ pub enum ProfileStorageAction {
         json: bool,
     },
     /// Create a complete checksummed profile backup under a quiesced exclusive lease.
-    #[command(name = "backup-profile")]
+    #[command(name = "backup")]
     BackupProfile {
         /// Backup parent outside the TraceDecay profile.
         #[arg(long)]
@@ -1163,7 +1163,7 @@ pub enum ProfileStorageAction {
         backup_id: String,
     },
     /// Restore and verify a complete backup in an isolated destination.
-    #[command(name = "rehearse-profile-backup")]
+    #[command(name = "rehearse-backup")]
     RehearseProfileBackup {
         /// Complete backup directory containing `backup-manifest.json`.
         #[arg(long)]

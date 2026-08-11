@@ -1607,19 +1607,23 @@ fn project_selector_flags_parse_for_cli_read_surfaces() {
 }
 
 #[test]
-fn storage_report_parses() {
-    let cli = Cli::try_parse_from([
+fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
+    let report = Cli::try_parse_from([
         "tracedecay",
         "storage",
-        "storage-report",
+        "report",
         "--profile-root",
         "/tmp/profile",
+        "--project-id",
+        "proj_a",
+        "--project-root",
+        "/repos/a",
         "--json",
     ])
-    .expect("storage storage-report should parse");
+    .expect("storage report should parse");
 
     assert!(matches!(
-        cli.command,
+        report.command,
         Some(Commands::Storage {
             action: ProfileStorageAction::StorageReport {
                 profile_root,
@@ -1628,40 +1632,86 @@ fn storage_report_parses() {
                 json,
             }
         }) if profile_root.as_deref() == Some("/tmp/profile")
-            && project_id.is_none()
-            && project_root.is_none()
-            && json
-    ));
-}
-
-#[test]
-fn storage_report_parses_targeted_project() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "storage",
-        "storage-report",
-        "--profile-root",
-        "/tmp/profile",
-        "--project-id",
-        "proj_a",
-        "--project-root",
-        "/repos/a",
-    ])
-    .expect("targeted storage storage-report should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Storage {
-            action: ProfileStorageAction::StorageReport {
-                profile_root,
-                project_id,
-                project_root,
-                json: false,
-            }
-        }) if profile_root.as_deref() == Some("/tmp/profile")
             && project_id.as_deref() == Some("proj_a")
             && project_root.as_deref() == Some("/repos/a")
+            && json
     ));
+
+    let backup = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "backup",
+        "--to",
+        "/tmp/backups",
+        "--backup-id",
+        "backup_2026_08_11",
+    ])
+    .expect("storage backup should parse");
+
+    assert!(matches!(
+        backup.command,
+        Some(Commands::Storage {
+            action: ProfileStorageAction::BackupProfile {
+                to,
+                backup_id,
+            }
+        }) if to == "/tmp/backups" && backup_id == "backup_2026_08_11"
+    ));
+
+    let rehearsal = Cli::try_parse_from([
+        "tracedecay",
+        "storage",
+        "rehearse-backup",
+        "--backup",
+        "/tmp/backups/backup_2026_08_11",
+        "--restore",
+        "/tmp/restore",
+    ])
+    .expect("storage rehearse-backup should parse");
+
+    assert!(matches!(
+        rehearsal.command,
+        Some(Commands::Storage {
+            action: ProfileStorageAction::RehearseProfileBackup {
+                backup,
+                restore,
+            }
+        }) if backup == "/tmp/backups/backup_2026_08_11" && restore == "/tmp/restore"
+    ));
+
+    for args in [
+        vec![
+            "tracedecay",
+            "storage",
+            "storage-report",
+            "--profile-root",
+            "/tmp/profile",
+        ],
+        vec![
+            "tracedecay",
+            "storage",
+            "backup-profile",
+            "--to",
+            "/tmp/backups",
+            "--backup-id",
+            "backup_2026_08_11",
+        ],
+        vec![
+            "tracedecay",
+            "storage",
+            "rehearse-profile-backup",
+            "--backup",
+            "/tmp/backups/backup_2026_08_11",
+            "--restore",
+            "/tmp/restore",
+        ],
+    ] {
+        let error = match Cli::try_parse_from(args.clone()) {
+            Ok(_) => panic!("legacy storage spelling must be rejected: {args:?}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "args: {args:?}");
+    }
 }
 
 #[test]

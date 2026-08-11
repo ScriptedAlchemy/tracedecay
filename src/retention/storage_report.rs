@@ -1,7 +1,7 @@
 //! Read-only, cheap-to-query storage observability (plan 38 §7): per-store
 //! size and free-page ratio for every registered profile-sharded store under
 //! a profile root, plus an unregistered-directory backlog summary —
-//! reachable from `tracedecay storage storage-report` without a live daemon
+//! reachable from `tracedecay storage report` without a live daemon
 //! or any [`crate::global_db::RegisteredGlobalDb`] writer authority.
 //!
 //! # Why this does not snapshot stores in place
@@ -75,7 +75,7 @@ pub struct StorageReport {
     pub global_db_bytes: u64,
     /// A direct, read-only census of every regular file under the profile
     /// root. The daemon's bounded per-page response leaves this absent; the
-    /// explicit storage-report command attaches it after paging completes.
+    /// explicit `storage report` command attaches it after paging completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_profile_size: Option<FullProfileSizeV1>,
     pub coverage: StorageReportCoverage,

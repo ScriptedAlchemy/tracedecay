@@ -600,9 +600,9 @@ created at their final shape, so there is no cross-version migration workflow.";
 
 pub(crate) const STORAGE_AFTER_HELP: &str = "\
 Examples:
-  tracedecay storage storage-report              Per-store size / free-page ratio (read-only)
-  tracedecay storage backup-profile --to <dir> --backup-id <id>
-  tracedecay storage rehearse-profile-backup --backup <dir> --restore <dir>
+  tracedecay storage report                      Per-store size / free-page ratio (read-only)
+  tracedecay storage backup --to <dir> --backup-id <id>
+  tracedecay storage rehearse-backup --backup <dir> --restore <dir>
 
 Related: tracedecay projects (registry view), tracedecay wipe.";
 

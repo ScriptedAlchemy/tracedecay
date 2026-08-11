@@ -86,10 +86,34 @@ fn nested_subcommands_accept_help() {
         &["automation", "runs", "list", "--help"],
         &["automation", "skills", "list", "--help"],
         &["automation", "facts", "list", "--help"],
-        &["storage", "storage-report", "--help"],
-        &["storage", "backup-profile", "--help"],
     ] {
         assert_help_succeeds(args, "Usage:");
+    }
+}
+
+#[test]
+fn storage_subcommands_use_contextual_nouns_without_legacy_aliases() {
+    for args in [
+        &["storage", "report", "--help"][..],
+        &["storage", "backup", "--help"],
+        &["storage", "rehearse-backup", "--help"],
+    ] {
+        assert_help_succeeds(args, "Usage:");
+    }
+
+    for args in [
+        &["storage", "storage-report", "--help"][..],
+        &["storage", "backup-profile", "--help"],
+        &["storage", "rehearse-profile-backup", "--help"],
+    ] {
+        let output = Command::new(tracedecay_bin())
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("run tracedecay {args:?}: {e}"));
+        assert!(
+            !output.status.success(),
+            "legacy tracedecay {args:?} should exit nonzero"
+        );
     }
 }
 

@@ -2098,7 +2098,7 @@ fn init_refuses_ephemeral_project_in_persistent_profile() {
     );
 }
 
-/// `storage storage-report` is read-only and works against an explicit
+/// `storage report` is read-only and works against an explicit
 /// `--profile-root` without any daemon or registered project, reporting a
 /// real registered store's size and an unregistered directory's presence
 /// (plan 38 §7 — size observability reachable from a command).
@@ -2141,7 +2141,7 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args([
         "storage",
-        "storage-report",
+        "report",
         "--profile-root",
         profile_root.to_str().unwrap(),
         "--json",
@@ -2150,7 +2150,7 @@ fn storage_report_prints_registered_store_size_and_unregistered_backlog() {
 
     assert!(
         output.status.success(),
-        "storage-report should succeed\nstdout:\n{}\nstderr:\n{}",
+        "storage report should succeed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -2193,7 +2193,7 @@ async fn storage_report_uses_active_daemon_authority_without_hanging() {
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
     let mut command = tracedecay_command_without_daemon(home.path(), project.path());
-    command.args(["storage", "storage-report", "--json"]);
+    command.args(["storage", "report", "--json"]);
     let started = Instant::now();
     let output = run_with_timeout(command, Duration::from_secs(15));
 
