@@ -411,8 +411,9 @@ impl TraceDecay {
 
         // If the dirty sentinel exists, a previous sync/index was interrupted.
         // Check integrity and rebuild if necessary.
+        let active_graph_is_root = db_path == store_layout.graph_db_path;
         let crashed = has_dirty_sentinel_at(&active_graph_layout.dirty_path)
-            || has_dirty_sentinel_at(&store_layout.dirty_path);
+            || (active_graph_is_root && has_dirty_sentinel_at(&store_layout.dirty_path));
         if crashed {
             eprintln!(
                 "[tracedecay] previous operation was interrupted — checking database integrity…"
@@ -421,9 +422,9 @@ impl TraceDecay {
 
         // A dirty marker can also describe a sync that is still active in a
         // peer process. Recovery must own both graph-local and legacy locks so
-        // it cannot race that writer or clear its sentinel. Preflight through
-        // the read-only connection before Database::open applies writable
-        // pragmas or migrations to a potentially damaged recovery set.
+        // it cannot race that writer or clear its sentinel. Database::open
+        // performs the single read-only integrity validation before applying
+        // writable pragmas or migrations to a potentially damaged recovery set.
         let mut recovery_lock = if crashed {
             Some(try_acquire_graph_sync_locks(
                 &active_graph_layout.sync_lock_path,
@@ -432,29 +433,6 @@ impl TraceDecay {
         } else {
             None
         };
-        if crashed {
-            let authority = DatabaseAuthority::for_runtime(&db_path, "crash verification")?;
-            let verification = match Database::open_read_only(&db_path, &authority).await {
-                Ok((db, _)) => db,
-                Err(error) => {
-                    drop(recovery_lock);
-                    return Self::recover_corrupt_branch_or_fail(
-                        project_root,
-                        open_options,
-                        &store_layout,
-                        &db_path,
-                        error,
-                        repair_corrupt_branch,
-                    )
-                    .await;
-                }
-            };
-            // `open_read_only` already completes the full read-only integrity
-            // validation before returning. Repeating `quick_check` here (and
-            // again after the writable open) turns one crash-recovery scan
-            // into three identical full-store scans.
-            verification.close();
-        }
 
         // Ordinary opens never replace database files. A daemon or another MCP
         // process may still hold the current DB/WAL/SHM inodes, and deleting
@@ -481,13 +459,14 @@ impl TraceDecay {
             == Some(FULL_REINDEX_REQUIRED_VALUE);
         let needs_reindex = migrated || reindex_pending;
 
-        // The read-only preflight above already validated the exact WAL-aware
-        // recovery set while both locks were held. A successful writable open
-        // does not need to scan the same pages again. Reindexing owns sentinel
-        // cleanup when migration requires it.
+        // Database::open validated the exact WAL-aware recovery set while both
+        // locks were held. Reindexing owns sentinel cleanup when migration
+        // requires it.
         if crashed && !needs_reindex {
             clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
-            clear_dirty_sentinel_at(&store_layout.dirty_path);
+            if active_graph_is_root {
+                clear_dirty_sentinel_at(&store_layout.dirty_path);
+            }
         }
 
         let ts = Self {
