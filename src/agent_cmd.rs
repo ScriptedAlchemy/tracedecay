@@ -18,6 +18,11 @@ use automation::{
     install_codex_daemon_automation, validate_codex_automation_flags,
     validate_codex_automation_project_path,
 };
+mod feedback_component;
+use feedback_component::{
+    aggregate_with_feedback_component, companion_owned_live_paths, live_feedback_receipt,
+    selected_feedback_component,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HostBundleCliOperation {
@@ -1129,15 +1134,13 @@ fn feedback_rollback_inputs(
     .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
         message: format!("no aggregate host receipt exists for {agent_id}"),
     })?;
-    let mut target = tracedecay::agents::host_bundle_registry::verified_embedded_host_bundle(
-        host,
-        tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core,
-        0,
-    )
-    .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-        message: format!("compiled feedback route is unavailable for {agent_id}: {error}"),
-    })?;
-    let companion_owned_paths = feedback_companion_owned_live_paths(&home, &previous);
+    let component = selected_feedback_component(&previous)?;
+    let mut target =
+        tracedecay::agents::host_bundle_registry::verified_embedded_host_bundle(host, component, 0)
+            .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+                message: format!("compiled feedback route is unavailable for {agent_id}: {error}"),
+            })?;
+    let companion_owned_paths = companion_owned_live_paths(&home, &previous)?;
     target
         .manifest
         .artifacts
@@ -1172,77 +1175,6 @@ fn feedback_rollback_inputs(
         artifact.artifact_digest = Sha256::digest(&content.bytes).into();
     }
     Ok((home, lifecycle_root, previous, target))
-}
-
-fn feedback_core_receipt(
-    aggregate: &tracedecay::agents::host_bundle_v2::HostComponentSetReceiptV1,
-) -> tracedecay::errors::Result<(
-    tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
-    tracedecay::agents::host_bundle_v2::HostBundleInstallReceiptV1,
-)> {
-    let component = tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core;
-    let manifest = aggregate
-        .component_manifests
-        .iter()
-        .find(|manifest| manifest.component == component)
-        .cloned()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "aggregate receipt has no Core feedback manifest".to_string(),
-        })?;
-    let receipt = aggregate
-        .component_receipts
-        .iter()
-        .find(|receipt| receipt.component == component)
-        .cloned()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "aggregate receipt has no Core component receipt".to_string(),
-        })?;
-    Ok((manifest, receipt))
-}
-
-fn feedback_companion_owned_live_paths(
-    home: &Path,
-    aggregate: &tracedecay::agents::host_bundle_v2::HostComponentSetReceiptV1,
-) -> std::collections::BTreeSet<String> {
-    aggregate
-        .component_receipts
-        .iter()
-        .filter(|receipt| {
-            receipt.component != tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
-        })
-        .flat_map(|receipt| &receipt.artifacts)
-        .filter(|owned| {
-            fs::read(home.join(&owned.relative_path))
-                .ok()
-                .is_some_and(|bytes| {
-                    <[u8; 32]>::from(Sha256::digest(bytes)) == owned.artifact_digest
-                })
-        })
-        .map(|owned| owned.relative_path.clone())
-        .collect()
-}
-
-fn feedback_live_core_receipt(
-    home: &Path,
-    aggregate: &tracedecay::agents::host_bundle_v2::HostComponentSetReceiptV1,
-) -> tracedecay::errors::Result<(
-    tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
-    tracedecay::agents::host_bundle_v2::HostBundleInstallReceiptV1,
-)> {
-    let (mut manifest, mut receipt) = feedback_core_receipt(aggregate)?;
-    let companion_owned_paths = feedback_companion_owned_live_paths(home, aggregate);
-    manifest
-        .artifacts
-        .retain(|artifact| !companion_owned_paths.contains(&artifact.relative_path));
-    receipt
-        .artifacts
-        .retain(|artifact| !companion_owned_paths.contains(&artifact.relative_path));
-    for artifact in &mut manifest.artifacts {
-        if let Ok(bytes) = fs::read(home.join(&artifact.relative_path)) {
-            artifact.artifact_digest = Sha256::digest(bytes).into();
-        }
-    }
-    Ok((manifest, receipt))
 }
 
 fn feedback_pair_verifier(
@@ -1435,8 +1367,9 @@ fn read_feedback_repair_contents(
 fn snapshot_feedback_registration(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
+    component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
 ) -> tracedecay::errors::Result<Vec<FeedbackRegistrationFileState>> {
-    let paths = feedback_registration_paths(home, integration)?;
+    let paths = feedback_registration_paths(home, integration, component)?;
     paths
         .into_iter()
         .enumerate()
@@ -1486,10 +1419,11 @@ fn snapshot_feedback_registration(
 fn feedback_registration_paths_for_state(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
+    component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
     inventory_changed: &str,
 ) -> tracedecay::errors::Result<Vec<PathBuf>> {
-    let paths = feedback_registration_paths(home, integration)?;
+    let paths = feedback_registration_paths(home, integration, component)?;
     if paths.len() == registration_files.len() {
         Ok(paths)
     } else {
@@ -1514,11 +1448,13 @@ fn feedback_registration_path<'a>(
 fn capture_feedback_applied_registration(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
+    component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
     registration_files: &mut [FeedbackRegistrationFileState],
 ) -> tracedecay::errors::Result<()> {
     let paths = feedback_registration_paths_for_state(
         home,
         integration,
+        component,
         registration_files,
         "feedback registration inventory changed during apply",
     )?;
@@ -1537,11 +1473,13 @@ fn capture_feedback_applied_registration(
 fn validate_feedback_registration_snapshot(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
+    component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
 ) -> tracedecay::errors::Result<()> {
     let paths = feedback_registration_paths_for_state(
         home,
         integration,
+        component,
         registration_files,
         "feedback registration inventory changed before apply",
     )?;
@@ -1568,6 +1506,7 @@ fn validate_feedback_registration_snapshot(
 fn validate_feedback_registration_restore(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
+    component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
     effect_started: bool,
     intent_root: Option<&Path>,
@@ -1575,6 +1514,7 @@ fn validate_feedback_registration_restore(
     let paths = feedback_registration_paths_for_state(
         home,
         integration,
+        component,
         registration_files,
         "feedback registration inventory no longer matches rollback state",
     )?;
@@ -1652,6 +1592,7 @@ fn validate_feedback_registration_restore(
 fn restore_feedback_registration(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
+    component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
     registration_files: &[FeedbackRegistrationFileState],
     effect_started: bool,
     intent_root: Option<&Path>,
@@ -1659,6 +1600,7 @@ fn restore_feedback_registration(
     let paths = validate_feedback_registration_restore(
         home,
         integration,
+        component,
         registration_files,
         effect_started,
         intent_root,
@@ -1757,27 +1699,24 @@ fn validate_feedback_applied_artifacts(
 fn validate_feedback_active_receipts(
     lifecycle_root: &Path,
     switch_receipt: &tracedecay::agents::host_bundle_v2::FeedbackPathRollbackReceiptV1,
+    selected_component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
     expected_aggregates: &[tracedecay::agents::host_bundle_v2::HostComponentSetReceiptV1],
     previous_aggregate: Option<&tracedecay::agents::host_bundle_v2::HostComponentSetReceiptV1>,
 ) -> tracedecay::errors::Result<()> {
     use tracedecay::agents::host_bundle_v2::{
-        HostBundleComponentV1, latest_host_component_receipt_at,
-        latest_host_component_set_receipt_at,
+        latest_host_component_receipt_at, latest_host_component_set_receipt_at,
     };
 
-    let component = latest_host_component_receipt_at(
-        lifecycle_root,
-        switch_receipt.host,
-        HostBundleComponentV1::Core,
-    )
-    .map_err(host_bundle_error)?;
+    let component =
+        latest_host_component_receipt_at(lifecycle_root, switch_receipt.host, selected_component)
+            .map_err(host_bundle_error)?;
     let aggregate = latest_host_component_set_receipt_at(lifecycle_root, switch_receipt.host)
         .map_err(host_bundle_error)?;
     let aggregate_component = aggregate.as_ref().and_then(|receipt| {
         receipt
             .component_receipts
             .iter()
-            .find(|receipt| receipt.component == HostBundleComponentV1::Core)
+            .find(|receipt| receipt.component == selected_component)
     });
     let self_authored_partial_transition = previous_aggregate.is_some_and(|previous| {
         aggregate.as_ref() == Some(previous)
@@ -1796,35 +1735,6 @@ fn validate_feedback_active_receipts(
         });
     }
     Ok(())
-}
-
-fn feedback_aggregate_with_core(
-    previous: &tracedecay::agents::host_bundle_v2::HostComponentSetReceiptV1,
-    manifest: &tracedecay::agents::host_bundle_v2::HostBundleManifestV1,
-    component_receipt: &tracedecay::agents::host_bundle_v2::HostBundleInstallReceiptV1,
-) -> tracedecay::agents::host_bundle_v2::HostComponentSetReceiptV1 {
-    let mut aggregate = previous.clone();
-    aggregate.operation_id = component_receipt.operation_id;
-    aggregate.operation = component_receipt.operation;
-    aggregate
-        .component_manifests
-        .retain(|candidate| candidate.component != manifest.component);
-    aggregate.component_manifests.push(manifest.clone());
-    aggregate
-        .component_manifests
-        .sort_by_key(|candidate| candidate.component);
-    aggregate
-        .component_receipts
-        .retain(|candidate| candidate.component != component_receipt.component);
-    aggregate.component_receipts.push(component_receipt.clone());
-    aggregate
-        .component_receipts
-        .sort_by_key(|candidate| candidate.component);
-    aggregate.confirmed_plan_digest = None;
-    aggregate.base_registration_revision = None;
-    aggregate.current_registration_revision = None;
-    aggregate.artifact_state_revision = None;
-    aggregate
 }
 
 fn snapshot_feedback_artifact_permissions(
@@ -1873,11 +1783,9 @@ fn restore_feedback_artifact_permissions(
 fn feedback_registration_paths(
     home: &Path,
     integration: &dyn tracedecay::agents::AgentIntegration,
+    component: tracedecay::agents::host_bundle_v2::HostBundleComponentV1,
 ) -> tracedecay::errors::Result<Vec<PathBuf>> {
-    let mut paths = integration.host_component_registration_paths_checked(
-        &[tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core],
-        home,
-    )?;
+    let mut paths = integration.host_component_registration_paths_checked(&[component], home)?;
     if integration.id() == "claude" {
         let artifact_owned_manifest =
             home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json");
@@ -2069,7 +1977,7 @@ fn persist_feedback_state(
 
 fn feedback_rollback_dry_run(agent_id: &str) -> tracedecay::errors::Result<()> {
     let (home, _lifecycle_root, aggregate, target) = feedback_rollback_inputs(agent_id)?;
-    let (previous, previous_receipt) = feedback_live_core_receipt(&home, &aggregate)?;
+    let (previous, previous_receipt) = live_feedback_receipt(&home, &aggregate)?;
     let verifier = feedback_pair_verifier(&previous, &target.manifest)?;
     let request = feedback_request(
         &target.manifest,
@@ -2110,11 +2018,12 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
     let dashboard_enabled =
         load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(agent_id);
     let (home, lifecycle_root, aggregate, target) = feedback_rollback_inputs(agent_id)?;
-    let (previous, _previous_receipt) = feedback_live_core_receipt(&home, &aggregate)?;
+    let (previous, _previous_receipt) = live_feedback_receipt(&home, &aggregate)?;
     let previous_contents = read_feedback_repair_contents(&home, &previous)?;
     let artifact_permissions = snapshot_feedback_artifact_permissions(&home, &previous)?;
     let integration = tracedecay::agents::get_integration(agent_id)?;
-    let registration_files = snapshot_feedback_registration(&home, integration.as_ref())?;
+    let registration_files =
+        snapshot_feedback_registration(&home, integration.as_ref(), target.manifest.component)?;
     let verifier = feedback_pair_verifier(&previous, &target.manifest)?;
     let request = feedback_request(
         &target.manifest,
@@ -2151,6 +2060,7 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
     validate_feedback_registration_snapshot(
         &home,
         integration.as_ref(),
+        target.manifest.component,
         &state.registration_files,
     )?;
 
@@ -2194,6 +2104,7 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
     let registration_snapshot = validate_feedback_registration_snapshot(
         &home,
         integration.as_ref(),
+        target.manifest.component,
         &state.registration_files,
     );
     let registration_effect_attempted = registration_snapshot.is_ok();
@@ -2204,7 +2115,12 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
             persist_feedback_state(state_path, &lifecycle_root, &state)?;
             let activation_result = tracedecay::agents::with_host_config_write_intents(
                 state.registration_intent_root.clone(),
-                || integration.activate_deployed_host_registration(&context),
+                || {
+                    integration.activate_deployed_host_component_registration(
+                        &[target.manifest.component],
+                        &context,
+                    )
+                },
             )
             .and_then(|()| {
                 if integration.id() == "cursor" {
@@ -2214,20 +2130,19 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
                     home: home.clone(),
                     project_path: std::env::current_dir().unwrap_or_else(|_| home.clone()),
                 };
-                (integration.host_component_registration(
-                    tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core,
-                    &health,
-                ) == tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current)
+                (integration.host_component_registration(target.manifest.component, &health)
+                    == tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1::Current)
                     .then_some(())
                     .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
                         message: format!(
-                            "{agent_id} did not verify its activated Core feedback registration"
+                            "{agent_id} did not verify its activated feedback registration"
                         ),
                     })
             });
             let capture_result = capture_feedback_applied_registration(
                 &home,
                 integration.as_ref(),
+                target.manifest.component,
                 &mut state.registration_files,
             );
             if capture_result.is_ok() {
@@ -2293,6 +2208,14 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
     state
         .identity
         .validate(&state.agent_id, &home, &lifecycle_root)?;
+    let feedback_component = selected_feedback_component(&state.previous_aggregate)?;
+    if state.previous_manifest.component != feedback_component
+        || state.target_manifest.component != feedback_component
+    {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "feedback rollback state component does not match its aggregate".to_string(),
+        });
+    }
     let integration = tracedecay::agents::get_integration(&state.agent_id)?;
     let dashboard_enabled =
         load_host_lifecycle_user_config()?.dashboard_enabled_for_agent(&state.agent_id);
@@ -2308,6 +2231,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         validate_feedback_registration_restore(
             &home,
             integration.as_ref(),
+            feedback_component,
             &state.registration_files,
             false,
             Some(&state.registration_intent_root),
@@ -2321,6 +2245,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         validate_feedback_registration_restore(
             &home,
             integration.as_ref(),
+            feedback_component,
             &state.registration_files,
             state.registration_effect_started,
             Some(&state.registration_intent_root),
@@ -2345,10 +2270,8 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         .canonical_digest()
         .map_err(host_bundle_error)?;
     let committed_restore_receipt = if state.restore_effect_started {
-        use tracedecay::agents::host_bundle_v2::{
-            HostBundleComponentV1, latest_host_component_receipt_at,
-        };
-        latest_host_component_receipt_at(&lifecycle_root, state.host, HostBundleComponentV1::Core)
+        use tracedecay::agents::host_bundle_v2::latest_host_component_receipt_at;
+        latest_host_component_receipt_at(&lifecycle_root, state.host, feedback_component)
             .map_err(host_bundle_error)?
             .filter(|receipt| {
                 Some(receipt.operation_id) == state.restore_operation_id
@@ -2363,12 +2286,12 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
     ) {
         use tracedecay::agents::host_bundle_v2::latest_host_component_set_receipt_at;
 
-        let target_aggregate = feedback_aggregate_with_core(
+        let target_aggregate = aggregate_with_feedback_component(
             &state.previous_aggregate,
             &state.target_manifest,
             &switch_receipt.apply_receipt,
         );
-        let restored_aggregate = feedback_aggregate_with_core(
+        let restored_aggregate = aggregate_with_feedback_component(
             &state.previous_aggregate,
             &state.previous_manifest,
             restore_receipt,
@@ -2391,7 +2314,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
                 message: "feedback restore effect has no switch receipt identity".to_string(),
             })?
     } else if let Some(switch_receipt) = state.switch_receipt.clone() {
-        let target_aggregate = feedback_aggregate_with_core(
+        let target_aggregate = aggregate_with_feedback_component(
             &state.previous_aggregate,
             &state.target_manifest,
             &switch_receipt.apply_receipt,
@@ -2404,6 +2327,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         validate_feedback_active_receipts(
             &lifecycle_root,
             &switch_receipt,
+            feedback_component,
             &expected_aggregates,
             (state.status != FeedbackRollbackCliStatus::Applied)
                 .then_some(&state.previous_aggregate),
@@ -2411,7 +2335,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         switch_receipt
     } else {
         use tracedecay::agents::host_bundle_v2::{
-            FeedbackPathRollbackReceiptV1, HostBundleComponentV1, latest_host_component_receipt_at,
+            FeedbackPathRollbackReceiptV1, latest_host_component_receipt_at,
             latest_host_component_set_receipt_at,
         };
 
@@ -2424,12 +2348,9 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
                 message: "feedback aggregate changed during interrupted apply".to_string(),
             });
         }
-        let component = latest_host_component_receipt_at(
-            &lifecycle_root,
-            state.host,
-            HostBundleComponentV1::Core,
-        )
-        .map_err(host_bundle_error)?;
+        let component =
+            latest_host_component_receipt_at(&lifecycle_root, state.host, feedback_component)
+                .map_err(host_bundle_error)?;
         let target_manifest_digest = state
             .target_manifest
             .canonical_digest()
@@ -2453,6 +2374,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
             validate_feedback_registration_restore(
                 &home,
                 integration.as_ref(),
+                feedback_component,
                 &state.registration_files,
                 state.registration_effect_started,
                 Some(&state.registration_intent_root),
@@ -2469,6 +2391,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         validate_feedback_registration_restore(
             &home,
             integration.as_ref(),
+            feedback_component,
             &state.registration_files,
             state.registration_effect_started,
             Some(&state.registration_intent_root),
@@ -2533,6 +2456,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         restore_feedback_registration(
             &context.home,
             integration.as_ref(),
+            feedback_component,
             &state.registration_files,
             state.registration_effect_started,
             Some(&state.registration_intent_root),
@@ -2543,6 +2467,7 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
         validate_feedback_registration_snapshot(
             &context.home,
             integration.as_ref(),
+            feedback_component,
             &state.registration_files,
         )?;
     }
@@ -2727,8 +2652,8 @@ fn host_bundle_error_for_agent(
                  tracedecay@tracedecay`, restart Claude Code, then retry the TraceDecay lifecycle."
             }
             "codex" => {
-                "Codex's loaded TraceDecay cache is stale. Run `codex plugin update \
-                 tracedecay@personal`, re-trust changed hooks, then retry the TraceDecay lifecycle."
+                "Codex's loaded TraceDecay cache is stale. Run `codex plugin add \
+                 tracedecay@personal` to reinstall it, re-trust changed hooks, then retry the TraceDecay lifecycle."
             }
             _ => {
                 "The host-native TraceDecay plugin cache is stale; update it through the host and retry."
@@ -3461,15 +3386,23 @@ mod tests {
         let _profile = pinned_host_profile();
         let home = tempfile::tempdir().unwrap();
         let integration = tracedecay::agents::get_integration("opencode").unwrap();
-        let registration_paths =
-            super::feedback_registration_paths(home.path(), integration.as_ref()).unwrap();
+        let registration_paths = super::feedback_registration_paths(
+            home.path(),
+            integration.as_ref(),
+            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core,
+        )
+        .unwrap();
         let config = home.path().join(".config/opencode/opencode.json");
         assert!(
             registration_paths.contains(&config),
             "the mutated file must be part of the host registration inventory: {registration_paths:?}"
         );
-        let snapshot =
-            super::snapshot_feedback_registration(home.path(), integration.as_ref()).unwrap();
+        let snapshot = super::snapshot_feedback_registration(
+            home.path(),
+            integration.as_ref(),
+            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core,
+        )
+        .unwrap();
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(
             &config,
@@ -3480,6 +3413,7 @@ mod tests {
         let error = super::validate_feedback_registration_snapshot(
             home.path(),
             integration.as_ref(),
+            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core,
             &snapshot,
         )
         .unwrap_err();
@@ -3501,9 +3435,13 @@ mod tests {
         let integration = tracedecay::agents::get_integration("opencode").unwrap();
         let config = home.path().join(".config/opencode/opencode.json");
         assert!(
-            super::feedback_registration_paths(home.path(), integration.as_ref())
-                .unwrap()
-                .contains(&config),
+            super::feedback_registration_paths(
+                home.path(),
+                integration.as_ref(),
+                tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core,
+            )
+            .unwrap()
+            .contains(&config),
             "the mutated file must be part of the host registration inventory"
         );
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -3513,13 +3451,18 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let snapshot =
-            super::snapshot_feedback_registration(home.path(), integration.as_ref()).unwrap();
+        let snapshot = super::snapshot_feedback_registration(
+            home.path(),
+            integration.as_ref(),
+            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core,
+        )
+        .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let error = super::validate_feedback_registration_snapshot(
             home.path(),
             integration.as_ref(),
+            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core,
             &snapshot,
         )
         .unwrap_err();

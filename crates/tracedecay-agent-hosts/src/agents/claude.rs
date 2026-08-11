@@ -311,20 +311,11 @@ fn claude_plugin_registration_is_active(home: &Path) -> Result<bool> {
                 marketplace_path.display()
             ),
         })?;
-    let source_manifest_current = plugin_manifest_version(&plugin_source_manifest_path(home))
-        .map_err(|()| TraceDecayError::Config {
-            message: format!(
-                "could not read Claude staged plugin identity at {}",
-                plugin_source_manifest_path(home).display()
-            ),
-        })?
-        == Some(crate::PRODUCT_VERSION.to_string());
-    Ok(source_manifest_current
-        && settings
-            .as_ref()
-            .and_then(|settings| settings.pointer("/enabledPlugins/tracedecay@tracedecay"))
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
+    Ok(settings
+        .as_ref()
+        .and_then(|settings| settings.pointer("/enabledPlugins/tracedecay@tracedecay"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
         && marketplace
             .as_ref()
             .and_then(|marketplace| marketplace.pointer("/tracedecay/source/source"))
@@ -345,10 +336,6 @@ fn json_path_matches(value: Option<&serde_json::Value>, expected: &Path) -> bool
     value.and_then(serde_json::Value::as_str) == expected.to_str()
 }
 
-fn plugin_source_manifest_path(home: &Path) -> PathBuf {
-    plugin_deploy_dir(home).join(".claude-plugin/plugin.json")
-}
-
 fn claude_current_cached_plugin_manifest_path(home: &Path) -> PathBuf {
     claude_current_cached_plugin_root(home).join(".claude-plugin/plugin.json")
 }
@@ -356,19 +343,6 @@ fn claude_current_cached_plugin_manifest_path(home: &Path) -> PathBuf {
 fn claude_current_cached_plugin_root(home: &Path) -> PathBuf {
     home.join(".claude/plugins/cache/tracedecay/tracedecay")
         .join(crate::PRODUCT_VERSION)
-}
-
-fn plugin_manifest_version(path: &Path) -> std::result::Result<Option<String>, ()> {
-    let Some(manifest) = read_optional_json(path)? else {
-        return Ok(None);
-    };
-    if manifest.get("name").and_then(serde_json::Value::as_str) != Some("tracedecay") {
-        return Ok(None);
-    }
-    Ok(manifest
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string))
 }
 
 fn claude_loaded_cache_matches_rendered_bundle(
@@ -560,16 +534,16 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 }
 
 /// Deploy every embedded bundle file into the stable marketplace dir,
-/// stamping the plugin version and substituting the tracedecay binary path.
-/// Returns the deploy dir.
+/// stamping the plugin version and substituting the binary path.
 fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
+    if std::fs::symlink_metadata(home.join(".claude"))
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(TraceDecayError::Config {
+            message: super::host_bundle_v2::HostBundleError::UnsafeClaudeHomeSymlink.to_string(),
+        });
+    }
     let deploy_dir = plugin_deploy_dir(home);
-    // Clean-replace: wipe the tracedecay-owned deploy dir before writing the
-    // fresh bundle, so a file the bundle no longer ships (e.g. a retired skill
-    // dir) does not linger across upgrades. Only remove a directory we
-    // exclusively own — confirmed by the deployed marketplace/plugin manifest
-    // naming tracedecay — so an unrelated dir squatting on the path is never
-    // nuked.
     write_rendered_plugin_bundle(&deploy_dir, tracedecay_bin)?;
     eprintln!(
         "\x1b[32m✔\x1b[0m Deployed tracedecay plugin bundle to {}",

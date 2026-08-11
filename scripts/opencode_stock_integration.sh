@@ -25,6 +25,40 @@ SCRIPT_PATH="$REPO_ROOT/scripts/opencode_stock_integration.sh"
 DAEMON_HARNESS="$REPO_ROOT/scripts/with-isolated-tracedecay-daemon.sh"
 STAGE=""
 
+resolve_stock_opencode_bin() {
+    local candidate="$1"
+    local isolated_home="$2"
+    local operator_home="$3"
+    local candidate_version isolated_version payload payload_version
+
+    candidate_version="$("$candidate" --version 2>/dev/null)" || {
+        echo "error: stock opencode launcher failed: $candidate" >&2
+        return 1
+    }
+    if isolated_version="$(HOME="$isolated_home" XDG_CONFIG_HOME="$isolated_home/.config" \
+        "$candidate" --version 2>/dev/null)" \
+        && [[ "$isolated_version" == "$candidate_version" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    # The official installer keeps its executable here. A PATH entry may be
+    # an operator launcher that uses HOME to find this payload, which cannot
+    # work after the stock journey isolates HOME. Require exact host-version
+    # identity before bypassing such a launcher.
+    payload="$operator_home/.opencode/bin/opencode"
+    if [[ -x "$payload" ]]; then
+        payload_version="$("$payload" --version 2>/dev/null)" || true
+        if [[ "$payload_version" == "$candidate_version" ]]; then
+            printf '%s\n' "$payload"
+            return 0
+        fi
+    fi
+
+    echo "error: $candidate cannot run under an isolated HOME; set OPENCODE_BIN to the stock executable payload" >&2
+    return 1
+}
+
 run_mcp_probe() {
     # Runs under the isolated-daemon harness: TRACEDECAY_DATA_DIR and
     # TRACEDECAY_DAEMON_SOCKET point at the temporary sole-owner daemon, so the
@@ -52,31 +86,33 @@ run_mcp_probe() {
 }
 
 main() {
-    local tracedecay_bin opencode_bin
+    local tracedecay_bin opencode_bin opencode_candidate operator_home
     local fake_home project config status
 
     tracedecay_bin="${TRACEDECAY_BIN:-$REPO_ROOT/target/debug/tracedecay}"
     tracedecay_bin="$(cd "$(dirname "$tracedecay_bin")" && pwd)/$(basename "$tracedecay_bin")"
-    opencode_bin="${OPENCODE_BIN:-$(command -v opencode || true)}"
+    opencode_candidate="${OPENCODE_BIN:-$(command -v opencode || true)}"
+    operator_home="$HOME"
 
     if [[ ! -x "$tracedecay_bin" ]]; then
         echo "error: tracedecay binary not found at $tracedecay_bin (build with: cargo build --bin tracedecay)" >&2
         return 1
     fi
-    if [[ -z "$opencode_bin" || ! -x "$opencode_bin" ]]; then
+    if [[ -z "$opencode_candidate" || ! -x "$opencode_candidate" ]]; then
         echo "error: stock opencode binary not found (set OPENCODE_BIN or npm install --global opencode-ai)" >&2
         return 1
     fi
-
-    echo "== stock opencode: $opencode_bin ($("$opencode_bin" --version 2>/dev/null || echo unknown))"
-    echo "== tracedecay binary: $tracedecay_bin ($("$tracedecay_bin" --version))"
-
 
     STAGE="$(mktemp -d -t opencode-stock-XXXXXX)"
     fake_home="$STAGE/home"
     project="$STAGE/project"
     mkdir -p "$fake_home" "$project/src" "$STAGE/bin"
     trap 'rm -rf "$STAGE"' EXIT
+    opencode_bin="$(resolve_stock_opencode_bin \
+        "$opencode_candidate" "$fake_home" "$operator_home")"
+
+    echo "== stock opencode: $opencode_bin ($("$opencode_bin" --version))"
+    echo "== tracedecay binary: $tracedecay_bin ($("$tracedecay_bin" --version))"
 
     # The installer records the PATH-resolved `tracedecay` in the host
     # registration and deliberately refuses transient cargo-target binaries.

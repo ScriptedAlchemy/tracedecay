@@ -177,7 +177,7 @@ impl AgentIntegration for CodexIntegration {
         Ok(UpdatePluginOutcome::DeferredUserAction(
             DeferredUserAction {
                 remediation: format!(
-                    "Codex plugin source is staged. Run `codex plugin update tracedecay@{marketplace_name}` (or `codex plugin add tracedecay@{marketplace_name}` if it is not installed), then re-trust any changed hooks."
+                    "Codex plugin source is staged. Run `codex plugin add tracedecay@{marketplace_name}` to install or reinstall it, then re-trust any changed hooks."
                 ),
                 staged_paths: staged,
             },
@@ -1364,7 +1364,7 @@ fn codex_non_interactive_install_state(
         return Ok(NonInteractiveInstallOutcome::DeferredUserAction(
             DeferredUserAction {
                 remediation: format!(
-                    "Codex's loaded TraceDecay cache is stale. Run `codex plugin update tracedecay@{marketplace_name}`, re-trust changed hooks, then retry the TraceDecay lifecycle."
+                    "Codex's loaded TraceDecay cache is stale. Run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, re-trust changed hooks, then retry the TraceDecay lifecycle."
                 ),
                 staged_paths,
             },
@@ -1979,22 +1979,22 @@ fn doctor_check_hooks(
                 ));
             }
             CodexHookTrustState::Trusted => dc.warn(&format!(
-                "Codex hook trust records in {} lack an explicit [hooks.state] table, so Codex still requests review; run `codex plugin update tracedecay@{marketplace_name}`, then use `/hooks` in Codex",
+                "Codex hook trust records in {} lack an explicit [hooks.state] table, so Codex still requests review; run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, then use `/hooks` in Codex",
                 config_path.display()
             )),
             CodexHookTrustState::Missing(missing) => dc.info(&format!(
-                "Codex skips untrusted command hooks — missing trust for {} in {}; run `codex plugin update tracedecay@{marketplace_name}`, then use `/hooks` in Codex",
+                "Codex skips untrusted command hooks — missing trust for {} in {}; run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, then use `/hooks` in Codex",
                 missing.join(", "),
                 config_path.display()
             )),
             CodexHookTrustState::Modified(modified) => dc.warn(&format!(
-                "Codex hook trust is stale for {} in {} — the hook content changed since it was trusted, so Codex now skips it; run `codex plugin update tracedecay@{marketplace_name}`, then use `/hooks` in Codex",
+                "Codex hook trust is stale for {} in {} — the hook content changed since it was trusted, so Codex now skips it; run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, then use `/hooks` in Codex",
                 modified.join(", "),
                 config_path.display()
             )),
         },
         Err(_) => dc.info(
-            "Codex skips untrusted command hooks — run `codex plugin update tracedecay@{marketplace_name}`, then use `/hooks` in Codex to trust the tracedecay hooks",
+            "Codex skips untrusted command hooks — run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, then use `/hooks` in Codex to trust the tracedecay hooks",
         ),
     }
 }

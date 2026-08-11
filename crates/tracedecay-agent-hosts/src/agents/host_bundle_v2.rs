@@ -2293,13 +2293,12 @@ where
             return Err(HostBundleError::ReceiptCorrupted);
         }
         if previous_manifest.host != switch_receipt.host
-            || previous_manifest.component != HostBundleComponentV1::Core
             || previous_manifest.canonical_digest()? != switch_receipt.previous_manifest_digest
             || request.lifecycle.operation != HostBundleLifecycleOpV1::Repair
             || request.lifecycle.expected_host != switch_receipt.host
-            || request.lifecycle.expected_component != HostBundleComponentV1::Core
+            || request.lifecycle.expected_component != previous_manifest.component
             || switch_receipt.apply_receipt.host != switch_receipt.host
-            || switch_receipt.apply_receipt.component != HostBundleComponentV1::Core
+            || switch_receipt.apply_receipt.component != previous_manifest.component
             || switch_receipt.apply_receipt.manifest_digest
                 != switch_receipt.applied_manifest_digest
         {
@@ -2323,8 +2322,7 @@ fn validate_feedback_switch_manifests(
     target_manifest: &HostBundleManifestV1,
 ) -> Result<(), HostBundleError> {
     if previous_manifest.host != target_manifest.host
-        || previous_manifest.component != HostBundleComponentV1::Core
-        || target_manifest.component != HostBundleComponentV1::Core
+        || previous_manifest.component != target_manifest.component
         || previous_manifest.canonical_digest()? == target_manifest.canonical_digest()?
     {
         return Err(HostBundleError::WrongTarget);

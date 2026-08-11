@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -13,6 +13,14 @@ use tracedecay::agents::host_bundle_v2::{
     HostBundleComponentV1, HostComponentSetReceiptV1, HostKindV1, latest_host_component_receipt_at,
     latest_host_component_set_receipt_at,
 };
+
+#[path = "host_lifecycle_cli_acceptance/native_plugin_fixture.rs"]
+mod native_plugin_fixture;
+use native_plugin_fixture::{
+    apply_current_codex_plugin_remediation, remediation_command, set_claude_native_activation,
+};
+#[cfg(unix)]
+use native_plugin_fixture::{install_current_claude_cli, recorded_claude_invocations};
 
 const VERIFY_FAILURE_ENV: &str = "TRACEDECAY_TEST_FAIL_HOST_REGISTRATION_VERIFY";
 
@@ -276,7 +284,12 @@ fn assert_documented_mcp_registration(case: HostCase, cli: &IsolatedCli) {
         "{} install discarded a sibling MCP server",
         case.id
     );
-    assert_eq!(config["theme"], "dark");
+    let theme = match case.host {
+        HostKindV1::Cline | HostKindV1::RooCode => &config["ui"]["theme"],
+        HostKindV1::Kilo => &config["theme"],
+        _ => unreachable!(),
+    };
+    assert_eq!(theme, "dark", "{} config after install: {config}", case.id);
     let entry = &config[root]["tracedecay"];
     match case.host {
         HostKindV1::Cline => {
@@ -329,90 +342,6 @@ fn seed_host(case: HostCase, cli: &IsolatedCli) -> BTreeMap<PathBuf, Vec<u8>> {
     fs::write(&native_extension_path, &extension_bytes).unwrap();
     originals.insert(native_extension, extension_bytes);
     originals
-}
-
-fn copy_test_bundle(source: &Path, destination: &Path) {
-    for entry in fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            fs::create_dir_all(&destination_path).unwrap();
-            copy_test_bundle(&source_path, &destination_path);
-        } else {
-            fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
-            fs::copy(source_path, destination_path).unwrap();
-        }
-    }
-}
-
-fn set_claude_native_activation(cli: &IsolatedCli, active: bool) {
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let mut settings: serde_json::Value =
-        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
-    let enabled_plugins = settings
-        .get_mut("enabledPlugins")
-        .and_then(serde_json::Value::as_object_mut)
-        .unwrap();
-    if active {
-        enabled_plugins.insert("tracedecay@tracedecay".to_string(), true.into());
-    } else {
-        enabled_plugins.remove("tracedecay@tracedecay");
-    }
-    fs::write(
-        &settings_path,
-        serde_json::to_vec_pretty(&settings).unwrap(),
-    )
-    .unwrap();
-
-    let marketplaces_path = cli
-        .home
-        .path()
-        .join(".claude/plugins/known_marketplaces.json");
-    let mut marketplaces: serde_json::Value =
-        serde_json::from_slice(&fs::read(&marketplaces_path).unwrap()).unwrap();
-    let marketplaces = marketplaces.as_object_mut().unwrap();
-    if active {
-        marketplaces.insert(
-            "tracedecay".to_string(),
-            serde_json::json!({
-                "source": {
-                    "source": "directory",
-                    "path": cli
-                        .home
-                        .path()
-                        .join(".claude/plugins/marketplaces/tracedecay")
-                },
-                "installLocation": cli
-                    .home
-                    .path()
-                    .join(".claude/plugins/marketplaces/tracedecay")
-            }),
-        );
-    } else {
-        marketplaces.remove("tracedecay");
-    }
-    fs::write(
-        &marketplaces_path,
-        serde_json::to_vec_pretty(&marketplaces).unwrap(),
-    )
-    .unwrap();
-    let cache_root = cli
-        .home
-        .path()
-        .join(".claude/plugins/cache/tracedecay/tracedecay")
-        .join(tracedecay_agent_hosts::PRODUCT_VERSION);
-    if active {
-        fs::create_dir_all(&cache_root).unwrap();
-        copy_test_bundle(
-            &cli.home
-                .path()
-                .join(".claude/plugins/marketplaces/tracedecay"),
-            &cache_root,
-        );
-    } else if cache_root.exists() {
-        fs::remove_dir_all(cache_root).unwrap();
-    }
 }
 
 fn assert_seeded_bytes(cli: &IsolatedCli, originals: &BTreeMap<PathBuf, Vec<u8>>) {
@@ -921,47 +850,69 @@ fn feedback_policy_failure_precedes_apply_and_restore_mutations() {
 }
 
 #[test]
-fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
+fn codex_stale_cache_remediation_executes_on_the_current_stock_cli_and_converges_update() {
     let cli = IsolatedCli::new();
     let case = host_case(HostKindV1::Codex);
     let originals = seed_host(case, &cli);
 
-    let output = cli.run(&["install", "--agent", "codex"]);
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unsupported") || stderr.contains("unavailable"),
-        "Codex capability denial was not reported honestly: {stderr}"
-    );
-    assert!(
-        stderr.contains("plugin UI")
-            && stderr.contains("source was staged")
-            && stderr.contains("not installed"),
-        "Codex denial omitted manual typed remediation: {stderr}"
-    );
+    let staged = cli.run(&["install", "--agent", case.id]);
+    assert!(!staged.status.success());
     assert_seeded_bytes(&cli, &originals);
     assert!(
         cli.home
             .path()
             .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json")
             .is_file(),
-        "Codex manual remediation has no staged plugin source"
+        "Codex remediation has no staged plugin source"
     );
     assert!(
         cli.home
             .path()
             .join(".agents/plugins/marketplace.json")
             .is_file(),
-        "Codex manual remediation has no staged marketplace entry"
+        "Codex remediation has no staged marketplace entry"
     );
     assert!(
-        latest_host_component_set_receipt_at(&cli.lifecycle_root(), HostKindV1::Codex)
+        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
             .unwrap()
-            .is_none()
+            .is_none(),
+        "staging Codex activation published a lifecycle receipt"
+    );
+    apply_current_codex_plugin_remediation(cli.home.path(), remediation_command(&staged.stderr))
+        .unwrap();
+    assert_success(
+        case.id,
+        "receipt-backed install after native activation",
+        cli.run(&["install", "--agent", case.id]),
+    );
+
+    let cache_manifest = cli
+        .home
+        .path()
+        .join(".codex/plugins/cache/personal/tracedecay")
+        .join(tracedecay_agent_hosts::PRODUCT_VERSION)
+        .join(".codex-plugin/plugin.json");
+    fs::write(
+        &cache_manifest,
+        br#"{"name":"tracedecay","version":"stale"}"#,
+    )
+    .unwrap();
+
+    let stale_update = cli.run(&["update-plugin"]);
+    assert!(!stale_update.status.success());
+    apply_current_codex_plugin_remediation(
+        cli.home.path(),
+        remediation_command(&stale_update.stderr),
+    )
+    .unwrap();
+    assert_success(
+        case.id,
+        "update after current stock remediation",
+        cli.run(&["update-plugin"]),
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn claude_lifecycle_tracks_assets_only_after_native_activation() {
     let cli = IsolatedCli::new();
@@ -990,7 +941,7 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
         "staging native activation published a lifecycle receipt"
     );
 
-    set_claude_native_activation(&cli, true);
+    set_claude_native_activation(cli.home.path(), true);
     let settings_path = cli.home.path().join(".claude/settings.json");
     let marketplaces_path = cli
         .home
@@ -1065,48 +1016,32 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
         "catalog maintenance rewrote Claude-owned activation state"
     );
 
-    let before_refusal = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
-    let refused = cli.run(&["uninstall", "--agent", case.id]);
-    assert!(!refused.status.success());
-    // The plugin is still natively registered, so the refusal must name the
-    // host-owned removal that has to happen first — not an unrelated
-    // "capability unsupported" or "cache is stale" state.
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("plugin removal"),
-        "Claude native-removal boundary was not reported truthfully: {}",
-        String::from_utf8_lossy(&refused.stderr)
-    );
-    assert!(
-        cli.home
-            .path()
-            .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json")
-            .is_file(),
-        "a refused uninstall must not remove the staged source the live registration references"
-    );
-    assert_eq!(
-        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
-        before_refusal,
-        "native-removal deferral changed the lifecycle receipt"
-    );
-
-    set_claude_native_activation(&cli, false);
-    let removed_native_state = [
-        fs::read(&settings_path).unwrap(),
-        fs::read(&marketplaces_path).unwrap(),
-    ];
+    let claude_invocations = install_current_claude_cli(cli.home.path(), &cli.bin_dir);
     assert_success(
         case.id,
-        "receipt-backed uninstall after native removal",
+        "stock CLI-backed uninstall",
         cli.run(&["uninstall", "--agent", case.id]),
     );
     assert_eq!(
+        recorded_claude_invocations(&claude_invocations),
         [
-            fs::read(&settings_path).unwrap(),
-            fs::read(&marketplaces_path).unwrap(),
+            "plugin uninstall tracedecay",
+            "plugin marketplace remove tracedecay",
         ],
-        removed_native_state,
-        "catalog uninstall rewrote Claude-owned activation state"
+        "Claude removal must use the current stock plugin lifecycle grammar"
     );
+    let removed_settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    let removed_marketplaces: serde_json::Value =
+        serde_json::from_slice(&fs::read(&marketplaces_path).unwrap()).unwrap();
+    assert_eq!(removed_settings["enabledPlugins"]["foreign@market"], true);
+    assert!(
+        removed_settings["enabledPlugins"]
+            .get("tracedecay@tracedecay")
+            .is_none()
+    );
+    assert!(removed_marketplaces.get("foreign").is_some());
+    assert!(removed_marketplaces.get("tracedecay").is_none());
     let uninstall_receipt = latest_receipt(&cli, case.host);
     assert!(
         uninstall_receipt
@@ -1422,8 +1357,14 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
     let refused = cli.run(&["install", "--agent", case.id]);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("Claude home configuration path ~/.claude is a symlink"));
-    assert!(stderr.contains("replace it with a real directory"));
+    assert!(
+        stderr.contains("Claude home configuration path ~/.claude is a symlink"),
+        "Claude symlink refusal omitted the typed path boundary: {stderr}"
+    );
+    assert!(
+        stderr.contains("replace it with a real directory"),
+        "Claude symlink refusal omitted actionable remediation: {stderr}"
+    );
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
 }
 
