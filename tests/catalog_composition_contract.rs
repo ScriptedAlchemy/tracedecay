@@ -60,7 +60,6 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
     for capability_id in [
         "capability.application.symbol-search",
         "capability.application.primitive.todos",
-        "capability.application.configuration.semantic_model_retry",
         "capability.application.retained.fact-store-search",
     ] {
         assert!(

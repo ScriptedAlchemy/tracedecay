@@ -36,9 +36,6 @@ use crate::retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
 };
 
-mod semantic_lifecycle;
-pub use semantic_lifecycle::*;
-
 /// Typed input for the first configuration read migrated through the daemon
 /// invocation boundary.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -212,14 +209,6 @@ pub enum ConfigurationWireRequestV1 {
     RollbackPreview(ConfigurationRollbackPreviewRequestV1),
     RollbackApply(ConfigurationRollbackApplyRequestV1),
     Audit(ConfigurationAuditRequestV1),
-    SemanticModelRetry(SemanticLifecycleControlRequestV1),
-    SemanticModelRemove(SemanticLifecycleControlRequestV1),
-    SemanticModelRollback(SemanticLifecycleControlRequestV1),
-    SemanticEmbeddingImportLocal(SemanticEmbeddingLocalImportRequestV1),
-    SemanticEmbeddingImportConfiguredHttps(SemanticEmbeddingConfiguredHttpsImportRequestV1),
-    SemanticRerankerImportLocal(SemanticRerankerLocalImportRequestV1),
-    SemanticRerankerImportConfiguredHttps(SemanticRerankerConfiguredHttpsImportRequestV1),
-    SemanticRerankerRollback(SemanticRerankerRollbackRequestV1),
 }
 
 struct ConfigurationSurfaceSpec {
@@ -240,7 +229,7 @@ const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
-const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 21] = [
+const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 13] = [
     ConfigurationSurfaceSpec {
         name: "configuration_list",
         summary: "List configuration settings",
@@ -371,89 +360,9 @@ const CONFIGURATION_SPECS: [ConfigurationSurfaceSpec; 21] = [
         maximum_deadline_millis: 15_000,
         surfaces: &CONFIGURATION_SURFACES,
     },
-    ConfigurationSurfaceSpec {
-        name: "semantic_model_retry",
-        summary: "Retry semantic model lifecycle",
-        description: "Retry the selected semantic model through the daemon-owned lifecycle owner.",
-        example: "Retry the selected semantic model",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 15_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "semantic_model_remove",
-        summary: "Remove semantic model installation",
-        description: "Remove the selected semantic installation through the daemon-owned lifecycle owner.",
-        example: "Remove the selected semantic model installation",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 15_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "semantic_model_rollback",
-        summary: "Rollback semantic model",
-        description: "Restore the prior verified semantic model through the daemon-owned lifecycle owner.",
-        example: "Rollback the semantic model to its verified predecessor",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 15_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "semantic_embedding_import_local",
-        summary: "Import local embedding artifact",
-        description: "Verify and install an explicitly selected local embedding artifact.",
-        example: "Import this local embedding artifact",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 900_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "semantic_embedding_import_configured_https",
-        summary: "Import configured HTTPS embedding artifact",
-        description: "Verify and install an explicitly configured immutable HTTPS embedding artifact.",
-        example: "Import this configured HTTPS embedding artifact",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 900_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "semantic_reranker_import_local",
-        summary: "Import local reranker artifact",
-        description: "Verify and install an explicitly selected local reranker artifact.",
-        example: "Import this local reranker artifact",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 900_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "semantic_reranker_import_configured_https",
-        summary: "Import configured HTTPS reranker artifact",
-        description: "Verify and install an explicitly configured immutable HTTPS reranker artifact.",
-        example: "Import this configured HTTPS reranker artifact",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 900_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
-    ConfigurationSurfaceSpec {
-        name: "semantic_reranker_rollback",
-        summary: "Rollback reranker artifact",
-        description: "Restore the prior verified reranker artifact through the daemon-owned lifecycle owner.",
-        example: "Rollback the reranker artifact to its verified predecessor",
-        effect: EffectClass::ConfigurationWrite,
-        paginated: false,
-        maximum_deadline_millis: 15_000,
-        surfaces: &CONFIGURATION_SURFACES,
-    },
 ];
 
-pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 21] = [
+pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
     "configuration_list",
     "configuration_explain",
     "configuration_get",
@@ -467,14 +376,6 @@ pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 21] = [
     "configuration_rollback_preview",
     "configuration_rollback_apply",
     "configuration_audit",
-    "semantic_model_retry",
-    "semantic_model_remove",
-    "semantic_model_rollback",
-    "semantic_embedding_import_local",
-    "semantic_embedding_import_configured_https",
-    "semantic_reranker_import_local",
-    "semantic_reranker_import_configured_https",
-    "semantic_reranker_rollback",
 ];
 
 pub fn configuration_surface_catalog_contribution()
@@ -670,46 +571,6 @@ fn configuration_executable_schemas(
         ConfigurationAuditRequestV1,
         ConfigurationAuditPage
     );
-    add!(
-        "semantic_model_retry",
-        SemanticLifecycleControlRequestV1,
-        SemanticLifecycleOperationResultV1
-    );
-    add!(
-        "semantic_model_remove",
-        SemanticLifecycleControlRequestV1,
-        SemanticLifecycleOperationResultV1
-    );
-    add!(
-        "semantic_model_rollback",
-        SemanticLifecycleControlRequestV1,
-        SemanticLifecycleOperationResultV1
-    );
-    add!(
-        "semantic_embedding_import_local",
-        SemanticEmbeddingLocalImportRequestV1,
-        SemanticLifecycleOperationResultV1
-    );
-    add!(
-        "semantic_embedding_import_configured_https",
-        SemanticEmbeddingConfiguredHttpsImportRequestV1,
-        SemanticLifecycleOperationResultV1
-    );
-    add!(
-        "semantic_reranker_import_local",
-        SemanticRerankerLocalImportRequestV1,
-        SemanticLifecycleOperationResultV1
-    );
-    add!(
-        "semantic_reranker_import_configured_https",
-        SemanticRerankerConfiguredHttpsImportRequestV1,
-        SemanticLifecycleOperationResultV1
-    );
-    add!(
-        "semantic_reranker_rollback",
-        SemanticRerankerRollbackRequestV1,
-        SemanticLifecycleOperationResultV1
-    );
     Ok(schemas)
 }
 
@@ -762,13 +623,6 @@ fn capability(
 ) -> Result<CapabilityManifestV1, ApplicationContractError> {
     let effect = spec.effect;
     let is_effect = effect.is_effect();
-    let is_semantic_import = matches!(
-        spec.name,
-        "semantic_embedding_import_local"
-            | "semantic_embedding_import_configured_https"
-            | "semantic_reranker_import_local"
-            | "semantic_reranker_import_configured_https"
-    );
     Ok(CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id,
         use_case_id: UseCaseId::new(use_case_id(spec.name))?,
@@ -790,13 +644,7 @@ fn capability(
         privacy: PrivacyClass::ScopedMetadata,
         lifecycle: LifecycleClass::Resumable,
         streaming: StreamingContract::Unsupported,
-        cancellation: if is_semantic_import {
-            CancellationContract::cooperative(vec![
-                CancellationPoint::BeforeAdmission,
-                CancellationPoint::BeforeEffect,
-                CancellationPoint::EffectInFlight,
-            ])?
-        } else if is_effect {
+        cancellation: if is_effect {
             CancellationContract::NotCancellable
         } else {
             CancellationContract::cooperative(vec![
@@ -847,17 +695,13 @@ fn capability(
             ReceiptContract::Operation
         },
         terminal_states: TerminalStateContract::new(if is_effect {
-            let mut states = vec![
+            vec![
                 TerminalState::Completed,
                 TerminalState::TimedOut,
                 TerminalState::Failed,
                 TerminalState::EffectUnknown,
                 TerminalState::Partial,
-            ];
-            if is_semantic_import {
-                states.push(TerminalState::Cancelled);
-            }
-            states
+            ]
         } else {
             vec![
                 TerminalState::Completed,
