@@ -12,6 +12,7 @@ use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::config::{
     discover_project_root, get_config_path, load_config, save_config_to_path,
 };
+use tracedecay::db::{Database, DatabaseAuthority};
 use tracedecay::global_db::GlobalDb;
 use tracedecay::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
@@ -1082,6 +1083,21 @@ async fn unreadable_cutover_sessions_block_identity_repair() {
     let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
     let cutover_project_id = cutover.identity.project_id.clone().unwrap();
     initialize_empty_profile_layout(&cutover).await;
+    let authority =
+        DatabaseAuthority::acquire_test(&cutover.graph_db_path, "populated cutover").unwrap();
+    let (graph, _) = Database::open(&cutover.graph_db_path, &authority)
+        .await
+        .unwrap();
+    graph
+        .conn()
+        .execute(
+            "INSERT INTO memory_facts (content, category) VALUES ('populated cutover graph', 'test')",
+            (),
+        )
+        .await
+        .unwrap();
+    graph.checkpoint().await.unwrap();
+    graph.close();
     remove_sqlite_family(&cutover.sessions_db_path);
     fs::create_dir_all(&cutover.sessions_db_path).unwrap();
     write_repository_identity_marker(&project, &cutover_project_id).unwrap();
@@ -1140,6 +1156,28 @@ async fn unreadable_cutover_artifact_tree_blocks_exact_root_fast_path() {
     let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
     let cutover_project_id = cutover.identity.project_id.clone().unwrap();
     initialize_empty_profile_layout(&cutover).await;
+    let sessions = GlobalDb::open_at(&cutover.sessions_db_path).await.unwrap();
+    assert!(
+        sessions
+            .upsert_session(&SessionRecord {
+                provider: "codex".to_string(),
+                session_id: "populated-artifact-cutover".to_string(),
+                project_key: cutover_project_id.clone(),
+                project_path: project.to_string_lossy().to_string(),
+                title: Some("populated artifact cutover".to_string()),
+                started_at: Some(1_800_000_020),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            })
+            .await
+    );
+    sessions.checkpoint().await;
+    sessions.close();
     fs::write(&cutover.dashboard_root, b"not a directory").unwrap();
     fs::create_dir_all(&cutover.lcm_payload_root).unwrap();
     fs::write(cutover.lcm_payload_root.join("payload.json"), b"{}").unwrap();

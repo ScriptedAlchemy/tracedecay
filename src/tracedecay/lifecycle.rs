@@ -1482,29 +1482,38 @@ async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) ->
     }) else {
         return false;
     };
-    let graph_is_populated = table_has_rows(db.conn(), "nodes").await
-        || table_has_rows(db.conn(), "files").await
-        || table_has_rows(db.conn(), "memory_facts").await;
+    let graph_presence = (
+        table_presence(db.conn(), "nodes").await,
+        table_presence(db.conn(), "files").await,
+        table_presence(db.conn(), "memory_facts").await,
+    );
     db.close();
-    if graph_is_populated {
-        return true;
-    }
+    let graph_is_populated = match graph_presence {
+        (Ok(nodes), Ok(files), Ok(facts)) => nodes || files || facts,
+        _ => return false,
+    };
 
-    match crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await {
-        Some(db) => {
-            let conn = db.dashboard_connection();
-            let sessions_are_populated = table_has_rows(&conn, "sessions").await
-                || table_has_rows(&conn, "session_messages").await
-                || table_has_rows(&conn, "lcm_raw_messages").await
-                || table_has_rows(&conn, "lcm_summary_nodes").await;
-            db.close();
-            if sessions_are_populated {
-                return true;
+    let sessions_are_populated =
+        match crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await {
+            Some(db) => {
+                let conn = db.dashboard_connection();
+                let session_presence = (
+                    table_presence(&conn, "sessions").await,
+                    table_presence(&conn, "session_messages").await,
+                    table_presence(&conn, "lcm_raw_messages").await,
+                    table_presence(&conn, "lcm_summary_nodes").await,
+                );
+                db.close();
+                match session_presence {
+                    (Ok(sessions), Ok(messages), Ok(raw_lcm), Ok(summary_lcm)) => {
+                        sessions || messages || raw_lcm || summary_lcm
+                    }
+                    _ => return false,
+                }
             }
-        }
-        None if layout.sessions_db_path.exists() => return false,
-        None => {}
-    }
+            None if layout.sessions_db_path.exists() => return false,
+            None => false,
+        };
 
     let branches_are_populated = match branch_inventory(&layout.data_root) {
         Ok(branches) => branches > 1,
@@ -1520,11 +1529,12 @@ async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) ->
         _ => return false,
     };
 
-    branches_are_populated || automation_files || payload_files || response_files
-}
-
-async fn table_has_rows(connection: &libsql::Connection, table: &str) -> bool {
-    table_presence(connection, table).await.unwrap_or(false)
+    graph_is_populated
+        || sessions_are_populated
+        || branches_are_populated
+        || automation_files
+        || payload_files
+        || response_files
 }
 
 async fn table_presence(connection: &libsql::Connection, table: &str) -> Result<bool> {
