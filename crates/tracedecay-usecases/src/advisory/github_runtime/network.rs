@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use super::dto::{
     GraphQlCommentPageNodeV1, GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1,
-    RestReviewV1,
+    RestReviewV1, valid_full_git_oid,
 };
 use super::{
     GitHubGraphQlReadRequestV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkOutcomeV1,
@@ -1346,7 +1346,7 @@ impl GitHubCiReadOnlyClientV1 {
         head_sha: &str,
         page: u32,
     ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        if !valid_full_commit_id(head_sha) || !valid_ci_page(page) {
+        if !valid_full_git_oid(head_sha) || !valid_ci_page(page) {
             return Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable });
         }
         let encoded_head =
@@ -1828,10 +1828,6 @@ fn valid_path_segment(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         && value != "."
         && value != ".."
-}
-
-fn valid_full_commit_id(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn valid_ci_page(page: u32) -> bool {

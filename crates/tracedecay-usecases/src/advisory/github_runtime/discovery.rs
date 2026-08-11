@@ -9,6 +9,7 @@ use tracedecay_domain::feedback::{GitHubPullRequestIdV1, GitHubReviewRateLimitCh
 use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
 
+use super::dto::valid_full_git_oid;
 use super::{
     GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
     GitHubRepositoryTargetV1,
@@ -182,7 +183,7 @@ fn scan_exact_commit_pull_request_v1(
     };
     if !valid_path_segment(owner)
         || !valid_path_segment(repository)
-        || !valid_full_commit_id(head_commit.as_str())
+        || !valid_full_git_oid(head_commit.as_str())
         || !valid_rest_base_uri(&config.rest_base_uri)
         || config.request_timeout.is_zero()
         || config.connect_timeout.is_zero()
@@ -348,8 +349,7 @@ fn exact_pull_request(
     }
     let base_commit_id = CommitId::new(pull.base.sha).ok()?;
     let head_commit_id = CommitId::new(pull.head.sha).ok()?;
-    if !valid_full_commit_id(base_commit_id.as_str())
-        || !valid_full_commit_id(head_commit_id.as_str())
+    if !valid_full_git_oid(base_commit_id.as_str()) || !valid_full_git_oid(head_commit_id.as_str())
     {
         return None;
     }
@@ -462,10 +462,6 @@ fn valid_path_segment(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-}
-
-fn valid_full_commit_id(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]

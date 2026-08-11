@@ -74,7 +74,7 @@ async fn degraded_capability_persists_through_the_v2_git_topology_authority() {
         owner.clone(),
         RetrievalAnchorTargetV2::ExactRepositoryCommit {
             repository_id: repository_id.clone(),
-            commit_id: CommitId::new("commit.github-stack-anchor.degraded").unwrap(),
+            commit_id: CommitId::new("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
         },
         AnchorSourceGenerationV2::Unknown,
         ProjectionGenerationId::new("generation.github-stack.source.degraded").unwrap(),

@@ -294,7 +294,8 @@ mod tests {
     #[tokio::test]
     async fn authenticated_stack_graphql_and_compare_publish_restart_safe_v3_lineage() {
         let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-        let scope = scope("stack-anchor-http");
+        let mut scope = scope("stack-anchor-http");
+        scope.head_commit_id = CommitId::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
         let context = context(&scope);
         let request = request(scope.clone());
         let profile = tempfile::tempdir().unwrap();
@@ -348,7 +349,7 @@ mod tests {
                                         "number": 421,
                                         "baseRefName": "main",
                                         "headRefName": "github-stack-anchor-http",
-                                        "baseRefOid": "commit.github.stack-anchor-http.base",
+                                        "baseRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                                         "headRefOid": head_commit,
                                         "baseRef": null,
                                         "statusCheckRollup": { "state": "SUCCESS" },
@@ -371,11 +372,11 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains("authorization: bearer github_pat_fixture_private_read")
             );
-            assert!(headers.contains("/compare/commit.github.stack-anchor-http.base..."));
+            assert!(headers.contains("/compare/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..."));
             write_http_json(
                 &mut compare,
                 &json!({
-                    "merge_base_commit": { "sha": "commit.github.stack-anchor-http.base" }
+                    "merge_base_commit": { "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
                 }),
             );
         });
@@ -419,7 +420,7 @@ mod tests {
                 .pull_request
                 .merge_base_commit_id
                 .as_str(),
-            "commit.github.stack-anchor-http.base"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         let observed_at = now_micros();
         let source_binding = anchors

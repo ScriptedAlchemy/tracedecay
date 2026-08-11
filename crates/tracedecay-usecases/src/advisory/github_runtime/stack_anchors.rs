@@ -429,7 +429,7 @@ impl GitHubStackReadAuthorityV1 for ProjectGitHubStackAnchorAuthorityV1 {
                     selected_found = true;
                 }
                 Some(GitHubStackProviderLayerV1 {
-                    provider_position: layer.provider_position,
+                    provider_position: canonical_stack_position(layer.provider_position)?,
                     pull_request,
                     base_ref_id: layer.base_ref_id,
                     head_ref_id: layer.head_ref_id,
@@ -447,6 +447,10 @@ impl GitHubStackReadAuthorityV1 for ProjectGitHubStackAnchorAuthorityV1 {
             layers,
         })
     }
+}
+
+fn canonical_stack_position(provider_position: u32) -> Option<u32> {
+    provider_position.checked_sub(1)
 }
 
 async fn resolve_v2(
@@ -782,5 +786,17 @@ const fn blocked_read(
             Some(GitHubStackAnchorReadOutcomeV1::Denied)
         }
         GitHubProviderLifecycleV1::Unavailable => Some(GitHubStackAnchorReadOutcomeV1::Unavailable),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_stack_position;
+
+    #[test]
+    fn provider_stack_positions_normalize_once_without_underflow() {
+        assert_eq!(canonical_stack_position(1), Some(0));
+        assert_eq!(canonical_stack_position(0), None);
+        assert_eq!(canonical_stack_position(u32::MAX), Some(u32::MAX - 1));
     }
 }

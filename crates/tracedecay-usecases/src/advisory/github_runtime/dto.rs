@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+pub(super) fn valid_full_git_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct RestCommitRefV1 {
     pub(crate) sha: String,

@@ -14,7 +14,6 @@ use tracedecay_domain::{
     BranchStackEdgeV1, BranchStackId, BranchStackNodeV1, BranchStackRevisionId,
     BranchStackRevisionV1, BranchStackSourceV1, CommitId, FrozenIndependentBranchSelectionV1,
     GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, MechanicalIntegrationModeV1,
-    NativeChangeSurfaceCoverageV1, NativeChangeSurfaceEvidenceV1, NativeConflictPredictionV1,
     NativeIntegrationDirectionV1, NativeIntegrationPreviewDispositionV1,
     NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationRepositorySnapshotV1,
     NativeIntegrationSelectionV1, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
@@ -23,7 +22,7 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{actor, digest};
-use crate::stack_coordinator::*;
+use tracedecay_usecases::stack_coordinator::*;
 
 fn oid(seed: char) -> GitOidV1 {
     GitOidV1::new(seed.to_string().repeat(40)).unwrap()
@@ -52,9 +51,6 @@ fn complete_preview() -> NativeIntegrationPreviewV1 {
     let repository_snapshot = NativeIntegrationRepositorySnapshotV1 {
         project_id: project,
         repository_id: repository,
-        authorized_scope_set_id: ScopeSetId::new("scope-set.stack.preview").unwrap(),
-        authorized_scope_set_revision: ScopeSetRevision::new(1).unwrap(),
-        authorized_scope_set_digest: digest('b'),
         source_worktree_id: None,
         destination_worktree_id: None,
         source_ref,
@@ -89,13 +85,6 @@ fn complete_preview() -> NativeIntegrationPreviewV1 {
         test_revision_digest: digest('f'),
         schema_revision_digest: digest('0'),
         migration_revision_digest: digest('1'),
-        change_surface: NativeChangeSurfaceEvidenceV1 {
-            source_changed_files: 1,
-            destination_changed_files: 1,
-            overlapping_changed_files: 0,
-            prediction: NativeConflictPredictionV1::NoConflict,
-            coverage: NativeChangeSurfaceCoverageV1::Complete,
-        },
         disposition: NativeIntegrationPreviewDispositionV1::MechanicalIntegrationEligible(
             MechanicalIntegrationModeV1::TwoParentMerge,
         ),

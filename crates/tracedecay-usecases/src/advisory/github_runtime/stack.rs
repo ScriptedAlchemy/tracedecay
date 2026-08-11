@@ -3,7 +3,7 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 
-use super::dto::GraphQlPullRequestStackV1;
+use super::dto::{GraphQlPullRequestStackV1, valid_full_git_oid};
 use super::network::GitHubRepositoryTargetV1;
 use crate::stack_coordinator::MAX_GITHUB_STACK_LAYERS_V1;
 
@@ -95,6 +95,8 @@ pub(super) fn decode_stack_snapshot(
             || pull_request.head_ref_name.is_empty()
             || pull_request.base_ref_oid.is_empty()
             || pull_request.head_ref_oid.is_empty()
+            || !valid_full_git_oid(&pull_request.base_ref_oid)
+            || !valid_full_git_oid(&pull_request.head_ref_oid)
             || pull_request
                 .base_ref
                 .as_ref()
@@ -249,8 +251,8 @@ mod tests {
                                     "number": 41,
                                     "baseRefName": "main",
                                     "headRefName": "lower",
-                                    "baseRefOid": "commit.main",
-                                    "headRefOid": "commit.lower",
+                                    "baseRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                                     "baseRef": null,
                                     "statusCheckRollup": { "state": "SUCCESS" },
                                     "mergeQueueEntry": null
@@ -262,8 +264,8 @@ mod tests {
                                     "number": 42,
                                     "baseRefName": "lower",
                                     "headRefName": "upper",
-                                    "baseRefOid": "commit.lower",
-                                    "headRefOid": "commit.upper",
+                                    "baseRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                                    "headRefOid": "cccccccccccccccccccccccccccccccccccccccc",
                                     "baseRef": null,
                                     "statusCheckRollup": { "state": "PENDING" },
                                     "mergeQueueEntry": { "id": "queue-1", "position": 1, "state": "QUEUED" }
@@ -286,6 +288,58 @@ mod tests {
         assert_eq!(snapshot.layers[0].provider_position, 1);
         assert_eq!(snapshot.layers[1].pull_request_id.as_str(), "42");
         assert_eq!(snapshot.final_target_ref_id.as_str(), "refs/heads/main");
-        assert_eq!(snapshot.final_target_commit_id.as_str(), "commit.main");
+        assert_eq!(
+            snapshot.final_target_commit_id.as_str(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn stack_decoder_rejects_non_git_provider_commit_oid() {
+        let target = GitHubRepositoryTargetV1 {
+            owner: "octo-org".to_owned(),
+            repository: "stack-repository".to_owned(),
+            pull_request_number: 42,
+            pull_request_id: GitHubPullRequestIdV1::new("42").unwrap(),
+        };
+        let pull_request: super::super::dto::GraphQlSelectedStackPullRequestV1 =
+            serde_json::from_value(serde_json::json!({
+                "stackEntry": { "position": 1 },
+                "stack": {
+                    "id": "stack-node-invalid-oid",
+                    "number": 7,
+                    "baseRefName": "main",
+                    "size": 1,
+                    "entries": {
+                        "totalCount": 1,
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": [{
+                            "position": 1,
+                            "pullRequest": {
+                                "number": 42,
+                                "baseRefName": "main",
+                                "headRefName": "feature",
+                                "baseRefOid": "not-a-git-oid",
+                                "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "baseRef": null,
+                                "statusCheckRollup": { "state": "SUCCESS" },
+                                "mergeQueueEntry": null
+                            }
+                        }]
+                    }
+                }
+            }))
+            .unwrap();
+        let response_digest = ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap();
+
+        assert_eq!(
+            decode_stack_snapshot(
+                &target,
+                pull_request.stack_entry.map(|entry| entry.position),
+                pull_request.stack.unwrap(),
+                response_digest.clone(),
+            ),
+            Err(response_digest)
+        );
     }
 }

@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-#[path = "stack_coordinator/preflight_tests.rs"]
+#[path = "github_stack_coordinator/preflight_tests.rs"]
 mod preflight_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,7 +15,7 @@ use tracedecay_domain::{
     UtcMicros, WorktreeId,
 };
 
-use crate::stack_coordinator::*;
+use tracedecay_usecases::stack_coordinator::*;
 
 fn actor(index: usize) -> tracedecay_domain::ActorId {
     tracedecay_domain::ActorId::new(format!("actor.stack.{index}")).unwrap()
@@ -219,7 +219,7 @@ fn enabled_snapshot(exact_scope: &ResolvedScope) -> GitHubStackProviderSnapshotV
         final_target_ref_id: RefId::new("refs/heads/main").unwrap(),
         final_target_commit_id: CommitId::new("commit.main").unwrap(),
         layers: vec![GitHubStackProviderLayerV1 {
-            provider_position: 1,
+            provider_position: 0,
             pull_request: PullRequestSnapshotAnchorRefV1 {
                 provider: ProviderId::new("provider.github").unwrap(),
                 project_id: exact_scope.project_id.clone(),
@@ -366,6 +366,7 @@ fn mounted_provider_observation_reports_pr_tip_merge_base_and_ci_drift() {
     let mut changed = enabled_snapshot(&exact_scope);
     changed.response_digest = digest('f');
     changed.final_target_commit_id = CommitId::new("commit.main.next").unwrap();
+    changed.layers[0].pull_request.base_commit_id = CommitId::new("commit.main.next").unwrap();
     changed.layers[0].pull_request.head_commit_id = CommitId::new("commit.feature.next").unwrap();
     changed.layers[0].pull_request.merge_base_commit_id =
         CommitId::new("commit.merge-base.next").unwrap();
