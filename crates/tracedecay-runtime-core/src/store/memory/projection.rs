@@ -1,4 +1,4 @@
-//! Compatibility projection loads, telemetry rows, and legacy-mapping resolution.
+//! Canonical project-memory projection loads and telemetry rows.
 
 use std::collections::BTreeMap;
 
@@ -7,48 +7,21 @@ use crate::db::engine::{Value, params};
 
 use tracedecay_domain::{
     Confidence, FactAssertionId, FactEventId, FactId, FactIdentityMaterialV1, FactOwnerV1,
-    FactPayloadV1, LegacyFactMappingV1, LegacyHistoryCoverageV1, PayloadAccessState, UtcMicros,
-    VectorWatermark,
+    FactPayloadV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
-    FactStoreError, FactStoreResult, LegacyFactQuery, ProjectMemoryFactAvailabilityV1,
-    ProjectMemoryFactIdV1, ProjectMemoryFactMappingV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactSourceV1, ProjectMemoryFactStatusV1, ProjectMemoryFactTargetV1,
-    ProjectMemoryFactTelemetryV1, ProjectMemoryFactUnavailableV1, ProjectMemoryFactV1,
-    ProjectMemoryProjectionStateV1, StoredFactV1,
+    FactReadControl, FactStoreError, FactStoreResult, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactStatusV1, ProjectMemoryFactTelemetryV1, ProjectMemoryFactUnavailableV1,
+    ProjectMemoryFactV1,
 };
 
 use super::primitives::{
-    OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, QUERY_OPERATION, compatibility_source_store_id,
-    from_json, nonnegative_u64, parse_payload_access, project_memory_source_label, row_i64,
-    row_optional_f64, row_optional_i64, row_optional_string, row_string, storage_error,
-    storage_message,
+    OwnerKey, QUERY_OPERATION, ensure_project_memory_read_active, from_json, nonnegative_u64,
+    parse_payload_access, row_i64, row_optional_f64, row_optional_i64, row_optional_string,
+    row_string, storage_error, storage_message,
 };
 
 const PROJECT_MEMORY_PROJECTION_BATCH_SIZE: usize = 400;
-
-fn project_memory_projection_state(value: &str) -> FactStoreResult<ProjectMemoryProjectionStateV1> {
-    match value {
-        "ready" => Ok(ProjectMemoryProjectionStateV1::Ready),
-        "rebuilding" => Ok(ProjectMemoryProjectionStateV1::Rebuilding),
-        "stale" => Ok(ProjectMemoryProjectionStateV1::Stale),
-        "unavailable" => Ok(ProjectMemoryProjectionStateV1::Unavailable),
-        _ => Err(storage_message(
-            QUERY_OPERATION,
-            format!("unknown compatibility projection state {value:?}"),
-        )),
-    }
-}
-
-fn project_memory_unavailable(
-    access: Option<PayloadAccessState>,
-) -> ProjectMemoryFactAvailabilityV1 {
-    match access {
-        Some(PayloadAccessState::Deleted) => ProjectMemoryFactAvailabilityV1::Deleted,
-        Some(PayloadAccessState::Quarantined) => ProjectMemoryFactAvailabilityV1::Quarantined,
-        _ => ProjectMemoryFactAvailabilityV1::Unavailable,
-    }
-}
 
 pub(super) async fn project_memory_fact_status_tx(
     transaction: &Transaction<'_>,
@@ -58,8 +31,7 @@ pub(super) async fn project_memory_fact_status_tx(
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
-            "SELECT current_facts.payload_access, current_facts.projection_state,
-                    current_facts.updated_at, current_facts.vector_watermark_json
+            "SELECT current_facts.payload_access, current_facts.updated_at
              FROM memory_v2_current_facts AS current_facts
              JOIN memory_v2_facts AS facts
                ON facts.fact_id = current_facts.fact_id
@@ -86,69 +58,21 @@ pub(super) async fn project_memory_fact_status_tx(
         return Ok(None);
     };
     let access = parse_payload_access(&row_string(&row, 0, QUERY_OPERATION)?)?;
-    let state = project_memory_projection_state(&row_string(&row, 1, QUERY_OPERATION)?)?;
-    let watermark = row_optional_string(&row, 3, QUERY_OPERATION)?
-        .as_deref()
-        .map(|value| from_json::<VectorWatermark>(value, QUERY_OPERATION))
-        .transpose()?;
     ProjectMemoryFactStatusV1::new(
         owner.clone(),
-        Some(fact_id.clone()),
-        Some(access),
-        state,
-        Some(UtcMicros(row_i64(&row, 2, QUERY_OPERATION)?)),
-        watermark,
+        fact_id.clone(),
+        access,
+        UtcMicros(row_i64(&row, 1, QUERY_OPERATION)?),
     )
     .map(Some)
-}
-
-pub(super) async fn project_memory_legacy_mapping_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    fact_id: &FactId,
-) -> FactStoreResult<Option<LegacyFactMappingV1>> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let mut rows = transaction
-        .query(
-            "SELECT projections.fact_id, facts.owner_json, facts.created_at
-             FROM memory_facts AS projections
-             JOIN memory_v2_facts AS facts
-               ON facts.fact_id = projections.canonical_fact_id
-             WHERE facts.owner_kind = ?1 AND facts.project_id = ?2
-               AND facts.fact_id = ?3",
-            params![key.kind, key.project_id.as_str(), fact_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?
-    else {
-        return Ok(None);
-    };
-    if row_string(&row, 1, QUERY_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch);
-    }
-    Ok(Some(LegacyFactMappingV1::new(
-        owner.clone(),
-        source_store_id,
-        row_i64(&row, 0, QUERY_OPERATION)?,
-        fact_id.clone(),
-        LegacyHistoryCoverageV1::Complete,
-        UtcMicros(row_i64(&row, 2, QUERY_OPERATION)?),
-    )?))
 }
 
 pub(super) async fn project_memory_projection_metadata_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     fact_id: &FactId,
-    mapping: Option<&LegacyFactMappingV1>,
 ) -> FactStoreResult<(
-    ProjectMemoryFactSourceV1,
-    Option<String>,
+    tracedecay_domain::FactIdentitySourceV1,
     ProjectMemoryFactTelemetryV1,
 )> {
     let key = OwnerKey::new(owner)?;
@@ -179,9 +103,7 @@ pub(super) async fn project_memory_projection_metadata_tx(
         .next()
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(QUERY_OPERATION, "compatibility fact metadata is missing")
-        })?;
+        .ok_or_else(|| storage_message(QUERY_OPERATION, "canonical fact metadata is missing"))?;
     let identity = from_json::<FactIdentityMaterialV1>(
         &row_string(&row, 0, QUERY_OPERATION)?,
         QUERY_OPERATION,
@@ -189,28 +111,9 @@ pub(super) async fn project_memory_projection_metadata_tx(
     if identity.owner() != owner || FactId::derive(&identity)? != *fact_id {
         return Err(storage_message(
             QUERY_OPERATION,
-            "compatibility fact identity material mismatch",
+            "canonical fact identity material mismatch",
         ));
     }
-    let source_label = match mapping {
-        Some(mapping) => {
-            let mut source_rows = transaction
-                .query(
-                    "SELECT source FROM memory_facts WHERE fact_id = ?1",
-                    params![mapping.legacy_fact_id()],
-                )
-                .await
-                .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-            source_rows
-                .next()
-                .await
-                .map_err(|error| storage_error(QUERY_OPERATION, error))?
-                .map(|row| row_optional_string(&row, 0, QUERY_OPERATION))
-                .transpose()?
-                .flatten()
-        }
-        None => None,
-    };
     let telemetry = ProjectMemoryFactTelemetryV1::new(
         nonnegative_u64(row_i64(&row, 2, QUERY_OPERATION)?, "retrieval count")?,
         nonnegative_u64(row_i64(&row, 3, QUERY_OPERATION)?, "access count")?,
@@ -222,11 +125,7 @@ pub(super) async fn project_memory_projection_metadata_tx(
         row_optional_i64(&row, 8, QUERY_OPERATION)?.map(UtcMicros),
         row_optional_i64(&row, 9, QUERY_OPERATION)?.map(UtcMicros),
     )?;
-    Ok((
-        ProjectMemoryFactSourceV1::Canonical(identity.source().clone()),
-        source_label,
-        telemetry,
-    ))
+    Ok((identity.source().clone(), telemetry))
 }
 
 pub(super) async fn load_project_memory_projection_tx(
@@ -241,7 +140,23 @@ pub(super) async fn load_project_memory_projection_tx(
     )
 }
 
-/// Loads many compatibility projections with one joined query per bounded
+pub(super) async fn load_project_memory_projection_controlled_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>> {
+    Ok(load_project_memory_projections_controlled_tx(
+        transaction,
+        owner,
+        std::slice::from_ref(fact_id),
+        read_control,
+    )
+    .await?
+    .pop())
+}
+
+/// Loads many canonical projections with one joined query per bounded
 /// batch. Search, list, and dashboard vector reads used to call
 /// [`load_project_memory_projection_tx`] once per fact, multiplying each result
 /// into up to six serialized actor queries while holding one read snapshot.
@@ -250,6 +165,29 @@ pub(super) async fn load_project_memory_projections_tx(
     owner: &FactOwnerV1,
     fact_ids: &[FactId],
 ) -> FactStoreResult<Vec<ProjectMemoryFactProjectionV1>> {
+    load_project_memory_projections_inner_tx(transaction, owner, fact_ids, None).await
+}
+
+pub(super) async fn load_project_memory_projections_controlled_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    fact_ids: &[FactId],
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryFactProjectionV1>> {
+    load_project_memory_projections_inner_tx(transaction, owner, fact_ids, Some(read_control)).await
+}
+
+async fn load_project_memory_projections_inner_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    fact_ids: &[FactId],
+    read_control: Option<&FactReadControl>,
+) -> FactStoreResult<Vec<ProjectMemoryFactProjectionV1>> {
+    let ensure_active = || match read_control {
+        Some(read_control) => ensure_project_memory_read_active(read_control),
+        None => Ok(()),
+    };
+    ensure_active()?;
     if fact_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -257,6 +195,7 @@ pub(super) async fn load_project_memory_projections_tx(
     let mut projections = BTreeMap::new();
 
     for batch in fact_ids.chunks(PROJECT_MEMORY_PROJECTION_BATCH_SIZE) {
+        ensure_active()?;
         let mut values = vec![
             Value::Text(key.kind.to_string()),
             Value::Text(key.project_id.clone()),
@@ -270,10 +209,7 @@ pub(super) async fn load_project_memory_projections_tx(
         let sql = format!(
             "SELECT facts.fact_id,
                     current_facts.payload_access,
-                    current_facts.projection_state,
                     current_facts.updated_at,
-                    current_facts.vector_watermark_json,
-                    NULL AS legacy_fact_id,
                     facts.owner_json,
                     current_facts.trust_score,
                     current_facts.active_assertion_id,
@@ -287,8 +223,7 @@ pub(super) async fn load_project_memory_projections_tx(
                     current_facts.unhelpful_count,
                     current_facts.last_retrieved_at,
                     current_facts.last_recalled_at,
-                    current_facts.last_feedback_at,
-                    NULL AS legacy_source
+                    current_facts.last_feedback_at
              FROM memory_v2_current_facts AS current_facts
              JOIN memory_v2_facts AS facts
                ON facts.fact_id = current_facts.fact_id
@@ -299,6 +234,7 @@ pub(super) async fn load_project_memory_projections_tx(
               AND payloads.fact_id = current_facts.fact_id
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
+              AND current_facts.payload_access = 'eligible'
              WHERE current_facts.owner_kind = ?1
                AND current_facts.project_id = ?2
                AND facts.owner_json = ?3
@@ -309,239 +245,91 @@ pub(super) async fn load_project_memory_projections_tx(
             .query(&sql, values)
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        ensure_active()?;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage_error(QUERY_OPERATION, error))?
         {
+            ensure_active()?;
             let fact_id = FactId::new(row_string(&row, 0, QUERY_OPERATION)?)?;
             let access = parse_payload_access(&row_string(&row, 1, QUERY_OPERATION)?)?;
             let status = ProjectMemoryFactStatusV1::new(
                 owner.clone(),
-                Some(fact_id.clone()),
-                Some(access),
-                project_memory_projection_state(&row_string(&row, 2, QUERY_OPERATION)?)?,
-                Some(UtcMicros(row_i64(&row, 3, QUERY_OPERATION)?)),
-                row_optional_string(&row, 4, QUERY_OPERATION)?
-                    .as_deref()
-                    .map(|value| from_json::<VectorWatermark>(value, QUERY_OPERATION))
-                    .transpose()?,
+                fact_id.clone(),
+                access,
+                UtcMicros(row_i64(&row, 2, QUERY_OPERATION)?),
             )?;
-            let legacy_mapping = None;
-            let compatibility_id = ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?;
-            let mapping =
-                ProjectMemoryFactMappingV1::new(compatibility_id.clone(), legacy_mapping.clone())?;
-            let Some(active_assertion_id) = row_optional_string(&row, 8, QUERY_OPERATION)?
-                .map(FactAssertionId::new)
-                .transpose()?
-            else {
+            if access != PayloadAccessState::Eligible {
                 projections.insert(
                     fact_id,
                     ProjectMemoryFactProjectionV1::Unavailable(
-                        ProjectMemoryFactUnavailableV1::new(
-                            compatibility_id,
-                            project_memory_unavailable(status.payload_access()),
-                            status,
-                        )?,
+                        ProjectMemoryFactUnavailableV1::new(status)?,
                     ),
                 );
                 continue;
+            }
+            let Some(active_assertion_id) = row_optional_string(&row, 5, QUERY_OPERATION)?
+                .map(FactAssertionId::new)
+                .transpose()?
+            else {
+                return Err(FactStoreError::PayloadAccessMismatch);
             };
-            let payload = match access {
-                PayloadAccessState::Eligible => Some(from_json::<FactPayloadV1>(
-                    &row_optional_string(&row, 10, QUERY_OPERATION)?
-                        .ok_or(FactStoreError::PayloadAccessMismatch)?,
+            let payload = from_json::<FactPayloadV1>(
+                &row_optional_string(&row, 7, QUERY_OPERATION)?
+                    .ok_or(FactStoreError::PayloadAccessMismatch)?,
+                QUERY_OPERATION,
+            )?;
+            let identity = from_json::<FactIdentityMaterialV1>(
+                &row_string(&row, 8, QUERY_OPERATION)?,
+                QUERY_OPERATION,
+            )?;
+            if identity.owner() != owner || FactId::derive(&identity)? != fact_id {
+                return Err(storage_message(
                     QUERY_OPERATION,
-                )?),
-                _ => None,
-            };
-            let stored = StoredFactV1::new(
+                    "canonical fact identity material mismatch",
+                ));
+            }
+            let telemetry = ProjectMemoryFactTelemetryV1::new(
+                nonnegative_u64(row_i64(&row, 10, QUERY_OPERATION)?, "retrieval count")?,
+                nonnegative_u64(row_i64(&row, 11, QUERY_OPERATION)?, "access count")?,
+                nonnegative_u64(row_i64(&row, 12, QUERY_OPERATION)?, "helpful count")?,
+                nonnegative_u64(row_i64(&row, 13, QUERY_OPERATION)?, "unhelpful count")?,
+                UtcMicros(row_i64(&row, 9, QUERY_OPERATION)?),
+                UtcMicros(row_i64(&row, 2, QUERY_OPERATION)?),
+                row_optional_i64(&row, 14, QUERY_OPERATION)?.map(UtcMicros),
+                row_optional_i64(&row, 15, QUERY_OPERATION)?.map(UtcMicros),
+                row_optional_i64(&row, 16, QUERY_OPERATION)?.map(UtcMicros),
+            )?;
+            let projection = ProjectMemoryFactV1::new(
                 fact_id.clone(),
                 owner.clone(),
                 payload,
-                access,
-                Confidence::new(row_optional_f64(&row, 7, QUERY_OPERATION)?.ok_or_else(|| {
+                Confidence::new(row_optional_f64(&row, 4, QUERY_OPERATION)?.ok_or_else(|| {
                     storage_message(
                         QUERY_OPERATION,
                         "current fact trust score is unexpectedly null",
                     )
                 })?)?,
                 active_assertion_id,
-                FactEventId::new(row_string(&row, 9, QUERY_OPERATION)?)?,
-                legacy_mapping,
-                UtcMicros(row_i64(&row, 3, QUERY_OPERATION)?),
-            )?;
-            if stored.payload().is_none() {
-                projections.insert(
-                    fact_id,
-                    ProjectMemoryFactProjectionV1::Unavailable(
-                        ProjectMemoryFactUnavailableV1::new(
-                            compatibility_id,
-                            project_memory_unavailable(status.payload_access()),
-                            status,
-                        )?,
-                    ),
-                );
-                continue;
-            }
-            let identity = from_json::<FactIdentityMaterialV1>(
-                &row_string(&row, 11, QUERY_OPERATION)?,
-                QUERY_OPERATION,
-            )?;
-            if identity.owner() != owner || FactId::derive(&identity)? != fact_id {
-                return Err(storage_message(
-                    QUERY_OPERATION,
-                    "compatibility fact identity material mismatch",
-                ));
-            }
-            let telemetry = ProjectMemoryFactTelemetryV1::new(
-                nonnegative_u64(row_i64(&row, 13, QUERY_OPERATION)?, "retrieval count")?,
-                nonnegative_u64(row_i64(&row, 14, QUERY_OPERATION)?, "access count")?,
-                nonnegative_u64(row_i64(&row, 15, QUERY_OPERATION)?, "helpful count")?,
-                nonnegative_u64(row_i64(&row, 16, QUERY_OPERATION)?, "unhelpful count")?,
-                UtcMicros(row_i64(&row, 12, QUERY_OPERATION)?),
-                UtcMicros(row_i64(&row, 3, QUERY_OPERATION)?),
-                row_optional_i64(&row, 17, QUERY_OPERATION)?.map(UtcMicros),
-                row_optional_i64(&row, 18, QUERY_OPERATION)?.map(UtcMicros),
-                row_optional_i64(&row, 19, QUERY_OPERATION)?.map(UtcMicros),
-            )?;
-            let projection = ProjectMemoryFactV1::new(
-                stored,
-                mapping,
-                ProjectMemoryFactSourceV1::Canonical(identity.source().clone()),
+                FactEventId::new(row_string(&row, 6, QUERY_OPERATION)?)?,
+                UtcMicros(row_i64(&row, 2, QUERY_OPERATION)?),
+                identity.source().clone(),
                 telemetry,
-            )?
-            .with_source_label(row_optional_string(&row, 20, QUERY_OPERATION)?)?;
+            )?;
             projections.insert(
                 fact_id,
                 ProjectMemoryFactProjectionV1::Available(Box::new(projection)),
             );
         }
+        drop(rows);
     }
 
-    Ok(fact_ids
+    ensure_active()?;
+    let ordered = fact_ids
         .iter()
         .filter_map(|fact_id| projections.get(fact_id).cloned())
-        .collect())
-}
-
-pub(super) async fn resolve_project_memory_target_tx(
-    transaction: &Transaction<'_>,
-    target: &ProjectMemoryFactTargetV1,
-) -> FactStoreResult<Option<FactId>> {
-    match target {
-        ProjectMemoryFactTargetV1::Canonical(target) => Ok(Some(target.fact_id().clone())),
-        ProjectMemoryFactTargetV1::Legacy(query) => {
-            resolve_legacy_fact_tx(transaction, query).await
-        }
-    }
-}
-
-pub(super) async fn project_memory_fact_for_legacy_id_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    legacy_fact_id: i64,
-) -> FactStoreResult<Option<FactId>> {
-    let key = OwnerKey::new(owner)?;
-    let mut rows = transaction
-        .query(
-            "SELECT projections.canonical_fact_id, facts.owner_json
-             FROM memory_facts AS projections
-             JOIN memory_v2_facts AS facts
-               ON facts.fact_id = projections.canonical_fact_id
-             WHERE projections.fact_id = ?1
-               AND facts.owner_kind = ?2 AND facts.project_id = ?3",
-            params![legacy_fact_id, key.kind, key.project_id.as_str()],
-        )
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?
-    else {
-        return Ok(None);
-    };
-    if row_string(&row, 1, QUERY_OPERATION)? != key.json {
-        return Err(FactStoreError::OwnerMismatch);
-    }
-    FactId::new(row_string(&row, 0, QUERY_OPERATION)?)
-        .map(Some)
-        .map_err(FactStoreError::from)
-}
-
-pub(super) async fn project_memory_required_mapping_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    fact_id: &FactId,
-) -> FactStoreResult<LegacyFactMappingV1> {
-    project_memory_legacy_mapping_tx(transaction, owner, fact_id)
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "persisted numeric fact has no fixed source mapping",
-            )
-        })
-}
-
-pub(super) async fn project_memory_source_for_fact_tx(
-    transaction: &Transaction<'_>,
-    mapping: &LegacyFactMappingV1,
-) -> FactStoreResult<String> {
-    let mut rows = transaction
-        .query(
-            "SELECT source FROM memory_facts WHERE fact_id = ?1",
-            params![mapping.legacy_fact_id()],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let source = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
-        .map(|row| row_optional_string(&row, 0, PROJECT_MEMORY_WRITE_OPERATION))
-        .transpose()?
-        .flatten()
-        .unwrap_or_else(|| "manual".to_owned());
-    project_memory_source_label(Some(source.as_str()))
-}
-
-pub(super) async fn resolve_legacy_fact_tx(
-    snapshot: &Transaction<'_>,
-    query: &LegacyFactQuery,
-) -> FactStoreResult<Option<FactId>> {
-    let owner = OwnerKey::new(query.owner())?;
-    if query.source_store_id() != &compatibility_source_store_id()? {
-        return Ok(None);
-    }
-    let mut rows = snapshot
-        .query(
-            "SELECT projections.canonical_fact_id, facts.owner_json
-             FROM memory_facts AS projections
-             JOIN memory_v2_facts AS facts
-               ON facts.fact_id = projections.canonical_fact_id
-             WHERE projections.fact_id = ?1
-               AND facts.owner_kind = ?2 AND facts.project_id = ?3",
-            params![
-                query.legacy_fact_id(),
-                owner.kind,
-                owner.project_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(QUERY_OPERATION, error))?
-    else {
-        return Ok(None);
-    };
-    if row_string(&row, 1, QUERY_OPERATION)? != owner.json {
-        return Err(FactStoreError::OwnerMismatch);
-    }
-    let fact_id = FactId::new(row_string(&row, 0, QUERY_OPERATION)?)?;
-    query.validate_resolved_fact_id(&fact_id)?;
-    Ok(Some(fact_id))
+        .collect();
+    ensure_active()?;
+    Ok(ordered)
 }

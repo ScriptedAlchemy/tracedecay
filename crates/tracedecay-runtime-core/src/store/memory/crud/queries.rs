@@ -1,23 +1,25 @@
 //! Current/as-of/lineage read paths and the commit-batch entry point.
 
-use super::super::DatabaseFactStore;
 use super::super::primitives::{
-    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, from_json, parse_payload_access, row_i64,
-    row_optional_f64, row_optional_string, row_string, storage_error, storage_message,
+    COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, ensure_project_memory_read_active, from_json,
+    parse_payload_access, row_i64, row_optional_f64, row_optional_string, row_string,
+    storage_error, storage_message,
 };
+use super::super::{DatabaseFactStore, schedule_project_memory_graph_reconciliation};
 use super::{Projection, anchor_matches, commit_fact_tx};
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use tracedecay_domain::{
     Confidence, CoverageUniverseKnowledgeV1, FactAssertionId, FactEventId, FactId,
-    FactLineageEventV1, FactOwnerV1, FactPayloadV1, LegacyHistoryCoverageV1, PayloadAccessState,
-    RetrievalAnchorRecordV2, ShardDispositionV1, UtcMicros,
+    FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState, RetrievalAnchorRecordV2,
+    ShardDispositionV1, UtcMicros,
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
     FactContradictionStateV1, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
-    FactLineageResponseV1, FactQueryCoverageV1, FactStoreError, FactStoreResult, FactWriteBatch,
-    MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery, StoredFactV1,
+    FactLineageResponseV1, FactQueryCoverageV1, FactReadControl, FactStoreError, FactStoreResult,
+    FactWriteBatch, FactWriteControl, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery,
+    StoredFactV1,
 };
 pub(in crate::store::memory) async fn query_current_facts_tx(
     snapshot: &Transaction<'_>,
@@ -126,6 +128,7 @@ pub(in crate::store::memory) async fn load_current_fact_tx(
               AND payloads.fact_id = current_facts.fact_id
               AND payloads.owner_kind = current_facts.owner_kind
               AND payloads.project_id = current_facts.project_id
+              AND current_facts.payload_access = 'eligible'
              WHERE current_facts.fact_id = ?1
                AND current_facts.owner_kind = ?2
                AND current_facts.project_id = ?3
@@ -182,7 +185,6 @@ pub(in crate::store::memory) async fn load_current_fact_tx(
         trust,
         active_assertion_id,
         last_event_id,
-        None,
         projected_as_of,
     )
     .map(Some)
@@ -262,7 +264,6 @@ pub(in crate::store::memory) async fn query_fact_as_of_tx(
         projection.trust,
         active_assertion_id,
         last_event_id,
-        None,
         projection.updated_at,
     )
     .map(Some)
@@ -322,6 +323,25 @@ pub(in crate::store::memory) async fn query_fact_lineage_tx(
     snapshot: &Transaction<'_>,
     query: &FactLineageQuery,
 ) -> FactStoreResult<Vec<FactLineageEventV1>> {
+    query_fact_lineage_inner_tx(snapshot, query, None).await
+}
+
+pub(in crate::store::memory) async fn query_fact_lineage_controlled_tx(
+    snapshot: &Transaction<'_>,
+    query: &FactLineageQuery,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<FactLineageEventV1>> {
+    query_fact_lineage_inner_tx(snapshot, query, Some(read_control)).await
+}
+
+async fn query_fact_lineage_inner_tx(
+    snapshot: &Transaction<'_>,
+    query: &FactLineageQuery,
+    read_control: Option<&FactReadControl>,
+) -> FactStoreResult<Vec<FactLineageEventV1>> {
+    if let Some(read_control) = read_control {
+        ensure_project_memory_read_active(read_control)?;
+    }
     let owner = OwnerKey::new(query.owner())?;
     let mut rows = match query.after() {
         Some(after) => {
@@ -365,6 +385,9 @@ pub(in crate::store::memory) async fn query_fact_lineage_tx(
         .await
         .map_err(|error| storage_error(QUERY_OPERATION, error))?
     {
+        if let Some(read_control) = read_control {
+            ensure_project_memory_read_active(read_control)?;
+        }
         let event = from_json::<FactLineageEventV1>(
             &row_string(&row, 0, QUERY_OPERATION)?,
             QUERY_OPERATION,
@@ -376,6 +399,9 @@ pub(in crate::store::memory) async fn query_fact_lineage_tx(
             ));
         }
         events.push(event);
+    }
+    if let Some(read_control) = read_control {
+        ensure_project_memory_read_active(read_control)?;
     }
     Ok(events)
 }
@@ -444,9 +470,6 @@ async fn query_fact_response_metadata_tx(
             .transpose()?
             .unwrap_or(PayloadAccessState::Eligible),
     };
-    let legacy_unknown = fact
-        .and_then(StoredFactV1::legacy_mapping)
-        .is_some_and(|mapping| mapping.history_coverage() == LegacyHistoryCoverageV1::Unknown);
     let coverage = query_fact_coverage_tx(
         snapshot,
         &owner,
@@ -454,7 +477,6 @@ async fn query_fact_response_metadata_tx(
         fact_id,
         latest_assertion_id.as_ref(),
         effective_access,
-        legacy_unknown,
         observed_event,
     )
     .await?;
@@ -656,12 +678,11 @@ async fn query_fact_coverage_tx(
     fact_id: &FactId,
     assertion_id: Option<&FactAssertionId>,
     effective_access: PayloadAccessState,
-    legacy_unknown: bool,
     observed_event: bool,
 ) -> FactStoreResult<FactQueryCoverageV1> {
     let Some(assertion_id) = assertion_id else {
         return Ok(if observed_event {
-            classify_fact_coverage(effective_access, legacy_unknown, None)
+            classify_fact_coverage(effective_access, None)
         } else {
             FactQueryCoverageV1::default()
         });
@@ -716,7 +737,7 @@ async fn query_fact_coverage_tx(
             ));
         }
         saw_anchor = true;
-        let count = classify_fact_coverage(effective_access, legacy_unknown, Some(&anchor));
+        let count = classify_fact_coverage(effective_access, Some(&anchor));
         visible += count.visible();
         hidden += count.hidden();
         unknown += count.unknown();
@@ -724,52 +745,43 @@ async fn query_fact_coverage_tx(
     }
     drop(rows);
     if !saw_anchor && observed_event {
-        return Ok(classify_fact_coverage(
-            effective_access,
-            legacy_unknown,
-            None,
-        ));
+        return Ok(classify_fact_coverage(effective_access, None));
     }
     Ok(FactQueryCoverageV1::new(visible, hidden, unknown, redacted))
 }
 
 fn classify_fact_coverage(
     effective_access: PayloadAccessState,
-    legacy_unknown: bool,
     anchor: Option<&RetrievalAnchorRecordV2>,
 ) -> FactQueryCoverageV1 {
-    let (visible, hidden, unknown, mut redacted, frontier_count) = if legacy_unknown {
-        (0, 0, 1, 0, 1)
-    } else {
-        match anchor {
-            None => (0, 0, 1, 0, 1),
-            Some(anchor) if anchor.coverage().universe == CoverageUniverseKnowledgeV1::Unknown => {
-                (0, 0, 1, 0, 1)
-            }
-            Some(anchor) => {
-                let mut visible = 0;
-                let mut hidden = 0;
-                let mut redacted = 0;
-                for disposition in anchor.coverage().dispositions.values() {
-                    match disposition {
-                        ShardDispositionV1::Searched => visible += 1,
-                        ShardDispositionV1::Redacted => redacted += 1,
-                        ShardDispositionV1::Skipped
-                        | ShardDispositionV1::Stale
-                        | ShardDispositionV1::Unavailable
-                        | ShardDispositionV1::Incompatible
-                        | ShardDispositionV1::Locked
-                        | ShardDispositionV1::Truncated => hidden += 1,
-                    }
+    let (visible, hidden, unknown, mut redacted, frontier_count) = match anchor {
+        None => (0, 0, 1, 0, 1),
+        Some(anchor) if anchor.coverage().universe == CoverageUniverseKnowledgeV1::Unknown => {
+            (0, 0, 1, 0, 1)
+        }
+        Some(anchor) => {
+            let mut visible = 0;
+            let mut hidden = 0;
+            let mut redacted = 0;
+            for disposition in anchor.coverage().dispositions.values() {
+                match disposition {
+                    ShardDispositionV1::Searched => visible += 1,
+                    ShardDispositionV1::Redacted => redacted += 1,
+                    ShardDispositionV1::Skipped
+                    | ShardDispositionV1::Stale
+                    | ShardDispositionV1::Unavailable
+                    | ShardDispositionV1::Incompatible
+                    | ShardDispositionV1::Locked
+                    | ShardDispositionV1::Truncated => hidden += 1,
                 }
-                (
-                    visible,
-                    hidden,
-                    0,
-                    redacted,
-                    anchor.coverage().dispositions.len() as u64,
-                )
             }
+            (
+                visible,
+                hidden,
+                0,
+                redacted,
+                anchor.coverage().dispositions.len() as u64,
+            )
         }
     };
     let anchor_access = anchor.map_or(
@@ -838,61 +850,69 @@ impl DatabaseFactStore<'_> {
     pub(in crate::store::memory) async fn commit_batch(
         &self,
         batch: &FactWriteBatch,
+        write_control: &FactWriteControl,
     ) -> FactStoreResult<FactCommitOutcome> {
-        if self
-            .write_control
-            .as_ref()
-            .is_some_and(super::super::FactWriteControl::interrupted)
-        {
-            return Err(storage_message(
-                COMMIT_OPERATION,
-                "fact commit was interrupted before transaction admission",
-            ));
-        }
-        let transaction = self
-            .db
-            .begin_memory_write_transaction(COMMIT_OPERATION)
-            .await
-            .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        let attempt = match commit_fact_tx(&transaction, batch).await {
-            Ok(attempt) => attempt,
-            Err(error) => {
-                return match transaction.rollback().await {
-                    Ok(()) => Err(error),
-                    Err(rollback) => Err(storage_error(
-                        COMMIT_OPERATION,
-                        std::io::Error::other(format!(
-                            "{error}; transaction rollback also failed and writer connection was retired: {rollback}"
-                        )),
-                    )),
-                };
+        let db = (*self.db).clone();
+        let batch = batch.clone();
+        let write_control = write_control.clone();
+        // The task owns every commit input so caller-future cancellation cannot
+        // interrupt SQLite after the control admits the commit-start transition.
+        tokio::spawn(async move {
+            if write_control.interrupted() {
+                return Err(storage_message(
+                    COMMIT_OPERATION,
+                    "fact commit was interrupted before transaction admission",
+                ));
             }
-        };
-        if attempt.wrote {
-            if self
-                .write_control
-                .as_ref()
-                .is_some_and(|control| !control.try_begin_commit())
-            {
+            let transaction = db
+                .begin_memory_write_transaction(COMMIT_OPERATION)
+                .await
+                .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+            let attempt = match commit_fact_tx(&transaction, &batch).await {
+                Ok(attempt) => attempt,
+                Err(error) => {
+                    return match transaction.rollback().await {
+                        Ok(()) => Err(error),
+                        Err(rollback) => Err(storage_error(
+                            COMMIT_OPERATION,
+                            std::io::Error::other(format!(
+                                "{error}; transaction rollback also failed and writer connection was retired: {rollback}"
+                            )),
+                        )),
+                    };
+                }
+            };
+            if attempt.wrote {
+                if !write_control.try_begin_commit() {
+                    transaction
+                        .rollback()
+                        .await
+                        .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+                    return Err(storage_message(
+                        COMMIT_OPERATION,
+                        "fact commit was interrupted before durable commit",
+                    ));
+                }
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+            } else {
                 transaction
                     .rollback()
                     .await
                     .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-                return Err(storage_message(
-                    COMMIT_OPERATION,
-                    "fact commit was interrupted before durable commit",
-                ));
             }
-            transaction
-                .commit()
-                .await
-                .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        } else {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
-        }
-        Ok(attempt.outcome)
+            let outcome = attempt.outcome;
+            if matches!(
+                &outcome,
+                FactCommitOutcome::Committed(_) | FactCommitOutcome::IdempotentReplay(_)
+            ) {
+                schedule_project_memory_graph_reconciliation(db.clone());
+            }
+            Ok(outcome)
+        })
+        .await
+        .map_err(|error| storage_error(COMMIT_OPERATION, error))?
     }
 }
