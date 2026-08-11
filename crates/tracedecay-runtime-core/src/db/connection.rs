@@ -105,12 +105,35 @@ impl Database {
     /// Returns `(Self, migrated)` where `migrated` is `true` if schema
     /// migrations were applied during open.
     pub async fn open(db_path: &Path, authority: &DatabaseAuthority) -> Result<(Self, bool)> {
+        Self::open_inner(db_path, authority, false).await
+    }
+
+    /// Opens an existing database while revalidating a cached writable
+    /// connection before reuse. Dirty-store recovery uses this entry point so
+    /// an in-process handle cannot bypass validation of the on-disk recovery
+    /// set before its marker is cleared.
+    #[doc(hidden)]
+    pub async fn open_revalidating_cached(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+    ) -> Result<(Self, bool)> {
+        Self::open_inner(db_path, authority, true).await
+    }
+
+    async fn open_inner(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        revalidate_cached: bool,
+    ) -> Result<(Self, bool)> {
         let authority = authority.hold_for(db_path, "open")?;
         let slot = database_slot(authority.canonical_database_path());
         let mut open = slot.lock().await;
         if let Some(inner) = open.upgrade() {
             if !inner.writable {
                 return Err(integrity::read_only_upgrade_error(db_path, "open"));
+            }
+            if revalidate_cached {
+                integrity::validate_read_only(db_path).await?;
             }
             return Ok((Self { inner }, false));
         }

@@ -1108,6 +1108,65 @@ async fn unreadable_cutover_sessions_block_identity_repair() {
 }
 
 #[tokio::test]
+async fn unreadable_cutover_artifact_tree_blocks_exact_root_fast_path() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn guarded_artifacts() {}\n",
+    )
+    .unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+
+    let old = TraceDecay::init(&project).await.unwrap();
+    old.add_fact(fact_request("healthy artifact legacy fact"))
+        .await
+        .unwrap();
+    let original_root = old.store_layout().data_root.clone();
+    old.checkpoint().await.unwrap();
+    old.close();
+    fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
+    remove_sqlite_family(&profile_root.join("global.db"));
+
+    let legacy_project_id = "proj_guarded_artifact_legacy";
+    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
+    relocate_store_as_legacy(&original_root, &legacy_root, &project, legacy_project_id);
+
+    let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
+    let cutover_project_id = cutover.identity.project_id.clone().unwrap();
+    initialize_empty_profile_layout(&cutover).await;
+    fs::write(&cutover.dashboard_root, b"not a directory").unwrap();
+    fs::create_dir_all(&cutover.lcm_payload_root).unwrap();
+    fs::write(cutover.lcm_payload_root.join("payload.json"), b"{}").unwrap();
+    write_repository_identity_marker(&project, &cutover_project_id).unwrap();
+
+    let error = match TraceDecay::open(&project).await {
+        Ok(graph) => {
+            graph.close();
+            panic!("unreadable artifact state must block exact-root selection");
+        }
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("identity cutover conflict"), "{message}");
+    assert!(message.contains("auxiliary_health=unreadable"), "{message}");
+    assert!(message.contains("no files changed"), "{message}");
+    assert_eq!(
+        read_repository_identity_marker(&project)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        cutover_project_id
+    );
+    assert!(cutover.data_root.join(STORE_MANIFEST_FILENAME).is_file());
+}
+
+#[tokio::test]
 async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
@@ -1162,6 +1221,85 @@ async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
         "healthy linked legacy cutover fact"
     );
     repaired.close();
+}
+
+#[tokio::test]
+async fn empty_cutover_store_rejects_candidate_with_corrupt_serving_branch() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let linked = dir.path().join("repo-linked");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn guarded_branch() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    init_repo_with_commit(&project);
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/corrupt-legacy-branch",
+            linked.to_str().unwrap(),
+        ],
+    );
+
+    let old = TraceDecay::init(&project).await.unwrap();
+    old.add_fact(fact_request("healthy root with corrupt serving branch"))
+        .await
+        .unwrap();
+    let original_root = old.store_layout().data_root.clone();
+    let branch = TraceDecay::open(&linked).await.unwrap();
+    let branch_relative_path = branch
+        .db_path()
+        .strip_prefix(&original_root)
+        .unwrap()
+        .to_path_buf();
+    branch.checkpoint().await.unwrap();
+    branch.close();
+    old.checkpoint().await.unwrap();
+    old.close();
+
+    fs::remove_file(repository_identity_path(&linked).unwrap()).unwrap();
+    remove_sqlite_family(&profile_root.join("global.db"));
+
+    let legacy_project_id = "proj_corrupt_serving_branch_legacy";
+    let legacy_root = profile_root.join(format!("projects/{legacy_project_id}"));
+    relocate_store_as_legacy(&original_root, &legacy_root, &linked, legacy_project_id);
+    let legacy_branch_db = legacy_root.join(branch_relative_path);
+    let mut corrupted = fs::read(&legacy_branch_db).unwrap();
+    corrupted[..16].copy_from_slice(b"not-a-sqlite-db!");
+    fs::write(&legacy_branch_db, &corrupted).unwrap();
+
+    let cutover = default_profile_sharded_layout(&linked, &profile_root).unwrap();
+    let cutover_project_id = cutover.identity.project_id.clone().unwrap();
+    initialize_empty_profile_layout(&cutover).await;
+    write_repository_identity_marker(&linked, &cutover_project_id).unwrap();
+
+    let error = match TraceDecay::open(&linked).await {
+        Ok(graph) => {
+            graph.close();
+            panic!("identity repair must validate the serving branch before mutation");
+        }
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("identity cutover conflict"), "{message}");
+    assert!(
+        message.contains("candidate failed full integrity validation"),
+        "{message}"
+    );
+    assert_eq!(
+        read_repository_identity_marker(&linked)
+            .unwrap()
+            .unwrap()
+            .project_id,
+        cutover_project_id
+    );
+    assert!(cutover.data_root.join(STORE_MANIFEST_FILENAME).is_file());
+    assert!(legacy_root.join(STORE_MANIFEST_FILENAME).is_file());
 }
 
 #[tokio::test]

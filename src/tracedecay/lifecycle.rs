@@ -461,7 +461,11 @@ impl TraceDecay {
         // process may still hold the current DB/WAL/SHM inodes, and deleting
         // them here would split readers and writers across different stores.
         let authority = DatabaseAuthority::for_runtime(&db_path, "open project store")?;
-        let open_result = Database::open(&db_path, &authority).await;
+        let open_result = if crashed {
+            Database::open_revalidating_cached(&db_path, &authority).await
+        } else {
+            Database::open(&db_path, &authority).await
+        };
         let (db, migrated) = match open_result {
             Ok(pair) => pair,
             Err(e) if Database::is_corruption_error(&e) || crashed => {
@@ -1441,11 +1445,17 @@ async fn store_identity_inventory(layout: &StoreLayout) -> StoreIdentityInventor
 }
 
 async fn store_identity_integrity_is_healthy(layout: &StoreLayout) -> bool {
-    let Ok(authority) = DatabaseAuthority::for_runtime(&layout.graph_db_path, "store repair")
+    let active_branch = branch::current_branch(&layout.project_root);
+    let (serving_graph_db_path, _, _) = TraceDecay::resolve_db_for_branch(
+        &layout.project_root,
+        &layout.data_root,
+        active_branch.as_deref(),
+    );
+    let Ok(authority) = DatabaseAuthority::for_runtime(&serving_graph_db_path, "store repair")
     else {
         return false;
     };
-    let Ok((db, _)) = Database::open_read_only(&layout.graph_db_path, &authority).await else {
+    let Ok((db, _)) = Database::open_read_only(&serving_graph_db_path, &authority).await else {
         return false;
     };
     db.close();
@@ -1480,23 +1490,37 @@ async fn store_identity_has_bounded_population_evidence(layout: &StoreLayout) ->
         return true;
     }
 
-    if let Some(db) = crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await
-    {
-        let conn = db.dashboard_connection();
-        let sessions_are_populated = table_has_rows(&conn, "sessions").await
-            || table_has_rows(&conn, "session_messages").await
-            || table_has_rows(&conn, "lcm_raw_messages").await
-            || table_has_rows(&conn, "lcm_summary_nodes").await;
-        db.close();
-        if sessions_are_populated {
-            return true;
+    match crate::global_db::GlobalDb::open_read_only_at(&layout.sessions_db_path).await {
+        Some(db) => {
+            let conn = db.dashboard_connection();
+            let sessions_are_populated = table_has_rows(&conn, "sessions").await
+                || table_has_rows(&conn, "session_messages").await
+                || table_has_rows(&conn, "lcm_raw_messages").await
+                || table_has_rows(&conn, "lcm_summary_nodes").await;
+            db.close();
+            if sessions_are_populated {
+                return true;
+            }
         }
+        None if layout.sessions_db_path.exists() => return false,
+        None => {}
     }
 
-    branch_meta::load_branch_meta(&layout.data_root).is_some_and(|meta| meta.branches.len() > 1)
-        || tree_has_files(&layout.dashboard_root).unwrap_or(true)
-        || tree_has_files(&layout.lcm_payload_root).unwrap_or(true)
-        || tree_has_files(&layout.response_handle_root).unwrap_or(true)
+    let branches_are_populated = match branch_inventory(&layout.data_root) {
+        Ok(branches) => branches > 1,
+        Err(()) => return false,
+    };
+    let tree_presence = (
+        tree_has_files(&layout.dashboard_root),
+        tree_has_files(&layout.lcm_payload_root),
+        tree_has_files(&layout.response_handle_root),
+    );
+    let (automation_files, payload_files, response_files) = match tree_presence {
+        (Ok(automation), Ok(payloads), Ok(responses)) => (automation, payloads, responses),
+        _ => return false,
+    };
+
+    branches_are_populated || automation_files || payload_files || response_files
 }
 
 async fn table_has_rows(connection: &libsql::Connection, table: &str) -> bool {
