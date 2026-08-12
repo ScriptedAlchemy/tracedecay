@@ -473,7 +473,7 @@ async fn persisted_topology_wakes_idle_rollup_after_unrelated_queue_tail() {
 }
 
 #[tokio::test]
-async fn refused_daily_projection_releases_its_claim_and_leaves_the_day_dirty() {
+async fn stale_daily_projection_releases_its_claim_and_leaves_the_day_dirty() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
