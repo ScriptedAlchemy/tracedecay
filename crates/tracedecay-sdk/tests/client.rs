@@ -169,11 +169,18 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
                     "payload": [{
                         "definition_id": "workflow.sdk",
                         "definition_version": 1,
-                        "pinned_catalog_digest": "sha256:catalog",
-                        "pinned_configuration_digest": "sha256:configuration",
-                        "pinned_policy_digest": "sha256:policy",
+                        "pinned_catalog_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "pinned_configuration_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "pinned_policy_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                         "project_id": "project.sdk",
-                        "steps": []
+                        "steps": [{
+                            "step_id": "step.sdk",
+                            "operation": "operation.sdk",
+                            "predecessors": [],
+                            "inputs": [],
+                            "outputs": [],
+                            "fan_out": null
+                        }]
                     }]
                 }}
             }
