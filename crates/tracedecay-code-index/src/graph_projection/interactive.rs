@@ -30,9 +30,10 @@ use tracedecay_graph_db::{
 };
 
 use super::{
-    CodeGraphProjectionError, CodeGraphReadCancellation, EDGE_LABEL, EDGE_RECORD_PROPERTY,
-    SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND, compare_edges, deserialize_property,
-    edge_entity_id, has_label, load_symbol_record, symbol_entity_id, validate_edge,
+    CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation, EDGE_LABEL,
+    EDGE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND, compare_edges,
+    deserialize_property, edge_entity_id, has_label, load_symbol_record, symbol_entity_id,
+    validate_edge,
 };
 
 mod catalog;
