@@ -187,7 +187,7 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         effective_behavior_digest: digest('b'),
         resolution_provenance_digest: digest('2'),
         route: WorkProviderRouteV1::new(
-            id::<ProviderId>("provider.workflow-journal"),
+            id::<ProviderId>("provider.work.codex-app-server"),
             id::<WorkProviderRouteId>("route.workflow-journal"),
         )
         .unwrap(),

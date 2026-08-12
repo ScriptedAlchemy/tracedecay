@@ -33,6 +33,7 @@ use tracedecay_domain::{
     WorkRunControlAuthorityV1, WorkRunControlReasonV1, WorkRunControlStateV1, WorkRunControlV1,
     WorkSandboxPolicy, WorkTerminalEvidenceV1, WorkflowOperationRef, WorkflowStepId, WorktreeId,
 };
+use tracedecay_rusqlite_runtime::workflow::install_workflow_schema;
 
 use work_registered_store::RegisteredWorkStore;
 
@@ -316,7 +317,9 @@ fn a_run_with_no_durable_attempt_has_no_admission_to_control() {
 
 #[test]
 fn run_admission_reads_the_deadline_and_live_frontier_off_the_attempt_rows() {
-    let store = RegisteredWorkStore::start("run-control-admission");
+    let store = RegisteredWorkStore::start_with_setup("run-control-admission", |connection| {
+        install_workflow_schema(connection).unwrap();
+    });
     let authority = authority("actor.run-control.admission");
     let live = attempt("attempt.rc.1");
     let done = attempt("attempt.rc.2");
