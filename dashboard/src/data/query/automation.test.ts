@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MemoryAutomationCommittedReceiptV1 } from "../../contracts/generated.ts";
+import type { AutomationCommittedReceiptV1 } from "../../contracts/generated.ts";
 import {
   AutomationOutcomesPayloadSchema,
   AutomationSchedulerStatusV1Schema,
@@ -11,7 +11,7 @@ import {
 } from "./automation.ts";
 
 type CurationReceipt = Extract<
-  MemoryAutomationCommittedReceiptV1,
+  AutomationCommittedReceiptV1,
   { kind: "curation" }
 >;
 type LinkCurationEffect = Extract<
@@ -101,6 +101,31 @@ describe("runAutomaticCurator", () => {
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
+  it("binds zero-effect terminals to the exact admitted curator bounds", async () => {
+    const completed = automaticRun("run-dashboard");
+    completed.request_digest = sha("f");
+    respond({ run: completed });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    respond({
+      run: {
+        ...automaticRun("run-dashboard"),
+        request_digest: sha("f"),
+        terminal: {
+          status: "skipped",
+          reason: "nothing_to_review",
+          summary: {
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 1,
+          },
+        },
+      },
+    });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("binds a curation receipt to the run and summary", async () => {
     const accepted = automaticRun("run-dashboard");
     accepted.terminal.summary.reviewed_count = 1;
@@ -122,8 +147,7 @@ describe("runAutomaticCurator", () => {
     run.terminal.summary.reviewed_count = 1;
     run.terminal.summary.accepted_count = 1;
     const receipt = curationReceipt("run-dashboard");
-    receipt.receipt.receipt.operation_effects[0]!.commit.last_event_id =
-      "event.dashboard.not-the-tail";
+    firstNormalizeEffect(receipt).commit.last_event_id = "event.dashboard.not-the-tail";
     refreshCurationDigest(receipt);
     run.committed_receipts = [receipt];
     respond({ run });
@@ -210,12 +234,14 @@ describe("runAutomaticCurator", () => {
   it("rejects link effects with foreign identities or non-durable provenance", async () => {
     const invalidReceipts = [
       mutateLinkReceipt((effect) => {
+        if (effect.commit === null) throw new Error("link fixture omitted its commit");
         effect.commit.owner = { kind: "project", project_id: "project.other" };
       }),
       mutateLinkReceipt((effect) => {
         effect.relation.evidence_fact_ids = [foreignFactId("4")];
       }),
       mutateLinkReceipt((effect, receipt) => {
+        if (effect.commit === null) throw new Error("link fixture omitted its commit");
         const foreignSource = foreignFactId("1");
         effect.source_fact_id = foreignSource;
         effect.commit.fact_id = foreignSource;
@@ -424,6 +450,7 @@ function foreignFactId(seed: string): string {
 function automaticRun(runId: string) {
   return {
     run_id: runId,
+    request_digest: automaticRequestDigest(),
     task: "memory_curator",
     terminal: {
       status: "completed",
@@ -436,6 +463,19 @@ function automaticRun(runId: string) {
     },
     committed_receipts: [] as CurationReceipt[],
   };
+}
+
+function automaticRequestDigest(): string {
+  return canonicalSha([
+    "tracedecay.automation-run.request-identity.v1",
+    {
+      kind: "memory_curator",
+      options: {
+        fact_review_limit: 24,
+        min_confidence_millionths: 720_000,
+      },
+    },
+  ]);
 }
 
 function curationReceipt(runId: string): CurationReceipt {
@@ -671,11 +711,13 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
         retry_scope: null,
         retry_after_millis: null,
         cancellation_stage: null,
+        execution_failure_classification: null,
         request_id: requestId,
         trace_id: requestId,
         details: [],
         legal_actions: [kind === "partial_effect" ? "reconcile" : "reset"],
         coverage: null,
+        unavailable_classification: null,
       },
     },
   };

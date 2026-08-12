@@ -204,6 +204,7 @@ function renderConsole() {
 function automaticRun(runId: string) {
   return {
     run_id: runId,
+    request_digest: automaticRequestDigest(),
     task: "memory_curator",
     terminal: {
       status: "completed",
@@ -216,6 +217,19 @@ function automaticRun(runId: string) {
     },
     committed_receipts: [],
   };
+}
+
+function automaticRequestDigest(): string {
+  return canonicalSha([
+    "tracedecay.automation-run.request-identity.v1",
+    {
+      kind: "memory_curator",
+      options: {
+        fact_review_limit: 24,
+        min_confidence_millionths: 720_000,
+      },
+    },
+  ]);
 }
 
 const sha = (seed: string) => `sha256:${seed.repeat(64)}`;
@@ -306,11 +320,13 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
         retry_scope: null,
         retry_after_millis: null,
         cancellation_stage: null,
+        execution_failure_classification: null,
         request_id: requestId,
         trace_id: requestId,
         details: [],
         legal_actions: [kind === "partial_effect" ? "reconcile" : "reset"],
         coverage: null,
+        unavailable_classification: null,
       },
     },
   };

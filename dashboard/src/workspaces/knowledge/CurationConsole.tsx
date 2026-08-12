@@ -154,27 +154,63 @@ function CommittedCurationEffects({
 }) {
   const effects = run.committed_receipts.flatMap((committed) =>
     committed.kind === "curation"
-      ? committed.receipt.receipt.operation_effects
+      ? committed.receipt.receipt.operation_effects.flatMap(committedCurationEffect)
       : [],
   );
   if (effects.length === 0) return null;
   return (
     <ol aria-label="Committed curator effects" className="flex flex-col gap-1 border-l border-edge-subtle pl-2">
       {effects.map((effect) => (
-        <li key={`${effect.kind}:${effect.commit.last_event_id}`} className="text-3xs text-text-secondary">
-          {effect.kind === "normalize_tags" ? (
-            <>
-              normalize tags · fact {effect.fact_id} · {effect.commit.disposition} · event {effect.commit.last_event_id}
-            </>
-          ) : (
-            <>
-              link facts · {effect.source_fact_id} → {effect.target_fact_id} · {effect.relation.kind} · {effect.commit.disposition} · event {effect.commit.last_event_id}
-            </>
-          )}
+        <li key={effect.key} className="text-3xs text-text-secondary">
+          {effect.label}
         </li>
       ))}
     </ol>
   );
+}
+
+type CurationEffect = Extract<
+  AutomaticCuratorRun["committed_receipts"][number],
+  { kind: "curation" }
+>["receipt"]["receipt"]["operation_effects"][number];
+
+function committedCurationEffect(
+  effect: CurationEffect,
+): { key: string; label: string }[] {
+  switch (effect.kind) {
+    case "add":
+      return effect.commit === null ? [] : [{
+        key: `add:${effect.commit.last_event_id}`,
+        label: `add fact · fact ${effect.fact_id} · ${effect.disposition} · event ${effect.commit.last_event_id}`,
+      }];
+    case "link_facts":
+      return effect.commit === null ? [] : [{
+        key: `link_facts:${effect.commit.last_event_id}`,
+        label: `link facts · ${effect.source_fact_id} → ${effect.target_fact_id} · ${effect.relation.kind} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
+      }];
+    case "merge": {
+      const commit = effect.outcome.commit_receipts.at(-1);
+      return commit === undefined ? [] : [{
+        key: `merge:${effect.outcome.operation_id}:${commit.last_event_id}`,
+        label: `merge facts · winner ${effect.outcome.winner_fact_id} · ${effect.outcome.deleted_loser_fact_ids.length.toLocaleString()} removed · event ${commit.last_event_id}`,
+      }];
+    }
+    case "normalize_tags":
+      return [{
+        key: `normalize_tags:${effect.commit.last_event_id}`,
+        label: `normalize tags · fact ${effect.fact_id} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
+      }];
+    case "remove":
+      return effect.commit === null ? [] : [{
+        key: `remove:${effect.commit.last_event_id}`,
+        label: `remove fact · fact ${effect.target_fact_id} · ${effect.disposition} · event ${effect.commit.last_event_id}`,
+      }];
+    case "update":
+      return [{
+        key: `update:${effect.commit.last_event_id}`,
+        label: `update fact · fact ${effect.fact_id} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
+      }];
+  }
 }
 
 function OutcomesBody({ data }: { data: AutomationOutcomesPayload }) {

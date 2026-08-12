@@ -30,10 +30,10 @@ import {
 import {
   AutomationSchedulerStatusV1Schema,
   ApplicationProblemEnvelopeSchema,
-  MemoryAutomationRunResultV1Schema,
+  AutomationRunResultV1Schema,
   type ApplicationProblemEnvelope,
   type AutomationSchedulerStatusV1,
-  type MemoryAutomationRunResultV1,
+  type AutomationRunResultV1,
 } from "../../contracts/generated.ts";
 
 // Re-export the generated validator for the query-layer tests and consumers.
@@ -518,7 +518,7 @@ const AutomaticCuratorResponseSchema = z
     value: z.object({
       outcome: z.object({
         outcome: z.literal("effect"),
-        value: z.object({ payload: MemoryAutomationRunResultV1Schema }),
+        value: z.object({ payload: AutomationRunResultV1Schema }),
       }),
     }),
   })
@@ -531,7 +531,7 @@ const ApplicationProblemResponseSchema = z
   })
   .strict();
 
-export type AutomaticCuratorRun = MemoryAutomationRunResultV1;
+export type AutomaticCuratorRun = AutomationRunResultV1;
 export type AutomaticCuratorPartialEffect = ApplicationProblemEnvelope;
 export type AutomaticCuratorResetRequired = ApplicationProblemEnvelope;
 
@@ -641,9 +641,21 @@ export async function runAutomaticCurator(
 }
 
 async function automaticCuratorRunMatchesEndpoint(
-  run: MemoryAutomationRunResultV1,
+  run: AutomationRunResultV1,
 ): Promise<boolean> {
-  if (run.task !== "memory_curator") return false;
+  if (
+    run.task !== "memory_curator" ||
+    run.request_digest !== await canonicalSha256([
+      "tracedecay.automation-run.request-identity.v1",
+      {
+        kind: "memory_curator",
+        options: {
+          fact_review_limit: 24,
+          min_confidence_millionths: 720_000,
+        },
+      },
+    ])
+  ) return false;
   const summary = run.terminal.summary;
   if (run.terminal.status === "skipped") {
     return (
@@ -727,7 +739,7 @@ function automaticCuratorProblemMatchesEndpoint(
 }
 
 type CurationReceipt = Extract<
-  MemoryAutomationRunResultV1["committed_receipts"][number],
+  AutomationRunResultV1["committed_receipts"][number],
   { kind: "curation" }
 >["receipt"];
 
@@ -942,7 +954,7 @@ type CurationCommit = Extract<CurationEffect, { kind: "normalize_tags" }>["commi
 function automaticCurationRelationMatches(
   effect: Extract<
     Extract<
-      MemoryAutomationRunResultV1["committed_receipts"][number],
+      AutomationRunResultV1["committed_receipts"][number],
       { kind: "curation" }
     >["receipt"]["receipt"]["operation_effects"][number],
     { kind: "link_facts" }

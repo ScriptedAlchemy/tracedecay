@@ -281,6 +281,10 @@ export const AnalyticsUsageSummaryV1Schema = z.object({
 });
 export type AnalyticsUsageSummaryV1 = z.infer<typeof AnalyticsUsageSummaryV1Schema>;
 
+/** Stable non-retryable class for an admitted execution failure. */
+export const ApplicationExecutionFailureClassV1Schema = z.enum(["denied", "malformed_output", "permanent"]);
+export type ApplicationExecutionFailureClassV1 = z.infer<typeof ApplicationExecutionFailureClassV1Schema>;
+
 /** Stable application failure envelope. Partial effects and reset-required
 states are admitted terminals; partial effects carry their committed
 receipt directly while reset-required states carry an explicit action. */
@@ -292,17 +296,18 @@ export const ApplicationProblemEnvelopeSchema = z.object({
 export type ApplicationProblemEnvelope = z.infer<typeof ApplicationProblemEnvelopeSchema>;
 
 /** Stable problem-code taxonomy for request failures and admitted terminals. */
-export const ApplicationProblemKindSchema = z.enum(["cancelled", "conflict", "invalid_request", "not_found_or_not_authorized", "partial_effect", "reset_required", "saturated", "stale", "timed_out", "unavailable", "unsupported"]);
+export const ApplicationProblemKindSchema = z.enum(["cancelled", "conflict", "execution_failed", "invalid_request", "not_found_or_not_authorized", "partial_effect", "reset_required", "saturated", "stale", "timed_out", "unavailable", "unsupported"]);
 export type ApplicationProblemKind = z.infer<typeof ApplicationProblemKindSchema>;
 
 /** Stable application problem record shared verbatim by every adapter. */
 export const ApplicationProblemRecordSchema = z.object({
-  cancellation_stage: z.union([z.lazy(() => CancellationStageSchema), z.null()]),
+  cancellation_stage: z.lazy(() => RequiredNullable2Schema),
   code: z.string(),
   committed_receipt: z.lazy(() => RequiredNullableSchema),
   coverage: z.union([z.lazy(() => EvidenceCoverageSchema), z.null()]),
   details: z.array(z.lazy(() => SafeDiagnosticSchema)),
   diagnostic: z.union([z.lazy(() => SafeDiagnosticSchema), z.null()]),
+  execution_failure_classification: z.lazy(() => RequiredNullable4Schema),
   kind: z.lazy(() => ApplicationProblemKindSchema),
   legal_actions: z.array(z.lazy(() => LegalActionSchema)),
   message: z.string(),
@@ -315,8 +320,13 @@ export const ApplicationProblemRecordSchema = z.object({
   revision: z.number().int().min(0),
   terminality: z.lazy(() => ProblemTerminalitySchema),
   trace_id: z.string(),
+  unavailable_classification: z.lazy(() => RequiredNullable3Schema),
 }).strict();
 export type ApplicationProblemRecord = z.infer<typeof ApplicationProblemRecordSchema>;
+
+/** Stable reason an application authority is unavailable. */
+export const ApplicationUnavailableClassV1Schema = z.enum(["authority", "backend_disconnected", "backend_retryable", "backend_unavailable"]);
+export type ApplicationUnavailableClassV1 = z.infer<typeof ApplicationUnavailableClassV1Schema>;
 
 export const ApplyWorkRelationReplanRequestV1Schema = z.object({
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
@@ -370,6 +380,88 @@ export const AutomaticWorktreeGcV1Schema = z.discriminatedUnion("kind", [z.objec
 })]);
 export type AutomaticWorktreeGcV1 = z.infer<typeof AutomaticWorktreeGcV1Schema>;
 
+export const AutomationCommittedReceiptV1Schema = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("automatic_fact"),
+  receipt: z.lazy(() => MemoryAutomationFactReceiptV1Schema),
+}).strict(), z.object({
+  kind: z.literal("curation"),
+  receipt: z.lazy(() => MemoryAutomationCurationReceiptV1Schema),
+}).strict(), z.object({
+  kind: z.literal("skill_writing"),
+  receipt: z.lazy(() => AutomationExternalEffectReceiptV1Schema),
+}).strict(), z.object({
+  kind: z.literal("user_job_delivery"),
+  receipt: z.lazy(() => AutomationExternalEffectReceiptV1Schema),
+}).strict()]);
+export type AutomationCommittedReceiptV1 = z.infer<typeof AutomationCommittedReceiptV1Schema>;
+
+/** Payload-free identity of one committed non-memory automation effect. */
+export const AutomationExternalEffectReceiptV1Schema = z.object({
+  manifest_digest: z.lazy(() => ManifestDigestSchema),
+  run_id: z.lazy(() => RunIdSchema),
+  task_key: z.string(),
+}).strict();
+export type AutomationExternalEffectReceiptV1 = z.infer<typeof AutomationExternalEffectReceiptV1Schema>;
+
+/** Canonical admitted problem for one automation run.
+
+The generic application receipt binds the outer operation. The ordered
+receipts retain the exact canonical memory effects needed to reconcile a
+partial terminal without inventing an endpoint-specific payload. */
+export const AutomationRunProblemV1Schema = z.object({
+  committed_outer_result: z.union([z.lazy(() => AutomationRunResultV1Schema), z.null()]).optional(),
+  committed_receipts: z.array(z.lazy(() => AutomationCommittedReceiptV1Schema)),
+  problem: z.lazy(() => ApplicationProblemEnvelopeSchema),
+  request_digest: z.lazy(() => ManifestDigestSchema),
+  run_id: z.lazy(() => RunIdSchema),
+  scope: z.lazy(() => ResolvedScopeSchema),
+  task: z.lazy(() => AutomationTaskV1Schema),
+}).strict();
+export type AutomationRunProblemV1 = z.infer<typeof AutomationRunProblemV1Schema>;
+
+/** Canonical input to one durable automation run.
+
+Trigger, actor, configuration and input digests are derived by the
+registered application authority. The tagged task prevents a caller from
+pairing one task identity with another task's options. */
+export const AutomationRunRequestV1Schema = z.object({
+  run_id: z.lazy(() => RunIdSchema),
+  task: z.lazy(() => AutomationTaskRequestV1Schema),
+}).strict();
+export type AutomationRunRequestV1 = z.infer<typeof AutomationRunRequestV1Schema>;
+
+/** Durable terminal payload for one admitted automation run.
+
+An empty receipt list is valid for completed or skipped zero-effect runs.
+Partial effects are represented only by an application problem carrying a
+non-empty committed effect receipt. */
+export const AutomationRunResultV1Schema = z.object({
+  committed_receipts: z.array(z.lazy(() => AutomationCommittedReceiptV1Schema)),
+  request_digest: z.lazy(() => ManifestDigestSchema),
+  run_id: z.lazy(() => RunIdSchema),
+  task: z.lazy(() => AutomationTaskV1Schema),
+  terminal: z.lazy(() => AutomationRunTerminalV1Schema),
+}).strict();
+export type AutomationRunResultV1 = z.infer<typeof AutomationRunResultV1Schema>;
+
+export const AutomationRunSummaryV1Schema = z.object({
+  accepted_count: z.number().int().safe().min(0),
+  rejected_count: z.number().int().safe().min(0),
+  reviewed_count: z.number().int().safe().min(0),
+  skipped_count: z.number().int().safe().min(0),
+}).strict();
+export type AutomationRunSummaryV1 = z.infer<typeof AutomationRunSummaryV1Schema>;
+
+export const AutomationRunTerminalV1Schema = z.discriminatedUnion("status", [z.object({
+  status: z.literal("completed"),
+  summary: z.lazy(() => AutomationRunSummaryV1Schema),
+}).strict(), z.object({
+  reason: z.lazy(() => AutomationSkipReasonV1Schema),
+  status: z.literal("skipped"),
+  summary: z.lazy(() => AutomationRunSummaryV1Schema),
+}).strict()]);
+export type AutomationRunTerminalV1 = z.infer<typeof AutomationRunTerminalV1Schema>;
+
 /** The scheduler reading served by `status`, `pause`, and `resume`.
 
 Automation is autonomous: the status has no pending-review counters. The
@@ -398,6 +490,27 @@ export const AutomationSettingsPayloadV1Schema = z.object({
 });
 export type AutomationSettingsPayloadV1 = z.infer<typeof AutomationSettingsPayloadV1Schema>;
 
+export const AutomationSkipReasonV1Schema = z.enum(["automation_disabled", "backend_disabled", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_unavailable", "session_reflector_disabled", "shipped_fact_proposal_history_retired", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
+export type AutomationSkipReasonV1 = z.infer<typeof AutomationSkipReasonV1Schema>;
+
+export const AutomationTaskRequestV1Schema = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("combined_review"),
+  options: z.lazy(() => CombinedReviewRunInputV1Schema),
+}).strict(), z.object({
+  kind: z.literal("memory_curator"),
+  options: z.lazy(() => MemoryCuratorRunInputV1Schema),
+}).strict(), z.object({
+  kind: z.literal("session_reflector"),
+  options: z.lazy(() => SessionReflectorRunInputV1Schema),
+}).strict(), z.object({
+  kind: z.literal("skill_writer"),
+  options: z.lazy(() => SkillWriterRunInputV1Schema),
+}).strict(), z.object({
+  kind: z.literal("user_job"),
+  options: z.lazy(() => UserJobRunInputV1Schema),
+}).strict()]);
+export type AutomationTaskRequestV1 = z.infer<typeof AutomationTaskRequestV1Schema>;
+
 export const AutomationTaskStatusV1Schema = z.object({
   due: z.boolean(),
   last_scheduler_run: z.unknown(),
@@ -405,6 +518,10 @@ export const AutomationTaskStatusV1Schema = z.object({
   task: z.string(),
 });
 export type AutomationTaskStatusV1 = z.infer<typeof AutomationTaskStatusV1Schema>;
+
+/** Automation capability selected after one registered application admission. */
+export const AutomationTaskV1Schema = z.enum(["combined_review", "memory_curator", "session_reflector", "skill_writer", "user_job"]);
+export type AutomationTaskV1 = z.infer<typeof AutomationTaskV1Schema>;
 
 /** Strongly typed canonical identity: `BrainId`. */
 export const BrainIdSchema = z.string();
@@ -523,6 +640,12 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   worktree_root: z.string(),
 });
 export type CodeIndexWorktreeFreshnessV1 = z.infer<typeof CodeIndexWorktreeFreshnessV1Schema>;
+
+export const CombinedReviewRunInputV1Schema = z.object({
+  session_reflector: z.lazy(() => SessionReflectorRunInputV1Schema),
+  skill_writer: z.lazy(() => SkillWriterRunInputV1Schema),
+}).strict();
+export type CombinedReviewRunInputV1 = z.infer<typeof CombinedReviewRunInputV1Schema>;
 
 /** Strongly typed canonical identity: `CommitId`. */
 export const CommitIdSchema = z.string();
@@ -1885,6 +2008,9 @@ export const LcmDepthCountV1Schema = z.object({
 });
 export type LcmDepthCountV1 = z.infer<typeof LcmDepthCountV1Schema>;
 
+export const LcmGrepSortV1Schema = z.enum(["hybrid", "recency", "relevance"]);
+export type LcmGrepSortV1 = z.infer<typeof LcmGrepSortV1Schema>;
+
 export const LcmLatestSessionV1Schema = z.object({
   last_store_id: z.number().int().safe().nullable(),
   last_timestamp: z.number().int().safe().nullable(),
@@ -1951,6 +2077,9 @@ export const LcmRoleCountV1Schema = z.object({
 });
 export type LcmRoleCountV1 = z.infer<typeof LcmRoleCountV1Schema>;
 
+export const LcmRoleV1Schema = z.enum(["assistant", "system", "tool", "unknown", "user"]);
+export type LcmRoleV1 = z.infer<typeof LcmRoleV1Schema>;
+
 export const LcmSearchEngineDetailV1Schema = z.object({
   messages: z.string(),
   summary_nodes: z.string(),
@@ -1980,6 +2109,9 @@ export const LcmSearchPayloadV1Schema = z.object({
   total: z.lazy(() => LcmSearchTotalsV1Schema),
 });
 export type LcmSearchPayloadV1 = z.infer<typeof LcmSearchPayloadV1Schema>;
+
+export const LcmSearchScopeV1Schema = z.enum(["all", "current", "session"]);
+export type LcmSearchScopeV1 = z.infer<typeof LcmSearchScopeV1Schema>;
 
 export const LcmSearchTotalsV1Schema = z.object({
   messages: z.number().int().safe(),
@@ -2225,25 +2357,54 @@ export const MemoryAlgebraStatusV1Schema = z.object({
 }).strict();
 export type MemoryAlgebraStatusV1 = z.infer<typeof MemoryAlgebraStatusV1Schema>;
 
-export const MemoryAutomationCommittedReceiptV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("automatic_fact"),
-  receipt: z.lazy(() => MemoryAutomationFactReceiptV1Schema),
-}).strict(), z.object({
-  kind: z.literal("curation"),
-  receipt: z.lazy(() => MemoryAutomationCurationReceiptV1Schema),
-}).strict()]);
-export type MemoryAutomationCommittedReceiptV1 = z.infer<typeof MemoryAutomationCommittedReceiptV1Schema>;
+export const MemoryAutomationCurationAddDispositionV1Schema = z.enum(["added", "near_duplicate", "possible_conflict"]);
+export type MemoryAutomationCurationAddDispositionV1 = z.infer<typeof MemoryAutomationCurationAddDispositionV1Schema>;
+
+export const MemoryAutomationCurationLinkDispositionV1Schema = z.enum(["already_linked", "linked"]);
+export type MemoryAutomationCurationLinkDispositionV1 = z.infer<typeof MemoryAutomationCurationLinkDispositionV1Schema>;
+
+export const MemoryAutomationCurationMergeV1Schema = z.object({
+  commit_receipts: z.array(z.lazy(() => FactCommitReceiptV1Schema)),
+  content_updated: z.boolean(),
+  deleted_loser_fact_ids: z.array(z.lazy(() => FactIdSchema)),
+  input_digest: z.string(),
+  operation_id: z.lazy(() => ProvenanceIdSchema),
+  winner_fact_id: z.lazy(() => FactIdSchema),
+}).strict();
+export type MemoryAutomationCurationMergeV1 = z.infer<typeof MemoryAutomationCurationMergeV1Schema>;
 
 export const MemoryAutomationCurationOperationEffectV1Schema = z.discriminatedUnion("kind", [z.object({
-  commit: z.lazy(() => FactCommitReceiptV1Schema),
+  closest_fact_id: z.union([z.lazy(() => FactIdSchema), z.null()]),
+  commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
+  disposition: z.lazy(() => MemoryAutomationCurationAddDispositionV1Schema),
+  fact_id: z.lazy(() => FactIdSchema),
+  kind: z.literal("add"),
+  similarity_millionths: z.number().int().min(0).nullable(),
+}).strict(), z.object({
+  commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
+  disposition: z.lazy(() => MemoryAutomationCurationLinkDispositionV1Schema),
   kind: z.literal("link_facts"),
   relation: z.lazy(() => MemoryAutomationCurationRelationV1Schema),
   source_fact_id: z.lazy(() => FactIdSchema),
   target_fact_id: z.lazy(() => FactIdSchema),
 }).strict(), z.object({
+  kind: z.literal("merge"),
+  outcome: z.lazy(() => MemoryAutomationCurationMergeV1Schema),
+}).strict(), z.object({
   commit: z.lazy(() => FactCommitReceiptV1Schema),
   fact_id: z.lazy(() => FactIdSchema),
   kind: z.literal("normalize_tags"),
+}).strict(), z.object({
+  commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
+  disposition: z.lazy(() => MemoryAutomationCurationRemoveDispositionV1Schema),
+  kind: z.literal("remove"),
+  remaining_fact_count: z.number().int().safe().min(0),
+  target_fact_id: z.lazy(() => FactIdSchema),
+}).strict(), z.object({
+  commit: z.lazy(() => FactCommitReceiptV1Schema),
+  fact_id: z.lazy(() => FactIdSchema),
+  kind: z.literal("update"),
+  trust_delta_millionths: z.number().int(),
 }).strict()]);
 export type MemoryAutomationCurationOperationEffectV1 = z.infer<typeof MemoryAutomationCurationOperationEffectV1Schema>;
 
@@ -2270,17 +2431,25 @@ export const MemoryAutomationCurationRelationV1Schema = z.object({
 }).strict();
 export type MemoryAutomationCurationRelationV1 = z.infer<typeof MemoryAutomationCurationRelationV1Schema>;
 
+export const MemoryAutomationCurationRemoveDispositionV1Schema = z.enum(["already_removed", "not_found", "removed"]);
+export type MemoryAutomationCurationRemoveDispositionV1 = z.infer<typeof MemoryAutomationCurationRemoveDispositionV1Schema>;
+
 export const MemoryAutomationCurationResultV1Schema = z.object({
+  accepted_operations: z.number().int().safe().min(0),
   automation_run_id: z.lazy(() => RunIdSchema),
   changed_fact_ids: z.array(z.lazy(() => FactIdSchema)),
+  facts_added: z.number().int().safe().min(0),
   facts_linked: z.number().int().safe().min(0),
+  facts_merged: z.number().int().safe().min(0),
+  facts_removed: z.number().int().safe().min(0),
+  facts_updated: z.number().int().safe().min(0),
   input_digest: z.string(),
   normalized_tags: z.number().int().safe().min(0),
   operation_effects: z.array(z.lazy(() => MemoryAutomationCurationOperationEffectV1Schema)),
   operation_id: z.lazy(() => ProvenanceIdSchema),
   owner: z.lazy(() => FactCommitOwnerV1Schema),
-  replay_event_id: z.lazy(() => FactEventIdSchema),
-  replay_fact_id: z.lazy(() => FactIdSchema),
+  replay_event_id: z.union([z.lazy(() => FactEventIdSchema), z.null()]),
+  replay_fact_id: z.union([z.lazy(() => FactIdSchema), z.null()]),
 }).strict();
 export type MemoryAutomationCurationResultV1 = z.infer<typeof MemoryAutomationCurationResultV1Schema>;
 
@@ -2407,64 +2576,17 @@ export const MemoryAutomationFactValidationV1Schema = z.object({
 }).strict();
 export type MemoryAutomationFactValidationV1 = z.infer<typeof MemoryAutomationFactValidationV1Schema>;
 
-/** Canonical admitted problem for one automatic-memory run.
-
-The generic application receipt binds the outer operation. The ordered
-receipts retain the exact canonical memory effects needed to reconcile a
-partial terminal without inventing an endpoint-specific payload. */
-export const MemoryAutomationRunProblemV1Schema = z.object({
-  committed_receipts: z.array(z.lazy(() => MemoryAutomationCommittedReceiptV1Schema)),
-  problem: z.lazy(() => ApplicationProblemEnvelopeSchema),
-  run_id: z.lazy(() => RunIdSchema),
-  scope: z.lazy(() => ResolvedScopeSchema),
-  task: z.lazy(() => MemoryAutomationTaskV1Schema),
-}).strict();
-export type MemoryAutomationRunProblemV1 = z.infer<typeof MemoryAutomationRunProblemV1Schema>;
-
-/** Durable terminal payload for one admitted automatic-memory run.
-
-An empty receipt list is valid for completed or skipped zero-effect runs.
-Partial effects are represented only by an application problem carrying a
-non-empty committed effect receipt. */
-export const MemoryAutomationRunResultV1Schema = z.object({
-  committed_receipts: z.array(z.lazy(() => MemoryAutomationCommittedReceiptV1Schema)),
-  run_id: z.lazy(() => RunIdSchema),
-  task: z.lazy(() => MemoryAutomationTaskV1Schema),
-  terminal: z.lazy(() => MemoryAutomationRunTerminalV1Schema),
-}).strict();
-export type MemoryAutomationRunResultV1 = z.infer<typeof MemoryAutomationRunResultV1Schema>;
-
-export const MemoryAutomationRunSummaryV1Schema = z.object({
-  accepted_count: z.number().int().safe().min(0),
-  rejected_count: z.number().int().safe().min(0),
-  reviewed_count: z.number().int().safe().min(0),
-  skipped_count: z.number().int().safe().min(0),
-}).strict();
-export type MemoryAutomationRunSummaryV1 = z.infer<typeof MemoryAutomationRunSummaryV1Schema>;
-
-export const MemoryAutomationRunTerminalV1Schema = z.discriminatedUnion("status", [z.object({
-  status: z.literal("completed"),
-  summary: z.lazy(() => MemoryAutomationRunSummaryV1Schema),
-}).strict(), z.object({
-  reason: z.lazy(() => MemoryAutomationSkipReasonV1Schema),
-  status: z.literal("skipped"),
-  summary: z.lazy(() => MemoryAutomationRunSummaryV1Schema),
-}).strict()]);
-export type MemoryAutomationRunTerminalV1 = z.infer<typeof MemoryAutomationRunTerminalV1Schema>;
-
-export const MemoryAutomationSkipReasonV1Schema = z.enum(["automation_disabled", "backend_disabled", "delegated_host_mode", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_unavailable", "session_reflector_disabled", "shipped_fact_proposal_history_retired", "similarity_authority_unavailable", "task_not_schedulable"]);
-export type MemoryAutomationSkipReasonV1 = z.infer<typeof MemoryAutomationSkipReasonV1Schema>;
-
-/** Automatic memory capability selected after one registered application
-admission. Skill-only automation remains outside this effect family. */
-export const MemoryAutomationTaskV1Schema = z.enum(["memory_curator", "session_reflector"]);
-export type MemoryAutomationTaskV1 = z.infer<typeof MemoryAutomationTaskV1Schema>;
-
 export const MemoryCategoryCountV1Schema = z.object({
   category: z.string(),
   count: z.number().int().safe().min(0),
 }).strict();
 export type MemoryCategoryCountV1 = z.infer<typeof MemoryCategoryCountV1Schema>;
+
+export const MemoryCuratorRunInputV1Schema = z.object({
+  fact_review_limit: z.number().int().min(0),
+  min_confidence_millionths: z.number().int().min(0),
+}).strict();
+export type MemoryCuratorRunInputV1 = z.infer<typeof MemoryCuratorRunInputV1Schema>;
 
 export const MemoryEntityRowV1Schema = z.object({
   entity_id: z.string(),
@@ -3211,6 +3333,24 @@ record so a missing committed receipt cannot be mistaken for `None`. */
 export const RequiredNullableSchema = z.union([z.lazy(() => EffectReceiptSchema), z.null()]);
 export type RequiredNullable = z.infer<typeof RequiredNullableSchema>;
 
+/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
+from an omitted field. New terminal-state fields must be present on every
+record so a missing committed receipt cannot be mistaken for `None`. */
+export const RequiredNullable2Schema = z.union([z.lazy(() => CancellationStageSchema), z.null()]);
+export type RequiredNullable2 = z.infer<typeof RequiredNullable2Schema>;
+
+/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
+from an omitted field. New terminal-state fields must be present on every
+record so a missing committed receipt cannot be mistaken for `None`. */
+export const RequiredNullable3Schema = z.union([z.lazy(() => ApplicationUnavailableClassV1Schema), z.null()]);
+export type RequiredNullable3 = z.infer<typeof RequiredNullable3Schema>;
+
+/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
+from an omitted field. New terminal-state fields must be present on every
+record so a missing committed receipt cannot be mistaken for `None`. */
+export const RequiredNullable4Schema = z.union([z.lazy(() => ApplicationExecutionFailureClassV1Schema), z.null()]);
+export type RequiredNullable4 = z.infer<typeof RequiredNullable4Schema>;
+
 /** The resolved configuration scope is one exact project/repository/worktree root.
 
 Paths, CWDs, labels, and mutable branch spellings are deliberately absent. */
@@ -3544,6 +3684,23 @@ export type SensitivityV1 = z.infer<typeof SensitivityV1Schema>;
 export const SessionIdSchema = z.string();
 export type SessionId = z.infer<typeof SessionIdSchema>;
 
+export const SessionReflectorRunInputV1Schema = z.object({
+  end_time: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  evidence_limit: z.number().int().min(0),
+  include_recent_sessions: z.boolean(),
+  include_summaries: z.boolean(),
+  provider: z.string(),
+  query: z.string(),
+  recent_sessions_limit: z.number().int().min(0),
+  role: z.union([z.lazy(() => LcmRoleV1Schema), z.null()]),
+  scope: z.lazy(() => LcmSearchScopeV1Schema),
+  session_id: z.string().nullable(),
+  sort: z.lazy(() => LcmGrepSortV1Schema),
+  source: z.string().nullable(),
+  start_time: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+}).strict();
+export type SessionReflectorRunInputV1 = z.infer<typeof SessionReflectorRunInputV1Schema>;
+
 export const SettingsAvailabilityV1Schema = z.object({
   available: z.boolean(),
   reason: z.string().nullable().optional(),
@@ -3583,6 +3740,15 @@ export const SignificantTableGrowthSampleV1Schema = z.object({
   table: z.string(),
 });
 export type SignificantTableGrowthSampleV1 = z.infer<typeof SignificantTableGrowthSampleV1Schema>;
+
+export const SkillWriterRunInputV1Schema = z.object({
+  evidence_limit: z.number().int().min(0),
+  include_recent_sessions: z.boolean(),
+  provider: z.string(),
+  query: z.string(),
+  recent_sessions_limit: z.number().int().min(0),
+}).strict();
+export type SkillWriterRunInputV1 = z.infer<typeof SkillWriterRunInputV1Schema>;
 
 /** Strongly typed canonical identity: `SourceStoreId`. */
 export const SourceStoreIdSchema = z.string();
@@ -4046,6 +4212,11 @@ export type TopologyNotificationLevelV1 = z.infer<typeof TopologyNotificationLev
 /** Stable, canonical catalog identity for `UseCaseId`. */
 export const UseCaseIdSchema = z.string();
 export type UseCaseId = z.infer<typeof UseCaseIdSchema>;
+
+export const UserJobRunInputV1Schema = z.object({
+  job_id: z.string(),
+}).strict();
+export type UserJobRunInputV1 = z.infer<typeof UserJobRunInputV1Schema>;
 
 /** Strongly typed canonical identity: `UserProfileId`. */
 export const UserProfileIdSchema = z.string();

@@ -41,7 +41,7 @@ import {
   GraphPathPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
-  MemoryAutomationRunResultV1Schema,
+  AutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
   ObservatoryReadModelV1Schema,
   ProjectContextPayloadV1Schema,
@@ -108,7 +108,7 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
     value: z.object({
       outcome: z.object({
         outcome: z.literal('effect'),
-        value: z.object({ payload: MemoryAutomationRunResultV1Schema }),
+        value: z.object({ payload: AutomationRunResultV1Schema }),
       }),
     }).passthrough(),
   }).strict(),

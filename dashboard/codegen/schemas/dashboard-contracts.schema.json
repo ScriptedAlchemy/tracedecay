@@ -944,6 +944,15 @@
       ],
       "type": "object"
     },
+    "ApplicationExecutionFailureClassV1": {
+      "description": "Stable non-retryable class for an admitted execution failure.",
+      "enum": [
+        "denied",
+        "malformed_output",
+        "permanent"
+      ],
+      "type": "string"
+    },
     "ApplicationProblemEnvelope": {
       "additionalProperties": false,
       "description": "Stable application failure envelope. Partial effects and reset-required\nstates are admitted terminals; partial effects carry their committed\nreceipt directly while reset-required states carry an explicit action.",
@@ -975,6 +984,7 @@
         "stale",
         "unsupported",
         "unavailable",
+        "execution_failed",
         "reset_required",
         "saturated",
         "cancelled",
@@ -987,14 +997,7 @@
       "description": "Stable application problem record shared verbatim by every adapter.",
       "properties": {
         "cancellation_stage": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CancellationStage"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/RequiredNullable2"
         },
         "code": {
           "type": "string"
@@ -1028,6 +1031,9 @@
               "type": "null"
             }
           ]
+        },
+        "execution_failure_classification": {
+          "$ref": "#/$defs/RequiredNullable4"
         },
         "kind": {
           "$ref": "#/$defs/ApplicationProblemKind"
@@ -1081,6 +1087,9 @@
         },
         "trace_id": {
           "type": "string"
+        },
+        "unavailable_classification": {
+          "$ref": "#/$defs/RequiredNullable3"
         }
       },
       "required": [
@@ -1097,6 +1106,8 @@
         "retry_scope",
         "retry_after_millis",
         "cancellation_stage",
+        "unavailable_classification",
+        "execution_failure_classification",
         "request_id",
         "trace_id",
         "details",
@@ -1104,6 +1115,16 @@
         "coverage"
       ],
       "type": "object"
+    },
+    "ApplicationUnavailableClassV1": {
+      "description": "Stable reason an application authority is unavailable.",
+      "enum": [
+        "authority",
+        "backend_unavailable",
+        "backend_disconnected",
+        "backend_retryable"
+      ],
+      "type": "string"
     },
     "ApplyWorkRelationReplanRequestV1": {
       "additionalProperties": false,
@@ -1247,6 +1268,268 @@
         }
       ]
     },
+    "AutomationCommittedReceiptV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "curation",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/MemoryAutomationCurationReceiptV1"
+            }
+          },
+          "required": [
+            "kind",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "automatic_fact",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/MemoryAutomationFactReceiptV1"
+            }
+          },
+          "required": [
+            "kind",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "skill_writing",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/AutomationExternalEffectReceiptV1"
+            }
+          },
+          "required": [
+            "kind",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "user_job_delivery",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/AutomationExternalEffectReceiptV1"
+            }
+          },
+          "required": [
+            "kind",
+            "receipt"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationExternalEffectReceiptV1": {
+      "additionalProperties": false,
+      "description": "Payload-free identity of one committed non-memory automation effect.",
+      "properties": {
+        "manifest_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "task_key",
+        "manifest_digest"
+      ],
+      "type": "object"
+    },
+    "AutomationRunProblemV1": {
+      "additionalProperties": false,
+      "description": "Canonical admitted problem for one automation run.\n\nThe generic application receipt binds the outer operation. The ordered\nreceipts retain the exact canonical memory effects needed to reconcile a\npartial terminal without inventing an endpoint-specific payload.",
+      "properties": {
+        "committed_outer_result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AutomationRunResultV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committed_receipts": {
+          "items": {
+            "$ref": "#/$defs/AutomationCommittedReceiptV1"
+          },
+          "type": "array"
+        },
+        "problem": {
+          "$ref": "#/$defs/ApplicationProblemEnvelope"
+        },
+        "request_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "scope": {
+          "$ref": "#/$defs/ResolvedScope"
+        },
+        "task": {
+          "$ref": "#/$defs/AutomationTaskV1"
+        }
+      },
+      "required": [
+        "run_id",
+        "task",
+        "request_digest",
+        "scope",
+        "problem",
+        "committed_receipts"
+      ],
+      "type": "object"
+    },
+    "AutomationRunRequestV1": {
+      "additionalProperties": false,
+      "description": "Canonical input to one durable automation run.\n\nTrigger, actor, configuration and input digests are derived by the\nregistered application authority. The tagged task prevents a caller from\npairing one task identity with another task's options.",
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task": {
+          "$ref": "#/$defs/AutomationTaskRequestV1"
+        }
+      },
+      "required": [
+        "run_id",
+        "task"
+      ],
+      "type": "object"
+    },
+    "AutomationRunResultV1": {
+      "additionalProperties": false,
+      "description": "Durable terminal payload for one admitted automation run.\n\nAn empty receipt list is valid for completed or skipped zero-effect runs.\nPartial effects are represented only by an application problem carrying a\nnon-empty committed effect receipt.",
+      "properties": {
+        "committed_receipts": {
+          "items": {
+            "$ref": "#/$defs/AutomationCommittedReceiptV1"
+          },
+          "type": "array"
+        },
+        "request_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task": {
+          "$ref": "#/$defs/AutomationTaskV1"
+        },
+        "terminal": {
+          "$ref": "#/$defs/AutomationRunTerminalV1"
+        }
+      },
+      "required": [
+        "run_id",
+        "task",
+        "request_digest",
+        "terminal",
+        "committed_receipts"
+      ],
+      "type": "object"
+    },
+    "AutomationRunSummaryV1": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rejected_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reviewed_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reviewed_count",
+        "accepted_count",
+        "rejected_count",
+        "skipped_count"
+      ],
+      "type": "object"
+    },
+    "AutomationRunTerminalV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "completed",
+              "type": "string"
+            },
+            "summary": {
+              "$ref": "#/$defs/AutomationRunSummaryV1"
+            }
+          },
+          "required": [
+            "status",
+            "summary"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/AutomationSkipReasonV1"
+            },
+            "status": {
+              "const": "skipped",
+              "type": "string"
+            },
+            "summary": {
+              "$ref": "#/$defs/AutomationRunSummaryV1"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "summary"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "AutomationSchedulerStatusV1": {
       "additionalProperties": false,
       "description": "The scheduler reading served by `status`, `pause`, and `resume`.\n\nAutomation is autonomous: the status has no pending-review counters. The\nlast run record carries the validation, repair, application, quarantine,\nand deployment receipts that describe what actually happened.",
@@ -1342,6 +1625,135 @@
       ],
       "type": "object"
     },
+    "AutomationSkipReasonV1": {
+      "enum": [
+        "automation_disabled",
+        "memory_curator_disabled",
+        "session_reflector_disabled",
+        "skill_writer_disabled",
+        "combined_review_disabled",
+        "user_job_disabled",
+        "job_commands_disabled",
+        "delegated_host_mode",
+        "backend_disabled",
+        "scheduler_lock_active",
+        "task_not_schedulable",
+        "scheduler_schedule_invalid",
+        "scheduler_schedule_manual",
+        "scheduler_idle_window_active",
+        "scheduler_non_retryable_failure",
+        "scheduler_cooldown_active",
+        "scheduler_interval_not_elapsed",
+        "scheduler_cron_not_due",
+        "no_new_session_activity",
+        "similarity_authority_unavailable",
+        "partial_coverage_no_candidates",
+        "nothing_to_review",
+        "session_evidence_filter_unavailable",
+        "session_evidence_retrieval_unavailable",
+        "session_evidence_unavailable",
+        "session_evidence_partial",
+        "session_evidence_stale",
+        "session_evidence_denied",
+        "session_evidence_locked",
+        "session_evidence_reset_required",
+        "session_cursor_manifest_limit_exceeded",
+        "session_evidence_budget_exhausted",
+        "session_evidence_cancelled",
+        "no_session_evidence",
+        "shipped_fact_proposal_history_retired"
+      ],
+      "type": "string"
+    },
+    "AutomationTaskRequestV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "memory_curator",
+              "type": "string"
+            },
+            "options": {
+              "$ref": "#/$defs/MemoryCuratorRunInputV1"
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "session_reflector",
+              "type": "string"
+            },
+            "options": {
+              "$ref": "#/$defs/SessionReflectorRunInputV1"
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "skill_writer",
+              "type": "string"
+            },
+            "options": {
+              "$ref": "#/$defs/SkillWriterRunInputV1"
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "combined_review",
+              "type": "string"
+            },
+            "options": {
+              "$ref": "#/$defs/CombinedReviewRunInputV1"
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "user_job",
+              "type": "string"
+            },
+            "options": {
+              "$ref": "#/$defs/UserJobRunInputV1"
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "AutomationTaskStatusV1": {
       "properties": {
         "due": {
@@ -1367,6 +1779,17 @@
         "last_scheduler_run"
       ],
       "type": "object"
+    },
+    "AutomationTaskV1": {
+      "description": "Automation capability selected after one registered application admission.",
+      "enum": [
+        "memory_curator",
+        "session_reflector",
+        "skill_writer",
+        "combined_review",
+        "user_job"
+      ],
+      "type": "string"
     },
     "BrainId": {
       "description": "Strongly typed canonical identity: `BrainId`.",
@@ -1786,6 +2209,22 @@
         "staleness_state",
         "hook_hint_count",
         "coverage"
+      ],
+      "type": "object"
+    },
+    "CombinedReviewRunInputV1": {
+      "additionalProperties": false,
+      "properties": {
+        "session_reflector": {
+          "$ref": "#/$defs/SessionReflectorRunInputV1"
+        },
+        "skill_writer": {
+          "$ref": "#/$defs/SkillWriterRunInputV1"
+        }
+      },
+      "required": [
+        "session_reflector",
+        "skill_writer"
       ],
       "type": "object"
     },
@@ -8362,6 +8801,14 @@
       ],
       "type": "object"
     },
+    "LcmGrepSortV1": {
+      "enum": [
+        "recency",
+        "relevance",
+        "hybrid"
+      ],
+      "type": "string"
+    },
     "LcmLatestSessionV1": {
       "properties": {
         "last_store_id": {
@@ -8664,6 +9111,16 @@
       ],
       "type": "object"
     },
+    "LcmRoleV1": {
+      "enum": [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "LcmSearchEngineDetailV1": {
       "properties": {
         "messages": {
@@ -8777,6 +9234,14 @@
         "matches"
       ],
       "type": "object"
+    },
+    "LcmSearchScopeV1": {
+      "enum": [
+        "current",
+        "session",
+        "all"
+      ],
+      "type": "string"
     },
     "LcmSearchTotalsV1": {
       "properties": {
@@ -9734,22 +10199,136 @@
       ],
       "type": "object"
     },
-    "MemoryAutomationCommittedReceiptV1": {
+    "MemoryAutomationCurationAddDispositionV1": {
+      "enum": [
+        "added",
+        "near_duplicate",
+        "possible_conflict"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationCurationLinkDispositionV1": {
+      "enum": [
+        "linked",
+        "already_linked"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationCurationMergeV1": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_receipts": {
+          "items": {
+            "$ref": "#/$defs/FactCommitReceiptV1"
+          },
+          "type": "array"
+        },
+        "content_updated": {
+          "type": "boolean"
+        },
+        "deleted_loser_fact_ids": {
+          "items": {
+            "$ref": "#/$defs/FactId"
+          },
+          "type": "array"
+        },
+        "input_digest": {
+          "type": "string"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/ProvenanceId"
+        },
+        "winner_fact_id": {
+          "$ref": "#/$defs/FactId"
+        }
+      },
+      "required": [
+        "operation_id",
+        "input_digest",
+        "winner_fact_id",
+        "content_updated",
+        "deleted_loser_fact_ids",
+        "commit_receipts"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationCurationOperationEffectV1": {
       "oneOf": [
         {
           "additionalProperties": false,
           "properties": {
+            "closest_fact_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FactId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "commit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FactCommitReceiptV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "disposition": {
+              "$ref": "#/$defs/MemoryAutomationCurationAddDispositionV1"
+            },
+            "fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
             "kind": {
-              "const": "curation",
+              "const": "add",
               "type": "string"
             },
-            "receipt": {
-              "$ref": "#/$defs/MemoryAutomationCurationReceiptV1"
+            "similarity_millionths": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
             "kind",
-            "receipt"
+            "fact_id",
+            "disposition",
+            "closest_fact_id",
+            "similarity_millionths",
+            "commit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "$ref": "#/$defs/FactCommitReceiptV1"
+            },
+            "fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "kind": {
+              "const": "update",
+              "type": "string"
+            },
+            "trust_delta_millionths": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "fact_id",
+            "trust_delta_millionths",
+            "commit"
           ],
           "type": "object"
         },
@@ -9757,23 +10336,57 @@
           "additionalProperties": false,
           "properties": {
             "kind": {
-              "const": "automatic_fact",
+              "const": "merge",
               "type": "string"
             },
-            "receipt": {
-              "$ref": "#/$defs/MemoryAutomationFactReceiptV1"
+            "outcome": {
+              "$ref": "#/$defs/MemoryAutomationCurationMergeV1"
             }
           },
           "required": [
             "kind",
-            "receipt"
+            "outcome"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "MemoryAutomationCurationOperationEffectV1": {
-      "oneOf": [
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FactCommitReceiptV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "disposition": {
+              "$ref": "#/$defs/MemoryAutomationCurationRemoveDispositionV1"
+            },
+            "kind": {
+              "const": "remove",
+              "type": "string"
+            },
+            "remaining_fact_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target_fact_id": {
+              "$ref": "#/$defs/FactId"
+            }
+          },
+          "required": [
+            "kind",
+            "target_fact_id",
+            "disposition",
+            "remaining_fact_count",
+            "commit"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "properties": {
@@ -9799,7 +10412,17 @@
           "additionalProperties": false,
           "properties": {
             "commit": {
-              "$ref": "#/$defs/FactCommitReceiptV1"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FactCommitReceiptV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "disposition": {
+              "$ref": "#/$defs/MemoryAutomationCurationLinkDispositionV1"
             },
             "kind": {
               "const": "link_facts",
@@ -9820,6 +10443,7 @@
             "source_fact_id",
             "target_fact_id",
             "relation",
+            "disposition",
             "commit"
           ],
           "type": "object"
@@ -9896,9 +10520,22 @@
       ],
       "type": "object"
     },
+    "MemoryAutomationCurationRemoveDispositionV1": {
+      "enum": [
+        "removed",
+        "already_removed",
+        "not_found"
+      ],
+      "type": "string"
+    },
     "MemoryAutomationCurationResultV1": {
       "additionalProperties": false,
       "properties": {
+        "accepted_operations": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "automation_run_id": {
           "$ref": "#/$defs/RunId"
         },
@@ -9908,7 +10545,27 @@
           },
           "type": "array"
         },
+        "facts_added": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "facts_linked": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "facts_merged": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "facts_removed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "facts_updated": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -9934,10 +10591,24 @@
           "$ref": "#/$defs/FactCommitOwnerV1"
         },
         "replay_event_id": {
-          "$ref": "#/$defs/FactEventId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "replay_fact_id": {
-          "$ref": "#/$defs/FactId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -9949,6 +10620,11 @@
         "replay_fact_id",
         "replay_event_id",
         "changed_fact_ids",
+        "accepted_operations",
+        "facts_added",
+        "facts_updated",
+        "facts_merged",
+        "facts_removed",
         "normalized_tags",
         "facts_linked"
       ],
@@ -10380,184 +11056,6 @@
       ],
       "type": "object"
     },
-    "MemoryAutomationRunProblemV1": {
-      "additionalProperties": false,
-      "description": "Canonical admitted problem for one automatic-memory run.\n\nThe generic application receipt binds the outer operation. The ordered\nreceipts retain the exact canonical memory effects needed to reconcile a\npartial terminal without inventing an endpoint-specific payload.",
-      "properties": {
-        "committed_receipts": {
-          "items": {
-            "$ref": "#/$defs/MemoryAutomationCommittedReceiptV1"
-          },
-          "type": "array"
-        },
-        "problem": {
-          "$ref": "#/$defs/ApplicationProblemEnvelope"
-        },
-        "run_id": {
-          "$ref": "#/$defs/RunId"
-        },
-        "scope": {
-          "$ref": "#/$defs/ResolvedScope"
-        },
-        "task": {
-          "$ref": "#/$defs/MemoryAutomationTaskV1"
-        }
-      },
-      "required": [
-        "run_id",
-        "task",
-        "scope",
-        "problem",
-        "committed_receipts"
-      ],
-      "type": "object"
-    },
-    "MemoryAutomationRunResultV1": {
-      "additionalProperties": false,
-      "description": "Durable terminal payload for one admitted automatic-memory run.\n\nAn empty receipt list is valid for completed or skipped zero-effect runs.\nPartial effects are represented only by an application problem carrying a\nnon-empty committed effect receipt.",
-      "properties": {
-        "committed_receipts": {
-          "items": {
-            "$ref": "#/$defs/MemoryAutomationCommittedReceiptV1"
-          },
-          "type": "array"
-        },
-        "run_id": {
-          "$ref": "#/$defs/RunId"
-        },
-        "task": {
-          "$ref": "#/$defs/MemoryAutomationTaskV1"
-        },
-        "terminal": {
-          "$ref": "#/$defs/MemoryAutomationRunTerminalV1"
-        }
-      },
-      "required": [
-        "run_id",
-        "task",
-        "terminal",
-        "committed_receipts"
-      ],
-      "type": "object"
-    },
-    "MemoryAutomationRunSummaryV1": {
-      "additionalProperties": false,
-      "properties": {
-        "accepted_count": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "rejected_count": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "reviewed_count": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "skipped_count": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "reviewed_count",
-        "accepted_count",
-        "rejected_count",
-        "skipped_count"
-      ],
-      "type": "object"
-    },
-    "MemoryAutomationRunTerminalV1": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "status": {
-              "const": "completed",
-              "type": "string"
-            },
-            "summary": {
-              "$ref": "#/$defs/MemoryAutomationRunSummaryV1"
-            }
-          },
-          "required": [
-            "status",
-            "summary"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "reason": {
-              "$ref": "#/$defs/MemoryAutomationSkipReasonV1"
-            },
-            "status": {
-              "const": "skipped",
-              "type": "string"
-            },
-            "summary": {
-              "$ref": "#/$defs/MemoryAutomationRunSummaryV1"
-            }
-          },
-          "required": [
-            "status",
-            "reason",
-            "summary"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "MemoryAutomationSkipReasonV1": {
-      "enum": [
-        "automation_disabled",
-        "memory_curator_disabled",
-        "session_reflector_disabled",
-        "delegated_host_mode",
-        "backend_disabled",
-        "scheduler_lock_active",
-        "task_not_schedulable",
-        "scheduler_schedule_invalid",
-        "scheduler_schedule_manual",
-        "scheduler_idle_window_active",
-        "scheduler_non_retryable_failure",
-        "scheduler_cooldown_active",
-        "scheduler_interval_not_elapsed",
-        "scheduler_cron_not_due",
-        "no_new_session_activity",
-        "similarity_authority_unavailable",
-        "partial_coverage_no_candidates",
-        "nothing_to_review",
-        "session_evidence_filter_unavailable",
-        "session_evidence_retrieval_unavailable",
-        "session_evidence_unavailable",
-        "session_evidence_partial",
-        "session_evidence_stale",
-        "session_evidence_denied",
-        "session_evidence_locked",
-        "session_evidence_reset_required",
-        "session_cursor_manifest_limit_exceeded",
-        "session_evidence_budget_exhausted",
-        "session_evidence_cancelled",
-        "no_session_evidence",
-        "shipped_fact_proposal_history_retired"
-      ],
-      "type": "string"
-    },
-    "MemoryAutomationTaskV1": {
-      "description": "Automatic memory capability selected after one registered application\nadmission. Skill-only automation remains outside this effect family.",
-      "enum": [
-        "memory_curator",
-        "session_reflector"
-      ],
-      "type": "string"
-    },
     "MemoryCategoryCountV1": {
       "additionalProperties": false,
       "properties": {
@@ -10573,6 +11071,26 @@
       "required": [
         "category",
         "count"
+      ],
+      "type": "object"
+    },
+    "MemoryCuratorRunInputV1": {
+      "additionalProperties": false,
+      "properties": {
+        "fact_review_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_confidence_millionths": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fact_review_limit",
+        "min_confidence_millionths"
       ],
       "type": "object"
     },
@@ -13324,6 +13842,39 @@
       ],
       "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
     },
+    "RequiredNullable2": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CancellationStage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
+    },
+    "RequiredNullable3": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApplicationUnavailableClassV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
+    },
+    "RequiredNullable4": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApplicationExecutionFailureClassV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
+    },
     "ResolvedScope": {
       "additionalProperties": false,
       "description": "The resolved configuration scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
@@ -14446,6 +14997,97 @@
       "description": "Strongly typed canonical identity: `SessionId`.",
       "type": "string"
     },
+    "SessionReflectorRunInputV1": {
+      "additionalProperties": false,
+      "properties": {
+        "end_time": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "include_recent_sessions": {
+          "type": "boolean"
+        },
+        "include_summaries": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "recent_sessions_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmRoleV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/LcmSearchScopeV1"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sort": {
+          "$ref": "#/$defs/LcmGrepSortV1"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_time": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "query",
+        "scope",
+        "session_id",
+        "include_summaries",
+        "evidence_limit",
+        "include_recent_sessions",
+        "recent_sessions_limit",
+        "sort",
+        "source",
+        "role",
+        "start_time",
+        "end_time"
+      ],
+      "type": "object"
+    },
     "SettingsAvailabilityV1": {
       "properties": {
         "available": {
@@ -14566,6 +15208,38 @@
         "growth_bytes",
         "previous_observed_at",
         "current_observed_at"
+      ],
+      "type": "object"
+    },
+    "SkillWriterRunInputV1": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "include_recent_sessions": {
+          "type": "boolean"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "recent_sessions_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "query",
+        "evidence_limit",
+        "include_recent_sessions",
+        "recent_sessions_limit"
       ],
       "type": "object"
     },
@@ -16281,6 +16955,18 @@
     "UseCaseId": {
       "description": "Stable, canonical catalog identity for `UseCaseId`.",
       "type": "string"
+    },
+    "UserJobRunInputV1": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "type": "object"
     },
     "UserProfileId": {
       "description": "Strongly typed canonical identity: `UserProfileId`.",
@@ -24299,11 +24985,14 @@
     "analytics_usage": {
       "$ref": "#/$defs/DashboardEnvelopeV116"
     },
-    "automation_memory_problem": {
-      "$ref": "#/$defs/MemoryAutomationRunProblemV1"
+    "automation_problem": {
+      "$ref": "#/$defs/AutomationRunProblemV1"
     },
-    "automation_memory_run": {
-      "$ref": "#/$defs/MemoryAutomationRunResultV1"
+    "automation_run": {
+      "$ref": "#/$defs/AutomationRunResultV1"
+    },
+    "automation_run_request": {
+      "$ref": "#/$defs/AutomationRunRequestV1"
     },
     "automation_scheduler_status": {
       "$ref": "#/$defs/AutomationSchedulerStatusV1",
@@ -24713,8 +25402,9 @@
     "multi_root_execute_request",
     "multi_root_query",
     "automation_scheduler_status",
-    "automation_memory_run",
-    "automation_memory_problem"
+    "automation_run_request",
+    "automation_run",
+    "automation_problem"
   ],
   "schemaRevision": 1,
   "title": "DashboardContractCatalogV1",
