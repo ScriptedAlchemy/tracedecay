@@ -11,7 +11,7 @@ use tracedecay_application::{
     ApplicationContractError, OpaqueCursor, OperationBudgetUsage, RequestAdmission, RequestContext,
     ResolvedScope,
 };
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{CodeGenerationId, UtcMicros};
 
 use super::symbol_graph::{SymbolGraphCursorFuture, SymbolGraphCursorPort, SymbolGraphPageClaim};
 use crate::context::read_modes::{LineRange, ReadMode};
@@ -149,11 +149,32 @@ fn source_read_failed(observed_at: UtcMicros) -> SourceReadPortOutcome {
     }
 }
 
-/// Supplies the existing query snapshot identity used by the authenticated
-/// temporal cursor codec. Implementations must derive the snapshot from the
-/// current request scope, grant/access binding, lane, and graph watermark.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolGraphCursorSnapshot {
+    temporal: TemporalExecutionSnapshot,
+    code_generation_id: CodeGenerationId,
+}
+
+impl SymbolGraphCursorSnapshot {
+    pub fn new(temporal: TemporalExecutionSnapshot, code_generation_id: CodeGenerationId) -> Self {
+        Self {
+            temporal,
+            code_generation_id,
+        }
+    }
+
+    pub const fn temporal(&self) -> &TemporalExecutionSnapshot {
+        &self.temporal
+    }
+
+    pub const fn code_generation_id(&self) -> &CodeGenerationId {
+        &self.code_generation_id
+    }
+}
+
+/// Supplies the authenticated query snapshot and its exact code generation.
 pub type SymbolGraphCursorSnapshotFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<TemporalExecutionSnapshot, PrimitiveFailure>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<SymbolGraphCursorSnapshot, PrimitiveFailure>> + Send + 'a>>;
 
 pub trait SymbolGraphCursorSnapshotAuthority: Send + Sync {
     /// Reads the identity that is live *now*. Resolving the current generation
@@ -202,16 +223,19 @@ where
         Box::pin(async move {
             reauthorize_cursor_context(context, observed_at)?;
             let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
-            validate_cursor_snapshot(context, &snapshot)?;
+            validate_cursor_snapshot(context, snapshot.temporal())?;
             let offset = match cursor {
                 // Verification is against the snapshot just read, so a cursor
                 // minted under a superseded generation cannot resolve to an
                 // offset here at all: it fails as stale rather than silently
                 // indexing into a different generation's result set.
                 Some(cursor) => {
-                    let sort_key =
-                        verify_cursor(cursor.as_str(), &snapshot, self.authenticator.as_ref())
-                            .map_err(cursor_verification_failure)?;
+                    let sort_key = verify_cursor(
+                        cursor.as_str(),
+                        snapshot.temporal(),
+                        self.authenticator.as_ref(),
+                    )
+                    .map_err(cursor_verification_failure)?;
                     if sort_key.stable_id != lane
                         || sort_key.normalized_score_micros
                             > u64::try_from(sort_key.knowledge_at_micros).unwrap_or_default()
@@ -243,7 +267,7 @@ where
                 return Err(invalid_cursor());
             }
             let snapshot = self.snapshots.snapshot(context, lane, observed_at).await?;
-            validate_cursor_snapshot(context, &snapshot)?;
+            validate_cursor_snapshot(context, snapshot.temporal())?;
             // The rows were gathered against `claim.snapshot`. If the live
             // identity has moved since, the page in hand belongs to a
             // generation that is no longer being served, so the caller is told
@@ -267,8 +291,12 @@ where
             };
             // Minted against the claim rather than the freshly read snapshot:
             // the continuation names the generation the page-set came from.
-            let encoded = encode_cursor(&claim.snapshot, &sort_key, self.authenticator.as_ref())
-                .map_err(cursor_issue_failure)?;
+            let encoded = encode_cursor(
+                claim.snapshot.temporal(),
+                &sort_key,
+                self.authenticator.as_ref(),
+            )
+            .map_err(cursor_issue_failure)?;
             OpaqueCursor::new(encoded)
                 .map_err(|_| {
                     primitive_failure(
@@ -389,13 +417,16 @@ mod tests {
         Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, ResultContractRef,
     };
     use tracedecay_domain::{
-        ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, RetrievalGrainV1,
-        SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId, SignedCursorKeyRefV1,
-        TemporalModeV1, UtcMicros, WorktreeId,
+        ActorId, CodeGenerationId, ManifestDigest, ProjectId, RefId, RepositoryId,
+        RetrievalGrainV1, SessionCursorKeyIdV1, SessionCursorVersionV1, SessionId,
+        SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, WorktreeId, canonical_sha256,
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
-    use super::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshotAuthority};
+    use super::{
+        AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshot,
+        SymbolGraphCursorSnapshotAuthority,
+    };
     use crate::primitives::SymbolGraphCursorPort;
     use tracedecay_application::retrieval::PrimitiveFailureKind;
     use tracedecay_temporal_query::ports::{
@@ -407,7 +438,7 @@ mod tests {
     const NOW: UtcMicros = UtcMicros(1_000);
 
     struct FixedSnapshotAuthority {
-        snapshot: TemporalExecutionSnapshot,
+        snapshot: SymbolGraphCursorSnapshot,
     }
 
     impl SymbolGraphCursorSnapshotAuthority for FixedSnapshotAuthority {
@@ -427,8 +458,8 @@ mod tests {
     /// later read reports its successor, which is exactly the shape of a
     /// publication landing mid-request.
     struct AdvancingSnapshotAuthority {
-        claimed: TemporalExecutionSnapshot,
-        superseded: TemporalExecutionSnapshot,
+        claimed: SymbolGraphCursorSnapshot,
+        superseded: SymbolGraphCursorSnapshot,
         reads: std::sync::atomic::AtomicUsize,
     }
 
@@ -566,7 +597,10 @@ mod tests {
         context: &RequestContext,
         key: SignedCursorKeyRefV1,
         watermark: u64,
-    ) -> TemporalExecutionSnapshot {
+    ) -> SymbolGraphCursorSnapshot {
+        let code_generation_id =
+            CodeGenerationId::new(format!("generation.symbol-graph.cursor.{watermark}"))
+                .expect("generation");
         let request = TemporalSnapshotRequest::new(
             SessionId::new("session.symbol-graph").expect("session"),
             scope.scope_digest.as_str(),
@@ -576,7 +610,7 @@ mod tests {
             RetrievalGrainV1::Occurrence,
         )
         .expect("snapshot request");
-        TemporalExecutionSnapshot::new_authorized(
+        let temporal = TemporalExecutionSnapshot::new_authorized(
             request,
             TemporalWatermarks {
                 generation: 1,
@@ -590,14 +624,20 @@ mod tests {
                 ranking: 1,
                 configuration_digest: BindingDigest::new(
                     "configuration_digest",
-                    format!("sha256:{}", "c".repeat(64)),
+                    canonical_sha256(&(
+                        "tracedecay.symbol-graph.cursor-test.v1",
+                        code_generation_id.as_str(),
+                    ))
+                    .expect("configuration digest")
+                    .as_str(),
                 )
                 .expect("configuration digest"),
             },
             Some(key),
             ValidatedAuthorization::Authorized,
         )
-        .expect("execution snapshot")
+        .expect("execution snapshot");
+        SymbolGraphCursorSnapshot::new(temporal, code_generation_id)
     }
 
     fn application_context(suffix: &str) -> (ResolvedScope, RequestContext, ApplicationOperation) {

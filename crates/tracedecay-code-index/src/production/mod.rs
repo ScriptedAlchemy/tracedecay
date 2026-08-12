@@ -15,10 +15,10 @@ use tracedecay_domain::{
     ExtractionBatchV1, ExtractionFailureV1, FileOccurrenceId, GenerationTestAttributionV1,
     IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
     ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
-    ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
-    SymbolLineageCandidateV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId,
-    UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
+    ProviderEvaluationStateV1, RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1,
+    SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1,
+    ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
 };
 
 use super::{
@@ -29,9 +29,7 @@ use super::{
         ExtractionAdmittedCodeSearchChunkV1, content_digest,
     },
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
-    generations::{
-        FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1, RebuildTriggerV1,
-    },
+    generations::{FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1},
     incremental::{
         ChunkIncrementErrorV1, GenerationChunkManifestV1, materialize_generation_increment,
         plan_chunk_increment,
@@ -59,6 +57,12 @@ use super::{
 
 mod helpers;
 use helpers::*;
+mod ignored_sources;
+use ignored_sources::IgnoredSourceRosterV1;
+pub use ignored_sources::{
+    CodeIndexBuildRequestV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexRepositoryParseIdentityV1,
+    MAX_IGNORED_DEPENDENCY_ENTRYPOINT_BYTES_V1,
+};
 mod import_evidence;
 use import_evidence::{derive_import_evidence, validate_import_evidence};
 mod parser_artifacts;
@@ -108,31 +112,6 @@ pub struct CodeIndexCapturedFileV1 {
     pub file_occurrence_id: FileOccurrenceId,
     pub sanitized_bytes: Vec<u8>,
     pub sensitivity_level: SensitivityLevelV1,
-}
-
-/// Inputs for one complete immutable code-index generation.
-#[derive(Clone, Debug)]
-pub struct CodeIndexBuildRequestV1 {
-    pub snapshot: SanitizedCodeSnapshotV1,
-    pub captured_files: Vec<CodeIndexCapturedFileV1>,
-    /// Capture-reported paths are evidence only; digest equality remains the
-    /// sole reuse authority.
-    pub changed_files: BTreeSet<String>,
-    /// Additional conservative invalidations that the application boundary,
-    /// rather than the sanitized snapshot, is authoritative to report.
-    pub invalidations: BTreeSet<RebuildTriggerV1>,
-    /// Exact Git tree and dirty-state evidence paired with the snapshot's
-    /// repository/worktree/ref/commit identity. Missing tree is truthful for
-    /// unborn or unavailable Git state and never replaced with a digest.
-    pub repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
-    pub sealed_at: UtcMicros,
-    pub target_projection_key: ProjectionKeyV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CodeIndexRepositoryParseIdentityV1 {
-    pub tree: Option<TreeId>,
-    pub dirty: RepositoryDirtyStateV1,
 }
 
 /// Synchronous checkpoints exposed by an application/daemon request.
@@ -401,6 +380,8 @@ impl FileGenerationArtifactsV1 {
 pub struct CodeIndexPublishedGenerationV1 {
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
+    repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
+    ignored_source_roster: IgnoredSourceRosterV1,
     files: Vec<FileGenerationArtifactsV1>,
     chunks: GenerationChunkManifestV1,
     symbols: GenerationSymbolIndexV1,
@@ -762,6 +743,8 @@ impl CodeIndexPublishedGenerationV1 {
         self.manifest
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        self.ignored_source_roster
+            .validate(&self.snapshot, &self.repository_parse_identity)?;
         if self.chunks.generation_id() != &self.manifest.generation_id
             || self.symbols.generation_id != self.manifest.generation_id
             || self.capability.generation_id != self.manifest.generation_id
@@ -1035,6 +1018,11 @@ where
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
         Self::checkpoint(control)?;
+        let ignored_source_roster = IgnoredSourceRosterV1::admit(
+            &request.snapshot,
+            &request.repository_parse_identity,
+            &request.ignored_source_admissions,
+        )?;
         let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
         let active = self.active_generation(&scope)?;
         Self::checkpoint(control)?;
@@ -1169,6 +1157,8 @@ where
         let candidate = CodeIndexPublishedGenerationV1 {
             manifest,
             snapshot: validated.snapshot,
+            repository_parse_identity: request.repository_parse_identity.clone(),
+            ignored_source_roster,
             files: staged.files,
             chunks: staged.chunks,
             symbols: staged.symbols,

@@ -47,16 +47,11 @@ where
     }
 }
 
-pub(super) async fn bind_verified_graph_to_search(
+pub(super) fn bind_verified_graph_to_search(
     graph: Result<VerifiedGraphQuery>,
     search_generation: &str,
-    require_lazy_candidate: bool,
-    query: &str,
-    scope_prefix: Option<&str>,
-    deadline: Option<&tracedecay_application::Deadline>,
-    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<VerifiedGraphQuery> {
-    let graph = match graph {
+    match graph {
         Ok(graph) if graph.generation().as_str() == search_generation => Ok(graph),
         Ok(graph) => Err(TraceDecayError::project_route(
             "verified-code-graph-generation-mismatch",
@@ -67,21 +62,7 @@ pub(super) async fn bind_verified_graph_to_search(
             ),
         )),
         Err(error) => Err(error),
-    };
-    if !require_lazy_candidate {
-        return graph;
     }
-    let graph = graph?;
-    dependency_hints::lazy_index_ignored_dependency_candidates(
-        &graph,
-        query,
-        1,
-        scope_prefix,
-        deadline,
-        cancellation,
-    )
-    .await?;
-    Ok(graph)
 }
 
 pub(super) struct SearchGraphEvidence<'a> {
@@ -89,8 +70,7 @@ pub(super) struct SearchGraphEvidence<'a> {
     unavailable: Option<Value>,
 }
 
-pub(super) fn append_search_evidence_md(md: &mut Md, value: &Value) {
-    dependency_hints::append_external_import_hint_md(md, value);
+pub(super) fn append_verified_graph_evidence_md(md: &mut Md, value: &Value) {
     let Some(evidence) = value.get("verified_graph_evidence") else {
         return;
     };

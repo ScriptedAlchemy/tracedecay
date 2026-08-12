@@ -713,52 +713,6 @@ async fn test_grep_missing_pattern_errors() {
     );
 }
 
-#[cfg(feature = "test-transport")]
-#[tokio::test]
-async fn test_find_exact_symbol_lazy_dependency_fails_closed_without_import_evidence() {
-    let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
-        fs::write(
-            project.join("src/app.ts"),
-            r#"import type { Foo } from "pkg";
-export const value = 1;
-"#,
-        )
-        .unwrap();
-        fs::write(
-            project.join("node_modules/pkg/index.d.ts"),
-            "export interface Foo { value: string }\n",
-        )
-        .unwrap();
-    })
-    .await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
-    warm_code_index_search(&server, "value").await;
-
-    let response = handle_real_server_tool_call_raw(
-        &server,
-        "tracedecay_find_exact_symbol",
-        json!({
-            "name": "Foo",
-            "limit": 5,
-            "format": "json",
-            "lazy_index_ignored_dependencies": true
-        }),
-    )
-    .await;
-    assert_eq!(
-        response["error"]["data"]["reason_code"].as_str(),
-        Some("code-graph-import-evidence-unavailable"),
-        "ignored-dependency discovery must fail closed without verified import evidence: {response}"
-    );
-    assert_eq!(response["error"]["data"]["retryable"], false);
-    fixture.harness.shutdown().await;
-}
-
 // ---------------------------------------------------------------------------
 // 3. tracedecay_callers
 // ---------------------------------------------------------------------------

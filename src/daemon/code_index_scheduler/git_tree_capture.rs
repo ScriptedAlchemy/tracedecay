@@ -83,6 +83,64 @@ impl CodeIndexExecutionControlV1 for branch_generations::BranchGenerationReadCon
     }
 }
 
+impl DaemonCodeIndexPublicationStoreV1 {
+    pub(super) fn exact_git_evidence(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<Option<(String, String, String)>, CodeIndexPublicationStoreErrorV1> {
+        let Some(source_revision) = generation.snapshot().source_revision.as_ref() else {
+            return Ok(None);
+        };
+        let Some(reference) = generation.snapshot().reference.as_ref() else {
+            return Ok(None);
+        };
+        let repository = gix::open(&self.project_root).map_err(Self::unavailable)?;
+        let identity =
+            identity::IndexingIdentityV1::resolve(&self.project_root).map_err(Self::unavailable)?;
+        if generation.snapshot().repository != *identity.repository_id()
+            || generation.snapshot().worktree.as_ref() != Some(identity.worktree_id())
+        {
+            return Ok(None);
+        }
+        let mut git_reference = repository
+            .try_find_reference(reference.as_str())
+            .map_err(Self::unavailable)?
+            .ok_or_else(|| Self::unavailable("exact code-generation reference is missing"))?;
+        let commit = git_reference.peel_to_commit().map_err(Self::unavailable)?;
+        if commit.id().to_string() != source_revision.as_str() {
+            return Ok(None);
+        }
+        let tree = commit.tree_id().map_err(Self::unavailable)?;
+        Ok(Some((
+            reference.as_str().to_owned(),
+            source_revision.as_str().to_owned(),
+            tree.to_string(),
+        )))
+    }
+
+    pub(super) fn validate_exact_git_evidence(
+        &self,
+        revision: &str,
+        expected_tree: &str,
+    ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let repository = gix::open(&self.project_root).map_err(Self::unavailable)?;
+        let object_id =
+            gix::hash::ObjectId::from_hex(revision.as_bytes()).map_err(Self::unavailable)?;
+        let commit = repository
+            .find_object(object_id)
+            .map_err(Self::unavailable)?
+            .try_into_commit()
+            .map_err(Self::unavailable)?;
+        let actual_tree = commit.tree_id().map_err(Self::unavailable)?;
+        if actual_tree.to_string() != expected_tree {
+            return Err(Self::unavailable(
+                "durable code-generation index commit tree does not match Git",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl CodeIndexWorktreeSchedulerV1 {
     pub(super) fn capture_candidate_bytes(
         &self,
@@ -265,17 +323,30 @@ impl CodeIndexWorktreeSchedulerV1 {
         source: &ExactGitTreeSourceV1,
         control: &branch_generations::BranchGenerationReadControlV1,
     ) -> Result<LatestCompleteCodeIndexV1, CodeIndexSearchUnavailableReasonV1> {
-        let mut captured = self.capture_exact_git_tree_snapshot(source, control)?;
-        self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-        let generation = self
-            .owner
+        let captured = self.capture_exact_git_tree_snapshot(source, control)?;
+        let CapturedSnapshotV1 {
+            snapshot,
+            repository_parse_identity,
+            captured_files,
+            changed_paths,
+            retained_bytes: _retained_bytes,
+        } = captured;
+        let mut owner = open_production_code_index_owner_v1(
+            self.production_config.clone(),
+            self.publication.retained_history(),
+            DaemonProjectionSinkV1,
+        )
+        .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?
+        .with_physical_artifact_pool(self.byte_pool.physical_artifacts.clone());
+        let generation = owner
             .build_and_publish(
                 CodeIndexBuildRequestV1 {
-                    snapshot: captured.snapshot,
-                    captured_files: captured.captured_files,
-                    changed_files: captured.changed_paths,
+                    snapshot,
+                    captured_files,
+                    changed_files: changed_paths,
                     invalidations: BTreeSet::new(),
-                    repository_parse_identity: captured.repository_parse_identity,
+                    repository_parse_identity,
+                    ignored_source_admissions: Vec::new(),
                     sealed_at: now_micros(),
                     target_projection_key: projection_key()
                         .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?,

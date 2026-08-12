@@ -32,7 +32,10 @@ use tracedecay_domain::{
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
-use super::concrete::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshotAuthority};
+use super::concrete::{
+    AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshot,
+    SymbolGraphCursorSnapshotAuthority,
+};
 use super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, ExtendedPrimitiveFuture,
@@ -50,6 +53,7 @@ use super::support::{
     run_bounded_source_search,
 };
 use super::symbol_graph::{SymbolGraphCursorPort, symbol_record};
+use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{
     DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
@@ -1963,6 +1967,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                         ),
                     )
                 })?;
+            let code_generation_id = graph_identity.code_generation_id.clone();
             // Every component of the published generation's address folds into
             // the identity, so any republication — even one that leaves the
             // generation sequence alone — produces a different snapshot and
@@ -2033,7 +2038,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                 )
             })?;
             let watermark = graph_identity.generation.max(1);
-            TemporalExecutionSnapshot::new_authorized(
+            let temporal = TemporalExecutionSnapshot::new_authorized(
                 request,
                 TemporalWatermarks {
                     generation: 1,
@@ -2051,6 +2056,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                             "tracedecay.symbol-graph.cursor-configuration.v1",
                             self.configuration_digest.as_str(),
                             graph_snapshot_digest.as_str(),
+                            code_generation_id.as_str(),
                         ))
                         .map_err(|_| {
                             symbol_graph_snapshot_failure(
@@ -2075,7 +2081,8 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                     "application.symbol-graph.snapshot",
                     "could not authorize temporal snapshot",
                 )
-            })
+            })?;
+            Ok(SymbolGraphCursorSnapshot::new(temporal, code_generation_id))
         })
     }
 }
@@ -2485,6 +2492,7 @@ pub struct ProductionPrimitiveOpenRequestV1 {
     database: Database,
     source_runtime: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+    ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     session_db: Arc<RegisteredGlobalDb>,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     project_root: PathBuf,
@@ -2501,6 +2509,7 @@ impl ProductionPrimitiveOpenRequestV1 {
     pub fn new(
         source_runtime: Arc<SourceReadRuntime>,
         code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
+        ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
         session_db: Arc<RegisteredGlobalDb>,
         temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
@@ -2517,6 +2526,7 @@ impl ProductionPrimitiveOpenRequestV1 {
             database,
             source_runtime,
             code_graph,
+            ignored_dependency_admission,
             session_db,
             temporal,
             project_root,
@@ -2539,6 +2549,7 @@ pub async fn open_production_primitive_runtime(
         database,
         source_runtime,
         code_graph,
+        ignored_dependency_admission,
         session_db,
         temporal,
         project_root,
@@ -2608,6 +2619,7 @@ pub async fn open_production_primitive_runtime(
         Arc::clone(&source_runtime),
         Arc::clone(&code_graph),
         cursors,
+        ignored_dependency_admission,
         Arc::new(TraceDecayTestPrimitivePortV1::new(Arc::clone(&code_graph))),
         Arc::new(TraceDecayLexicalGrepAuthorityV1::new(
             Arc::clone(&source_runtime),

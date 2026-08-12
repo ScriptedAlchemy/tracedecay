@@ -139,6 +139,8 @@ pub(crate) type CodeGraphProjectionReadPort =
     Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort + 'static>;
 pub(crate) type CodeGraphReadAdmissionPort =
     Arc<dyn tracedecay_usecases::graph::CodeGraphReadAdmissionPort + 'static>;
+pub(crate) type CodeIndexIgnoredDependencyAdmissionPort =
+    Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1 + 'static>;
 
 /// Code-index search boundary contracts, owned by the query kernel.
 ///
@@ -326,6 +328,7 @@ pub struct McpServer {
     code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
     code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
     code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
+    code_index_ignored_dependency_admission: Option<CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority. It is installed only
     /// by daemon project-open after the route identity has resolved.
     generation_census_reader:
@@ -759,6 +762,7 @@ impl McpServer {
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
             code_graph_read_admission_port,
+            code_index_ignored_dependency_admission,
             code_index_search_authority,
             retained_project_server_resolver,
             project_routes,
@@ -990,6 +994,7 @@ impl McpServer {
             code_index_branch_diff_executor,
             code_graph_projection_read_port,
             code_graph_read_admission_port,
+            code_index_ignored_dependency_admission,
             generation_census_reader: tokio::sync::OnceCell::new(),
             source_edit_executor: tokio::sync::OnceCell::new(),
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),

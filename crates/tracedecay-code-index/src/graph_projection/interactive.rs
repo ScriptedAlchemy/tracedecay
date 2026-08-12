@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, TryLockError};
 
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, FileOccurrenceId, RelationEdgeKindV1,
@@ -76,6 +76,34 @@ impl fmt::Debug for CodeGraphInteractiveReader {
             .field("generation", &self.generation)
             .field("projection_node_count", &self.projection_node_count)
             .finish_non_exhaustive()
+    }
+}
+
+impl CodeGraphProjectionStore {
+    /// Builds and validates the generation-pinned interactive catalog before
+    /// serving latency-bounded reads. Only a fully built immutable catalog is
+    /// published into the store's shared slot.
+    pub fn warm_interactive_catalog_with_cancellation(
+        &self,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), CodeGraphProjectionError> {
+        let reader =
+            self.interactive_reader_with_cancellation(&self.generation, Arc::clone(&cancellation))?;
+        reader.catalog(cancellation).map(|_| ())
+    }
+
+    /// Reports whether this store's generation-pinned interactive catalog has
+    /// been fully built without triggering a build or hiding lock failure.
+    pub fn interactive_catalog_is_warm(&self) -> Result<bool, CodeGraphProjectionError> {
+        match self.interactive_catalog.try_read() {
+            Ok(catalog) => Ok(catalog.is_some()),
+            // Exclusive ownership does not reveal whether the writer acquired
+            // an empty or populated slot, so contention cannot fabricate cold.
+            Err(TryLockError::WouldBlock) => Err(CodeGraphProjectionError::Unavailable(
+                "code graph interactive catalog warm state is contended".to_owned(),
+            )),
+            Err(TryLockError::Poisoned(_)) => Err(catalog_lock_poisoned()),
+        }
     }
 }
 
@@ -648,12 +676,8 @@ impl CodeGraphInteractiveReader {
             return Ok(Arc::clone(catalog));
         }
         drop(slot);
-        let built = Arc::new(catalog::build_interactive_catalog(
-            &self.snapshot,
-            &self.projection,
-            self.projection_node_count,
-            Arc::clone(&cancellation),
-        )?);
+        // Exclusive ownership of the one cache slot is also the single-flight
+        // authority: followers wait, then recheck before attempting a scan.
         let mut slot = self.catalog.write().map_err(|_| catalog_lock_poisoned())?;
         if let Some(existing) = slot.as_ref() {
             if cancellation.is_cancelled() {
@@ -661,6 +685,12 @@ impl CodeGraphInteractiveReader {
             }
             return Ok(Arc::clone(existing));
         }
+        let built = Arc::new(catalog::build_interactive_catalog(
+            &self.snapshot,
+            &self.projection,
+            self.projection_node_count,
+            Arc::clone(&cancellation),
+        )?);
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }

@@ -1,6 +1,6 @@
 #![cfg(feature = "test-transport")]
 
-mod scheduler_unavailable;
+mod lazy_cutover;
 
 use crate::support::*;
 use serde_json::{Value, json};

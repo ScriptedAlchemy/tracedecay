@@ -2662,6 +2662,7 @@ fn publish_corpus_with_scale(
         captured_files: captured,
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
@@ -2784,6 +2785,7 @@ fn publish_corpus_with_scale(
                 captured_files: incremental_captured,
                 changed_files: BTreeSet::from([incremental_document.source_path.clone()]),
                 invalidations: BTreeSet::new(),
+                ignored_source_admissions: Vec::new(),
                 repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
                     tree: None,
                     dirty: RepositoryDirtyStateV1::Dirty,
@@ -2986,6 +2988,7 @@ fn build_projection_source_generation(
                 captured_files,
                 changed_files,
                 invalidations: BTreeSet::new(),
+                ignored_source_admissions: Vec::new(),
                 repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
                     tree: None,
                     dirty: RepositoryDirtyStateV1::Dirty,
@@ -3139,6 +3142,7 @@ fn prove_cancellation(
         captured_files: captured,
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,

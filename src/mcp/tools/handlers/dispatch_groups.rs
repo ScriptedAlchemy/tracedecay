@@ -213,6 +213,7 @@ pub(super) async fn dispatch_graph_tools(
                 selected_scope_prefix,
                 options.code_index_search_executor.as_ref(),
                 options.code_index_search_authority.as_ref(),
+                options.code_index_ignored_dependency_admission.as_deref(),
                 options.application_deadline.clone(),
                 options.application_cancellation.clone(),
             )
@@ -301,6 +302,7 @@ pub(super) async fn dispatch_graph_tools(
                 &graph_query,
                 args,
                 selected_scope_prefix,
+                options.code_index_ignored_dependency_admission.as_deref(),
                 options.application_deadline.as_ref(),
                 options.application_cancellation.as_ref(),
             )

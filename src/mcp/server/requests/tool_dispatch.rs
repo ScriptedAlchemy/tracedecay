@@ -291,6 +291,9 @@ impl McpServer {
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
                 code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
+                code_index_ignored_dependency_admission: self
+                    .code_index_ignored_dependency_admission
+                    .clone(),
                 generation_census_reader: self.generation_census_reader(),
                 retained_project_server_resolver: self.retained_project_server_resolver.clone(),
                 session_sync_service: session_sync_service.as_deref(),

@@ -49,6 +49,7 @@ use super::grep_analysis::{
 };
 use super::symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
 use crate::ProjectSourceAccessSnapshot;
+use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
 use crate::operation_stream::{
     CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
     ManagedTestRunStaleReason, OperationEventAuthority,
@@ -529,6 +530,7 @@ pub fn open_primitive_project_runtime(
     source_runtime: Arc<crate::tracedecay::SourceReadRuntime>,
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     symbol_graph_cursors: Arc<dyn SymbolGraphCursorPort>,
+    ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     tests: Arc<dyn TestPrimitivePort + Send + Sync>,
     lexical_grep: Arc<dyn LexicalGrepAuthorityV1 + Send + Sync>,
     redundancy: Arc<dyn RedundancyAuthorityV1 + Send + Sync>,
@@ -549,9 +551,12 @@ pub fn open_primitive_project_runtime(
             field: "application primitive admitted project authority",
         });
     }
-    let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> = Arc::new(
-        CanonicalSymbolGraphAdapter::new(Arc::clone(&code_graph), symbol_graph_cursors),
-    );
+    let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> =
+        Arc::new(CanonicalSymbolGraphAdapter::new(
+            Arc::clone(&code_graph),
+            symbol_graph_cursors,
+            ignored_dependency_admission,
+        ));
     let source: Arc<dyn SourceReadPrimitivePort + Send + Sync> = Arc::new(SourceReadAdapter::new(
         Arc::clone(&source_runtime),
         Arc::clone(&code_graph),

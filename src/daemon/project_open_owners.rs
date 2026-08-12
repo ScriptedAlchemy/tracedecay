@@ -952,6 +952,12 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open primitive runtime requires the production code-graph projection authority"
                 .to_owned(),
         })?;
+    let ignored_dependency_admission = server
+        .code_index_ignored_dependency_admission()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open primitive runtime requires ignored-dependency admission"
+                .to_owned(),
+        })?;
     let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
         server
             .project_session_application_retrieval_service()
@@ -964,6 +970,7 @@ pub(super) async fn register_project_open_production_owners(
         open_production_primitive_runtime(ProductionPrimitiveOpenRequestV1::new(
             graph.clone(),
             code_graph,
+            Some(ignored_dependency_admission),
             Arc::clone(&session_db),
             temporal,
             Arc::new(invocation.code_index_schedulers.clone()),

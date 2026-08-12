@@ -5,6 +5,7 @@ mod diagnostic_generation;
 mod generations;
 mod git_joins;
 mod graph_projection_publication;
+mod ignored_source_admissions;
 mod impact_joins;
 mod import_evidence;
 mod language_registry;

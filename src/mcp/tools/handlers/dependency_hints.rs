@@ -1,5 +1,9 @@
 use serde_json::{Value, json};
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
+use tracedecay_usecases::code_index::{
+    CodeIndexIgnoredDependencyAdmissionErrorV1, CodeIndexIgnoredDependencyAdmissionPortV1,
+    CodeIndexIgnoredDependencyAdmissionRequestV1,
+};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::render::{self, Md};
@@ -63,24 +67,82 @@ pub(super) fn unavailable_hint(error: &TraceDecayError) -> Value {
     })
 }
 
-pub(super) async fn lazy_index_ignored_dependency_candidates(
+pub(super) async fn admit_verified_ignored_dependency(
+    admission: Option<&dyn CodeIndexIgnoredDependencyAdmissionPortV1>,
     graph: &VerifiedGraphQuery,
     query: &str,
-    limit: usize,
     scope_prefix: Option<&str>,
     deadline: Option<&tracedecay_application::Deadline>,
     cancellation: Option<&tracedecay_application::CancellationSignal>,
-) -> Result<Vec<String>> {
+) -> Result<()> {
     let candidates =
-        ignored_dependency_candidates(graph, query, limit, scope_prefix, deadline, cancellation)?;
-    if candidates.is_empty() {
-        return Ok(Vec::new());
+        ignored_dependency_candidates(graph, query, 1, scope_prefix, deadline, cancellation)?;
+    let Some(import) = candidates.first() else {
+        return Ok(());
+    };
+    let Some(admission) = admission else {
+        return Err(TraceDecayError::project_route(
+            "application.symbol-graph.ignored-dependency-scheduler-unavailable",
+            true,
+            "ignored dependency indexing scheduler is unavailable",
+        ));
+    };
+    let source_generation = graph.generation();
+    match admission
+        .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
+            graph.request_context(),
+            source_generation,
+            std::slice::from_ref(import),
+        ))
+        .await
+    {
+        Ok(active_generation) if &active_generation != source_generation => {
+            Err(generation_advanced())
+        }
+        Ok(_) => Err(TraceDecayError::project_route(
+            "application.symbol-graph.ignored-dependency-generation-not-advanced",
+            true,
+            "ignored dependency indexing did not publish a newer graph generation",
+        )),
+        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::Unavailable { detail }) => {
+            Err(TraceDecayError::project_route(
+                "application.symbol-graph.ignored-dependency-scheduler-unavailable",
+                true,
+                detail,
+            ))
+        }
+        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::ReadOnly) => {
+            Err(TraceDecayError::project_route(
+                "application.symbol-graph.ignored-dependency-read-only",
+                false,
+                "ignored dependency indexing is unavailable in read-only mode",
+            ))
+        }
+        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::Cancelled) => {
+            Err(TraceDecayError::project_route(
+                "application.symbol-graph.ignored-dependency-cancelled",
+                false,
+                "ignored dependency indexing was cancelled",
+            ))
+        }
+        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::TimedOut) => {
+            Err(TraceDecayError::project_route(
+                "application.symbol-graph.ignored-dependency-timed-out",
+                true,
+                "ignored dependency indexing timed out",
+            ))
+        }
+        Err(CodeIndexIgnoredDependencyAdmissionErrorV1::Stale { active_generation }) => {
+            Err(TraceDecayError::project_route(
+                "application.symbol-graph.ignored-dependency-generation-stale",
+                true,
+                format!(
+                    "ignored dependency indexing rejected a stale source generation; active generation is {}",
+                    active_generation.as_str()
+                ),
+            ))
+        }
     }
-    Err(TraceDecayError::project_route(
-        "ignored_dependency_index_scheduler_unavailable",
-        true,
-        "ignored dependency indexing requires a bounded scheduler authority",
-    ))
 }
 
 fn ignored_dependency_candidates(
@@ -107,6 +169,14 @@ fn ignored_dependency_candidates(
         ));
     }
     graph.external_type_import_candidates(query, scope_prefix, limit.clamp(1, 20))
+}
+
+fn generation_advanced() -> TraceDecayError {
+    TraceDecayError::project_route(
+        "application.symbol-graph.ignored-dependency-generation-advanced",
+        true,
+        "ignored dependency indexing advanced the graph generation; retry the request",
+    )
 }
 
 pub(super) fn append_external_import_hint_md(md: &mut Md, value: &Value) {

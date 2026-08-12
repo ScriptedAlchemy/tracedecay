@@ -23,6 +23,7 @@ use crate::graph_projection::{
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 mod imports;
+mod warm_catalog;
 
 struct CancelledNow;
 

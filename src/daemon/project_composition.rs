@@ -226,6 +226,13 @@ pub(super) async fn production_project_server(
             canonical_project_path.to_path_buf(),
             code_search_scope.clone(),
         );
+    let code_index_ignored_dependency_admission =
+        project_open_owners::project_code_index_ignored_dependency_admission_port(
+            invocation.code_index_schedulers.clone(),
+            canonical_project_path.to_path_buf(),
+            code_search_scope.clone(),
+            !project_database_is_read_only,
+        );
     let generation_census_reader = project_open_owners::project_code_index_generation_census_reader(
         invocation.code_index_schedulers.clone(),
         canonical_project_path.to_path_buf(),
@@ -503,6 +510,9 @@ pub(super) async fn production_project_server(
     .with_code_index_search_executor(Arc::clone(&code_index_search_executor))
     .with_code_index_branch_diff_executor(Arc::clone(&code_index_branch_diff_executor))
     .with_code_graph_projection_read_port(Arc::clone(&code_graph_projection_read_port))
+    .with_code_index_ignored_dependency_admission(Arc::clone(
+        &code_index_ignored_dependency_admission,
+    ))
     .with_code_graph_read_admission_port(Arc::clone(&code_graph_read_admission_port))
     .with_code_index_search_authority(code_search_authority.clone())
     .with_project_server_live(Arc::clone(&route_registered))
@@ -869,6 +879,9 @@ pub(super) async fn production_project_server(
             .with_code_index_search_executor(code_index_search_executor)
             .with_code_index_branch_diff_executor(code_index_branch_diff_executor)
             .with_code_graph_projection_read_port(Arc::clone(&code_graph_projection_read_port))
+            .with_code_index_ignored_dependency_admission(Arc::clone(
+                &code_index_ignored_dependency_admission,
+            ))
             .with_code_graph_read_admission_port(Arc::clone(&code_graph_read_admission_port))
             .with_code_index_search_authority(code_search_authority)
             .with_project_server_live(Arc::clone(&route_registered))

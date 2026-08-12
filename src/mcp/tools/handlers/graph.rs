@@ -47,7 +47,9 @@ use primitive_surface::{
     semantic_search_mode as primitive_semantic_search_mode,
     symbol_location as primitive_symbol_location,
 };
-use search_evidence::{SearchGraphEvidence, race_primary_search_with_graph};
+use search_evidence::{
+    SearchGraphEvidence, bind_verified_graph_to_search, race_primary_search_with_graph,
+};
 
 use verified::{
     GRAPH_RELATION_READ_LIMIT, append_verified_plan_context, canonical_relation_kind,
@@ -203,6 +205,9 @@ pub(super) async fn handle_search<F>(
     scope_prefix: Option<&str>,
     search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
+    ignored_dependency_admission: Option<
+        &dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
+    >,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult>
@@ -250,16 +255,22 @@ where
         race_primary_search_with_graph(search, graph, lazy_indexing_requested).await;
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
-            let graph = search_evidence::bind_verified_graph_to_search(
-                graph,
-                &complete.code_generation,
-                lazy_indexing_requested && complete.ordered_candidates.is_empty(),
-                query,
-                scope_prefix,
-                deadline.as_ref(),
-                cancellation.as_ref(),
-            )
-            .await;
+            let graph = bind_verified_graph_to_search(graph, &complete.code_generation);
+            let graph = if lazy_indexing_requested && complete.ordered_candidates.is_empty() {
+                let graph = graph?;
+                dependency_hints::admit_verified_ignored_dependency(
+                    ignored_dependency_admission,
+                    &graph,
+                    query,
+                    scope_prefix,
+                    deadline.as_ref(),
+                    cancellation.as_ref(),
+                )
+                .await?;
+                Ok(graph)
+            } else {
+                graph
+            };
             let mut results = Vec::with_capacity(complete.ordered_candidates.len());
             let mut graph_evidence = SearchGraphEvidence::new(graph.as_ref());
             // The generation-bound display metadata names each result's
@@ -479,7 +490,8 @@ fn render_search_md(value: &Value) -> String {
     {
         md.blank().heading(3, "Index Coverage Hint").line(msg);
     }
-    search_evidence::append_search_evidence_md(&mut md, value);
+    dependency_hints::append_external_import_hint_md(&mut md, value);
+    search_evidence::append_verified_graph_evidence_md(&mut md, value);
     md.render()
 }
 
@@ -817,6 +829,9 @@ pub(super) async fn handle_find_exact_symbol(
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
     args: Value,
     scope_prefix: Option<&str>,
+    ignored_dependency_admission: Option<
+        &dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1,
+    >,
     deadline: Option<&tracedecay_application::Deadline>,
     cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
@@ -833,24 +848,16 @@ pub(super) async fn handle_find_exact_symbol(
 
     let mut nodes = graph.resolve_simple_name(name, None, limit.saturating_mul(4))?;
     nodes = graph_symbols_in_scope(nodes, scope_prefix)?;
-    let mut lazy_indexed_files = Vec::new();
     if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
-        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
+        dependency_hints::admit_verified_ignored_dependency(
+            ignored_dependency_admission,
             graph,
             name,
-            limit,
             scope_prefix,
             deadline,
             cancellation,
         )
         .await?;
-        if !lazy_indexed_files.is_empty() {
-            return Err(TraceDecayError::ProjectRoute {
-                reason_code: "verified-code-graph-generation-advanced".to_owned(),
-                retryable: true,
-                detail: "ignored dependencies were indexed after this request pinned its graph generation; retry the exact-symbol read".to_owned(),
-            });
-        }
     }
     if nodes.len() > limit {
         nodes.truncate(limit);
@@ -878,7 +885,6 @@ pub(super) async fn handle_find_exact_symbol(
         "name": name,
         "count": items.len(),
         "matches": items,
-        "lazy_indexed_ignored_dependency_files": lazy_indexed_files,
     });
     Ok(generic_tool_result(cg, &args, &body, touched_files))
 }

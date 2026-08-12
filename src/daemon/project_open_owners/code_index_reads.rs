@@ -1,5 +1,10 @@
 //! Exact-scope code-index read bridges for daemon project owners.
 
+mod ignored_dependency_admission;
+pub(crate) use ignored_dependency_admission::project_code_index_ignored_dependency_admission_port;
+#[cfg(test)]
+mod ignored_dependency_admission_tests;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

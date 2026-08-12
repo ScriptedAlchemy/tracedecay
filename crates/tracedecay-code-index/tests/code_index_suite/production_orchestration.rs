@@ -272,6 +272,7 @@ fn request_at_path(
         }],
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,
@@ -964,6 +965,7 @@ fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildReques
         captured_files: captured,
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
+        ignored_source_admissions: Vec::new(),
         repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
             tree: None,
             dirty: RepositoryDirtyStateV1::Dirty,

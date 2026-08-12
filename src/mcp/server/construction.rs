@@ -109,6 +109,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
     pub(crate) code_graph_projection_read_port: Option<super::CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port: Option<super::CodeGraphReadAdmissionPort>,
+    pub(crate) code_index_ignored_dependency_admission:
+        Option<super::CodeIndexIgnoredDependencyAdmissionPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_server_resolver: Option<super::RetainedProjectServerResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
@@ -215,6 +217,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
             retained_project_server_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
@@ -299,6 +302,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
             retained_project_server_resolver: None,
             project_routes,
@@ -359,6 +363,7 @@ impl McpServerConstructionContext {
             code_index_branch_diff_executor: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            code_index_ignored_dependency_admission: None,
             code_index_search_authority: None,
             retained_project_server_resolver: None,
             project_routes,
@@ -424,6 +429,14 @@ impl McpServerConstructionContext {
         port: super::CodeGraphReadAdmissionPort,
     ) -> Self {
         self.code_graph_read_admission_port = Some(port);
+        self
+    }
+
+    pub(crate) fn with_code_index_ignored_dependency_admission(
+        mut self,
+        admission: super::CodeIndexIgnoredDependencyAdmissionPort,
+    ) -> Self {
+        self.code_index_ignored_dependency_admission = Some(admission);
         self
     }
 

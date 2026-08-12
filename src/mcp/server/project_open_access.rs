@@ -1,8 +1,8 @@
 //! Project-open authority accessors installed on an MCP server.
 
 use super::{
-    CodeGraphProjectionReadPort, McpServer, SourceEditExecutor, SourceEditReconciliationExecutor,
-    SourceEditRollbackExecutor,
+    CodeGraphProjectionReadPort, CodeIndexIgnoredDependencyAdmissionPort, McpServer,
+    SourceEditExecutor, SourceEditReconciliationExecutor, SourceEditRollbackExecutor,
 };
 
 impl McpServer {
@@ -23,6 +23,12 @@ impl McpServer {
 
     pub(crate) fn code_graph_projection_read_port(&self) -> Option<CodeGraphProjectionReadPort> {
         self.code_graph_projection_read_port.clone()
+    }
+
+    pub(crate) fn code_index_ignored_dependency_admission(
+        &self,
+    ) -> Option<CodeIndexIgnoredDependencyAdmissionPort> {
+        self.code_index_ignored_dependency_admission.clone()
     }
 
     pub(crate) fn install_generation_census_reader(

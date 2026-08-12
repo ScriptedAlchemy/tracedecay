@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 use tracedecay_graph_db::{GraphCancellation, SealedGraphStateDigest};
 
 use super::{
@@ -12,6 +13,66 @@ use super::{
     DaemonCodeIndexPublicationStoreV1, DurablePublicationPointerV1, LatestCompleteCodeIndexV1,
 };
 use crate::code_index::graph_projection::CodeGraphProjectionStore;
+
+#[derive(Clone)]
+pub(super) enum CodeGraphActivationAuthorityV1 {
+    Persistent {
+        runtime:
+            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+        project_database: Arc<crate::db::Database>,
+    },
+    #[cfg(test)]
+    Memory,
+}
+
+impl CodeGraphActivationAuthorityV1 {
+    pub(super) async fn activate(
+        &self,
+        project_id: &ProjectId,
+        repository_id: &RepositoryId,
+        worktree_id: &WorktreeId,
+        latest: LatestCompleteCodeIndexV1,
+        replay_binding: CodeGraphReplayBindingV1,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        match self {
+            Self::Persistent {
+                runtime,
+                project_database,
+            } => {
+                let generation_id = latest.generation().manifest().generation_id.clone();
+                let retained = runtime
+                    .retain_code_graph_runtime(
+                        project_id.clone(),
+                        repository_id.clone(),
+                        worktree_id.clone(),
+                        latest.generation().snapshot().reference.clone(),
+                        generation_id,
+                        Arc::clone(project_database),
+                        replay_binding,
+                    )
+                    .await
+                    .map_err(|error| {
+                        CodeIndexSchedulerErrorV1::GraphActivation(error.to_string())
+                    })?;
+                tokio::task::spawn_blocking(move || {
+                    latest.activate_persistent_graph(retained, cancellation)
+                })
+                .await
+                .map_err(|error| {
+                    CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                        "code graph activation task failed: {error}"
+                    ))
+                })?
+            }
+            #[cfg(test)]
+            Self::Memory => {
+                latest.warm_serving_caches();
+                Ok(())
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CodeGraphReplayBindingV1 {
@@ -88,12 +149,15 @@ impl LatestCompleteCodeIndexV1 {
             snapshot,
             generation_id.clone(),
         )?);
+        let graph_cancellation: Arc<dyn GraphCancellation> =
+            Arc::new(SchedulerGraphCancellation(Arc::clone(&cancellation)));
+        store.warm_interactive_catalog_with_cancellation(Arc::clone(&graph_cancellation))?;
         let reader = store.evidence_reader_with_cancellation(
             &generation_id,
             Some(self.generation.snapshot().repository.clone()),
             self.source_freshness()
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?,
-            Arc::new(SchedulerGraphCancellation(cancellation)),
+            graph_cancellation,
         )?;
         self.install_query_owners(reader, CodeGraphServingAuthorityV1::Persistent(authority))
             .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;

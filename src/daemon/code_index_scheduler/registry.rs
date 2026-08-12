@@ -21,6 +21,7 @@ use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::LspRuntimeFailure;
 
+use super::graph_activation::CodeGraphActivationAuthorityV1;
 use super::{
     CodeIndexArrivalV1, CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1,
     CodeIndexCadenceReadModelV1, CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1,
@@ -30,25 +31,16 @@ use super::{
     PendingHintsV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
 };
 
+mod ignored_dependencies;
 mod lsp_projection;
 #[cfg(test)]
 mod runtime_generation_census_tests;
 mod scope_identity;
 
+use self::ignored_dependencies::exact_activated_serving_generation;
 pub(super) use scope_identity::{latest_matches_scope, latest_matches_scope_identity};
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
-
-#[derive(Clone)]
-enum CodeGraphActivationAuthorityV1 {
-    Persistent {
-        runtime:
-            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
-        project_database: Arc<crate::db::Database>,
-    },
-    #[cfg(test)]
-    Memory,
-}
 
 mod resident_memory;
 pub(super) mod watch_ingress;
@@ -136,6 +128,15 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         Option<Arc<dyn tracedecay_usecases::semantic_runtime::SemanticVectorGraphProviderV1>>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
+    graph_activation: CodeGraphActivationAuthorityV1,
+    ignored_dependency_admissions: Arc<
+        Mutex<
+            BTreeMap<
+                ignored_dependencies::AdmissionFlightKeyV1,
+                Arc<ignored_dependencies::AdmissionFlightV1>,
+            >,
+        >,
+    >,
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
@@ -750,6 +751,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let shutting_down = Arc::clone(&opened.shutting_down);
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
+        let ignored_dependency_admissions = Arc::new(Mutex::new(BTreeMap::new()));
         let pending_wake_micros = Arc::new(AtomicU64::new(0));
         let pending_wake_trigger = Arc::new(AtomicU64::new(0));
         let worker_scheduler = Arc::clone(&scheduler);
@@ -769,7 +771,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_project_id = project_id;
         let worker_repository_id = repository_id.clone();
         let worker_worktree_id = worktree_id.clone();
-        let worker_graph_activation = graph_activation;
+        let worker_graph_activation = graph_activation.clone();
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -828,50 +830,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 })
                 .await;
                 if let Ok((Ok(_), Some(latest), Some(replay_binding))) = &result {
-                    let activation = match &worker_graph_activation {
-                        CodeGraphActivationAuthorityV1::Persistent {
-                            runtime,
-                            project_database,
-                        } => {
-                            let generation_id =
-                                latest.generation().manifest().generation_id.clone();
-                            let retained = runtime
-                                .retain_code_graph_runtime(
-                                    worker_project_id.clone(),
-                                    worker_repository_id.clone(),
-                                    worker_worktree_id.clone(),
-                                    latest.generation().snapshot().reference.clone(),
-                                    generation_id.clone(),
-                                    Arc::clone(project_database),
-                                    replay_binding.clone(),
-                                )
-                                .await;
-                            match retained {
-                                Ok(retained) => {
-                                    let latest = latest.clone();
-                                    let cancellation = Arc::clone(&worker_shutting_down);
-                                    tokio::task::spawn_blocking(move || {
-                                        latest.activate_persistent_graph(retained, cancellation)
-                                    })
-                                    .await
-                                    .map_err(|error| {
-                                        CodeIndexSchedulerErrorV1::GraphActivation(format!(
-                                            "code graph activation task failed: {error}"
-                                        ))
-                                    })
-                                    .and_then(|outcome| outcome)
-                                }
-                                Err(error) => Err(CodeIndexSchedulerErrorV1::GraphActivation(
-                                    error.to_string(),
-                                )),
-                            }
-                        }
-                        #[cfg(test)]
-                        CodeGraphActivationAuthorityV1::Memory => {
-                            latest.warm_serving_caches();
-                            Ok(())
-                        }
-                    };
+                    let activation = worker_graph_activation
+                        .activate(
+                            &worker_project_id,
+                            &worker_repository_id,
+                            &worker_worktree_id,
+                            latest.clone(),
+                            replay_binding.clone(),
+                            Arc::clone(&worker_shutting_down),
+                        )
+                        .await;
                     if let Err(error) = activation {
                         result = Ok((Err(error), None, None));
                     }
@@ -880,26 +848,36 @@ impl CodeIndexSchedulerRegistryV1 {
                     let scheduler = Arc::clone(&worker_scheduler);
                     let serving_generation = Arc::clone(&worker_serving_generation);
                     let latest = latest.clone();
-                    if let Err(_error) = tokio::task::spawn_blocking(move || {
+                    let serving_swap = tokio::task::spawn_blocking(move || {
                         let scheduler = scheduler
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if !scheduler.active_publication_matches(&latest)? {
+                            return Err(CodeIndexSchedulerErrorV1::PublicationConflict(
+                                "the reconciled generation is no longer the active durable publication"
+                                    .to_owned(),
+                            ));
+                        }
                         *serving_generation
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) =
                             Some(latest.clone());
                         let _ = scheduler.schedule_semantic_generation(latest.generation());
+                        Ok::<_, CodeIndexSchedulerErrorV1>(())
                     })
-                    .await
-                    {
-                        let error = CodeIndexSchedulerErrorV1::SemanticSchedule(
-                            "hook task failed".to_owned(),
-                        );
-                        tracing::warn!(
-                            event = "code_index_semantic_schedule_failed",
-                            error = %error,
-                            "code-index generation is serving but semantic scheduling failed"
-                        );
+                    .await;
+                    match serving_swap {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => result = Ok((Err(error), None, None)),
+                        Err(error) => {
+                            result = Ok((
+                                Err(CodeIndexSchedulerErrorV1::SemanticSchedule(format!(
+                                    "serving-swap task failed: {error}"
+                                ))),
+                                None,
+                                None,
+                            ));
+                        }
                     }
                 }
                 if let Ok((Ok(outcome), _, _)) = &result {
@@ -971,6 +949,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 semantic_vector_graph_provider: None,
                 scheduler,
                 serving_generation,
+                graph_activation,
+                ignored_dependency_admissions,
                 hints,
                 wake: Arc::clone(&wake),
                 epoch,
@@ -1828,8 +1808,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let servable = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-                .or_else(|| scheduler.latest_complete_already_decoded());
+                .clone();
             if let Some(latest) = servable {
                 // Something is servable, so freshness is a background concern.
                 // Only record an arrival when the ladder actually asked for a
@@ -1844,9 +1823,6 @@ impl CodeIndexSchedulerRegistryV1 {
                         CodeIndexCadenceTriggerV1::QueryAdmission,
                     );
                 }
-                *serving_generation
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
                 return Some(latest);
             }
             // Cold open has no servable generation. Verification and any
@@ -1919,10 +1895,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .latest_complete_ready_for_query_with(admission)
                 .ok()
                 .flatten()?;
-            *serving_generation
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
-            Some(latest)
+            exact_activated_serving_generation(&serving_generation, &latest)
         })
         .await
         .ok()
@@ -2038,10 +2011,7 @@ impl CodeIndexSchedulerRegistryV1 {
         if !latest_matches_scope(&latest, scope) {
             return None;
         }
-        *serving_generation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
-        Some(latest)
+        exact_activated_serving_generation(&serving_generation, &latest)
     }
 
     /// Report an already-decoded current generation for one exact mounted root
@@ -2237,8 +2207,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let nothing_servable = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none()
-                && scheduler.latest_complete_already_decoded().is_none();
+                .is_none();
             // Nothing is servable at all, so the ladder's suppression cannot
             // apply: a reconcile is the only thing that can ever make this scope
             // answerable, and no other caller on this path will ask for it.

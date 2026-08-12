@@ -31,6 +31,9 @@ struct PersistedPublishedGenerationV1 {
     format_revision: CompatibleSealedFormatRevisionV1,
     manifest: CodeGenerationManifestV1,
     snapshot: SanitizedCodeSnapshotV1,
+    repository_parse_identity: CodeIndexRepositoryParseIdentityV1,
+    ignored_source_admissions: Vec<CodeIndexIgnoredSourceAdmissionV1>,
+    ignored_source_admissions_digest: ManifestDigest,
     files: Vec<PersistedFileGenerationArtifactsV1>,
     lineage: Vec<SymbolLineageCandidateV1>,
     coverage: CoverageSummaryV1,
@@ -70,6 +73,9 @@ struct PersistedPublishedGenerationRefV1<'a> {
     format_revision: u32,
     manifest: &'a CodeGenerationManifestV1,
     snapshot: &'a SanitizedCodeSnapshotV1,
+    repository_parse_identity: &'a CodeIndexRepositoryParseIdentityV1,
+    ignored_source_admissions: &'a [CodeIndexIgnoredSourceAdmissionV1],
+    ignored_source_admissions_digest: &'a ManifestDigest,
     files: Vec<PersistedFileGenerationArtifactsRefV1<'a>>,
     lineage: &'a [SymbolLineageCandidateV1],
     coverage: CoverageSummaryV1,
@@ -133,6 +139,9 @@ impl CodeIndexPublishedGenerationV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
             manifest: &self.manifest,
             snapshot: &self.snapshot,
+            repository_parse_identity: &self.repository_parse_identity,
+            ignored_source_admissions: self.ignored_source_roster.admissions(),
+            ignored_source_admissions_digest: self.ignored_source_roster.digest(),
             files: self
                 .files
                 .iter()
@@ -183,6 +192,14 @@ impl CodeIndexPublishedGenerationV1 {
             ));
         }
 
+        let repository_parse_identity = envelope.generation.repository_parse_identity;
+        let ignored_source_roster = IgnoredSourceRosterV1::restore(
+            &envelope.generation.snapshot,
+            &repository_parse_identity,
+            envelope.generation.ignored_source_admissions,
+            envelope.generation.ignored_source_admissions_digest,
+        )?;
+
         let mut files = Vec::with_capacity(envelope.generation.files.len());
         for file in envelope.generation.files {
             let exact_authority = ExactExtractionAuthorityV1::restore(&file.artifacts.chunks)
@@ -220,6 +237,8 @@ impl CodeIndexPublishedGenerationV1 {
         let generation = Self {
             manifest: envelope.generation.manifest,
             snapshot: envelope.generation.snapshot,
+            repository_parse_identity,
+            ignored_source_roster,
             files,
             chunks,
             symbols,

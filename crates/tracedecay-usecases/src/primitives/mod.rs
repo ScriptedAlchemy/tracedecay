@@ -6,10 +6,12 @@ pub mod production;
 pub mod runtime;
 mod support;
 pub mod symbol_graph;
+#[cfg(test)]
+mod symbol_graph_ignored_dependency_tests;
 
 pub use concrete::{
-    AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshotAuthority,
-    SymbolGraphCursorSnapshotFuture,
+    AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshot,
+    SymbolGraphCursorSnapshotAuthority, SymbolGraphCursorSnapshotFuture,
 };
 pub use grep_analysis::{
     TraceDecayAstGrepAuthorityV1, TraceDecayComplexityAuthorityV1,

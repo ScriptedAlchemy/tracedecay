@@ -17,7 +17,14 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId, UtcMicros};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::types::NodeKind;
-use tracedecay_temporal_query::ports::TemporalExecutionSnapshot;
+
+mod ignored_dependency;
+
+#[cfg(test)]
+pub(super) use self::ignored_dependency::ignored_dependency_candidate_failure;
+use self::ignored_dependency::{admit_ignored_dependency, validate_claim_generation};
+use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
+use crate::primitives::concrete::SymbolGraphCursorSnapshot;
 
 const MAX_COMPATIBILITY_RESULTS: usize = 500;
 const MAX_IMPLEMENTATION_RESULTS: usize = 200;
@@ -33,16 +40,8 @@ pub type SymbolGraphCursorFuture<'a, T> =
 /// served under a generation other than the one its claim was minted against.
 #[derive(Debug)]
 pub struct SymbolGraphPageClaim {
-    pub(super) snapshot: TemporalExecutionSnapshot,
+    pub(super) snapshot: SymbolGraphCursorSnapshot,
     pub(super) offset: usize,
-}
-
-impl SymbolGraphPageClaim {
-    /// Offset into the claimed generation's result set at which this page
-    /// starts. Zero for a first page; the resumed cursor's offset otherwise.
-    pub const fn offset(&self) -> usize {
-        self.offset
-    }
 }
 
 /// Adapter into the existing authenticated opaque-cursor authority. This
@@ -116,15 +115,7 @@ where
 pub struct CanonicalSymbolGraphAdapter<C> {
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     cursors: C,
-}
-
-impl<C> CanonicalSymbolGraphAdapter<C> {
-    pub fn new(code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>, cursors: C) -> Self {
-        Self {
-            code_graph,
-            cursors,
-        }
-    }
+    ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
 }
 
 impl<C> SymbolGraphPrimitivePort for CanonicalSymbolGraphAdapter<C>
@@ -146,6 +137,9 @@ where
             let Ok(graph) = open_graph(&self.code_graph, context).await else {
                 return failed(context, "canonical symbol search failed");
             };
+            if let Err(failure) = validate_claim_generation(&claim, &graph.reader) {
+                return failed_with(context, failure);
+            }
             let Ok(symbols) = all_symbols(&graph.reader, Arc::clone(&graph.cancellation)) else {
                 return failed(context, "canonical symbol search failed");
             };
@@ -168,17 +162,22 @@ where
             let Ok(records) = records else {
                 return failed(context, "canonical symbol search evidence was incomplete");
             };
-            let gaps = request
-                .lazy_index_ignored_dependencies
-                .then(|| {
-                    support_gap(
-                        Some("ignored-dependency-lazy-index"),
-                        None,
-                        "lazy dependency indexing remains provider-owned",
-                    )
-                })
-                .into_iter()
-                .collect();
+            if let Err(failure) = admit_ignored_dependency(
+                self.ignored_dependency_admission.as_ref(),
+                context,
+                &graph,
+                &self.cursors,
+                "search",
+                &claim,
+                records.is_empty(),
+                request.lazy_index_ignored_dependencies,
+                request.query.as_str(),
+                &request.scope,
+            )
+            .await
+            {
+                return failed_with(context, failure);
+            }
             complete_or_failed(
                 &self.cursors,
                 context,
@@ -186,7 +185,7 @@ where
                 "search",
                 &claim,
                 records,
-                gaps,
+                Vec::new(),
                 None,
             )
             .await
@@ -207,6 +206,9 @@ where
             let Ok(graph) = open_graph(&self.code_graph, context).await else {
                 return failed(context, "exact symbol lookup failed");
             };
+            if let Err(failure) = validate_claim_generation(&claim, &graph.reader) {
+                return failed_with(context, failure);
+            }
             let Ok(nodes) = graph.reader.resolve_simple_name(
                 &request.name,
                 None,
@@ -223,17 +225,22 @@ where
             let Ok(records) = records else {
                 return failed(context, "exact symbol evidence was incomplete");
             };
-            let gaps = request
-                .lazy_index_ignored_dependencies
-                .then(|| {
-                    support_gap(
-                        Some("ignored-dependency-lazy-index"),
-                        None,
-                        "lazy dependency indexing remains provider-owned",
-                    )
-                })
-                .into_iter()
-                .collect();
+            if let Err(failure) = admit_ignored_dependency(
+                self.ignored_dependency_admission.as_ref(),
+                context,
+                &graph,
+                &self.cursors,
+                "exact",
+                &claim,
+                records.is_empty(),
+                request.lazy_index_ignored_dependencies,
+                &request.name,
+                &request.scope,
+            )
+            .await
+            {
+                return failed_with(context, failure);
+            }
             complete_or_failed(
                 &self.cursors,
                 context,
@@ -241,7 +248,7 @@ where
                 "exact",
                 &claim,
                 records,
-                gaps,
+                Vec::new(),
                 None,
             )
             .await
@@ -1148,17 +1155,4 @@ fn primitive_failure(
 ) -> PrimitiveFailure {
     PrimitiveFailure::new(kind, code, message)
         .unwrap_or_else(|_| panic!("static primitive failure is valid"))
-}
-
-fn support_gap(
-    provider: Option<&str>,
-    language: Option<&str>,
-    reason: &'static str,
-) -> PrimitiveSupportGap {
-    PrimitiveSupportGap::unsupported(
-        provider.map(str::to_owned),
-        language.map(str::to_owned),
-        reason,
-    )
-    .unwrap_or_else(|_| panic!("static support gap is valid"))
 }

@@ -4,14 +4,18 @@
 //! cancellation and deadline state. This adapter does not decode controls
 //! from client data or create a second publication authority.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use tracedecay_application::RequestContext;
+use tracedecay_domain::CodeGenerationId;
 
 use crate::context::{CancellationToken, RequestInterruption, application_request_interruption};
 use tracedecay_code_index::{
+    chunks::CodeIndexImportEvidenceV1,
     production::{
         CodeIndexAtomicPublicationPort, CodeIndexExecutionControlV1, CodeIndexProductionConfigV1,
         CodeIndexProductionOpenErrorV1, CodeIndexProductionOwnerV1,
@@ -21,6 +25,67 @@ use tracedecay_code_index::{
 
 /// Production owner type exposed to daemon, CLI, MCP, and hook composition.
 pub type ProductionCodeIndexOwnerV1<P, S> = CodeIndexProductionOwnerV1<P, S>;
+
+/// One admitted lazy-index request, pinned to the graph generation whose
+/// verified parser evidence motivated it.
+pub struct CodeIndexIgnoredDependencyAdmissionRequestV1<'a> {
+    context: &'a RequestContext,
+    source_generation: &'a CodeGenerationId,
+    imports: &'a [CodeIndexImportEvidenceV1],
+}
+
+impl<'a> CodeIndexIgnoredDependencyAdmissionRequestV1<'a> {
+    pub fn new(
+        context: &'a RequestContext,
+        source_generation: &'a CodeGenerationId,
+        imports: &'a [CodeIndexImportEvidenceV1],
+    ) -> Self {
+        Self {
+            context,
+            source_generation,
+            imports,
+        }
+    }
+
+    pub const fn context(&self) -> &RequestContext {
+        self.context
+    }
+
+    pub const fn source_generation(&self) -> &CodeGenerationId {
+        self.source_generation
+    }
+
+    pub const fn imports(&self) -> &[CodeIndexImportEvidenceV1] {
+        self.imports
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexIgnoredDependencyAdmissionErrorV1 {
+    Unavailable { detail: String },
+    ReadOnly,
+    Cancelled,
+    TimedOut,
+    Stale { active_generation: CodeGenerationId },
+}
+
+pub type CodeIndexIgnoredDependencyAdmissionFutureV1<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<CodeGenerationId, CodeIndexIgnoredDependencyAdmissionErrorV1>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// Transport-neutral scheduling seam for parser-verified ignored dependency
+/// imports. Implementations may advance the canonical code-index generation;
+/// they may not return symbols directly.
+pub trait CodeIndexIgnoredDependencyAdmissionPortV1: Send + Sync {
+    fn admit<'a>(
+        &'a self,
+        request: CodeIndexIgnoredDependencyAdmissionRequestV1<'a>,
+    ) -> CodeIndexIgnoredDependencyAdmissionFutureV1<'a>;
+}
 
 /// Adapt one already-authorized application request to synchronous code-index
 /// checkpoints. The owner checks this control before and after every bounded

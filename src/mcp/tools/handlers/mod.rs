@@ -275,6 +275,8 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port:
         Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
+    pub(crate) code_index_ignored_dependency_admission:
+        Option<crate::mcp::server::CodeIndexIgnoredDependencyAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.
     pub(crate) generation_census_reader: Option<crate::runtime_telemetry::GenerationCensusReader>,
     /// Retained server authority consumed by the dashboard boundary. Project
@@ -326,6 +328,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_index_search_authority: None,
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
+            code_index_ignored_dependency_admission: None,
             generation_census_reader: None,
             retained_project_server_resolver: None,
             session_sync_service: None,
