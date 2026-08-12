@@ -826,6 +826,15 @@ fn parse_http_header_document(
         return Ok(None);
     };
     let has_start_line = is_http_start_line(first);
+    let has_indented_mapping_member = !has_start_line
+        && looks_like_yaml_mapping(first)
+        && text.lines().skip(1).any(|line| {
+            let content = line.trim_start_matches(' ');
+            content.len() != line.len() && looks_like_yaml_mapping(content)
+        });
+    if has_indented_mapping_member {
+        return Ok(None);
+    }
     if !has_start_line
         && !first
             .split_once(':')

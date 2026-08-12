@@ -87,7 +87,7 @@ punctuation, and it still redacts a value whose quote the record truncated.
 """
 kind = "credential_assignment"
 profiles = ["observation"]
-regex = '''(?i)\b(?:api[_ -]?(?:key|token)|secret|token|passwd|password|credential|private[_ -]?key|access[_ -]?(?:key|token)|client[_ -]?secret)\b[ \t]*[:=][ \t]*'''
+regex = '''(?i)\b(?:api[_ -]?(?:key|token)|secret|token|passwd|password|passphrase|credential|private[_ -]?key|access[_ -]?(?:key|token)|client[_ -]?secret)\b[ \t]*[:=][ \t]*'''
 assignment_min_len = 6
 
 [[rules]]

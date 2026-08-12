@@ -122,7 +122,7 @@ fn url_query_sensitive_field_is_detected_only_after_parsing() {
 fn http_header_sensitive_field_is_detected_only_after_parsing() {
     assert_detected_only_by_parsing(
         &format!(
-            "GET /v1/session HTTP/1.1\nHost: example.test\nX-Vault-Passphrase: {PLACEHOLDER}\n"
+            "GET /v1/session HTTP/1.1\nHost: example.test\nX-Vault_Passphrase: {PLACEHOLDER}\n"
         ),
         StructuredTextFormatV1::HttpHeaders,
     );
