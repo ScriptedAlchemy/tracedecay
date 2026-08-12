@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex};
 use tracedecay_application::{
     AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
     CancellationSignal, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    NativeIntegrationSelectionBindingV1, NativeIntegrationStackResolutionOutcomeV1,
-    NativeIntegrationStackResolutionPort, NativeIntegrationStackResolutionRequestV1,
-    RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
+    NativeIntegrationPortError, NativeIntegrationSelectionBindingV1,
+    NativeIntegrationStackResolutionOutcomeV1, NativeIntegrationStackResolutionPort,
+    NativeIntegrationStackResolutionRequestV1, RegisteredRootLocatorV1, RequestContext, RequestId,
+    ResolvedScope,
 };
 use tracedecay_code_index::git_projection::{
     GitTopologyProjectionError, GitTopologyProjectionStore, git_topology_namespace,
@@ -57,6 +58,7 @@ struct VerifiedSnapshotRuntime {
     locator: VerifiedStoreLocatorV1,
     snapshots: Mutex<Vec<VerifiedGraphSnapshot>>,
     cancelled: AtomicBool,
+    cancel_on_publish: Mutex<Option<CancellationSignal>>,
 }
 
 impl Default for VerifiedSnapshotRuntime {
@@ -67,13 +69,13 @@ impl Default for VerifiedSnapshotRuntime {
 
 impl VerifiedSnapshotRuntime {
     fn for_project(project_id: ProjectId) -> Self {
-        Self::for_project_and_profile(
+        Self::for_scope(
             project_id,
-            UserProfileId::new("profile.native-topology-fixture").expect("profile id"),
+            UserProfileId::new("profile.native-declared-topology").expect("profile id"),
         )
     }
 
-    fn for_project_and_profile(project_id: ProjectId, profile_id: UserProfileId) -> Self {
+    fn for_scope(project_id: ProjectId, profile_id: UserProfileId) -> Self {
         let shard_id = StoreShardIdV1::project(
             BrainId::new("brain.native-topology-fixture").expect("brain id"),
             profile_id,
@@ -93,7 +95,15 @@ impl VerifiedSnapshotRuntime {
             ),
             snapshots: Mutex::new(Vec::new()),
             cancelled: AtomicBool::new(false),
+            cancel_on_publish: Mutex::new(None),
         }
+    }
+
+    fn cancel_request_on_publish(&self, cancellation: CancellationSignal) {
+        *self
+            .cancel_on_publish
+            .lock()
+            .expect("publish cancellation mutex") = Some(cancellation);
     }
 
     fn snapshot(&self, projection: &GraphProjectionIdentity) -> VerifiedGraphSnapshot {
@@ -130,6 +140,14 @@ impl VerifiedGraphRuntimePortV1 for VerifiedSnapshotRuntime {
         _idempotency_key: GraphIdempotencyKey,
         cancelled: Arc<AtomicBool>,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
+        if let Some(cancellation) = self
+            .cancel_on_publish
+            .lock()
+            .expect("publish cancellation mutex")
+            .take()
+        {
+            cancellation.cancel(UtcMicros(11));
+        }
         if cancelled.load(Ordering::Acquire) || self.cancelled.load(Ordering::Acquire) {
             return Err(GraphDbError::Cancelled);
         }
@@ -474,11 +492,12 @@ fn resolver(
     request: &DeclaredStackRequest,
     runtime: Arc<VerifiedSnapshotRuntime>,
 ) -> ExactPairNativeIntegrationTopology {
+    let expected_shard = runtime.relational_binding().shard_id.clone();
     ExactPairNativeIntegrationTopology::open_with_graph_runtime(
         request.project.clone(),
-        &runtime.binding.shard_id.profile_id,
         request.repository.clone(),
         fixture.root(),
+        expected_shard,
         runtime,
     )
     .expect("open declared-stack resolver")
@@ -578,11 +597,12 @@ fn declared_stack_outside_the_enrolled_project_is_denied() {
     let other_project =
         ProjectId::new("project.native-declared-topology.other").expect("other project");
     let runtime = Arc::new(VerifiedSnapshotRuntime::for_project(other_project.clone()));
+    let expected_shard = runtime.relational_binding().shard_id.clone();
     let resolver = ExactPairNativeIntegrationTopology::open_with_graph_runtime(
         other_project,
-        &runtime.binding.shard_id.profile_id,
         declared.repository.clone(),
         fixture.root(),
+        expected_shard,
         runtime,
     )
     .expect("open unrelated resolver");
@@ -604,40 +624,114 @@ fn native_topology_rejects_a_foreign_graph_runtime_binding() {
     let foreign = Arc::new(VerifiedSnapshotRuntime::for_project(
         ProjectId::new("project.native-declared-topology.foreign").expect("foreign project"),
     ));
+    let expected_shard = StoreShardIdV1::project(
+        foreign.binding.shard_id.brain_id.clone(),
+        foreign.binding.shard_id.profile_id.clone(),
+        project.clone(),
+    );
 
-    assert!(
+    assert_eq!(
         ExactPairNativeIntegrationTopology::open_with_graph_runtime(
             project,
-            &foreign.binding.shard_id.profile_id,
             RepositoryId::new("repository.native-declared-topology").expect("repository"),
             fixture.root(),
+            expected_shard,
             foreign,
         )
-        .is_err()
+        .err(),
+        Some(NativeIntegrationPortError::Unavailable)
     );
 }
 
 #[test]
-fn native_topology_rejects_the_same_project_from_a_foreign_profile() {
+fn native_topology_rejects_an_incoherent_verified_locator() {
     let fixture = NativeGitFixture::new();
     let project = ProjectId::new("project.native-declared-topology").expect("project");
-    let expected_profile =
-        UserProfileId::new("profile.native-topology-fixture").expect("expected profile");
-    let foreign = Arc::new(VerifiedSnapshotRuntime::for_project_and_profile(
-        project.clone(),
-        UserProfileId::new("profile.native-topology-fixture.foreign").expect("foreign profile"),
-    ));
+    let mut incoherent = VerifiedSnapshotRuntime::for_project(project.clone());
+    let expected_shard = incoherent.binding.shard_id.clone();
+    incoherent.locator = VerifiedStoreLocatorV1::new(
+        incoherent.binding.shard_id.clone(),
+        StoreIncarnationV1::new(2).expect("different locator incarnation"),
+        LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).expect("locator digest"),
+    );
 
-    assert!(
+    assert_eq!(
         ExactPairNativeIntegrationTopology::open_with_graph_runtime(
             project,
-            &expected_profile,
             RepositoryId::new("repository.native-declared-topology").expect("repository"),
             fixture.root(),
-            foreign,
+            expected_shard,
+            Arc::new(incoherent),
         )
-        .is_err()
+        .err(),
+        Some(NativeIntegrationPortError::Unavailable)
     );
+}
+
+#[test]
+fn native_topology_rejects_a_same_project_foreign_brain_runtime() {
+    let fixture = NativeGitFixture::new();
+    let project = ProjectId::new("project.native-declared-topology").expect("project");
+    let runtime = Arc::new(VerifiedSnapshotRuntime::for_project(project.clone()));
+    let expected_shard = StoreShardIdV1::project(
+        BrainId::new("brain.native-topology-expected").expect("expected brain"),
+        runtime.binding.shard_id.profile_id.clone(),
+        project.clone(),
+    );
+
+    assert_eq!(
+        ExactPairNativeIntegrationTopology::open_with_graph_runtime(
+            project,
+            RepositoryId::new("repository.native-declared-topology").expect("repository"),
+            fixture.root(),
+            expected_shard,
+            runtime,
+        )
+        .err(),
+        Some(NativeIntegrationPortError::Unavailable)
+    );
+}
+
+#[test]
+fn declared_stack_with_a_foreign_profile_graph_runtime_is_unavailable() {
+    let fixture = NativeGitFixture::new();
+    let declared = declared_stack_request(&fixture, "branch-stack-revision.native.profile");
+    let runtime = Arc::new(VerifiedSnapshotRuntime::for_scope(
+        declared.project.clone(),
+        UserProfileId::new("profile.native-declared-topology.foreign").expect("foreign profile"),
+    ));
+    let resolver = resolver(&fixture, &declared, runtime);
+    let cancellation = CancellationSignal::active("cancel.native-declared-topology.profile")
+        .expect("cancellation");
+
+    assert_eq!(
+        resolver
+            .resolve(&declared.request, &cancellation)
+            .expect("foreign-profile declared-stack resolution"),
+        NativeIntegrationStackResolutionOutcomeV1::Unavailable
+    );
+}
+
+#[test]
+fn declared_stack_cancellation_after_graph_commit_admission_returns_complete() {
+    let fixture = NativeGitFixture::new();
+    fixture.advance_feature("cancelled feature revision\n");
+    let declared = declared_stack_request(&fixture, "branch-stack-revision.native.cancelled");
+    let runtime = Arc::new(VerifiedSnapshotRuntime::default());
+    let resolver = resolver(&fixture, &declared, Arc::clone(&runtime));
+    let cancellation = CancellationSignal::active("cancel.native-declared-topology.publication")
+        .expect("cancellation");
+    runtime.cancel_request_on_publish(cancellation.clone());
+
+    expect_declared_stack(
+        resolver
+            .resolve(&declared.request, &cancellation)
+            .expect("cancelled declared-stack resolution"),
+        &declared.revision,
+    );
+    assert_eq!(cancellation.cancelled_at(), Some(UtcMicros(11)));
+    let published = projection_store(&runtime, &declared.repository);
+    assert_eq!(published.repository(), &declared.repository);
 }
 
 #[test]

@@ -25,9 +25,11 @@ use tracedecay_application::{
     ResolvedScope,
 };
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, RepositoryId, ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros,
+    ManifestDigest, ProjectId, RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros,
 };
-use tracedecay_store::{NativeIntegrationStore, NativeIntegrationStoreResult};
+use tracedecay_store::{
+    NativeIntegrationStore, NativeIntegrationStoreResult, StoreShardIdV1, StoreShardScopeV1,
+};
 use tracedecay_usecases::native_integration::{
     DaemonNativeIntegrationAuthorization, ExactPairNativeIntegrationTopology,
     GixNativeIntegrationAdapter, NativeIntegrationTransactionCoordinator,
@@ -404,7 +406,21 @@ impl DaemonNativeIntegrationServiceRegistry {
             .project_graph_runtime()
             .cloned()
             .ok_or(NativeIntegrationPortError::Unavailable)?;
-        let graph_profile_id = database.binding().shard_id.profile_id.clone();
+        let session_shard = &database.binding().shard_id;
+        let StoreShardScopeV1::ProjectSessions {
+            project_id: session_project,
+        } = &session_shard.scope
+        else {
+            return Err(NativeIntegrationPortError::Unavailable);
+        };
+        if session_project != &project_id {
+            return Err(NativeIntegrationPortError::Unavailable);
+        }
+        let expected_graph_shard = StoreShardIdV1::project(
+            session_shard.brain_id.clone(),
+            session_shard.profile_id.clone(),
+            project_id.clone(),
+        );
         self.ensure_with(
             database_path,
             repository_root,
@@ -413,8 +429,8 @@ impl DaemonNativeIntegrationServiceRegistry {
             policy_digest,
             observed_at,
             Some(scope_sets),
+            Some(expected_graph_shard),
             Some(graph_runtime),
-            Some(graph_profile_id),
             || self.stores.ensure(database),
         )
         .await
@@ -472,8 +488,8 @@ impl DaemonNativeIntegrationServiceRegistry {
         policy_digest: ManifestDigest,
         observed_at: UtcMicros,
         scope_sets: Option<AuthorizedScopeSetSqliteStorage>,
+        expected_graph_shard: Option<StoreShardIdV1>,
         graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
-        graph_profile_id: Option<UserProfileId>,
         open_store: F,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError>
     where
@@ -509,29 +525,29 @@ impl DaemonNativeIntegrationServiceRegistry {
         let recovery_store = store.clone();
         let native_root = repository_root.clone();
         let topology_runtime = graph_runtime.clone();
+        let topology_shard = expected_graph_shard.clone();
         let worktree_scope_sets = scope_sets.clone();
         let owner_project_id = project_id.clone();
         let owner_repository_id = repository_id.clone();
         let (owner_project_id, owner_repository_id, service, snapshots, worktrees) =
             tokio::task::spawn_blocking(move || {
                 let topology = SharedProjectNativeIntegrationTopology {
-                    inner: Arc::new(match topology_runtime {
-                        Some(runtime) => {
+                    inner: Arc::new(match (topology_shard, topology_runtime) {
+                        (Some(expected_shard), Some(runtime)) => {
                             ExactPairNativeIntegrationTopology::open_with_graph_runtime(
                                 owner_project_id.clone(),
-                                graph_profile_id
-                                    .as_ref()
-                                    .ok_or(NativeIntegrationPortError::Unavailable)?,
                                 owner_repository_id.clone(),
                                 &native_root,
+                                expected_shard,
                                 runtime,
                             )?
                         }
-                        None => ExactPairNativeIntegrationTopology::open(
+                        (None, None) => ExactPairNativeIntegrationTopology::open(
                             owner_project_id.clone(),
                             owner_repository_id.clone(),
                             &native_root,
                         )?,
+                        _ => return Err(NativeIntegrationPortError::Unavailable),
                     }),
                 };
                 let native = GixNativeIntegrationAdapter::open(

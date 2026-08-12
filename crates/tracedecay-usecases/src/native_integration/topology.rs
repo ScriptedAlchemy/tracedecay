@@ -27,12 +27,12 @@ use tracedecay_code_index::git_projection::{
 use tracedecay_domain::{
     BranchStackRevisionV1, FrozenBranchStackSnapshotV1, FrozenIndependentBranchSelectionV1,
     GitHeadStateV1, GitOidV1, NativeIntegrationSelectionV1, ProjectId, RefId, RepositoryId,
-    UserProfileId, WorktreeId,
+    WorktreeId,
 };
 use tracedecay_global_db::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{GraphCancellation, GraphProjectorRevision};
 use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
-use tracedecay_store::{FactReadControl, StoreShardScopeV1};
+use tracedecay_store::{FactReadControl, StoreShardIdV1, StoreShardScopeV1};
 
 use super::{domain_error, native_error};
 use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
@@ -65,7 +65,6 @@ impl ExactPairNativeIntegrationTopology {
     ) -> Result<Self, NativeIntegrationPortError> {
         Self::open_with_optional_graph_runtime(
             project_id,
-            None,
             repository_id,
             enrolled_repository_root,
             None,
@@ -74,44 +73,40 @@ impl ExactPairNativeIntegrationTopology {
 
     pub fn open_with_graph_runtime(
         project_id: ProjectId,
-        expected_profile_id: &UserProfileId,
         repository_id: RepositoryId,
         enrolled_repository_root: &Path,
+        expected_graph_shard: StoreShardIdV1,
         graph_runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
     ) -> Result<Self, NativeIntegrationPortError> {
         Self::open_with_optional_graph_runtime(
             project_id,
-            Some(expected_profile_id),
             repository_id,
             enrolled_repository_root,
-            Some(graph_runtime),
+            Some((expected_graph_shard, graph_runtime)),
         )
     }
 
     fn open_with_optional_graph_runtime(
         project_id: ProjectId,
-        expected_profile_id: Option<&UserProfileId>,
         repository_id: RepositoryId,
         enrolled_repository_root: &Path,
-        graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
+        graph_runtime: Option<(StoreShardIdV1, Arc<dyn VerifiedGraphRuntimePortV1>)>,
     ) -> Result<Self, NativeIntegrationPortError> {
         project_id.validate().map_err(domain_error)?;
         repository_id.validate().map_err(domain_error)?;
-        if let Some(runtime) = &graph_runtime {
+        if let Some((expected_shard, runtime)) = &graph_runtime {
             let binding = runtime.relational_binding();
             let locator = runtime.relational_verified_locator();
             let exact_project = matches!(
-                &binding.shard_id.scope,
+                &expected_shard.scope,
                 StoreShardScopeV1::Project { project_id: bound } if bound == &project_id
             );
             if !exact_project
-                || expected_profile_id != Some(&binding.shard_id.profile_id)
+                || &binding.shard_id != expected_shard
                 || locator.shard_id != binding.shard_id
                 || locator.incarnation != binding.incarnation
             {
-                return Err(NativeIntegrationPortError::Native(
-                    "verified graph runtime does not match the enrolled project".to_owned(),
-                ));
+                return Err(NativeIntegrationPortError::Unavailable);
             }
         }
         let repository =
@@ -121,7 +116,7 @@ impl ExactPairNativeIntegrationTopology {
             repository_id,
             repository_root: enrolled_repository_root.to_path_buf(),
             repository,
-            graph_runtime,
+            graph_runtime: graph_runtime.map(|(_, runtime)| runtime),
         })
     }
 
@@ -181,6 +176,22 @@ impl ExactPairNativeIntegrationTopology {
         {
             return Ok(NativeIntegrationStackResolutionOutcomeV1::Denied);
         }
+        let runtime_profile = &runtime.relational_binding().shard_id.profile_id;
+        let exact_profile = request
+            .authorized_scope_set
+            .roots()
+            .iter()
+            .filter(|root| {
+                root.scope().project_id == self.project_id
+                    && root.scope().repository_id == self.repository_id
+            })
+            .all(|root| {
+                root.locator()
+                    .is_some_and(|locator| &locator.profile.profile_id == runtime_profile)
+            });
+        if !exact_profile {
+            return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable);
+        }
         let (binding, occupancies) =
             match self.verify_declared_authority(request, declared_revision, cancellation) {
                 Ok(value) => value,
@@ -200,7 +211,6 @@ impl ExactPairNativeIntegrationTopology {
             Ok(identity) => identity,
             Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
         };
-        let cancelled = Arc::new(AtomicBool::new(false));
         let read_cancellation = cancellation.clone();
         let previous = match runtime.verified_snapshot(
             &identity,
@@ -278,6 +288,7 @@ impl ExactPairNativeIntegrationTopology {
             Ok(idempotency) => idempotency,
             Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
         };
+        let cancelled = Arc::new(AtomicBool::new(cancellation.is_cancelled()));
         if runtime
             .publish_verified_manifest(&manifest, idempotency, cancelled)
             .is_err()
