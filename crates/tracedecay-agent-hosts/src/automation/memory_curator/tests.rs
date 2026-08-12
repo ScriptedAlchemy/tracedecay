@@ -55,10 +55,23 @@ fn settled_curation_receipt() -> ProjectMemoryFactCurationReceiptV1 {
 }
 
 fn all_noop_curation_receipt() -> ProjectMemoryFactCurationReceiptV1 {
-    let duplicate = FactId::new(format!("fact.{}.{}", "0".repeat(64), "1".repeat(64))).unwrap();
-    let absent = FactId::new(format!("fact.{}.{}", "0".repeat(64), "2".repeat(64))).unwrap();
+    let owner = FactOwnerV1::Profile;
+    let derive_fact_id = |operation_id: &str| {
+        FactId::derive(
+            &FactIdentityMaterialV1::new(
+                owner.clone(),
+                FactIdentitySourceV1::Application {
+                    operation_id: ProvenanceId::new(operation_id).unwrap(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let duplicate = derive_fact_id("operation.curator.all-noop.duplicate");
+    let absent = derive_fact_id("operation.curator.all-noop.absent");
     serde_json::from_value(json!({
-        "owner": FactOwnerV1::Profile,
+        "owner": owner,
         "operation_id": ProvenanceId::new("operation.curator.all-noop").unwrap(),
         "input_digest": "b".repeat(64),
         "automation_run_id": tracedecay_domain::RunId::new("run.curator.all-noop").unwrap(),
@@ -187,7 +200,7 @@ fn all_noop_curation_is_settled_without_claiming_a_store_mutation() {
             .unwrap(),
     };
     let operations = vec![json!({"op": "add"}), json!({"op": "remove"})];
-    let evidence = "c".repeat(64);
+    let evidence = crate::automation::artifacts::sha256_bytes(b"all-noop curation evidence");
     let decision = memory_curation_decision(
         &AutomationConfig::default(),
         &authority,
