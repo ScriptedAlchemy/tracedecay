@@ -17,7 +17,11 @@ pub use production::{
     ProductionCiProviderOpenErrorV1, discover_production_ci_failure_request_v1,
     open_production_ci_provider_authorities_v1, unavailable_production_ci_provider_authorities_v1,
 };
-pub use stores::{ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1};
+pub use stores::{
+    CiRetainedObservationManifestEntryV1, CiRetainedObservationManifestLoadOutcomeV1,
+    CiRetainedObservationManifestV1, MAX_CI_RETAINED_OBSERVATION_MANIFEST_ENTRIES_V1,
+    ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
+};
 
 use tracedecay_application::RequestContext;
 use tracedecay_application::feedback::{

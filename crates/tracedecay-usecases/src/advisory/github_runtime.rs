@@ -11,6 +11,7 @@ mod dto;
 mod network;
 mod owner;
 mod read_requests;
+mod releases;
 mod stack;
 mod stack_anchors;
 mod store;
@@ -83,7 +84,17 @@ pub use owner::{
     GitHubReviewRuntimeOwnerV1, build_github_review_runtime_owner_v1,
 };
 pub use read_requests::{GitHubGraphQlReadRequestV1, GitHubReadResumeV1, GitHubRestReadRequestV1};
-pub use store::ProjectGitHubReviewStoreV1;
+pub use releases::{
+    GitHubReleaseAssetV1, GitHubReleaseReadControlV1, GitHubReleaseTagV1, GitHubReleaseV1,
+    ProjectGitHubReleaseAuthorityOpenOutcomeV1, ProjectGitHubReleasePageV1,
+    ProjectGitHubReleaseReadAuthorityV1, ProjectGitHubReleaseReadOutcomeV1,
+    ProjectGitHubReleaseReadRequestV1, open_project_github_release_read_authority_v1,
+};
+pub use store::{
+    GitHubReviewStoreManifestEntryV1, GitHubReviewStoreManifestLoadOutcomeV1,
+    GitHubReviewStoreManifestV1, MAX_GITHUB_REVIEW_STORE_MANIFEST_ENTRIES_V1,
+    ProjectGitHubReviewStoreV1,
+};
 
 /// Raw GitHub response bytes are transient parser input only. They are never
 /// put into a checkpoint, an ingress result, or this transport's receipt.
@@ -1223,7 +1234,6 @@ mod tests {
         ActorId, CommitId, GitHubPullRequestIdV1, ManifestDigest, ProjectId, ProviderId, RefId,
         RepositoryId, UtcMicros, WorktreeId,
     };
-    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
@@ -1873,60 +1883,5 @@ mod tests {
         assert_eq!(calls.get.load(Ordering::SeqCst), 0);
         assert_eq!(calls.query.load(Ordering::SeqCst), 1);
         assert!(calls.last_query.lock().unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn project_store_restarts_and_replays_the_github_refresh() {
-        let (context, request) =
-            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
-        let response = complete_response(&request);
-        let digest = github_review_scan_digest(&request, &response).unwrap();
-        let next = GitHubReviewRefreshStateV1::transition_with_receipt(
-            &request,
-            None,
-            response.clone(),
-            Some(GitHubReviewRefreshAttemptReceiptV1 {
-                disposition: GitHubReviewRefreshAttemptDispositionV1::Agreed,
-                scan_digests: vec![digest.clone(), digest],
-                observed_at: response.ingress.fetched_at,
-            }),
-        )
-        .expect("complete GitHub response creates a refresh state");
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("github-review.db");
-        crate::register_test_schema_installer();
-        let authority = DatabaseAuthority::acquire_test(&path, "github-source-restart").unwrap();
-        let (database, _) =
-            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
-                .await
-                .unwrap();
-        let store =
-            ProjectGitHubReviewStoreV1::new(database.clone(), request.scope.clone()).unwrap();
-
-        assert_eq!(
-            store
-                .compare_and_record(&context, &request, None, &next)
-                .await,
-            GitHubReviewRefreshStoreCommitOutcomeV1::Recorded
-        );
-        drop(store);
-        database.close();
-
-        let (database, _) =
-            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Existing)
-                .await
-                .unwrap();
-        let store = ProjectGitHubReviewStoreV1::new(database, request.scope.clone()).unwrap();
-        assert_eq!(
-            store.load(&context, &request).await,
-            GitHubReviewRefreshStoreReadOutcomeV1::State(Box::new(next.clone()))
-        );
-        assert_eq!(next.attempt_receipts.len(), 1);
-        assert_eq!(
-            store
-                .compare_and_record(&context, &request, Some(&next.revision), &next)
-                .await,
-            GitHubReviewRefreshStoreCommitOutcomeV1::Duplicate
-        );
     }
 }

@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tracedecay_application::RequestContext;
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
@@ -14,7 +15,9 @@ use tracedecay_domain::feedback::{
     CiFailureSymbolEvidenceV1, CiFailureTestEvidenceV1, FeedbackScopeV1,
     MAX_CI_FAILURE_CALLER_EVIDENCE_V1, MAX_CI_FAILURE_TEST_EVIDENCE_V1,
 };
-use tracedecay_domain::{CanonicalObservationIdV1, ContentDigest, RetrievalAnchorId, SourceSpan};
+use tracedecay_domain::{
+    CanonicalObservationIdV1, ContentDigest, ManifestDigest, RetrievalAnchorId, SourceSpan,
+};
 use tracedecay_domain::{RelationEdgeKindV1, canonical_sha256};
 
 use super::GitHubCiProviderRecordV1;
@@ -29,6 +32,83 @@ use tracedecay_runtime_core::db::Database;
 const RETAINED_KEY_DOMAIN_V1: &str = "tracedecay.advisory.ci.retained-key.v1";
 const RETAINED_KEY_PREFIX_V1: &str = "feedback.ci-failure.retained.v1.";
 const MAX_RETAINED_BYTES_V1: usize = 4 * 1024 * 1024;
+const RETAINED_MANIFEST_KEY_DOMAIN_V1: &str = "tracedecay.advisory.ci.retained-manifest-key.v1";
+const RETAINED_MANIFEST_KEY_PREFIX_V1: &str = "feedback.ci-failure.retained-manifest.v1.";
+const RETAINED_MANIFEST_SCHEMA_DOMAIN_V1: &str =
+    "tracedecay.advisory.ci.retained-manifest-schema.v1";
+const MAX_RETAINED_MANIFEST_BYTES_V1: usize = 1024 * 1024;
+pub const MAX_CI_RETAINED_OBSERVATION_MANIFEST_ENTRIES_V1: usize = 256;
+
+/// Exact point-read identity and immutable content identity for one retained
+/// provider observation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CiRetainedObservationManifestEntryV1 {
+    pub request: CiFailureLocalizationRequestV1,
+    pub observation_id: CanonicalObservationIdV1,
+    pub record_digest: ManifestDigest,
+}
+
+/// Bounded source-owned inventory for retained CI observations in one exact
+/// feedback scope.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CiRetainedObservationManifestV1 {
+    pub schema_digest: ManifestDigest,
+    pub scope: FeedbackScopeV1,
+    pub entries: Vec<CiRetainedObservationManifestEntryV1>,
+}
+
+impl CiRetainedObservationManifestV1 {
+    fn empty(scope: FeedbackScopeV1) -> Option<Self> {
+        Some(Self {
+            schema_digest: ci_retained_manifest_schema_digest_v1()?,
+            scope,
+            entries: Vec::new(),
+        })
+    }
+
+    pub fn validate(&self) -> bool {
+        self.scope.validate().is_ok()
+            && ci_retained_manifest_schema_digest_v1()
+                .is_some_and(|expected| self.schema_digest == expected)
+            && self.entries.len() <= MAX_CI_RETAINED_OBSERVATION_MANIFEST_ENTRIES_V1
+            && self.entries.iter().all(|entry| {
+                entry.request.validate().is_ok()
+                    && entry.request.scope == self.scope
+                    && entry.observation_id.validate().is_ok()
+                    && entry.record_digest.validate().is_ok()
+            })
+            && ci_manifest_entries_are_strictly_ordered(&self.entries)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CiRetainedObservationManifestLoadOutcomeV1 {
+    Manifest(CiRetainedObservationManifestV1),
+    Empty,
+    Unavailable,
+}
+
+fn ci_retained_manifest_schema_digest_v1() -> Option<ManifestDigest> {
+    canonical_sha256(&RETAINED_MANIFEST_SCHEMA_DOMAIN_V1).ok()
+}
+
+fn ci_manifest_entry_sort_key(
+    entry: &CiRetainedObservationManifestEntryV1,
+) -> Option<ManifestDigest> {
+    canonical_sha256(&entry.request).ok()
+}
+
+fn ci_manifest_entries_are_strictly_ordered(
+    entries: &[CiRetainedObservationManifestEntryV1],
+) -> bool {
+    entries
+        .iter()
+        .map(ci_manifest_entry_sort_key)
+        .collect::<Option<Vec<_>>>()
+        .is_some_and(|keys| keys.windows(2).all(|pair| pair[0] < pair[1]))
+}
 
 /// Durable CI retained-observation authority mirrored on the project graph DB.
 #[derive(Clone)]
@@ -50,6 +130,118 @@ impl ProjectCiRetainedObservationStoreV1 {
         canonical_sha256(&(RETAINED_KEY_DOMAIN_V1, &request.scope, &request.run))
             .ok()
             .map(|digest| format!("{RETAINED_KEY_PREFIX_V1}{}", digest.as_str()))
+    }
+
+    fn manifest_key(&self) -> Option<String> {
+        canonical_sha256(&(RETAINED_MANIFEST_KEY_DOMAIN_V1, &self.scope))
+            .ok()
+            .map(|digest| format!("{RETAINED_MANIFEST_KEY_PREFIX_V1}{}", digest.as_str()))
+    }
+
+    fn decode_record(
+        request: &CiFailureLocalizationRequestV1,
+        encoded: &str,
+    ) -> Option<CiRetainedProviderRecordV1> {
+        if encoded.len() > MAX_RETAINED_BYTES_V1 {
+            return None;
+        }
+        let record = serde_json::from_str::<CiRetainedProviderRecordV1>(encoded).ok()?;
+        record.validate_for(request).then_some(record)
+    }
+
+    fn decode_manifest(&self, encoded: &str) -> Option<CiRetainedObservationManifestV1> {
+        if encoded.len() > MAX_RETAINED_MANIFEST_BYTES_V1 {
+            return None;
+        }
+        let manifest = serde_json::from_str::<CiRetainedObservationManifestV1>(encoded).ok()?;
+        (manifest.scope == self.scope && manifest.validate()).then_some(manifest)
+    }
+
+    fn update_manifest_entry(
+        &self,
+        manifest: &mut CiRetainedObservationManifestV1,
+        request: &CiFailureLocalizationRequestV1,
+        retained: &CiRetainedProviderRecordV1,
+    ) -> Option<()> {
+        if !manifest.validate() || request.scope != self.scope {
+            return None;
+        }
+        let entry = CiRetainedObservationManifestEntryV1 {
+            request: request.clone(),
+            observation_id: retained.observation.observation_id.clone(),
+            record_digest: canonical_sha256(retained).ok()?,
+        };
+        let entry_key = ci_manifest_entry_sort_key(&entry)?;
+        if let Some(existing) = manifest
+            .entries
+            .iter_mut()
+            .find(|candidate| candidate.request == *request)
+        {
+            *existing = entry;
+        } else {
+            if manifest.entries.len() == MAX_CI_RETAINED_OBSERVATION_MANIFEST_ENTRIES_V1 {
+                return None;
+            }
+            manifest.entries.push(entry);
+        }
+        manifest.entries.sort_by(|left, right| {
+            ci_manifest_entry_sort_key(left).cmp(&ci_manifest_entry_sort_key(right))
+        });
+        manifest
+            .entries
+            .iter()
+            .find(|candidate| candidate.request == *request)
+            .and_then(ci_manifest_entry_sort_key)
+            .filter(|candidate_key| *candidate_key == entry_key)?;
+        manifest.validate().then_some(())
+    }
+
+    /// Loads the exact-scope bounded inventory and verifies every retained
+    /// record against the manifest's canonical content identity.
+    pub async fn load_manifest(
+        &self,
+        context: &RequestContext,
+        scope: &FeedbackScopeV1,
+    ) -> CiRetainedObservationManifestLoadOutcomeV1 {
+        if scope != &self.scope
+            || !context_allows_feedback_operation(
+                context,
+                &self.scope,
+                CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+                CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+            )
+        {
+            return CiRetainedObservationManifestLoadOutcomeV1::Unavailable;
+        }
+        let Some(manifest_key) = self.manifest_key() else {
+            return CiRetainedObservationManifestLoadOutcomeV1::Unavailable;
+        };
+        let Ok(encoded) = self.database.get_metadata(&manifest_key).await else {
+            return CiRetainedObservationManifestLoadOutcomeV1::Unavailable;
+        };
+        let Some(encoded) = encoded else {
+            return CiRetainedObservationManifestLoadOutcomeV1::Empty;
+        };
+        let Some(manifest) = self.decode_manifest(&encoded) else {
+            return CiRetainedObservationManifestLoadOutcomeV1::Unavailable;
+        };
+        for entry in &manifest.entries {
+            let Some(key) = self.key(&entry.request) else {
+                return CiRetainedObservationManifestLoadOutcomeV1::Unavailable;
+            };
+            let Ok(Some(encoded)) = self.database.get_metadata(&key).await else {
+                return CiRetainedObservationManifestLoadOutcomeV1::Unavailable;
+            };
+            let Some(record) = Self::decode_record(&entry.request, &encoded) else {
+                return CiRetainedObservationManifestLoadOutcomeV1::Unavailable;
+            };
+            if record.observation.observation_id != entry.observation_id
+                || canonical_sha256(&record).ok().as_ref() != Some(&entry.record_digest)
+            {
+                return CiRetainedObservationManifestLoadOutcomeV1::Unavailable;
+            }
+        }
+        CiRetainedObservationManifestLoadOutcomeV1::Manifest(manifest)
     }
 
     fn observation_for(
@@ -123,11 +315,7 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
             }
             let key = self.key(request)?;
             let encoded = self.database.get_metadata(&key).await.ok()??;
-            if encoded.len() > MAX_RETAINED_BYTES_V1 {
-                return None;
-            }
-            let record = serde_json::from_str::<CiRetainedProviderRecordV1>(&encoded).ok()?;
-            record.validate_for(request).then_some(record)
+            Self::decode_record(request, &encoded)
         })
     }
 
@@ -170,7 +358,95 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
             if encoded.len() > MAX_RETAINED_BYTES_V1 {
                 return None;
             }
-            self.database.set_metadata(&key, &encoded).await.ok()?;
+            let transaction = self
+                .database
+                .begin_write_transaction("retain CI provider observation")
+                .await
+                .ok()?;
+            let current = match self
+                .database
+                .get_metadata_unguarded(&transaction, &key)
+                .await
+            {
+                Ok(Some(encoded)) => match Self::decode_record(request, &encoded) {
+                    Some(record) => Some(record),
+                    None => {
+                        let _ = transaction.rollback().await;
+                        return None;
+                    }
+                },
+                Ok(None) => None,
+                Err(_) => {
+                    let _ = transaction.rollback().await;
+                    return None;
+                }
+            };
+            let manifest_key = self.manifest_key()?;
+            let encoded_manifest = match self
+                .database
+                .get_metadata_unguarded(&transaction, &manifest_key)
+                .await
+            {
+                Ok(encoded) => encoded,
+                Err(_) => {
+                    let _ = transaction.rollback().await;
+                    return None;
+                }
+            };
+            let mut manifest = match encoded_manifest {
+                Some(encoded) => match self.decode_manifest(&encoded) {
+                    Some(manifest) => manifest,
+                    None => {
+                        let _ = transaction.rollback().await;
+                        return None;
+                    }
+                },
+                None if current.is_none() => {
+                    CiRetainedObservationManifestV1::empty(self.scope.clone())?
+                }
+                None => {
+                    let _ = transaction.rollback().await;
+                    return None;
+                }
+            };
+            let manifest_entry = manifest
+                .entries
+                .iter()
+                .find(|entry| entry.request == *request);
+            if current.is_some() != manifest_entry.is_some()
+                || current.as_ref().is_some_and(|record| {
+                    manifest_entry.is_none_or(|entry| {
+                        entry.observation_id != record.observation.observation_id
+                            || canonical_sha256(record).ok().as_ref() != Some(&entry.record_digest)
+                    })
+                })
+            {
+                let _ = transaction.rollback().await;
+                return None;
+            }
+            self.update_manifest_entry(&mut manifest, request, &retained)?;
+            let encoded_manifest = serde_json::to_string(&manifest).ok()?;
+            if encoded_manifest.len() > MAX_RETAINED_MANIFEST_BYTES_V1
+                || !context_allows_feedback_operation(
+                    context,
+                    &self.scope,
+                    CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+                    CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
+                )
+                || self
+                    .database
+                    .set_metadata_unguarded(&transaction, &key, &encoded)
+                    .await
+                    .is_err()
+                || self
+                    .database
+                    .set_metadata_unguarded(&transaction, &manifest_key, &encoded_manifest)
+                    .await
+                    .is_err()
+                || transaction.commit().await.is_err()
+            {
+                return None;
+            }
             Some(observation)
         })
     }
@@ -540,5 +816,134 @@ fn line_column_offset(
         )
     } else {
         Some(line_start.saturating_add(base))
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use std::collections::BTreeSet;
+
+    use tracedecay_application::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::{ActorId, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    use super::*;
+
+    fn context(scope: &FeedbackScopeV1) -> RequestContext {
+        let resolved = ResolvedScope::new(
+            scope.project_id.clone(),
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+        )
+        .unwrap();
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.ci-retained-manifest").unwrap(),
+            1,
+            ManifestDigest::new(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
+            ActorId::new("actor.ci-retained-manifest.issuer").unwrap(),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            resolved.clone(),
+            BTreeSet::from([CapabilityId::new(CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1).unwrap()]),
+            BTreeSet::from([UseCaseId::new(CI_FAILURE_LOCALIZE_USE_CASE_ID_V1).unwrap()]),
+            DisclosureClass::Evidence,
+        )
+        .unwrap();
+        RequestContext::new(
+            ActorId::new("actor.ci-retained-manifest").unwrap(),
+            resolved,
+            grant,
+            RequestId::new("request.ci-retained-manifest").unwrap(),
+            Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
+            CancellationContext::active("cancel.ci-retained-manifest").unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn scope(
+        fixture: &crate::advisory::fixtures::AdvisorySourceBackedCompositeFixtureV1,
+    ) -> FeedbackScopeV1 {
+        FeedbackScopeV1 {
+            project_id: ProjectId::new("project.ci-retained-manifest").unwrap(),
+            repository_id: RepositoryId::new("repository.ci-retained-manifest").unwrap(),
+            worktree_id: WorktreeId::new("worktree.ci-retained-manifest").unwrap(),
+            branch_ref: format!("refs/heads/{}", fixture.branch),
+            head_commit_id: fixture.head_commit_id.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_manifest_replays_exact_scope_and_fails_closed_on_corruption() {
+        let fixture =
+            crate::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let request = CiFailureLocalizationRequestV1 {
+            scope: scope.clone(),
+            run: fixture.ci.run.clone(),
+        };
+        let context = context(&scope);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ci-retained-manifest.db");
+        crate::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "ci-retained-manifest-replay").unwrap();
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        let store =
+            ProjectCiRetainedObservationStoreV1::new(database.clone(), scope.clone()).unwrap();
+
+        let observation = store
+            .retain(
+                &context,
+                &request,
+                &fixture.ci_provider_record,
+                CiFailureLocalizationStateV1::Complete,
+                CiFailureCoverageV1::Complete,
+            )
+            .await
+            .expect("canonical retained observation");
+        let CiRetainedObservationManifestLoadOutcomeV1::Manifest(manifest) =
+            store.load_manifest(&context, &scope).await
+        else {
+            panic!("retained manifest must be readable");
+        };
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].request, request);
+        assert_eq!(
+            manifest.entries[0].observation_id,
+            observation.observation_id
+        );
+        assert_eq!(
+            store.load(&context, &request).await.unwrap().observation,
+            observation
+        );
+
+        let mut foreign_scope = scope.clone();
+        foreign_scope.branch_ref = "refs/heads/foreign".to_owned();
+        assert_eq!(
+            store.load_manifest(&context, &foreign_scope).await,
+            CiRetainedObservationManifestLoadOutcomeV1::Unavailable
+        );
+
+        let manifest_key = store.manifest_key().unwrap();
+        database
+            .set_metadata(&manifest_key, "{\"schema_digest\":\"corrupt\"}")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load_manifest(&context, &scope).await,
+            CiRetainedObservationManifestLoadOutcomeV1::Unavailable
+        );
+        assert!(store.load(&context, &request).await.is_some());
     }
 }
