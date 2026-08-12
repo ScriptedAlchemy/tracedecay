@@ -138,6 +138,7 @@ async fn scheduled_disabled_session_reflector_reads_no_evidence_and_runs_no_back
             run_id: Some("run.early-gate.session-reflector".to_owned()),
             ..SessionReflectorAutomationOptions::default()
         },
+        None,
     )
     .await
     .expect("scheduled-disabled reflector skip");
@@ -175,6 +176,7 @@ async fn scheduled_disabled_skill_writer_reads_no_evidence_and_runs_no_backend()
             profile_root: Some(directory.path().join("profile")),
             ..SkillWriterAutomationOptions::default()
         },
+        None,
     )
     .await
     .expect("scheduled-disabled skill writer skip");

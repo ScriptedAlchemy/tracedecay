@@ -11,6 +11,7 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::curation::unpersisted_rejected_parts;
 use super::session_reflector::{default_include_recent_sessions, default_recent_sessions_limit};
+use super::user_evidence_preflight::preflight_user_skill_writer_evidence;
 use super::*;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,6 +79,7 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
         config,
         backend,
         options,
+        None,
     )
     .await
 }
@@ -98,6 +100,31 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
         "automation:skill-writer",
         configuration_revision_id,
     )?;
+    let prebuilt_evidence =
+        match preflight_user_skill_writer_evidence(retrieval, config, options.clone()).await? {
+            Some(SkillWriterEvidenceOutcome::Ready(bundle)) => Some(bundle),
+            Some(SkillWriterEvidenceOutcome::Skipped {
+                reason,
+                evidence_hash,
+            }) => {
+                let run = AgentTaskRunContext::new(
+                    user_automation_root(profile_root),
+                    Arc::clone(&sessions_db),
+                    options.run_id.clone(),
+                    "skill_writer",
+                    options.trigger,
+                    config,
+                    AgentTaskKind::SkillWriter,
+                );
+                return Ok(rejected_skill_writer_run(
+                    &run,
+                    config,
+                    reason,
+                    evidence_hash,
+                ));
+            }
+            None => None,
+        };
     run_skill_writer_for_store(
         SkillWriterStoreRuntime {
             dashboard_root: user_automation_root(profile_root),
@@ -110,6 +137,7 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
         config,
         backend,
         options,
+        prebuilt_evidence,
     )
     .await
 }
@@ -128,6 +156,7 @@ pub(super) async fn run_skill_writer_for_store(
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
+    prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
     let SkillWriterStoreRuntime {
         dashboard_root,
@@ -153,26 +182,29 @@ pub(super) async fn run_skill_writer_for_store(
                 .map_err(Into::into);
         }
     };
-    let evidence_bundle = match build_skill_writer_evidence(
-        retrieval,
-        analytics_project_root,
-        analytics_db.map(|database| database as &dyn AutomationSessionStore),
-        options,
-    )
-    .await?
-    {
-        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-        SkillWriterEvidenceOutcome::Skipped {
-            reason,
-            evidence_hash,
-        } => {
-            return Ok(rejected_skill_writer_run(
-                &run,
-                config,
+    let evidence_bundle = match prebuilt_evidence {
+        Some(bundle) => bundle,
+        None => match build_skill_writer_evidence(
+            retrieval,
+            analytics_project_root,
+            analytics_db.map(|database| database as &dyn AutomationSessionStore),
+            options,
+        )
+        .await?
+        {
+            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+            SkillWriterEvidenceOutcome::Skipped {
                 reason,
                 evidence_hash,
-            ));
-        }
+            } => {
+                return Ok(rejected_skill_writer_run(
+                    &run,
+                    config,
+                    reason,
+                    evidence_hash,
+                ));
+            }
+        },
     };
     let SkillWriterEvidenceBundle {
         profile_root,

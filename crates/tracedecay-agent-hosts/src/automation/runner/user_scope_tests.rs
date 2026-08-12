@@ -24,6 +24,11 @@ use crate::automation::run_ledger::AutomationRunStatus;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use crate::store::memory::DatabaseFactStore;
+use tracedecay_store::{FactStoreError, ProjectMemoryGraphQueryV1};
+use tracedecay_usecases::memory::MemoryApplicationError;
+
+mod user_scope_graph_runtime;
+use user_scope_graph_runtime::bind_profile_memory_graph_runtime;
 
 struct FixtureProfileRuntime {
     profile_id: UserProfileId,
@@ -63,13 +68,14 @@ impl UserRuntimeHarness {
         let authority =
             DatabaseAuthority::acquire_test(&memory_path, "profile automation memory fixture")
                 .expect("profile memory authority");
-        let (memory, _) = Database::publish_test_runtime(
+        let (memory, _) = Database::publish_profile_memory_test_runtime(
             &memory_path,
             &authority,
             TestDatabaseRuntimeMode::Initialize,
         )
         .await
         .expect("registered profile memory");
+        bind_profile_memory_graph_runtime(&memory);
         let registry: Arc<dyn ProfileRuntime> = Arc::new(FixtureProfileRuntime {
             profile_id: UserProfileId::new("profile.automation.fixture").expect("profile id"),
             sessions: session_runtime.profile_database_arc(),
@@ -292,7 +298,7 @@ async fn projectless_reflection_uses_caller_supplied_automation_configuration() 
     .await
     .expect("profile reflection");
 
-    assert_eq!(run.report["status"], json!("auto_applied"));
+    assert_eq!(run.report["status"], json!("applied"));
     let database = harness.memory().await;
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
         .expect("profile memory authority");
@@ -454,7 +460,7 @@ async fn projectless_memory_curator_quarantines_deprecated_operations() {
         }),
     );
 
-    let run = run_user_memory_curator_with_backend(
+    let error = run_user_memory_curator_with_backend(
         &harness.profile_root,
         Arc::clone(&harness.registry),
         &enabled_user_config(),
@@ -464,10 +470,12 @@ async fn projectless_memory_curator_quarantines_deprecated_operations() {
         &run_control,
     )
     .await
-    .expect("profile memory curator");
+    .expect_err("deprecated operation must exhaust bounded repair and quarantine");
 
-    assert_eq!(run.report["llm_apply"]["applied"], json!(0));
-    assert_eq!(run.ledger_record.rejected_count, 1);
+    assert_eq!(
+        error.to_string(),
+        "config error: memory curator validation repair budget exhausted; output quarantined"
+    );
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
         .expect("profile memory authority");
     assert!(
@@ -637,6 +645,32 @@ async fn seed_user_duplicate_facts(
         };
         facts.push((fact.fact_id().clone(), fact.last_event_id().clone()));
     }
+    let roots = facts
+        .iter()
+        .map(|(fact_id, _)| fact_id.clone())
+        .collect::<Vec<_>>();
+    let mut graph_current = false;
+    for _ in 0..512 {
+        let query = ProjectMemoryGraphQueryV1::new(owner.clone(), roots.clone(), 4_096)
+            .expect("profile graph readiness query");
+        match memory
+            .project_memory_graph(query, run_control.read_control())
+            .await
+        {
+            Ok(_) => {
+                graph_current = true;
+                break;
+            }
+            Err(MemoryApplicationError::Store(
+                FactStoreError::GraphConflict | FactStoreError::GraphUnavailable,
+            )) => tokio::task::yield_now().await,
+            Err(error) => panic!("profile graph readiness failed: {error}"),
+        }
+    }
+    assert!(
+        graph_current,
+        "profile graph did not reach the seeded facts"
+    );
     let (winner_id, winner_event_id) = facts.remove(0);
     let (loser_id, loser_event_id) = facts.remove(0);
     SeededUserDuplicateFacts {

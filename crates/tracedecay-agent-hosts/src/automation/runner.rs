@@ -39,6 +39,7 @@ mod evidence;
 mod retrieval;
 mod session_reflector;
 mod skill_writer;
+mod user_evidence_preflight;
 #[cfg(test)]
 mod user_scope_tests;
 
@@ -64,7 +65,6 @@ pub use retrieval::{
     AuthorizedAutomationSessionRetrieval, AutomationSessionRetrieval,
     AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
 };
-pub(crate) use session_reflector::run_user_session_reflector_with_backend_and_retrieval;
 pub use session_reflector::{
     SessionFactCurationOutcome, SessionFactCurationReceipt, SessionReflectorAutomationOptions,
     SessionReflectorAutomationRun, run_session_reflector_with_backend,
@@ -74,6 +74,7 @@ pub use skill_writer::{
     SkillWriterAutomationOptions, SkillWriterAutomationRun, run_skill_writer_with_backend,
     run_skill_writer_with_backend_and_retrieval,
 };
+pub(crate) use user_evidence_preflight::run_user_session_reflector_with_backend_and_retrieval;
 
 pub(crate) use super::memory_curator::run_user_memory_curator_with_backend;
 pub use super::memory_curator::{

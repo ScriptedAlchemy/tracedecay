@@ -2,10 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use std::{path::PathBuf, sync::Arc};
-use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::ProjectMemoryFactStore;
 
-use super::user_automation_root;
 use crate::automation::automatic_facts::{
     AutomaticFactReceipt, AutomaticFactState, SettledAutomaticFactReceipt,
     record_session_automatic_facts,
@@ -22,7 +20,7 @@ use crate::automation::lifecycle::{
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::automation::session_reflector::validate_fact_candidates;
 use crate::errors::{Result, TraceDecayError};
-use crate::ports::project_runtime::{ProfileRuntime, TraceDecay};
+use crate::ports::project_runtime::TraceDecay;
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
@@ -331,7 +329,7 @@ async fn skipped_session_reflector_run(
     })
 }
 
-fn rejected_session_reflector_run(
+pub(super) fn rejected_session_reflector_run(
     run: &AgentTaskRunContext<'_>,
     config: &AutomationConfig,
     reason: &str,
@@ -629,6 +627,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     authority: &tracedecay_policy::CurationApplyAuthorityV1,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
+    prebuilt_evidence: Option<SessionReflectorEvidenceBundle>,
 ) -> AutomationRunResult<SessionReflectorAutomationRun> {
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
@@ -647,23 +646,27 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                 .map_err(Into::into);
         }
     };
+    let evidence_bundle = match prebuilt_evidence {
+        Some(bundle) => bundle,
+        None => match build_session_reflector_evidence(retrieval, &options).await? {
+            SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
+            SessionReflectorEvidenceOutcome::Skipped {
+                reason,
+                evidence_hash,
+            } => {
+                return Ok(rejected_session_reflector_run(
+                    &run,
+                    config,
+                    reason,
+                    evidence_hash,
+                ));
+            }
+        },
+    };
     let SessionReflectorEvidenceBundle {
         evidence,
         evidence_hash,
-    } = match build_session_reflector_evidence(retrieval, &options).await? {
-        SessionReflectorEvidenceOutcome::Ready(bundle) => bundle,
-        SessionReflectorEvidenceOutcome::Skipped {
-            reason,
-            evidence_hash,
-        } => {
-            return Ok(rejected_session_reflector_run(
-                &run,
-                config,
-                reason,
-                evidence_hash,
-            ));
-        }
-    };
+    } = evidence_bundle;
     crate::automation::outcomes::refresh_fact_outcomes(
         &run.dashboard_root,
         memory,
@@ -910,6 +913,7 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
         &authority,
         backend,
         options,
+        None,
     )
     .await
 }
@@ -930,43 +934,6 @@ pub async fn run_session_reflector_with_backend(
         configuration_revision_id,
         backend,
         retrieval.as_ref(),
-        options,
-    )
-    .await
-}
-
-pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
-    profile_root: &std::path::Path,
-    session_registry: Arc<dyn ProfileRuntime>,
-    config: &AutomationConfig,
-    run_control: &AutomationRunControl,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
-    options: SessionReflectorAutomationOptions,
-) -> AutomationRunResult<SessionReflectorAutomationRun> {
-    let authority = super::profile_curation_authority(
-        session_registry.as_ref(),
-        "automation:session-reflector",
-        configuration_revision_id,
-    )?;
-    let sessions_db = session_registry.profile_sessions().await?;
-    let memory_db = session_registry.open_user_memory_db().await?;
-    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&memory_db))
-        .map_err(|error| TraceDecayError::Config {
-        message: format!(
-            "could not initialize profile session reflector memory authority: {error}"
-        ),
-    })?;
-    run_session_reflector_for_store(
-        user_automation_root(profile_root),
-        sessions_db,
-        retrieval,
-        &memory,
-        config,
-        run_control,
-        &authority,
-        backend,
         options,
     )
     .await
