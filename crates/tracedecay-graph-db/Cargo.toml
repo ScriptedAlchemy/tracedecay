@@ -38,6 +38,21 @@ name = "native_state_100k"
 harness = false
 required-features = ["test-helpers"]
 
+[[bench]]
+name = "code_traversal"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "vector_search"
+harness = false
+required-features = ["test-helpers"]
+
+[[bench]]
+name = "mixed_read_write"
+harness = false
+required-features = ["test-helpers"]
+
 [[test]]
 name = "backup_contract"
 required-features = ["test-helpers"]
