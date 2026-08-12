@@ -15,7 +15,7 @@ use tracedecay_usecases::host_admission::{
 };
 
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
+use crate::global_db::RegisteredGlobalDb;
 use crate::support::weak_registry::WeakRegistry;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
@@ -35,6 +35,7 @@ mod lcm_fixture_test_support;
 mod profile_registry_test_support;
 #[path = "host_admission/session_test_support.rs"]
 mod session_test_support;
+mod verified_graph_test_support;
 
 #[doc(hidden)]
 pub use lcm_fixture_test_support::{
@@ -146,11 +147,10 @@ impl HostAdmissionTestRuntimeV1 {
                 .session_registry
                 .project_memory(project_id.clone(), [project_root.to_path_buf()])
                 .await?;
-            let graph_runtime = self
-                .session_registry
-                .retain_project_graph_runtime(project_id.clone(), project_database)
-                .await?;
-            let graph_runtime: Arc<dyn ProjectGraphRuntimePortV1> = Arc::new(graph_runtime);
+            let graph_runtime = verified_graph_test_support::bound_graph_runtime(
+                &project_database,
+                "bind sibling test runtime project graph",
+            )?;
             registered
                 .bind_project_graph_runtime(graph_runtime)
                 .map_err(|_| TraceDecayError::Database {
@@ -232,10 +232,10 @@ impl HostAdmissionTestRuntimeV1 {
                 let project_database = session_registry
                     .project_memory(project_id.clone(), [project_root])
                     .await?;
-                let graph_runtime = session_registry
-                    .retain_project_graph_runtime(project_id.clone(), project_database)
-                    .await?;
-                let graph_runtime: Arc<dyn ProjectGraphRuntimePortV1> = Arc::new(graph_runtime);
+                let graph_runtime = verified_graph_test_support::bound_graph_runtime(
+                    &project_database,
+                    "bind test runtime project graph",
+                )?;
                 registered
                     .bind_project_graph_runtime(graph_runtime)
                     .map_err(|_| TraceDecayError::Database {

@@ -32,11 +32,13 @@ mod code_graph;
 mod code_graph_manifest;
 mod code_reads;
 mod maintenance;
+mod memory_graph_reconciliation_tasks;
 mod mounts;
 mod remote_recovery;
 mod retained_hook_tasks;
 
 use maintenance::RegisteredSchemaConvergenceMaintenance;
+use memory_graph_reconciliation_tasks::RetainedMemoryGraphReconciliationTasksV1;
 use retained_hook_tasks::RetainedHookTasks;
 
 pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
@@ -100,6 +102,7 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     project_sessions: Arc<Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
+    memory_graph_reconciliation_tasks: RetainedMemoryGraphReconciliationTasksV1,
     #[cfg(test)]
     long_lived_session_maintenance_for_test: AtomicBool,
 }

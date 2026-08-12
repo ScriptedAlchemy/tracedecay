@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use tracedecay_domain::ProjectId;
+use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
@@ -364,10 +365,7 @@ impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
 
     fn graph_runtime(
         &self,
-    ) -> Result<
-        &dyn git_correlation::GitEvidenceGraphRuntimePort,
-        git_correlation::GitCorrelationError,
-    > {
+    ) -> Result<&dyn VerifiedGraphRuntimePortV1, git_correlation::GitCorrelationError> {
         Ok(&self.graph)
     }
 }

@@ -10,10 +10,11 @@ use tracedecay_code_index::git_projection::{
     git_topology_projection_identity,
 };
 use tracedecay_domain::{GitHeadStateV1, RefId, RepositoryId, WorktreeId};
-use tracedecay_global_db::ProjectGraphRuntimePortV1;
+use tracedecay_global_db::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{GraphCancellation, GraphDbError, GraphProjectorRevision};
 use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
+use tracedecay_store::FactReadControl;
 
 use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
 
@@ -44,7 +45,7 @@ impl GraphCancellation for GitTopologySyncCancellation {
 }
 
 pub(super) fn publish_native_topology(
-    runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+    runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
     project_root: PathBuf,
     repository: RepositoryId,
     worktree: WorktreeId,
@@ -55,8 +56,12 @@ pub(super) fn publish_native_topology(
         git_topology_namespace(&repository).map_err(|_| GitTopologySyncFailure::Unavailable)?,
     )
     .map_err(|_| GitTopologySyncFailure::Unavailable)?;
+    let read_cancelled = Arc::clone(&cancelled);
     let current = runtime
-        .verified_snapshot(&identity, Arc::clone(&cancelled))
+        .verified_snapshot(
+            &identity,
+            FactReadControl::new(Arc::new(move || read_cancelled.load(Ordering::Acquire))),
+        )
         .map_err(|_| GitTopologySyncFailure::Unavailable)?;
     let (branch_stacks, worktree_occupancies) = match current {
         Some(snapshot) => {

@@ -22,9 +22,10 @@ use super::{
     LocalProfileIdentityAuthorityV1, LocalProfileStoreAuthorityV1,
     LocalProjectEnrollmentAuthorityV1, LocalStoreRuntimeResolverV1, ProfileAuthorityPinResult,
     RegisteredGlobalDb, RegisteredSchemaConvergenceMaintenance, Result, RetainedHookTasks,
-    StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistry, StoreRuntimeResolver,
-    open_runtime, open_runtime_with_presence, register_registered_schema_installer,
-    registry_open_error, runtime_incarnation, session_registry_error,
+    RetainedMemoryGraphReconciliationTasksV1, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
+    StoreRuntimeRegistry, StoreRuntimeResolver, open_runtime, open_runtime_with_presence,
+    register_registered_schema_installer, registry_open_error, runtime_incarnation,
+    session_registry_error,
 };
 
 struct UnavailableRemoteSpoolKeyringV1;
@@ -131,6 +132,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             project_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
             retained_hook_tasks: RetainedHookTasks::new(),
+            memory_graph_reconciliation_tasks: RetainedMemoryGraphReconciliationTasksV1::new(),
             #[cfg(test)]
             long_lived_session_maintenance_for_test: AtomicBool::new(false),
         };
@@ -252,8 +254,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
         crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
-        let relation_graph = self.retain_session_relation_graph_runtime(shard_id).await?;
-        database.bind_memory_relation_graph(relation_graph)?;
+        let graph_runtime = self
+            .retain_memory_graph_runtime(shard_id.clone(), Arc::clone(&database))
+            .await?;
+        database.bind_memory_graph_runtime(Arc::new(graph_runtime))?;
+        self.retain_memory_graph_reconciliation_task(&shard_id, database.as_ref())?;
+        super::code_graph::schedule_bound_memory_graph_reconciliation(database.as_ref())?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
     }
@@ -602,8 +608,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
         crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
-        let relation_graph = self.retain_session_relation_graph_runtime(shard_id).await?;
-        database.bind_memory_relation_graph(relation_graph)?;
+        let graph_runtime = self
+            .retain_memory_graph_runtime(shard_id.clone(), Arc::clone(&database))
+            .await?;
+        database.bind_memory_graph_runtime(Arc::new(graph_runtime))?;
+        self.retain_memory_graph_reconciliation_task(&shard_id, database.as_ref())?;
+        super::code_graph::schedule_bound_memory_graph_reconciliation(database.as_ref())?;
         mounted.insert(project_id, Arc::clone(&database));
         Ok(database)
     }
@@ -624,19 +634,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                 session_registry_error("register project memory authority", format!("{error:?}"))
             })?;
         if let Some(database) = self.project_memory.lock().await.get(&project_id).cloned() {
-            let readonly = Database::publish_runtime(
+            return Database::publish_runtime(
                 database.retained_runtime().clone(),
                 DatabaseAccessMode::ReadOnly,
             )
-            .await?;
-            let shard_id = StoreShardIdV1::project(
-                self.identity.brain_id().clone(),
-                self.identity.profile_id().clone(),
-                project_id,
-            );
-            let relation_graph = self.retain_session_relation_graph_runtime(shard_id).await?;
-            readonly.bind_memory_relation_graph(relation_graph)?;
-            return Ok(readonly);
+            .await;
         }
         let shard_id = StoreShardIdV1::project(
             self.identity.brain_id().clone(),
@@ -660,9 +662,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 ));
             }
         };
-        let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await?;
-        let relation_graph = self.retain_session_relation_graph_runtime(shard_id).await?;
-        database.bind_memory_relation_graph(relation_graph)?;
-        Ok(database)
+        Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await
     }
 }

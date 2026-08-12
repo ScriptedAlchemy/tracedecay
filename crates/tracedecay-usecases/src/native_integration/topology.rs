@@ -27,11 +27,12 @@ use tracedecay_code_index::git_projection::{
 use tracedecay_domain::{
     BranchStackRevisionV1, FrozenBranchStackSnapshotV1, FrozenIndependentBranchSelectionV1,
     GitHeadStateV1, GitOidV1, NativeIntegrationSelectionV1, ProjectId, RefId, RepositoryId,
-    WorktreeId,
+    UserProfileId, WorktreeId,
 };
-use tracedecay_global_db::ProjectGraphRuntimePortV1;
+use tracedecay_global_db::VerifiedGraphRuntimePortV1;
 use tracedecay_graph_db::{GraphCancellation, GraphProjectorRevision};
 use tracedecay_runtime_core::git_repository::GitRepositoryAuthority;
+use tracedecay_store::{FactReadControl, StoreShardScopeV1};
 
 use super::{domain_error, native_error};
 use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
@@ -53,7 +54,7 @@ pub struct ExactPairNativeIntegrationTopology {
     repository_id: RepositoryId,
     repository_root: PathBuf,
     repository: GitRepositoryAuthority,
-    graph_runtime: Option<Arc<dyn ProjectGraphRuntimePortV1>>,
+    graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
 }
 
 impl ExactPairNativeIntegrationTopology {
@@ -64,6 +65,7 @@ impl ExactPairNativeIntegrationTopology {
     ) -> Result<Self, NativeIntegrationPortError> {
         Self::open_with_optional_graph_runtime(
             project_id,
+            None,
             repository_id,
             enrolled_repository_root,
             None,
@@ -72,12 +74,14 @@ impl ExactPairNativeIntegrationTopology {
 
     pub fn open_with_graph_runtime(
         project_id: ProjectId,
+        expected_profile_id: &UserProfileId,
         repository_id: RepositoryId,
         enrolled_repository_root: &Path,
-        graph_runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+        graph_runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
     ) -> Result<Self, NativeIntegrationPortError> {
         Self::open_with_optional_graph_runtime(
             project_id,
+            Some(expected_profile_id),
             repository_id,
             enrolled_repository_root,
             Some(graph_runtime),
@@ -86,12 +90,30 @@ impl ExactPairNativeIntegrationTopology {
 
     fn open_with_optional_graph_runtime(
         project_id: ProjectId,
+        expected_profile_id: Option<&UserProfileId>,
         repository_id: RepositoryId,
         enrolled_repository_root: &Path,
-        graph_runtime: Option<Arc<dyn ProjectGraphRuntimePortV1>>,
+        graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
     ) -> Result<Self, NativeIntegrationPortError> {
         project_id.validate().map_err(domain_error)?;
         repository_id.validate().map_err(domain_error)?;
+        if let Some(runtime) = &graph_runtime {
+            let binding = runtime.relational_binding();
+            let locator = runtime.relational_verified_locator();
+            let exact_project = matches!(
+                &binding.shard_id.scope,
+                StoreShardScopeV1::Project { project_id: bound } if bound == &project_id
+            );
+            if !exact_project
+                || expected_profile_id != Some(&binding.shard_id.profile_id)
+                || locator.shard_id != binding.shard_id
+                || locator.incarnation != binding.incarnation
+            {
+                return Err(NativeIntegrationPortError::Native(
+                    "verified graph runtime does not match the enrolled project".to_owned(),
+                ));
+            }
+        }
         let repository =
             GitRepositoryAuthority::discover(enrolled_repository_root).map_err(native_error)?;
         Ok(Self {
@@ -179,7 +201,11 @@ impl ExactPairNativeIntegrationTopology {
             Err(_) => return Ok(NativeIntegrationStackResolutionOutcomeV1::Unavailable),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
-        let previous = match runtime.verified_snapshot(&identity, Arc::clone(&cancelled)) {
+        let read_cancellation = cancellation.clone();
+        let previous = match runtime.verified_snapshot(
+            &identity,
+            FactReadControl::new(Arc::new(move || read_cancellation.is_cancelled())),
+        ) {
             Ok(Some(snapshot)) => {
                 match GitTopologyProjectionStore::from_verified_snapshot_verified(
                     snapshot,

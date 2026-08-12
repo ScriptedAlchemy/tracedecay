@@ -40,7 +40,7 @@ use self::execution::{
     TaskSessionTemporalExecutionReportV1, TemporalExecutionFuture,
 };
 use self::render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
-use crate::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
+use crate::RegisteredGlobalDb;
 use tracedecay_query::retrieval::evidence_lanes::{
     CanonicalTaskSessionCandidateExportPortV1, TaskSessionLaneRequestV1,
     TaskSessionLaneRetrieverV1, TaskSessionPlan23BindingV1,
@@ -50,8 +50,8 @@ use tracedecay_sessions::lcm::contracts::{
     LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
 };
 use tracedecay_sessions::runtime::git_correlation::{
-    GitCorrelationError, GitEvidenceGraphRuntimePort, GitScopeFilter,
-    git_evidence_projection_identity, recover_git_evidence_projection,
+    GitCorrelationError, GitScopeFilter, git_evidence_projection_identity,
+    recover_git_evidence_projection,
 };
 use tracedecay_store::SessionMessageRecord;
 use tracedecay_temporal_query::context::VersionedTokenEstimator;
@@ -83,29 +83,6 @@ pub(crate) use schema::{
 };
 pub use store::GlobalDbSessionTemporalStore;
 
-struct RegisteredGitEvidenceGraphRuntime<'a>(&'a dyn ProjectGraphRuntimePortV1);
-
-impl GitEvidenceGraphRuntimePort for RegisteredGitEvidenceGraphRuntime<'_> {
-    fn publish_verified_manifest(
-        &self,
-        manifest: &tracedecay_graph_db::GraphGenerationManifest,
-        idempotency_key: tracedecay_graph_db::GraphIdempotencyKey,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
-        self.0
-            .publish_verified_manifest(manifest, idempotency_key, cancelled)
-    }
-
-    fn verified_snapshot(
-        &self,
-        projection: &tracedecay_graph_db::GraphProjectionIdentity,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<Option<tracedecay_graph_db::VerifiedGraphSnapshot>, tracedecay_graph_db::GraphDbError>
-    {
-        self.0.verified_snapshot(projection, cancelled)
-    }
-}
-
 impl RegisteredGlobalDb {
     /// Resolves a Git filter through the verified Git-evidence graph.
     ///
@@ -129,7 +106,7 @@ impl RegisteredGlobalDb {
         // evidence has been published, callers cannot prove that no durable
         // session holds a matching worktree.
         let Some(projection) = recover_git_evidence_projection(
-            &RegisteredGitEvidenceGraphRuntime(runtime.as_ref()),
+            runtime.as_ref(),
             &identity,
             Arc::new(AtomicBool::new(false)),
         )?

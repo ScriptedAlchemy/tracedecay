@@ -103,10 +103,9 @@ pub use project_registry::{
 pub use registered::{
     DeliveryAttemptClaimV1, DeliverySourceReceiptReadV1, DurableDeliverySettlementReceiptV1,
     MAX_PENDING_RECEIPTED_DELIVERIES_V1, MAX_WORK_ATTEMPT_DELIVERY_FANOUTS_V1,
-    PendingDeliverySourceReceiptV1, ProjectGraphRuntimePortV1, RegisteredGlobalDb,
-    RegisteredGlobalDbWriteTransaction, RegisteredWorkApplicationServicesV1,
-    RegisteredWorkProductServicesV1, RegisteredWorkflowApplicationServicesV1,
-    WorkAttemptDeliveryCensusReadV1,
+    PendingDeliverySourceReceiptV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
+    RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1,
+    RegisteredWorkflowApplicationServicesV1, WorkAttemptDeliveryCensusReadV1,
 };
 pub use registered_analytics::ObservabilityRetentionReceiptV1;
 pub use remote_deletion::{
@@ -117,6 +116,7 @@ pub use remote_deletion::{
 pub use session_temporal::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };
+pub use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 pub use transcript::TranscriptPersistenceError;
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;

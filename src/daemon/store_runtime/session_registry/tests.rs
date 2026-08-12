@@ -16,7 +16,7 @@ use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
 };
-use tracedecay_store::RetainedGraphStoreLeaseV1;
+use tracedecay_store::{FactReadControl, RetainedGraphStoreLeaseV1};
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
 
@@ -698,9 +698,8 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         .project_memory(project_id.clone(), [project_root])
         .await
         .expect("project database");
-    let runtime = registry
-        .retain_project_graph_runtime(project_id, Arc::clone(&project_database))
-        .await
+    let runtime = project_database
+        .memory_graph_runtime()
         .expect("project graph runtime");
     let projection = GraphProjectionIdentity::new(
         GraphNamespace::new("journey:generic-test").expect("namespace"),
@@ -731,7 +730,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         .expect("recover exact publication");
     assert_eq!(replayed.generation(), &manifest.generation);
     let recovered = runtime
-        .verified_snapshot(&projection, Arc::new(AtomicBool::new(false)))
+        .verified_snapshot(&projection, FactReadControl::new(Arc::new(|| false)))
         .expect("recover verified head")
         .expect("published verified head");
     assert_eq!(recovered.generation(), &manifest.generation);
@@ -762,7 +761,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
         Err(GraphDbError::Conflict)
     ));
 
-    let cancelled = Arc::new(AtomicBool::new(true));
+    let cancelled = FactReadControl::new(Arc::new(|| true));
     assert!(matches!(
         runtime.verified_snapshot(&projection, cancelled),
         Err(GraphDbError::Cancelled)
@@ -773,7 +772,7 @@ async fn project_graph_runtime_publishes_recovers_and_fails_closed() {
     );
     // Never published: the typed empty start, not an unavailability error.
     assert!(matches!(
-        runtime.verified_snapshot(&missing, Arc::new(AtomicBool::new(false))),
+        runtime.verified_snapshot(&missing, FactReadControl::new(Arc::new(|| false))),
         Ok(None)
     ));
 }

@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -24,6 +23,7 @@ use tracedecay_domain::{
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_graph_db::{GraphCancellation, GraphDbError};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_store::FactReadControl;
 
 use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelligenceError};
 // SEAM: the native `git` spawn adapter is still root-owned
@@ -453,19 +453,16 @@ impl GitReadAuthorityV1 {
                 .map_err(|error| GitQueryError::TopologyFailed(error.to_string()))?,
         )
         .map_err(|error| GitQueryError::TopologyFailed(error.to_string()))?;
-        // The graph port polls an `Arc<AtomicBool>`; the request token cannot
-        // drive that flag live without a watcher task, so the flag carries the
-        // token state observed at call time and `bounds.check()` brackets the
-        // bounded snapshot read. The topology store below polls the token
-        // itself, so traversal cancellation stays live.
-        let cancelled_at_call = Arc::new(AtomicBool::new(
-            bounds
-                .cancel
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled),
-        ));
+        let read_cancelled = bounds.cancel.clone();
         let snapshot = runtime
-            .verified_snapshot(&identity, cancelled_at_call)
+            .verified_snapshot(
+                &identity,
+                FactReadControl::new(Arc::new(move || {
+                    read_cancelled
+                        .as_ref()
+                        .is_some_and(CancellationToken::is_cancelled)
+                })),
+            )
             .map_err(map_graph_runtime_error)?
             .ok_or_else(|| {
                 // The Git topology join needs a projected history; a topology

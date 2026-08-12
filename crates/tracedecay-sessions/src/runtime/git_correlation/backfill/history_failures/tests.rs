@@ -4,12 +4,11 @@ use std::time::Duration;
 use tracedecay_runtime_core::db::engine::{
     QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior,
 };
+use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 
 use super::*;
 use crate::observation::ObservationCancellation;
-use crate::runtime::git_correlation::{
-    GitEvidenceGraphRuntimePort, ensure_git_correlation_receipt_schema_in_transaction,
-};
+use crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction;
 
 struct TestStore {
     connection: TestConnection,
@@ -44,7 +43,7 @@ impl GitCorrelationSessionStore for TestStore {
             .map_err(GitCorrelationError::from)
     }
 
-    fn graph_runtime(&self) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
+    fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
         Err(GitCorrelationError::Unavailable(
             "failure receipt tests do not mount graph evidence".to_owned(),
         ))

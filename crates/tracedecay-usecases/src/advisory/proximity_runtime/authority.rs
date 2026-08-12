@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use serde_json::Value;
 use tracedecay_application::RequestContext;
@@ -24,7 +23,9 @@ use tracedecay_domain::{
     SourceSpan, SymbolOccurrenceId, UtcMicros,
 };
 use tracedecay_graph_db::{GraphNamespace, NeverCancelled};
-use tracedecay_store::{ObservationProjectionStore, ObservationReplayRequest, ObservationStore};
+use tracedecay_store::{
+    FactReadControl, ObservationProjectionStore, ObservationReplayRequest, ObservationStore,
+};
 
 use super::{
     CanonicalProximityEvidenceAuthorityV1, CanonicalProximityEvidenceBatchV1,
@@ -65,10 +66,6 @@ struct ProximityCandidate {
 }
 
 /// Owned production authority mounted by the advisory registrar.
-///
-/// `sessions` is the already-open canonical project session/observation
-/// database. `graph` is the already-open project graph for this exact
-/// worktree. The authority performs reads only and owns no cache or store.
 pub struct ProductionProximityEvidenceAuthorityV1 {
     sessions: Arc<RegisteredGlobalDb>,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
@@ -165,12 +162,14 @@ impl ProductionProximityEvidenceAuthorityV1 {
         // saved-generation content is rechecked before publication.
         let projection =
             git_evidence_projection_identity(GraphNamespace::new("project").ok()?).ok()?;
-        // A never-published projection carries no session evidence; fall back
-        // to the same "no evidence" path as an unreadable one.
+        let graph_read_cancellation = Arc::clone(&cancellation);
         let snapshot = self
             .sessions
             .project_graph_runtime()?
-            .verified_snapshot(&projection, Arc::new(AtomicBool::new(false)))
+            .verified_snapshot(
+                &projection,
+                FactReadControl::new(Arc::new(move || graph_read_cancellation.is_cancelled())),
+            )
             .ok()
             .flatten()?;
         let store =

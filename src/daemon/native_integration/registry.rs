@@ -25,7 +25,7 @@ use tracedecay_application::{
     ResolvedScope,
 };
 use tracedecay_domain::{
-    ManifestDigest, ProjectId, RepositoryId, ScopeSetId, ScopeSetRevision, UtcMicros,
+    ManifestDigest, ProjectId, RepositoryId, ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros,
 };
 use tracedecay_store::{NativeIntegrationStore, NativeIntegrationStoreResult};
 use tracedecay_usecases::native_integration::{
@@ -39,7 +39,7 @@ use tracedecay_usecases::stack_coordinator::{
 
 #[cfg(test)]
 use crate::db::engine::TestConnection;
-use crate::global_db::{ProjectGraphRuntimePortV1, RegisteredGlobalDb};
+use crate::global_db::{RegisteredGlobalDb, VerifiedGraphRuntimePortV1};
 use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 
 use super::stack_runtime::DaemonGitHubStackRuntimeV1;
@@ -404,6 +404,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             .project_graph_runtime()
             .cloned()
             .ok_or(NativeIntegrationPortError::Unavailable)?;
+        let graph_profile_id = database.binding().shard_id.profile_id.clone();
         self.ensure_with(
             database_path,
             repository_root,
@@ -413,6 +414,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             observed_at,
             Some(scope_sets),
             Some(graph_runtime),
+            Some(graph_profile_id),
             || self.stores.ensure(database),
         )
         .await
@@ -454,6 +456,7 @@ impl DaemonNativeIntegrationServiceRegistry {
             observed_at,
             None,
             None,
+            None,
             || self.stores.ensure_engine_test(store_path),
         )
         .await
@@ -469,7 +472,8 @@ impl DaemonNativeIntegrationServiceRegistry {
         policy_digest: ManifestDigest,
         observed_at: UtcMicros,
         scope_sets: Option<AuthorizedScopeSetSqliteStorage>,
-        graph_runtime: Option<Arc<dyn ProjectGraphRuntimePortV1>>,
+        graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
+        graph_profile_id: Option<UserProfileId>,
         open_store: F,
     ) -> Result<DaemonNativeIntegrationOwner, NativeIntegrationPortError>
     where
@@ -515,6 +519,9 @@ impl DaemonNativeIntegrationServiceRegistry {
                         Some(runtime) => {
                             ExactPairNativeIntegrationTopology::open_with_graph_runtime(
                                 owner_project_id.clone(),
+                                graph_profile_id
+                                    .as_ref()
+                                    .ok_or(NativeIntegrationPortError::Unavailable)?,
                                 owner_repository_id.clone(),
                                 &native_root,
                                 runtime,

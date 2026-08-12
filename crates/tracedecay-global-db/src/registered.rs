@@ -16,8 +16,9 @@ use tracedecay_runtime_core::{
         },
     },
     errors::TraceDecayError,
-    store_runtime::registry::StoreRuntimeHandle,
+    store_runtime::{VerifiedGraphRuntimePortV1, registry::StoreRuntimeHandle},
 };
+use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 mod delivery_settlement;
 mod session_relation_graph;
@@ -32,37 +33,19 @@ pub struct RegisteredGlobalDb {
     write_connection: Connection,
     runtime: StoreRuntimeHandle,
     authority: DatabaseAuthority,
-    project_graph: OnceLock<Arc<dyn ProjectGraphRuntimePortV1>>,
+    project_graph: OnceLock<Arc<dyn VerifiedGraphRuntimePortV1>>,
     session_relation_graph: OnceLock<(
         crate::session_temporal::relations::SessionRelationScope,
         Arc<tracedecay_graph_db::GraphDb>,
-        tracedecay_store::StoreRuntimeBindingV1,
-        tracedecay_store::VerifiedStoreLocatorV1,
+        StoreRuntimeBindingV1,
+        VerifiedStoreLocatorV1,
     )>,
-}
-
-pub trait ProjectGraphRuntimePortV1: Send + Sync {
-    fn publish_verified_manifest(
-        &self,
-        manifest: &tracedecay_graph_db::GraphGenerationManifest,
-        idempotency_key: tracedecay_graph_db::GraphIdempotencyKey,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError>;
-
-    /// Recovers the projection's verified head, answering `Ok(None)` when the
-    /// projection has never published one. "Nothing published yet" is a typed
-    /// empty start, not an unavailability error.
-    fn verified_snapshot(
-        &self,
-        projection: &tracedecay_graph_db::GraphProjectionIdentity,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<Option<tracedecay_graph_db::VerifiedGraphSnapshot>, tracedecay_graph_db::GraphDbError>;
 }
 
 #[derive(Clone)]
 pub struct RegisteredWorkTopologyV1 {
     source: tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+    runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
 }
 
 impl RegisteredWorkTopologyV1 {
@@ -103,7 +86,7 @@ impl RegisteredWorkTopologyV1 {
 #[derive(Clone)]
 pub struct RegisteredWorkflowTopologyV1 {
     source: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority,
-    runtime: Arc<dyn ProjectGraphRuntimePortV1>,
+    runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
 }
 
 impl RegisteredWorkflowTopologyV1 {
@@ -450,12 +433,28 @@ impl RegisteredGlobalDb {
 
     pub fn bind_project_graph_runtime(
         &self,
-        runtime: Arc<dyn ProjectGraphRuntimePortV1>,
-    ) -> Result<(), Arc<dyn ProjectGraphRuntimePortV1>> {
+        runtime: Arc<dyn VerifiedGraphRuntimePortV1>,
+    ) -> Result<(), Arc<dyn VerifiedGraphRuntimePortV1>> {
+        let session_shard = &self.binding().shard_id;
+        let graph_binding = runtime.relational_binding();
+        let graph_locator = runtime.relational_verified_locator();
+        let exact = matches!(
+            (&session_shard.scope, &graph_binding.shard_id.scope),
+            (
+                StoreShardScopeV1::ProjectSessions { project_id: expected },
+                StoreShardScopeV1::Project { project_id: actual },
+            ) if expected == actual
+                && session_shard.brain_id == graph_binding.shard_id.brain_id
+                && session_shard.profile_id == graph_binding.shard_id.profile_id
+        ) && graph_locator.shard_id == graph_binding.shard_id
+            && graph_locator.incarnation == graph_binding.incarnation;
+        if !exact {
+            return Err(runtime);
+        }
         self.project_graph.set(runtime)
     }
 
-    pub fn project_graph_runtime(&self) -> Option<&Arc<dyn ProjectGraphRuntimePortV1>> {
+    pub fn project_graph_runtime(&self) -> Option<&Arc<dyn VerifiedGraphRuntimePortV1>> {
         self.project_graph.get()
     }
 

@@ -975,9 +975,8 @@ pub use backfill::{
 pub use backfill::{run_backfill, run_incremental_backfill};
 pub use store::{
     AnalyticsSessionTimestamp, AnalyticsSessionTimestampSource, GitCorrelationSessionStore,
-    GitCorrelationWriteTxn, GitEvidenceGraphRuntimePort, GitEvidenceProjectionStore,
-    build_git_evidence_manifest_checked, git_evidence_generation_id,
-    git_evidence_projection_identity, publish_git_evidence_projection,
+    GitCorrelationWriteTxn, GitEvidenceProjectionStore, build_git_evidence_manifest_checked,
+    git_evidence_generation_id, git_evidence_projection_identity, publish_git_evidence_projection,
     recover_git_evidence_projection,
 };
 

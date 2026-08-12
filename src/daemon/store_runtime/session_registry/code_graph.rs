@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -17,9 +17,9 @@ use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1, StoreRuntimeKey,
 };
 use tracedecay_store::{
-    CodeShardScopeV1, GraphGenerationIdV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
-    GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1,
+    CodeShardScopeV1, FactReadControl, GraphGenerationIdV1, GraphProjectionIdV1,
+    GraphProjectionIdentityV1, GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1,
+    GraphPublicationKeyV1, GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1,
     GraphPublicationStoreErrorV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1, ProjectId,
     RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
@@ -32,6 +32,10 @@ use tracedecay_store::{
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
 
+mod memory_runtime;
+pub(super) use memory_runtime::{
+    inline_graph_publication_input_digest, schedule_bound_memory_graph_reconciliation,
+};
 mod seals;
 mod semantic_vector;
 use seals::{
@@ -45,6 +49,14 @@ const GRAPH_OPEN_DEADLINE: Duration = Duration::from_secs(30);
 
 struct AtomicGraphCancellationV1 {
     cancelled: Arc<AtomicBool>,
+}
+
+struct FactReadGraphCancellationV1(FactReadControl);
+
+impl GraphCancellation for FactReadGraphCancellationV1 {
+    fn is_cancelled(&self) -> bool {
+        self.0.interrupted()
+    }
 }
 
 impl AtomicGraphCancellationV1 {
@@ -126,26 +138,41 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     lifecycle_cancelled: Arc<AtomicBool>,
 }
 
-/// Project-scoped publication runtime for immutable non-code graph journeys.
+/// Memory-shard publication runtime for immutable non-code graph journeys.
 ///
 /// Code and journey projections share the daemon's sole `GraphDbRegistry` and
 /// physical Grafeo store. Journey manifests use canonical inline replay; code
 /// generations keep their sealed replay source through
 /// [`RetainedCodeGraphRuntimeV1`].
-pub(crate) struct RetainedProjectGraphRuntimeV1 {
+pub(crate) struct RetainedVerifiedGraphRuntimeV1 {
     graph_registry: tracedecay_graph_db::GraphDbRegistry,
     authority: Arc<CanonicalGraphStoreLeaseV1>,
-    project_database: Arc<crate::db::Database>,
+    publication_storage: tracedecay_rusqlite_runtime::repository::GraphPublicationExactSqlStorage,
+    relational_binding: tracedecay_store::StoreRuntimeBindingV1,
+    relational_verified_locator: tracedecay_store::VerifiedStoreLocatorV1,
+    publication_gate: Mutex<()>,
     lifecycle_cancelled: Arc<AtomicBool>,
 }
 
-impl RetainedProjectGraphRuntimeV1 {
+impl RetainedVerifiedGraphRuntimeV1 {
+    pub(crate) fn close_reconciliation(&self) -> std::result::Result<(), GraphDbError> {
+        let _publication = self.publication_gate.lock().map_err(|_| {
+            GraphDbError::unavailable("verified graph publication gate is poisoned")
+        })?;
+        self.graph_registry
+            .close_retained(self.authority.binding(), self.authority.verified_locator())
+            .map(|_| ())
+    }
+
     pub(crate) fn publish_verified_manifest(
         &self,
         manifest: &GraphGenerationManifest,
         idempotency_key: GraphIdempotencyKey,
         request_cancelled: Arc<AtomicBool>,
     ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
+        let _publication = self.publication_gate.lock().map_err(|_| {
+            GraphDbError::unavailable("verified graph publication gate is poisoned")
+        })?;
         let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
         let identity = manifest.generation.as_str();
         let cancellation_identity = RuntimeCancellationIdentityV1 {
@@ -210,10 +237,7 @@ impl RetainedProjectGraphRuntimeV1 {
             }
             None => {}
         }
-        let mut storage = self
-            .project_database
-            .graph_publication_storage()
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        let mut storage = self.publication_storage.clone();
         // The verified-head CAS inside `publish_verified` is its own
         // irreversible durable commit; the journal append above already
         // consumes this flow's first at-most-once commit grant, so the
@@ -248,11 +272,32 @@ impl RetainedProjectGraphRuntimeV1 {
         let publish_context =
             GraphPublicationOperationContextV1::new(&publish_control, &publish_probe)
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+        let input = inline_graph_publication_input_digest(&publication_key, manifest)?;
+        let requested_replay = |prior| {
+            manifest.relational_replay(
+                self.authority.binding().shard_id.clone(),
+                idempotency_key.clone(),
+                input.clone(),
+                prior,
+                &|| match probe.interruption() {
+                    Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
+                    Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                        Err(GraphDbError::DeadlineExceeded)
+                    }
+                    None => Ok(()),
+                },
+            )
+        };
         match storage
             .replay(&publication_key, &context)
             .map_err(map_publication_error)?
         {
             GraphPublicationReplayLookupV1::Active(journaled) => {
+                if requested_replay(journaled.publication.expected_prior_head.clone())?
+                    != journaled.publication
+                {
+                    return Err(GraphDbError::Conflict);
+                }
                 let head = storage
                     .verified_head(&relational_projection, &context)
                     .map_err(map_publication_error)?;
@@ -299,26 +344,7 @@ impl RetainedProjectGraphRuntimeV1 {
         let prior = storage
             .verified_head(&relational_projection, &context)
             .map_err(map_publication_error)?;
-        let input = canonical_sha256(&(
-            "tracedecay.inline-graph-publication-input.v1",
-            &publication_key,
-            manifest,
-        ))
-        .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let replay = manifest.relational_replay(
-            self.authority.binding().shard_id.clone(),
-            idempotency_key,
-            GraphPublicationInputDigestV1::new(input.as_str())
-                .map_err(|error| GraphDbError::invalid(error.to_string()))?,
-            prior,
-            &|| match probe.interruption() {
-                Some(RuntimeInterruptionV1::Cancelled) => Err(GraphDbError::Cancelled),
-                Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                    Err(GraphDbError::DeadlineExceeded)
-                }
-                None => Ok(()),
-            },
-        )?;
+        let replay = requested_replay(prior)?;
         match storage
             .append_replay(&replay, &context)
             .map_err(map_publication_error)?
@@ -345,7 +371,7 @@ impl RetainedProjectGraphRuntimeV1 {
     pub(crate) fn verified_snapshot(
         &self,
         projection: &GraphProjectionIdentity,
-        request_cancelled: Arc<AtomicBool>,
+        read_control: FactReadControl,
     ) -> std::result::Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
         let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
         let cancellation_identity = RuntimeCancellationIdentityV1 {
@@ -363,10 +389,10 @@ impl RetainedProjectGraphRuntimeV1 {
             ))
             .map_err(|error| GraphDbError::invalid(error.to_string()))?,
         };
+        let request_cancellation: Arc<dyn GraphCancellation> =
+            Arc::new(FactReadGraphCancellationV1(read_control));
         let probe = GraphPublicationProbeV1 {
-            request_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                &request_cancelled,
-            ))),
+            request_cancellation: Arc::clone(&request_cancellation),
             lifecycle_cancelled: Arc::clone(&self.lifecycle_cancelled),
             deadline_at,
             cancellation: cancellation_identity.clone(),
@@ -390,16 +416,13 @@ impl RetainedProjectGraphRuntimeV1 {
         let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = self.authority.clone();
         let registration = GraphDbRegistration {
             authority_lease,
-            cancellation: Arc::new(AtomicGraphCancellationV1::new(request_cancelled)),
+            cancellation: request_cancellation,
             lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
                 &self.lifecycle_cancelled,
             ))),
             deadline: deadline_at,
         };
-        let mut storage = self
-            .project_database
-            .graph_publication_storage()
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        let mut storage = self.publication_storage.clone();
         // A projection that has never published a verified head is a typed
         // empty start, not an unavailability error (same pre-check as
         // `recover_semantic_vector_projection`).
@@ -413,30 +436,6 @@ impl RetainedProjectGraphRuntimeV1 {
         self.graph_registry
             .recover_verified_snapshot(registration, &mut storage, &context, &relational_projection)
             .map(Some)
-    }
-}
-
-impl crate::global_db::ProjectGraphRuntimePortV1 for RetainedProjectGraphRuntimeV1 {
-    fn publish_verified_manifest(
-        &self,
-        manifest: &GraphGenerationManifest,
-        idempotency_key: GraphIdempotencyKey,
-        cancelled: Arc<AtomicBool>,
-    ) -> std::result::Result<VerifiedGraphSnapshot, GraphDbError> {
-        RetainedProjectGraphRuntimeV1::publish_verified_manifest(
-            self,
-            manifest,
-            idempotency_key,
-            cancelled,
-        )
-    }
-
-    fn verified_snapshot(
-        &self,
-        projection: &GraphProjectionIdentity,
-        cancelled: Arc<AtomicBool>,
-    ) -> std::result::Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
-        RetainedProjectGraphRuntimeV1::verified_snapshot(self, projection, cancelled)
     }
 }
 
@@ -936,31 +935,6 @@ impl RetainedCodeGraphRuntimeV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
-    pub(crate) async fn retain_project_graph_runtime(
-        &self,
-        project_id: ProjectId,
-        project_database: Arc<crate::db::Database>,
-    ) -> Result<RetainedProjectGraphRuntimeV1> {
-        let project_shard = StoreShardIdV1::project(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id,
-        );
-        let authority = self
-            .registry
-            .retain_graph_store(StoreRuntimeKey::new(project_shard, self.incarnation))
-            .await
-            .map_err(|failure| {
-                session_registry_error("retain project graph authority", format!("{failure:?}"))
-            })?;
-        Ok(RetainedProjectGraphRuntimeV1 {
-            graph_registry: self.graph_registry.clone(),
-            authority,
-            project_database,
-            lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
-        })
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn retain_code_graph_runtime(
         &self,
@@ -1313,5 +1287,6 @@ impl Drop for DaemonSessionRuntimeRegistryV1 {
     fn drop(&mut self) {
         self.graph_lifecycle_cancelled
             .store(true, Ordering::Release);
+        self.memory_graph_reconciliation_tasks.cancel();
     }
 }

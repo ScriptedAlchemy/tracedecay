@@ -65,7 +65,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 open_runtime(
                     &self.registry,
                     self.resolver.as_ref(),
-                    shard_id,
+                    shard_id.clone(),
                     self.incarnation,
                     Some(self.profile_pin.clone()),
                     Some(authority),
@@ -78,7 +78,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 match self
                     .registry
                     .open(super::StoreRuntimeOpenRequest::new_read_only(
-                        shard_id,
+                        shard_id.clone(),
                         self.incarnation,
                         Some(self.profile_pin.clone()),
                     ))
@@ -113,7 +113,15 @@ impl DaemonSessionRuntimeRegistryV1 {
         let writable = matches!(&access, DatabaseAccessMode::ReadWrite);
         let database = Database::publish_runtime(runtime, access).await?;
         if writable {
-            mounted.insert(project_id, Arc::new(database.clone()));
+            let database = Arc::new(database);
+            let graph_runtime = self
+                .retain_memory_graph_runtime(shard_id.clone(), Arc::clone(&database))
+                .await?;
+            database.bind_memory_graph_runtime(Arc::new(graph_runtime))?;
+            self.retain_memory_graph_reconciliation_task(&shard_id, database.as_ref())?;
+            super::code_graph::schedule_bound_memory_graph_reconciliation(database.as_ref())?;
+            mounted.insert(project_id, Arc::clone(&database));
+            return Ok(database.as_ref().clone());
         }
         Ok(database)
     }

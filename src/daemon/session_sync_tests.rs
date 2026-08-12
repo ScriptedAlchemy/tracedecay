@@ -28,7 +28,7 @@ use tracedecay_domain::{
     WorktreeInventoryEpoch, WorktreeInventorySnapshotId,
 };
 use tracedecay_graph_db::{GraphCancellation, GraphProjectorRevision};
-use tracedecay_store::runtime::ScopeSetCasOutcomeV1;
+use tracedecay_store::{FactReadControl, runtime::ScopeSetCasOutcomeV1};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::git_topology::GitTopologySyncFailure;
@@ -391,12 +391,9 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
         .project_sessions(project.clone(), roots.clone())
         .await
         .expect("first project sessions database");
-    let first_runtime = first_registry
-        .retain_project_graph_runtime(project.clone(), Arc::clone(&first_project_database))
-        .await
+    let first_runtime = first_project_database
+        .memory_graph_runtime()
         .expect("first project graph runtime");
-    let first_runtime: Arc<dyn crate::global_db::ProjectGraphRuntimePortV1> =
-        Arc::new(first_runtime);
     assert!(
         first_sessions
             .bind_project_graph_runtime(Arc::clone(&first_runtime))
@@ -590,12 +587,9 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
         .project_sessions(project.clone(), roots.clone())
         .await
         .expect("restarted project sessions database");
-    let restarted_runtime = restarted_registry
-        .retain_project_graph_runtime(project.clone(), restarted_project_database)
-        .await
+    let restarted_runtime = restarted_project_database
+        .memory_graph_runtime()
         .expect("restarted project graph runtime");
-    let restarted_runtime: Arc<dyn crate::global_db::ProjectGraphRuntimePortV1> =
-        Arc::new(restarted_runtime);
     assert!(
         restarted_sessions
             .bind_project_graph_runtime(Arc::clone(&restarted_runtime))
@@ -616,7 +610,10 @@ async fn persisted_declared_topology_survives_registry_restart_and_session_sync_
     .expect("session sync must revalidate and republish retained topology after restart");
 
     let snapshot = restarted_runtime
-        .verified_snapshot(&projection_identity, Arc::new(AtomicBool::new(false)))
+        .verified_snapshot(
+            &projection_identity,
+            FactReadControl::new(Arc::new(|| false)),
+        )
         .expect("read restarted topology")
         .expect("persisted topology head");
     let store = GitTopologyProjectionStore::from_verified_snapshot_verified(

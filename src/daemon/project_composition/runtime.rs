@@ -4,9 +4,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use tracedecay_global_db::RegisteredGlobalDb;
+
 #[cfg(any(not(unix), test, feature = "test-transport"))]
 use super::portable_database_owner_reconciler;
 use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, StoreAdministration};
+
+pub(super) fn bind_verified_project_graph_runtime(
+    database: &crate::db::Database,
+    sessions: &RegisteredGlobalDb,
+) -> crate::errors::Result<()> {
+    let runtime =
+        database
+            .memory_graph_runtime()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "project memory graph runtime was not mounted before project sessions"
+                    .to_owned(),
+            })?;
+    sessions.bind_project_graph_runtime(runtime).map_err(|_| {
+        crate::errors::TraceDecayError::Config {
+            message: "project graph runtime was already mounted for project sessions".to_owned(),
+        }
+    })
+}
 
 #[derive(Clone)]
 pub(in crate::daemon) enum ProductionProjectCompositionRuntime {

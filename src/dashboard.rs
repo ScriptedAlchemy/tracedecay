@@ -187,12 +187,12 @@ impl DashboardGraphTestRuntimeV1 {
                 .registry
                 .project_memory(project_id.clone(), [project_root.to_path_buf()])
                 .await?;
-            let graph_runtime = self
-                .registry
-                .retain_project_graph_runtime(project_id, project_database)
-                .await?;
-            let graph_runtime: std::sync::Arc<dyn crate::global_db::ProjectGraphRuntimePortV1> =
-                std::sync::Arc::new(graph_runtime);
+            let graph_runtime = project_database.memory_graph_runtime().ok_or_else(|| {
+                crate::errors::TraceDecayError::Database {
+                    operation: "bind dashboard project graph".to_owned(),
+                    message: "project memory database has no verified graph runtime".to_owned(),
+                }
+            })?;
             // A lost set race means another caller already bound the same
             // retained runtime; the required postcondition holds either way.
             let _ = registered.bind_project_graph_runtime(graph_runtime);

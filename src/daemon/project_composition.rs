@@ -9,6 +9,7 @@ use super::*;
 mod runtime;
 mod session_database_admission;
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
+use runtime::bind_verified_project_graph_runtime;
 use session_database_admission::{join_independent_session_opens, log_session_database_admission};
 
 pub(super) struct ProductionProjectComposition {
@@ -670,21 +671,12 @@ pub(super) async fn production_project_server(
                 (registered_project_session_db, project_sessions_elapsed),
                 (registered_user_session_db, profile_sessions_elapsed),
             ) = join_independent_session_opens(project_session_open, profile_session_open).await?;
-            let project_graph_runtime = graph_runtime
-                .retain_project_graph_runtime(
-                    code_search_project_id.clone(),
-                    Arc::new(cg.db().clone()),
-                )
-                .await?;
-            let project_graph_runtime: Arc<
-                dyn crate::global_db::ProjectGraphRuntimePortV1,
-            > = Arc::new(project_graph_runtime);
-            registered_project_session_db
-                .bind_project_graph_runtime(project_graph_runtime)
-                .map_err(|_| TraceDecayError::Config {
-                    message: "project graph runtime was already mounted for project sessions"
-                        .to_owned(),
-                })?;
+            if !project_database_is_read_only {
+                bind_verified_project_graph_runtime(
+                    cg.db(),
+                    registered_project_session_db.as_ref(),
+                )?;
+            }
             log_session_database_admission(
                 canonical_project_path,
                 project_sessions_elapsed,

@@ -13,7 +13,11 @@ use tracedecay_graph_db::{
     GraphProjectorRevision, GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind,
     GraphWatermark, SourceGeneration, VerifiedGraphSnapshot,
 };
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, ReadSnapshot};
+use tracedecay_runtime_core::{
+    db::engine::{Executor, QueryExecutor, ReadSnapshot},
+    store_runtime::VerifiedGraphRuntimePortV1,
+};
+use tracedecay_store::FactReadControl;
 
 use super::{
     CommitSessionRecord, CorrelationIndexHealth, GitCorrelationError, GitEvidenceProjectionV1,
@@ -124,29 +128,6 @@ pub trait GitCorrelationWriteTxn: QueryExecutor + Executor + Sized + Send {
     fn commit(self) -> impl Future<Output = Result<(), GitCorrelationError>> + Send;
 }
 
-/// Exact graph publication/recovery surface supplied by
-/// `RegisteredGlobalDb::project_graph_runtime()`.
-///
-/// The signatures intentionally mirror `ProjectGraphRuntimePortV1`; the root
-/// adapter only delegates and adds no second storage authority.
-pub trait GitEvidenceGraphRuntimePort: Send + Sync {
-    fn publish_verified_manifest(
-        &self,
-        manifest: &tracedecay_graph_db::GraphGenerationManifest,
-        idempotency_key: GraphIdempotencyKey,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<VerifiedGraphSnapshot, GraphDbError>;
-
-    /// Recovers the projection's verified head, answering `Ok(None)` when the
-    /// projection has never published one. "Nothing published yet" is a typed
-    /// empty start, not an unavailability error.
-    fn verified_snapshot(
-        &self,
-        projection: &GraphProjectionIdentity,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError>;
-}
-
 /// The already-open project sessions authority plus its bound graph runtime.
 ///
 /// SQL methods exist only for session activity and bounded-history receipts.
@@ -165,7 +146,7 @@ pub trait GitCorrelationSessionStore: Sync {
         &self,
     ) -> impl Future<Output = Result<Self::WriteTxn<'_>, GitCorrelationError>> + Send;
 
-    fn graph_runtime(&self) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError>;
+    fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError>;
 }
 
 /// Typed query view recovered from one verified graph generation.
@@ -296,7 +277,7 @@ impl GitEvidenceProjectionStore {
 }
 
 pub fn publish_git_evidence_projection(
-    runtime: &dyn GitEvidenceGraphRuntimePort,
+    runtime: &dyn VerifiedGraphRuntimePortV1,
     identity: GraphProjectionIdentity,
     projection: &GitEvidenceProjectionV1,
     projector_revision: &GraphProjectorRevision,
@@ -322,11 +303,16 @@ pub fn publish_git_evidence_projection(
 /// the projection has never published a verified head — the typed empty start
 /// of a project without any recorded Git evidence.
 pub fn recover_git_evidence_projection(
-    runtime: &dyn GitEvidenceGraphRuntimePort,
+    runtime: &dyn VerifiedGraphRuntimePortV1,
     identity: &GraphProjectionIdentity,
     cancelled: Arc<AtomicBool>,
 ) -> Result<Option<GitEvidenceProjectionStore>, GitCorrelationError> {
-    let Some(snapshot) = runtime.verified_snapshot(identity, Arc::clone(&cancelled))? else {
+    let read_cancelled = Arc::clone(&cancelled);
+    let Some(snapshot) = runtime.verified_snapshot(
+        identity,
+        FactReadControl::new(Arc::new(move || read_cancelled.load(Ordering::Acquire))),
+    )?
+    else {
         return Ok(None);
     };
     GitEvidenceProjectionStore::from_verified_snapshot(

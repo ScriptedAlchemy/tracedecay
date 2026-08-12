@@ -14,14 +14,14 @@ use tracedecay_store::StoreShardScopeV1;
 
 use crate::db::engine::ReadSnapshot;
 use crate::global_db::{
-    ProjectGraphRuntimePortV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
+    RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, VerifiedGraphRuntimePortV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
     AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats,
     BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter, CommitSessionRecord,
     CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError,
-    GitCorrelationSessionStore, GitEvidenceGraphRuntimePort, GitEvidenceProjectionStore,
-    GitReflogSource, SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
+    GitCorrelationSessionStore, GitEvidenceProjectionStore, GitReflogSource,
+    SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
     git_evidence_projection_identity, graph_evidence_publication_key, normalize_worktree,
     observation_extends_span, providers_compatible, publish_graph_evidence, read_meta_value,
     recover_git_evidence_projection, run_backfill, run_bounded_history_index_page,
@@ -29,29 +29,6 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
-
-struct RegisteredProjectGraphRuntime(Arc<dyn ProjectGraphRuntimePortV1>);
-
-impl GitEvidenceGraphRuntimePort for RegisteredProjectGraphRuntime {
-    fn publish_verified_manifest(
-        &self,
-        manifest: &tracedecay_graph_db::GraphGenerationManifest,
-        idempotency_key: tracedecay_graph_db::GraphIdempotencyKey,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<tracedecay_graph_db::VerifiedGraphSnapshot, tracedecay_graph_db::GraphDbError> {
-        self.0
-            .publish_verified_manifest(manifest, idempotency_key, cancelled)
-    }
-
-    fn verified_snapshot(
-        &self,
-        projection: &tracedecay_graph_db::GraphProjectionIdentity,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
-    ) -> Result<Option<tracedecay_graph_db::VerifiedGraphSnapshot>, tracedecay_graph_db::GraphDbError>
-    {
-        self.0.verified_snapshot(projection, cancelled)
-    }
-}
 
 /// Adapter over an already-open project-sessions database.
 ///
@@ -65,7 +42,7 @@ impl GitEvidenceGraphRuntimePort for RegisteredProjectGraphRuntime {
 /// cross such a boundary.
 pub struct GlobalDbGitCorrelationStore<D> {
     db: D,
-    graph_runtime: Option<RegisteredProjectGraphRuntime>,
+    graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
 }
 
 impl<D> GlobalDbGitCorrelationStore<D>
@@ -73,11 +50,7 @@ where
     D: Borrow<RegisteredGlobalDb> + Send + Sync,
 {
     pub(crate) fn new(db: D) -> Self {
-        let graph_runtime = db
-            .borrow()
-            .project_graph_runtime()
-            .cloned()
-            .map(RegisteredProjectGraphRuntime);
+        let graph_runtime = db.borrow().project_graph_runtime().cloned();
         Self { db, graph_runtime }
     }
 
@@ -339,14 +312,11 @@ where
         GlobalDbGitCorrelationStore::open_write_transaction(self).await
     }
 
-    fn graph_runtime(&self) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
-        self.graph_runtime
-            .as_ref()
-            .map(|runtime| runtime as &dyn GitEvidenceGraphRuntimePort)
-            .ok_or_else(|| {
-                GitCorrelationError::Unavailable(
-                    "registered project graph runtime is not mounted".to_owned(),
-                )
-            })
+    fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
+        self.graph_runtime.as_deref().ok_or_else(|| {
+            GitCorrelationError::Unavailable(
+                "registered project graph runtime is not mounted".to_owned(),
+            )
+        })
     }
 }

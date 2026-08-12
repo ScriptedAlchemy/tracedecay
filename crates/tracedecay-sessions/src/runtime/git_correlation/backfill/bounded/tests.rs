@@ -6,12 +6,11 @@ use std::time::Duration;
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior, params,
 };
+use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 
 use super::*;
+use crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction;
 use crate::runtime::git_correlation::test_support::MemoryEvidenceGraphRuntime;
-use crate::runtime::git_correlation::{
-    GitEvidenceGraphRuntimePort, ensure_git_correlation_receipt_schema_in_transaction,
-};
 
 impl GitCorrelationWriteTxn for Transaction {
     async fn commit(self) -> Result<(), GitCorrelationError> {
@@ -65,7 +64,7 @@ impl GitCorrelationSessionStore for TestStore {
             .map_err(GitCorrelationError::from)
     }
 
-    fn graph_runtime(&self) -> Result<&dyn GitEvidenceGraphRuntimePort, GitCorrelationError> {
+    fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
         Ok(self.graph.as_ref())
     }
 }
