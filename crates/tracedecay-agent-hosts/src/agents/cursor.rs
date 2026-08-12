@@ -1088,7 +1088,7 @@ mod tests {
         let expectations = cursor_plugin_hook_expectations();
         assert_eq!(
             expectations.len(),
-            9,
+            8,
             "expected one entry per bundled lifecycle hook, got {expectations:?}"
         );
         assert!(expectations.contains(&(
