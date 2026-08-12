@@ -14,9 +14,9 @@ use tracedecay_application::{OpaqueCursor, OperationBudgetUsage, PageRequest, Re
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId, UtcMicros};
 use tracedecay_graph_db::GraphCancellation;
-use tracedecay_runtime_core::types::NodeKind;
 
 mod ignored_dependency;
 

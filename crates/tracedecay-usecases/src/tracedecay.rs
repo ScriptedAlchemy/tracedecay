@@ -20,6 +20,9 @@ use tracedecay_application::source_edit::{
     RenameSymbolBindingV1,
 };
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
+use tracedecay_domain::code_intelligence::{
+    Edge, GraphStats, Node, NodeKind, SearchResult, Subgraph,
+};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::Result;
@@ -27,7 +30,6 @@ use tracedecay_runtime_core::path_safety::{
     normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
 };
 use tracedecay_runtime_core::storage::StoreLayout;
-use tracedecay_runtime_core::types::{Edge, GraphStats, Node, NodeKind, SearchResult, Subgraph};
 
 pub type GraphFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 pub type GraphValueFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

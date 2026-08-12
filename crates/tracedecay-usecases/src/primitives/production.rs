@@ -80,10 +80,10 @@ use tracedecay_code_index::provider::{
 use tracedecay_code_index::test_attribution::{
     GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinV1,
 };
+use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
 use tracedecay_runtime_core::db::Database;
-use tracedecay_runtime_core::types::NodeKind;
 use tracedecay_temporal_query::cursor::{
     CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
 };

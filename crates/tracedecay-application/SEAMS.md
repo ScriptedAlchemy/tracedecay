@@ -74,7 +74,7 @@ Moving the top layer into the bottom crate inverts the stack. Every one of the
 | 64 | `crate::global_db` [root] | `tracedecay-global-db` depends on application |
 | 55 | `crate::tracedecay` [kernel] | cycle via runtime-core |
 | 35 | `crate::storage` [kernel] | cycle via runtime-core |
-| 22 | `crate::types` [kernel] | cycle via runtime-core |
+| 22 | `crate::types` [root] | root compatibility surface |
 | 22 | `crate::mcp` [root] | not extracted yet |
 | 21 | `crate::daemon` [root] | not extracted yet |
 | 19 | `crate::store` [kernel] | cycle via runtime-core |
@@ -179,9 +179,10 @@ reachable from it, and every existing consumer already links it.
   compatibility surface, so **no caller path changed** — including
   `tracedecay-hooks` and `crates/tracedecay-sessions`, which this mover does not
   own.
-- `runtime_core::types` no longer re-exports `application::source_edit`; that
-  module is a pure façade, so the re-export moved to the root `crate::types`
-  shim, which now unions both halves.
+- The unpublished `runtime_core::types` façade was removed. Internal callers
+  import code-intelligence contracts directly from `tracedecay-domain`, while
+  the shipped root `crate::types` surface still unions those contracts with
+  `application::source_edit` results.
 
 **Deviation from the assignment:** the task specified moving `framed_log` into
 `tracedecay-runtime-core`. It went into `tracedecay-domain` instead, because

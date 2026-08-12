@@ -29,6 +29,7 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::code_intelligence::Node as CodeNode;
 use tree_sitter::{Node, Parser, Tree};
 
 /// Length of an n-gram shingle, in tokens.
@@ -650,8 +651,8 @@ fn short_sha256(s: &str) -> String {
 /// presents the same `a`/`b` sides regardless of input order.
 pub struct RedundantPair<'a> {
     pub score: RedundancyMatchScore,
-    pub node_a: &'a crate::types::Node,
-    pub node_b: &'a crate::types::Node,
+    pub node_a: &'a CodeNode,
+    pub node_b: &'a CodeNode,
     pub fp_a: &'a Fingerprint,
     pub fp_b: &'a Fingerprint,
 }
@@ -666,7 +667,7 @@ pub struct RedundantPair<'a> {
 /// `ranking_score` (a total order: ties fall through similarity, cosine, then
 /// names and node ids) and truncated to `max_pairs`.
 pub fn find_redundant_pairs<'a>(
-    scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
+    scoped: Vec<(&'a CodeNode, &'a Fingerprint)>,
     threshold: f64,
     include_naming: bool,
     max_pairs: usize,
@@ -686,7 +687,7 @@ pub fn find_redundant_pairs<'a>(
 /// *when* the loop pauses, never which pairs it visits or in what order — so
 /// a sliced run and a single-shot run return byte-identical results.
 pub struct RedundancyPairScan<'a> {
-    scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
+    scoped: Vec<(&'a CodeNode, &'a Fingerprint)>,
     threshold: f64,
     include_naming: bool,
     max_pairs: usize,
@@ -701,7 +702,7 @@ pub struct RedundancyPairScan<'a> {
 
 impl<'a> RedundancyPairScan<'a> {
     pub fn new(
-        mut scoped: Vec<(&'a crate::types::Node, &'a Fingerprint)>,
+        mut scoped: Vec<(&'a CodeNode, &'a Fingerprint)>,
         threshold: f64,
         include_naming: bool,
         max_pairs: usize,
@@ -814,9 +815,9 @@ pub fn body_token_window(body_tokens: usize) -> (usize, usize) {
 /// pair always presents the same `a`/`b` sides regardless of input order
 /// (scoring is symmetric).
 pub(crate) fn redundant_pair<'a>(
-    node_a: &'a crate::types::Node,
+    node_a: &'a CodeNode,
     fp_a: &'a Fingerprint,
-    node_b: &'a crate::types::Node,
+    node_b: &'a CodeNode,
     fp_b: &'a Fingerprint,
     threshold: f64,
     include_naming: bool,
@@ -850,10 +851,8 @@ pub(crate) fn redundant_pair<'a>(
 /// Connected components over the returned pairs — the shared source of truth
 /// for both the JSON `groups` array and the markdown Groups section, so the
 /// two views cannot drift on membership.
-pub fn connected_node_groups<'a>(
-    pairs: &'a [RedundantPair<'a>],
-) -> Vec<Vec<&'a crate::types::Node>> {
-    let mut groups: Vec<Vec<&'a crate::types::Node>> = Vec::new();
+pub fn connected_node_groups<'a>(pairs: &'a [RedundantPair<'a>]) -> Vec<Vec<&'a CodeNode>> {
+    let mut groups: Vec<Vec<&'a CodeNode>> = Vec::new();
     for pair in pairs {
         let mut matching_groups = Vec::new();
         for (idx, group) in groups.iter().enumerate() {
@@ -886,7 +885,7 @@ pub fn connected_node_groups<'a>(
     groups
 }
 
-fn push_unique_node<'a>(nodes: &mut Vec<&'a crate::types::Node>, node: &'a crate::types::Node) {
+fn push_unique_node<'a>(nodes: &mut Vec<&'a CodeNode>, node: &'a CodeNode) {
     if nodes.iter().any(|existing| existing.id == node.id) {
         return;
     }

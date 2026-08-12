@@ -4,10 +4,10 @@ use std::sync::Arc;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSymbolSummaryV1,
 };
+use tracedecay_domain::code_intelligence::NodeKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::types::NodeKind;
 
 use super::map_projection_error;
 

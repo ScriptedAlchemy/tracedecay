@@ -88,7 +88,6 @@ pub mod sync;
 pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
-pub mod types;
 #[cfg(windows)]
 pub mod windows_file;
 #[cfg(windows)]
