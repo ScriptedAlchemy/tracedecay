@@ -13,10 +13,13 @@ analytics prove whether generated output was adopted.
 
 1. Start with `tracedecay automation config get` to identify enabled tasks,
    schedules, locks, and profile paths.
-2. When the operator requests an immediate memory-curation cycle, run
-   `tracedecay automation run memory-curation`. The dashboard equivalent is
-   `POST /api/automation/run/memory-curator`. Both invoke the autonomous
-   daemon-owned runner; neither creates an approval or per-operation apply step.
+2. When the operator requests an immediate memory-curation cycle, use the sole
+   public launcher: MCP `tracedecay_fact_store_curate` with optional
+   `fact_review_limit` and `min_confidence_millionths` bounds, generic CLI
+   `tracedecay tool fact_store_curate`, or
+   `POST /api/application/retained/fact_store_curate`. All three invoke the
+   same daemon-owned run. The daemon derives run identity, task selection,
+   operations, validation, policy, and effect settlement.
 3. List recent runs with `tracedecay automation runs list --limit 100`; group
    by task and status before opening individual artifacts.
 4. Inspect one exact run with `tracedecay automation runs view <run_id>`.
