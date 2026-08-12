@@ -9,7 +9,9 @@ use tokio::time::timeout;
 use tracedecay_runtime_core::db::engine::{
     Connection, TestConnection, TransactionBehavior, params,
 };
-use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use tracedecay_runtime_core::db::{
+    Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+};
 
 async fn open_global_db(db_path: &Path) -> tracedecay_runtime_core::errors::Result<TestConnection> {
     if let Some(parent) = db_path.parent() {
@@ -31,9 +33,13 @@ async fn open_read_only_global_db(
     // Idempotent — the port keeps the first registration.
     crate::register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(db_path, "LCM schema read-only fixture")?;
-    let (database, _) =
-        Database::publish_test_runtime(db_path, &authority, TestDatabaseRuntimeMode::ReadOnly)
-            .await?;
+    let (database, _) = Database::publish_registered_test_runtime(
+        db_path,
+        &authority,
+        TestDatabaseRuntimeMode::ReadOnly,
+        TestDatabaseRuntimeScope::ProfileSessions,
+    )
+    .await?;
     Ok(Some((authority, database)))
 }
 
