@@ -115,6 +115,15 @@ mod runtime_generation_census_dispatch_tests;
     clippy::redundant_closure_for_method_calls,
     clippy::uninlined_format_args
 )]
+mod search_graph_independence_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
 mod tool_definition_tests;
 
 pub use session_authorities::SessionAuthorities;

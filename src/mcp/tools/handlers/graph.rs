@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::future::Future;
 
 use serde_json::{Value, json};
 use tracedecay_application::retrieval::{
@@ -31,6 +32,7 @@ use super::support::{
 
 mod context_support;
 mod primitive_surface;
+mod search_evidence;
 mod verified;
 
 #[cfg(test)]
@@ -45,6 +47,7 @@ use primitive_surface::{
     semantic_search_mode as primitive_semantic_search_mode,
     symbol_location as primitive_symbol_location,
 };
+use search_evidence::{SearchGraphEvidence, race_primary_search_with_graph};
 
 use verified::{
     GRAPH_RELATION_READ_LIMIT, append_verified_plan_context, canonical_relation_kind,
@@ -166,26 +169,6 @@ fn generic_tool_result(
     support::generic_tool_result(Some(cg.project_root()), args, value, touched_files)
 }
 
-fn unique_graph_node_id_for_search_display(
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
-    display: &crate::mcp::server::CodeIndexSearchDisplayV1,
-) -> Result<Option<String>> {
-    let nodes = graph.resolve_qualified_name(&display.qualified_name, Some(&display.kind), 16)?;
-    let mut matches = nodes.into_iter().filter(|node| {
-        node.binding
-            .as_ref()
-            .and_then(|binding| binding.logical_path.as_deref())
-            == Some(display.path.as_str())
-    });
-    let Some(node) = matches.next() else {
-        return Ok(None);
-    };
-    Ok(matches
-        .next()
-        .is_none()
-        .then(|| node.occurrence.as_str().to_owned()))
-}
-
 fn rendered_context_tool_result(
     cg: &TraceDecay,
     args: &Value,
@@ -213,16 +196,19 @@ fn rendered_context_tool_result(
 }
 
 /// Handles `tracedecay_search` tool calls.
-pub(super) async fn handle_search(
+pub(super) async fn handle_search<F>(
     cg: &TraceDecay,
-    graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
+    graph: F,
     args: Value,
     scope_prefix: Option<&str>,
     search_executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     search_authority: Option<&crate::mcp::server::CodeIndexSearchAuthorityV1>,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Result<ToolResult> {
+) -> Result<ToolResult>
+where
+    F: Future<Output = Result<crate::tracedecay::queries::graph::VerifiedGraphQuery>>,
+{
     let query =
         args.get("query")
             .and_then(|v| v.as_str())
@@ -231,6 +217,7 @@ pub(super) async fn handle_search(
             })?;
 
     let semantic_mode = semantic_search_mode(&args)?;
+    let lazy_indexing_requested = dependency_hints::lazy_indexing_requested(&args);
     let cursor = support::retrieval_cursor(&args)?;
     let include_graph_node_ids = render::wants_json(&args);
     let limit = args
@@ -243,7 +230,7 @@ pub(super) async fn handle_search(
     // the tool return nothing for the whole session (any serve launched from a
     // subdirectory sets a scope), so run the search and report below that the
     // scope was not honored rather than silently implying it was.
-    let outcome = execute_code_index_search(
+    let search = execute_code_index_search(
         search_executor,
         crate::mcp::server::CodeIndexSearchRequestV1 {
             project_root: cg.project_root().to_path_buf(),
@@ -258,11 +245,23 @@ pub(super) async fn handle_search(
             deadline: deadline.clone(),
             cancellation: cancellation.clone(),
         },
-    )
-    .await;
+    );
+    let (outcome, graph) =
+        race_primary_search_with_graph(search, graph, lazy_indexing_requested).await;
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+            let graph = search_evidence::bind_verified_graph_to_search(
+                graph,
+                &complete.code_generation,
+                lazy_indexing_requested && complete.ordered_candidates.is_empty(),
+                query,
+                scope_prefix,
+                deadline.as_ref(),
+                cancellation.as_ref(),
+            )
+            .await;
             let mut results = Vec::with_capacity(complete.ordered_candidates.len());
+            let mut graph_evidence = SearchGraphEvidence::new(graph.as_ref());
             // The generation-bound display metadata names each result's
             // declaring file; that set is the raw-read counterfactual the
             // savings accounting charges this response against.
@@ -284,11 +283,8 @@ pub(super) async fn handle_search(
                         "kind": display.kind,
                         "path": display.path,
                     });
-                    if include_graph_node_ids
-                        && let Some(node_id) =
-                            unique_graph_node_id_for_search_display(graph, display)?
-                    {
-                        result["node_id"] = json!(node_id);
+                    if include_graph_node_ids {
+                        graph_evidence.enrich_node_id(&mut result, display);
                     }
                 }
                 results.push(result);
@@ -309,18 +305,22 @@ pub(super) async fn handle_search(
                 output["scope_prefix"] = json!(scope);
                 output["scope_prefix_applied"] = json!(false);
             }
-            if dependency_hints::should_check_ignored_dependency_hint(result_count, limit)
-                && let Some(hint) = dependency_hints::ignored_dependency_hint(
-                    cg,
-                    query,
-                    limit,
-                    scope_prefix,
-                    deadline.as_ref(),
-                    cancellation.as_ref(),
-                )
-                .await?
-            {
-                output["ignored_dependency_hint"] = hint;
+            if let Some(unavailable) = graph_evidence.unavailable() {
+                output["verified_graph_evidence"] = unavailable.clone();
+            }
+            if dependency_hints::should_check_external_import_hint(result_count, limit) {
+                if let Some(hint) = graph_evidence
+                    .external_import_hint(
+                        query,
+                        limit,
+                        scope_prefix,
+                        deadline.as_ref(),
+                        cancellation.as_ref(),
+                    )
+                    .await
+                {
+                    output["external_import_hint"] = hint;
+                }
             }
             let output = output;
             Ok(rendered_tool_result(
@@ -479,7 +479,7 @@ fn render_search_md(value: &Value) -> String {
     {
         md.blank().heading(3, "Index Coverage Hint").line(msg);
     }
-    dependency_hints::append_ignored_dependency_hint_md(&mut md, value);
+    search_evidence::append_search_evidence_md(&mut md, value);
     md.render()
 }
 
@@ -836,7 +836,7 @@ pub(super) async fn handle_find_exact_symbol(
     let mut lazy_indexed_files = Vec::new();
     if nodes.is_empty() && dependency_hints::lazy_indexing_requested(&args) {
         lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
-            cg,
+            graph,
             name,
             limit,
             scope_prefix,

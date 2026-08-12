@@ -1700,7 +1700,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 repository: repository_id.clone(),
                 sanitizer_revision,
                 policy_revision: id::<PolicyRevisionId>("policy.daemon.v1")?,
-                chunker_revision: id::<ChunkerRevision>("chunker.daemon.v1")?,
+                chunker_revision: id::<ChunkerRevision>("chunker.daemon.v2")?,
                 privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
                 privacy_key_epoch: 1,
                 max_snapshot_age_micros: None,

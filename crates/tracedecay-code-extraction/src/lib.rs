@@ -28,6 +28,7 @@ pub(crate) mod annotations;
 pub(crate) mod basic_common;
 pub(crate) mod common;
 pub mod complexity;
+mod extraction_artifact;
 pub mod incremental;
 pub mod parsed_extraction;
 pub mod source_mask;
@@ -120,6 +121,9 @@ pub use astro_extractor::AstroExtractor;
 pub use c_extractor::CExtractor;
 pub use cpp_extractor::CppExtractor;
 pub use csharp_extractor::CSharpExtractor;
+pub use extraction_artifact::{
+    ExtractedImportEvidenceV1, ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1,
+};
 pub use go_extractor::GoExtractor;
 pub use java_extractor::JavaExtractor;
 pub use kotlin_extractor::KotlinExtractor;
@@ -211,7 +215,7 @@ pub use wgsl_extractor::WgslExtractor;
 pub use zig_extractor::ZigExtractor;
 
 use crate::types::ExtractionResult;
-use parsed_extraction::{ParsedExtraction, ParsedExtractionScope};
+use parsed_extraction::{ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionScope};
 use tree_sitter::Tree;
 
 /// Trait for language-specific source code extractors.
@@ -259,6 +263,13 @@ pub trait LanguageExtractor: Send + Sync {
     /// `source` is the source code to parse.
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult;
 
+    /// Extract the legacy graph and any structured evidence supported by this
+    /// language. The default preserves existing extractors without another
+    /// parse or a parallel evidence authority.
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        ExtractionArtifactV1::from_result(self.extract(file_path, source))
+    }
+
     /// Extract from the shared retained tree. Implementations traverse only
     /// the requested complete top-level regions and never acquire a parser.
     ///
@@ -269,6 +280,18 @@ pub trait LanguageExtractor: Send + Sync {
         tree: &Tree,
         scope: ParsedExtractionScope<'_>,
     ) -> ParsedExtraction;
+
+    /// Extract an artifact from an already parser-owned tree. The default
+    /// delegates exactly once to the legacy parsed-tree method.
+    fn extract_parsed_artifact(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: ParsedExtractionScope<'_>,
+    ) -> ParsedExtractionArtifactV1 {
+        ParsedExtractionArtifactV1::from_parsed(self.extract_parsed(file_path, source, tree, scope))
+    }
 }
 
 /// Registry of all available language extractors.

@@ -3,15 +3,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 
 #[test]
-fn legacy_sealed_generation_is_rejected_before_manifest_decode() {
-    let legacy = br#"{"generation":{"format_revision":2}}"#;
+fn prior_sealed_generation_is_rejected_before_manifest_decode() {
+    let prior = br#"{"generation":{"format_revision":4}}"#;
 
     assert!(
-        !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(legacy)
-            .expect("legacy format probe")
+        !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(prior)
+            .expect("prior format probe")
     );
-    let error = CodeIndexPublishedGenerationV1::decode_sealed(legacy)
-        .expect_err("legacy generation must require a rebuild");
+    let error = CodeIndexPublishedGenerationV1::decode_sealed(prior)
+        .expect_err("prior generation must require a rebuild");
     assert!(
         error
             .to_string()

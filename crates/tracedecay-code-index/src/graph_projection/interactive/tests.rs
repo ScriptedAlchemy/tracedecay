@@ -15,12 +15,14 @@ use tracedecay_graph_db::{
 };
 
 use crate::graph_projection::builder::ProductionCodeGraphInputs;
+use crate::graph_projection::schema::SYMBOL_LABEL;
 use crate::graph_projection::{
-    CODE_GRAPH_PROJECTOR_REVISION_V3, CodeGraphProjectionError, CodeGraphProjectionStore,
+    CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionError, CodeGraphProjectionStore,
     CodeGraphSymbolSummaryV1, build_code_graph_manifest_inputs_checked,
     code_graph_projection_identity, current_generation_entity, has_label,
 };
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+mod imports;
 
 struct CancelledNow;
 
@@ -200,8 +202,9 @@ fn production_manifest() -> GraphGenerationManifest {
         Some(ProductionCodeGraphInputs {
             files: &files,
             symbols: &symbols,
+            imports: &[],
         }),
-        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
         &|| Ok(()),
     )
@@ -579,7 +582,7 @@ fn corrupt_symbol_payload_is_refused_not_skipped() {
     // other's record.
     let mut symbol_indices = Vec::new();
     for (index, entity) in manifest.entities.iter().enumerate() {
-        if has_label(entity, super::SYMBOL_LABEL) {
+        if has_label(entity, SYMBOL_LABEL) {
             symbol_indices.push(index);
         }
     }
@@ -648,7 +651,7 @@ fn retrieval_only_publication_serves_no_names_truthfully() {
         &fixture_edges(),
         &fixture_chunks(),
         None,
-        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())
+        &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision"),
         &|| Ok(()),
     )

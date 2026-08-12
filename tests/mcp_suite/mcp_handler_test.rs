@@ -6,6 +6,7 @@
 mod admin_test;
 mod bounded_analysis_test;
 mod context_test;
+mod dependency_hint_test;
 #[cfg(feature = "test-transport")]
 mod edit_test;
 mod graph_analysis_test;

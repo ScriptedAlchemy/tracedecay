@@ -6,7 +6,6 @@ use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_application::CancellationSignal;
 use tracedecay_domain::{
@@ -27,16 +26,21 @@ use tracedecay_graph_db::{GraphWatermark, NeverCancelled};
 mod builder;
 mod interactive;
 mod reader;
+mod schema;
 mod traversal;
 
 pub use self::builder::build_published_code_graph_manifest_checked;
 use self::builder::{ProductionCodeGraphInputs, build_projection};
-use self::interactive::SymbolCatalog;
+use self::interactive::InteractiveCatalog;
 pub use self::interactive::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
     CodeGraphImpactedSymbolV1, CodeGraphInteractiveReader, CodeGraphPathSearchV1,
     CodeGraphSemanticEdgeV1, CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1,
     CodeGraphSymbolSummaryV1,
+};
+use self::schema::{
+    SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY, deserialize_property, has_label, serialize,
+    stable_identity,
 };
 use self::traversal::{FrontierPath, admit_frontier_path, best_frontier_path, compare_paths};
 use crate::lineage::LineageSymbolRecordV1;
@@ -47,19 +51,15 @@ const CODE_PROJECTION: &str = "code-generation";
 const CURRENT_GENERATION_ENTITY: &str = "code-current-generation";
 const CURRENT_GENERATION_PROPERTY: &str = "current-generation";
 const PROJECTION_NODE_COUNT_PROPERTY: &str = "projection-node-count";
-const SYMBOL_RECORD_PROPERTY: &str = "symbol-record";
-const FILE_RECORD_PROPERTY: &str = "file-record";
 const CHUNK_RECORD_PROPERTY: &str = "chunk-record";
 const EDGE_RECORD_PROPERTY: &str = "edge-record";
-const SYMBOL_LABEL: &str = "CodeSymbol";
-const FILE_LABEL: &str = "CodeFile";
 const CHUNK_LABEL: &str = "CodeChunk";
 const EDGE_LABEL: &str = "CodeRelationEvidence";
 const FILE_SYMBOL_EDGE_KIND: &str = "CodeFileContainsSymbol";
 const CHUNK_SYMBOL_EDGE_KIND: &str = "CodeChunkDescribesSymbol";
 const SOURCE_EDGE_KIND: &str = "CodeRelationSource";
 const TARGET_EDGE_KIND: &str = "CodeRelationTarget";
-pub const CODE_GRAPH_PROJECTOR_REVISION_V3: &str = "code-graph-projector.v3";
+pub const CODE_GRAPH_PROJECTOR_REVISION: &str = "code-graph-projector.v4";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CodeGraphProjectionError {
@@ -189,7 +189,7 @@ pub struct CodeGraphProjectionStore {
     /// read and shared by every reader cloned from this store. The catalog is
     /// derived from the verified snapshot and dies with it, so it is a cache
     /// of the projection authority rather than a parallel authority.
-    interactive_catalog: Arc<RwLock<Option<Arc<SymbolCatalog>>>>,
+    interactive_catalog: Arc<RwLock<Option<Arc<InteractiveCatalog>>>>,
 }
 
 impl fmt::Debug for CodeGraphProjectionStore {
@@ -208,7 +208,7 @@ impl CodeGraphProjectionStore {
         let projection = snapshot.projection().clone();
         let expected = code_graph_generation_id(
             &generation,
-            &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())?,
+            &GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())?,
         )?;
         if snapshot.generation() != &expected {
             return Err(CodeGraphProjectionError::GenerationMismatch);
@@ -358,8 +358,7 @@ impl InMemoryCodeGraphProjectionBuilder {
         if cancellation.is_cancelled() {
             return Err(CodeGraphProjectionError::Cancelled);
         }
-        let revision =
-            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())?;
+        let revision = GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())?;
         let manifest = build_code_graph_manifest(
             self.projection.clone(),
             generation,
@@ -399,8 +398,7 @@ impl InMemoryCodeGraphProjectionBuilder {
         if symbols.generation_id != *generation {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
-        let revision =
-            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())?;
+        let revision = GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())?;
         let check = {
             let cancellation = Arc::clone(&cancellation);
             move || {
@@ -416,7 +414,11 @@ impl InMemoryCodeGraphProjectionBuilder {
             generation,
             edges,
             chunks,
-            Some(ProductionCodeGraphInputs { files, symbols }),
+            Some(ProductionCodeGraphInputs {
+                files,
+                symbols,
+                imports: &[],
+            }),
             &revision,
             &check,
         )?;
@@ -808,10 +810,6 @@ fn symbol_entity_id(
     GraphEntityId::new(stable_identity("symbol", occurrence.as_str())).map_err(Into::into)
 }
 
-fn file_entity_id(file: &FileOccurrenceId) -> Result<GraphEntityId, CodeGraphProjectionError> {
-    GraphEntityId::new(stable_identity("file", file.as_str())).map_err(Into::into)
-}
-
 fn edge_entity_id(
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphEntityId, CodeGraphProjectionError> {
@@ -823,14 +821,6 @@ fn relation_id(
     edge: &CanonicalRelationEdgeV1,
 ) -> Result<GraphRelationId, CodeGraphProjectionError> {
     GraphRelationId::new(stable_identity(role, edge_entity_id(edge)?.as_str())).map_err(Into::into)
-}
-
-fn stable_identity(kind: &str, value: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(kind.as_bytes());
-    digest.update([0]);
-    digest.update(value.as_bytes());
-    format!("{kind}:{}", hex::encode(digest.finalize()))
 }
 
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
@@ -848,29 +838,6 @@ fn source_generation(
     SourceGeneration::new(stable_identity("generation", generation.as_str())).map_err(Into::into)
 }
 
-fn serialize(value: &impl Serialize) -> Result<Vec<u8>, CodeGraphProjectionError> {
-    serde_json::to_vec(value).map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))
-}
-
-fn deserialize_property<T>(entity: &GraphEntity, name: &str) -> Result<T, CodeGraphProjectionError>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let property = entity
-        .properties
-        .get(&GraphPropertyName::new(name)?)
-        .ok_or_else(|| {
-            CodeGraphProjectionError::Corrupt(format!("code graph entity is missing {name}"))
-        })?;
-    let GraphProperty::Bytes(bytes) = property else {
-        return Err(CodeGraphProjectionError::Corrupt(format!(
-            "code graph entity {name} has the wrong type"
-        )));
-    };
-    serde_json::from_slice(bytes)
-        .map_err(|error| CodeGraphProjectionError::Corrupt(error.to_string()))
-}
-
 fn property_string(entity: &GraphEntity, name: &str) -> Result<String, CodeGraphProjectionError> {
     let property = entity
         .properties
@@ -884,13 +851,6 @@ fn property_string(entity: &GraphEntity, name: &str) -> Result<String, CodeGraph
         )));
     };
     Ok(value.clone())
-}
-
-fn has_label(entity: &GraphEntity, label: &str) -> bool {
-    entity
-        .labels
-        .iter()
-        .any(|candidate| candidate.as_str() == label)
 }
 
 fn validate_reader_metadata(

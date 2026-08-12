@@ -315,7 +315,7 @@ impl GraphGenerationManifestProvider for DaemonCodeGraphManifestProviderV1 {
         if owner.shard_id != binding.project_shard
             || !binding.repositories.contains(&source.repository)
             || source.projector_revision.as_str()
-                != tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION_V3
+                != tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION
         {
             return Err(GraphDbError::Conflict);
         }
@@ -432,7 +432,7 @@ mod tests {
                 ))
                 .unwrap(),
                 projector_revision: GraphProjectorRevision::try_from(
-                    tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION_V3
+                    tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION
                         .to_owned(),
                 )
                 .unwrap(),

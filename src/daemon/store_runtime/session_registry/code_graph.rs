@@ -458,7 +458,7 @@ impl RetainedCodeGraphRuntimeV1 {
         GraphDbError,
     > {
         let revision = GraphProjectorRevision::try_from(
-            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned(),
+            tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
         )?;
         let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
             self.authority.namespace().clone(),
@@ -501,8 +501,7 @@ impl RetainedCodeGraphRuntimeV1 {
         let graph_generation = tracedecay_code_index::graph_projection::code_graph_generation_id(
             &self.generation_id,
             &GraphProjectorRevision::try_from(
-                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION_V3
-                    .to_owned(),
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
             )?,
         )
         .map_err(map_code_graph_error)?;
@@ -558,7 +557,7 @@ impl RetainedCodeGraphRuntimeV1 {
                 projection.clone(),
                 generation,
                 &GraphProjectorRevision::try_from(
-                    tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION_V3
+                    tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION
                         .to_owned(),
                 )?,
                 &|| match probe.interruption() {
@@ -588,8 +587,7 @@ impl RetainedCodeGraphRuntimeV1 {
             generation: self.generation_id.clone(),
             sealed_state_digest: self.sealed_state_digest.clone(),
             projector_revision: GraphProjectorRevision::try_from(
-                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION_V3
-                    .to_owned(),
+                tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
             )?,
         };
         let mut storage = self

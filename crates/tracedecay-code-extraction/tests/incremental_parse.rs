@@ -1,14 +1,17 @@
 use std::time::Duration;
 
-use tracedecay_code_extraction::RustExtractor;
 use tracedecay_code_extraction::incremental::{
     ParseCompleteness, ParseDocumentIdentity, ParseError, ParseInputEdit, ParseLimits,
     ParsePartialReason, ParsePoint, ParseResetReason, ParseReuse, RetainedParseDocument,
 };
 use tracedecay_code_extraction::parsed_extraction::ParsedExtractionDisposition;
+use tracedecay_code_extraction::{
+    ExtractionArtifactV1, ImportModuleKindV1, ImportNamespaceV1, LanguageExtractor, RustExtractor,
+    TypeScriptExtractor,
+};
 use tracedecay_domain::{
-    CommitId, ContentDigest, ManifestDigest, ProjectId, RefId, RepositoryDirtyStateV1,
-    RepositoryId, TreeId, WorktreeId,
+    CommitId, ContentDigest, ManifestDigest, NodeKind, ProjectId, RefId, RepositoryDirtyStateV1,
+    RepositoryId, SourceSpan, TreeId, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -41,6 +44,23 @@ fn identity_in_worktree(
     }
 }
 
+fn typescript_identity(
+    commit: &str,
+    tree: &str,
+    dirty: RepositoryDirtyStateV1,
+) -> ParseDocumentIdentity {
+    ParseDocumentIdentity::Repository {
+        project_id: id::<ProjectId>("project.incremental"),
+        repository_id: id::<RepositoryId>("repository.incremental"),
+        worktree_id: Some(id::<WorktreeId>("worktree.incremental")),
+        reference: Some(id::<RefId>("refs/heads/main")),
+        commit: Some(id::<CommitId>(commit)),
+        tree: Some(id::<TreeId>(tree)),
+        dirty,
+        logical_path: "src/imports.ts".to_owned(),
+    }
+}
+
 fn point_for(source: &str, byte: usize) -> ParsePoint {
     let prefix = &source[..byte];
     let row = prefix.bytes().filter(|byte| *byte == b'\n').count();
@@ -48,6 +68,31 @@ fn point_for(source: &str, byte: usize) -> ParsePoint {
         .rfind('\n')
         .map_or(prefix.len(), |line_start| prefix.len() - line_start - 1);
     ParsePoint { row, column }
+}
+
+fn assert_artifact_rows_match_fresh_parse(
+    incremental: &ExtractionArtifactV1,
+    fresh: &ExtractionArtifactV1,
+) {
+    let mut incremental_result = incremental.result.clone();
+    let mut fresh_result = fresh.result.clone();
+    incremental_result.duration_ms = 0;
+    fresh_result.duration_ms = 0;
+    for node in &mut incremental_result.nodes {
+        node.updated_at = 0;
+    }
+    for node in &mut fresh_result.nodes {
+        node.updated_at = 0;
+    }
+
+    assert_eq!(incremental_result.nodes, fresh_result.nodes);
+    assert_eq!(incremental_result.edges, fresh_result.edges);
+    assert_eq!(
+        incremental_result.unresolved_refs,
+        fresh_result.unresolved_refs
+    );
+    assert_eq!(incremental_result.errors, fresh_result.errors);
+    assert_eq!(incremental.imports, fresh.imports);
 }
 
 #[test]
@@ -366,5 +411,339 @@ fn same_line_column_shifts_reextract_following_top_level_syntax() {
     assert_eq!(
         following.start_column as usize,
         after.find("fn b").expect("b")
+    );
+}
+
+#[test]
+fn incremental_edit_after_same_line_import_matches_fresh_parser_artifact() {
+    let before = "import type { Foo } from \"./foo\"; export const tail = 1;\n";
+    let after = "import type { Foo } from \"./foo\"; export const tail = 2;\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        typescript_identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "typescript",
+        before,
+        ParseLimits::default(),
+    )
+    .expect("initial TypeScript parse");
+    let initial = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &opened, None)
+        .expect("initial extraction artifact");
+
+    let report = document
+        .reparse(
+            typescript_identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            after,
+        )
+        .expect("later same-line edit");
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    let incremental = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&initial.artifact))
+        .expect("incremental extraction artifact");
+    assert_eq!(
+        incremental.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+
+    assert_eq!(
+        incremental
+            .artifact
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Use)
+            .count(),
+        1,
+        "editing later syntax must retain the preceding raw import statement"
+    );
+    assert_eq!(incremental.artifact.imports.len(), 1);
+    assert_eq!(incremental.artifact.imports[0].module_specifier, "./foo");
+
+    let fresh = TypeScriptExtractor.extract_artifact("src/imports.ts", after);
+    assert_artifact_rows_match_fresh_parse(&incremental.artifact, &fresh);
+}
+
+#[test]
+fn incremental_edit_of_duplicate_module_import_matches_fresh_parser_artifact() {
+    let before = "import type { A } from \"x\"; import { b } from \"x\";\n";
+    let after = "import type { A } from \"x\"; import { c } from \"x\";\n";
+    let (mut document, opened) = RetainedParseDocument::open(
+        typescript_identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "typescript",
+        before,
+        ParseLimits::default(),
+    )
+    .expect("initial duplicate-module TypeScript parse");
+    let initial = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &opened, None)
+        .expect("initial duplicate-module extraction artifact");
+
+    let report = document
+        .reparse(
+            typescript_identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            after,
+        )
+        .expect("later duplicate-module import edit");
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    let incremental = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&initial.artifact))
+        .expect("incremental duplicate-module extraction artifact");
+    assert_eq!(
+        incremental.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+
+    assert_eq!(
+        incremental
+            .artifact
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Use)
+            .count(),
+        2,
+        "editing the later import must retain both same-module Use statements"
+    );
+    assert_eq!(
+        incremental
+            .artifact
+            .imports
+            .iter()
+            .map(|row| (row.imported_name.as_deref(), row.namespace))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some("A"), ImportNamespaceV1::Type),
+            (Some("c"), ImportNamespaceV1::Value),
+        ],
+        "the unchanged preceding type row and edited value row must both survive"
+    );
+
+    let fresh = TypeScriptExtractor.extract_artifact("src/imports.ts", after);
+    assert_artifact_rows_match_fresh_parse(&incremental.artifact, &fresh);
+}
+
+#[test]
+fn incremental_edit_after_multiline_import_closing_line_matches_fresh_parser_artifact() {
+    let before = concat!(
+        "import type {\n",
+        "  Foo,\n",
+        "} from \"./foo\"; export const tail = 1;\n",
+    );
+    let after = concat!(
+        "import type {\n",
+        "  Foo,\n",
+        "} from \"./foo\"; export const tail = 2;\n",
+    );
+    let (mut document, opened) = RetainedParseDocument::open(
+        typescript_identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "typescript",
+        before,
+        ParseLimits::default(),
+    )
+    .expect("initial multiline TypeScript parse");
+    let initial = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &opened, None)
+        .expect("initial multiline extraction artifact");
+
+    let report = document
+        .reparse(
+            typescript_identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            after,
+        )
+        .expect("later closing-line edit");
+    assert_eq!(report.reuse, ParseReuse::Incremental);
+    let incremental = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &report, Some(&initial.artifact))
+        .expect("incremental multiline extraction artifact");
+    assert_eq!(
+        incremental.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+
+    assert_eq!(
+        incremental
+            .artifact
+            .result
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Use)
+            .count(),
+        1,
+        "editing later closing-line syntax must retain the multiline import statement"
+    );
+    assert_eq!(incremental.artifact.imports.len(), 1);
+    assert_eq!(
+        incremental.artifact.imports[0].imported_name.as_deref(),
+        Some("Foo")
+    );
+
+    let fresh = TypeScriptExtractor.extract_artifact("src/imports.ts", after);
+    assert_artifact_rows_match_fresh_parse(&incremental.artifact, &fresh);
+}
+
+#[test]
+fn incremental_import_artifact_does_not_keep_stale_rows_after_add_change_and_delete() {
+    let without_import = concat!(
+        "export const untouched = 1;\n",
+        "\n",
+        "export const tail = 2;\n",
+    );
+    let with_type_import = concat!(
+        "export const untouched = 1;\n",
+        "import type { Foo } from \"./foo\";\n",
+        "export const tail = 2;\n",
+    );
+    let with_value_import = concat!(
+        "export const untouched = 1;\n",
+        "import { Bar as Baz } from \"pkg\";\n",
+        "export const tail = 2;\n",
+    );
+    let (mut document, opened) = RetainedParseDocument::open(
+        typescript_identity("commit-a", "tree-a", RepositoryDirtyStateV1::Clean),
+        "typescript",
+        without_import,
+        ParseLimits::default(),
+    )
+    .expect("initial TypeScript parse");
+    let initial = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &opened, None)
+        .expect("initial extraction artifact");
+    assert!(
+        initial.artifact.result.errors.is_empty(),
+        "initial extraction errors: {:?}",
+        initial.artifact.result.errors
+    );
+    assert!(initial.artifact.imports.is_empty());
+
+    let added_report = document
+        .reparse(
+            typescript_identity("commit-b", "tree-b", RepositoryDirtyStateV1::Dirty),
+            with_type_import,
+        )
+        .expect("incremental import addition");
+    assert_eq!(added_report.reuse, ParseReuse::Incremental);
+    let added = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &added_report, Some(&initial.artifact))
+        .expect("added import artifact");
+    assert!(
+        added.artifact.result.errors.is_empty(),
+        "added extraction errors: {:?}",
+        added.artifact.result.errors
+    );
+    assert_eq!(
+        added.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+    assert_eq!(
+        added
+            .artifact
+            .imports
+            .iter()
+            .map(|row| (
+                row.logical_path.as_str(),
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.namespace,
+                row.module_kind,
+                row.span,
+                row.start_line,
+                row.start_column,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "src/imports.ts",
+            "./foo",
+            Some("Foo"),
+            Some("Foo"),
+            ImportNamespaceV1::Type,
+            ImportModuleKindV1::ProjectRelative,
+            SourceSpan {
+                start_byte: 42,
+                end_byte: 45,
+            },
+            1,
+            14,
+        )]
+    );
+
+    let changed_report = document
+        .reparse(
+            typescript_identity("commit-c", "tree-c", RepositoryDirtyStateV1::Dirty),
+            with_value_import,
+        )
+        .expect("incremental import change");
+    assert_eq!(changed_report.reuse, ParseReuse::Incremental);
+    let changed = document
+        .extract_canonical_artifact(&TypeScriptExtractor, &changed_report, Some(&added.artifact))
+        .expect("changed import artifact");
+    assert!(
+        changed.artifact.result.errors.is_empty(),
+        "changed extraction errors: {:?}",
+        changed.artifact.result.errors
+    );
+    assert_eq!(
+        changed.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+    assert_eq!(
+        changed
+            .artifact
+            .imports
+            .iter()
+            .map(|row| (
+                row.logical_path.as_str(),
+                row.module_specifier.as_str(),
+                row.imported_name.as_deref(),
+                row.local_name.as_deref(),
+                row.namespace,
+                row.module_kind,
+                row.span,
+                row.start_line,
+                row.start_column,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(
+            "src/imports.ts",
+            "pkg",
+            Some("Bar"),
+            Some("Baz"),
+            ImportNamespaceV1::Value,
+            ImportModuleKindV1::BareModule,
+            SourceSpan {
+                start_byte: 37,
+                end_byte: 47,
+            },
+            1,
+            9,
+        )]
+    );
+
+    let deleted_report = document
+        .reparse(
+            typescript_identity("commit-d", "tree-d", RepositoryDirtyStateV1::Dirty),
+            without_import,
+        )
+        .expect("incremental import deletion");
+    assert_eq!(deleted_report.reuse, ParseReuse::Incremental);
+    let deleted = document
+        .extract_canonical_artifact(
+            &TypeScriptExtractor,
+            &deleted_report,
+            Some(&changed.artifact),
+        )
+        .expect("deleted import artifact");
+    assert!(
+        deleted.artifact.result.errors.is_empty(),
+        "deleted extraction errors: {:?}",
+        deleted.artifact.result.errors
+    );
+    assert_eq!(
+        deleted.disposition,
+        ParsedExtractionDisposition::ChangedRegions
+    );
+    assert!(
+        deleted.artifact.imports.is_empty(),
+        "deleted import rows must not survive incremental merge: {:#?}",
+        deleted.artifact.imports
     );
 }

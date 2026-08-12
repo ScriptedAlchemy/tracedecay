@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::chunks::CodeIndexImportEvidenceV1;
 use crate::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use crate::production::CodeIndexPublishedGenerationV1;
 use serde::{Deserialize, Serialize};
@@ -14,12 +15,15 @@ use tracedecay_graph_db::{
     GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphWatermark,
 };
 
+use super::schema::{
+    FILE_IMPORT_EDGE_KIND, FILE_LABEL, FILE_RECORD_PROPERTY, IMPORT_LABEL, IMPORT_RECORD_PROPERTY,
+    file_entity_id, file_import_relation_id, import_entity_id, serialize, stable_identity,
+};
 use super::{
     CHUNK_LABEL, CHUNK_RECORD_PROPERTY, CHUNK_SYMBOL_EDGE_KIND, CodeGraphProjectionError,
-    CodeGraphSymbolBindingV1, FILE_LABEL, FILE_RECORD_PROPERTY, FILE_SYMBOL_EDGE_KIND,
-    SymbolRecordV1, build_code_graph_manifest_inputs_checked, compare_edges,
-    current_generation_entity, edge_entity, file_entity_id, serialize, source_relation,
-    stable_identity, symbol_entity, symbol_entity_id, target_relation, validate_edge,
+    CodeGraphSymbolBindingV1, FILE_SYMBOL_EDGE_KIND, SymbolRecordV1,
+    build_code_graph_manifest_inputs_checked, compare_edges, current_generation_entity,
+    edge_entity, source_relation, symbol_entity, symbol_entity_id, target_relation, validate_edge,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,6 +58,7 @@ pub fn build_published_code_graph_manifest_checked(
         Some(ProductionCodeGraphInputs {
             files: &generation.snapshot().files,
             symbols: generation.symbols(),
+            imports: generation.imports(),
         }),
         projector_revision,
         check,
@@ -70,6 +75,7 @@ pub(super) struct BuiltProjection {
 pub(super) struct ProductionCodeGraphInputs<'a> {
     pub(super) files: &'a [SanitizedCodeFileV1],
     pub(super) symbols: &'a GenerationSymbolIndexV1,
+    pub(super) imports: &'a [CodeIndexImportEvidenceV1],
 }
 
 pub(super) fn build_projection(
@@ -102,6 +108,23 @@ pub(super) fn build_projection(
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
+    let imports: &[CodeIndexImportEvidenceV1] = production.map_or(&[], |inputs| inputs.imports);
+    for import in imports {
+        check()?;
+        import
+            .validate()
+            .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
+        let file = files.get(&import.file_occurrence_id).ok_or_else(|| {
+            CodeGraphProjectionError::Contract(
+                "code graph import refers to a file outside its immutable snapshot".to_owned(),
+            )
+        })?;
+        if file.logical_path != import.logical_path {
+            return Err(CodeGraphProjectionError::Contract(
+                "code graph import logical path does not match its file occurrence".to_owned(),
+            ));
+        }
+    }
     let mut bindings = BTreeMap::<SymbolOccurrenceId, CodeGraphSymbolBindingV1>::new();
     for chunk in chunks {
         check()?;
@@ -181,6 +204,7 @@ pub(super) fn build_projection(
     let mut entities = Vec::with_capacity(
         files
             .len()
+            .saturating_add(imports.len())
             .saturating_add(chunks.len())
             .saturating_add(occurrences.len())
             .saturating_add(retained_edges.len())
@@ -189,6 +213,10 @@ pub(super) fn build_projection(
     for file in files.values() {
         check()?;
         entities.push(file_entity(file)?);
+    }
+    for import in imports {
+        check()?;
+        entities.push(import_entity(import)?);
     }
     for chunk in chunks {
         check()?;
@@ -219,12 +247,17 @@ pub(super) fn build_projection(
         retained_edges
             .len()
             .saturating_mul(2)
-            .saturating_add(bindings.len().saturating_mul(2)),
+            .saturating_add(bindings.len().saturating_mul(2))
+            .saturating_add(imports.len()),
     );
     if production.is_some() {
         for (occurrence, binding) in &bindings {
             relations.push(file_symbol_relation(projection, binding, occurrence)?);
         }
+    }
+    for import in imports {
+        check()?;
+        relations.push(file_import_relation(projection, import)?);
     }
     for chunk in chunks {
         if let Some(occurrence) = &chunk.anchor.symbol_occurrence_id {
@@ -251,6 +284,20 @@ fn file_entity(file: &SanitizedCodeFileV1) -> Result<GraphEntity, CodeGraphProje
         BTreeMap::from([(
             GraphPropertyName::new(FILE_RECORD_PROPERTY)?,
             GraphProperty::Bytes(serialize(file)?),
+        )]),
+    )
+    .map_err(Into::into)
+}
+
+fn import_entity(
+    import: &CodeIndexImportEvidenceV1,
+) -> Result<GraphEntity, CodeGraphProjectionError> {
+    GraphEntity::new(
+        import_entity_id(import)?,
+        BTreeSet::from([GraphLabel::new(IMPORT_LABEL)?]),
+        BTreeMap::from([(
+            GraphPropertyName::new(IMPORT_RECORD_PROPERTY)?,
+            GraphProperty::Bytes(serialize(import)?),
         )]),
     )
     .map_err(Into::into)
@@ -290,6 +337,24 @@ fn file_symbol_relation(
         GraphEntityRef::new(projection.clone(), file_entity_id(&binding.file)?),
         GraphEntityRef::new(projection.clone(), symbol_entity_id(occurrence)?),
         GraphRelationKind::new(FILE_SYMBOL_EDGE_KIND)?,
+        BTreeMap::new(),
+    )
+    .map_err(Into::into)
+}
+
+fn file_import_relation(
+    projection: &GraphProjectionIdentity,
+    import: &CodeIndexImportEvidenceV1,
+) -> Result<GraphGenerationRelation, CodeGraphProjectionError> {
+    let import_id = import_entity_id(import)?;
+    GraphGenerationRelation::new(
+        file_import_relation_id(import)?,
+        GraphEntityRef::new(
+            projection.clone(),
+            file_entity_id(&import.file_occurrence_id)?,
+        ),
+        GraphEntityRef::new(projection.clone(), import_id),
+        GraphRelationKind::new(FILE_IMPORT_EDGE_KIND)?,
         BTreeMap::new(),
     )
     .map_err(Into::into)

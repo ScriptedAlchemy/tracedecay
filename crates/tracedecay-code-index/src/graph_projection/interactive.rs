@@ -9,10 +9,10 @@
 //! doctrine: generation mismatches, cancellation, budget exhaustion, and
 //! payload corruption are all explicit errors, never silent truncation.
 //!
-//! Name and file keys are served from a [`SymbolCatalog`] built lazily by one
-//! bounded, cancellable scan of the projection's symbol entities and cached
-//! on the owning [`CodeGraphProjectionStore`]. The catalog is derived from
-//! the verified snapshot and shares its lifetime, so it is a cache of the
+//! Name, file, and import keys are served from an [`InteractiveCatalog`] built
+//! lazily by one bounded, cancellable scan of the projection and cached on the
+//! owning [`CodeGraphProjectionStore`]. The catalog is derived from the
+//! verified snapshot and shares its lifetime, so it is a cache of the
 //! projection authority — not a second authority. Per-seed adjacency reads go
 //! straight to the snapshot's kind-filtered relation fan-outs.
 
@@ -25,31 +25,28 @@ use tracedecay_domain::{
     SanitizedCodeFileV1, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity,
-    GraphProjectionReadRequest, GraphRelationId, GraphRelationKind, GraphRelationRef,
-    MAX_VERIFIED_GENERATION_RELATIONS, VerifiedGraphSnapshot,
+    GraphCancellation, GraphEntity, GraphEntityId, GraphProjectionIdentity, GraphRelationId,
+    GraphRelationKind, GraphRelationRef, MAX_VERIFIED_GENERATION_RELATIONS, VerifiedGraphSnapshot,
 };
 
 use super::{
-    CodeGraphProjectionError, CodeGraphReadCancellation, EDGE_LABEL, EDGE_RECORD_PROPERTY,
-    FILE_LABEL, FILE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SYMBOL_LABEL, SYMBOL_RECORD_PROPERTY,
-    SymbolRecordV1, TARGET_EDGE_KIND, compare_edges, deserialize_property, edge_entity_id,
-    file_entity_id, has_label, load_symbol_record, symbol_entity_id, validate_edge,
-    validate_symbol_record,
+    CodeGraphProjectionError, CodeGraphProjectionStore, CodeGraphReadCancellation, EDGE_LABEL,
+    EDGE_RECORD_PROPERTY, SOURCE_EDGE_KIND, SymbolRecordV1, TARGET_EDGE_KIND, compare_edges,
+    deserialize_property, edge_entity_id, has_label, load_symbol_record, symbol_entity_id,
+    validate_edge,
 };
 
+mod catalog;
+mod imports;
 mod models;
 
 use self::models::CatalogSymbol;
-pub(super) use self::models::SymbolCatalog;
+pub(super) use self::models::InteractiveCatalog;
 pub use self::models::{
     CodeGraphDegreeRankingV1, CodeGraphEdgeKindCountsV1, CodeGraphImpactBatchV1,
     CodeGraphImpactedSymbolV1, CodeGraphPathSearchV1, CodeGraphSemanticEdgeV1,
     CodeGraphSymbolDegreesV1, CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
 };
-
-/// Entities examined per projection page while building the symbol catalog.
-const CATALOG_SCAN_PAGE_ENTITIES: usize = 1_024;
 
 /// Symbols measured per bulk degree read while ranking a generation. Bounds
 /// the batch-wide relation budget each measurement charges.
@@ -69,7 +66,7 @@ pub struct CodeGraphInteractiveReader {
     snapshot: Arc<VerifiedGraphSnapshot>,
     projection_node_count: usize,
     cancellation: Arc<dyn GraphCancellation>,
-    catalog: Arc<RwLock<Option<Arc<SymbolCatalog>>>>,
+    catalog: Arc<RwLock<Option<Arc<InteractiveCatalog>>>>,
 }
 
 impl fmt::Debug for CodeGraphInteractiveReader {
@@ -89,7 +86,7 @@ impl CodeGraphInteractiveReader {
         snapshot: Arc<VerifiedGraphSnapshot>,
         projection_node_count: usize,
         cancellation: Arc<dyn GraphCancellation>,
-        catalog: Arc<RwLock<Option<Arc<SymbolCatalog>>>>,
+        catalog: Arc<RwLock<Option<Arc<InteractiveCatalog>>>>,
     ) -> Self {
         Self {
             generation,
@@ -639,112 +636,36 @@ impl CodeGraphInteractiveReader {
     fn catalog(
         &self,
         cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Arc<SymbolCatalog>, CodeGraphProjectionError> {
-        if let Some(catalog) = self
-            .catalog
-            .read()
-            .map_err(|_| catalog_lock_poisoned())?
-            .as_ref()
-        {
-            return Ok(Arc::clone(catalog));
+    ) -> Result<Arc<InteractiveCatalog>, CodeGraphProjectionError> {
+        if cancellation.is_cancelled() {
+            return Err(CodeGraphProjectionError::Cancelled);
         }
-        let built = Arc::new(self.build_catalog(cancellation)?);
-        let mut slot = self.catalog.write().map_err(|_| catalog_lock_poisoned())?;
-        if let Some(existing) = slot.as_ref() {
-            // A concurrent reader finished first; both builds derive from the
-            // same immutable snapshot, so either value is authoritative.
-            return Ok(Arc::clone(existing));
-        }
-        *slot = Some(Arc::clone(&built));
-        Ok(built)
-    }
-
-    fn build_catalog(
-        &self,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<SymbolCatalog, CodeGraphProjectionError> {
-        let mut catalog = SymbolCatalog {
-            symbols: BTreeMap::new(),
-            by_qualified_name: BTreeMap::new(),
-            by_simple_name: BTreeMap::new(),
-            by_file: BTreeMap::new(),
-            by_logical_path: BTreeMap::new(),
-            files: BTreeMap::new(),
-        };
-        let mut after: Option<GraphEntityId> = None;
-        let mut scanned = 0_usize;
-        loop {
+        let slot = self.catalog.read().map_err(|_| catalog_lock_poisoned())?;
+        if let Some(catalog) = slot.as_ref() {
             if cancellation.is_cancelled() {
                 return Err(CodeGraphProjectionError::Cancelled);
             }
-            let page = self.snapshot.read_projection(GraphProjectionReadRequest {
-                namespace: self.projection.namespace.clone(),
-                projection: self.projection.projection.clone(),
-                after_entity: after.clone(),
-                after_relation: None,
-                max_entities: CATALOG_SCAN_PAGE_ENTITIES,
-                max_relations: 0,
-                cancellation: Arc::clone(&cancellation),
-            })?;
-            scanned = scanned.saturating_add(page.entities.len());
-            if scanned > self.projection_node_count {
-                return Err(CodeGraphProjectionError::Corrupt(
-                    "code graph symbol scan exceeded the declared projection node count".to_owned(),
-                ));
-            }
-            for entity in &page.entities {
-                if has_label(entity, FILE_LABEL) {
-                    let record: SanitizedCodeFileV1 =
-                        deserialize_property(entity, FILE_RECORD_PROPERTY)?;
-                    record
-                        .validate()
-                        .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
-                    if file_entity_id(&record.file_occurrence_id)? != entity.identity {
-                        return Err(CodeGraphProjectionError::Corrupt(
-                            "code graph file identity does not match its payload".to_owned(),
-                        ));
-                    }
-                    let previous = catalog.by_logical_path.insert(
-                        record.logical_path.clone(),
-                        record.file_occurrence_id.clone(),
-                    );
-                    if let Some(existing) = previous {
-                        if existing != record.file_occurrence_id {
-                            return Err(CodeGraphProjectionError::Corrupt(format!(
-                                "code graph logical path `{}` is claimed by more than one file occurrence",
-                                record.logical_path
-                            )));
-                        }
-                    }
-                    catalog
-                        .files
-                        .insert(record.file_occurrence_id.clone(), record);
-                    continue;
-                }
-                if !has_label(entity, SYMBOL_LABEL) {
-                    continue;
-                }
-                let record: SymbolRecordV1 = deserialize_property(entity, SYMBOL_RECORD_PROPERTY)?;
-                validate_symbol_record(&record)?;
-                if symbol_entity_id(&record.occurrence)? != entity.identity {
-                    return Err(CodeGraphProjectionError::Corrupt(
-                        "code graph symbol identity does not match its payload".to_owned(),
-                    ));
-                }
-                catalog.insert(
-                    record.occurrence.clone(),
-                    CatalogSymbol {
-                        binding: record.binding,
-                        metadata: record.metadata,
-                    },
-                );
-            }
-            match page.next_entity {
-                Some(next) => after = Some(next),
-                None => break,
-            }
+            return Ok(Arc::clone(catalog));
         }
-        Ok(catalog)
+        drop(slot);
+        let built = Arc::new(catalog::build_interactive_catalog(
+            &self.snapshot,
+            &self.projection,
+            self.projection_node_count,
+            Arc::clone(&cancellation),
+        )?);
+        let mut slot = self.catalog.write().map_err(|_| catalog_lock_poisoned())?;
+        if let Some(existing) = slot.as_ref() {
+            if cancellation.is_cancelled() {
+                return Err(CodeGraphProjectionError::Cancelled);
+            }
+            return Ok(Arc::clone(existing));
+        }
+        if cancellation.is_cancelled() {
+            return Err(CodeGraphProjectionError::Cancelled);
+        }
+        *slot = Some(Arc::clone(&built));
+        Ok(built)
     }
 
     fn semantic_neighbors(
@@ -854,7 +775,7 @@ impl CodeGraphInteractiveReader {
 }
 
 fn resolve_from_index(
-    catalog: &SymbolCatalog,
+    catalog: &InteractiveCatalog,
     occurrences: Option<&Vec<SymbolOccurrenceId>>,
     kind: Option<&str>,
     limit: usize,
@@ -962,7 +883,9 @@ fn reconstruct_path(
 }
 
 fn catalog_lock_poisoned() -> CodeGraphProjectionError {
-    CodeGraphProjectionError::Unavailable("code graph symbol catalog lock is poisoned".to_owned())
+    CodeGraphProjectionError::Unavailable(
+        "code graph interactive catalog lock is poisoned".to_owned(),
+    )
 }
 
 #[cfg(test)]

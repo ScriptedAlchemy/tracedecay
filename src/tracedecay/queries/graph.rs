@@ -5,6 +5,7 @@ use crate::errors::Result;
 use crate::graph::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
+use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
     CodeGraphSymbolPageV1, CodeGraphSymbolSummaryV1,
@@ -194,6 +195,22 @@ impl VerifiedGraphQuery {
     ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
         self.reader
             .resolve_qualified_name(qualified_name, kind, limit, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn external_type_import_candidates(
+        &self,
+        query: &str,
+        scope_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CodeIndexImportEvidenceV1>> {
+        self.reader
+            .external_type_import_candidates(
+                query,
+                scope_prefix,
+                limit,
+                Arc::clone(&self.cancellation),
+            )
             .map_err(graph_projection_error)
     }
 

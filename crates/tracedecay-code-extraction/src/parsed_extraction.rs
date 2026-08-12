@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 use tracedecay_domain::{ExtractionResult, NodeKind};
 use tree_sitter::{Node as TreeSitterNode, Tree};
 
-use crate::incremental::ParseChangedRange;
+use crate::ExtractionArtifactV1;
+use crate::incremental::{ParseChangedRange, ParsePoint};
 
 #[derive(Clone, Copy, Debug)]
 pub enum ParsedExtractionScope<'a> {
@@ -48,6 +49,65 @@ pub struct ParsedExtraction {
     pub result: ExtractionResult,
     pub disposition: ParsedExtractionDisposition,
     pub metrics: ParsedTraversalMetrics,
+}
+
+/// Structured artifact extracted from one parser-owned tree traversal.
+#[derive(Debug)]
+pub struct ParsedExtractionArtifactV1 {
+    pub artifact: ExtractionArtifactV1,
+    pub disposition: ParsedExtractionDisposition,
+    pub metrics: ParsedTraversalMetrics,
+}
+
+impl ParsedExtractionArtifactV1 {
+    pub(crate) fn complete(
+        mut artifact: ExtractionArtifactV1,
+        scope: ParsedExtractionScope<'_>,
+        metrics: ParsedTraversalMetrics,
+    ) -> Self {
+        let disposition = match scope {
+            ParsedExtractionScope::FullDocument => ParsedExtractionDisposition::FullDocument,
+            ParsedExtractionScope::ChangedRegions(_) => ParsedExtractionDisposition::ChangedRegions,
+        };
+        artifact.canonicalize_order();
+        Self {
+            artifact,
+            disposition,
+            metrics,
+        }
+    }
+
+    pub(crate) fn reset(
+        mut artifact: ExtractionArtifactV1,
+        reason: ParsedExtractionResetReason,
+        source_bytes: usize,
+    ) -> Self {
+        artifact.canonicalize_order();
+        Self {
+            artifact,
+            disposition: ParsedExtractionDisposition::Reset { reason },
+            metrics: ParsedTraversalMetrics {
+                visited_top_level_nodes: 0,
+                visited_bytes: source_bytes,
+            },
+        }
+    }
+
+    pub(crate) fn from_parsed(parsed: ParsedExtraction) -> Self {
+        Self {
+            artifact: ExtractionArtifactV1::from_result(parsed.result),
+            disposition: parsed.disposition,
+            metrics: parsed.metrics,
+        }
+    }
+
+    pub(crate) fn into_parsed(self) -> ParsedExtraction {
+        ParsedExtraction {
+            result: self.artifact.result,
+            disposition: self.disposition,
+            metrics: self.metrics,
+        }
+    }
 }
 
 impl ParsedExtraction {
@@ -135,8 +195,8 @@ fn node_intersects(node: TreeSitterNode<'_>, region: &ParseChangedRange) -> bool
 pub(crate) fn merge_changed_extraction(
     previous: &ExtractionResult,
     mut delta: ExtractionResult,
-    old_start_row: u32,
-    old_end_row: u32,
+    edit_start: ParsePoint,
+    old_edit_end: ParsePoint,
 ) -> Option<ExtractionResult> {
     if !previous.errors.is_empty() || !delta.errors.is_empty() {
         return None;
@@ -156,8 +216,7 @@ pub(crate) fn merge_changed_extraction(
         .iter()
         .filter(|node| node.kind != NodeKind::File)
         .filter(|node| {
-            ranges_overlap(node.start_line, node.end_line, old_start_row, old_end_row)
-                || delta_ids.contains(&node.id)
+            node_intersects_edit(node, edit_start, old_edit_end) || delta_ids.contains(&node.id)
         })
         .map(|node| node.id.clone())
         .collect::<Vec<_>>();
@@ -202,6 +261,18 @@ pub(crate) fn merge_changed_extraction(
     Some(merged)
 }
 
-fn ranges_overlap(left_start: u32, left_end: u32, right_start: u32, right_end: u32) -> bool {
-    left_start <= right_end && right_start <= left_end
+pub(crate) fn node_intersects_edit(
+    node: &tracedecay_domain::Node,
+    edit_start: ParsePoint,
+    old_edit_end: ParsePoint,
+) -> bool {
+    let node_start = (node.start_line as usize, node.start_column as usize);
+    let node_end = (node.end_line as usize, node.end_column as usize);
+    let edit_start = (edit_start.row, edit_start.column);
+    let edit_end = (old_edit_end.row, old_edit_end.column);
+    if edit_start == edit_end {
+        node_start <= edit_start && edit_start < node_end
+    } else {
+        node_start < edit_end && edit_start < node_end
+    }
 }

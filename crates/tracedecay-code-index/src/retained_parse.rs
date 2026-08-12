@@ -11,15 +11,15 @@ use std::{
 };
 
 use thiserror::Error;
-use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_code_extraction::incremental::{
     ParseDocumentIdentity, ParseError, ParseLimits, ParseReport, ParseResetReason, ParseReuse,
     RetainedParseDocument,
 };
 use tracedecay_code_extraction::parsed_extraction::{
-    ParsedExtraction, ParsedExtractionDisposition,
+    ParsedExtraction, ParsedExtractionArtifactV1, ParsedExtractionDisposition,
 };
-use tracedecay_domain::{ExtractionResult, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
+use tracedecay_code_extraction::{ExtractionArtifactV1, LanguageExtractor};
+use tracedecay_domain::{ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 
 const DEFAULT_MAX_RETAINED_DOCUMENTS: usize = 256;
 const DEFAULT_MAX_RETAINED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
@@ -115,7 +115,7 @@ impl ParseDocumentKey {
 
 struct RetainedEntry {
     document: RetainedParseDocument,
-    extraction: Option<ExtractionResult>,
+    artifact: Option<ExtractionArtifactV1>,
 }
 
 #[derive(Default)]
@@ -174,6 +174,29 @@ impl SharedRetainedParsePool {
         source: &str,
         extractor: &dyn LanguageExtractor,
     ) -> Result<(ParseReport, ParsedExtraction), ParseError> {
+        let (report, extraction) =
+            self.parse_and_extract_artifact(identity, language_id, source, extractor)?;
+        Ok((
+            report,
+            ParsedExtraction {
+                result: extraction.artifact.result,
+                disposition: extraction.disposition,
+                metrics: extraction.metrics,
+            },
+        ))
+    }
+
+    /// Parse and extract one full canonical artifact from the pool-owned tree.
+    /// The retained artifact, including import bindings, is the previous-state
+    /// authority for incremental merging; this path never acquires a second
+    /// parser.
+    pub fn parse_and_extract_artifact(
+        &self,
+        identity: ParseDocumentIdentity,
+        language_id: &str,
+        source: &str,
+        extractor: &dyn LanguageExtractor,
+    ) -> Result<(ParseReport, ParsedExtractionArtifactV1), ParseError> {
         let grammar_key = extractor.retained_grammar_key(identity.logical_path());
         let prepared_source = extractor.prepare_parse_source(source);
         let (report, extraction) = self.parse_internal(
@@ -198,7 +221,7 @@ impl SharedRetainedParsePool {
         prepared_source: &str,
         grammar_key: Option<&str>,
         extractor: Option<&dyn LanguageExtractor>,
-    ) -> Result<(ParseReport, Option<ParsedExtraction>), ParseError> {
+    ) -> Result<(ParseReport, Option<ParsedExtractionArtifactV1>), ParseError> {
         if source.len() > self.limits.max_total_source_bytes {
             self.record_failure();
             return Err(ParseError::SourceTooLarge {
@@ -273,20 +296,23 @@ impl SharedRetainedParsePool {
                     }
                 };
                 let extraction = match extractor {
-                    Some(extractor) => match document.extract_canonical(extractor, &report, None) {
-                        Ok(extraction) => Some(extraction),
-                        Err(error) => {
-                            state.stats.failed_parses = state.stats.failed_parses.saturating_add(1);
-                            return Err(error);
+                    Some(extractor) => {
+                        match document.extract_canonical_artifact(extractor, &report, None) {
+                            Ok(extraction) => Some(extraction),
+                            Err(error) => {
+                                state.stats.failed_parses =
+                                    state.stats.failed_parses.saturating_add(1);
+                                return Err(error);
+                            }
                         }
-                    },
+                    }
                     None => None,
                 };
-                let retained_extraction = extraction.as_ref().map(|parsed| parsed.result.clone());
+                let retained_artifact = extraction.as_ref().map(|parsed| parsed.artifact.clone());
                 let current_size = document.retained_source_bytes();
                 let entry = Arc::new(Mutex::new(RetainedEntry {
                     document,
-                    extraction: retained_extraction,
+                    artifact: retained_artifact,
                 }));
                 state.documents.insert(key.clone(), Arc::clone(&entry));
                 state.source_bytes.insert(key.clone(), current_size);
@@ -311,7 +337,7 @@ impl SharedRetainedParsePool {
         prepared_source: &str,
         grammar_key: Option<&str>,
         extractor: Option<&dyn LanguageExtractor>,
-    ) -> Result<(ParseReport, Option<ParsedExtraction>), ParseError> {
+    ) -> Result<(ParseReport, Option<ParsedExtractionArtifactV1>), ParseError> {
         let mut retained = entry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -358,18 +384,18 @@ impl SharedRetainedParsePool {
                 let previous = if language_changed {
                     None
                 } else {
-                    retained.extraction.as_ref()
+                    retained.artifact.as_ref()
                 };
                 match retained
                     .document
-                    .extract_canonical(extractor, &report, previous)
+                    .extract_canonical_artifact(extractor, &report, previous)
                 {
                     Ok(extraction) => {
-                        retained.extraction = Some(extraction.result.clone());
+                        retained.artifact = Some(extraction.artifact.clone());
                         Some(extraction)
                     }
                     Err(error) => {
-                        retained.extraction = None;
+                        retained.artifact = None;
                         drop(retained);
                         self.record_failure();
                         return Err(error);
@@ -377,7 +403,7 @@ impl SharedRetainedParsePool {
                 }
             }
             None => {
-                retained.extraction = None;
+                retained.artifact = None;
                 None
             }
         };
@@ -467,7 +493,7 @@ fn evict_to_limits(
 fn record_success(
     stats: &mut RetainedParsePoolStats,
     report: &ParseReport,
-    extraction: Option<&ParsedExtraction>,
+    extraction: Option<&ParsedExtractionArtifactV1>,
 ) {
     match report.reuse {
         ParseReuse::Initial => stats.initial_parses = stats.initial_parses.saturating_add(1),

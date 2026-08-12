@@ -7,11 +7,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use crate::complexity::{TYPESCRIPT_COMPLEXITY, count_complexity};
+use crate::extraction_artifact::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use crate::traversal::find_direct_child_by_kind;
 use crate::types::{
     Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef, Visibility, generate_node_id,
 };
 
+mod imports;
 mod test_calls;
 
 /// Extracts code graph nodes and edges from TypeScript/JavaScript source files
@@ -24,6 +26,7 @@ struct ExtractionState {
     edges: Vec<Edge>,
     unresolved_refs: Vec<UnresolvedRef>,
     errors: Vec<String>,
+    imports: Vec<ExtractedImportEvidenceV1>,
     /// Stack of (name, `node_id`) for building qualified names and parent edges.
     node_stack: Vec<(String, String)>,
     file_path: String,
@@ -44,6 +47,7 @@ impl ExtractionState {
             edges: Vec::new(),
             unresolved_refs: Vec::new(),
             errors: Vec::new(),
+            imports: Vec::new(),
             node_stack: Vec::new(),
             file_path: file_path.to_string(),
             source: source.as_bytes().to_vec(),
@@ -80,6 +84,10 @@ impl TypeScriptExtractor {
     /// `file_path` is used for qualified names and node IDs (not for I/O).
     /// `source` is the source code to parse.
     pub fn extract_typescript(file_path: &str, source: &str) -> ExtractionResult {
+        Self::extract_typescript_artifact(file_path, source).result
+    }
+
+    fn extract_typescript_artifact(file_path: &str, source: &str) -> ExtractionArtifactV1 {
         let ext = file_path.rsplit('.').next().unwrap_or("ts");
         let tree = match Self::parse_source(source, ext) {
             Ok(tree) => tree,
@@ -87,16 +95,16 @@ impl TypeScriptExtractor {
                 let start = Instant::now();
                 let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
-                return Self::build_result(state, start);
+                return Self::build_artifact(state, start);
             }
         };
-        Self::extract_tree(
+        Self::extract_tree_artifact(
             file_path,
             source,
             &tree,
             crate::parsed_extraction::ParsedExtractionScope::FullDocument,
         )
-        .result
+        .artifact
     }
 
     fn extract_tree(
@@ -105,6 +113,15 @@ impl TypeScriptExtractor {
         tree: &Tree,
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree_artifact(file_path, source, tree, scope).into_parsed()
+    }
+
+    fn extract_tree_artifact(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
         let start = Instant::now();
         let mut state = ExtractionState::new(file_path, source);
 
@@ -144,8 +161,8 @@ impl TypeScriptExtractor {
 
         state.node_stack.pop();
 
-        crate::parsed_extraction::ParsedExtraction::complete(
-            Self::build_result(state, start),
+        crate::parsed_extraction::ParsedExtractionArtifactV1::complete(
+            Self::build_artifact(state, start),
             scope,
             metrics,
         )
@@ -215,7 +232,7 @@ impl TypeScriptExtractor {
             "interface_declaration" => Self::visit_interface(state, node),
             "enum_declaration" => Self::visit_enum(state, node),
             "type_alias_declaration" => Self::visit_type_alias(state, node),
-            "import_statement" => Self::visit_import(state, node),
+            "import_statement" => imports::visit_import(state, node),
             "expression_statement" => {
                 // Namespace declarations appear as expression_statement > internal_module.
                 if let Some(internal) = find_direct_child_by_kind(node, "internal_module") {
@@ -1075,67 +1092,6 @@ impl TypeScriptExtractor {
         }
     }
 
-    /// Extract an import statement.
-    fn visit_import(state: &mut ExtractionState, node: TsNode<'_>) {
-        let text = state.node_text(node);
-        // Extract the module path from the string literal.
-        let module_path = Self::extract_import_path(state, node);
-        let name = module_path.clone().unwrap_or_else(|| text.clone());
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = generate_node_id(&state.file_path, &NodeKind::Use, &name, start_line);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Use,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().to_string()),
-            docstring: None,
-            visibility: Visibility::Private,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        // Contains edge from parent (File).
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        // Unresolved Uses reference.
-        state.unresolved_refs.push(UnresolvedRef {
-            from_node_id: id.clone(),
-            reference_name: name,
-            reference_kind: EdgeKind::Uses,
-            line: start_line,
-            column: start_column,
-            file_path: state.file_path.clone(),
-        });
-    }
-
     /// Extract a namespace (`internal_module`) declaration.
     fn visit_namespace(state: &mut ExtractionState, node: TsNode<'_>) {
         let name = Self::child_name(state, find_direct_child_by_kind(node, "identifier"));
@@ -1323,20 +1279,6 @@ impl TypeScriptExtractor {
                 }
             }
         }
-    }
-
-    /// Extract the import path from an `import_statement`.
-    fn extract_import_path(state: &ExtractionState, node: TsNode<'_>) -> Option<String> {
-        // The string child contains the module path.
-        if let Some(string_node) = find_direct_child_by_kind(node, "string") {
-            let text = state.node_text(string_node);
-            // Strip quotes.
-            let path = text.trim().trim_matches('\'').trim_matches('"').to_string();
-            if !path.is_empty() {
-                return Some(path);
-            }
-        }
-        None
     }
 
     /// Recursively find `call_expression` nodes inside a node and create
@@ -1552,14 +1494,17 @@ impl TypeScriptExtractor {
         false
     }
 
-    /// Build the final `ExtractionResult` from the accumulated state.
-    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: state.unresolved_refs,
-            errors: state.errors,
-            duration_ms: start.elapsed().as_millis() as u64,
+    /// Build the graph and parser-backed evidence accumulated in one traversal.
+    fn build_artifact(state: ExtractionState, start: Instant) -> ExtractionArtifactV1 {
+        ExtractionArtifactV1 {
+            result: ExtractionResult {
+                nodes: state.nodes,
+                edges: state.edges,
+                unresolved_refs: state.unresolved_refs,
+                errors: state.errors,
+                duration_ms: start.elapsed().as_millis() as u64,
+            },
+            imports: state.imports,
         }
     }
 }
@@ -1577,6 +1522,10 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
         TypeScriptExtractor::extract_typescript(file_path, source)
     }
 
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        TypeScriptExtractor::extract_typescript_artifact(file_path, source)
+    }
+
     fn extract_parsed(
         &self,
         file_path: &str,
@@ -1585,5 +1534,15 @@ impl crate::LanguageExtractor for TypeScriptExtractor {
         scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
     ) -> crate::parsed_extraction::ParsedExtraction {
         TypeScriptExtractor::extract_tree(file_path, source, tree, scope)
+    }
+
+    fn extract_parsed_artifact(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        TypeScriptExtractor::extract_tree_artifact(file_path, source, tree, scope)
     }
 }

@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
+use tracedecay_code_extraction::{ExtractedImportEvidenceV1, ExtractionArtifactV1};
 use tracedecay_domain::{
     ExtractionBatchV1, ExtractionCoverageV1, ExtractionFailureV1, LanguageDescriptorV1,
     ManifestDigest, ParseOutcomeV1, SourceSpan, ValidatedCodeFileV1, canonical_sha256,
@@ -21,7 +22,9 @@ use super::{
     intake::{ReceiptBoundCodeFileAuthorityV1, ReceiptBoundCodeFileV1},
     languages::canonical_language_id,
 };
-use tracedecay_domain::{Edge, ExtractionResult, Node, UnresolvedRef, Visibility};
+use tracedecay_domain::{Edge, Node, UnresolvedRef, Visibility};
+
+const PARSER_IMPORT_ROWS_DIGEST_SEPARATOR: &str = "tracedecay.code-index-parser-import-rows.v1";
 
 /// Cancellation checkpoint for extraction (the code-index-local spelling of
 /// the Plan 25 `CancellationToken`). Application adapts its cancellation
@@ -49,7 +52,7 @@ impl ExtractionCancellation for NeverCancelled {
 pub struct ExtractedCodeFileV1 {
     authority: ReceiptBoundCodeFileAuthorityV1,
     batch: ExtractionBatchV1,
-    parse_artifacts: ExtractionResult,
+    parse_artifact: ExtractionArtifactV1,
 }
 
 impl ExtractedCodeFileV1 {
@@ -66,8 +69,8 @@ impl ExtractedCodeFileV1 {
         &self.authority
     }
 
-    pub(crate) fn parse_artifacts(&self) -> &ExtractionResult {
-        &self.parse_artifacts
+    pub(crate) fn parse_artifact(&self) -> &ExtractionArtifactV1 {
+        &self.parse_artifact
     }
 
     pub(crate) fn into_parts(
@@ -75,9 +78,9 @@ impl ExtractedCodeFileV1 {
     ) -> (
         ReceiptBoundCodeFileAuthorityV1,
         ExtractionBatchV1,
-        ExtractionResult,
+        ExtractionArtifactV1,
     ) {
-        (self.authority, self.batch, self.parse_artifacts)
+        (self.authority, self.batch, self.parse_artifact)
     }
 
     /// Rebind carried extraction evidence onto a new generation-scoped file
@@ -137,7 +140,7 @@ pub trait LanguageExtractor {
 }
 
 /// Domain separator for the canonical extraction-rows digest.
-pub const EXTRACTION_ROWS_SEPARATOR: &str = "tracedecay.extraction-rows.v1";
+pub const EXTRACTION_ROWS_SEPARATOR: &str = "tracedecay.extraction-rows.v2";
 
 /// Pinned maximum source prefix parsed by one extraction operation. Bytes
 /// beyond the cap remain explicit unsupported evidence in the batch.
@@ -199,7 +202,7 @@ impl TreeSitterExtractor {
         &self,
         file: &ReceiptBoundCodeFileV1,
         descriptor: &LanguageDescriptorV1,
-        result: ExtractionResult,
+        artifact: ExtractionArtifactV1,
         parsed_len: usize,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
@@ -222,7 +225,7 @@ impl TreeSitterExtractor {
             authority,
             file,
             descriptor,
-            result,
+            artifact,
             parsed_len,
             parsed_len < file.sanitized_bytes.len(),
             cancellation,
@@ -350,8 +353,9 @@ impl<'a> From<&'a UnresolvedRef> for CanonicalUnresolvedRefRow<'a> {
 fn rows_digest(
     file: &ValidatedCodeFileV1,
     descriptor: &LanguageDescriptorV1,
-    result: &ExtractionResult,
+    artifact: &ExtractionArtifactV1,
 ) -> Result<ManifestDigest, ExtractionFailureV1> {
+    let result = &artifact.result;
     let mut nodes = result
         .nodes
         .iter()
@@ -367,9 +371,11 @@ fn rows_digest(
         .iter()
         .map(CanonicalUnresolvedRefRow::from)
         .collect::<Vec<_>>();
+    let mut imports = artifact.imports.clone();
     sort_canonical_rows(&mut nodes);
     sort_canonical_rows(&mut edges);
     sort_canonical_rows(&mut unresolved);
+    imports.sort();
 
     #[derive(Serialize)]
     struct RowsPayload<'a> {
@@ -379,6 +385,7 @@ fn rows_digest(
         descriptor_revision: &'a str,
         grammar_revision: &'a str,
         extractor_revision: &'a str,
+        imports: Vec<ExtractedImportEvidenceV1>,
         nodes: Vec<CanonicalNodeRow<'a>>,
         edges: Vec<CanonicalEdgeRow<'a>>,
         unresolved_refs: Vec<CanonicalUnresolvedRefRow<'a>>,
@@ -391,12 +398,25 @@ fn rows_digest(
         descriptor_revision: descriptor.descriptor_revision.as_str(),
         grammar_revision: descriptor.grammar_revision.as_str(),
         extractor_revision: descriptor.extractor_revision.as_str(),
+        imports,
         nodes,
         edges,
         unresolved_refs: unresolved,
     })
     .map_err(|error| ExtractionFailureV1::ParseFailed {
         detail: format!("canonical rows digest failed: {error}"),
+    })
+}
+
+pub(crate) fn parser_import_rows_digest(
+    imports: &[ExtractedImportEvidenceV1],
+) -> Result<ManifestDigest, ExtractionFailureV1> {
+    let mut imports = imports.to_vec();
+    imports.sort();
+    canonical_sha256(&(PARSER_IMPORT_ROWS_DIGEST_SEPARATOR, imports.as_slice())).map_err(|error| {
+        ExtractionFailureV1::ParseFailed {
+            detail: format!("canonical parser import rows digest failed: {error}"),
+        }
     })
 }
 
@@ -441,12 +461,12 @@ impl LanguageExtractor for TreeSitterExtractor {
         let extraction_source = &source[..parsed_len];
         let source_was_capped = parsed_len < source.len();
 
-        let result = parser.extract(&file.file.logical_path, extraction_source);
+        let artifact = parser.extract_artifact(&file.file.logical_path, extraction_source);
         finish_extraction(
             authority,
             file,
             descriptor,
-            result,
+            artifact,
             parsed_len,
             source_was_capped,
             cancellation,
@@ -475,15 +495,17 @@ fn finish_extraction(
     authority: ReceiptBoundCodeFileAuthorityV1,
     file: &ValidatedCodeFileV1,
     descriptor: &LanguageDescriptorV1,
-    mut result: ExtractionResult,
+    mut artifact: ExtractionArtifactV1,
     parsed_len: usize,
     source_was_capped: bool,
     cancellation: &dyn ExtractionCancellation,
 ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
-    result.sanitize();
+    artifact.result.sanitize();
     if cancellation.is_cancelled() {
         return Err(ExtractionFailureV1::Cancelled);
     }
+
+    let result = &artifact.result;
 
     let parse_outcome = match (source_was_capped, result.errors.first()) {
         (false, None) => ParseOutcomeV1::Complete,
@@ -535,7 +557,8 @@ fn finish_extraction(
         relations_extracted: result.edges.len() as u64,
         ambiguity_count: result.unresolved_refs.len() as u64,
     };
-    let rows_digest = rows_digest(file, descriptor, &result)?;
+    let rows_digest = rows_digest(file, descriptor, &artifact)?;
+    let parser_import_rows_digest = parser_import_rows_digest(&artifact.imports)?;
 
     Ok(ExtractedCodeFileV1 {
         authority,
@@ -552,9 +575,10 @@ fn finish_extraction(
             error_ranges: Vec::new(),
             unsupported_ranges,
             coverage,
+            parser_import_rows_digest,
             rows_digest,
         },
-        parse_artifacts: result,
+        parse_artifact: artifact,
     })
 }
 
@@ -691,7 +715,7 @@ mod tests {
 
         assert_eq!(
             extraction.batch().rows_digest.as_str(),
-            "sha256:e9812b169bc0d1bdbfc013132ec4a808dfdd7d982822b78ee929986a19d940d3"
+            "sha256:62eaaf3e43a4f9773e43c7f2385213ca6aa59bb5a0ee6c07ff44fa7e37beede3"
         );
     }
 

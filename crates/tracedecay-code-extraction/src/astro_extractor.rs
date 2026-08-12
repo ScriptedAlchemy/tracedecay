@@ -18,9 +18,9 @@
 
 use std::borrow::Cow;
 
-use crate::LanguageExtractor;
 use crate::types::ExtractionResult;
 use crate::typescript_extractor::TypeScriptExtractor;
+use crate::{ExtractionArtifactV1, LanguageExtractor};
 use tree_sitter::Tree;
 
 /// Extracts code graph nodes and edges from Astro component files.
@@ -91,6 +91,11 @@ impl LanguageExtractor for AstroExtractor {
         Self::extract_astro(file_path, source)
     }
 
+    fn extract_artifact(&self, file_path: &str, source: &str) -> ExtractionArtifactV1 {
+        let masked = Self::mask_non_frontmatter(source);
+        TypeScriptExtractor.extract_artifact(file_path, &masked)
+    }
+
     fn extract_parsed(
         &self,
         file_path: &str,
@@ -100,6 +105,17 @@ impl LanguageExtractor for AstroExtractor {
     ) -> crate::parsed_extraction::ParsedExtraction {
         let masked = Self::mask_non_frontmatter(source);
         TypeScriptExtractor.extract_parsed(file_path, &masked, tree, scope)
+    }
+
+    fn extract_parsed_artifact(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtractionArtifactV1 {
+        let masked = Self::mask_non_frontmatter(source);
+        TypeScriptExtractor.extract_parsed_artifact(file_path, &masked, tree, scope)
     }
 }
 

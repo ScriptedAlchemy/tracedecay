@@ -5784,6 +5784,7 @@ name = "tracedecay-code-extraction"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "serde",
  "thiserror",
  "tokensave-large-treesitters",
  "tokensave-medium-treesitters",

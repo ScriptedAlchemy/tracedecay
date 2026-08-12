@@ -8,6 +8,7 @@ use tracedecay_domain::{
 };
 
 use super::super::CodeGraphSymbolBindingV1;
+use crate::chunks::CodeIndexImportEvidenceV1;
 use crate::lineage::LineageSymbolRecordV1;
 
 /// One symbol as the interactive surface knows it. `metadata` is present for
@@ -95,9 +96,10 @@ pub(super) struct CatalogSymbol {
     pub(super) metadata: Option<LineageSymbolRecordV1>,
 }
 
-/// Generation-pinned symbol catalog: every symbol entity of one published
-/// generation, keyed for interactive lookup.
-pub(in crate::graph_projection) struct SymbolCatalog {
+/// Generation-pinned catalog of every file, symbol, and import entity in one
+/// published graph. It is derived from the verified snapshot and remains a
+/// lookup cache rather than a second projection authority.
+pub(in crate::graph_projection) struct InteractiveCatalog {
     pub(super) symbols: BTreeMap<SymbolOccurrenceId, CatalogSymbol>,
     pub(super) by_qualified_name: BTreeMap<String, Vec<SymbolOccurrenceId>>,
     /// Keyed by the lowercased trailing segment of the qualified name (split
@@ -112,9 +114,10 @@ pub(in crate::graph_projection) struct SymbolCatalog {
     /// the catalog is built rather than resolved by picking a winner.
     pub(super) by_logical_path: BTreeMap<String, FileOccurrenceId>,
     pub(super) files: BTreeMap<FileOccurrenceId, SanitizedCodeFileV1>,
+    pub(super) imports: Vec<CodeIndexImportEvidenceV1>,
 }
 
-impl SymbolCatalog {
+impl InteractiveCatalog {
     pub(super) fn insert(&mut self, occurrence: SymbolOccurrenceId, record: CatalogSymbol) {
         if let Some(metadata) = &record.metadata {
             self.by_qualified_name

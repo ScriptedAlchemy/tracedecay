@@ -17,14 +17,9 @@ use tracedecay_domain::{
 };
 use tree_sitter::{InputEdit, ParseOptions, Parser, Point, Tree};
 
-use crate::{
-    LanguageExtractor,
-    parsed_extraction::{
-        ParsedExtraction, ParsedExtractionDisposition, ParsedExtractionResetReason,
-        ParsedExtractionScope, merge_changed_extraction,
-    },
-    ts_provider,
-};
+use crate::ts_provider;
+
+mod extraction;
 
 /// Default per-document source bound. It matches the LSP overlay hard limit.
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -572,119 +567,6 @@ impl RetainedParseDocument {
         self.tree = new_tree;
         self.state_epoch = report.state_epoch;
         Ok(report)
-    }
-
-    /// Produce a complete canonical extraction from the current retained tree.
-    ///
-    /// Incremental reports traverse only complete affected top-level syntax
-    /// regions and merge their canonical rows with `previous`. Unsafe merge
-    /// shapes and missing/partial authority re-extract the full retained tree
-    /// and remain explicit typed resets.
-    pub fn extract_canonical(
-        &self,
-        extractor: &dyn LanguageExtractor,
-        report: &ParseReport,
-        previous: Option<&tracedecay_domain::ExtractionResult>,
-    ) -> Result<ParsedExtraction, ParseError> {
-        if report.state_epoch != self.state_epoch {
-            return Err(ParseError::StaleReport);
-        }
-
-        let complete_composite_reset = |extracted: ParsedExtraction| match extracted.disposition {
-            ParsedExtractionDisposition::Reset {
-                reason: ParsedExtractionResetReason::CompositeGrammar,
-            } => ParsedExtraction::reset(
-                extractor.extract(self.identity.logical_path(), &self.source),
-                ParsedExtractionResetReason::CompositeGrammar,
-                self.source.len(),
-            ),
-            _ => extracted,
-        };
-        let full = |reason: Option<ParsedExtractionResetReason>| {
-            let extracted = complete_composite_reset(extractor.extract_parsed(
-                self.identity.logical_path(),
-                &self.source,
-                &self.tree,
-                ParsedExtractionScope::FullDocument,
-            ));
-            match reason {
-                Some(reason) => {
-                    ParsedExtraction::reset(extracted.result, reason, self.source.len())
-                }
-                None => extracted,
-            }
-        };
-
-        match report.reuse {
-            ParseReuse::Initial => Ok(full(None)),
-            ParseReuse::Reset { reason } => Ok(full(Some(match reason {
-                ParseResetReason::FullReplacement => ParsedExtractionResetReason::FullReplacement,
-                ParseResetReason::LanguageChanged => ParsedExtractionResetReason::LanguageChanged,
-            }))),
-            ParseReuse::Noop => match previous {
-                Some(previous) => Ok(ParsedExtraction::complete(
-                    previous.clone(),
-                    ParsedExtractionScope::ChangedRegions(&[]),
-                    crate::parsed_extraction::ParsedTraversalMetrics::default(),
-                )),
-                None => Ok(full(Some(
-                    ParsedExtractionResetReason::MissingPriorExtraction,
-                ))),
-            },
-            ParseReuse::Incremental => {
-                if !matches!(report.completeness, ParseCompleteness::Complete) {
-                    return Ok(full(Some(ParsedExtractionResetReason::PartialParse)));
-                }
-                let Some(previous) = previous else {
-                    return Ok(full(Some(
-                        ParsedExtractionResetReason::MissingPriorExtraction,
-                    )));
-                };
-                let Some(edit) = report.source_edit else {
-                    return Ok(full(Some(ParsedExtractionResetReason::PartialParse)));
-                };
-                let old_lines = edit
-                    .old_end_position
-                    .row
-                    .saturating_sub(edit.start_position.row);
-                let new_lines = edit
-                    .new_end_position
-                    .row
-                    .saturating_sub(edit.start_position.row);
-                if old_lines != new_lines {
-                    return Ok(full(Some(ParsedExtractionResetReason::MultilineEdit)));
-                }
-
-                let delta = extractor.extract_parsed(
-                    self.identity.logical_path(),
-                    &self.source,
-                    &self.tree,
-                    ParsedExtractionScope::ChangedRegions(&report.extraction_ranges),
-                );
-                if matches!(delta.disposition, ParsedExtractionDisposition::Reset { .. }) {
-                    return Ok(complete_composite_reset(delta));
-                }
-                let metrics = delta.metrics;
-                let old_start_row = u32::try_from(edit.start_position.row).map_err(|_| {
-                    ParseError::InvalidEdit {
-                        detail: "edit start row does not fit canonical extraction rows".to_owned(),
-                    }
-                })?;
-                let old_end_row = u32::try_from(edit.old_end_position.row).map_err(|_| {
-                    ParseError::InvalidEdit {
-                        detail: "edit end row does not fit canonical extraction rows".to_owned(),
-                    }
-                })?;
-                match merge_changed_extraction(previous, delta.result, old_start_row, old_end_row) {
-                    Some(result) => Ok(ParsedExtraction::complete(
-                        result,
-                        ParsedExtractionScope::ChangedRegions(&report.extraction_ranges),
-                        metrics,
-                    )),
-                    None => Ok(full(Some(ParsedExtractionResetReason::ChangedRootIdentity))),
-                }
-            }
-        }
     }
 }
 

@@ -68,7 +68,6 @@ pub mod daemon_client;
 pub mod daemon_contract;
 pub mod dashboard;
 pub mod db;
-mod dependency_imports;
 pub mod derive_table;
 pub mod diagnose;
 pub mod diagnostics;

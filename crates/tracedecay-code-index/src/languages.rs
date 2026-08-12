@@ -202,7 +202,7 @@ impl StaticLanguageRegistry {
                     "grammar.tree-sitter.{language}.v1"
                 ))
                 .expect("grammar revision is canonical"),
-                extractor_revision: ExtractorRevision::new(format!("extractor.{language}.v1"))
+                extractor_revision: ExtractorRevision::new(format!("extractor.{language}.v2"))
                     .expect("extractor revision is canonical"),
                 aliases: aliases.into_iter().collect(),
                 extensions: extensions.into_iter().collect(),

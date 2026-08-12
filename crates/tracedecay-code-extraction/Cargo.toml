@@ -62,6 +62,7 @@ lang-toml = ["dep:tracedecay-large-treesitters"]
 lang-lean = ["dep:tracedecay-large-treesitters"]
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-large-treesitters = { package = "tokensave-large-treesitters", version = "0.5.0", optional = true }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }

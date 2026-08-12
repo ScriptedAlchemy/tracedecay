@@ -206,10 +206,9 @@ pub(super) async fn dispatch_graph_tools(
 ) -> Result<ToolResult> {
     match tool_name {
         "tracedecay_search" => {
-            let graph_query = admitted_graph_query(cg, &options, "code_symbol_search").await?;
             graph::handle_search(
                 cg,
-                &graph_query,
+                admitted_graph_query(cg, &options, "code_symbol_search"),
                 args,
                 selected_scope_prefix,
                 options.code_index_search_executor.as_ref(),

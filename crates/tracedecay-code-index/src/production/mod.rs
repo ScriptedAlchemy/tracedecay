@@ -8,29 +8,25 @@ use std::{
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_code_extraction::LanguageExtractor as ParserLanguageExtractor;
-use tracedecay_code_extraction::incremental::{
-    ParseCompleteness, ParseDocumentIdentity, ParseError,
-};
+use tracedecay_code_extraction::incremental::ParseError;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
     CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
-    ExtractionBatchV1, ExtractionFailureV1, ExtractionResult, FileOccurrenceId,
-    GenerationTestAttributionV1, IntakeRejectionV1, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1, RefId,
-    RepositoryDirtyStateV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1,
-    SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, ValidatedCodeFileV1,
-    ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
+    ExtractionBatchV1, ExtractionFailureV1, FileOccurrenceId, GenerationTestAttributionV1,
+    IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
+    ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
+    ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1,
+    SymbolLineageCandidateV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId,
+    UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
 };
 
 use super::{
     capabilities::{BaseCapabilityEmitter, CapabilityEmissionErrorV1, CodeIndexCapabilityEmitter},
     chunks::{
         ChunkingFailureV1, CodeFileIndexArtifactsV1, CodeIndexEdgeAbstentionV1,
-        DeterministicCodeChunker, ExactExtractionAuthorityV1, ExtractionAdmittedCodeSearchChunkV1,
-        content_digest,
+        CodeIndexImportEvidenceV1, DeterministicCodeChunker, ExactExtractionAuthorityV1,
+        ExtractionAdmittedCodeSearchChunkV1, content_digest,
     },
     extract::{ExtractionCancellation, TreeSitterExtractor, rebind_extraction_batch},
     generations::{
@@ -63,6 +59,10 @@ use super::{
 
 mod helpers;
 use helpers::*;
+mod import_evidence;
+use import_evidence::{derive_import_evidence, validate_import_evidence};
+mod parser_artifacts;
+use parser_artifacts::parse_for_indexing;
 mod generation_attribution;
 pub use generation_attribution::PublishedGenerationTestAttributionAuthorityV1;
 mod generation_statistics;
@@ -299,55 +299,6 @@ where
     })
 }
 
-fn parse_for_indexing(
-    retained_parses: &SharedRetainedParsePool,
-    config: &CodeIndexProductionConfigV1,
-    snapshot: &SanitizedCodeSnapshotV1,
-    repository_parse_identity: &CodeIndexRepositoryParseIdentityV1,
-    file: &SanitizedCodeFileV1,
-    captured: &CodeIndexCapturedFileV1,
-    parser: &dyn ParserLanguageExtractor,
-) -> Result<(ExtractionResult, usize), CodeIndexProductionErrorV1> {
-    let language = file.language.as_ref().ok_or_else(|| {
-        CodeIndexProductionErrorV1::Contract(
-            "present snapshot file has no declared language".to_owned(),
-        )
-    })?;
-    let source = std::str::from_utf8(&captured.sanitized_bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "admitted sanitized source is not UTF-8: {error}"
-        ))
-    })?;
-    let mut parsed_len = source
-        .len()
-        .min(crate::extract::MAX_EXTRACTION_SOURCE_BYTES);
-    while !source.is_char_boundary(parsed_len) {
-        parsed_len = parsed_len.saturating_sub(1);
-    }
-    let (report, mut extraction) = retained_parses.parse_and_extract(
-        ParseDocumentIdentity::Repository {
-            project_id: config.project_id.clone(),
-            repository_id: snapshot.repository.clone(),
-            worktree_id: snapshot.worktree.clone(),
-            reference: snapshot.reference.clone(),
-            commit: snapshot.source_revision.clone(),
-            tree: repository_parse_identity.tree.clone(),
-            dirty: repository_parse_identity.dirty,
-            logical_path: file.logical_path.clone(),
-        },
-        language.as_str(),
-        &source[..parsed_len],
-        parser,
-    )?;
-    if let ParseCompleteness::Partial { reasons } = report.completeness {
-        extraction
-            .result
-            .errors
-            .push(format!("retained parse incomplete: {reasons:?}"));
-    }
-    Ok((extraction.result, parsed_len))
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PhysicalCodeArtifactPoolStatsV1 {
     pub inserted: u64,
@@ -454,6 +405,7 @@ pub struct CodeIndexPublishedGenerationV1 {
     chunks: GenerationChunkManifestV1,
     symbols: GenerationSymbolIndexV1,
     lineage: Vec<SymbolLineageCandidateV1>,
+    imports: Vec<CodeIndexImportEvidenceV1>,
     edges: Vec<CanonicalRelationEdgeV1>,
     edge_abstentions: Vec<CodeIndexEdgeAbstentionV1>,
     coverage: CoverageSummaryV1,
@@ -498,6 +450,10 @@ impl CodeIndexPublishedGenerationV1 {
 
     pub fn lineage(&self) -> &[SymbolLineageCandidateV1] {
         &self.lineage
+    }
+
+    pub fn imports(&self) -> &[CodeIndexImportEvidenceV1] {
+        &self.imports
     }
 
     pub fn edges(&self) -> &[CanonicalRelationEdgeV1] {
@@ -876,6 +832,7 @@ impl CodeIndexPublishedGenerationV1 {
                 .validate_all(&file.artifacts.chunks.chunks)
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
         }
+        validate_import_evidence(&files, &self.imports)?;
         let mut chunks = files
             .iter()
             .flat_map(|file| file.artifacts.chunks.chunks.iter())
@@ -1207,6 +1164,7 @@ where
             .map_err(CodeIndexProductionErrorV1::Projection)?;
         Self::checkpoint(control)?;
 
+        let imports = derive_import_evidence(&staged.files);
         let (edges, edge_abstentions) = collect_edge_evidence(&staged.files);
         let candidate = CodeIndexPublishedGenerationV1 {
             manifest,
@@ -1215,6 +1173,7 @@ where
             chunks: staged.chunks,
             symbols: staged.symbols,
             lineage: staged.lineage,
+            imports,
             edges,
             edge_abstentions,
             coverage,

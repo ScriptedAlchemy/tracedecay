@@ -6,7 +6,7 @@ use std::{
 use tracedecay_code_index::{
     chunks::content_digest,
     graph_projection::{
-        CODE_GRAPH_PROJECTOR_REVISION_V3, build_published_code_graph_manifest_checked,
+        CODE_GRAPH_PROJECTOR_REVISION, build_published_code_graph_manifest_checked,
         code_graph_projection_identity,
     },
     production::{
@@ -36,7 +36,7 @@ use tracedecay_graph_db::{GraphNamespace, GraphProjectorRevision};
 use crate::support::{RUST_SOURCE, id};
 
 #[derive(Clone, Default)]
-struct SharedPublicationStore {
+pub(super) struct SharedPublicationStore {
     active: Arc<Mutex<BTreeMap<CodeIndexGenerationScopeV1, CodeIndexPublishedGenerationV1>>>,
 }
 
@@ -84,7 +84,7 @@ impl CodeIndexAtomicPublicationPort for SharedPublicationStore {
 }
 
 #[derive(Default)]
-struct ApplyingProjectionSink;
+pub(super) struct ApplyingProjectionSink;
 
 impl CodeChunkProjectionSink for ApplyingProjectionSink {
     fn project_changed_chunks(
@@ -159,7 +159,7 @@ impl CodeChunkProjectionSink for RejectingProjectionSink {
     }
 }
 
-struct ActiveControl;
+pub(super) struct ActiveControl;
 
 impl CodeIndexExecutionControlV1 for ActiveControl {
     fn is_cancelled(&self) -> bool {
@@ -195,13 +195,13 @@ impl CodeIndexExecutionControlV1 for ExpiredControl {
     }
 }
 
-fn config() -> CodeIndexProductionConfigV1 {
+pub(super) fn config() -> CodeIndexProductionConfigV1 {
     CodeIndexProductionConfigV1 {
         project_id: id::<ProjectId>("project.production"),
         repository: id::<RepositoryId>("repository.production"),
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
         policy_revision: id::<PolicyRevisionId>("policy.v1"),
-        chunker_revision: id::<ChunkerRevision>("chunker.v1"),
+        chunker_revision: id::<ChunkerRevision>("chunker.v2"),
         privacy_domain: id::<PrivacyDomainId>("privacy.production"),
         privacy_key_epoch: 7,
         max_snapshot_age_micros: None,
@@ -281,7 +281,7 @@ fn request_at_path(
     }
 }
 
-fn request_with_source(
+pub(super) fn request_with_source(
     file_occurrence: &str,
     sealed_at: i64,
     source_revision: &str,
@@ -470,7 +470,7 @@ fn published_graph_manifest_projects_files_chunks_symbols_and_replays_byte_ident
         .build_and_publish(request("file.graph-projection", 1_250_000), &ActiveControl)
         .expect("generation publishes");
     let projector_revision =
-        GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION_V3.to_owned())
+        GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
             .expect("projector revision");
     let projection =
         code_graph_projection_identity(GraphNamespace::new("code-graph-test").expect("namespace"))

@@ -7,7 +7,7 @@ use super::*;
 ///
 /// Every reader that gates on the sealed format — the publication store, the
 /// worker probe, and code-generation retention — must gate on this one value.
-pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 4;
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 5;
 pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,6 +210,7 @@ impl CodeIndexPublishedGenerationV1 {
                 .collect(),
         )
         .map_err(CodeIndexProductionErrorV1::Lineage)?;
+        let imports = derive_import_evidence(&files);
         let (edges, edge_abstentions) = collect_edge_evidence(&files);
         let projection = ProjectionPublicationHandoffV1::restore(
             envelope.generation.projection_request,
@@ -223,6 +224,7 @@ impl CodeIndexPublishedGenerationV1 {
             chunks,
             symbols,
             lineage: envelope.generation.lineage,
+            imports,
             edges,
             edge_abstentions,
             coverage: envelope.generation.coverage,
