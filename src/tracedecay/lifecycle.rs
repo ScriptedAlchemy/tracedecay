@@ -186,20 +186,22 @@ impl TraceDecay {
         let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
             .then(|| crate::worktree::git_common_dir(project_root))
             .flatten();
+        let alias_matches_live_git_identity = |registered_git_common_dir: Option<&str>| {
+            registered_git_common_dir
+                .zip(git_common_dir.as_deref())
+                .is_some_and(|(registered, live)| {
+                    crate::global_db::GlobalDb::canonical_project_key(Path::new(registered))
+                        == crate::global_db::GlobalDb::canonical_project_key(live)
+                })
+        };
         if selected.is_none()
             && let Some(global_db) = open_options.open_global_db().await
         {
             let resolution = match global_db.resolve_project_store_by_alias(project_root).await {
                 Some(resolution) => {
-                    selected_via_exact_registry_alias = resolution
-                        .project
-                        .git_common_dir
-                        .as_deref()
-                        .zip(git_common_dir.as_deref())
-                        .is_some_and(|(registered, live)| {
-                            crate::global_db::GlobalDb::canonical_project_key(Path::new(registered))
-                                == crate::global_db::GlobalDb::canonical_project_key(live)
-                        });
+                    selected_via_exact_registry_alias = alias_matches_live_git_identity(
+                        resolution.project.git_common_dir.as_deref(),
+                    );
                     Some(resolution)
                 }
                 None => {
@@ -233,6 +235,20 @@ impl TraceDecay {
             candidates_match_exact_root,
         ) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
+        if selected.is_some()
+            && !candidates.is_empty()
+            && !selected_manifest_matches_exact_root
+            && !candidates_match_exact_root
+            && !selected_via_exact_registry_alias
+            && let Some(global_db) = open_options.open_global_db().await
+            && let Some(resolution) = global_db.resolve_project_store_by_alias(project_root).await
+        {
+            selected_via_exact_registry_alias = selected
+                .as_ref()
+                .and_then(|layout| layout.identity.project_id.as_deref())
+                == Some(resolution.project.project_id.as_str())
+                && alias_matches_live_git_identity(resolution.project.git_common_dir.as_deref());
+        }
         Self::choose_identity_layout(
             project_root,
             selected,

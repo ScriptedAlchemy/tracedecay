@@ -1918,6 +1918,33 @@ async fn linked_worktree_exact_registry_alias_ignores_duplicate_shared_legacy_ma
         ));
     }
 
+    let marker_selected = TraceDecay::resolve_store_layout_for_identity_with_options(
+        &worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(global_db_path.clone()),
+        },
+    )
+    .await
+    .expect("the exact linked-worktree alias must authorize its repository-marker selection");
+    assert_eq!(
+        marker_selected.identity.project_id.as_deref(),
+        Some(canonical_project_id.as_str())
+    );
+    assert_path_eq(&marker_selected.data_root, &canonical_data_root);
+    for (project_id, legacy_root, manifest_before) in &legacy_roots {
+        assert_eq!(
+            fs::read_to_string(legacy_root.join("untouched-sentinel")).unwrap(),
+            *project_id,
+            "marker resolution must leave legacy stores untouched"
+        );
+        assert_eq!(
+            fs::read(legacy_root.join(STORE_MANIFEST_FILENAME)).unwrap(),
+            *manifest_before,
+            "marker resolution must not rewrite legacy manifests"
+        );
+    }
+
     fs::remove_file(repository_identity_path(&worktree).unwrap()).unwrap();
     let fallback_error = TraceDecay::resolve_store_layout_for_identity_with_options(
         &unregistered_worktree,
