@@ -1,7 +1,7 @@
 //! Transport-neutral memory application services and ports.
 
 mod canonical;
-mod convergence;
+mod public_contract;
 
 pub use canonical::*;
-pub use convergence::*;
+pub use public_contract::*;

@@ -29,6 +29,8 @@ use tracedecay_tool_catalog::{
     McpIdempotencyContract, McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 
+#[cfg(test)]
+mod public_memory_automation_tests;
 mod work;
 mod workflow;
 
@@ -157,6 +159,9 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_runtime", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_dsm", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_test_risk", group: Some(McpToolDispatchGroup::Health), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_memory_automation_run", group: Some(McpToolDispatchGroup::Admin), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_automation_run_list", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
+    McpToolBinding { name: "tracedecay_automation_run_view", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_automation_run_artifact_view", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
     McpToolBinding { name: "tracedecay_analytics", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_skill_list", group: Some(McpToolDispatchGroup::Memory), project: RegisteredProjectAccess::ActiveProjectOnly },
@@ -268,7 +273,6 @@ pub(crate) const MCP_TOOL_BINDINGS: &[McpToolBinding] = &[
     McpToolBinding { name: "tracedecay_fact_store_update", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_fact_store_remove", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_fact_store_list", group: None, project: RegisteredProjectAccess::SelectorOnly },
-    McpToolBinding { name: "tracedecay_fact_store_curate", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_memory_status", group: None, project: RegisteredProjectAccess::SelectorOnly },
     McpToolBinding { name: "tracedecay_message_search", group: None, project: RegisteredProjectAccess::SelectorOnly },
 ];
@@ -319,8 +323,8 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_fact_store_add"
         | "tracedecay_fact_store_update"
         | "tracedecay_fact_store_remove"
-        | "tracedecay_fact_store_curate"
         | "tracedecay_fact_feedback"
+        | "tracedecay_memory_automation_run"
         | "tracedecay_session_refresh"
         | "tracedecay_run_affected_tests" => EffectClass::Administrative,
         _ => EffectClass::Read,
@@ -455,6 +459,7 @@ pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
         || matches!(
             tool_name,
             "tracedecay_admin_cli"
+                | "tracedecay_memory_automation_run"
                 | "tracedecay_search"
                 | "tracedecay_run_affected_tests"
                 | "tracedecay_pr_context"
@@ -469,13 +474,14 @@ pub(crate) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
 }
 
 pub(crate) fn tool_requires_canonical_effect_settlement(tool_name: &str) -> bool {
-    work_executable_binding_for_tool(tool_name)
-        .ok()
-        .flatten()
-        .is_some_and(|binding| {
-            binding.effect() != EffectClass::Read
-                && *binding.cancellation() == CancellationContract::NotCancellable
-        })
+    tool_name == "tracedecay_memory_automation_run"
+        || work_executable_binding_for_tool(tool_name)
+            .ok()
+            .flatten()
+            .is_some_and(|binding| {
+                binding.effect() != EffectClass::Read
+                    && *binding.cancellation() == CancellationContract::NotCancellable
+            })
         || application_capability_for_tool(tool_name)
             .ok()
             .flatten()
@@ -489,10 +495,10 @@ fn verified_effect_journey(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "tracedecay_dashboard"
+            | "tracedecay_memory_automation_run"
             | "tracedecay_fact_store_add"
             | "tracedecay_fact_store_update"
             | "tracedecay_fact_store_remove"
-            | "tracedecay_fact_store_curate"
             | "tracedecay_fact_feedback"
             | "tracedecay_session_refresh"
             | "tracedecay_run_affected_tests"
@@ -587,6 +593,9 @@ fn cancellation_for_tool(
         ],
         _ if tool_name == "tracedecay_search" => vec![CancellationPoint::DuringRead],
         _ if tool_name == "tracedecay_run_affected_tests" => {
+            vec![CancellationPoint::EffectInFlight]
+        }
+        _ if tool_name == "tracedecay_memory_automation_run" => {
             vec![CancellationPoint::EffectInFlight]
         }
         _ => return Ok(CancellationContract::NotCancellable),
@@ -847,7 +856,6 @@ mod tests {
     fn retained_administrative_effects_are_available_after_their_canonical_journeys_ship() {
         let catalog = mcp_dispatch_catalog().unwrap();
         for tool_name in [
-            "tracedecay_fact_store_curate",
             "tracedecay_fact_feedback",
             "tracedecay_session_refresh",
             "tracedecay_run_affected_tests",
@@ -925,7 +933,6 @@ mod tests {
             "tracedecay_fact_store_update",
             "tracedecay_fact_store_remove",
             "tracedecay_fact_store_list",
-            "tracedecay_fact_store_curate",
             "tracedecay_memory_status",
         ] {
             assert!(tool_accepts_registered_project_selector(tool_name));
@@ -942,7 +949,7 @@ mod tests {
             .filter(|entry| entry.group.is_none())
         {
             let claimed = ApplicationSurfaceOperation::from_tool_name(entry.name).is_some()
-                || RetainedSurfaceOperation::from_name(entry.name).is_some();
+                || RetainedSurfaceOperation::from_tool_name(entry.name).is_some();
             assert!(claimed, "{} has no group and no surface owner", entry.name);
         }
     }
@@ -960,7 +967,7 @@ mod tests {
             )
         }) {
             assert!(
-                RetainedSurfaceOperation::from_name(entry.name).is_none(),
+                RetainedSurfaceOperation::from_tool_name(entry.name).is_none(),
                 "{} would change groups under a flat lookup",
                 entry.name
             );

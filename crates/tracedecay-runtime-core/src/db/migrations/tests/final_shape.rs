@@ -133,6 +133,27 @@ async fn current_final_store_is_admitted_without_mutation() {
 }
 
 #[tokio::test]
+async fn automation_run_receipt_indexes_are_required_final_shape() {
+    let (_directory, path) = fresh_current_store().await;
+    for name in [
+        "idx_memory_v2_operation_receipts_automation_run",
+        "idx_memory_v2_automatic_fact_receipts_automation_run",
+    ] {
+        let sql = object_sql(&path, "index", name).expect("automation-run index exists");
+        assert!(
+            sql.contains("json_extract"),
+            "{name} must index the run identity"
+        );
+    }
+
+    tamper(
+        &path,
+        "DROP INDEX idx_memory_v2_automatic_fact_receipts_automation_run;",
+    );
+    assert_reset_required_without_repair(&path, "missing automatic-run lookup index").await;
+}
+
+#[tokio::test]
 async fn stamped_final_store_with_missing_or_tampered_required_shape_is_reset_required() {
     let (_directory, path) = fresh_current_store().await;
     tamper(&path, "DROP TABLE metadata;");

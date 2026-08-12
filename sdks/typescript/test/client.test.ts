@@ -98,8 +98,39 @@ function problemEnvelope(
     legalActions?: string[];
     retryAfterMillis?: number | null;
     committedReceipt?: unknown;
+    cancellationStage?: string | null;
+    unavailableClassification?: string | null;
+    executionFailureClassification?: string | null;
+    diagnostic?: unknown;
+    terminality?: string;
   } = {},
 ) {
+  const retry = options.retry ?? "never";
+  const cancellationStage =
+    options.cancellationStage ??
+    (kind === "cancelled" || kind === "timed_out"
+      ? "before_admission"
+      : null);
+  const unavailableClassification =
+    options.unavailableClassification ??
+    (kind === "unavailable" ? "authority" : null);
+  const executionFailureClassification =
+    options.executionFailureClassification ??
+    (kind === "execution_failed" ? "permanent" : null);
+  const admitted =
+    kind === "partial_effect" ||
+    kind === "reset_required" ||
+    kind === "execution_failed" ||
+    (cancellationStage !== null && cancellationStage !== "before_admission") ||
+    (unavailableClassification !== null && unavailableClassification !== "authority");
+  const diagnostic =
+    options.diagnostic !== undefined
+      ? options.diagnostic
+      : kind === "not_found_or_not_authorized" ||
+          kind === "cancelled" ||
+          kind === "timed_out"
+        ? null
+        : { code, message: code };
   const value: Record<string, unknown> = {
     contract: {
       schema_id: "schema.application.problem",
@@ -111,18 +142,26 @@ function problemEnvelope(
       kind,
       code,
       message: code,
-      diagnostic: { code, message: code },
+      diagnostic,
       committed_receipt: options.committedReceipt ?? null,
       owning_layer: "application",
       terminality:
-        kind === "partial_effect" || kind === "reset_required"
-          ? "admitted_terminal"
-          : "pre_admission",
+        options.terminality ??
+        (admitted ? "admitted_terminal" : "pre_admission"),
       retryable: options.retryable ?? false,
-      retry: options.retry ?? "never",
-      retry_scope: null,
+      retry,
+      retry_scope:
+        retry === "never"
+          ? null
+          : retry === "same_request" || retry === "after_delay"
+            ? "same_request"
+            : retry === "after_revalidate"
+              ? "fresh_request"
+              : "same_operation",
       retry_after_millis: options.retryAfterMillis ?? null,
-      cancellation_stage: null,
+      cancellation_stage: cancellationStage,
+      unavailable_classification: unavailableClassification,
+      execution_failure_classification: executionFailureClassification,
       request_id: `request.${code}`,
       trace_id: `trace.${code}`,
       details: [],
@@ -600,7 +639,16 @@ describe("TraceDecayClient transport envelopes", () => {
     const partial = problemEnvelope("partial_effect", "effect_partially_committed", {
       bindingId,
       legalActions: ["reconcile"],
-      committedReceipt: { outcome: "partial", receipt_id: "receipt.partial" },
+      committedReceipt: {
+        operation: "operation.memory-automation-run",
+        request_id: "request.effect_partially_committed",
+        effect_class: "administrative",
+        idempotency_key: "idempotency.partial",
+        input_digest: "digest.partial",
+        outcome: "partial",
+        committed_state: "state.partial",
+        external_proof: null,
+      },
     });
     const missingReceipt = problemEnvelope("reset_required", "missing_receipt_field", {
       bindingId,
@@ -722,6 +770,45 @@ describe("TraceDecayClient transport envelopes", () => {
         await expect(
           client.cancelOperation("request.operation"),
         ).rejects.toBeInstanceOf(TraceDecayMalformedResponseError);
+      },
+    );
+  });
+
+  it("rejects classified admitted terminals that Rust would reject", async () => {
+    const unavailable = problemEnvelope("unavailable", "backend.unavailable", {
+      unavailableClassification: "backend_unavailable",
+      retry: "after_revalidate",
+      retryable: true,
+      legalActions: ["retry"],
+    });
+    (unavailable.value.problem as Record<string, unknown>).retry = "never";
+    (unavailable.value.problem as Record<string, unknown>).retryable = false;
+    (unavailable.value.problem as Record<string, unknown>).retry_scope = null;
+
+    const executionFailed = problemEnvelope(
+      "execution_failed",
+      "backend.execution_failed",
+      { legalActions: ["contact_administrator"], diagnostic: null },
+    );
+
+    await withServer(
+      [
+        (_request, response) => json(response, 503, unavailable),
+        (_request, response) => json(response, 500, executionFailed),
+      ],
+      async (baseUrl) => {
+        const client = createClient({
+          baseUrl,
+          projectId: "project.sdk",
+          token: "sdk-secret",
+        });
+
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
+        await expect(requestThroughTransport(client)).rejects.toBeInstanceOf(
+          TraceDecayMalformedResponseError,
+        );
       },
     );
   });

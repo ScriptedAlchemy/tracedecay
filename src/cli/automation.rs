@@ -164,11 +164,11 @@ pub enum AutomationRunAction {
     /// Build a memory-curation review, call the configured backend, and validate proposed ops.
     #[command(name = "memory-curation")]
     MemoryCuration {
-        /// Maximum candidate clusters included in the backend review request.
-        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS)]
-        max_clusters: usize,
+        /// Maximum canonical facts included in the backend review request.
+        #[arg(long, default_value_t = tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_FACT_REVIEW_LIMIT)]
+        fact_review_limit: usize,
         /// Confidence floor below which backend ops are rejected.
-        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE)]
+        #[arg(long, default_value_t = tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_MIN_CONFIDENCE)]
         min_confidence: f64,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]

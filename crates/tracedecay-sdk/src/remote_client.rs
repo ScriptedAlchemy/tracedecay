@@ -523,6 +523,7 @@ fn status_matches_problem(status: reqwest::StatusCode, kind: ApplicationProblemK
         ApplicationProblemKind::Unavailable | ApplicationProblemKind::ResetRequired => {
             reqwest::StatusCode::SERVICE_UNAVAILABLE
         }
+        ApplicationProblemKind::ExecutionFailed => reqwest::StatusCode::INTERNAL_SERVER_ERROR,
         ApplicationProblemKind::Saturated => reqwest::StatusCode::TOO_MANY_REQUESTS,
         ApplicationProblemKind::Cancelled => reqwest::StatusCode::REQUEST_TIMEOUT,
         ApplicationProblemKind::TimedOut => reqwest::StatusCode::GATEWAY_TIMEOUT,

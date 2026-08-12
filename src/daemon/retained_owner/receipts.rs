@@ -6,11 +6,11 @@ use tracedecay_application::retained_surfaces::{
     SessionCoverageModeV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, AuthorityReceipt, EffectId, EffectReceipt, EffectResult, EffectTermination,
-    EvidenceAuthority, EvidenceCoverage, EvidenceIdentity, EvidencePacket, IdempotencyKey,
-    Omission, OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageState, PolicyDecisionRef,
-    ReconciliationState, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
-    TemporalState, now_micros,
+    ApplicationOutcome, AuthorityReceipt, CancellationStage, Deadline, EffectId, EffectReceipt,
+    EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceIdentity,
+    EvidencePacket, IdempotencyKey, Omission, OperationBudgetUsage, OperationReceipt, PageState,
+    PolicyDecisionRef, ReconciliationState, RetainedSurfaceExecutionContextV1,
+    RetainedSurfaceExecutionErrorV1, TemporalState, now_micros,
 };
 use tracedecay_domain::{ComponentVersion, ManifestDigest, TemporalModeV1, canonical_sha256};
 use tracedecay_tool_catalog::{EffectClass, SortContractId};
@@ -23,6 +23,7 @@ pub(super) fn evidence_outcome(
     let facts = result.evidence_facts().map_err(map_evidence_terminal)?;
     let domain = facts.domain;
     let finished_at = now_micros();
+    let effective_deadline = effective_memory_deadline(context);
     let authority = authority_receipt(context, finished_at)?;
     let result_digest = canonical_sha256(&(operation.as_str(), &result))
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
@@ -45,7 +46,7 @@ pub(super) fn evidence_outcome(
     coverage
         .validate()
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let page = PageState::first_page(
+    let mut page = PageState::first_page(
         SortContractId::new(format!("sort.retained.{}.v1", operation.as_str()))
             .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
         1,
@@ -53,15 +54,15 @@ pub(super) fn evidence_outcome(
         facts.returned,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let page = page_with_next_cursor(page, facts.next_cursor.as_deref())?;
+    page.cursor = facts.next_cursor.clone();
     let execution = OperationReceipt::completed(
         context.observed_at,
         finished_at,
-        context.request_context.deadline().clone(),
+        effective_deadline.clone(),
         measured_budget(context.observed_at, finished_at, &result)?,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    Ok(ApplicationOutcome::Evidence(EvidencePacket {
+    let outcome = ApplicationOutcome::Evidence(EvidencePacket {
         temporal: evidence_temporal_state(&facts, context.observed_at, finished_at)?,
         authority,
         evidence_authorities: vec![EvidenceAuthority {
@@ -88,31 +89,67 @@ pub(super) fn evidence_outcome(
         page,
         execution,
         payload: Some(result),
-    }))
+    });
+    if effective_deadline.is_elapsed_at(now_micros()) {
+        return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+            CancellationStage::DuringRead,
+        ));
+    }
+    Ok(outcome)
 }
 
-pub(super) fn session_refresh_effect_outcome<T: Serialize>(
+pub(super) fn effective_memory_deadline(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+) -> Deadline {
+    Deadline {
+        expires_at: context
+            .request_context
+            .deadline()
+            .expires_at
+            .min(context.request_context.grant().expires_at),
+    }
+}
+
+pub(crate) struct PreparedRetainedEffect {
+    operation: RetainedSurfaceOperation,
+    durable_operation_id: String,
+    effect_id: EffectId,
+    idempotency_key: IdempotencyKey,
+    authority: AuthorityReceipt,
+    expected_state: ManifestDigest,
+    receipt_template: EffectReceipt,
+}
+
+pub(crate) fn prepare_retained_effect<T: Serialize>(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     operation: RetainedSurfaceOperation,
     configuration_digest: &ManifestDigest,
     request: &T,
     durable_operation_id: &str,
-    result: RetainedSurfaceResultV1,
-    reconciliation_required: bool,
-) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    if !matches!(
+) -> Result<PreparedRetainedEffect, RetainedSurfaceExecutionErrorV1> {
+    let admitted_operation = matches!(
         operation,
-        RetainedSurfaceOperation::SessionRefreshBegin
+        RetainedSurfaceOperation::MemoryAutomationRun
+            | RetainedSurfaceOperation::SessionRefreshBegin
             | RetainedSurfaceOperation::SessionRefreshCancel
-    ) || durable_operation_id.trim().is_empty()
-    {
+            | RetainedSurfaceOperation::FactStoreAdd
+            | RetainedSurfaceOperation::FactStoreUpdate
+            | RetainedSurfaceOperation::FactStoreRemove
+            | RetainedSurfaceOperation::FactFeedback
+            | RetainedSurfaceOperation::FactStoreSearch
+    );
+    if !admitted_operation || durable_operation_id.trim().is_empty() {
         return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
     }
-    let finished_at = now_micros();
-    let authority = authority_receipt(context, finished_at)?;
+    let prepared_at = now_micros();
+    let authority = authority_receipt(context, prepared_at)?;
+    let delivery_id = (operation == RetainedSurfaceOperation::FactStoreSearch)
+        .then_some(context.request_context.request_id());
     let input_digest = canonical_sha256(&(
         "tracedecay.retained.effect.input.v1",
         operation.as_str(),
+        context.request_context.actor(),
+        delivery_id,
         request,
     ))
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
@@ -120,13 +157,9 @@ pub(super) fn session_refresh_effect_outcome<T: Serialize>(
         "tracedecay.retained.effect.expected-state.v1",
         context.request_context.scope(),
         operation.as_str(),
+        context.request_context.actor(),
+        delivery_id,
         request,
-    ))
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let committed_state = canonical_sha256(&(
-        "tracedecay.retained.effect.committed-state.v1",
-        operation.as_str(),
-        durable_operation_id,
     ))
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
     let catalog_digest = canonical_sha256(&(
@@ -148,12 +181,13 @@ pub(super) fn session_refresh_effect_outcome<T: Serialize>(
         operation.as_str()
     ))
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let termination = if reconciliation_required {
-        EffectTermination::Partial
-    } else {
-        EffectTermination::Completed
-    };
-    let receipt = EffectReceipt {
+    let effect_id = EffectId::new(format!(
+        "effect.retained.{}.{}",
+        operation.as_str(),
+        durable_operation_id
+    ))
+    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    let mut receipt_template = EffectReceipt {
         operation: context.operation.use_case_id().clone(),
         request_id: context.request_context.request_id().clone(),
         actor: context.request_context.actor().clone(),
@@ -166,46 +200,342 @@ pub(super) fn session_refresh_effect_outcome<T: Serialize>(
         configuration_digest: configuration_digest.clone(),
         catalog_digest,
         privacy_digest,
-        outcome: termination,
-        committed_state: Some(committed_state),
+        outcome: EffectTermination::Partial,
+        committed_state: Some(
+            canonical_sha256(&"tracedecay.retained.effect.uncommitted-placeholder.v1")
+                .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
+        ),
         external_proof: None,
     };
-    receipt
+    receipt_template
         .validate()
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    if reconciliation_required {
-        return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
-            reason_code: "application.retained.session-refresh.delivery-failed".to_owned(),
-            committed_receipt: receipt,
-            detail: "The session refresh committed, but required scheduler delivery failed."
-                .to_owned(),
-        });
+    receipt_template.committed_state = None;
+    Ok(PreparedRetainedEffect {
+        operation,
+        durable_operation_id: durable_operation_id.to_owned(),
+        effect_id,
+        idempotency_key,
+        authority,
+        expected_state,
+        receipt_template,
+    })
+}
+
+impl PreparedRetainedEffect {
+    pub(crate) fn authority_receipt(&self) -> &AuthorityReceipt {
+        &self.authority
     }
-    let execution = OperationReceipt::completed(
-        context.observed_at,
-        finished_at,
-        context.request_context.deadline().clone(),
-        measured_budget(context.observed_at, finished_at, &result)?,
-    )
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let effect = EffectResult::new(
-        EffectId::new(format!(
+
+    pub(crate) fn recover(
+        operation: RetainedSurfaceOperation,
+        durable_operation_id: &str,
+        authority: AuthorityReceipt,
+        receipt_template: EffectReceipt,
+    ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
+        if operation != RetainedSurfaceOperation::MemoryAutomationRun
+            || durable_operation_id.trim().is_empty()
+            || receipt_template.outcome != EffectTermination::Partial
+            || receipt_template.committed_state.is_some()
+        {
+            return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
+        }
+        receipt_template
+            .validate()
+            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        authority
+            .validate_for(&receipt_template.scope)
+            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        let effect_id = EffectId::new(format!(
             "effect.retained.{}.{}",
             operation.as_str(),
             durable_operation_id
         ))
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?,
-        EffectClass::Administrative,
-        idempotency_key,
-        authority,
-        expected_state,
-        execution,
-        ReconciliationState::Reconciled,
-        receipt,
-        Some(result),
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
+        Ok(Self {
+            operation,
+            durable_operation_id: durable_operation_id.to_owned(),
+            effect_id,
+            idempotency_key: receipt_template.idempotency_key.clone(),
+            authority,
+            expected_state: receipt_template.expected_state.clone(),
+            receipt_template,
+        })
+    }
+
+    pub(crate) fn material_committed_state_digest<C: Serialize + ?Sized>(
+        &self,
+        committed_state_material: &C,
+    ) -> Result<ManifestDigest, RetainedSurfaceExecutionErrorV1> {
+        canonical_sha256(&(
+            "tracedecay.retained.effect.committed-state.v1",
+            self.operation.as_str(),
+            &self.durable_operation_id,
+            committed_state_material,
+        ))
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)
+    }
+
+    fn partial_receipt(&self, committed_state: &ManifestDigest) -> EffectReceipt {
+        let mut receipt = self.receipt_template.clone();
+        receipt.committed_state = Some(committed_state.clone());
+        receipt
+    }
+
+    pub(super) fn partial_with_digest(
+        &self,
+        committed_state: &ManifestDigest,
+        reason_code: &str,
+        detail: &str,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        Err(self.partial_error_with_digest(committed_state, reason_code, detail))
+    }
+
+    pub(crate) fn partial_error_with_digest(
+        &self,
+        committed_state: &ManifestDigest,
+        reason_code: &str,
+        detail: &str,
+    ) -> RetainedSurfaceExecutionErrorV1 {
+        RetainedSurfaceExecutionErrorV1::PartialEffect {
+            reason_code: reason_code.to_owned(),
+            committed_receipt: self.partial_receipt(committed_state),
+            detail: detail.to_owned(),
+        }
+    }
+
+    pub(super) fn memory_projection_failed(
+        &self,
+        committed_state: &ManifestDigest,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        self.partial_with_digest(
+            committed_state,
+            "application.retained.memory-result-projection-failed",
+            "The canonical fact committed, but its public projection could not be assembled.",
+        )
+    }
+
+    pub(super) fn memory_expiry_failed(
+        &self,
+        committed_state: &ManifestDigest,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let (reason_code, detail) = memory_expiry_detail();
+        self.partial_with_digest(committed_state, reason_code, detail)
+    }
+
+    pub(super) fn complete<C: Serialize + ?Sized>(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        committed_state_material: &C,
+        reconciliation: ReconciliationState,
+        result: RetainedSurfaceResultV1,
+        partial: Option<(&str, &str)>,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let committed_state = self.material_committed_state_digest(committed_state_material)?;
+        self.complete_with_digest(context, &committed_state, reconciliation, result, partial)
+    }
+
+    pub(crate) fn complete_with_digest(
+        &self,
+        context: &RetainedSurfaceExecutionContextV1<'_>,
+        committed_state: &ManifestDigest,
+        reconciliation: ReconciliationState,
+        result: RetainedSurfaceResultV1,
+        partial: Option<(&str, &str)>,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let finished_at = now_micros();
+        self.complete_at(
+            context.observed_at,
+            finished_at,
+            effective_memory_deadline(context),
+            committed_state,
+            reconciliation,
+            result,
+            partial,
+        )
+    }
+
+    pub(crate) fn complete_recovered_with_digest(
+        &self,
+        observed_at: tracedecay_domain::UtcMicros,
+        finished_at: tracedecay_domain::UtcMicros,
+        effective_deadline: Deadline,
+        committed_state: &ManifestDigest,
+        reconciliation: ReconciliationState,
+        result: RetainedSurfaceResultV1,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        self.complete_at(
+            observed_at,
+            finished_at,
+            effective_deadline,
+            committed_state,
+            reconciliation,
+            result,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_at(
+        &self,
+        observed_at: tracedecay_domain::UtcMicros,
+        finished_at: tracedecay_domain::UtcMicros,
+        effective_deadline: Deadline,
+        committed_state: &ManifestDigest,
+        reconciliation: ReconciliationState,
+        result: RetainedSurfaceResultV1,
+        partial: Option<(&str, &str)>,
+    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+        let partial_receipt = self.partial_receipt(committed_state);
+        if let Some((reason_code, detail)) = partial {
+            return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
+                reason_code: reason_code.to_owned(),
+                committed_receipt: partial_receipt,
+                detail: detail.to_owned(),
+            });
+        }
+        let post_commit_failure =
+            |detail: &'static str| RetainedSurfaceExecutionErrorV1::PartialEffect {
+                reason_code: "application.retained.effect-delivery-failed".to_owned(),
+                committed_receipt: partial_receipt.clone(),
+                detail: detail.to_owned(),
+            };
+        let execution = OperationReceipt::completed(
+            observed_at,
+            finished_at,
+            effective_deadline.clone(),
+            measured_budget(observed_at, finished_at, &result).map_err(|_| {
+                post_commit_failure(
+                    "The effect committed, but its delivery budget could not be measured.",
+                )
+            })?,
+        )
+        .map_err(|_| {
+            post_commit_failure(
+                "The effect committed, but its execution receipt could not be assembled.",
+            )
+        })?;
+        let mut completed_receipt = partial_receipt.clone();
+        completed_receipt.outcome = EffectTermination::Completed;
+        completed_receipt.validate().map_err(|_| {
+            post_commit_failure(
+                "The effect committed, but its completed receipt could not be validated.",
+            )
+        })?;
+        // Reconciliation covers the authoritative effect named by this receipt.
+        // Derived memory-graph lag is reported independently by typed read coverage.
+        let effect = EffectResult::new(
+            self.effect_id.clone(),
+            EffectClass::Administrative,
+            self.idempotency_key.clone(),
+            self.authority.clone(),
+            self.expected_state.clone(),
+            execution,
+            reconciliation,
+            completed_receipt,
+            Some(result),
+        )
+        .map_err(|_| {
+            post_commit_failure(
+                "The effect committed, but its public result could not be assembled.",
+            )
+        })?;
+        if effective_deadline.is_elapsed_at(finished_at) {
+            let (reason_code, detail) = self.expiry_partial();
+            return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
+                reason_code: reason_code.to_owned(),
+                committed_receipt: partial_receipt,
+                detail: detail.to_owned(),
+            });
+        }
+        Ok(ApplicationOutcome::Effect(effect))
+    }
+
+    fn expiry_partial(&self) -> (&'static str, &'static str) {
+        match self.operation {
+            RetainedSurfaceOperation::FactStoreAdd
+            | RetainedSurfaceOperation::FactStoreUpdate
+            | RetainedSurfaceOperation::FactStoreRemove
+            | RetainedSurfaceOperation::FactFeedback
+            | RetainedSurfaceOperation::FactStoreSearch => memory_expiry_detail(),
+            RetainedSurfaceOperation::SessionRefreshBegin
+            | RetainedSurfaceOperation::SessionRefreshCancel => (
+                "application.retained.effect-admission-expiry-after-commit",
+                "The retained effect committed after the request or capability grant expired.",
+            ),
+            _ => (
+                "application.retained.effect-delivery-failed",
+                "The retained effect committed, but its delivery did not settle in time.",
+            ),
+        }
+    }
+}
+
+pub(super) fn memory_expiry_partial(
+    settled_after_expiry: bool,
+) -> Option<(&'static str, &'static str)> {
+    settled_after_expiry.then_some(memory_expiry_detail())
+}
+
+fn memory_expiry_detail() -> (&'static str, &'static str) {
+    (
+        "application.retained.memory-admission-expiry-after-commit",
+        "The canonical fact mutation committed after the request or capability grant expired.",
     )
-    .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    Ok(ApplicationOutcome::Effect(effect))
+}
+
+pub(super) fn retained_effect_outcome<T: Serialize, C: Serialize + ?Sized>(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    operation: RetainedSurfaceOperation,
+    configuration_digest: &ManifestDigest,
+    request: &T,
+    durable_operation_id: &str,
+    committed_state_material: &C,
+    reconciliation: ReconciliationState,
+    result: Option<RetainedSurfaceResultV1>,
+    partial: Option<(&str, &str)>,
+) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    let prepared = prepare_retained_effect(
+        context,
+        operation,
+        configuration_digest,
+        request,
+        durable_operation_id,
+    )?;
+    let result = result.ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?;
+    prepared.complete(
+        context,
+        committed_state_material,
+        reconciliation,
+        result,
+        partial,
+    )
+}
+
+pub(super) fn session_refresh_effect_outcome<T: Serialize>(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    operation: RetainedSurfaceOperation,
+    configuration_digest: &ManifestDigest,
+    request: &T,
+    durable_operation_id: &str,
+    result: RetainedSurfaceResultV1,
+    reconciliation_required: bool,
+) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    let partial = reconciliation_required.then_some((
+        "application.retained.session-refresh.delivery-failed",
+        "The session refresh committed, but required scheduler delivery failed.",
+    ));
+    retained_effect_outcome(
+        context,
+        operation,
+        configuration_digest,
+        request,
+        durable_operation_id,
+        durable_operation_id,
+        ReconciliationState::Reconciled,
+        Some(result),
+        partial,
+    )
 }
 
 fn map_evidence_terminal(
@@ -219,13 +549,17 @@ fn map_evidence_terminal(
         | RetainedSurfaceEvidenceTerminalV1::CursorManifestLimitExceeded => {
             RetainedSurfaceExecutionErrorV1::Saturated
         }
-        RetainedSurfaceEvidenceTerminalV1::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled,
+        RetainedSurfaceEvidenceTerminalV1::Cancelled => {
+            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
+        }
         RetainedSurfaceEvidenceTerminalV1::Conflict => RetainedSurfaceExecutionErrorV1::Conflict,
         RetainedSurfaceEvidenceTerminalV1::Denied
         | RetainedSurfaceEvidenceTerminalV1::NotFoundOrNotAuthorized => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        RetainedSurfaceEvidenceTerminalV1::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut,
+        RetainedSurfaceEvidenceTerminalV1::TimedOut => {
+            RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::DuringRead)
+        }
         RetainedSurfaceEvidenceTerminalV1::Unsupported => {
             RetainedSurfaceExecutionErrorV1::Unsupported
         }
@@ -235,17 +569,6 @@ fn map_evidence_terminal(
             RetainedSurfaceExecutionErrorV1::Unavailable
         }
     }
-}
-
-fn page_with_next_cursor(
-    mut page: PageState,
-    next_cursor: Option<&str>,
-) -> Result<PageState, RetainedSurfaceExecutionErrorV1> {
-    page.cursor = next_cursor
-        .map(|cursor| OpaqueCursor::new(cursor.to_owned()))
-        .transpose()
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    Ok(page)
 }
 
 fn evidence_temporal_state(
@@ -383,7 +706,7 @@ mod tests {
             digest('a'),
             ActorId::new("actor.retained.issuer").expect("issuer"),
             UtcMicros(1),
-            UtcMicros(i64::MAX),
+            UtcMicros(i64::MAX - 1),
             scope.clone(),
             BTreeSet::from([operation.capability_id().clone()]),
             BTreeSet::from([operation.use_case_id().clone()]),
@@ -447,6 +770,11 @@ mod tests {
         );
         assert_eq!(effect.receipt.operation, expected_operation);
         assert_eq!(effect.receipt.request_id, expected_request);
+        assert_eq!(
+            effect.execution.effective_deadline.expires_at,
+            UtcMicros(i64::MAX - 1),
+            "the earlier capability-grant expiry must bound the receipt"
+        );
         assert!(effect.receipt.committed_state.is_some());
         assert!(effect.payload.is_some());
     }
@@ -475,6 +803,7 @@ mod tests {
         let durable_commit = canonical_sha256(&(
             "tracedecay.retained.effect.committed-state.v1",
             RetainedSurfaceOperation::SessionRefreshBegin.as_str(),
+            "refresh.operation.fixture",
             "refresh.operation.fixture",
         ))
         .expect("canonical durable operation digest");

@@ -589,7 +589,7 @@ pub async fn run_user_job_with_backend(
         }
     };
 
-    let mut record = ctx.base_record(AutomationRunStatus::Succeeded, None);
+    let mut record = ctx.base_record(AutomationRunStatus::Succeeded, None)?;
     record.model = response.model.clone();
     record.input_hash = input_hash;
     record.output_hash = Some(sha256_json(&json!(response.output_text)));
@@ -654,14 +654,15 @@ impl JobRunContext<'_> {
         &self,
         status: AutomationRunStatus,
         error: Option<String>,
-    ) -> AutomationRunLedgerRecord {
-        let completed_at = current_timestamp().to_string();
+    ) -> Result<AutomationRunLedgerRecord> {
+        let completed_at_micros = super::run_ledger::current_timestamp_micros()?;
+        let completed_at = (completed_at_micros / 1_000_000).to_string();
         let error_classification = if status == AutomationRunStatus::Failed {
             error.as_deref().map(classify_agent_task_error_message)
         } else {
             None
         };
-        AutomationRunLedgerRecord {
+        Ok(AutomationRunLedgerRecord {
             schema_version: 2,
             run_id: self.run_id.to_string(),
             trigger: self.trigger,
@@ -706,7 +707,8 @@ impl JobRunContext<'_> {
             artifacts: Vec::new(),
             started_at: self.started_at.to_string(),
             completed_at,
-        }
+            completed_at_micros,
+        })
     }
 
     async fn skipped(
@@ -714,7 +716,7 @@ impl JobRunContext<'_> {
         reason: &'static str,
         records: Option<&[AutomationRunLedgerRecord]>,
     ) -> Result<UserJobAutomationRun> {
-        let record = self.base_record(AutomationRunStatus::Skipped, Some(reason.to_string()));
+        let record = self.base_record(AutomationRunStatus::Skipped, Some(reason.to_string()))?;
         // Mirror the fixed-task ledger dedup: scheduler ticks re-evaluate
         // every job, so a standing skip is persisted only once.
         let is_repeat = self.trigger == AutomationTrigger::Scheduler
@@ -752,7 +754,7 @@ impl JobRunContext<'_> {
         model: Option<String>,
         retry_report: Option<&AgentTaskRetryReport>,
     ) -> Result<AutomationRunLedgerRecord> {
-        let mut record = self.base_record(AutomationRunStatus::Failed, Some(error));
+        let mut record = self.base_record(AutomationRunStatus::Failed, Some(error))?;
         record.input_hash = input_hash;
         if let Some(retry_report) = retry_report {
             record.backend_attempt_count = retry_report.attempt_count();

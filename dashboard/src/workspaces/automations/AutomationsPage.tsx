@@ -299,17 +299,34 @@ function SkillRowLine({ skill }: { skill: SkillRow }) {
 function FactReceiptRowLine({ receipt }: { receipt: AutomaticFactReceipt }) {
   const content = receipt.add_fact_request.content;
   return (
-    <div className="flex items-center gap-2 border-b border-edge-subtle py-1.5 last:border-b-0">
-      {content !== undefined ? (
-        <span className="min-w-0 flex-1 truncate text-xs" title={content}>
-          {content}
-        </span>
-      ) : (
-        <span className="min-w-0 flex-1 truncate text-xs text-text-muted">
-          receipt carries no fact text
-        </span>
-      )}
-      <StateLabel state={receipt.state} />
+    <div className="flex flex-col gap-1 border-b border-edge-subtle py-1.5 last:border-b-0">
+      <div className="flex items-center gap-2">
+        {content !== undefined ? (
+          <span className="min-w-0 flex-1 truncate text-xs" title={content}>
+            {content}
+          </span>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-xs text-text-muted">
+            receipt carries no fact text
+          </span>
+        )}
+        <StateLabel state={receipt.state} />
+      </div>
+      <p className="break-all font-mono text-3xs text-text-muted">
+        apply {receipt.apply_id} · run {receipt.run_id}
+        {receipt.applied_fact_id ? ` · fact ${receipt.applied_fact_id}` : ""}
+        {receipt.evidence_hash ? ` · evidence ${receipt.evidence_hash}` : ""}
+      </p>
+      {receipt.validation !== undefined ? (
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words text-3xs text-text-secondary">
+          validation {JSON.stringify(receipt.validation, null, 2)}
+        </pre>
+      ) : null}
+      {receipt.quarantine_reason ? (
+        <p className="text-2xs leading-relaxed text-state-error">
+          quarantine: {receipt.quarantine_reason}
+        </p>
+      ) : null}
     </div>
   );
 }

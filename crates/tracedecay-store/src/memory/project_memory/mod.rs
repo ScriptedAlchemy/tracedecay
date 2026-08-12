@@ -13,6 +13,7 @@ use super::{
 };
 
 mod automatic_facts;
+mod automation_run_receipts;
 mod curation;
 pub(super) mod dashboard;
 mod search;
@@ -23,16 +24,23 @@ pub use automatic_facts::{
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
     ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
 };
+pub use automation_run_receipts::ProjectMemoryAutomationRunReceiptsV1;
 pub use curation::{
     ProjectMemoryEntityIdV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
-    ProjectMemoryFactAddMaterialV1, ProjectMemoryFactAddOutcomeV1,
-    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
-    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackCommandV1,
+    ProjectMemoryFactAddMaterialV1, ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactCurationAddV1,
+    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationEvidenceV1,
+    ProjectMemoryFactCurationLinkDispositionV1, ProjectMemoryFactCurationLinkEffectV1,
+    ProjectMemoryFactCurationMergeV1, ProjectMemoryFactCurationMutationKindV1,
+    ProjectMemoryFactCurationOperationEffectV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactCurationRemoveDispositionV1,
+    ProjectMemoryFactCurationRemoveV1, ProjectMemoryFactCurationReviewRefV1,
+    ProjectMemoryFactCurationUpdateV1, ProjectMemoryFactFeedbackCommandV1,
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1,
-    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactNormalizeTagsV1,
-    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
-    ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
-    ProjectMemoryFactUpdatePatchV1,
+    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactMergeTargetV1,
+    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1,
+    derive_project_memory_fact_curation_child_operation_id,
 };
 pub use dashboard::{
     ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactDetailQueryV1,

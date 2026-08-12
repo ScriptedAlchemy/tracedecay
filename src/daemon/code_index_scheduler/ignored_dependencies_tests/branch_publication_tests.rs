@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::sync::atomic::Ordering;
 
 use tracedecay_domain::{CodeGenerationId, GitOidV1, RefId};
 

@@ -3,7 +3,7 @@
 use super::*;
 
 impl DaemonInvocationState {
-    pub(super) async fn invoke_for_project(
+    pub(in crate::daemon) async fn invoke_for_project(
         &self,
         store_administration: &StoreAdministration,
         project_path: Option<&Path>,

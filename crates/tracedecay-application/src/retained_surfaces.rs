@@ -5,6 +5,7 @@
 //! invoking the retained owner.
 
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingStatus, BindingSurface,
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
@@ -36,10 +37,10 @@ pub use evidence::*;
 pub use sdk::*;
 pub use service::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum RetainedSurfaceOperation {
-    /// Legacy broad MCP translator; never a current catalog capability.
-    FactStore,
+    MemoryAutomationRun,
     FactStoreAdd,
     FactStoreSearch,
     FactStoreProbe,
@@ -70,10 +71,10 @@ pub enum RetainedSurfaceOperation {
 }
 
 impl RetainedSurfaceOperation {
-    /// Canonical catalog operations. Broad `fact_store` and `session_refresh`
-    /// are translator names, not catalog operations, and intentionally do not
-    /// appear here.
-    pub const ALL: [Self; 25] = [
+    /// Canonical catalog operations. The broad `session_refresh` translator is
+    /// intentionally not a catalog operation.
+    pub const ALL: [Self; 26] = [
+        Self::MemoryAutomationRun,
         Self::FactStoreAdd,
         Self::FactStoreSearch,
         Self::FactStoreProbe,
@@ -132,8 +133,7 @@ impl RetainedSurfaceOperation {
     ];
 
     /// Every current retained action has an exact project-open production
-    /// adapter. The broad `fact_store` and `session_refresh` MCP names remain
-    /// translators only; SDK clients invoke the operation-selected routes.
+    /// adapter. SDK clients invoke the operation-selected routes.
     pub const SDK_EXECUTABLE: [Self; 25] = [
         Self::FactStoreAdd,
         Self::FactStoreSearch,
@@ -163,12 +163,12 @@ impl RetainedSurfaceOperation {
     ];
 
     pub const fn is_callable(self) -> bool {
-        !matches!(self, Self::FactStore | Self::SessionRefresh)
+        !matches!(self, Self::MemoryAutomationRun | Self::SessionRefresh)
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::FactStore => "fact_store",
+            Self::MemoryAutomationRun => "memory_automation_run",
             Self::FactStoreAdd => "fact_store_add",
             Self::FactStoreSearch => "fact_store_search",
             Self::FactStoreProbe => "fact_store_probe",
@@ -198,17 +198,21 @@ impl RetainedSurfaceOperation {
         }
     }
 
-    pub fn from_name(name: &str) -> Option<Self> {
-        let name = name.strip_prefix("tracedecay_").unwrap_or(name);
+    /// Parse an exact catalog/HTTP operation segment without a tool prefix.
+    pub fn from_operation_name(name: &str) -> Option<Self> {
         match name {
-            "fact_store" => return Some(Self::FactStore),
             "session_refresh" => return Some(Self::SessionRefresh),
             _ => {}
         }
         surface_specs()
             .into_iter()
-            .find(|spec| spec.operation.as_str() == name)
+            .find(|spec| !spec.surfaces.is_empty() && spec.operation.as_str() == name)
             .map(|spec| spec.operation)
+    }
+
+    /// Parse an exact MCP/CLI tool name without accepting a bare operation.
+    pub fn from_tool_name(name: &str) -> Option<Self> {
+        Self::from_operation_name(name.strip_prefix("tracedecay_")?)
     }
 }
 
@@ -549,6 +553,76 @@ pub fn retained_surface_application_operation(
     application_operation(spec)
 }
 
+/// Verify that a successful retained terminal still belongs to the selected
+/// operation and authenticated HTTP envelope before an adapter serializes it.
+pub fn retained_surface_outcome_matches_terminal(
+    operation: RetainedSurfaceOperation,
+    request_id: &crate::RequestId,
+    scope: &crate::ResolvedScope,
+    outcome: &crate::ApplicationOutcome<RetainedSurfaceResultV1>,
+) -> bool {
+    if !service::outcome_matches_operation(operation, outcome) {
+        return false;
+    }
+    let Ok(application_operation) = retained_surface_application_operation(operation) else {
+        return false;
+    };
+    let Some(expected_effect_class) = surface_specs()
+        .into_iter()
+        .find(|spec| spec.operation == operation)
+        .map(|spec| spec.effect)
+    else {
+        return false;
+    };
+    match outcome {
+        crate::ApplicationOutcome::Evidence(_) => expected_effect_class == EffectClass::Read,
+        crate::ApplicationOutcome::Effect(effect) => {
+            effect.effect_class == expected_effect_class
+                && effect.receipt.effect_class == expected_effect_class
+                && effect.receipt.request_id == *request_id
+                && effect.receipt.operation == *application_operation.use_case_id()
+                && effect.receipt.scope == *scope
+        }
+        crate::ApplicationOutcome::Preview(_) => false,
+    }
+}
+
+/// Verify an admitted retained problem against the exact selected effect.
+///
+/// Partial effects require the independently authenticated retained scope that
+/// accompanied the daemon terminal; generic unscoped problems fail closed.
+pub fn retained_surface_problem_matches_terminal(
+    operation: RetainedSurfaceOperation,
+    request_id: &crate::RequestId,
+    scope: Option<&crate::ResolvedScope>,
+    problem: &crate::ApplicationProblem,
+) -> bool {
+    let crate::ApplicationProblem::PartialEffect {
+        committed_receipt, ..
+    } = problem
+    else {
+        return true;
+    };
+    let Ok(application_operation) = retained_surface_application_operation(operation) else {
+        return false;
+    };
+    let Some(expected_effect_class) = surface_specs()
+        .into_iter()
+        .find(|spec| spec.operation == operation)
+        .map(|spec| spec.effect)
+    else {
+        return false;
+    };
+    let Some(scope) = scope else {
+        return false;
+    };
+    retained_surface_operation_is_effect(operation)
+        && committed_receipt.effect_class == expected_effect_class
+        && committed_receipt.request_id == *request_id
+        && committed_receipt.operation == *application_operation.use_case_id()
+        && committed_receipt.scope == *scope
+}
+
 fn capability(
     spec: &RetainedSurfaceSpec,
     capability_id: CapabilityId,
@@ -728,16 +802,17 @@ mod tests {
                 .sum::<usize>()
         );
         for spec in surface_specs() {
+            let exposed = (!spec.surfaces.is_empty()).then_some(spec.operation);
             assert_eq!(
-                RetainedSurfaceOperation::from_name(spec.operation.as_str()),
-                Some(spec.operation)
+                RetainedSurfaceOperation::from_operation_name(spec.operation.as_str()),
+                exposed
             );
             assert_eq!(
-                RetainedSurfaceOperation::from_name(&format!(
+                RetainedSurfaceOperation::from_tool_name(&format!(
                     "tracedecay_{}",
                     spec.operation.as_str()
                 )),
-                Some(spec.operation)
+                exposed
             );
         }
         assert_eq!(
@@ -764,8 +839,67 @@ mod tests {
             "session_refresh_join",
             "session_refresh_resume",
         ] {
-            assert_eq!(RetainedSurfaceOperation::from_name(name), None);
+            assert_eq!(RetainedSurfaceOperation::from_operation_name(name), None);
         }
+    }
+
+    #[test]
+    fn broad_fact_store_translator_is_not_a_v2_operation() {
+        for name in [
+            "fact_store",
+            "tracedecay_fact_store",
+            "fact_store_curate",
+            "tracedecay_fact_store_curate",
+        ] {
+            assert_eq!(RetainedSurfaceOperation::from_operation_name(name), None);
+            assert_eq!(RetainedSurfaceOperation::from_tool_name(name), None);
+        }
+        for name in [
+            "fact_store_add",
+            "fact_store_search",
+            "fact_store_probe",
+            "fact_store_related",
+            "fact_store_reason",
+            "fact_store_contradict",
+            "fact_store_get",
+            "fact_store_update",
+            "fact_store_remove",
+            "fact_store_list",
+            "fact_feedback",
+        ] {
+            assert!(RetainedSurfaceOperation::from_operation_name(name).is_some());
+            assert!(RetainedSurfaceOperation::from_tool_name(name).is_none());
+            assert!(
+                RetainedSurfaceOperation::from_tool_name(&format!("tracedecay_{name}")).is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_memory_run_is_registered_without_a_public_route() {
+        let contribution = retained_surface_catalog_contribution().expect("contribution");
+        let operation = RetainedSurfaceOperation::MemoryAutomationRun;
+        let capability = CapabilityId::new(capability_id(operation)).expect("capability id");
+
+        assert!(RetainedSurfaceOperation::ALL.contains(&operation));
+        assert!(!RetainedSurfaceOperation::CALLABLE.contains(&operation));
+        assert!(!RetainedSurfaceOperation::SDK_EXECUTABLE.contains(&operation));
+        assert!(
+            contribution
+                .capabilities()
+                .iter()
+                .any(|entry| entry.capability_id() == &capability)
+        );
+        assert!(contribution.executable_schema(&capability).is_none());
+        assert_eq!(
+            RetainedSurfaceOperation::from_operation_name("memory_automation_run"),
+            None
+        );
+        assert_eq!(
+            RetainedSurfaceOperation::from_tool_name("tracedecay_memory_automation_run"),
+            None
+        );
+        retained_surface_application_operation(operation).expect("registered application use case");
     }
 
     #[test]

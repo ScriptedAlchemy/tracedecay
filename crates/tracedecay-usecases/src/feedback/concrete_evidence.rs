@@ -2,8 +2,8 @@ use tracedecay_application::feedback::FeedbackCompletedPublicationV1;
 use tracedecay_application::{
     CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
     EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState,
-    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission,
-    RequestContext, RetrievalEvidence, RetrievalPortOutcome, TemporalState,
+    Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor, PageState,
+    RequestAdmission, RequestContext, RetrievalEvidence, RetrievalPortOutcome, TemporalState,
 };
 use tracedecay_domain::{ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
@@ -59,7 +59,7 @@ pub(super) fn complete<T>(
             sort_revision: 1,
             total: Some(total),
             returned: coverage_returned,
-            cursor,
+            cursor: cursor.map(|cursor| PageCursor::Opaque { cursor }),
             expires_at,
         },
         None => match PageState::first_page(feedback_sort_contract(), 1, Some(1), 1) {

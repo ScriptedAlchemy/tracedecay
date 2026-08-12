@@ -337,8 +337,16 @@ pub enum DaemonInvocationError {
 impl DaemonInvocationError {
     pub(crate) fn into_application_problem(self) -> ApplicationProblem {
         match self {
-            Self::Cancelled { .. } => ApplicationProblem::cancelled_before_admission(),
-            Self::TimedOut { .. } => ApplicationProblem::timed_out_before_admission(),
+            Self::Cancelled { stage } => ApplicationProblem::Cancelled {
+                stage,
+                retry: tracedecay_application::RetryDirective::Never,
+                legal_actions: Vec::new(),
+            },
+            Self::TimedOut { stage } => ApplicationProblem::TimedOut {
+                stage,
+                retry: tracedecay_application::RetryDirective::Never,
+                legal_actions: Vec::new(),
+            },
             Self::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "daemon_unavailable".to_owned(),
                 message: "The owning TraceDecay daemon is unavailable".to_owned(),
@@ -910,7 +918,9 @@ fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationErro
         ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
             InvocationError::Conflict
         }
-        ApplicationProblemKind::PartialEffect | ApplicationProblemKind::ResetRequired => {
+        ApplicationProblemKind::PartialEffect
+        | ApplicationProblemKind::ExecutionFailed
+        | ApplicationProblemKind::ResetRequired => {
             InvocationError::Problem(Box::new(problem.clone()))
         }
         ApplicationProblemKind::Unavailable
@@ -955,6 +965,11 @@ fn semantic_evaluation_application_problem(
                 "Semantic evaluation publication committed only part of its required effect",
                 |diagnostic| diagnostic.message.as_str(),
             ),
+        ),
+        ApplicationProblemKind::ExecutionFailed => crate::errors::TraceDecayError::project_route(
+            "semantic_evaluation_execution_failed",
+            false,
+            "Semantic evaluation execution failed",
         ),
         ApplicationProblemKind::ResetRequired => crate::errors::TraceDecayError::reset_required(
             "semantic evaluation publication",

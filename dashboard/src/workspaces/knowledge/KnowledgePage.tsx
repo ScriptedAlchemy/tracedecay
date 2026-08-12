@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type RefObject,
 } from "react";
 import type { EChartsOption } from "echarts";
@@ -20,12 +21,15 @@ import { VirtualList } from "../../ui/VirtualList.tsx";
 import { formatCount, splitCount } from "../../ui/format.ts";
 import { cn } from "../../ui/cn";
 import { envelopePayload, useEnvelope } from "../../data/query/useEnvelope.ts";
+import { scopeKey, useScope } from "../../data/scope/store.ts";
 import {
+  type DashboardCoverageV1,
   type MemoryCategoryCountV1,
   MemoryFactDetailPayloadV1Schema,
   type MemoryFactRowV1,
-  type MemoryHrrCoverageV1,
+  type MemoryFactsCoverageV1,
   MemoryOverviewPayloadV1Schema,
+  type MemoryReadStatusV1,
   MemoryStatusPayloadV1Schema,
 } from "../../contracts/generated.ts";
 import { CurationConsole } from "./CurationConsole.tsx";
@@ -43,8 +47,6 @@ import {
 import {
   composeTrustDistribution,
   factsBelow,
-  hrrStatusLabel,
-  summarizeHrrCoverage,
   summarizeLoadedTrust,
   trustSourceNote,
   type LoadedTrust,
@@ -58,7 +60,7 @@ const BASE = "/api/plugins/holographic";
  *
  * Four camera positions over one memory store, in the order a reader descends
  * through it: the facts explorer, the phase geometry those facts sit in, the
- * daemon's automatic curation outcomes and control, and the store's own record
+ * daemon's automatic curation outcomes, and the store's own record
  * of what changed. `KnowledgeViews.tsx` owns the camera; each view owns its reads,
  * so a position is paid for only when it is looked at.
  *
@@ -121,6 +123,8 @@ function KnowledgeView({ kind }: { kind: KnowledgeViewKind }) {
  * entity summary, and fact drill-down. The semantic WebGL map is the phase-2
  * canvas per the visualization catalog. */
 function KnowledgeFacts() {
+  const scope = useScope((state) => state.scope);
+  const currentScopeKey = scopeKey(scope);
   const [query, setQuery] = useState("");
   const [applied, setApplied] = useState("");
   const overview = useEnvelope(
@@ -128,16 +132,15 @@ function KnowledgeFacts() {
     `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ""}`,
     MemoryOverviewPayloadV1Schema,
   );
-  // The overview's own `trust_histogram` comes back all-zero against a real
-  // store (see trust.ts). This route reports the same distribution in four
-  // coarser bands and is correct, so it is read as the fallback source rather
-  // than leaving the plate empty. Cheap — ~0.1s against a live daemon.
+  // The overview histogram is the finest canonical store-wide distribution.
+  // Status contributes the current four-band authority when the histogram is
+  // empty, so an empty store stays distinct from a failed reading.
   const status = useEnvelope(
     ["memory", "status"],
     `${BASE}/status`,
     MemoryStatusPayloadV1Schema,
   );
-  const statusBands = envelopePayload(status.data)?.memory;
+  const statusMemory = envelopePayload(status.data)?.memory;
   const overviewData = envelopePayload(overview.data);
   // One distribution for the two plates that draw it.
   //
@@ -149,10 +152,15 @@ function KnowledgeFacts() {
   // mean a rail and a list disagreeing about the trust of the same facts.
   const trust = composeTrustDistribution(
     overviewData?.holographic.overview?.trust_histogram,
-    statusBands,
+    statusMemory,
     overviewData?.holographic.facts,
   );
-  const [selected, setSelected] = useState<MemoryFactRowV1 | null>(null);
+  const [selection, setSelection] = useState<{
+    scopeKey: string;
+    fact: MemoryFactRowV1;
+  } | null>(null);
+  const selected =
+    selection?.scopeKey === currentScopeKey ? selection.fact : null;
   const detail = useEnvelope(
     ["memory", "fact", String(selected?.fact_id ?? "")],
     `${BASE}/fact/${encodeURIComponent(String(selected?.fact_id ?? ""))}`,
@@ -232,18 +240,28 @@ function KnowledgeFacts() {
                           unit={entityCount.unit}
                         />
                       </div>
-                      {stats?.banks != null ? (
-                        <div className="min-w-0 flex-1 border-l border-edge-subtle px-3 py-2">
-                          <Readout
-                            label="banks"
-                            size="sm"
-                            value={stats.banks}
-                          />
-                        </div>
-                      ) : null}
                     </div>
                   </div>
                   <TrustDistributionPlate distribution={trust} />
+                  {statusMemory ? (
+                    <figure className="flex flex-col gap-1.5">
+                      <figcaption className="td-legend">memory algebra</figcaption>
+                      <p className="text-2xs text-text-secondary">
+                        {statusMemory.algebra.name}
+                      </p>
+                      <p className="text-3xs text-text-muted">
+                        {statusMemory.algebra.hrr_dim.toLocaleString()} dimensions
+                        {" · "}
+                        estimated capacity {statusMemory.algebra.estimated_capacity.toLocaleString()}
+                      </p>
+                      <p className="text-3xs text-text-muted">
+                        {statusMemory.feedback_funnel.rated_fact_count.toLocaleString()} rated of{" "}
+                        {statusMemory.feedback_funnel.retrieved_fact_count.toLocaleString()} retrieved
+                        {" · "}
+                        {statusMemory.feedback_funnel.feedback_total.toLocaleString()} feedback events
+                      </p>
+                    </figure>
+                  ) : null}
                   {categories.length > 0 ? (
                     <figure className="flex flex-col gap-2">
                       <figcaption className="td-legend">
@@ -260,7 +278,6 @@ function KnowledgeFacts() {
                       </div>
                     </figure>
                   ) : null}
-                  <HrrCoveragePlate rows={stats?.hrr_coverage ?? []} />
                   {growth.length > 0 ? <GrowthChart growth={growth} /> : null}
                 </div>
               );
@@ -281,6 +298,19 @@ function KnowledgeFacts() {
             const data = envelope.payload;
             const facts = data.holographic.facts ?? [];
             const factsRead = data.holographic.reads?.facts;
+            const graphRead = data.holographic.reads?.graph;
+            const factsComplete =
+              data.holographic.facts_coverage.completeness === "complete" &&
+              (factsRead?.state === "ready" ||
+                factsRead?.state === "complete_zero_findings");
+            const coverageNotice = (
+              <MemoryCoverageNotices
+                factsCoverage={data.holographic.facts_coverage}
+                factsRead={factsRead}
+                graphCoverage={data.holographic.graph.coverage}
+                graphRead={graphRead}
+              />
+            );
             if (data.holographic.error) {
               return (
                 <p className="p-6 text-center text-sm text-text-muted">
@@ -288,30 +318,35 @@ function KnowledgeFacts() {
                 </p>
               );
             }
-            if (factsRead?.state === "error") {
+            if (
+              factsRead &&
+              factsRead.state !== "ready" &&
+              factsRead.state !== "partial" &&
+              factsRead.state !== "complete_zero_findings"
+            ) {
               return (
                 <p
                   role="status"
+                  data-state={factsRead.state}
                   className="p-6 text-center text-sm text-state-error"
                 >
-                  Fact list read failed
+                  Fact list read is {factsRead.state.replaceAll("_", " ")}
                   {factsRead.error ? `: ${factsRead.error}` : "."}
                 </p>
               );
             }
             if (facts.length === 0) {
-              const coverage = data.holographic.facts_coverage;
-              const boundedQuery =
-                applied && coverage?.query_applied_after_limit
-                  ? `no match in the loaded top-${coverage.limit.toLocaleString()} slice for “${applied}”`
-                  : null;
               return (
-                <p className="p-6 text-center text-sm text-text-muted">
-                  {boundedQuery ??
-                    (applied
+                <div className="flex flex-col">
+                  {coverageNotice}
+                  <p className="p-6 text-center text-sm text-text-muted">
+                    {applied
                       ? `no loaded facts match “${applied}”`
-                      : "no facts recorded")}
-                </p>
+                      : factsComplete
+                        ? "no facts recorded"
+                        : "no facts were returned by this incomplete read"}
+                  </p>
+                </div>
               );
             }
             // Recall counts have no absolute ceiling, so the rail is scaled to
@@ -326,12 +361,15 @@ function KnowledgeFacts() {
             return (
               <FactList
                 facts={facts}
+                coverageNotice={coverageNotice}
                 recallCeiling={recallCeiling}
                 loaded={loaded}
                 distribution={trust}
                 query={applied}
                 selected={selected}
-                onSelect={setSelected}
+                onSelect={(fact) =>
+                  setSelection({ scopeKey: currentScopeKey, fact })
+                }
               />
             );
           }}
@@ -339,7 +377,7 @@ function KnowledgeFacts() {
       }
       inspector={
         selectedDetail ? (
-          <InspectorPanel title="Fact" onClose={() => setSelected(null)}>
+          <InspectorPanel title="Fact" onClose={() => setSelection(null)}>
             <div className="flex flex-col gap-3">
               {detail.isPending ? (
                 <p className="text-2xs text-text-muted">
@@ -351,7 +389,13 @@ function KnowledgeFacts() {
                   row.
                 </p>
               ) : null}
-              <TrustGauge score={selectedDetail.trust_score} />
+              {selectedDetail.trust_score == null ? (
+                <p className="text-2xs text-text-muted">
+                  trust unavailable while payload access is {selectedDetail.payload_access}
+                </p>
+              ) : (
+                <TrustGauge score={selectedDetail.trust_score} />
+              )}
               {selectedDetail.content ? (
                 <p className="whitespace-pre-wrap text-xs leading-relaxed">
                   {selectedDetail.content}
@@ -378,6 +422,55 @@ function KnowledgeFacts() {
         ) : undefined
       }
     />
+  );
+}
+
+function MemoryCoverageNotices({
+  factsCoverage,
+  factsRead,
+  graphCoverage,
+  graphRead,
+}: {
+  factsCoverage: MemoryFactsCoverageV1;
+  factsRead: MemoryReadStatusV1 | undefined;
+  graphCoverage: DashboardCoverageV1;
+  graphRead: MemoryReadStatusV1 | undefined;
+}) {
+  const factsIncomplete =
+    factsCoverage.completeness !== "complete" || factsRead?.state === "partial";
+  const graphReadComplete =
+    graphRead?.state === "ready" ||
+    graphRead?.state === "complete_zero_findings";
+  const graphIncomplete =
+    graphCoverage.completeness !== "complete" || !graphReadComplete;
+  if (!factsIncomplete && !graphIncomplete) return null;
+  const graphReset = graphRead?.code === "graph_reset_required";
+  return (
+    <div className="flex flex-col gap-1 border-b border-edge-subtle px-3 py-2 text-2xs leading-relaxed">
+      {factsIncomplete ? (
+        <p role="status" data-state={factsRead?.state ?? "partial"} className="text-state-partial">
+          {factsRead?.state === "partial"
+            ? `Fact read is partial; reported fact coverage is ${factsCoverage.completeness}`
+            : `Fact coverage is ${factsCoverage.completeness}`}
+          ; this read was bounded to at most{" "}
+          {factsCoverage.limit.toLocaleString()} facts.
+        </p>
+      ) : null}
+      {graphReset ? (
+        <p role="status" data-state="error" className="text-state-error">
+          Memory graph reset required
+          {graphRead.error ? `: ${graphRead.error}` : "."}
+        </p>
+      ) : null}
+      {graphIncomplete ? (
+        <p role="status" data-state={graphRead?.state ?? "unknown"} className="text-state-partial">
+          Memory graph coverage is {graphCoverage.completeness}
+          {graphCoverage.omission_reasons.length > 0
+            ? `; omissions: ${graphCoverage.omission_reasons.join(", ")}.`
+            : "."}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -450,13 +543,7 @@ function GrowthChart({
 /**
  * The trust distribution, or a statement of why there is nothing to draw.
  *
- * This plate used to render ten bars from `overview.trust_histogram` and, on
- * any real store, every one of those bars was zero — the producer names its
- * rows `trust-<n>` and the consumer parses them as bare integers, so no bucket
- * ever receives a count. An empty chart is not an honest empty state: it looks
- * like a store with no trust rather than a reading that failed to arrive.
- *
- * `composeTrustDistribution` therefore takes the first source that carries any
+ * `composeTrustDistribution` takes the finest canonical source that carries
  * mass, and this plate prints which one it used. When the mass all lands in a
  * single band there is no shape to draw, so the reading is stated instead —
  * one full bar beside nine empty ones is the same non-information in a more
@@ -541,67 +628,6 @@ function TrustDistributionPlate({
 }
 
 /**
- * HRR coverage as one sentence and its exceptions.
- *
- * Six category bars all sitting between 96% and 100% is one fact drawn six
- * times, and it hides the reading that does vary — four of those six banks are
- * stale or incompletely vectorized, which no coverage percentage shows. The
- * uniformity is stated; only the banks that deviate get a row.
- */
-function HrrCoveragePlate({ rows }: { rows: readonly MemoryHrrCoverageV1[] }) {
-  const summary = summarizeHrrCoverage(rows);
-  if (!summary) return null;
-  return (
-    <figure className="flex flex-col gap-1.5">
-      <figcaption className="td-legend">HRR vector coverage</figcaption>
-      <p className="text-2xs leading-relaxed text-text-secondary">
-        {summary.line}
-      </p>
-      {summary.exceptions.length > 0 ? (
-        <ul className="flex flex-col">
-          {/* Two lines, not one. The longest status in the taxonomy is
-           * "missing vectors"; beside a coverage figure in a 224px filter
-           * rail it leaves under seventy pixels for the category name, which
-           * clipped "decision" to "dec…" — the one word on the row a reader
-           * actually needs. */}
-          {summary.exceptions.map((row) => (
-            <li
-              key={row.category}
-              className="flex flex-col gap-0.5 border-b border-edge-subtle py-1 last:border-b-0"
-            >
-              <span className="flex items-baseline gap-2">
-                <span className="min-w-0 flex-1 truncate text-2xs text-text-primary">
-                  {row.category}
-                </span>
-                {/* missing_bank has no bank to measure against, so a percentage
-                 * would be a fabricated denominator; the status stands alone. */}
-                {row.status !== "missing_bank" ? (
-                  <span
-                    className="td-value shrink-0 text-3xs text-text-muted"
-                    data-cell="numeric"
-                  >
-                    {Math.round(Math.max(0, Math.min(row.coverage, 1)) * 100)}%
-                    vectorized
-                  </span>
-                ) : null}
-              </span>
-              {/* `--raw-state-stale` measures 4.39:1 against the light
-               * substrate at this 10px legend tier — under AA. The status is
-               * already the only thing on the row that is not a number, and
-               * only non-ready banks get a row at all, so the word carries the
-               * signal without a hue that cannot be read. */}
-              <span className="td-legend truncate text-text-primary">
-                {hrrStatusLabel(row.status)}
-              </span>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </figure>
-  );
-}
-
-/**
  * What the loaded slice of facts is, stated above the rows.
  *
  * The list is a top-100 slice ordered so the highest-trust facts fill it. A
@@ -620,20 +646,29 @@ function FactListHeader({
   distribution: TrustDistribution;
   query: string;
 }) {
-  const unreached = factsBelow(distribution, loaded.min);
-  const sameEverywhere = loaded.min === loaded.max;
+  const measuredRange =
+    loaded.min != null && loaded.max != null
+      ? { min: loaded.min, max: loaded.max }
+      : null;
+  const unreached = measuredRange
+    ? factsBelow(distribution, measuredRange.min)
+    : null;
+  const sameEverywhere = measuredRange?.min === measuredRange?.max;
   return (
     <div className="flex flex-col gap-0.5 border-b border-edge-subtle px-3 py-2">
       <p className="td-legend">
-        {loaded.count.toLocaleString()} facts loaded
+        {loaded.total.toLocaleString()} facts loaded · {loaded.measured.toLocaleString()} with trust ·{" "}
+        {loaded.unavailable.toLocaleString()} unavailable
         {query ? ` · matching “${query}”` : ""}
       </p>
       <p className="text-2xs leading-relaxed text-text-muted">
-        {sameEverywhere
-          ? `Every one is at trust ${loaded.max.toFixed(2)}.`
-          : `Trust ${loaded.min.toFixed(2)}–${loaded.max.toFixed(2)}, with ${loaded.atMax.toLocaleString()} at exactly ${loaded.max.toFixed(2)}.`}
-        {unreached != null && unreached > 0
-          ? ` The store holds ${unreached.toLocaleString()} further facts below ${loaded.min.toFixed(2)} that this slice does not reach.`
+        {measuredRange == null
+          ? "No loaded fact exposes a trust measurement."
+          : sameEverywhere
+            ? `Every measured fact is at trust ${measuredRange.max.toFixed(2)}.`
+            : `Trust ${measuredRange.min.toFixed(2)}–${measuredRange.max.toFixed(2)}, with ${loaded.atMax.toLocaleString()} at exactly ${measuredRange.max.toFixed(2)}.`}
+        {measuredRange && unreached != null && unreached > 0
+          ? ` The store holds ${unreached.toLocaleString()} further facts below ${measuredRange.min.toFixed(2)} that this slice does not reach.`
           : ""}
       </p>
     </div>
@@ -649,6 +684,7 @@ const FACT_SUMMARY_CHARACTER_SAMPLE = "abcdefghijklmnopqrstuvwxyz";
 
 function FactList({
   facts,
+  coverageNotice,
   recallCeiling,
   loaded,
   distribution,
@@ -657,6 +693,7 @@ function FactList({
   onSelect,
 }: {
   facts: MemoryFactRowV1[];
+  coverageNotice: ReactNode;
   recallCeiling: number;
   loaded: LoadedTrust | null;
   distribution: TrustDistribution;
@@ -695,12 +732,17 @@ function FactList({
         getKey={(fact) => String(fact.fact_id)}
         estimateHeight={FACT_ROW_HEIGHT}
         header={
-          loaded ? (
-            <FactListHeader
-              loaded={loaded}
-              distribution={distribution}
-              query={query}
-            />
+          coverageNotice || loaded ? (
+            <>
+              {coverageNotice}
+              {loaded ? (
+                <FactListHeader
+                  loaded={loaded}
+                  distribution={distribution}
+                  query={query}
+                />
+              ) : null}
+            </>
           ) : null
         }
         renderItem={(fact) => (
@@ -759,7 +801,10 @@ function FactListRow({
   const content = fact.content ?? String(fact.fact_id);
   const summary = useMemo(() => content.split("\n")[0] ?? "", [content]);
   const clipped = characterLimit !== null && content.length > characterLimit;
-  const trust = Math.max(0, Math.min(fact.trust_score, 1));
+  const trust =
+    typeof fact.trust_score === "number"
+      ? Math.max(0, Math.min(fact.trust_score, 1))
+      : null;
   const recalls = fact.retrieval_count ?? 0;
   return (
     <DataRow
@@ -772,7 +817,9 @@ function FactListRow({
         <span
           className={cn(
             "td-value text-2xs leading-none",
-            trust >= 0.7
+            trust == null
+              ? "text-text-muted"
+              : trust >= 0.7
               ? "text-text-primary"
               : trust >= 0.4
                 ? "text-text-secondary"
@@ -780,9 +827,9 @@ function FactListRow({
           )}
           data-cell="numeric"
         >
-          {trust.toFixed(2)}
+          {trust == null ? "—" : trust.toFixed(2)}
         </span>
-        {showTrustRail ? (
+        {showTrustRail && trust != null ? (
           <Meter
             fraction={trust}
             height="row"

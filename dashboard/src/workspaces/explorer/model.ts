@@ -239,7 +239,7 @@ export function knowledgeHits(
       ? rawTags.map((tag) => String(tag)).filter((tag) => tag !== '')
       : [];
     const category = str(row, 'category');
-    const recalled = num(row, 'last_recalled_at');
+    const recalledMicros = num(row, 'last_recalled_at');
     const hit: Hit = {
       key: `knowledge:${factId ?? index}`,
       lane: 'knowledge',
@@ -250,7 +250,9 @@ export function knowledgeHits(
       ...(tags.length > 0 ? { context: tags.join(' · ') } : {}),
       contextFields: tags.length > 0 ? ['tags'] : [],
       ...(category ? { facet: category } : {}),
-      ...(recalled != null ? { stamp: recalled, stampField: 'last_recalled_at' } : {}),
+      ...(recalledMicros != null
+        ? { stamp: Math.trunc(recalledMicros / 1_000_000), stampField: 'last_recalled_at' }
+        : {}),
       ...(trust != null
         ? {
             signal: {

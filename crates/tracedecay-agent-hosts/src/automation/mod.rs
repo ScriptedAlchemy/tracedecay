@@ -30,6 +30,11 @@ pub mod skill_usage;
 pub mod skill_writer;
 pub mod text;
 
+pub use lifecycle::{
+    AutomationCommittedReceipt, AutomationRunControl, AutomationRunError, AutomationRunResult,
+    NonEmptyAutomaticFactReceipts,
+};
+
 /// Build a [`TraceDecayError::Config`] from any message-like value.
 ///
 /// Canonical home for the `config_error` helper duplicated across the

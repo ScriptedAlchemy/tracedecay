@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+mod curation;
+
 use super::artifact_feedback::{
     validation_feedback_entries, validation_gate_decision, validation_report_hash,
 };
@@ -18,6 +20,7 @@ use super::outcomes::{
     AutomationOutcomesSnapshot, outcome_eval_definitions, outcome_feedback_section,
 };
 use super::run_ledger::{AutomationRunArtifactKind, AutomationRunLedgerRecord};
+use super::runner::SessionFactCurationReceipt;
 use super::text::truncate_chars_for_prompt;
 
 pub(super) struct ArtifactPayloadContext<'a> {
@@ -62,6 +65,8 @@ pub(super) struct ArtifactRefs {
 }
 
 pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
+    let curation_result = (ctx.task == AgentTaskKind::MemoryCurator)
+        .then(|| curation::memory_curation_trace_summary(ctx.record));
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -77,6 +82,7 @@ pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
         "context_keys": ctx.request.context.as_object()
             .map(|object| object.keys().cloned().collect::<Vec<_>>())
             .unwrap_or_default(),
+        "curation_result": curation_result,
     })
 }
 
@@ -104,6 +110,11 @@ fn context_evidence_mode(context: &Value) -> Value {
 }
 
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {
+    let model = if ctx.task == AgentTaskKind::SessionReflector {
+        Vec::new()
+    } else {
+        validation_feedback_entries(ctx.record)
+    };
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -120,7 +131,9 @@ pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Val
             "skipped_count": ctx.record.skipped_count,
         },
         "human": [],
-        "model": validation_feedback_entries(ctx.record),
+        "model": model,
+        "session_reflection_result": (ctx.task == AgentTaskKind::SessionReflector)
+            .then(|| session_reflection_summary(ctx.record)),
         "applied_change_outcomes": outcome_feedback_section(ctx.task, ctx.outcomes),
     })
 }
@@ -216,7 +229,12 @@ pub(super) fn validation_gate_payload(
     gate: &ImprovementGatePayload,
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref) = refs;
-    let automatic_application = automatic_application_effect(ctx.record);
+    let automatic_application = task_automatic_application_effect(ctx.task, ctx.record);
+    let report = match ctx.task {
+        AgentTaskKind::MemoryCurator => curation::memory_curation_trace_summary(ctx.record),
+        AgentTaskKind::SessionReflector => session_reflection_summary(ctx.record),
+        _ => ctx.record.validation_report.clone().unwrap_or(Value::Null),
+    };
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -227,7 +245,7 @@ pub(super) fn validation_gate_payload(
             "accepted_count": ctx.record.accepted_count,
             "rejected_count": ctx.record.rejected_count,
             "reviewed_count": ctx.record.reviewed_count,
-            "report": ctx.record.validation_report,
+            "report": report,
             "automatic_application": automatic_application.clone(),
         },
         "improvement_gate": {
@@ -320,7 +338,32 @@ pub(super) fn codex_handoff_payload(
     evals: &GeneratedEvalPayloads,
     gate: &ImprovementGatePayload,
 ) -> Value {
-    let automatic_application = automatic_application_effect(ctx.record);
+    let automatic_application = task_automatic_application_effect(ctx.task, ctx.record);
+    let response = if ctx.task == AgentTaskKind::MemoryCurator {
+        json!({
+            "model": ctx.response.model,
+            "input_tokens": ctx.response.input_tokens,
+            "output_tokens": ctx.response.output_tokens,
+            "output_hash": ctx.record.output_hash,
+            "curation_result": curation::memory_curation_trace_summary(ctx.record),
+        })
+    } else if ctx.task == AgentTaskKind::SessionReflector {
+        json!({
+            "model": ctx.response.model,
+            "input_tokens": ctx.response.input_tokens,
+            "output_tokens": ctx.response.output_tokens,
+            "output_hash": ctx.record.output_hash,
+            "session_reflection_result": session_reflection_summary(ctx.record),
+        })
+    } else {
+        json!({
+            "model": ctx.response.model,
+            "input_tokens": ctx.response.input_tokens,
+            "output_tokens": ctx.response.output_tokens,
+            "output_text_preview": truncate_chars_for_prompt(&ctx.response.output_text, 4000),
+            "output_json": ctx.response.output_json,
+        })
+    };
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -334,18 +377,19 @@ pub(super) fn codex_handoff_payload(
         "evidence_hash": ctx.record.evidence_hash,
         "input_hash": ctx.record.input_hash,
         "output_hash": ctx.record.output_hash,
-        "request": {
-            "evidence_hash": ctx.request.evidence_hash,
-            "prompt_preview": truncate_chars_for_prompt(&ctx.request.prompt, 4000),
-            "context_hash": ctx.record.input_hash,
+        "request": if matches!(ctx.task, AgentTaskKind::MemoryCurator | AgentTaskKind::SessionReflector) {
+            json!({
+                "evidence_hash": ctx.request.evidence_hash,
+                "context_hash": ctx.record.input_hash,
+            })
+        } else {
+            json!({
+                "evidence_hash": ctx.request.evidence_hash,
+                "prompt_preview": truncate_chars_for_prompt(&ctx.request.prompt, 4000),
+                "context_hash": ctx.record.input_hash,
+            })
         },
-        "response": {
-            "model": ctx.response.model,
-            "input_tokens": ctx.response.input_tokens,
-            "output_tokens": ctx.response.output_tokens,
-            "output_text_preview": truncate_chars_for_prompt(&ctx.response.output_text, 4000),
-            "output_json": ctx.response.output_json,
-        },
+        "response": response,
         "readiness": {
             "validation_gate_decision": gate.decision,
             "eval_count": evals.count,
@@ -411,6 +455,45 @@ pub(super) fn codex_handoff_payload(
     })
 }
 
+fn session_reflection_summary(record: &AutomationRunLedgerRecord) -> Value {
+    json!({
+        "status": record.status,
+        "reviewed_count": record.reviewed_count,
+        "accepted_count": record.accepted_count,
+        "rejected_count": record.rejected_count,
+        "proposed_ops_hash": validation_report_hash(record.proposed_ops.as_ref()),
+        "applied_ops_hash": validation_report_hash(record.applied_ops.as_ref()),
+        "rejected_ops_hash": validation_report_hash(record.rejected_ops.as_ref()),
+        "validation_report_hash": validation_report_hash(record.validation_report.as_ref()),
+        "curation_receipt": session_reflection_curation_receipt(record),
+    })
+}
+
+fn session_reflection_curation_receipt(record: &AutomationRunLedgerRecord) -> Option<Value> {
+    let receipt = serde_json::from_value::<SessionFactCurationReceipt>(
+        record.validation_report.as_ref()?.get("receipt")?.clone(),
+    )
+    .ok()?;
+    serde_json::to_value(receipt).ok()
+}
+
+fn task_automatic_application_effect(
+    task: AgentTaskKind,
+    record: &AutomationRunLedgerRecord,
+) -> Value {
+    if task == AgentTaskKind::SessionReflector {
+        let application = automatic_application_effect(record);
+        json!({
+            "status": application.get("status"),
+            "accepted_count": record.accepted_count,
+            "rejected_count": record.rejected_count,
+            "retry_required": application.get("retry_required"),
+        })
+    } else {
+        automatic_application_effect(record)
+    }
+}
+
 fn automatic_application_effect(record: &AutomationRunLedgerRecord) -> Value {
     let deployment = record
         .applied_ops
@@ -431,6 +514,7 @@ fn automatic_application_effect(record: &AutomationRunLedgerRecord) -> Value {
         Some("no_candidate") => "no_candidate",
         Some("quarantined") => "quarantined",
         Some("failed_after_partial_effects") => "partial",
+        Some("settled_noop") => "settled_noop",
         Some("applied") if deployment_retry => "partial",
         Some("applied") => "applied",
         _ if deployment_retry || record.error_retryable == Some(true) => "retry",
@@ -481,6 +565,14 @@ mod tests {
     use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict};
     use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
     use super::*;
+    use tracedecay_domain::{
+        DomainError, FactEventId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
+        ProvenanceId, RunId,
+    };
+    use tracedecay_store::{
+        FactCommitReceipt, ProjectMemoryFactCurationOperationEffectV1,
+        ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1,
+    };
 
     fn payload_fixture() -> (
         AgentTaskRequest,
@@ -538,6 +630,7 @@ mod tests {
             artifacts: Vec::new(),
             started_at: "0".to_string(),
             completed_at: "0".to_string(),
+            completed_at_micros: 0,
         };
         (request, response, record)
     }
@@ -566,10 +659,10 @@ mod tests {
         let outcomes = outcomes_snapshot();
         let ctx = ArtifactPayloadContext {
             run_id: "run-outcomes",
-            task: AgentTaskKind::SkillWriter,
-            task_key: "skill_writer",
-            prompt_version: "skill_writer:v1",
-            policy: artifact_policy(AgentTaskKind::SkillWriter),
+            task: AgentTaskKind::SessionReflector,
+            task_key: "session_reflector",
+            prompt_version: "session_reflector:v1",
+            policy: artifact_policy(AgentTaskKind::SessionReflector),
             request: &request,
             response: &response,
             record: &record,
@@ -643,6 +736,261 @@ mod tests {
     }
 
     #[test]
+    fn curator_trace_publishes_only_typed_payload_free_effect_detail() {
+        let (request, mut response, mut record) = payload_fixture();
+        record.task = AgentTaskKind::MemoryCurator;
+        record.status = AutomationRunStatus::Succeeded;
+        record.reviewed_count = 2;
+        record.accepted_count = 1;
+        record.rejected_count = 1;
+        let owner = FactOwnerV1::Profile;
+        let operation_id = domain_id::<ProvenanceId>("operation.trace.curator");
+        let fact_id = tracedecay_domain::FactId::derive(
+            &FactIdentityMaterialV1::new(
+                owner.clone(),
+                FactIdentitySourceV1::Application {
+                    operation_id: operation_id.clone(),
+                },
+            )
+            .expect("fact identity material"),
+        )
+        .expect("fact id");
+        let fact_event_id = domain_id::<FactEventId>("event.trace.curator.fact");
+        let provenance_event_id = domain_id::<FactEventId>("event.trace.curator.provenance");
+        let commit = FactCommitReceipt::new(
+            fact_id.clone(),
+            owner.clone(),
+            vec![fact_event_id, provenance_event_id.clone()],
+            provenance_event_id.clone(),
+            None,
+        )
+        .expect("commit receipt");
+        let receipt = ProjectMemoryFactCurationReceiptV1::new(
+            owner.clone(),
+            operation_id.clone(),
+            "a".repeat(64),
+            Some(RunId::new("run-outcomes").expect("run id")),
+            vec![
+                ProjectMemoryFactCurationOperationEffectV1::normalize_tags(
+                    ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone()).expect("owned fact"),
+                    commit,
+                )
+                .expect("normalize effect"),
+            ],
+            vec![ProjectMemoryFactIdV1::new(owner, fact_id.clone()).expect("changed fact")],
+        )
+        .expect("curation receipt");
+        let hostile_secret = "sk-live-do-not-publish";
+        response.output_text = format!("model proposed private content: {hostile_secret}");
+        response.output_json = Some(json!({
+            "ops": [{
+                "op": "add",
+                "content": hostile_secret,
+                "metadata": {"private": hostile_secret},
+            }]
+        }));
+        record.applied_ops = Some(json!([{
+            "op": "curation_batch",
+            "status": "applied",
+            "operation_count": 1,
+            "receipt": receipt,
+            "raw_model_text": hostile_secret,
+        }]));
+        record.rejected_ops = Some(json!([{
+            "fact_id": "fact.beta",
+            "reason": hostile_secret,
+            "evidence": {"content": hostile_secret},
+        }]));
+        record.validation_report = Some(json!({
+            "status": "applied",
+            "raw_model_text": hostile_secret,
+        }));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::MemoryCurator,
+            task_key: "memory_curator",
+            prompt_version: "memory_curator:v1",
+            policy: artifact_policy(AgentTaskKind::MemoryCurator),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+
+        let payload = traces_payload(&ctx);
+        let result = payload
+            .pointer("/curation_result")
+            .expect("curation result");
+        assert_eq!(result.pointer("/status"), Some(&json!("succeeded")));
+        assert_eq!(result.pointer("/reviewed_count"), Some(&json!(2)));
+        assert_eq!(
+            result.pointer("/operation_receipts/0/operation_id"),
+            Some(&json!(operation_id))
+        );
+        assert_eq!(
+            result.pointer("/operation_receipts/0/effects/0/kind"),
+            Some(&json!("normalize_tags"))
+        );
+        assert_eq!(
+            result.pointer("/operation_receipts/0/effects/0/fact_id"),
+            Some(&json!(fact_id))
+        );
+        assert_eq!(
+            result.pointer("/operation_receipts/0/effects/0/commit/last_event_id"),
+            Some(&json!(provenance_event_id))
+        );
+        assert!(result.pointer("/applied_ops").is_none());
+        assert!(result.pointer("/rejected_ops").is_none());
+        assert!(result.pointer("/validation_report").is_none());
+        assert!(
+            !serde_json::to_string(result)
+                .expect("payload JSON")
+                .contains(hostile_secret)
+        );
+
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+        let validation_gate = validation_gate_payload(
+            &ctx,
+            (
+                &json!({"kind": "traces"}),
+                &json!({"kind": "feedback"}),
+                &json!({"kind": "generated_evals"}),
+            ),
+            &evals,
+            &gate,
+        );
+        let validation_report = validation_gate
+            .pointer("/task_validation/report")
+            .expect("redacted validation report");
+        assert_eq!(
+            validation_report.pointer("/operation_receipts/0/operation_id"),
+            Some(&json!(operation_id))
+        );
+        assert!(validation_report.pointer("/raw_model_text").is_none());
+        assert!(validation_report.pointer("/validation_report").is_none());
+        assert!(
+            validation_report
+                .pointer("/validation_report_hash")
+                .is_some()
+        );
+        assert!(
+            !serde_json::to_string(&validation_gate)
+                .expect("validation gate JSON")
+                .contains(hostile_secret)
+        );
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let handoff = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+        assert!(handoff.pointer("/response/output_text_preview").is_none());
+        assert!(handoff.pointer("/response/output_json").is_none());
+        assert_eq!(
+            handoff.pointer("/response/curation_result/operation_receipts/0/operation_id"),
+            Some(&json!(operation_id))
+        );
+        assert!(
+            !serde_json::to_string(&handoff)
+                .expect("Codex handoff JSON")
+                .contains(hostile_secret)
+        );
+    }
+
+    #[test]
+    fn session_reflector_feedback_validation_and_handoff_are_payload_free() {
+        let (mut request, mut response, mut record) = payload_fixture();
+        let hostile_secret = "sk-live-session-reflector-do-not-publish";
+        request.prompt = format!("private session evidence: {hostile_secret}");
+        response.output_text = format!("proposed fact: {hostile_secret}");
+        response.output_json = Some(json!({"facts": [{"content": hostile_secret}]}));
+        record.task = AgentTaskKind::SessionReflector;
+        record.task_key = Some("session_reflector".to_owned());
+        record.reviewed_count = 2;
+        record.accepted_count = 1;
+        record.rejected_count = 1;
+        record.proposed_ops = Some(json!({"facts": [{"content": hostile_secret}]}));
+        record.applied_ops = Some(json!([{"apply_id": "apply-one", "secret": hostile_secret}]));
+        record.rejected_ops = Some(json!({"count": 1, "secret": hostile_secret}));
+        record.validation_report = Some(json!({
+            "status": "partial",
+            "receipt": {
+                "schema_version": 1,
+                "outcome": "partial",
+                "repair_attempted": true,
+                "admitted_count": 1,
+                "applied_count": 1,
+                "quarantined_count": 1,
+                "retry_required": false,
+                "automatic_fact_receipt_ids": ["apply-one"],
+                "applied_fact_ids": ["fact-one"],
+            },
+            "validation_repairs": [{"content": hostile_secret}],
+        }));
+        let outcomes = AutomationOutcomesSnapshot::default();
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::SessionReflector,
+            task_key: "session_reflector",
+            prompt_version: "session_reflector:v1",
+            policy: artifact_policy(AgentTaskKind::SessionReflector),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+        let refs = ArtifactRefs {
+            trace: json!({"kind": "traces"}),
+            feedback: json!({"kind": "feedback"}),
+            generated_evals: json!({"kind": "generated_evals"}),
+            validation_gate: json!({"kind": "validation_gate"}),
+            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
+        };
+        let evals = generated_eval_payloads(&ctx);
+        let gate = improvement_gate_payload(&ctx, &evals);
+        let feedback = feedback_payload(&ctx, &refs.trace);
+        let validation = validation_gate_payload(
+            &ctx,
+            (&refs.trace, &refs.feedback, &refs.generated_evals),
+            &evals,
+            &gate,
+        );
+        let handoff = codex_handoff_payload(&ctx, &refs, &evals, &gate);
+
+        for payload in [&feedback, &validation, &handoff] {
+            assert!(
+                !serde_json::to_string(payload)
+                    .unwrap()
+                    .contains(hostile_secret)
+            );
+        }
+        assert_eq!(feedback.pointer("/model"), Some(&json!([])));
+        assert_eq!(
+            validation.pointer("/task_validation/report/curation_receipt/applied_count"),
+            Some(&json!(1))
+        );
+        assert!(handoff.pointer("/request/prompt_preview").is_none());
+        assert!(handoff.pointer("/response/output_text_preview").is_none());
+        assert!(handoff.pointer("/response/output_json").is_none());
+        assert!(
+            handoff
+                .pointer("/response/session_reflection_result/validation_report_hash")
+                .is_some()
+        );
+    }
+
+    fn domain_id<T>(value: &str) -> T
+    where
+        T: TryFrom<String, Error = DomainError>,
+    {
+        T::try_from(value.to_owned()).expect("domain id")
+    }
+
+    #[test]
     fn empty_outcomes_snapshot_reports_none_recorded() {
         let (request, response, record) = payload_fixture();
         let outcomes = AutomationOutcomesSnapshot::default();
@@ -688,10 +1036,10 @@ mod tests {
         let outcomes = AutomationOutcomesSnapshot::default();
         let ctx = ArtifactPayloadContext {
             run_id: "run-outcomes",
-            task: AgentTaskKind::SessionReflector,
-            task_key: "session_reflector",
-            prompt_version: "session_reflector:v1",
-            policy: artifact_policy(AgentTaskKind::SessionReflector),
+            task: AgentTaskKind::SkillWriter,
+            task_key: "skill_writer",
+            prompt_version: "skill_writer:v1",
+            policy: artifact_policy(AgentTaskKind::SkillWriter),
             request: &request,
             response: &response,
             record: &record,
@@ -742,6 +1090,15 @@ mod tests {
         assert_eq!(
             automatic_application_effect(&no_candidate).pointer("/status"),
             Some(&json!("no_candidate"))
+        );
+
+        let (_, _, mut settled_noop) = payload_fixture();
+        settled_noop.accepted_count = 2;
+        settled_noop.applied_ops = None;
+        settled_noop.validation_report = Some(json!({"status": "settled_noop"}));
+        assert_eq!(
+            automatic_application_effect(&settled_noop).pointer("/status"),
+            Some(&json!("settled_noop"))
         );
 
         let (_, _, mut quarantined) = payload_fixture();

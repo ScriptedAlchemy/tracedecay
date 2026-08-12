@@ -7,7 +7,7 @@ pub(super) fn automation_run_rpc_request(
 ) -> tracedecay::errors::Result<(Option<String>, serde_json::Value)> {
     let request = match action {
         AutomationRunAction::MemoryCuration {
-            max_clusters,
+            fact_review_limit,
             min_confidence,
             path,
         } => (
@@ -16,7 +16,7 @@ pub(super) fn automation_run_rpc_request(
                 "action": "automation_run",
                 "task": "memory_curation",
                 "options": {
-                    "max_clusters": max_clusters,
+                    "fact_review_limit": fact_review_limit,
                     "min_confidence": min_confidence,
                 },
             }),
@@ -84,11 +84,30 @@ pub(super) fn automation_run_rpc_request(
     Ok(request)
 }
 
+pub(super) enum AutomationRunRpcOutcome<'a> {
+    Run(&'a serde_json::Value),
+    Problem(tracedecay_application::ApplicationProblemEnvelope),
+}
+
 pub(super) fn automation_run_result(
     payload: &serde_json::Value,
-) -> tracedecay::errors::Result<&serde_json::Value> {
+) -> tracedecay::errors::Result<AutomationRunRpcOutcome<'_>> {
+    if payload.get("kind").and_then(serde_json::Value::as_str) == Some("problem") {
+        let problem =
+            payload
+                .get("value")
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: "daemon automation problem omitted its typed value".to_owned(),
+                })?;
+        return serde_json::from_value(problem.clone())
+            .map(AutomationRunRpcOutcome::Problem)
+            .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+                message: format!("daemon automation problem is invalid: {error}"),
+            });
+    }
     payload
         .get("run")
+        .map(AutomationRunRpcOutcome::Run)
         .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
             message: "daemon automation response omitted run".to_string(),
         })
@@ -100,9 +119,18 @@ pub(super) async fn handle_automation_run_command(
     let (path, args) = automation_run_rpc_request(action)?;
     let project_path = resolve_cli_project_root(path, None, None).await?;
     let payload = daemon_automation_action(&project_path, args).await?;
-    let run = automation_run_result(&payload)?;
-    println!("{}", serde_json::to_string_pretty(run)?);
-    Ok(())
+    match automation_run_result(&payload)? {
+        AutomationRunRpcOutcome::Run(run) => {
+            println!("{}", serde_json::to_string_pretty(run)?);
+            Ok(())
+        }
+        AutomationRunRpcOutcome::Problem(problem) => {
+            eprintln!("{}", serde_json::to_string_pretty(&problem)?);
+            Err(tracedecay::errors::TraceDecayError::Config {
+                message: problem.problem.message,
+            })
+        }
+    }
 }
 
 pub(super) async fn handle_automation_runs_command(

@@ -158,14 +158,13 @@ resolves unchanged.
 **Owed by the lead:** when `tracedecay-global-db` and the full `tracedecay-
 sessions` land, these adapters should follow them, not the kernel.
 
-### 4. Daemon session registry — `memory::user::open_user_memory_db`
+### 4. Daemon session registry — `open_user_memory_db`
 
-The five-line opener borrows
+The opener borrows
 `daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1`, so
-it stayed in the root `memory::user` shim
-(`src/memory.rs`), which re-exports the kernel's `memory::user` alongside it.
-Callers (`automation::memory_curator`, `automation::runner::session_reflector`,
-`mcp::tools::handlers::memory`) are unchanged.
+it lives with that registry. Root callers import it directly from
+`daemon::store_runtime::session_registry`; the kernel's `memory::user` module
+retains only profile-path utilities.
 
 ### 5. Branch-admin recovery gate needs registering
 

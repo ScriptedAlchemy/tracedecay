@@ -341,7 +341,7 @@ fn retained_operations_for_advertised_tool(tool_name: &str) -> Vec<RetainedSurfa
             RetainedSurfaceOperation::SessionRefreshBegin,
         ],
         _ => vec![
-            RetainedSurfaceOperation::from_name(tool_name)
+            RetainedSurfaceOperation::from_tool_name(tool_name)
                 .unwrap_or_else(|| panic!("{tool_name} has no retained-surface handler entry")),
         ],
     }

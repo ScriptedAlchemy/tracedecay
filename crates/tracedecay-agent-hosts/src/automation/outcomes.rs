@@ -22,10 +22,11 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracedecay_domain::PayloadAccessState;
 use tracedecay_store::{
-    MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS, ProjectMemoryAutomaticFactReceiptV1,
-    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactAvailabilityV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactStore, ProjectMemoryFactTargetV1,
+    FactReadControl, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
 };
 
 use super::backend::AgentTaskKind;
@@ -376,8 +377,9 @@ pub async fn refresh_fact_outcomes<A: ProjectMemoryFactStore>(
     dashboard_root: &Path,
     application: &MemoryApplication<A>,
     now_unix: i64,
+    read_control: &FactReadControl,
 ) -> Result<Vec<FactOutcomeRecord>> {
-    let outcomes = compute_fact_outcomes(application, now_unix).await?;
+    let outcomes = compute_fact_outcomes(application, now_unix, read_control).await?;
     let lock = outcomes_snapshot_lock(dashboard_root);
     let _guard = lock.lock().await;
     let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
@@ -409,6 +411,7 @@ pub fn compute_skill_outcomes(
 pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
     application: &MemoryApplication<A>,
     now_unix: i64,
+    read_control: &FactReadControl,
 ) -> Result<Vec<FactOutcomeRecord>> {
     let mut outcomes = Vec::new();
     let mut after_apply_id = None;
@@ -419,6 +422,7 @@ pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
                 None,
                 after_apply_id.clone(),
                 MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
+                read_control,
             )
             .await
             .map_err(|error| config_error(format!("list automatic fact receipts: {error}")))?;
@@ -432,20 +436,18 @@ pub async fn compute_fact_outcomes<A: ProjectMemoryFactStore>(
                         receipt.apply_id().as_str()
                     ))
                 })?;
-                let target = ProjectMemoryFactTargetV1::Canonical(
-                    ProjectMemoryFactIdV1::new(
-                        application.owner().clone(),
-                        canonical_fact_id.clone(),
-                    )
-                    .map_err(|error| {
-                        config_error(format!(
-                            "invalid canonical fact id for automatic receipt '{}': {error}",
-                            receipt.apply_id().as_str()
-                        ))
-                    })?,
-                );
+                let fact_id = ProjectMemoryFactIdV1::new(
+                    application.owner().clone(),
+                    canonical_fact_id.clone(),
+                )
+                .map_err(|error| {
+                    config_error(format!(
+                        "invalid canonical fact id for automatic receipt '{}': {error}",
+                        receipt.apply_id().as_str()
+                    ))
+                })?;
                 application
-                    .get_project_memory_fact(target)
+                    .get_project_memory_fact(fact_id, read_control)
                     .await
                     .map_err(|error| {
                         config_error(format!(
@@ -502,13 +504,18 @@ fn fact_outcome_input(
                     })
                 }
                 Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
-                    match unavailable.availability() {
-                        ProjectMemoryFactAvailabilityV1::Deleted => FactOutcomeObservation::Deleted,
-                        ProjectMemoryFactAvailabilityV1::Quarantined => {
-                            FactOutcomeObservation::Quarantined
-                        }
-                        ProjectMemoryFactAvailabilityV1::Unavailable => {
-                            FactOutcomeObservation::Unavailable
+                    match unavailable.payload_access() {
+                        PayloadAccessState::Deleted => FactOutcomeObservation::Deleted,
+                        PayloadAccessState::Quarantined => FactOutcomeObservation::Quarantined,
+                        PayloadAccessState::Unavailable
+                        | PayloadAccessState::Redacted
+                        | PayloadAccessState::RetentionExpired
+                        | PayloadAccessState::Ambiguous => FactOutcomeObservation::Unavailable,
+                        PayloadAccessState::Eligible => {
+                            return Err(config_error(format!(
+                                "unavailable projection for automatic fact receipt '{}' has eligible payload access",
+                                receipt.apply_id().as_str()
+                            )));
                         }
                     }
                 }

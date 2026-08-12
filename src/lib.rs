@@ -91,7 +91,6 @@ pub mod hooks;
 mod host_admission_test;
 pub mod lifecycle_lease;
 pub mod mcp;
-pub mod memory;
 pub mod monitor;
 #[cfg(test)]
 mod os_str_bytes;

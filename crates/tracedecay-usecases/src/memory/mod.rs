@@ -8,6 +8,7 @@ use tracedecay_runtime_core::store::memory::DatabaseFactStore;
 mod anchors;
 mod canonical;
 mod context;
+mod curation;
 mod dashboard;
 mod error;
 mod graph;
@@ -19,7 +20,10 @@ mod tests;
 
 pub use anchors::{EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchor};
 pub use context::MemoryOperationContext;
-pub use dashboard::ProjectMemoryCurationOperation;
+pub use curation::{
+    ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
+    ProjectMemoryFactMutationTarget,
+};
 pub use error::{MemoryApplicationError, MemoryMutationError};
 pub use project_memory::{
     ProjectMemoryFactAddEffectMaterialV1, ProjectMemoryFactAddPreflight,

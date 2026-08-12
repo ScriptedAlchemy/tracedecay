@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
-    ActorId, Confidence, FactId, FactOwnerV1, ManifestDigest, canonical_sha256,
+    ActorId, Confidence, FactEventId, FactId, FactOwnerV1, ManifestDigest, canonical_sha256,
 };
 
 use super::artifacts::sha256_json;
@@ -13,7 +13,10 @@ use super::backend::{
     BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::AutomationConfig;
-use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
+use super::lifecycle::{
+    AgentTaskRunContext, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
+    AutomationRunResult, SchedulerGate, failed_backend_fallback_report,
+};
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::errors::{Result, TraceDecayError};
 use crate::ports::project_runtime::ProfileRuntime;
@@ -24,18 +27,20 @@ use tracedecay_policy::{
     CurationApplyAuthorityV1, CurationApplyDecisionV1, CurationApplyPolicyInputV1,
     CurationApplySubjectV1, CurationValidationDispositionV1, evaluate_curation_apply,
 };
-use tracedecay_runtime_core::memory::types::FactRelationKind;
-use tracedecay_store::ProjectMemoryFactRelationV1;
+use tracedecay_store::ProjectMemoryFactCurationReceiptV1;
 use tracedecay_usecases::memory::{
-    CanonicalMemoryGroomingOperation, MemoryApplication, MemoryApplicationError,
-    MemoryOperationContext,
+    MemoryApplication, MemoryApplicationError, MemoryMutationError, MemoryOperationContext,
 };
 
-const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
-const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.72;
+pub const CURATION_DEFAULT_FACT_REVIEW_LIMIT: usize = 24;
+pub const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.72;
+const CURATION_MAX_OPERATIONS: usize = 256;
 
 mod review;
-use review::memory_curator_review;
+mod wire;
+#[cfg(test)]
+use review::memory_curator_review_value;
+use review::{attach_pagination_summary, memory_curator_resume_cursor, memory_curator_review};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryCuratorAutomationOptions {
@@ -43,8 +48,8 @@ pub struct MemoryCuratorAutomationOptions {
     pub trigger: AutomationTrigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(default = "default_max_clusters")]
-    pub max_clusters: usize,
+    #[serde(default = "default_fact_review_limit")]
+    pub fact_review_limit: usize,
     #[serde(default = "default_min_confidence")]
     pub min_confidence: f64,
 }
@@ -54,7 +59,7 @@ impl Default for MemoryCuratorAutomationOptions {
         Self {
             trigger: AutomationTrigger::ManualCli,
             run_id: None,
-            max_clusters: default_max_clusters(),
+            fact_review_limit: default_fact_review_limit(),
             min_confidence: default_min_confidence(),
         }
     }
@@ -67,6 +72,10 @@ pub struct MemoryCuratorAutomationRun {
     pub ledger_record: AutomationRunLedgerRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_response: Option<AgentTaskResponse>,
+    /// Canonical committed authority result retained in-process until the
+    /// daemon persists the outer automation application terminal.
+    #[serde(skip)]
+    pub committed_receipt: Option<AutomationCommittedReceipt>,
 }
 
 pub async fn run_memory_curator_with_backend(
@@ -75,7 +84,8 @@ pub async fn run_memory_curator_with_backend(
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
-) -> Result<MemoryCuratorAutomationRun> {
+    run_control: &AutomationRunControl,
+) -> AutomationRunResult<MemoryCuratorAutomationRun> {
     let sessions_db = super::runner::project_automation_sessions(cg).await?;
     run_memory_curator_for_store(
         MemoryCuratorStore::Project { cg, sessions_db },
@@ -83,6 +93,7 @@ pub async fn run_memory_curator_with_backend(
         configuration_revision_id,
         backend,
         options,
+        run_control,
     )
     .await
 }
@@ -95,7 +106,8 @@ pub(crate) async fn run_user_memory_curator_with_backend(
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
-) -> Result<MemoryCuratorAutomationRun> {
+    run_control: &AutomationRunControl,
+) -> AutomationRunResult<MemoryCuratorAutomationRun> {
     let sessions_db = session_registry.profile_sessions().await?;
     run_memory_curator_for_store(
         MemoryCuratorStore::User {
@@ -107,6 +119,7 @@ pub(crate) async fn run_user_memory_curator_with_backend(
         configuration_revision_id,
         backend,
         options,
+        run_control,
     )
     .await
 }
@@ -187,7 +200,8 @@ async fn run_memory_curator_for_store(
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
-) -> Result<MemoryCuratorAutomationRun> {
+    run_control: &AutomationRunControl,
+) -> AutomationRunResult<MemoryCuratorAutomationRun> {
     let curation_authority = store.curation_authority(configuration_revision_id)?;
     let sessions_db = store.sessions_db();
     let mut run = AgentTaskRunContext::new(
@@ -199,20 +213,23 @@ async fn run_memory_curator_for_store(
         config,
         AgentTaskKind::MemoryCurator,
     );
-    let max_clusters = options.max_clusters.clamp(1, 50);
+    let fact_review_limit = options.fact_review_limit.clamp(1, 1_000);
     if !options.min_confidence.is_finite() {
         return Err(TraceDecayError::Config {
             message: "memory curator minimum confidence must be finite".to_owned(),
-        });
+        }
+        .into());
     }
     let min_confidence = options.min_confidence.clamp(0.0, 1.0);
-
     let _run_lock = match run.gate().await? {
         SchedulerGate::Proceed(lock) => lock,
         SchedulerGate::Skip(reason) => {
-            return skipped_run(&run, reason, None).await;
+            return skipped_run(&run, reason, None, None)
+                .await
+                .map_err(Into::into);
         }
     };
+    let after_fact_id = memory_curator_resume_cursor(&run.dashboard_root).await?;
 
     let owner = store.owner()?;
     let database = store.open_memory_database().await?;
@@ -221,8 +238,17 @@ async fn run_memory_curator_for_store(
             message: format!("initialize memory curator authority: {error}"),
         },
     )?;
-    let (llm_review, allowed_fact_ids) =
-        memory_curator_review(&memory, &owner, max_clusters).await?;
+    let review_page = memory_curator_review(
+        &memory,
+        &owner,
+        fact_review_limit,
+        after_fact_id.clone(),
+        run_control,
+    )
+    .await?;
+    let llm_review = review_page.review;
+    let allowed_facts = review_page.allowed_facts;
+    let resume_after_fact_id = review_page.resume_after_fact_id;
     let evidence_hash = Some(sha256_json(&llm_review));
     if llm_review.get("status").and_then(Value::as_str) != Some("needs_llm_review") {
         let reason = match llm_review.get("status").and_then(Value::as_str) {
@@ -230,7 +256,9 @@ async fn run_memory_curator_for_store(
             Some("partial_coverage_no_candidates") => "partial_coverage_no_candidates",
             _ => "nothing_to_review",
         };
-        return skipped_run(&run, reason, evidence_hash).await;
+        return skipped_run(&run, reason, evidence_hash, Some(resume_after_fact_id))
+            .await
+            .map_err(Into::into);
     }
 
     let request = AgentTaskRequest::new(
@@ -259,6 +287,7 @@ async fn run_memory_curator_for_store(
                     report: failed_backend_fallback_report(&record),
                     ledger_record: record,
                     backend_response: None,
+                    committed_receipt: None,
                 });
             }
         };
@@ -269,7 +298,7 @@ async fn run_memory_curator_for_store(
     let mut validation_repairs = Vec::new();
     let (accepted_ops, rejected_ops) = loop {
         let (accepted_ops, rejected_ops) =
-            validate_memory_curation_ops(&proposed_ops, &allowed_fact_ids, min_confidence);
+            validate_memory_curation_ops(&proposed_ops, &allowed_facts, min_confidence);
         if rejected_ops.is_empty() {
             break (accepted_ops, rejected_ops);
         }
@@ -287,24 +316,23 @@ async fn run_memory_curator_for_store(
                 .append_failed_record(
                     response.model.clone(),
                     evidence_hash,
-                    Some(proposed_ops),
+                    None,
                     error.to_string(),
                     &retry_report,
                 )
                 .await?;
-            return Err(error);
+            return Err(error.into());
         }
 
         let repair_request = AgentTaskRequest::new(
             run.run_id.clone(),
             AgentTaskKind::MemoryCurator,
-            "Repair the previous memory curation JSON. Return only {\"ops\": [...]}. Preserve valid intent, fix every validation error, use only fact ids from context.allowed_fact_ids, and do not add unrelated operations."
-                .to_string(),
+            build_memory_curator_repair_prompt(),
             evidence_hash.clone(),
             json!({
                 "previous_output": proposed_ops.clone(),
                 "validation_errors": validation_repairs.last(),
-                "allowed_fact_ids": allowed_fact_ids,
+                "allowed_fact_snapshots": allowed_facts,
                 "min_confidence": min_confidence,
                 "apply": true,
             }),
@@ -325,12 +353,12 @@ async fn run_memory_curator_for_store(
                     .append_failed_record(
                         None,
                         evidence_hash,
-                        Some(proposed_ops),
+                        None,
                         error.to_string(),
                         &retry_report,
                     )
                     .await?;
-                return Err(error);
+                return Err(error.into());
             }
         };
         retry_report.append(repair_retry_report);
@@ -344,47 +372,132 @@ async fn run_memory_curator_for_store(
         evidence_hash.as_deref(),
         &accepted_ops,
     )?;
-    let (applied_count, receipts) = if curation_decision.allows_apply() {
-        let result =
-            apply_memory_curation_ops(&memory, &run.run_id, &accepted_ops, min_confidence).await;
-        let (applied_count, receipts) = match result {
+    let facts_reviewed = llm_review
+        .get("facts_reviewed")
+        .cloned()
+        .unwrap_or_else(|| json!(0));
+    let accepted_count = accepted_ops.len();
+    let rejected_count = rejected_ops.len();
+    let (settled_count, mutation_count, receipts, committed_receipt) = if curation_decision
+        .allows_apply()
+    {
+        let result = apply_memory_curation_ops(
+            &memory,
+            &run.run_id,
+            &accepted_ops,
+            min_confidence,
+            run_control,
+        )
+        .await;
+        let (settled_count, mutation_count, receipts, committed_receipt) = match result {
             Ok(result) => result,
-            Err(err) => {
+            Err(MemoryCurationApplyFailure::Application(error)) => {
                 finalizer
                     .append_failed_record(
                         response.model.clone(),
                         evidence_hash,
-                        Some(proposed_ops),
-                        err.to_string(),
+                        None,
+                        error.to_string(),
                         &retry_report,
                     )
                     .await?;
-                return Err(err);
+                return Err(error.into());
+            }
+            Err(MemoryCurationApplyFailure::Settled {
+                error,
+                operation_count,
+                receipt,
+            }) => {
+                let settled_count = receipt.operation_effects().len();
+                let mutation_count = memory_curation_mutation_count(&receipt);
+                let receipts = vec![memory_curation_receipt_json(
+                    "failed_after_partial_effects",
+                    operation_count,
+                    &receipt,
+                )];
+                let curation_policy = memory_curation_report(
+                    &accepted_ops,
+                    &curation_decision,
+                    settled_count,
+                    mutation_count,
+                    true,
+                );
+                let mut validated_report = json!({
+                    "llm_review": llm_review,
+                    "llm_apply": {
+                        "status": "failed_after_partial_effects",
+                        "facts_reviewed": facts_reviewed,
+                        "ops": accepted_ops,
+                        "rejected_ops": rejected_ops,
+                        "settled": settled_count,
+                        "applied": mutation_count,
+                        "receipts": receipts,
+                        "validation_repairs": validation_repairs,
+                    }
+                });
+                annotate_memory_curation_report(&mut validated_report, curation_policy);
+                let applied_ops = validated_report.pointer("/llm_apply/receipts").cloned();
+                let validation_report = Some(memory_curation_validation_summary(
+                    "failed_after_partial_effects",
+                    facts_reviewed.as_u64().unwrap_or(0),
+                    accepted_count,
+                    rejected_count,
+                    validation_repairs.len(),
+                    settled_count,
+                    mutation_count,
+                ));
+                let committed_receipt = AutomationCommittedReceipt::MemoryCuration(receipt);
+                let record = match finalizer
+                    .append_failed_record_with_effects(
+                        response.model.clone(),
+                        evidence_hash,
+                        None,
+                        error.to_string(),
+                        &retry_report,
+                        applied_ops,
+                        None,
+                        validation_report,
+                        accepted_count,
+                        rejected_count,
+                    )
+                    .await
+                {
+                    Ok(record) => Some(record),
+                    Err(_) => None,
+                };
+                return Err(AutomationRunError::PartialEffect {
+                    run_id: run.run_id.clone(),
+                    committed_receipt,
+                    ledger_record: record,
+                    detail: "Memory curation committed, but its canonical result projection failed; reconcile the committed receipt before another run.",
+                });
             }
         };
-        (applied_count, receipts)
+        (settled_count, mutation_count, receipts, committed_receipt)
     } else {
-        (0, Vec::new())
+        (0, 0, Vec::new(), None)
     };
-    let curation_policy = memory_curation_report(&accepted_ops, curation_decision, applied_count);
-    let clusters_reviewed = llm_review
-        .get("clusters_reviewed")
-        .cloned()
-        .unwrap_or_else(|| json!(0));
+    let curation_policy = memory_curation_report(
+        &accepted_ops,
+        &curation_decision,
+        settled_count,
+        mutation_count,
+        false,
+    );
     let mut validated_report = json!({
         "llm_review": llm_review,
         "llm_apply": {
-            "clusters_reviewed": clusters_reviewed,
+            "facts_reviewed": facts_reviewed,
             "ops": accepted_ops,
             "rejected_ops": rejected_ops,
-            "applied": applied_count,
+            "settled": settled_count,
+            "applied": mutation_count,
             "receipts": receipts,
             "validation_repairs": validation_repairs,
         }
     });
     annotate_memory_curation_report(&mut validated_report, curation_policy);
 
-    let validation_report = validated_report.get("llm_apply").cloned();
     let applied_ops = validated_report
         .pointer("/llm_apply/receipts")
         .filter(|value| {
@@ -393,53 +506,118 @@ async fn run_memory_curator_for_store(
                 .is_some_and(|receipts| !receipts.is_empty())
         })
         .cloned();
-    let rejected_ops = validated_report.pointer("/llm_apply/rejected_ops").cloned();
-    let accepted_count = validated_report
-        .pointer("/llm_apply/ops")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let rejected_count = validated_report
-        .pointer("/llm_apply/rejected_ops")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+    let mut terminal_summary = memory_curation_validation_summary(
+        memory_curation_settlement_status(
+            &curation_decision,
+            accepted_count,
+            settled_count,
+            mutation_count,
+        ),
+        facts_reviewed.as_u64().unwrap_or(0),
+        accepted_count,
+        rejected_count,
+        validation_repairs.len(),
+        settled_count,
+        mutation_count,
+    );
+    attach_pagination_summary(
+        &mut terminal_summary,
+        after_fact_id.as_ref(),
+        resume_after_fact_id.as_ref(),
+    );
+    let validation_report = Some(terminal_summary);
     let mut record = finalizer.success_record(
         &response,
         evidence_hash,
-        Some(proposed_ops),
+        None,
         accepted_count,
         rejected_count,
     );
     record.applied_ops = applied_ops;
-    record.rejected_ops = rejected_ops;
+    record.rejected_ops = None;
     record.validation_report = validation_report;
-    let record = finalizer
+    let record = match finalizer
         .append_success_record(&request, &response, &retry_report, record)
-        .await?;
-
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            if let Some(committed_receipt) = committed_receipt {
+                return Err(AutomationRunError::PartialEffect {
+                    run_id: run.run_id.clone(),
+                    committed_receipt: AutomationCommittedReceipt::MemoryCuration(
+                        committed_receipt,
+                    ),
+                    ledger_record: None,
+                    detail: "Memory curation committed, but the automation terminal could not be published; reconcile the committed receipt before another run.",
+                });
+            }
+            return Err(error.into());
+        }
+    };
     Ok(MemoryCuratorAutomationRun {
         run_id: run.run_id,
         report: validated_report,
         ledger_record: record,
         backend_response: Some(response),
+        committed_receipt: committed_receipt.map(AutomationCommittedReceipt::MemoryCuration),
     })
+}
+
+fn memory_curation_settlement_status(
+    decision: &CurationApplyDecisionV1,
+    accepted_count: usize,
+    settled_count: usize,
+    mutation_count: usize,
+) -> &'static str {
+    if accepted_count == 0 {
+        "no_candidate"
+    } else if decision.allows_apply() && settled_count == accepted_count {
+        if mutation_count == 0 {
+            "settled_noop"
+        } else {
+            "applied"
+        }
+    } else {
+        "quarantined"
+    }
 }
 
 async fn skipped_run(
     run: &AgentTaskRunContext<'_>,
     reason: &str,
     evidence_hash: Option<String>,
+    pagination: Option<Option<FactId>>,
 ) -> Result<MemoryCuratorAutomationRun> {
-    let (report, record) = run.skipped_parts(evidence_hash, reason, None).await?;
+    let (report, record) = if let Some(resume_after_fact_id) = pagination {
+        let mut summary = json!({"status": "skipped", "reason": reason});
+        attach_pagination_summary(&mut summary, None, resume_after_fact_id.as_ref());
+        run.skipped_parts_with_validation_report(evidence_hash, reason, None, summary)
+            .await?
+    } else {
+        run.skipped_parts(evidence_hash, reason, None).await?
+    };
     Ok(MemoryCuratorAutomationRun {
         run_id: run.run_id.clone(),
         report,
         ledger_record: record,
         backend_response: None,
+        committed_receipt: None,
     })
 }
 
 fn build_memory_curator_prompt() -> String {
-    "Review only the canonical current-fact pairs in context.llm_review. Return {\"ops\":[]} with zero or more bounded operations described by the system message. Never invent or rewrite a fact id.".to_string()
+    format!(
+        "Review only the canonical current facts in context.llm_review. Return {{\"ops\":[]}} with at most {CURATION_MAX_OPERATIONS} operations. Never invent or rewrite a fact id.\n{}",
+        wire::MODEL_CONTRACT
+    )
+}
+
+fn build_memory_curator_repair_prompt() -> String {
+    format!(
+        "Repair the previous memory curation JSON. Return only {{\"ops\": [...]}} with at most {CURATION_MAX_OPERATIONS} operations. Preserve valid intent, fix every validation error, use only exact fact snapshots from context.allowed_fact_snapshots, and do not add unrelated operations.\n{}",
+        wire::MODEL_CONTRACT
+    )
 }
 
 fn memory_curator_backend_context(llm_review: &Value, min_confidence: f64) -> Value {
@@ -452,7 +630,7 @@ fn memory_curator_backend_context(llm_review: &Value, min_confidence: f64) -> Va
 
 fn validate_memory_curation_ops(
     output: &Value,
-    allowed_fact_ids: &BTreeSet<FactId>,
+    allowed_facts: &BTreeMap<FactId, FactEventId>,
     min_confidence: f64,
 ) -> (Vec<Value>, Vec<Value>) {
     let Some(ops) = output.get("ops").and_then(Value::as_array) else {
@@ -463,6 +641,16 @@ fn validate_memory_curation_ops(
             })],
         );
     };
+    if ops.len() > CURATION_MAX_OPERATIONS {
+        return (
+            Vec::new(),
+            vec![json!({
+                "rejected_reason": format!(
+                    "memory curator output exceeded the {CURATION_MAX_OPERATIONS}-operation limit"
+                )
+            })],
+        );
+    }
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
     for raw in ops {
@@ -487,17 +675,10 @@ fn validate_memory_curation_ops(
             ));
             continue;
         }
-        let valid = match op {
-            "delete" => raw
-                .get("fact_id")
-                .and_then(Value::as_str)
-                .is_some_and(|fact_id| valid_allowed_fact_id(fact_id, allowed_fact_ids)),
-            "merge" => valid_merge_op(raw, allowed_fact_ids),
-            "normalize_tags" | "merge_entities" | "add_alias" | "link_facts" => {
-                valid_grooming_op(raw, allowed_fact_ids)
-            }
-            _ => false,
-        };
+        let valid = matches!(
+            op,
+            "add" | "update" | "merge" | "remove" | "normalize_tags" | "link_facts"
+        ) && wire::valid_curation_op(raw, allowed_facts);
         if valid {
             accepted.push(raw.clone());
         } else {
@@ -507,191 +688,7 @@ fn validate_memory_curation_ops(
             ));
         }
     }
-    let destructive_count = accepted
-        .iter()
-        .filter(|op| {
-            matches!(
-                op.get("op").and_then(Value::as_str),
-                Some("delete" | "merge")
-            )
-        })
-        .count();
-    let has_grooming = accepted.iter().any(|op| {
-        !matches!(
-            op.get("op").and_then(Value::as_str),
-            Some("delete" | "merge")
-        )
-    });
-    if destructive_count > 1 || (destructive_count == 1 && has_grooming) {
-        rejected.extend(accepted.drain(..).map(|raw| {
-            rejected_memory_op(
-                &raw,
-                "a batch may contain one destructive operation or grooming operations, not both",
-            )
-        }));
-    }
     (accepted, rejected)
-}
-
-fn valid_allowed_fact_id(fact_id: &str, allowed_fact_ids: &BTreeSet<FactId>) -> bool {
-    FactId::new(fact_id.to_owned()).is_ok_and(|fact_id| allowed_fact_ids.contains(&fact_id))
-}
-
-fn valid_merge_op(raw: &Value, allowed_fact_ids: &BTreeSet<FactId>) -> bool {
-    let Some(winner_id) = raw.get("winner_id").and_then(Value::as_str) else {
-        return false;
-    };
-    let Some(loser_ids) = raw.get("loser_ids").and_then(Value::as_array) else {
-        return false;
-    };
-    let mut unique_losers = BTreeSet::new();
-    valid_allowed_fact_id(winner_id, allowed_fact_ids)
-        && !loser_ids.is_empty()
-        && loser_ids.iter().all(|loser_id| {
-            loser_id.as_str().is_some_and(|loser_id| {
-                loser_id != winner_id
-                    && unique_losers.insert(loser_id)
-                    && valid_allowed_fact_id(loser_id, allowed_fact_ids)
-            })
-        })
-        && raw
-            .get("merged_content")
-            .is_none_or(|content| content.as_str().is_some())
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum CanonicalGroomingWire {
-    NormalizeTags {
-        fact_id: FactId,
-        tags: Vec<String>,
-        evidence_fact_ids: Vec<FactId>,
-        confidence: Confidence,
-    },
-    MergeEntities {
-        winner_entity_id: i64,
-        loser_entity_ids: Vec<i64>,
-        evidence_fact_ids: Vec<FactId>,
-        confidence: Confidence,
-    },
-    AddAlias {
-        entity_id: i64,
-        alias: String,
-        evidence_fact_ids: Vec<FactId>,
-        confidence: Confidence,
-    },
-    LinkFacts {
-        source_fact_id: FactId,
-        target_fact_id: FactId,
-        relation: FactRelationKind,
-        evidence_fact_ids: Vec<FactId>,
-        confidence: Confidence,
-        source: String,
-        #[serde(default)]
-        metadata: Value,
-    },
-}
-
-impl CanonicalGroomingWire {
-    fn into_operation(self) -> CanonicalMemoryGroomingOperation {
-        match self {
-            Self::NormalizeTags {
-                fact_id,
-                tags,
-                evidence_fact_ids,
-                confidence,
-            } => CanonicalMemoryGroomingOperation::NormalizeTags {
-                fact_id,
-                tags,
-                evidence_fact_ids,
-                confidence,
-            },
-            Self::MergeEntities {
-                winner_entity_id,
-                loser_entity_ids,
-                evidence_fact_ids,
-                confidence,
-            } => CanonicalMemoryGroomingOperation::MergeEntities {
-                winner_entity_id,
-                loser_entity_ids,
-                evidence_fact_ids,
-                confidence,
-            },
-            Self::AddAlias {
-                entity_id,
-                alias,
-                evidence_fact_ids,
-                confidence,
-            } => CanonicalMemoryGroomingOperation::AddAlias {
-                entity_id,
-                alias,
-                evidence_fact_ids,
-                confidence,
-            },
-            Self::LinkFacts {
-                source_fact_id,
-                target_fact_id,
-                relation,
-                evidence_fact_ids,
-                confidence,
-                source,
-                metadata,
-            } => CanonicalMemoryGroomingOperation::LinkFacts {
-                source_fact_id,
-                target_fact_id,
-                relation: match relation {
-                    FactRelationKind::Supports => ProjectMemoryFactRelationV1::Supports,
-                    FactRelationKind::Contradicts => ProjectMemoryFactRelationV1::Contradicts,
-                    FactRelationKind::Supersedes => ProjectMemoryFactRelationV1::Supersedes,
-                    FactRelationKind::DerivedFrom => ProjectMemoryFactRelationV1::DerivedFrom,
-                },
-                evidence_fact_ids,
-                confidence,
-                source,
-                metadata,
-            },
-        }
-    }
-}
-
-fn valid_grooming_op(raw: &Value, allowed_fact_ids: &BTreeSet<FactId>) -> bool {
-    let Ok(operation) = serde_json::from_value::<CanonicalGroomingWire>(raw.clone()) else {
-        return false;
-    };
-    match operation {
-        CanonicalGroomingWire::NormalizeTags {
-            fact_id,
-            evidence_fact_ids,
-            ..
-        } => {
-            valid_allowed_fact_id(fact_id.as_str(), allowed_fact_ids)
-                && valid_typed_evidence_ids(&evidence_fact_ids, allowed_fact_ids)
-        }
-        CanonicalGroomingWire::MergeEntities {
-            evidence_fact_ids, ..
-        }
-        | CanonicalGroomingWire::AddAlias {
-            evidence_fact_ids, ..
-        } => valid_typed_evidence_ids(&evidence_fact_ids, allowed_fact_ids),
-        CanonicalGroomingWire::LinkFacts {
-            source_fact_id,
-            target_fact_id,
-            evidence_fact_ids,
-            ..
-        } => {
-            source_fact_id != target_fact_id
-                && valid_allowed_fact_id(source_fact_id.as_str(), allowed_fact_ids)
-                && valid_allowed_fact_id(target_fact_id.as_str(), allowed_fact_ids)
-                && valid_typed_evidence_ids(&evidence_fact_ids, allowed_fact_ids)
-        }
-    }
-}
-
-fn valid_typed_evidence_ids(ids: &[FactId], allowed_fact_ids: &BTreeSet<FactId>) -> bool {
-    !ids.is_empty()
-        && ids
-            .iter()
-            .all(|id| valid_allowed_fact_id(id.as_str(), allowed_fact_ids))
 }
 
 fn uses_timestamp_as_truth(raw: &Value) -> bool {
@@ -707,12 +704,123 @@ fn rejected_memory_op(raw: &Value, reason: &str) -> Value {
     Value::Object(rejected)
 }
 
+#[derive(Debug)]
+enum MemoryCurationApplyFailure {
+    Application(TraceDecayError),
+    Settled {
+        error: TraceDecayError,
+        operation_count: usize,
+        receipt: ProjectMemoryFactCurationReceiptV1,
+    },
+}
+
+impl From<TraceDecayError> for MemoryCurationApplyFailure {
+    fn from(error: TraceDecayError) -> Self {
+        Self::Application(error)
+    }
+}
+
+fn settle_memory_curation_result(
+    result: std::result::Result<
+        ProjectMemoryFactCurationReceiptV1,
+        MemoryMutationError<ProjectMemoryFactCurationReceiptV1>,
+    >,
+    operation_count: usize,
+) -> std::result::Result<
+    (
+        usize,
+        usize,
+        Vec<Value>,
+        Option<ProjectMemoryFactCurationReceiptV1>,
+    ),
+    MemoryCurationApplyFailure,
+> {
+    match result {
+        Ok(receipt) => {
+            let projected = memory_curation_receipt_json("applied", operation_count, &receipt);
+            let settled_count = receipt.operation_effects().len();
+            let mutation_count = memory_curation_mutation_count(&receipt);
+            Ok((
+                settled_count,
+                mutation_count,
+                vec![projected],
+                Some(receipt),
+            ))
+        }
+        Err(MemoryMutationError::Application(error)) => Err(
+            MemoryCurationApplyFailure::Application(memory_application_error(error)),
+        ),
+        Err(MemoryMutationError::InvalidAuthorityResult {
+            error,
+            authority_result,
+        }) => Err(MemoryCurationApplyFailure::Settled {
+            error: memory_application_error(error),
+            operation_count,
+            receipt: authority_result,
+        }),
+    }
+}
+
+fn memory_curation_mutation_count(receipt: &ProjectMemoryFactCurationReceiptV1) -> usize {
+    receipt
+        .operation_effects()
+        .iter()
+        .filter(|effect| effect.primary_commit().is_some())
+        .count()
+}
+
+fn memory_curation_receipt_json(
+    status: &'static str,
+    operation_count: usize,
+    receipt: &ProjectMemoryFactCurationReceiptV1,
+) -> Value {
+    json!({
+        "op": "curation_batch",
+        "status": status,
+        "operation_count": operation_count,
+        "receipt": receipt,
+    })
+}
+
+fn memory_curation_validation_summary(
+    status: &'static str,
+    facts_reviewed: u64,
+    accepted_count: usize,
+    rejected_count: usize,
+    validation_repair_count: usize,
+    settled_count: usize,
+    mutation_count: usize,
+) -> Value {
+    json!({
+        "status": status,
+        "facts_reviewed": facts_reviewed,
+        "accepted_count": accepted_count,
+        "rejected_count": rejected_count,
+        "validation_repair_count": validation_repair_count,
+        "settled_count": settled_count,
+        "applied_count": mutation_count,
+        "mutates_store": mutation_count > 0,
+    })
+}
+
 async fn apply_memory_curation_ops<A: tracedecay_store::ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
     run_id: &str,
     operations: &[Value],
     min_confidence: f64,
-) -> Result<(usize, Vec<Value>)> {
+    run_control: &AutomationRunControl,
+) -> std::result::Result<
+    (
+        usize,
+        usize,
+        Vec<Value>,
+        Option<ProjectMemoryFactCurationReceiptV1>,
+    ),
+    MemoryCurationApplyFailure,
+> {
+    if operations.is_empty() {
+        return Ok((0, 0, Vec::new(), None));
+    }
     let actor = ActorId::new("automation:memory-curator").map_err(memory_contract_error)?;
     let context = MemoryOperationContext::from_logical_effect(
         memory.owner(),
@@ -721,115 +829,37 @@ async fn apply_memory_curation_ops<A: tracedecay_store::ProjectMemoryFactStore>(
         Some(actor),
     )
     .map_err(memory_application_error)?;
-    match operations
-        .first()
-        .and_then(|operation| operation.get("op").and_then(Value::as_str))
-    {
-        Some("delete") => {
-            let fact_id = operations[0]
-                .get("fact_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| memory_validation_error("validated delete lost fact_id"))?;
-            let fact_id = FactId::new(fact_id.to_owned()).map_err(memory_contract_error)?;
-            let removed = memory
-                .remove_canonical_fact(fact_id.clone(), context)
-                .await
-                .map_err(memory_application_error)?;
-            Ok((
-                usize::from(removed.removed()),
-                vec![json!({
-                    "op": "delete",
-                    "fact_id": fact_id,
-                    "status": if removed.removed() { "deleted" } else { "not_found" },
-                })],
-            ))
-        }
-        Some("merge") => {
-            let winner_id = operations[0]
-                .get("winner_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| memory_validation_error("validated merge lost winner_id"))?;
-            let winner_id = FactId::new(winner_id.to_owned()).map_err(memory_contract_error)?;
-            let loser_ids = operations[0]
-                .get("loser_ids")
-                .and_then(Value::as_array)
-                .ok_or_else(|| memory_validation_error("validated merge lost loser_ids"))?
-                .iter()
-                .map(|value| {
-                    value
-                        .as_str()
-                        .ok_or_else(|| memory_validation_error("validated merge lost loser id"))
-                        .and_then(|value| {
-                            FactId::new(value.to_owned()).map_err(memory_contract_error)
-                        })
+    let curation = operations
+        .iter()
+        .cloned()
+        .map(|operation| {
+            serde_json::from_value::<wire::CanonicalCurationWire>(operation)
+                .map_err(|error| error.to_string())
+                .and_then(wire::CanonicalCurationWire::into_operation)
+                .map_err(|error| {
+                    memory_validation_error(format!(
+                        "validated curation operation could not be reconstructed: {error}"
+                    ))
                 })
-                .collect::<Result<Vec<_>>>()?;
-            let merged_content = operations[0]
-                .get("merged_content")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
-            let outcome = memory
-                .merge_canonical_facts(
-                    winner_id.clone(),
-                    loser_ids.clone(),
-                    merged_content,
-                    context,
-                )
-                .await
-                .map_err(memory_application_error)?;
-            Ok((
-                1,
-                vec![json!({
-                    "op": "merge",
-                    "winner_id": winner_id,
-                    "loser_ids": loser_ids,
-                    "deleted_loser_ids": outcome
-                        .deleted_losers()
-                        .iter()
-                        .map(|target| target.fact_id().as_str())
-                        .collect::<Vec<_>>(),
-                    "status": "merged",
-                })],
-            ))
-        }
-        Some(_) => {
-            let grooming = operations
-                .iter()
-                .cloned()
-                .map(|operation| {
-                    serde_json::from_value::<CanonicalGroomingWire>(operation)
-                        .map(CanonicalGroomingWire::into_operation)
-                        .map_err(|error| {
-                            memory_validation_error(format!(
-                                "validated grooming operation could not be reconstructed: {error}"
-                            ))
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let count = grooming.len();
-            let minimum = Confidence::new(min_confidence).map_err(memory_contract_error)?;
-            let report = memory
-                .apply_canonical_grooming(grooming, minimum, context)
-                .await
-                .map_err(memory_application_error)?;
-            Ok((
-                count,
-                vec![json!({
-                    "op": "grooming_batch",
-                    "status": "applied",
-                    "operation_count": count,
-                    "receipt": {
-                        "changed_fact_ids": report.changed_facts().iter().map(|mapping| mapping.fact_id()).collect::<Vec<_>>(),
-                        "normalized_tags": report.normalized_tags(),
-                        "merged_entities": report.merged_entities(),
-                        "aliases_added": report.aliases_added(),
-                        "facts_linked": report.facts_linked(),
-                    },
-                })],
-            ))
-        }
-        None => Ok((0, Vec::new())),
-    }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let count = curation.len();
+    let minimum = Confidence::new(min_confidence).map_err(memory_contract_error)?;
+    let write_control = run_control.write_control();
+    let automation_run_id =
+        tracedecay_domain::RunId::new(run_id.to_owned()).map_err(memory_contract_error)?;
+    settle_memory_curation_result(
+        memory
+            .apply_project_memory_curation(
+                curation,
+                minimum,
+                context,
+                Some(automation_run_id),
+                &write_control,
+            )
+            .await,
+        count,
+    )
 }
 
 fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
@@ -860,21 +890,20 @@ fn memory_validation_error(message: impl Into<String>) -> TraceDecayError {
 
 fn memory_curation_report(
     ops: &[Value],
-    decision: CurationApplyDecisionV1,
-    applied_count: usize,
+    decision: &CurationApplyDecisionV1,
+    settled_count: usize,
+    mutation_count: usize,
+    settled_failure: bool,
 ) -> Value {
-    let destructive = memory_destructive_op_counts(ops);
     let accepted_count = ops.len();
     json!({
         "decision": decision,
         "effect": {
             "accepted_count": accepted_count,
-            "applied_count": applied_count,
-            "fully_applied": decision.allows_apply() && applied_count >= accepted_count,
-            "mutates_store": applied_count > 0,
-            "permanent_delete_count": destructive.permanent_delete_count,
-            "merge_loser_count": destructive.merge_loser_count,
-            "destructive_target_count": destructive.permanent_delete_count + destructive.merge_loser_count,
+            "settled_count": settled_count,
+            "applied_count": mutation_count,
+            "fully_applied": !settled_failure && decision.allows_apply() && settled_count == accepted_count,
+            "mutates_store": mutation_count > 0,
         },
     })
 }
@@ -906,29 +935,6 @@ fn memory_curation_decision(
     .map_err(memory_contract_error)
 }
 
-#[derive(Debug, Default)]
-struct MemoryDestructiveOpCounts {
-    permanent_delete_count: usize,
-    merge_loser_count: usize,
-}
-
-fn memory_destructive_op_counts(ops: &[Value]) -> MemoryDestructiveOpCounts {
-    let mut counts = MemoryDestructiveOpCounts::default();
-    for op in ops {
-        match op.get("op").and_then(Value::as_str) {
-            Some("delete") => counts.permanent_delete_count += 1,
-            Some("merge") => {
-                counts.merge_loser_count += op
-                    .get("loser_ids")
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len);
-            }
-            _ => {}
-        }
-    }
-    counts
-}
-
 fn annotate_memory_curation_report(report: &mut Value, curation_policy: Value) {
     if let Some(object) = report.as_object_mut() {
         object.insert("curation_policy".to_string(), curation_policy.clone());
@@ -938,8 +944,8 @@ fn annotate_memory_curation_report(report: &mut Value, curation_policy: Value) {
     }
 }
 
-fn default_max_clusters() -> usize {
-    CURATION_DEFAULT_MAX_CLUSTERS
+fn default_fact_review_limit() -> usize {
+    CURATION_DEFAULT_FACT_REVIEW_LIMIT
 }
 
 fn default_min_confidence() -> f64 {
@@ -947,55 +953,4 @@ fn default_min_confidence() -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn memory_curator_request_does_not_duplicate_review_messages() {
-        let marker = "cluster-evidence-that-must-appear-once";
-        let review = json!({
-            "status": "needs_llm_review",
-            "messages": [
-                { "role": "system", "content": "return strict JSON" },
-                { "role": "user", "content": marker },
-            ],
-        });
-
-        let prompt = build_memory_curator_prompt();
-        let request = AgentTaskRequest::new(
-            "run-1".to_string(),
-            AgentTaskKind::MemoryCurator,
-            prompt.clone(),
-            None,
-            memory_curator_backend_context(&review, 0.8),
-        );
-        let backend_message = request.backend_message().unwrap();
-
-        assert!(prompt.contains("canonical current-fact pairs"));
-        assert_eq!(backend_message.matches(marker).count(), 1);
-        assert_eq!(request.context["apply"], json!(true));
-    }
-
-    #[test]
-    fn memory_curator_request_stays_below_codex_limit_for_large_review() {
-        const CODEX_APP_SERVER_MAX_INPUT_CHARS: usize = 1_048_576;
-        let review = json!({
-            "status": "needs_llm_review",
-            "messages": [
-                { "role": "system", "content": "return strict JSON" },
-                { "role": "user", "content": "x".repeat(600_000) },
-            ],
-        });
-        let request = AgentTaskRequest::new(
-            "run-1".to_string(),
-            AgentTaskKind::MemoryCurator,
-            build_memory_curator_prompt(),
-            None,
-            memory_curator_backend_context(&review, 0.8),
-        );
-
-        let backend_message = request.backend_message().unwrap();
-
-        assert!(backend_message.len() < CODEX_APP_SERVER_MAX_INPUT_CHARS);
-    }
-}
+mod tests;

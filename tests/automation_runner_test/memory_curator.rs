@@ -1,6 +1,10 @@
 use crate::support::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod backend_failures;
+mod manual_trigger;
+mod pagination;
+
 struct TransientThenJsonBackend {
     calls: AtomicUsize,
 }
@@ -32,36 +36,21 @@ impl AgentTaskBackend for TransientThenJsonBackend {
     }
 }
 
-#[tokio::test]
-async fn memory_curator_runner_skips_when_automation_is_disabled() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    let backend = JsonBackend::new(json!({"ops": []}));
-    let config = AutomationConfig {
-        enabled: false,
-        ..AutomationConfig::default()
-    };
+fn normalize_tags_op(facts: &SeededDuplicateFacts) -> Value {
+    json!({
+        "op": "normalize_tags",
+        "target": exact_fact(&facts.loser_id, &facts.loser_event_id),
+        "tags": ["cache", "policy", "curated"],
+        "evidence_facts": [exact_fact(&facts.winner_id, &facts.winner_event_id)],
+        "confidence": 0.98,
+    })
+}
 
-    let run = run_memory_curator_with_backend(
-        &cg,
-        &config,
-        &backend,
-        MemoryCuratorAutomationOptions::default(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
-    assert_eq!(
-        run.ledger_record.error.as_deref(),
-        Some("automation_disabled")
-    );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].run_id, run.run_id);
+fn exact_fact(fact_id: &str, expected_last_event_id: &str) -> Value {
+    json!({
+        "fact_id": fact_id,
+        "expected_last_event_id": expected_last_event_id,
+    })
 }
 
 #[tokio::test]
@@ -72,26 +61,29 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     let backend = SequentialJsonBackend::new(vec![
         json!({
             "ops": [{
-                "cluster_id": "cluster-0000",
-                "op": "delete",
-                "fact_id": facts.loser_id,
+                "op": "normalize_tags",
+                "target": exact_fact(&facts.loser_id, &facts.loser_event_id),
+                "tags": ["cache", "policy", "curated"],
+                "evidence_facts": [exact_fact(&facts.winner_id, &facts.winner_event_id)],
                 "confidence": 0.98,
-                "reason": format!("near duplicate of fact {}", facts.winner_id)
             }, {
-                "cluster_id": "cluster-0000",
-                "op": "delete",
-                "fact_id": "fact.missing",
+                "op": "normalize_tags",
+                "target": {
+                    "fact_id": "fact.missing",
+                    "expected_last_event_id": facts.loser_event_id,
+                },
+                "tags": ["cache", "policy", "curated"],
+                "evidence_facts": [exact_fact(&facts.winner_id, &facts.winner_event_id)],
                 "confidence": 0.98,
-                "reason": "hallucinated id should be rejected"
             }]
         }),
         json!({
             "ops": [{
-                "cluster_id": "cluster-0000",
-                "op": "delete",
-                "fact_id": facts.loser_id,
+                "op": "normalize_tags",
+                "target": exact_fact(&facts.loser_id, &facts.loser_event_id),
+                "tags": ["cache", "policy", "curated"],
+                "evidence_facts": [exact_fact(&facts.winner_id, &facts.winner_event_id)],
                 "confidence": 0.98,
-                "reason": format!("near duplicate of fact {}", facts.winner_id)
             }]
         }),
     ]);
@@ -110,16 +102,19 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         ..AutomationConfig::default()
     };
 
-    let run = run_memory_curator_with_backend(
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
+        &run_control,
     )
     .await
     .unwrap();
@@ -164,7 +159,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
             .is_some_and(|hash| hash.starts_with("sha256:"))
     );
     assert_eq!(
-        run.ledger_record.applied_ops.as_ref().unwrap()[0]["fact_id"],
+        run.ledger_record.applied_ops.as_ref().unwrap()[0]["receipt"]["changed_fact_ids"][0],
         json!(facts.loser_id)
     );
     assert_eq!(run.ledger_record.rejected_ops.as_ref().unwrap(), &json!([]));
@@ -173,16 +168,12 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
         json!(1)
     );
     assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["clusters_reviewed"],
-        json!(1)
+        run.ledger_record.validation_report.as_ref().unwrap()["facts_reviewed"],
+        json!(2)
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["curation_policy"]["decision"]["disposition"],
         json!("allow")
-    );
-    assert_eq!(
-        run.ledger_record.validation_report.as_ref().unwrap()["curation_policy"]["effect"]["permanent_delete_count"],
-        json!(1)
     );
     assert_eq!(
         run.ledger_record.validation_report.as_ref().unwrap()["curation_policy"]["effect"]["mutates_store"],
@@ -203,7 +194,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
             .as_str()
             .is_some_and(|digest| digest.starts_with("sha256:"))
     );
-    assert!(!fact_exists(&cg, &facts.loser_id).await);
+    assert!(fact_exists(&cg, &facts.loser_id, run_control.read_control()).await);
     assert_eq!(
         run.ledger_record.report_ref.as_ref().unwrap()["run_id"],
         json!(run.run_id)
@@ -558,7 +549,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
             .is_some_and(|hash| hash.starts_with("sha256:"))
     );
     assert_eq!(
-        run.report["llm_apply"]["ops"][0]["fact_id"],
+        run.report["llm_apply"]["ops"][0]["target"]["fact_id"],
         json!(facts.loser_id)
     );
     assert_eq!(run.report["llm_apply"]["rejected_ops"], json!([]));
@@ -577,8 +568,8 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     assert_eq!(records[0].artifacts.len(), 6);
     assert_eq!(records[0].artifacts, run.ledger_record.artifacts);
     assert!(
-        !fact_exists(&cg, &facts.loser_id).await,
-        "default memory curation must apply accepted validated ops"
+        fact_exists(&cg, &facts.loser_id, run_control.read_control()).await,
+        "normalizing tags must retain the curated fact"
     );
 }
 
@@ -605,11 +596,14 @@ async fn memory_curator_persists_transient_transient_success_retry_receipt() {
         ..AutomationConfig::default()
     };
 
-    let run = run_memory_curator_with_backend(
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions::default(),
+        &run_control,
     )
     .await
     .unwrap();
@@ -644,27 +638,24 @@ async fn scheduler_memory_curator_applies_validated_ops_automatically() {
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
-        "ops": [{
-            "cluster_id": "cluster-0000",
-            "op": "delete",
-            "fact_id": facts.loser_id,
-            "confidence": 0.98,
-            "reason": format!("near duplicate of fact {}", facts.winner_id)
-        }]
+        "ops": [normalize_tags_op(&facts)]
     }));
     let mut config = scheduler_config(None, None);
     config.tasks.memory_curator.interval_secs = Some(1);
 
-    let run = run_memory_curator_with_backend(
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::Scheduler,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
+        &run_control,
     )
     .await
     .unwrap();
@@ -674,7 +665,7 @@ async fn scheduler_memory_curator_applies_validated_ops_automatically() {
         run.report["curation_policy"]["decision"]["disposition"],
         json!("allow")
     );
-    assert!(!fact_exists(&cg, &facts.loser_id).await);
+    assert!(fact_exists(&cg, &facts.loser_id, run_control.read_control()).await);
 }
 
 #[tokio::test]
@@ -698,16 +689,19 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
         ..AutomationConfig::default()
     };
 
-    let run = run_memory_curator_with_backend(
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
+        &run_control,
     )
     .await
     .unwrap();
@@ -769,13 +763,7 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
-        "ops": [{
-            "cluster_id": "cluster-0000",
-            "op": "delete",
-            "fact_id": facts.loser_id,
-            "confidence": 0.98,
-            "reason": format!("near duplicate of fact {}", facts.winner_id)
-        }]
+        "ops": [normalize_tags_op(&facts)]
     }));
     let config = AutomationConfig {
         enabled: true,
@@ -792,16 +780,19 @@ async fn memory_curator_runner_artifacts_mark_handoff_ready_for_accepted_only_ex
         ..AutomationConfig::default()
     };
 
-    let run = run_memory_curator_with_backend(
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
+        &run_control,
     )
     .await
     .unwrap();
@@ -862,13 +853,7 @@ async fn memory_curator_runner_applies_validated_ops_under_apply_policy() {
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
-        "ops": [{
-            "cluster_id": "cluster-0000",
-            "op": "delete",
-            "fact_id": facts.loser_id,
-            "confidence": 0.98,
-            "reason": format!("near duplicate of fact {}", facts.winner_id)
-        }]
+        "ops": [normalize_tags_op(&facts)]
     }));
     let config = AutomationConfig {
         enabled: true,
@@ -885,16 +870,19 @@ async fn memory_curator_runner_applies_validated_ops_under_apply_policy() {
         ..AutomationConfig::default()
     };
 
-    let run = run_memory_curator_with_backend(
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
+        &run_control,
     )
     .await
     .unwrap();
@@ -910,25 +898,22 @@ async fn memory_curator_runner_applies_validated_ops_under_apply_policy() {
     );
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
     assert!(
-        !fact_exists(&cg, &facts.loser_id).await,
-        "auto-apply must delete accepted permanent-delete ops"
+        fact_exists(&cg, &facts.loser_id, run_control.read_control()).await,
+        "canonical curation retains the fact after normalizing its tags"
     );
 }
 
 #[tokio::test]
-async fn memory_curator_quarantines_output_after_bounded_repair_exhaustion() {
+async fn memory_curator_quarantines_legacy_output_after_bounded_repair_exhaustion() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
     let invalid = json!({
         "ops": [
             {
-                "cluster_id": "cluster-0000",
-                "op": "merge",
-                "winner_id": facts.winner_id,
-                "loser_ids": [facts.loser_id, facts.loser_id],
+                "op": "delete",
+                "fact_id": facts.loser_id,
                 "confidence": 0.98,
-                "reason": "valid dry-run ids but invalid duplicate loser ids at apply"
             }
         ]
     });
@@ -948,25 +933,28 @@ async fn memory_curator_quarantines_output_after_bounded_repair_exhaustion() {
         ..AutomationConfig::default()
     };
 
-    let error = run_memory_curator_with_backend(
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let error = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
+        &run_control,
     )
     .await
     .unwrap_err();
 
     assert_eq!(backend.calls(), 2);
     assert!(error.to_string().contains("repair budget exhausted"));
-    assert!(fact_exists(&cg, &facts.winner_id).await);
+    assert!(fact_exists(&cg, &facts.winner_id, run_control.read_control()).await);
     assert!(
-        fact_exists(&cg, &facts.loser_id).await,
+        fact_exists(&cg, &facts.loser_id, run_control.read_control()).await,
         "quarantined validation failures must not mutate memory"
     );
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
@@ -988,13 +976,19 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
     let cg = init_project(temp.path()).await;
     let facts = seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({
-        "ops": [{
-            "cluster_id": "cluster-0000",
-            "op": "delete",
-            "fact_id": facts.loser_id,
-            "confidence": 0.98,
-            "reason": format!("near duplicate of fact {}", facts.winner_id)
-        }]
+        "ops": [
+            normalize_tags_op(&facts),
+            {
+                "op": "link_facts",
+                "source": exact_fact(&facts.winner_id, &facts.winner_event_id),
+                "target": exact_fact(&facts.loser_id, &facts.loser_event_id),
+                "relation": "supports",
+                "evidence_facts": [exact_fact(&facts.loser_id, &facts.loser_event_id)],
+                "confidence": 0.98,
+                "source_label": "automation:memory-curator",
+                "metadata": {"review": "canonical-link"},
+            }
+        ]
     }));
     let config = AutomationConfig {
         enabled: true,
@@ -1011,16 +1005,19 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
         ..AutomationConfig::default()
     };
 
-    let run = run_memory_curator_with_backend(
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let run = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
+        &run_control,
     )
     .await
     .unwrap();
@@ -1034,23 +1031,59 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
         run.report["curation_policy"]["effect"]["mutates_store"],
         json!(true)
     );
-    assert_eq!(run.report["llm_apply"]["applied"], json!(1));
+    assert_eq!(run.report["llm_apply"]["applied"], json!(2));
     assert_eq!(
         run.report["llm_apply"]["receipts"][0]["status"],
-        json!("deleted")
+        json!("applied")
+    );
+    let receipt = &run.report["llm_apply"]["receipts"][0]["receipt"];
+    assert_eq!(receipt["normalized_tags"], json!(1));
+    assert_eq!(receipt["facts_linked"], json!(1));
+    assert_eq!(
+        receipt["operation_effects"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert!(receipt["replay_fact_id"].is_string());
+    assert!(receipt["replay_event_id"].is_string());
+    let changed_fact_ids = receipt["changed_fact_ids"].as_array().unwrap();
+    assert!(
+        changed_fact_ids
+            .iter()
+            .any(|fact_id| fact_id.as_str() == Some(facts.winner_id.as_str()))
     );
     assert!(
-        !fact_exists(&cg, &facts.loser_id).await,
-        "automatic validation policy should delete accepted fact"
+        changed_fact_ids
+            .iter()
+            .any(|fact_id| fact_id.as_str() == Some(facts.loser_id.as_str()))
+    );
+    assert!(
+        fact_exists(&cg, &facts.loser_id, run_control.read_control()).await,
+        "automatic validation policy should retain the canonical fact"
     );
 }
 
 #[tokio::test]
-async fn memory_curator_runner_ledgers_malformed_backend_output() {
+async fn memory_curator_stops_before_backend_or_apply_when_caller_is_interrupted() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
-    let backend = MalformedTextBackend::new(AgentTaskKind::MemoryCurator, "not json");
+    let facts = seed_duplicate_facts(&cg).await;
+    let backend = JsonBackend::new(json!({"ops": [normalize_tags_op(&facts)]}));
+    let owner = project_memory_owner(&cg);
+    let memory = tracedecay_usecases::memory::MemoryApplication::new(
+        owner.clone(),
+        tracedecay::store::memory::DatabaseFactStore::new(cg.db()),
+    )
+    .unwrap();
+    let winner_tags_before = memory
+        .query_current_facts(
+            tracedecay_store::CurrentFactsQuery::new(owner.clone(), None, 10).unwrap(),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|fact| fact.fact_id().as_str() == facts.winner_id.as_str())
+        .and_then(|fact| fact.payload().map(|payload| payload.tags().to_vec()))
+        .expect("seeded winner must be available through canonical current-fact authority");
     let config = AutomationConfig {
         enabled: true,
         backend: AutomationBackend::CodexAppServer,
@@ -1065,107 +1098,44 @@ async fn memory_curator_runner_ledgers_malformed_backend_output() {
         },
         ..AutomationConfig::default()
     };
+    let interrupted = Arc::new(AtomicBool::new(true));
+    let run_control = test_automation_run_control(Arc::clone(&interrupted));
 
-    let err = run_memory_curator_with_backend(
+    let error = tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
         &cg,
         &config,
+        &test_configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions {
             trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
+            fact_review_limit: 4,
             min_confidence: 0.5,
             run_id: None,
         },
+        &run_control,
     )
     .await
     .unwrap_err();
 
-    assert_eq!(backend.calls(), 1);
-    assert!(
-        err.to_string().contains("expected ident") || err.to_string().contains("expected value"),
-        "unexpected error: {err}"
-    );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+    assert!(error.to_string().contains("interrupted"));
+    assert_eq!(backend.calls(), 0);
+    interrupted.store(false, Ordering::Release);
+    assert!(fact_exists(&cg, &facts.winner_id, run_control.read_control()).await);
+    assert!(fact_exists(&cg, &facts.loser_id, run_control.read_control()).await);
+    let winner_tags_after = memory
+        .query_current_facts(tracedecay_store::CurrentFactsQuery::new(owner, None, 10).unwrap())
         .await
-        .unwrap();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].task, AgentTaskKind::MemoryCurator);
-    assert_eq!(records[0].task_key.as_deref(), Some("memory_curator"));
-    assert_eq!(records[0].status, AutomationRunStatus::Failed);
-    assert_eq!(records[0].model.as_deref(), Some("fixture-model"));
-    assert!(records[0].evidence_hash.is_some());
-    assert!(records[0].input_hash.is_some());
-    assert!(records[0].proposed_ops.is_none());
-    assert!(records[0].error.as_deref().is_some_and(|error| {
-        error.contains("expected ident") || error.contains("expected value")
-    }));
-    assert_eq!(
-        records[0].error_classification,
-        Some(AgentTaskFailureClass::MalformedOutput)
-    );
-    assert_eq!(records[0].error_retryable, Some(false));
-}
-
-#[tokio::test]
-async fn memory_curator_runner_records_noop_fallback_when_backend_run_task_fails() {
-    let temp = tempdir().unwrap();
-    let cg = init_project(temp.path()).await;
-    seed_duplicate_facts(&cg).await;
-    let backend = FailingBackend::new(AgentTaskKind::MemoryCurator);
-    let config = AutomationConfig {
-        enabled: true,
-        backend: AutomationBackend::CodexAppServer,
-        host_mode: AutomationHostMode::Standalone,
-        timeout_secs: 1,
-        tasks: AutomationTaskSet {
-            memory_curator: AutomationTaskConfig {
-                enabled: true,
-                schedule: Some("manual".to_string()),
-                ..AutomationTaskConfig::default()
-            },
-            ..AutomationTaskSet::default()
-        },
-        ..AutomationConfig::default()
-    };
-
-    let run = run_memory_curator_with_backend(
-        &cg,
-        &config,
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::ManualCli,
-            max_clusters: 4,
-            min_confidence: 0.5,
-            run_id: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    // The backend failure is transient, but this test pins the noop-fallback
-    // record, not retry semantics (covered by backend.rs retry tests) —
-    // timeout_secs: 1 short-circuits the backoff so the test stays fast.
-    assert_eq!(backend.calls(), 1);
-    assert_noop_fallback_record(
-        &run.ledger_record,
-        AgentTaskKind::MemoryCurator,
-        "memory_curator",
-        json!({ "ops": [] }),
-    );
+        .unwrap()
+        .into_iter()
+        .find(|fact| fact.fact_id().as_str() == facts.winner_id.as_str())
+        .and_then(|fact| fact.payload().map(|payload| payload.tags().to_vec()))
+        .expect("interrupted run must retain the seeded winner");
+    assert_eq!(winner_tags_after, winner_tags_before);
     assert!(
-        run.ledger_record
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("executable"))
-    );
-    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
-        .await
-        .unwrap();
-    assert_eq!(records.len(), 1);
-    assert_noop_fallback_record(
-        &records[0],
-        AgentTaskKind::MemoryCurator,
-        "memory_curator",
-        json!({ "ops": [] }),
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an interrupted run must not emit an application receipt"
     );
 }

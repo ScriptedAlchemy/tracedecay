@@ -1,10 +1,13 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{EffectReceipt, EffectTermination};
+use super::{CancellationStage, EffectReceipt, EffectTermination};
 use crate::error::ApplicationContractError;
 
 /// Safe adapter-independent retry instruction. Adapters preserve it verbatim.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RetryDirective {
     Never,
@@ -15,7 +18,9 @@ pub enum RetryDirective {
 }
 
 /// Request identity boundary within which a retry remains valid.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RetryScope {
     SameRequest,
@@ -24,7 +29,9 @@ pub enum RetryScope {
 }
 
 /// Layer that owns resolving the problem rather than merely presenting it.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProblemOwningLayer {
     Adapter,
@@ -34,7 +41,9 @@ pub enum ProblemOwningLayer {
 }
 
 /// Whether the problem occurred before admission or is an admitted terminal.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProblemTerminality {
     PreAdmission,
@@ -42,7 +51,9 @@ pub enum ProblemTerminality {
 }
 
 /// Bounded action an adapter may offer without inferring executable authority.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum LegalAction {
     CorrectRequest,
@@ -55,7 +66,7 @@ pub enum LegalAction {
 }
 
 /// Sanitized detail that may cross the application boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SafeDiagnostic {
     pub code: String,
@@ -93,7 +104,9 @@ impl SafeDiagnostic {
 }
 
 /// Stable problem-code taxonomy for request failures and admitted terminals.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationProblemKind {
     InvalidRequest,
@@ -103,34 +116,34 @@ pub enum ApplicationProblemKind {
     Stale,
     Unsupported,
     Unavailable,
+    ExecutionFailed,
     ResetRequired,
     Saturated,
     Cancelled,
     TimedOut,
 }
 
-impl ApplicationProblemKind {
-    /// Whether this problem was produced after the application admitted the
-    /// operation.  These states must remain terminal receipts at every
-    /// adapter boundary; they are never safe to reinterpret as availability.
-    pub const fn terminality(self) -> ProblemTerminality {
-        match self {
-            Self::PartialEffect | Self::ResetRequired => ProblemTerminality::AdmittedTerminal,
-            Self::InvalidRequest
-            | Self::NotFoundOrNotAuthorized
-            | Self::Conflict
-            | Self::Stale
-            | Self::Unsupported
-            | Self::Unavailable
-            | Self::Saturated
-            | Self::Cancelled
-            | Self::TimedOut => ProblemTerminality::PreAdmission,
-        }
-    }
+/// Stable reason an application authority is unavailable.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationUnavailableClassV1 {
+    Authority,
+    BackendUnavailable,
+    BackendDisconnected,
+    BackendRetryable,
+}
 
-    pub const fn is_admitted_terminal(self) -> bool {
-        matches!(self, Self::PartialEffect | Self::ResetRequired)
-    }
+/// Stable non-retryable class for an admitted execution failure.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationExecutionFailureClassV1 {
+    Denied,
+    MalformedOutput,
+    Permanent,
 }
 
 /// Application failure or admitted terminal. Resource-addressed denial
@@ -170,6 +183,13 @@ pub enum ApplicationProblem {
         legal_actions: Vec<LegalAction>,
     },
     Unavailable {
+        classification: ApplicationUnavailableClassV1,
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    ExecutionFailed {
+        classification: ApplicationExecutionFailureClassV1,
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
@@ -185,10 +205,12 @@ pub enum ApplicationProblem {
         legal_actions: Vec<LegalAction>,
     },
     Cancelled {
+        stage: CancellationStage,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
     },
     TimedOut {
+        stage: CancellationStage,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
     },
@@ -228,6 +250,13 @@ enum ApplicationProblemWire {
         legal_actions: Vec<LegalAction>,
     },
     Unavailable {
+        classification: ApplicationUnavailableClassV1,
+        diagnostic: SafeDiagnostic,
+        retry: RetryDirective,
+        legal_actions: Vec<LegalAction>,
+    },
+    ExecutionFailed {
+        classification: ApplicationExecutionFailureClassV1,
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
@@ -243,10 +272,12 @@ enum ApplicationProblemWire {
         legal_actions: Vec<LegalAction>,
     },
     Cancelled {
+        stage: CancellationStage,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
     },
     TimedOut {
+        stage: CancellationStage,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
     },
@@ -310,10 +341,23 @@ impl From<ApplicationProblem> for ApplicationProblemWire {
                 legal_actions,
             },
             ApplicationProblem::Unavailable {
+                classification,
                 diagnostic,
                 retry,
                 legal_actions,
             } => Self::Unavailable {
+                classification,
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblem::ExecutionFailed {
+                classification,
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::ExecutionFailed {
+                classification,
                 diagnostic,
                 retry,
                 legal_actions,
@@ -337,16 +381,20 @@ impl From<ApplicationProblem> for ApplicationProblemWire {
                 legal_actions,
             },
             ApplicationProblem::Cancelled {
+                stage,
                 retry,
                 legal_actions,
             } => Self::Cancelled {
+                stage,
                 retry,
                 legal_actions,
             },
             ApplicationProblem::TimedOut {
+                stage,
                 retry,
                 legal_actions,
             } => Self::TimedOut {
+                stage,
                 retry,
                 legal_actions,
             },
@@ -432,10 +480,23 @@ impl ApplicationProblem {
                 legal_actions,
             },
             ApplicationProblemWire::Unavailable {
+                classification,
                 diagnostic,
                 retry,
                 legal_actions,
             } => Self::Unavailable {
+                classification,
+                diagnostic,
+                retry,
+                legal_actions,
+            },
+            ApplicationProblemWire::ExecutionFailed {
+                classification,
+                diagnostic,
+                retry,
+                legal_actions,
+            } => Self::ExecutionFailed {
+                classification,
                 diagnostic,
                 retry,
                 legal_actions,
@@ -459,16 +520,20 @@ impl ApplicationProblem {
                 legal_actions,
             },
             ApplicationProblemWire::Cancelled {
+                stage,
                 retry,
                 legal_actions,
             } => Self::Cancelled {
+                stage,
                 retry,
                 legal_actions,
             },
             ApplicationProblemWire::TimedOut {
+                stage,
                 retry,
                 legal_actions,
             } => Self::TimedOut {
+                stage,
                 retry,
                 legal_actions,
             },
@@ -514,15 +579,50 @@ impl ApplicationProblem {
                     });
                 }
             }
+            Self::Unavailable {
+                classification,
+                retry,
+                legal_actions,
+                ..
+            } if !matches!(classification, ApplicationUnavailableClassV1::Authority) => {
+                if *retry != RetryDirective::AfterRevalidate
+                    || legal_actions.as_slice() != [LegalAction::Retry]
+                {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "admitted unavailable terminal",
+                    });
+                }
+            }
+            Self::ExecutionFailed {
+                retry,
+                legal_actions,
+                ..
+            } => {
+                if *retry != RetryDirective::Never
+                    || legal_actions.as_slice() != [LegalAction::ContactAdministrator]
+                {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "execution-failed terminal",
+                    });
+                }
+            }
+            Self::Cancelled { stage, .. } | Self::TimedOut { stage, .. } => {
+                if matches!(
+                    stage,
+                    CancellationStage::Reconciling | CancellationStage::AfterCommit
+                ) {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "application problem cancellation stage",
+                    });
+                }
+            }
             Self::InvalidRequest { .. }
             | Self::NotFoundOrNotAuthorized { .. }
             | Self::Conflict { .. }
             | Self::Stale { .. }
             | Self::Unsupported { .. }
             | Self::Unavailable { .. }
-            | Self::Saturated { .. }
-            | Self::Cancelled { .. }
-            | Self::TimedOut { .. } => {}
+            | Self::Saturated { .. } => {}
         }
         Ok(())
     }
@@ -536,6 +636,7 @@ impl ApplicationProblem {
             Self::Stale { .. } => ApplicationProblemKind::Stale,
             Self::Unsupported { .. } => ApplicationProblemKind::Unsupported,
             Self::Unavailable { .. } => ApplicationProblemKind::Unavailable,
+            Self::ExecutionFailed { .. } => ApplicationProblemKind::ExecutionFailed,
             Self::ResetRequired { .. } => ApplicationProblemKind::ResetRequired,
             Self::Saturated { .. } => ApplicationProblemKind::Saturated,
             Self::Cancelled { .. } => ApplicationProblemKind::Cancelled,
@@ -544,11 +645,26 @@ impl ApplicationProblem {
     }
 
     pub const fn terminality(&self) -> ProblemTerminality {
-        self.kind().terminality()
+        match self {
+            Self::PartialEffect { .. }
+            | Self::ResetRequired { .. }
+            | Self::ExecutionFailed { .. } => ProblemTerminality::AdmittedTerminal,
+            Self::Unavailable { classification, .. }
+                if !matches!(classification, ApplicationUnavailableClassV1::Authority) =>
+            {
+                ProblemTerminality::AdmittedTerminal
+            }
+            Self::Cancelled { stage, .. } | Self::TimedOut { stage, .. }
+                if !matches!(stage, CancellationStage::BeforeAdmission) =>
+            {
+                ProblemTerminality::AdmittedTerminal
+            }
+            _ => ProblemTerminality::PreAdmission,
+        }
     }
 
     pub const fn is_admitted_terminal(&self) -> bool {
-        self.kind().is_admitted_terminal()
+        matches!(self.terminality(), ProblemTerminality::AdmittedTerminal)
     }
 
     pub fn not_found_or_not_authorized(retry: RetryDirective) -> Self {
@@ -560,6 +676,7 @@ impl ApplicationProblem {
 
     pub fn cancelled_before_admission() -> Self {
         Self::Cancelled {
+            stage: CancellationStage::BeforeAdmission,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         }
@@ -567,17 +684,95 @@ impl ApplicationProblem {
 
     pub fn timed_out_before_admission() -> Self {
         Self::TimedOut {
+            stage: CancellationStage::BeforeAdmission,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         }
     }
 
+    pub fn cancelled(stage: CancellationStage) -> Result<Self, ApplicationContractError> {
+        let problem = Self::Cancelled {
+            stage,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        };
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    pub fn timed_out(stage: CancellationStage) -> Result<Self, ApplicationContractError> {
+        let problem = Self::TimedOut {
+            stage,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        };
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    pub const fn cancellation_stage(&self) -> Option<CancellationStage> {
+        match self {
+            Self::Cancelled { stage, .. } | Self::TimedOut { stage, .. } => Some(*stage),
+            _ => None,
+        }
+    }
+
+    pub const fn unavailable_classification(&self) -> Option<ApplicationUnavailableClassV1> {
+        match self {
+            Self::Unavailable { classification, .. } => Some(*classification),
+            _ => None,
+        }
+    }
+
+    pub const fn execution_failure_classification(
+        &self,
+    ) -> Option<ApplicationExecutionFailureClassV1> {
+        match self {
+            Self::ExecutionFailed { classification, .. } => Some(*classification),
+            _ => None,
+        }
+    }
+
     pub fn unavailable(diagnostic: SafeDiagnostic) -> Self {
         Self::Unavailable {
+            classification: ApplicationUnavailableClassV1::Authority,
             diagnostic,
             retry: RetryDirective::AfterDelay,
             legal_actions: vec![LegalAction::Retry],
         }
+    }
+
+    pub fn admitted_unavailable(
+        classification: ApplicationUnavailableClassV1,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<Self, ApplicationContractError> {
+        if matches!(classification, ApplicationUnavailableClassV1::Authority) {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "admitted unavailable classification",
+            });
+        }
+        let problem = Self::Unavailable {
+            classification,
+            diagnostic,
+            retry: RetryDirective::AfterRevalidate,
+            legal_actions: vec![LegalAction::Retry],
+        };
+        problem.validate()?;
+        Ok(problem)
+    }
+
+    pub fn execution_failed(
+        classification: ApplicationExecutionFailureClassV1,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<Self, ApplicationContractError> {
+        let problem = Self::ExecutionFailed {
+            classification,
+            diagnostic,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::ContactAdministrator],
+        };
+        problem.validate()?;
+        Ok(problem)
     }
 
     pub fn stale(diagnostic: SafeDiagnostic) -> Self {
@@ -605,6 +800,7 @@ impl ApplicationProblem {
             | Self::Stale { retry, .. }
             | Self::Unsupported { retry, .. }
             | Self::Unavailable { retry, .. }
+            | Self::ExecutionFailed { retry, .. }
             | Self::ResetRequired { retry, .. }
             | Self::Saturated { retry, .. }
             | Self::Cancelled { retry, .. }
@@ -621,6 +817,7 @@ impl ApplicationProblem {
             | Self::Stale { legal_actions, .. }
             | Self::Unsupported { legal_actions, .. }
             | Self::Unavailable { legal_actions, .. }
+            | Self::ExecutionFailed { legal_actions, .. }
             | Self::ResetRequired { legal_actions, .. }
             | Self::Saturated { legal_actions, .. }
             | Self::Cancelled { legal_actions, .. }
@@ -636,6 +833,7 @@ impl ApplicationProblem {
             | Self::Stale { diagnostic, .. }
             | Self::Unsupported { diagnostic, .. }
             | Self::Unavailable { diagnostic, .. }
+            | Self::ExecutionFailed { diagnostic, .. }
             | Self::ResetRequired { diagnostic, .. }
             | Self::Saturated { diagnostic, .. } => Some(diagnostic),
             Self::NotFoundOrNotAuthorized { .. }
@@ -653,6 +851,7 @@ impl ApplicationProblem {
             Self::Stale { .. } => "stale",
             Self::Unsupported { .. } => "unsupported",
             Self::Unavailable { .. } => "unavailable",
+            Self::ExecutionFailed { .. } => "execution_failed",
             Self::ResetRequired { .. } => "reset_required",
             Self::Saturated { .. } => "saturated",
             Self::Cancelled { .. } => "cancelled",
@@ -667,8 +866,16 @@ impl ApplicationProblem {
                 Self::NotFoundOrNotAuthorized { .. } => {
                     "The requested resource was not found or is not authorized"
                 }
-                Self::Cancelled { .. } => "The request was cancelled before admission",
-                Self::TimedOut { .. } => "The request timed out before admission",
+                Self::Cancelled { stage, .. } => match stage {
+                    CancellationStage::BeforeAdmission => {
+                        "The request was cancelled before admission"
+                    }
+                    _ => "The admitted request was cancelled",
+                },
+                Self::TimedOut { stage, .. } => match stage {
+                    CancellationStage::BeforeAdmission => "The request timed out before admission",
+                    _ => "The admitted request timed out",
+                },
                 _ => unreachable!("diagnostic-bearing problem handled above"),
             })
     }
@@ -684,54 +891,5 @@ impl ApplicationProblem {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        ApplicationProblem, ApplicationProblemKind, LegalAction, ProblemTerminality,
-        RetryDirective, SafeDiagnostic,
-    };
-
-    #[test]
-    fn reset_required_is_a_distinct_non_retryable_terminal() {
-        let problem = ApplicationProblem::reset_required(
-            SafeDiagnostic::new("store.reset_required", "The store must be reset.")
-                .expect("fixture diagnostic is valid"),
-        );
-
-        assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
-        assert_eq!(problem.canonical_code(), "reset_required");
-        assert_eq!(problem.retry(), RetryDirective::Never);
-        assert_eq!(problem.legal_actions(), &[LegalAction::Reset]);
-        assert_eq!(problem.terminality(), ProblemTerminality::AdmittedTerminal);
-        assert!(problem.is_admitted_terminal());
-        assert!(problem.committed_receipt().is_none());
-
-        let wire = serde_json::to_value(&problem).expect("problem serializes");
-        assert_eq!(wire["kind"], "reset_required");
-        assert_eq!(wire["retry"], "never");
-        assert_eq!(wire["legal_actions"], serde_json::json!(["reset"]));
-
-        let mut unknown = wire.clone();
-        unknown["unexpected"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<ApplicationProblem>(unknown).is_err());
-
-        let mut retrying = wire.clone();
-        retrying["retry"] = serde_json::json!("after_delay");
-        assert!(serde_json::from_value::<ApplicationProblem>(retrying).is_err());
-
-        let mut wrong_action = wire;
-        wrong_action["legal_actions"] = serde_json::json!(["retry"]);
-        assert!(serde_json::from_value::<ApplicationProblem>(wrong_action).is_err());
-    }
-
-    #[test]
-    fn direct_serialization_rejects_an_invalid_terminal() {
-        let invalid = ApplicationProblem::ResetRequired {
-            diagnostic: SafeDiagnostic::new("store.reset_required", "The store must be reset.")
-                .expect("fixture diagnostic is valid"),
-            retry: RetryDirective::AfterDelay,
-            legal_actions: vec![LegalAction::Retry],
-        };
-
-        assert!(serde_json::to_value(invalid).is_err());
-    }
-}
+#[path = "problem/tests.rs"]
+mod tests;

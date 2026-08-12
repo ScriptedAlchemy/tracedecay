@@ -21,10 +21,10 @@ use tracedecay_application::{
     CodeQueryPage, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
     CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain,
     ExactOccurrenceRecord, ExactOccurrenceRequest, FreshnessState, LexicalOccurrenceRecord,
-    ModuleApiRequest, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageState,
-    PhraseSearchRequest, QualifiedNameRequest, RequestAdmission, RequestContext, RetrievalEvidence,
-    RetrievalPortContext, RetrievalPortOutcome, SourceMetadataRecord, SourceMetadataRequest,
-    TemporalState,
+    ModuleApiRequest, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, PageCursor,
+    PageState, PhraseSearchRequest, QualifiedNameRequest, RequestAdmission, RequestContext,
+    RetrievalEvidence, RetrievalPortContext, RetrievalPortOutcome, SourceMetadataRecord,
+    SourceMetadataRequest, TemporalState,
 };
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, CodeSearchChunkId, ComponentRevision,
@@ -611,7 +611,7 @@ fn bounded_result<T>(
             return unavailable_for_generation(finished_at, page.generation.clone());
         }
     };
-    page_state.cursor.clone_from(&page.next_cursor);
+    page_state.cursor = page.next_cursor.clone().map(PageCursor::from);
     page_state.expires_at = cursor_expires_at;
     let evidence = RetrievalEvidence {
         page: page_state,

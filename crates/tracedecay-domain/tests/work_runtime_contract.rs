@@ -1,18 +1,18 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::json;
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
-    ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId,
+    AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
+    ProjectId, ProposalId, ProviderId, RefId, RepositoryId, RunId, SourceStoreId, TaskId,
     UtcMicros, WorkApprovalPolicy, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
     WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
     WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestId,
     WorkCancellationRequestV1, WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy,
-    WorkEvent, WorkEventKind, WorkExecutableReference, WorkExecutionEnvelopeV1,
-    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
-    WorkFenceEpochV1, WorkFilesystemPolicy, WorkGraphChangeV1, WorkGraphVersionV1, WorkHierarchyV1,
-    WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1,
-    WorkPlanId, WorkPlanV1, WorkProductGraphV1, WorkProjectionSequenceV1, WorkProposalV1,
+    WorkExecutableReference, WorkExecutionEnvelopeV1, WorkExecutionLimits, WorkExecutionSnapshot,
+    WorkExecutionSnapshotInput, WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy,
+    WorkGraphChangeV1, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
+    WorkItemV1, WorkLeaseFenceV1, WorkLeaseId, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
+    WorkProductEventSequenceV1, WorkProductGraphV1, WorkProductSourceWatermarkV1, WorkProposalV1,
     WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
     WorkRecoveryStateV1, WorkRestartReasonV1, WorkRouteDecisionV1, WorkSandboxPolicy,
     WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1, WorkTerminalEvidenceV1,
@@ -54,11 +54,20 @@ fn lease(epoch: u64) -> WorkLeaseFenceV1 {
 
 fn binding() -> WorkAttemptProjectionBindingV1 {
     WorkAttemptProjectionBindingV1::new(
-        id::<ProjectionGenerationId>("generation.work.runtime"),
-        WorkProjectionSequenceV1::new(7),
-        WorkGraphVersionV1::new(4).unwrap(),
+        WorkGraphVersionV1::new(3).unwrap(),
+        WorkProductEventSequenceV1::new(7).unwrap(),
+        source_watermark(),
+        digest('7'),
         id::<ProposalId>("proposal.work.runtime"),
     )
+    .unwrap()
+}
+
+fn source_watermark() -> WorkProductSourceWatermarkV1 {
+    WorkProductSourceWatermarkV1::new(BTreeMap::from([(
+        id::<SourceStoreId>("source.work.runtime"),
+        7,
+    )]))
     .unwrap()
 }
 
@@ -191,17 +200,19 @@ fn admitted_graph(identity: WorkAttemptIdentityV1) -> WorkProductGraphV1 {
             accepted_at: UtcMicros(2),
         })
         .unwrap();
+    let based_on_version = graph.version();
     let graph = graph
         .apply(WorkGraphChangeV1::ExecutionAdmitted {
             task_id: task_id.clone(),
-            based_on_version: graph.version(),
+            based_on_version,
             admitted_at: UtcMicros(3),
         })
         .unwrap();
+    let based_on_version = graph.version();
     graph
         .apply(WorkGraphChangeV1::AcceptedAttemptLinked {
             task_id,
-            based_on_version: graph.version(),
+            based_on_version,
             identity,
             linked_at: UtcMicros(4),
         })
@@ -262,14 +273,22 @@ fn attempt_identity_fence_and_projection_binding_are_validated() {
     .unwrap();
     assert!(wrong_task.validate_graph_admission(&admitted).is_err());
     assert_eq!(
-        attempt.projection_binding().graph_version(),
+        attempt.projection_binding().graph_version().next().unwrap(),
         admitted.version()
     );
+    assert_eq!(attempt.projection_binding().event_sequence().get(), 7);
     assert_eq!(
-        attempt.projection_binding().generation_id().as_str(),
-        "generation.work.runtime"
+        attempt.projection_binding().source_watermark(),
+        &source_watermark()
     );
-    assert_eq!(attempt.projection_binding().sequence().get(), 7);
+    assert_eq!(
+        attempt.projection_binding().recovered_graph_digest(),
+        &digest('7')
+    );
+    assert_eq!(
+        attempt.projection_binding().accepted_proposal(),
+        &id::<ProposalId>("proposal.work.runtime")
+    );
 }
 
 #[test]

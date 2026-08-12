@@ -7,7 +7,7 @@ use tracedecay_application::retrieval::{
 use tracedecay_application::{
     CancellationObservation, CancellationStage, CoverageCompleteness, CoverageDomainState,
     EvidenceCoverage, EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor,
-    OperationBudgetUsage, PageState, RetrievalEvidence, TemporalState, now_micros,
+    OperationBudgetUsage, PageCursor, PageState, RetrievalEvidence, TemporalState, now_micros,
 };
 use tracedecay_domain::{RetrievalGrainV1, UtcMicros};
 use tracedecay_temporal_query::context::ContextBudget;
@@ -202,7 +202,8 @@ fn page_evidence(
     let cursor = cursor
         .map(OpaqueCursor::new)
         .transpose()
-        .map_err(|_| TemporalRetrievalFailure::Unavailable)?;
+        .map_err(|_| TemporalRetrievalFailure::Unavailable)?
+        .map(PageCursor::from);
     Ok(RetrievalEvidence {
         payload: Some(payload),
         temporal: temporal_state(request, finished_at, freshness),

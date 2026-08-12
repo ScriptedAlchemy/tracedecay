@@ -3,7 +3,7 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ManifestDigest, RetrievalAnchorId, TemporalModeV1,
+    CodeGenerationId, ComponentVersion, FactId, ManifestDigest, RetrievalAnchorId, TemporalModeV1,
     UtcMicros,
 };
 use tracedecay_tool_catalog::{RetrieverId, SortContractId};
@@ -11,6 +11,7 @@ use tracedecay_tool_catalog::{RetrieverId, SortContractId};
 use crate::context::{CapabilityGrantId, DisclosureClass, RequestContext, ResolvedScope};
 use crate::error::ApplicationContractError;
 use crate::identity::application_identifier;
+use crate::memory::FactSearchCursorV1;
 
 use super::{CancellationObservation, OperationBudgetUsage, OperationReceipt, ResultContractRef};
 
@@ -23,6 +24,33 @@ application_identifier!(
     // bounded without forcing a second compact cursor scheme.
     OpaqueCursor => ("opaque cursor", 4_096),
 );
+
+/// Exact continuation authority for the enclosing evidence page.
+///
+/// General retrieval keeps its authenticated opaque cursor, while retained
+/// fact operations carry their canonical structural ordering cursor directly.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PageCursor {
+    Opaque { cursor: OpaqueCursor },
+    FactSearch { cursor: FactSearchCursorV1 },
+    FactListAfter { fact_id: FactId },
+}
+
+impl PageCursor {
+    pub const fn as_opaque(&self) -> Option<&OpaqueCursor> {
+        match self {
+            Self::Opaque { cursor } => Some(cursor),
+            Self::FactSearch { .. } | Self::FactListAfter { .. } => None,
+        }
+    }
+}
+
+impl From<OpaqueCursor> for PageCursor {
+    fn from(cursor: OpaqueCursor) -> Self {
+        Self::Opaque { cursor }
+    }
+}
 
 /// Application-level freshness. Missing or partial truth never becomes current.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -158,7 +186,9 @@ impl AuthorityReceipt {
 }
 
 /// Requested evidence domain for bounded coverage and omissions.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceDomain {
     Symbol,
@@ -172,7 +202,9 @@ pub enum EvidenceDomain {
 }
 
 /// Completeness is explicit; unknown never renders as clean.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageCompleteness {
     Complete,
@@ -180,7 +212,7 @@ pub enum CoverageCompleteness {
     Unknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageDomainState {
     pub domain: EvidenceDomain,
@@ -188,7 +220,7 @@ pub struct CoverageDomainState {
 }
 
 /// Deterministic coverage fold input for an evidence packet.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceCoverage {
     pub requested_domains: Vec<EvidenceDomain>,
@@ -397,8 +429,8 @@ pub struct RetrieverContribution {
     pub elapsed_budget_class: BudgetClass,
 }
 
-/// Stable page state. Cursor bytes stay opaque until authorization is
-/// revalidated by the application service.
+/// Stable page state. General cursor bytes stay opaque until authorization is
+/// revalidated; structural fact cursors retain their canonical ordering type.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PageState {
@@ -406,7 +438,7 @@ pub struct PageState {
     pub sort_revision: u32,
     pub total: Option<u64>,
     pub returned: u64,
-    pub cursor: Option<OpaqueCursor>,
+    pub cursor: Option<PageCursor>,
     pub expires_at: Option<UtcMicros>,
 }
 

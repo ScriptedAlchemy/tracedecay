@@ -159,7 +159,7 @@ impl ExactOnlyPort {
             self.scenario,
             ExactPortScenario::MismatchedPageCounts
         ));
-        evidence.page.cursor = next_cursor;
+        evidence.page.cursor = next_cursor.map(Into::into);
         if matches!(self.scenario, ExactPortScenario::ValidCursor) {
             evidence.page.expires_at = Some(UtcMicros(10));
         }
@@ -534,7 +534,11 @@ fn callable_code_service_accepts_a_bounded_unexpired_port_cursor() {
     };
     assert_eq!(packet.page.expires_at, Some(UtcMicros(10)));
     assert_eq!(
-        packet.page.cursor.as_ref().map(OpaqueCursor::as_str),
+        packet
+            .page
+            .cursor
+            .as_ref()
+            .and_then(|cursor| cursor.as_opaque().map(OpaqueCursor::as_str)),
         Some("cursor.generation.fixture.page-2")
     );
 }

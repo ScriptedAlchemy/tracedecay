@@ -95,6 +95,7 @@ use tracedecay_usecases::configuration::{
     ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
     configuration_layer_scope_digest,
 };
+
 use tracedecay_usecases::feedback::FeedbackCycleRuntimeError;
 use tracedecay_usecases::feedback::concrete::{
     FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackStore, open_feedback_runtime,
@@ -144,7 +145,10 @@ use crate::request_identity::{
     mint_global_opaque_id,
 };
 #[cfg(test)]
-use tracedecay_application::{MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1};
+use tracedecay_application::{
+    CancellationStage, MultiRootExecuteRequestV1, MultiRootScopeSetReadRequestV1,
+    ProblemTerminality,
+};
 use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
 
 // Structural split: production logic now lives in the child modules below;
@@ -230,6 +234,20 @@ pub(in crate::daemon::service) use types::{
     UnavailableFeedbackCycleRuntimeV1,
 };
 
+#[derive(Debug)]
+pub(crate) enum RegisteredRetainedRequestContextError {
+    Application(ApplicationProblem),
+    Runtime(TraceDecayError),
+}
+
+fn retained_request_admission_problem(admission: RequestAdmission) -> Option<ApplicationProblem> {
+    match admission {
+        RequestAdmission::Admitted => None,
+        RequestAdmission::Cancelled => Some(ApplicationProblem::cancelled_before_admission()),
+        RequestAdmission::TimedOut => Some(ApplicationProblem::timed_out_before_admission()),
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct DaemonInvocationService {
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
@@ -292,6 +310,54 @@ impl DaemonInvocationService {
         &self,
     ) -> Arc<tracedecay_usecases::stack_coordinator::DaemonGitHubStackCoordinatorV1> {
         Arc::clone(&self.github_stack_coordinator)
+    }
+
+    pub(crate) async fn registered_retained_request_context(
+        &self,
+        project_root: &Path,
+        request_id: RequestId,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+        observed_at: UtcMicros,
+        operation: &ApplicationOperation,
+    ) -> Result<RequestContext, RegisteredRetainedRequestContextError> {
+        let registered = self
+            .project_runtimes
+            .get::<RegisteredRetainedRuntime>(project_root)
+            .await
+            .ok_or_else(|| {
+                RegisteredRetainedRequestContextError::Runtime(TraceDecayError::Config {
+                    message: "automation retained application authority is unavailable".to_owned(),
+                })
+            })?;
+        let effective_deadline = Deadline {
+            expires_at: UtcMicros(deadline.expires_at.0.min(registered.grant.expires_at.0)),
+        };
+        let context = RequestContext::new(
+            registered.actor,
+            registered.scope,
+            registered.grant,
+            request_id,
+            effective_deadline,
+            cancellation,
+        )
+        .map_err(|error| {
+            RegisteredRetainedRequestContextError::Runtime(TraceDecayError::Config {
+                message: format!("automation retained request context is invalid: {error}"),
+            })
+        })?;
+        if let Some(problem) = retained_request_admission_problem(context.admission_at(observed_at))
+        {
+            return Err(RegisteredRetainedRequestContextError::Application(problem));
+        }
+        if !context.allows(operation.capability_id(), operation.use_case_id()) {
+            return Err(RegisteredRetainedRequestContextError::Runtime(
+                TraceDecayError::Config {
+                    message: "automation retained application request is not admitted".to_owned(),
+                },
+            ));
+        }
+        Ok(context)
     }
 
     /// Installs every durable worktree-cleanup recovery fence before project

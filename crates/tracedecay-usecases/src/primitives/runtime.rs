@@ -34,8 +34,8 @@ use tracedecay_application::{
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
     EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OpaqueCursor,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageCursor, PageRequest,
+    PageState, PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
     RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
 use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
@@ -1494,7 +1494,7 @@ fn evidence_result(
         context,
         operation
     );
-    page.cursor = continuation;
+    page.cursor = continuation.map(|cursor| PageCursor::Opaque { cursor });
     if page.cursor.is_some() {
         page.expires_at = Some(context.deadline().expires_at);
     }

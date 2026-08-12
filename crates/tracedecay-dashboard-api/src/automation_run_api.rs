@@ -1,26 +1,32 @@
+use axum::Extension;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::memory_api::{default_agent_plan_max_clusters, default_agent_plan_min_confidence};
+use super::memory_api::default_agent_plan_min_confidence;
 use super::util::http_detail;
 use super::{
-    DashboardAutomationRunRequestV1, DashboardState, automation_authority_error_response,
-    exact_automation_authority,
+    DashboardAutomationRunRequestV1, DashboardHttpRequestControlV1, DashboardState,
+    automation_authority_error_response, exact_automation_authority,
 };
 use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord, find_run_record,
     read_published_artifact_chain, read_run_artifact_payload,
 };
+use tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_FACT_REVIEW_LIMIT;
 use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
+
+fn default_fact_review_limit() -> usize {
+    CURATION_DEFAULT_FACT_REVIEW_LIMIT
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryCuratorRunBody {
-    #[serde(default = "default_agent_plan_max_clusters")]
-    max_clusters: usize,
+    #[serde(default = "default_fact_review_limit")]
+    fact_review_limit: usize,
     #[serde(default = "default_agent_plan_min_confidence")]
     min_confidence: f64,
 }
@@ -28,7 +34,7 @@ pub struct MemoryCuratorRunBody {
 impl Default for MemoryCuratorRunBody {
     fn default() -> Self {
         Self {
-            max_clusters: default_agent_plan_max_clusters(),
+            fact_review_limit: default_fact_review_limit(),
             min_confidence: default_agent_plan_min_confidence(),
         }
     }
@@ -37,7 +43,7 @@ impl Default for MemoryCuratorRunBody {
 impl From<MemoryCuratorRunBody> for DashboardAutomationRunRequestV1 {
     fn from(body: MemoryCuratorRunBody) -> Self {
         Self::MemoryCurator {
-            max_clusters: body.max_clusters,
+            fact_review_limit: body.fact_review_limit,
             min_confidence: body.min_confidence,
         }
     }
@@ -97,46 +103,51 @@ impl From<SkillWritingRunBody> for DashboardAutomationRunRequestV1 {
 
 pub async fn memory_curator(
     State(state): State<DashboardState>,
+    Extension(control): Extension<DashboardHttpRequestControlV1>,
     body: Option<axum::extract::Json<MemoryCuratorRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body)).await
+    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body), control).await
 }
 
 pub async fn session_reflection(
     State(state): State<DashboardState>,
+    Extension(control): Extension<DashboardHttpRequestControlV1>,
     body: Option<axum::extract::Json<SessionReflectionRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body)).await
+    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body), control).await
 }
 
 pub async fn skill_writing(
     State(state): State<DashboardState>,
+    Extension(control): Extension<DashboardHttpRequestControlV1>,
     body: Option<axum::extract::Json<SkillWritingRunBody>>,
 ) -> (StatusCode, Json<Value>) {
     let body = body.map(|body| body.0).unwrap_or_default();
-    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body)).await
+    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body), control).await
 }
 
 async fn run_dashboard_task_endpoint(
     state: DashboardState,
     request: DashboardAutomationRunRequestV1,
+    control: DashboardHttpRequestControlV1,
 ) -> (StatusCode, Json<Value>) {
     let authority = match exact_automation_authority(&state) {
         Ok(authority) => authority,
         Err(error) => return automation_authority_error_response(error),
     };
-    execute_dashboard_task(authority, &state.project_root, request).await
+    execute_dashboard_task(authority, &state.project_root, request, control).await
 }
 
 async fn execute_dashboard_task(
     authority: &super::DashboardAutomationAuthorityV1,
     project_root: &std::path::Path,
     request: DashboardAutomationRunRequestV1,
+    control: DashboardHttpRequestControlV1,
 ) -> (StatusCode, Json<Value>) {
-    match authority.run(project_root, request).await {
-        Ok(payload) => (StatusCode::OK, Json(payload)),
+    match authority.run(project_root, request, control).await {
+        Ok(payload) => (StatusCode::OK, Json(json!({ "run": payload }))),
         Err(error) => automation_authority_error_response(error),
     }
 }
@@ -154,21 +165,29 @@ pub async fn run_list(
     axum::extract::Query(params): axum::extract::Query<RunListParams>,
 ) -> (StatusCode, Json<Value>) {
     let limit = super::util::coerce_limit(params.limit, 50, 200) as usize;
-    match tracedecay_agent_hosts::automation::run_ledger::load_run_records(
+    match tracedecay_agent_hosts::automation::run_ledger::load_run_records_page(
         &state.dashboard_root,
         limit,
     )
     .await
     {
-        Ok(records) => {
-            let runs: Vec<Value> = records.iter().map(run_history_row).collect();
+        Ok(page) => {
+            let runs: Vec<Value> = page.records.iter().map(run_history_row).collect();
             let count = runs.len();
+            let completeness = if page.is_complete() {
+                "known"
+            } else {
+                "partial"
+            };
             (
                 StatusCode::OK,
                 Json(json!({
                     "runs": runs,
                     "count": count,
                     "limit": limit,
+                    "has_more": page.has_more,
+                    "malformed_row_count": page.malformed_row_count,
+                    "completeness": completeness,
                     "error": "",
                 })),
             )
@@ -368,6 +387,21 @@ mod run_list_tests {
         ));
     }
 
+    #[test]
+    fn empty_memory_curator_body_uses_daemon_run_defaults() {
+        let body = serde_json::from_value::<MemoryCuratorRunBody>(json!({}))
+            .expect("empty memory-curator request body");
+
+        assert_eq!(
+            DashboardAutomationRunRequestV1::from(body),
+            DashboardAutomationRunRequestV1::MemoryCurator {
+                fact_review_limit: CURATION_DEFAULT_FACT_REVIEW_LIMIT,
+                min_confidence:
+                    tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_MIN_CONFIDENCE,
+            }
+        );
+    }
+
     #[tokio::test]
     async fn dashboard_run_delegates_exact_project_scope_to_daemon_authority() {
         let observed = Arc::new(Mutex::new(None));
@@ -377,12 +411,12 @@ mod run_list_tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invocation);
             Box::pin(async {
-                Ok(json!({
-                    "run": {
+                Ok(super::super::DashboardAutomationRunOutcomeV1::SkillWriting(
+                    json!({
                         "run_id": "daemon-run-1",
                         "ledger_record": { "status": "succeeded" }
-                    }
-                }))
+                    }),
+                ))
             })
         });
         let skills: super::super::DashboardManagedSkillCommandPortV1 = Arc::new(|_| {
@@ -405,14 +439,30 @@ mod run_list_tests {
         let authority =
             super::super::DashboardAutomationAuthorityV1::new(profile_root, run, skills)
                 .expect("absolute automation profile root");
+        let control = super::super::DashboardHttpRequestControlV1 {
+            request_id: tracedecay_application::RequestId::new(
+                "request.dashboard-automation-endpoint-test",
+            )
+            .expect("request identity"),
+            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                2_000_000,
+            ))
+            .expect("request deadline"),
+            cancellation: tracedecay_application::CancellationSignal::active(
+                "cancel.dashboard-automation-endpoint-test",
+            )
+            .expect("request cancellation"),
+            observed_at: tracedecay_domain::UtcMicros(1_000_000),
+        };
 
         let (status, Json(payload)) = execute_dashboard_task(
             &authority,
             &project_root,
             DashboardAutomationRunRequestV1::MemoryCurator {
-                max_clusters: 9,
+                fact_review_limit: 9,
                 min_confidence: 0.75,
             },
+            control,
         )
         .await;
 
@@ -435,7 +485,7 @@ mod run_list_tests {
         assert_eq!(
             invocation.request,
             DashboardAutomationRunRequestV1::MemoryCurator {
-                max_clusters: 9,
+                fact_review_limit: 9,
                 min_confidence: 0.75,
             }
         );
@@ -462,7 +512,8 @@ mod run_list_tests {
                 "created_at": "1754000060"
             }],
             "started_at": "1754000000",
-            "completed_at": "1754000060"
+            "completed_at": "1754000060",
+            "completed_at_micros": 1_754_000_060_000_000_i64
         }))
         .expect("ledger record fixture parses");
 

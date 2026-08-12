@@ -102,7 +102,7 @@ impl ProjectRuntimeRegistryV1 {
         snapshot
     }
 
-    pub(in crate::daemon) fn request_runtimes_with_admission(
+    pub(in crate::daemon::service) fn request_runtimes_with_admission(
         &self,
         project_root: &Path,
         canonical_root: Option<&Path>,

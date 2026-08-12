@@ -422,28 +422,30 @@ const TRUST_SPREAD = [
   0.09, 0.08,
 ] as const;
 
-function memoryFacts(): Record<string, unknown>[] {
+function memoryFacts() {
   return TRUST_SPREAD.map((trust, i) => {
     const helpful = 12 - (i % 9);
     const unhelpful = i % 4;
-    const created = nowSecs - (i + 3) * DAY;
+    const createdAtMicros = nowMicros - (i + 3) * DAY * 1_000_000;
     return {
-      fact_id: 1000 + i,
+      fact_id: `fact.${'a'.repeat(64)}.${i.toString(16).padStart(64, '0')}`,
+      payload_access: 'eligible',
       trust_score: trust,
       retrieval_count: 60 - i * 2 + (i % 3) * 4,
       access_count: 90 - i * 2,
       helpful_count: Math.max(helpful, 0),
       unhelpful_count: unhelpful,
-      created_at: created,
-      updated_at: created + (i % 5) * DAY,
-      last_recalled_at: i % 6 === 5 ? null : nowSecs - i * 3600,
-      has_hrr: i % 5 === 4 ? 0 : 1,
+      created_at: createdAtMicros,
+      updated_at: createdAtMicros + (i % 5) * DAY * 1_000_000,
+      projected_as_of: nowMicros,
+      last_recalled_at: i % 6 === 5 ? null : nowMicros - i * 3_600_000_000,
       content: FACT_CONTENTS[i % FACT_CONTENTS.length],
       category: FACT_CATEGORIES[i % FACT_CATEGORIES.length],
       tags: FACT_TAGS[i % FACT_TAGS.length],
-      // `fact_summary_json` never attaches entities to a summary row; the typed
-      // row carries the null the decode left behind.
-      entities: null,
+      entities: [],
+      linked_entities: null,
+      metadata: {},
+      source_label: 'story-fixture',
     };
   });
 }
@@ -463,28 +465,25 @@ function trustHistogram(facts: Record<string, unknown>[]): Record<string, unknow
   }));
 }
 
-const ENTITY_NAMES: ReadonlyArray<readonly [string, string, number]> = [
-  ['Module Federation', 'concept', 34],
-  ['Rspeedy', 'tool', 21],
-  ['tracedecay', 'project', 58],
-  ['ForceAtlas2', 'algorithm', 6],
-  ['rusqlite', 'dependency', 14],
-  ['axum', 'dependency', 19],
-  ['GitHub Actions', 'tool', 27],
-  ['LCM store', 'component', 31],
-  ['holographic memory', 'component', 40],
-  ['Sigma', 'library', 8],
-  ['gpt-5.6-terra', 'model', 11],
-  ['cargo', 'tool', 24],
+const ENTITY_NAMES: ReadonlyArray<readonly [string, number]> = [
+  ['Module Federation', 34],
+  ['Rspeedy', 21],
+  ['tracedecay', 58],
+  ['ForceAtlas2', 6],
+  ['rusqlite', 14],
+  ['axum', 19],
+  ['GitHub Actions', 27],
+  ['LCM store', 31],
+  ['holographic memory', 40],
+  ['Sigma', 8],
+  ['gpt-5.6-terra', 11],
+  ['cargo', 24],
 ];
 
 function memoryEntities(): Record<string, unknown>[] {
-  return ENTITY_NAMES.map(([name, type, factCount], i) => ({
-    entity_id: 500 + i,
+  return ENTITY_NAMES.map(([name, factCount]) => ({
+    entity_id: name,
     name,
-    entity_type: type,
-    aliases: [],
-    created_at: nowSecs - (i + 1) * 2 * DAY,
     fact_count: factCount,
   }));
 }
@@ -492,6 +491,19 @@ function memoryEntities(): Record<string, unknown>[] {
 function memoryPayload(query = ''): Record<string, unknown> {
   const facts = memoryFacts();
   const entities = memoryEntities();
+  const graphNodes = facts.map((fact) => ({
+    id: `fact:${fact.fact_id}`,
+    kind: 'fact',
+    label: fact.content,
+    fact_id: fact.fact_id,
+    payload_access: fact.payload_access,
+    projected_as_of: fact.projected_as_of,
+    content: fact.content,
+    category: fact.category,
+    trust_score: fact.trust_score,
+    retrieval_count: fact.retrieval_count,
+    helpful_count: fact.helpful_count,
+  }));
   return {
     providers: {
       memory_provider: 'tracedecay',
@@ -514,47 +526,9 @@ function memoryPayload(query = ''): Record<string, unknown> {
       overview: {
         facts: 4128,
         entities: 612,
-        banks: 6,
         categories: FACT_CATEGORIES.map((category, i) => ({
           category,
           count: 900 - i * 120,
-        })),
-        entity_types: [
-          { entity_type: 'concept', count: 210 },
-          { entity_type: 'tool', count: 168 },
-          { entity_type: 'component', count: 96 },
-          { entity_type: 'dependency', count: 74 },
-          { entity_type: 'project', count: 41 },
-          { entity_type: 'model', count: 23 },
-        ],
-        hrr_coverage: FACT_CATEGORIES.map((category, i) => {
-          const factCount = 900 - i * 120;
-          const vectors = i === 2 ? 0 : factCount - i * 40;
-          return {
-            category,
-            facts: factCount,
-            hrr_vectors: vectors,
-            coverage: factCount === 0 ? 0 : vectors / factCount,
-            bank_name: i === 2 ? null : category,
-            bank_fact_count: i === 2 ? null : 880 - i * 120,
-            dim: i === 2 ? null : 1024,
-            updated_at: i === 2 ? null : nowSecs - i * DAY,
-            status:
-              i === 2
-                ? 'missing_bank'
-                : i === 4
-                  ? 'stale_bank'
-                  : vectors < factCount
-                    ? 'missing_vectors'
-                    : 'ready',
-          };
-        }),
-        memory_banks: FACT_CATEGORIES.map((category, i) => ({
-          bank_name: category,
-          dim: 1024,
-          fact_count: 900 - i * 120,
-          bundled_fact_count: 880 - i * 120,
-          updated_at: nowSecs - i * DAY,
         })),
         trust_histogram: trustHistogram(facts),
         growth: Array.from({ length: 12 }, (_, i) => {
@@ -568,7 +542,28 @@ function memoryPayload(query = ''): Record<string, unknown> {
       },
       facts,
       entities,
-      graph: { nodes: [], edges: [] },
+      graph: {
+        nodes: graphNodes,
+        edges: [],
+        coverage: {
+          completeness: 'unknown',
+          eligible: null,
+          examined: null,
+          matched: null,
+          excluded: null,
+          omitted: null,
+          unknown: null,
+          denominator: null,
+          unit: null,
+          omission_reasons: ['fact_universe_bounded'],
+        },
+        fact_universe_count: 4128,
+        fact_candidates_examined: facts.length,
+        unavailable_fact_candidates: 0,
+        root_count: facts.length,
+        relation_limit: 100,
+        relation_count: 0,
+      },
       // Per-read outcome, seeded `pending` and overwritten as each of the three
       // reads lands (memory_api.rs::overview). All three succeeded here.
       reads: {
@@ -576,9 +571,14 @@ function memoryPayload(query = ''): Record<string, unknown> {
         entities: { state: 'ready' },
         graph: { state: 'ready' },
       },
-      // The fact list is bounded by `limit`, and the query — empty here — is
-      // applied after that bound, so `bounded` is what the route reports.
-      facts_coverage: { completeness: 'bounded', limit: 100, query_applied_after_limit: query !== '' },
+      // The fixture carries only a bounded projection of the eligible facts,
+      // so the current coverage contract reports that partial observation.
+      facts_coverage: {
+        completeness: 'partial',
+        limit: 100,
+        examined: facts.length,
+        eligible: 4128,
+      },
       error: '',
     },
   };
@@ -1507,16 +1507,6 @@ function automationRunsPayload(): Record<string, unknown> {
       started_at: String(nowSecs - 2 * DAY),
       completed_at: String(nowSecs - 2 * DAY + 240),
       artifact_kinds: ['traces', 'feedback', 'validation_gate'],
-      activation_policy: 'validate_then_activate',
-      created_skills: [{ id: 'code-slop-cleanup' }],
-      validation_repairs: [{ field: 'summary', repaired: true }],
-      deployment: {
-        status: 'complete',
-        exports: [],
-        materialization_scopes: [],
-        errors: [],
-        retry_required: false,
-      },
     },
     {
       run_id: 'run-20260804-071133-skill-writing',
@@ -1535,7 +1525,48 @@ function automationRunsPayload(): Record<string, unknown> {
       artifact_kinds: [],
     },
   ];
-  return { runs, count: runs.length, limit: 50, error: '' };
+  return {
+    runs,
+    count: runs.length,
+    limit: 50,
+    has_more: false,
+    malformed_row_count: 0,
+    completeness: 'known',
+    error: '',
+  };
+}
+
+function automationOutcomesPayload(): Record<string, unknown> {
+  return {
+    generated_at: nowSecs,
+    skills: [],
+    facts: [],
+    snapshot: {
+      available: true,
+      skills_refreshed_at: nowSecs - DAY,
+      facts_refreshed_at: nowSecs - DAY,
+    },
+    error: '',
+  };
+}
+
+function automaticCuratorRunPayload(): Record<string, unknown> {
+  return {
+    run: {
+      run_id: 'run-story-memory-curator',
+      task: 'memory_curator',
+      terminal: {
+        status: 'completed',
+        summary: {
+          reviewed_count: 0,
+          accepted_count: 0,
+          rejected_count: 0,
+          skipped_count: 0,
+        },
+      },
+      committed_receipts: [],
+    },
+  };
 }
 
 const SKILL_ROWS: ReadonlyArray<readonly [string, string, string, string]> = [
@@ -1592,9 +1623,8 @@ function automaticFactReceiptsPayload(): Record<string, unknown> {
       category: FACT_CATEGORIES[i % FACT_CATEGORIES.length],
     },
     quarantine_reason: i === 2 ? 'validation failed' : undefined,
-    applied_canonical_fact_id: i === 2 ? undefined : `fact.canonical.${i}`,
-    applied_fact_id: i === 2 ? null : 100 + i,
-    recorded_at: nowSecs - i * DAY,
+    applied_fact_id: i === 2 ? undefined : `fact.project.story.${i}`,
+    recorded_at_micros: (nowSecs - i * DAY) * 1_000_000,
   }));
   return { receipts, count: receipts.length, limit: 50, error: '' };
 }
@@ -2509,7 +2539,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': envelope(savingsPayload()),
   '/api/plugins/savings/sessions': loomSessionsPayload(),
-  // Memory bank status (memory_api.rs::status) — the scoped Brain's fact and
+  // Canonical memory status (memory_api.rs::status) — the scoped Brain's fact and
   // entity readouts. Distinct from the overview payload above.
   '/api/plugins/holographic/status': envelope(memoryStatusPayload()),
   // Analytics reads are envelope-only. Their generated inner contracts follow
@@ -2526,6 +2556,8 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/automation/skills': skillsPayload(),
   '/api/automation/automatic-fact-receipts': automaticFactReceiptsPayload(),
   '/api/automation/runs': automationRunsPayload(),
+  '/api/automation/outcomes': automationOutcomesPayload(),
+  '/api/automation/run/memory-curator': automaticCuratorRunPayload(),
   // Plan 26 canonical read models. These are the projections the CLI and MCP
   // also serve, so their fixtures carry the mixed available/unavailable metric
   // set the real projector emits rather than a fully-populated one.
@@ -3292,34 +3324,15 @@ function memoryStatusPayload(): Record<string, unknown> {
     error: '',
     exists: true,
     path: '/fast/projects/tracedecay/.tracedecay/memory.db',
-    largest_bank_fact_count: 169,
-    largest_bank_utilization_pct: 0.0477,
-    // A store past its legacy backfill with no outstanding feedback repair —
-    // the steady state, and the one the Brain readout is designed against.
-    feedback_history_repair: { state: 'not_required', processed: 0, remaining: null },
     memory: {
-      algebra_name: 'amari_fhrr',
-      bank_count: 7,
-      // 2048-dimension FHRR (the `hrr_dim` migration default), which is what
-      // sets `estimated_capacity` below.
-      hrr_dim: 2048,
+      algebra: {
+        name: 'amari_fhrr',
+        hrr_dim: 2048,
+        estimated_capacity: 354_304,
+      },
       entity_count: 1186,
-      estimated_capacity: 354_304,
       fact_count: 173,
       below_default_recall_threshold_count: 4,
-      missing_vector_count: 0,
-      repair: { banks_rebuilt: 0, missing_vectors_repaired: 0 },
-      // The four coarse trust bands. KnowledgePage reads these as its FALLBACK
-      // trust distribution, because on a real store the overview's ten-bucket
-      // `trust_histogram` comes back all-zero — `dashboard_compatibility_named_
-      // counts_tx` emits row names of the form `trust-<n>` and
-      // `facts.rs::trust_histogram` reads them with `parse::<usize>()`, which
-      // fails and skips every row.
-      //
-      // The overview fixture deliberately keeps a POPULATED histogram, so the
-      // audit renders the preferred source and the endpoint gate can assert the
-      // shape the route is specified to serve. The fallback path is covered by
-      // trust.test.ts against the exact all-zero payload the daemon sends.
       trust_0_025_count: 0,
       trust_025_050_count: 6,
       trust_050_075_count: 21,

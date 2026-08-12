@@ -769,47 +769,20 @@ async fn dispatch_memory_command(action: MemoryAction) -> tracedecay::errors::Re
             let project_path = resolve_cli_project_root(path, project_id, project_path).await?;
             let result = commands::daemon_tool_json(
                 Some(&project_path),
-                "tracedecay_admin_project",
-                serde_json::json!({ "action": "memory_status" }),
+                "tracedecay_memory_status",
+                serde_json::json!({ "format": "json" }),
             )
             .await?;
-            let status: tracedecay::memory::types::MemoryStatus =
-                serde_json::from_value(result.get("status").cloned().ok_or_else(|| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: "daemon memory response omitted status".to_string(),
-                    }
-                })?)?;
-            let largest_bank_fact_count = result
-                .get("largest_bank_fact_count")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok())
-                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                    message: "daemon memory response omitted largest bank count".to_string(),
-                })?;
-            let largest_bank_utilization_pct = if status.estimated_capacity > 0 {
-                largest_bank_fact_count as f64 / status.estimated_capacity as f64 * 100.0
-            } else {
-                0.0
-            };
+            let status: tracedecay_application::retained_surfaces::MemoryStatusResultV1 =
+                serde_json::from_value(result)?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "memory": status,
-                        "largest_bank_fact_count": largest_bank_fact_count,
-                        "largest_bank_utilization_pct": largest_bank_utilization_pct,
-                    }))
-                    .unwrap_or_default()
-                );
+                println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
                 print!(
                     "{}",
-                    status_cmd::format_memory_status_report(&status, largest_bank_fact_count)
+                    status_cmd::format_memory_status_report(&status.memory)
                 );
             }
-        }
-        other => {
-            commands::handle_memory_action(other).await?;
         }
     }
     Ok(())

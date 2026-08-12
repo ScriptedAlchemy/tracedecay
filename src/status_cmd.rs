@@ -88,48 +88,44 @@ async fn daemon_tool_json_within(
 }
 
 pub(crate) fn format_memory_status_report(
-    status: &tracedecay::memory::types::MemoryStatus,
-    largest_bank_facts: usize,
+    status: &tracedecay_application::retained_surfaces::MemoryStatusV1,
 ) -> String {
-    let capacity = status.estimated_capacity.max(1);
-    let utilization_pct = largest_bank_facts as f64 / capacity as f64 * 100.0;
+    let owner = match &status.owner {
+        tracedecay_application::retained_surfaces::FactCommitOwnerV1::Profile => {
+            "profile".to_owned()
+        }
+        tracedecay_application::retained_surfaces::FactCommitOwnerV1::Project { project_id } => {
+            format!("project:{}", project_id.as_str())
+        }
+    };
     format!(
         concat!(
-            "Holographic memory status\n",
+            "Canonical memory status\n",
+            "owner: {}\n",
             "facts: {}\n",
             "entities: {}\n",
-            "banks: {}\n",
             "algebra: {}\n",
             "hrr dim: {}\n",
-            "capacity / bank: {}\n",
-            "largest bank utilization: {}/{} ({:.1}%)\n",
+            "estimated capacity: {}\n",
             "below recall floor: {}\n",
-            "missing vectors: {}\n",
             "helpful feedback: {}\n",
             "unhelpful feedback: {}\n",
             "trust buckets: <0.25={}  0.25-0.50={}  0.50-0.75={}  0.75-1.00={}\n",
-            "repair: missing_vectors_repaired={}  banks_rebuilt={}\n",
             "feedback funnel: retrieved={} accessed={} facts_retrieved={} facts_rated={} feedback_total={} seen:feedback={}\n"
         ),
+        owner,
         status.fact_count,
         status.entity_count,
-        status.bank_count,
-        status.algebra_name,
-        status.hrr_dim,
-        status.estimated_capacity,
-        largest_bank_facts,
-        status.estimated_capacity,
-        utilization_pct,
+        status.algebra.name,
+        status.algebra.hrr_dim,
+        status.algebra.estimated_capacity,
         status.below_default_recall_threshold_count,
-        status.missing_vector_count,
         status.helpful_count,
         status.unhelpful_count,
         status.trust_0_025_count,
         status.trust_025_050_count,
         status.trust_050_075_count,
         status.trust_075_100_count,
-        status.repair.missing_vectors_repaired,
-        status.repair.banks_rebuilt,
         status.feedback_funnel.retrieval_count_total,
         status.feedback_funnel.access_count_total,
         status.feedback_funnel.retrieved_fact_count,

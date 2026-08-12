@@ -368,28 +368,6 @@ impl<T> MemoryFactLineagePortResult<T> {
 }
 
 #[derive(Clone, Debug)]
-pub struct MemoryLegacyFactQuery<Q> {
-    owner: FactOwnerV1,
-    query: Q,
-}
-
-impl<Q> MemoryLegacyFactQuery<Q> {
-    pub fn new(owner: FactOwnerV1, query: Q) -> Self {
-        Self { owner, query }
-    }
-}
-
-pub trait LegacyFactPort {
-    type Error: Debug;
-    type Query;
-
-    fn resolve_legacy_fact(
-        &self,
-        query: Self::Query,
-    ) -> impl Future<Output = Result<Option<FactId>, Self::Error>> + Send;
-}
-
-#[derive(Clone, Debug)]
 pub struct MemoryRetrievalAnchorQuery<Q> {
     owner: FactOwnerV1,
     anchor_id: RetrievalAnchorId,
@@ -609,31 +587,6 @@ impl<P: FactLineagePort> MemoryApplication<P> {
             .into());
         }
         Ok(result.output)
-    }
-}
-
-impl<P: LegacyFactPort> MemoryApplication<P> {
-    pub async fn resolve_legacy_fact(
-        &self,
-        query: MemoryLegacyFactQuery<P::Query>,
-    ) -> Result<Option<FactId>, MemoryUseCaseError<P::Error>> {
-        let MemoryLegacyFactQuery { owner, query } = query;
-        self.ensure_owner(&owner)?;
-        let fact_id = self
-            .port
-            .resolve_legacy_fact(query)
-            .await
-            .map_err(MemoryUseCaseError::Authority)?;
-        if fact_id
-            .as_ref()
-            .is_some_and(|fact_id| fact_id.validate_owner(&owner).is_err())
-        {
-            return Err(MemoryApplicationInvariantError::InvalidAuthorityResult {
-                invariant: "legacy fact owner",
-            }
-            .into());
-        }
-        Ok(fact_id)
     }
 }
 

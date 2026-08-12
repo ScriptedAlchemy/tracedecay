@@ -201,10 +201,6 @@ impl DashboardTestRuntimeV1 {
         self.database(scope).ok().map(RegisteredGlobalDb::db_path)
     }
 
-    fn primary_session_database(&self) -> &RegisteredGlobalDb {
-        self.project_database.as_ref()
-    }
-
     pub(crate) async fn upsert_code_project(
         &self,
         project_id: &str,
@@ -221,14 +217,6 @@ impl DashboardTestRuntimeV1 {
                 git_remote_url,
                 default_branch,
             )
-            .await
-    }
-
-    pub(crate) async fn append_profile_analytics_event_for_test(
-        &self,
-        event: &tracedecay_global_db::AnalyticsEventInsert,
-    ) -> Result<i64> {
-        self.append_analytics_event_for_test(HostAdmissionScope::Profile, event)
             .await
     }
 
@@ -375,14 +363,6 @@ impl DashboardTestRuntimeV1 {
         .await
     }
 
-    pub(crate) async fn lcm_load_raw_message_for_test(
-        &self,
-        provider: &str,
-        message_id: &str,
-    ) -> Option<tracedecay_sessions::runtime::lcm::LcmRawMessage> {
-        load_registered_raw_message(self.primary_session_database(), provider, message_id).await
-    }
-
     pub(crate) async fn lcm_ingest_raw_message_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -468,24 +448,6 @@ impl DashboardTestRuntimeV1 {
             )
             .await
             .map(|receipt| receipt.summary)
-    }
-
-    pub(crate) async fn lcm_status_deep_for_test(
-        &self,
-        provider: &str,
-        session_id: Option<&str>,
-    ) -> std::result::Result<
-        tracedecay_sessions::runtime::lcm::LcmStatus,
-        tracedecay_sessions::runtime::lcm::LcmError,
-    > {
-        self.primary_session_database()
-            .lcm_status_with_options(
-                provider,
-                session_id,
-                true,
-                &tracedecay_sessions::runtime::lcm::LcmGcConfig::default(),
-            )
-            .await
     }
 }
 

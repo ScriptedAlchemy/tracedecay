@@ -86,8 +86,7 @@ pub(crate) fn retained_mcp_operation(
             Some("cancel") => Some(RetainedSurfaceOperation::SessionRefreshCancel),
             _ => None,
         },
-        _ => RetainedSurfaceOperation::from_name(tool_name)
-            .filter(|operation| *operation != RetainedSurfaceOperation::FactStore),
+        _ => RetainedSurfaceOperation::from_tool_name(tool_name),
     }
 }
 

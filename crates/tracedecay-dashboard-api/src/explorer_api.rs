@@ -17,6 +17,11 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
+mod knowledge;
+mod lifecycle;
+
+use lifecycle::{admitted_deadline_elapsed, mark_cancelled, mark_timed_out};
+
 use super::lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
     DashboardLcmCanonicalSummaryV1, DashboardLcmReadOutcomeV1, DashboardLcmReadRequestV1,
@@ -26,7 +31,7 @@ use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
-use super::{DashboardHttpRequestControlV1, DashboardState, graph_service, memory_service};
+use super::{DashboardHttpRequestControlV1, DashboardState, graph_service};
 use crate::application::context::CancellationToken;
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 
@@ -78,6 +83,7 @@ pub(super) enum ExplorerRunStateV1 {
     Completed,
     Partial,
     Cancelled,
+    TimedOut,
     Error,
 }
 
@@ -88,6 +94,7 @@ pub(super) enum ExplorerFinalityV1 {
     Complete,
     Partial,
     Cancelled,
+    TimedOut,
     Error,
 }
 
@@ -313,6 +320,7 @@ fn envelope_for_run(
         ExplorerRunStateV1::Completed => DashboardDomainStateV1::Ready,
         ExplorerRunStateV1::Partial => DashboardDomainStateV1::Partial,
         ExplorerRunStateV1::Cancelled => DashboardDomainStateV1::Cancelled,
+        ExplorerRunStateV1::TimedOut => DashboardDomainStateV1::TimedOut,
         ExplorerRunStateV1::Error => DashboardDomainStateV1::Error,
     };
     let mut envelope = DashboardEnvelopeV1::new(
@@ -463,6 +471,10 @@ async fn execute_query(
     cancellation: CancellationToken,
     control: DashboardHttpRequestControlV1,
 ) {
+    let request_cancellation = control.cancellation().clone();
+    let deadline = control.deadline();
+    let deadline_wait = admitted_deadline_elapsed(deadline.clone());
+    tokio::pin!(deadline_wait);
     {
         let mut current = run.write().await;
         for source in &mut current.sources {
@@ -475,10 +487,11 @@ async fn execute_query(
         let state = state.clone();
         let request = request.clone();
         let control = control.clone();
+        let source_cancellation = cancellation.clone();
         tasks.spawn(async move {
             (
                 source_id,
-                execute_source(state, request, source_id, control).await,
+                execute_source(state, request, source_id, control, source_cancellation).await,
             )
         });
     }
@@ -486,7 +499,24 @@ async fn execute_query(
     let mut completed = 0;
     while completed < SOURCE_IDS.len() {
         tokio::select! {
+            biased;
+            () = &mut deadline_wait => {
+                tasks.abort_all();
+                let mut current = run.write().await;
+                if current.state == ExplorerRunStateV1::Pending {
+                    mark_timed_out(&mut current);
+                }
+                return;
+            }
             () = cancellation.cancelled() => {
+                tasks.abort_all();
+                let mut current = run.write().await;
+                if current.state == ExplorerRunStateV1::Pending {
+                    mark_cancelled(&mut current);
+                }
+                return;
+            }
+            () = request_cancellation.cancelled() => {
                 tasks.abort_all();
                 let mut current = run.write().await;
                 if current.state == ExplorerRunStateV1::Pending {
@@ -534,6 +564,14 @@ async fn execute_query(
     if current.state != ExplorerRunStateV1::Pending {
         return;
     }
+    if deadline.is_elapsed_at(crate::application::context::application_observed_at()) {
+        mark_timed_out(&mut current);
+        return;
+    }
+    if cancellation.is_cancelled() || request_cancellation.is_cancelled() {
+        mark_cancelled(&mut current);
+        return;
+    }
     let every_ready = current
         .sources
         .iter()
@@ -564,30 +602,19 @@ async fn execute_query(
     }
 }
 
-fn mark_cancelled(run: &mut ExplorerQueryRunV1) {
-    let completed_at = now_micros();
-    run.state = ExplorerRunStateV1::Cancelled;
-    run.finality = ExplorerFinalityV1::Cancelled;
-    run.completed_at_micros = Some(completed_at);
-    run.elapsed_micros = completed_at.saturating_sub(run.submitted_at_micros);
-    for source in &mut run.sources {
-        if source.outcome == ExplorerSourceOutcomeV1::Pending {
-            source.phase = ExplorerSourcePhaseV1::Cancelled;
-            source.outcome = ExplorerSourceOutcomeV1::Cancelled;
-        }
-    }
-}
-
 async fn execute_source(
     state: DashboardState,
     request: ExplorerQueryRequestV1,
     source_id: ExplorerSourceIdV1,
     control: DashboardHttpRequestControlV1,
+    cancellation: CancellationToken,
 ) -> ExplorerSourceProgressV1 {
     match source_id {
         ExplorerSourceIdV1::CodeGraph => code_source(&state, &request, &control).await,
         ExplorerSourceIdV1::Sessions => session_source(&state, &request, control).await,
-        ExplorerSourceIdV1::Knowledge => knowledge_source(&state, &request).await,
+        ExplorerSourceIdV1::Knowledge => {
+            knowledge::knowledge_source(&state, &request, &control, cancellation).await
+        }
     }
 }
 
@@ -775,33 +802,6 @@ async fn session_source(
     }
 }
 
-async fn knowledge_source(
-    state: &DashboardState,
-    request: &ExplorerQueryRequestV1,
-) -> ExplorerSourceProgressV1 {
-    let rows = match memory_service::fetch_facts(state, &request.query, request.limit).await {
-        Ok(rows) => rows,
-        Err(_error) => {
-            return ExplorerSourceProgressV1::error(
-                ExplorerSourceIdV1::Knowledge,
-                "knowledge_query_failed",
-                "knowledge query unavailable",
-            );
-        }
-    };
-    ready_source(
-        ExplorerSourceIdV1::Knowledge,
-        request,
-        rows,
-        None,
-        json!({"authority": "bounded project fact overview"}),
-        "facts",
-        vec![
-            "matching fact total is not exposed by the bounded compatibility authority".to_owned(),
-        ],
-    )
-}
-
 fn ready_source(
     source_id: ExplorerSourceIdV1,
     request: &ExplorerQueryRequestV1,
@@ -833,9 +833,6 @@ fn ready_source(
             }
         },
     );
-    let next_offset = total
-        .filter(|total| request.offset as u64 + completed < *total)
-        .map(|_| request.offset.saturating_add(request.limit));
     ExplorerSourceProgressV1 {
         source_id,
         source_label: source_id.label(),
@@ -852,7 +849,7 @@ fn ready_source(
             offset: request.offset,
             limit: request.limit,
             total,
-            next_offset,
+            next_offset: None,
             rows,
             metadata,
         }),
@@ -990,7 +987,6 @@ pub async fn read_context(
     let mut window_partial = false;
     let mut omitted_total = 0_u64;
     let mut cursor: Option<String> = None;
-    let mut has_more_messages = false;
     for _ in 0..READ_CONTEXT_FILL_PAGES {
         let outcome =
             read_session_page(&state, control.clone(), &session_id, limit, cursor.take()).await;
@@ -1015,20 +1011,20 @@ pub async fn read_context(
         stats = Some(page.stats);
         cursor = page.next_cursor;
         if overflow || messages.len() >= usize::try_from(limit).unwrap_or(usize::MAX) {
-            has_more_messages = overflow || cursor.is_some();
             break;
         }
         if cursor.is_none() {
             break;
         }
-        has_more_messages = true;
     }
     let stats = stats.unwrap_or_default();
     let counts = explorer_session_counts(&stats);
+    let returned_messages = i64::try_from(messages.len()).unwrap_or(i64::MAX);
     let returned_summary_nodes = i64::try_from(summary_nodes.len()).unwrap_or(i64::MAX);
+    let has_more_messages = stats.message_count > returned_messages;
     let has_more_summary_nodes = stats.summary_node_count > returned_summary_nodes;
     let examined = u64::try_from(messages.len()).unwrap_or(u64::MAX);
-    let has_more = has_more_messages || cursor.is_some();
+    let has_more = has_more_messages || has_more_summary_nodes;
     let payload = ExplorerReadContextV1 {
         session_id,
         storage_scope: "project".to_owned(),
@@ -1042,7 +1038,7 @@ pub async fn read_context(
             .map(explorer_lcm_summary)
             .collect(),
         has_more,
-        has_more_messages: has_more,
+        has_more_messages,
         has_more_summary_nodes,
     };
     if window_partial || has_more {

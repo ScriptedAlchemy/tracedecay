@@ -9,13 +9,14 @@ use tracedecay_domain::{
     ActorId, Confidence, DomainError, FactAssertionKindV1, FactAssertionV1, FactCurationActionV1,
     FactEventId, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
     FactLineageEventV1, FactOwnerV1, FactRelationKindV1, FactRelationProvenanceV1, FactRelationV1,
-    ProvenanceId, UtcMicros,
+    ProvenanceId, RunId, UtcMicros,
 };
 use tracedecay_store::{
     FactCommitOutcome, FactCommitReceipt, FactReadControl, FactStore, FactStoreError,
-    FactWriteBatch, ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
-    ProjectMemoryFactIdV1, ProjectMemoryFactLinkV1, ProjectMemoryFactNormalizeTagsV1,
-    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactStore,
+    FactWriteBatch, ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationEffectV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactCurationReviewRefV1, ProjectMemoryFactIdV1, ProjectMemoryFactLinkV1,
+    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactStore,
 };
 
 use crate::db::engine::params;
@@ -30,7 +31,9 @@ use crate::store::memory::{DatabaseFactStore, FactWriteControl};
 
 use super::apply::{apply_project_memory_fact_curation_tx, curation_receipt_from_value};
 
+mod duplicate_identity_tests;
 mod graph_source_tests;
+mod replay_conflict_tests;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StoredOperationReceipt {
@@ -138,6 +141,14 @@ fn accepting_read_control() -> FactReadControl {
     FactReadControl::new(Arc::new(|| false))
 }
 
+fn primary_commit(effect: &ProjectMemoryFactCurationOperationEffectV1) -> &FactCommitReceipt {
+    effect.primary_commit().expect("committed curation effect")
+}
+
+fn replay_event(receipt: &ProjectMemoryFactCurationReceiptV1) -> &FactEventId {
+    receipt.replay_event_id().expect("curation replay event")
+}
+
 fn provenance_id(value: &str) -> ProvenanceId {
     ProvenanceId::new(value.to_owned()).expect("canonical provenance id")
 }
@@ -197,24 +208,57 @@ fn relation(
     .expect("canonical fact relation")
 }
 
-fn request(
+async fn reviewed_ref(
+    db: &Database,
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+) -> ProjectMemoryFactCurationReviewRefV1 {
+    let transaction = db
+        .begin_memory_write_transaction(PROJECT_MEMORY_WRITE_OPERATION)
+        .await
+        .expect("begin reviewed fact transaction");
+    let key = OwnerKey::new(owner).expect("reviewed fact owner key");
+    let fact = load_current_fact_tx(&transaction, &key, owner, fact_id)
+        .await
+        .expect("load reviewed fact")
+        .expect("reviewed fact exists");
+    transaction
+        .rollback()
+        .await
+        .expect("close reviewed fact read");
+    ProjectMemoryFactCurationReviewRefV1::new(
+        ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone()).unwrap(),
+        fact.last_event_id().clone(),
+    )
+}
+
+async fn request(
+    db: &Database,
     owner: &FactOwnerV1,
     operation_id: &str,
     relation: FactRelationV1,
 ) -> ProjectMemoryFactCurationBatchV1 {
+    let source = reviewed_ref(db, owner, relation.source_fact_id()).await;
+    let target = reviewed_ref(db, owner, relation.target_fact_id()).await;
+    let mut evidence = Vec::new();
+    for fact_id in relation.evidence_fact_ids() {
+        evidence.push(reviewed_ref(db, owner, fact_id).await);
+    }
     ProjectMemoryFactCurationBatchV1::new(
         owner.clone(),
         provenance_id(operation_id),
         None,
         Confidence::new(0.5).expect("minimum confidence"),
         vec![ProjectMemoryFactCurationOperationV1::LinkFacts(
-            ProjectMemoryFactLinkV1::new(relation).expect("link operation"),
+            ProjectMemoryFactLinkV1::new(relation, source, target, evidence)
+                .expect("link operation"),
         )],
     )
     .expect("canonical relation curation request")
 }
 
-fn normalize_request(
+async fn normalize_request(
+    db: &Database,
     owner: &FactOwnerV1,
     operation_id: &str,
     actor: Option<ActorId>,
@@ -223,12 +267,10 @@ fn normalize_request(
     evidence_fact_ids: Vec<FactId>,
     confidence: f64,
 ) -> ProjectMemoryFactCurationBatchV1 {
-    let evidence = evidence_fact_ids
-        .into_iter()
-        .map(|fact_id| {
-            ProjectMemoryFactIdV1::new(owner.clone(), fact_id).expect("owner-bound evidence fact")
-        })
-        .collect();
+    let mut evidence = Vec::new();
+    for fact_id in evidence_fact_ids {
+        evidence.push(reviewed_ref(db, owner, &fact_id).await);
+    }
     ProjectMemoryFactCurationBatchV1::new(
         owner.clone(),
         provenance_id(operation_id),
@@ -236,8 +278,7 @@ fn normalize_request(
         Confidence::new(0.5).expect("minimum confidence"),
         vec![ProjectMemoryFactCurationOperationV1::NormalizeTags(
             ProjectMemoryFactNormalizeTagsV1::new(
-                ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())
-                    .expect("owner-bound normalized fact"),
+                reviewed_ref(db, owner, fact_id).await,
                 tags,
                 evidence,
                 Confidence::new(confidence).expect("normalization confidence"),
@@ -471,6 +512,21 @@ async fn assert_no_link_or_receipt(fixture: &Fixture, operation_id: &ProvenanceI
     );
 }
 
+fn json_contains_key(value: &Value, forbidden: &str) -> bool {
+    match value {
+        Value::Object(object) => {
+            object.contains_key(forbidden)
+                || object
+                    .values()
+                    .any(|value| json_contains_key(value, forbidden))
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|value| json_contains_key(value, forbidden)),
+        _ => false,
+    }
+}
+
 #[tokio::test]
 async fn normalized_tag_provenance_survives_reopen_and_exact_replay_without_a_graph_edge() {
     let fixture = Fixture::new("normalize-reopen-replay").await;
@@ -478,6 +534,7 @@ async fn normalized_tag_provenance_survives_reopen_and_exact_replay_without_a_gr
     let evidence = fixture.seed("normalize-evidence", 20).await;
     let operation_id = provenance_id("fixture.normalize.reopen-replay");
     let request = normalize_request(
+        &fixture.db,
         &fixture.owner,
         operation_id.as_str(),
         None,
@@ -485,7 +542,8 @@ async fn normalized_tag_provenance_survives_reopen_and_exact_replay_without_a_gr
         vec!["Cache Policy".to_owned(), "canonical-tag".to_owned()],
         vec![evidence.clone(), normalized.clone()],
         0.91,
-    );
+    )
+    .await;
     let first = DatabaseFactStore::new(&fixture.db)
         .apply_project_memory_fact_curation(request.clone(), &fixture.control)
         .await
@@ -518,7 +576,18 @@ async fn normalized_tag_provenance_survives_reopen_and_exact_replay_without_a_gr
     assert!(persisted_evidence.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(persisted_evidence.contains(&normalized));
     assert!(persisted_evidence.contains(&evidence));
-    assert_eq!(first.commit_receipts()[0].committed_event_ids().len(), 2);
+    assert_eq!(
+        primary_commit(&first.operation_effects()[0])
+            .committed_event_ids()
+            .len(),
+        2
+    );
+    let mut reversed_event_tail = first_receipts[0].receipt.clone();
+    reversed_event_tail["operation_effects"][0]["commit"]["committed_event_ids"]
+        .as_array_mut()
+        .expect("committed event array")
+        .reverse();
+    assert!(curation_receipt_from_value(&reversed_event_tail).is_err());
     assert_eq!(
         current_fact_tags(&fixture.db, &fixture.owner, &normalized).await,
         vec!["cache_policy".to_owned(), "canonical_tag".to_owned()]
@@ -565,56 +634,59 @@ async fn normalized_tag_provenance_survives_reopen_and_exact_replay_without_a_gr
 }
 
 #[tokio::test]
-async fn changed_actor_under_the_same_normalization_id_conflicts_without_mutation() {
-    let fixture = Fixture::new("normalize-actor-conflict").await;
-    let normalized = fixture.seed("actor-conflict-subject", 10).await;
-    let operation_id = provenance_id("fixture.normalize.actor-conflict");
-    let first_request = normalize_request(
-        &fixture.owner,
-        operation_id.as_str(),
-        Some(ActorId::new("actor.normalize.first").expect("first actor")),
-        &normalized,
-        vec!["Cache Policy".to_owned(), "canonical-tag".to_owned()],
-        vec![normalized.clone()],
-        0.92,
+async fn stale_reviewed_normalize_evidence_rejects_before_any_write() {
+    let fixture = Fixture::new("normalize-stale-reviewed-evidence").await;
+    let target = fixture.seed("stale-normalize-target", 10).await;
+    let evidence = fixture.seed("stale-normalize-evidence", 20).await;
+    let operation_id = provenance_id("fixture.normalize.stale-reviewed-evidence");
+    let target_ref = reviewed_ref(&fixture.db, &fixture.owner, &target).await;
+    let stale_event = FactEventId::new("event.stale-reviewed-evidence".to_owned()).unwrap();
+    let evidence_ref = ProjectMemoryFactCurationReviewRefV1::new(
+        ProjectMemoryFactIdV1::new(fixture.owner.clone(), evidence.clone()).unwrap(),
+        stale_event.clone(),
     );
-    let changed_actor_request = normalize_request(
-        &fixture.owner,
-        operation_id.as_str(),
-        Some(ActorId::new("actor.normalize.second").expect("second actor")),
-        &normalized,
-        vec!["Cache Policy".to_owned(), "canonical-tag".to_owned()],
-        vec![normalized.clone()],
-        0.92,
-    );
-    let store = DatabaseFactStore::new(&fixture.db);
-    store
-        .apply_project_memory_fact_curation(first_request.clone(), &fixture.control)
-        .await
-        .expect("commit first actor normalization");
-    let before_events = lineage_events_for_fact(&fixture.db, &fixture.owner, &normalized).await;
-    let before_receipts = operation_receipts(&fixture.db, &fixture.owner, &operation_id).await;
+    let request = ProjectMemoryFactCurationBatchV1::new(
+        fixture.owner.clone(),
+        operation_id.clone(),
+        None,
+        Confidence::new(0.5).unwrap(),
+        vec![ProjectMemoryFactCurationOperationV1::NormalizeTags(
+            ProjectMemoryFactNormalizeTagsV1::new(
+                target_ref,
+                vec!["canonical".to_owned()],
+                vec![evidence_ref],
+                Confidence::new(0.9).unwrap(),
+            )
+            .unwrap(),
+        )],
+    )
+    .unwrap();
+    let before_target = lineage_events_for_fact(&fixture.db, &fixture.owner, &target).await;
+    let before_evidence = lineage_events_for_fact(&fixture.db, &fixture.owner, &evidence).await;
 
     assert!(matches!(
-        store
-            .apply_project_memory_fact_curation(changed_actor_request, &fixture.control)
+        DatabaseFactStore::new(&fixture.db)
+            .apply_project_memory_fact_curation(request, &fixture.control)
             .await,
-        Err(FactStoreError::OperationConflict)
+        Err(FactStoreError::CommitConflict {
+            conflict: FactCommitConflict::LastEventMismatch {
+                expected: Some(expected),
+                actual: Some(_),
+            },
+        }) if expected == stale_event
     ));
     assert_eq!(
-        lineage_events_for_fact(&fixture.db, &fixture.owner, &normalized).await,
-        before_events
+        lineage_events_for_fact(&fixture.db, &fixture.owner, &target).await,
+        before_target
     );
     assert_eq!(
-        operation_receipts(&fixture.db, &fixture.owner, &operation_id).await,
-        before_receipts
+        lineage_events_for_fact(&fixture.db, &fixture.owner, &evidence).await,
+        before_evidence
     );
     assert!(
-        store
-            .apply_project_memory_fact_curation(first_request, &fixture.control)
+        operation_receipts(&fixture.db, &fixture.owner, &operation_id)
             .await
-            .expect("original actor request remains replayable")
-            .replayed()
+            .is_empty()
     );
 }
 
@@ -625,6 +697,7 @@ async fn replay_rejects_receipt_rebound_to_different_normalized_tags() {
     let evidence = fixture.seed("rebound-evidence", 20).await;
     let first_operation_id = provenance_id("fixture.normalize.rebound-first");
     let first_request = normalize_request(
+        &fixture.db,
         &fixture.owner,
         first_operation_id.as_str(),
         None,
@@ -632,8 +705,10 @@ async fn replay_rejects_receipt_rebound_to_different_normalized_tags() {
         vec!["first-tag".to_owned()],
         vec![evidence.clone()],
         0.9,
-    );
+    )
+    .await;
     let second_request = normalize_request(
+        &fixture.db,
         &fixture.owner,
         "fixture.normalize.rebound-second",
         None,
@@ -641,7 +716,8 @@ async fn replay_rejects_receipt_rebound_to_different_normalized_tags() {
         vec!["second-tag".to_owned()],
         vec![evidence],
         0.9,
-    );
+    )
+    .await;
     let store = DatabaseFactStore::new(&fixture.db);
     let first = store
         .apply_project_memory_fact_curation(first_request.clone(), &fixture.control)
@@ -653,13 +729,13 @@ async fn replay_rejects_receipt_rebound_to_different_normalized_tags() {
         .expect("commit different normalized tags");
     let mut rebound = serde_json::to_value(&first).expect("serialize first curation receipt");
     let second_value = serde_json::to_value(&second).expect("serialize second curation receipt");
-    rebound["commit_receipts"] = second_value["commit_receipts"].clone();
+    rebound["operation_effects"] = second_value["operation_effects"].clone();
     rebound["replay_event_id"] = second_value["replay_event_id"].clone();
     rebind_curation_operation_receipt(
         &fixture.db,
         &fixture.owner,
         &first_operation_id,
-        second.replay_event_id(),
+        replay_event(&second),
         &rebound,
     )
     .await;
@@ -678,6 +754,170 @@ async fn replay_rejects_receipt_rebound_to_different_normalized_tags() {
 }
 
 #[tokio::test]
+async fn replay_rejects_a_self_consistent_reordered_multi_effect_receipt() {
+    let fixture = Fixture::new("link-replay-reordered-effects").await;
+    let source = fixture.seed("reorder-source", 10).await;
+    let first_target = fixture.seed("reorder-first-target", 20).await;
+    let second_target = fixture.seed("reorder-second-target", 30).await;
+    let evidence = fixture.seed("reorder-evidence", 40).await;
+    let operation_id = provenance_id("fixture.link.reordered-effects");
+    let source_ref = reviewed_ref(&fixture.db, &fixture.owner, &source).await;
+    let first_target_ref = reviewed_ref(&fixture.db, &fixture.owner, &first_target).await;
+    let second_target_ref = reviewed_ref(&fixture.db, &fixture.owner, &second_target).await;
+    let evidence_ref = reviewed_ref(&fixture.db, &fixture.owner, &evidence).await;
+    let request = ProjectMemoryFactCurationBatchV1::new(
+        fixture.owner.clone(),
+        operation_id.clone(),
+        None,
+        Confidence::new(0.5).unwrap(),
+        vec![
+            ProjectMemoryFactCurationOperationV1::LinkFacts(
+                ProjectMemoryFactLinkV1::new(
+                    relation(
+                        &fixture.owner,
+                        &source,
+                        &first_target,
+                        vec![evidence.clone()],
+                        FactRelationKindV1::Supports,
+                    ),
+                    source_ref.clone(),
+                    first_target_ref,
+                    vec![evidence_ref.clone()],
+                )
+                .unwrap(),
+            ),
+            ProjectMemoryFactCurationOperationV1::LinkFacts(
+                ProjectMemoryFactLinkV1::new(
+                    relation(
+                        &fixture.owner,
+                        &source,
+                        &second_target,
+                        vec![evidence],
+                        FactRelationKindV1::DerivedFrom,
+                    ),
+                    source_ref,
+                    second_target_ref,
+                    vec![evidence_ref],
+                )
+                .unwrap(),
+            ),
+        ],
+    )
+    .unwrap();
+    let store = DatabaseFactStore::new(&fixture.db);
+    let committed = store
+        .apply_project_memory_fact_curation(request.clone(), &fixture.control)
+        .await
+        .expect("commit ordered relation effects");
+    let before_events = linked_events(&fixture.db, &fixture.owner).await;
+    let mut reordered = serde_json::to_value(&committed).unwrap();
+    reordered["operation_effects"]
+        .as_array_mut()
+        .unwrap()
+        .reverse();
+    reordered["changed_fact_ids"] = json!([
+        source.as_str(),
+        second_target.as_str(),
+        first_target.as_str()
+    ]);
+    let reordered_event = primary_commit(&committed.operation_effects()[1])
+        .last_event_id()
+        .clone();
+    reordered["replay_event_id"] = json!(reordered_event.as_str());
+    assert!(curation_receipt_from_value(&reordered).is_ok());
+    rebind_curation_operation_receipt(
+        &fixture.db,
+        &fixture.owner,
+        &operation_id,
+        &reordered_event,
+        &reordered,
+    )
+    .await;
+
+    assert!(matches!(
+        store
+            .apply_project_memory_fact_curation(request, &fixture.control)
+            .await,
+        Err(FactStoreError::Storage { .. })
+    ));
+    assert_eq!(
+        linked_events(&fixture.db, &fixture.owner).await,
+        before_events
+    );
+}
+
+#[tokio::test]
+async fn replay_rejects_a_valid_relation_effect_rebound_to_another_target() {
+    let fixture = Fixture::new("link-replay-target-rebind").await;
+    let source = fixture.seed("target-rebind-source", 10).await;
+    let original_target = fixture.seed("target-rebind-original", 20).await;
+    let substituted_target = fixture.seed("target-rebind-substituted", 30).await;
+    let evidence = fixture.seed("target-rebind-evidence", 40).await;
+    let original_operation_id = provenance_id("fixture.link.target-rebind-original");
+    let original_request = request(
+        &fixture.db,
+        &fixture.owner,
+        original_operation_id.as_str(),
+        relation(
+            &fixture.owner,
+            &source,
+            &original_target,
+            vec![evidence.clone()],
+            FactRelationKindV1::Supports,
+        ),
+    )
+    .await;
+    let substitute_request = request(
+        &fixture.db,
+        &fixture.owner,
+        "fixture.link.target-rebind-substitute",
+        relation(
+            &fixture.owner,
+            &source,
+            &substituted_target,
+            vec![evidence],
+            FactRelationKindV1::Supports,
+        ),
+    )
+    .await;
+    let store = DatabaseFactStore::new(&fixture.db);
+    let original = store
+        .apply_project_memory_fact_curation(original_request.clone(), &fixture.control)
+        .await
+        .unwrap();
+    let substitute = store
+        .apply_project_memory_fact_curation(substitute_request, &fixture.control)
+        .await
+        .unwrap();
+    let mut rebound = serde_json::to_value(&original).unwrap();
+    let substitute_value = serde_json::to_value(&substitute).unwrap();
+    rebound["operation_effects"] = substitute_value["operation_effects"].clone();
+    rebound["replay_event_id"] = substitute_value["replay_event_id"].clone();
+    rebound["changed_fact_ids"] = substitute_value["changed_fact_ids"].clone();
+    assert!(curation_receipt_from_value(&rebound).is_ok());
+    rebind_curation_operation_receipt(
+        &fixture.db,
+        &fixture.owner,
+        &original_operation_id,
+        replay_event(&substitute),
+        &rebound,
+    )
+    .await;
+    let before_events = linked_events(&fixture.db, &fixture.owner).await;
+
+    assert!(matches!(
+        store
+            .apply_project_memory_fact_curation(original_request, &fixture.control)
+            .await,
+        Err(FactStoreError::Storage { .. })
+    ));
+    assert_eq!(
+        linked_events(&fixture.db, &fixture.owner).await,
+        before_events
+    );
+}
+
+#[tokio::test]
 async fn same_transaction_rollback_leaves_no_linked_event_or_operation_receipt() {
     let fixture = Fixture::new("link-rollback").await;
     let source = fixture.seed("rollback-source", 10).await;
@@ -685,6 +925,7 @@ async fn same_transaction_rollback_leaves_no_linked_event_or_operation_receipt()
     let evidence = fixture.seed("rollback-evidence", 30).await;
     let operation_id = provenance_id("fixture.link.rollback");
     let request = request(
+        &fixture.db,
         &fixture.owner,
         operation_id.as_str(),
         relation(
@@ -694,7 +935,10 @@ async fn same_transaction_rollback_leaves_no_linked_event_or_operation_receipt()
             vec![evidence],
             FactRelationKindV1::Supports,
         ),
-    );
+    )
+    .await
+    .with_automation_run_id(RunId::new("run.curation-replay").unwrap())
+    .expect("automation run binding");
 
     let transaction = fixture
         .db
@@ -720,6 +964,7 @@ async fn exact_operation_replay_reports_replayed_with_stable_canonical_material(
     let evidence = fixture.seed("replay-evidence", 30).await;
     let operation_id = provenance_id("fixture.link.replay");
     let request = request(
+        &fixture.db,
         &fixture.owner,
         operation_id.as_str(),
         relation(
@@ -729,7 +974,8 @@ async fn exact_operation_replay_reports_replayed_with_stable_canonical_material(
             vec![evidence],
             FactRelationKindV1::Supports,
         ),
-    );
+    )
+    .await;
     let store = DatabaseFactStore::new(&fixture.db);
 
     let first = store
@@ -739,7 +985,7 @@ async fn exact_operation_replay_reports_replayed_with_stable_canonical_material(
     let first_events = linked_events(&fixture.db, &fixture.owner).await;
     let first_receipts = operation_receipts(&fixture.db, &fixture.owner, &operation_id).await;
     let replay = store
-        .apply_project_memory_fact_curation(request, &fixture.control)
+        .apply_project_memory_fact_curation(request.clone(), &fixture.control)
         .await
         .expect("exact relation replay");
 
@@ -751,19 +997,136 @@ async fn exact_operation_replay_reports_replayed_with_stable_canonical_material(
     let replayed_material =
         serde_json::to_value(&replay).expect("serialize replay stable material");
     assert_eq!(replayed_material, committed_material);
+    assert_eq!(
+        serde_json::to_vec(&replay).unwrap(),
+        serde_json::to_vec(&first).unwrap()
+    );
     assert_eq!(committed_material, first_receipts[0].receipt);
+    assert!(!json_contains_key(&first_receipts[0].receipt, "metadata"));
+    assert!(!json_contains_key(&first_receipts[0].receipt, "payload"));
     assert!(first_receipts[0].receipt.get("replayed").is_none());
     assert_eq!(first.operation_id(), &operation_id);
+    assert_eq!(first.automation_run_id(), None);
     assert_eq!(first.input_digest(), first_receipts[0].request_digest);
-    assert_eq!(first.commit_receipts().len(), 1);
-    assert_eq!(first.commit_receipts()[0].fact_id(), &source);
-    assert_eq!(first.replay_fact_id(), &source);
-    assert_eq!(first.replay_event_id(), first_events[0].event_id());
+    assert_eq!(first.operation_effects().len(), 1);
+    assert_eq!(
+        primary_commit(&first.operation_effects()[0]).fact_id(),
+        &source
+    );
+    assert_eq!(first.replay_fact_id(), Some(&source));
+    assert_eq!(first.replay_event_id(), Some(first_events[0].event_id()));
     assert_eq!(
         curation_receipt_from_value(&first_receipts[0].receipt)
             .expect("typed durable curation receipt"),
         first
     );
+    assert_eq!(
+        first
+            .changed_facts()
+            .iter()
+            .map(ProjectMemoryFactIdV1::fact_id)
+            .collect::<Vec<_>>(),
+        vec![&source, &target]
+    );
+    assert!(matches!(
+        &first.operation_effects()[0],
+        tracedecay_store::ProjectMemoryFactCurationOperationEffectV1::LinkFacts {
+            relation,
+            ..
+        } if relation.source_fact_id() == &source
+            && relation.target_fact_id() == &target
+            && relation.relation() == FactRelationKindV1::Supports
+    ));
+    let mut omitted_target = first_receipts[0].receipt.clone();
+    omitted_target["changed_fact_ids"] = json!([source.as_str()]);
+    assert!(curation_receipt_from_value(&omitted_target).is_err());
+    for (field, changed) in [
+        ("target_fact_id", json!(source.as_str())),
+        ("evidence_fact_ids", json!([])),
+        (
+            "evidence_fact_ids",
+            json!([source.as_str(), source.as_str()]),
+        ),
+        ("source_label", json!("")),
+        ("sanitization_disposition", json!("rejected")),
+        ("sanitization_sensitivity", json!("unclassified")),
+    ] {
+        let mut invalid_relation = first_receipts[0].receipt.clone();
+        invalid_relation["operation_effects"][0]["relation"][field] = changed;
+        assert!(curation_receipt_from_value(&invalid_relation).is_err());
+    }
+    let mut invalid_reference = first_receipts[0].receipt.clone();
+    invalid_reference["operation_effects"][0]["relation"]["provenance_reference"]["byte_len"] =
+        json!(0);
+    assert!(curation_receipt_from_value(&invalid_reference).is_err());
+    let mut foreign_owner = first_receipts[0].receipt.clone();
+    foreign_owner["operation_effects"][0]["relation"]["owner"] = json!({"kind":"profile"});
+    assert!(curation_receipt_from_value(&foreign_owner).is_err());
+    let mut duplicated_effect = first_receipts[0].receipt.clone();
+    let duplicate = duplicated_effect["operation_effects"][0].clone();
+    duplicated_effect["operation_effects"]
+        .as_array_mut()
+        .expect("operation effect array")
+        .push(duplicate);
+    duplicated_effect["facts_linked"] = json!(2);
+    assert!(curation_receipt_from_value(&duplicated_effect).is_err());
+    for (field, changed) in [
+        ("source_label", json!("different-source")),
+        ("confidence", json!(0.2)),
+        ("evidence_fact_ids", json!([target.as_str()])),
+    ] {
+        let mut changed_relation = first_receipts[0].receipt.clone();
+        changed_relation["operation_effects"][0]["relation"][field] = changed;
+        assert!(curation_receipt_from_value(&changed_relation).is_ok());
+        rebind_curation_operation_receipt(
+            &fixture.db,
+            &fixture.owner,
+            &operation_id,
+            replay_event(&first),
+            &changed_relation,
+        )
+        .await;
+        assert!(matches!(
+            store
+                .apply_project_memory_fact_curation(request.clone(), &fixture.control)
+                .await,
+            Err(FactStoreError::Storage { .. })
+        ));
+        rebind_curation_operation_receipt(
+            &fixture.db,
+            &fixture.owner,
+            &operation_id,
+            replay_event(&first),
+            &first_receipts[0].receipt,
+        )
+        .await;
+    }
+    let mut changed_sanitizer = first_receipts[0].receipt.clone();
+    changed_sanitizer["operation_effects"][0]["relation"]["provenance_reference"]["byte_len"] =
+        json!(1);
+    assert!(curation_receipt_from_value(&changed_sanitizer).is_ok());
+    rebind_curation_operation_receipt(
+        &fixture.db,
+        &fixture.owner,
+        &operation_id,
+        replay_event(&first),
+        &changed_sanitizer,
+    )
+    .await;
+    assert!(matches!(
+        store
+            .apply_project_memory_fact_curation(request.clone(), &fixture.control)
+            .await,
+        Err(FactStoreError::Storage { .. })
+    ));
+    rebind_curation_operation_receipt(
+        &fixture.db,
+        &fixture.owner,
+        &operation_id,
+        replay_event(&first),
+        &first_receipts[0].receipt,
+    )
+    .await;
     let mut tampered_pointer = first_receipts[0].receipt.clone();
     tampered_pointer["replay_event_id"] =
         Value::String(format!("{}.tampered", first_events[0].event_id().as_str()));
@@ -771,6 +1134,16 @@ async fn exact_operation_replay_reports_replayed_with_stable_canonical_material(
     let mut unknown_field = first_receipts[0].receipt.clone();
     unknown_field["unexpected"] = Value::Bool(true);
     assert!(curation_receipt_from_value(&unknown_field).is_err());
+    let rebound_run = request
+        .clone()
+        .with_automation_run_id(RunId::new("run.curation-rebound").unwrap())
+        .expect("changed automation run binding");
+    assert!(matches!(
+        store
+            .apply_project_memory_fact_curation(rebound_run, &fixture.control)
+            .await,
+        Err(FactStoreError::OperationConflict)
+    ));
     assert_eq!(
         linked_events(&fixture.db, &fixture.owner).await,
         first_events
@@ -791,8 +1164,128 @@ async fn exact_operation_replay_reports_replayed_with_stable_canonical_material(
         FactLineageEventKindV1::Curated {
             action: FactCurationActionV1::Linked { relation },
             ..
-        } if relation.kind() == FactRelationKindV1::Supports
+        } if relation.relation() == FactRelationKindV1::Supports
     ));
+}
+
+#[tokio::test]
+async fn repeated_exact_relation_is_a_noop_without_fresh_linked_events() {
+    let fixture = Fixture::new("link-semantic-noop").await;
+    let source = fixture.seed("semantic-noop-source", 10).await;
+    let target = fixture.seed("semantic-noop-target", 20).await;
+    let evidence = fixture.seed("semantic-noop-evidence", 30).await;
+    let alternate_evidence = fixture.seed("semantic-noop-alternate-evidence", 40).await;
+    let relation = relation(
+        &fixture.owner,
+        &source,
+        &target,
+        vec![evidence],
+        FactRelationKindV1::Supports,
+    );
+    let first = request(
+        &fixture.db,
+        &fixture.owner,
+        "fixture.link.semantic-noop.first",
+        relation.clone(),
+    )
+    .await;
+    let store = DatabaseFactStore::new(&fixture.db);
+    store
+        .apply_project_memory_fact_curation(first, &fixture.control)
+        .await
+        .expect("first semantic relation commit");
+    let events = linked_events(&fixture.db, &fixture.owner).await;
+    let changed_material = FactRelationV1::new(
+        fixture.owner.clone(),
+        source.clone(),
+        target.clone(),
+        FactRelationKindV1::Supports,
+        vec![alternate_evidence],
+        Confidence::new(0.61).unwrap(),
+        relation_provenance("curation.changed-model-material"),
+    )
+    .unwrap();
+    let repeat = request(
+        &fixture.db,
+        &fixture.owner,
+        "fixture.link.semantic-noop.repeat",
+        changed_material,
+    )
+    .await;
+    let settled = store
+        .apply_project_memory_fact_curation(repeat, &fixture.control)
+        .await
+        .expect("repeated semantic relation settles as no-op");
+
+    assert_eq!(settled.facts_linked(), 0);
+    assert!(settled.changed_facts().is_empty());
+    assert!(settled.replay_fact_id().is_none());
+    assert!(matches!(
+        &settled.operation_effects()[0],
+        ProjectMemoryFactCurationOperationEffectV1::LinkFacts {
+            disposition:
+                tracedecay_store::ProjectMemoryFactCurationLinkDispositionV1::AlreadyLinked,
+            commit: None,
+            ..
+        }
+    ));
+    assert_eq!(linked_events(&fixture.db, &fixture.owner).await, events);
+}
+
+#[tokio::test]
+async fn automation_bound_replay_preserves_outer_run_and_rejects_a_changed_run() {
+    let fixture = Fixture::new("link-automation-replay").await;
+    let source = fixture.seed("automation-replay-source", 10).await;
+    let target = fixture.seed("automation-replay-target", 20).await;
+    let evidence = fixture.seed("automation-replay-evidence", 30).await;
+    let operation_id = provenance_id("fixture.link.automation-replay");
+    let outer_run = RunId::new("run.curation-automation-replay").unwrap();
+    let request = request(
+        &fixture.db,
+        &fixture.owner,
+        operation_id.as_str(),
+        relation(
+            &fixture.owner,
+            &source,
+            &target,
+            vec![evidence],
+            FactRelationKindV1::DerivedFrom,
+        ),
+    )
+    .await
+    .with_automation_run_id(outer_run.clone())
+    .unwrap();
+    let store = DatabaseFactStore::new(&fixture.db);
+    let committed = store
+        .apply_project_memory_fact_curation(request.clone(), &fixture.control)
+        .await
+        .expect("automation-bound relation commit");
+    let replayed = store
+        .apply_project_memory_fact_curation(request.clone(), &fixture.control)
+        .await
+        .expect("automation-bound exact replay");
+
+    assert_eq!(committed.automation_run_id(), Some(&outer_run));
+    assert_eq!(replayed.automation_run_id(), Some(&outer_run));
+    assert!(replayed.replayed());
+    assert_eq!(
+        serde_json::to_value(&replayed).unwrap(),
+        serde_json::to_value(&committed).unwrap()
+    );
+    let before_events = linked_events(&fixture.db, &fixture.owner).await;
+    let changed_run = request
+        .with_automation_run_id(RunId::new("run.curation-automation-changed").unwrap())
+        .unwrap();
+    assert!(matches!(
+        store
+            .apply_project_memory_fact_curation(changed_run, &fixture.control)
+            .await,
+        Err(FactStoreError::OperationConflict)
+    ));
+    assert_eq!(
+        linked_events(&fixture.db, &fixture.owner).await,
+        before_events
+    );
 }
 
 #[tokio::test]
@@ -803,6 +1296,7 @@ async fn changed_relation_under_the_same_operation_id_conflicts_without_mutation
     let evidence = fixture.seed("changed-evidence", 30).await;
     let operation_id = provenance_id("fixture.link.changed-input");
     let first_request = request(
+        &fixture.db,
         &fixture.owner,
         operation_id.as_str(),
         relation(
@@ -812,8 +1306,10 @@ async fn changed_relation_under_the_same_operation_id_conflicts_without_mutation
             vec![evidence.clone()],
             FactRelationKindV1::Supports,
         ),
-    );
+    )
+    .await;
     let changed_request = request(
+        &fixture.db,
         &fixture.owner,
         operation_id.as_str(),
         relation(
@@ -823,7 +1319,8 @@ async fn changed_relation_under_the_same_operation_id_conflicts_without_mutation
             vec![evidence],
             FactRelationKindV1::Supersedes,
         ),
-    );
+    )
+    .await;
     let store = DatabaseFactStore::new(&fixture.db);
     let first = store
         .apply_project_memory_fact_curation(first_request.clone(), &fixture.control)
@@ -866,6 +1363,7 @@ async fn conflicting_relation_kind_is_rejected_without_event_or_receipt_mutation
     let accepted_operation = provenance_id("fixture.link.conflict.supports");
     let rejected_operation = provenance_id("fixture.link.conflict.contradicts");
     let accepted = request(
+        &fixture.db,
         &fixture.owner,
         accepted_operation.as_str(),
         relation(
@@ -875,8 +1373,10 @@ async fn conflicting_relation_kind_is_rejected_without_event_or_receipt_mutation
             vec![evidence.clone()],
             FactRelationKindV1::Supports,
         ),
-    );
+    )
+    .await;
     let rejected = request(
+        &fixture.db,
         &fixture.owner,
         rejected_operation.as_str(),
         relation(
@@ -886,7 +1386,8 @@ async fn conflicting_relation_kind_is_rejected_without_event_or_receipt_mutation
             vec![evidence],
             FactRelationKindV1::Contradicts,
         ),
-    );
+    )
+    .await;
     let store = DatabaseFactStore::new(&fixture.db);
     let accepted_receipt = store
         .apply_project_memory_fact_curation(accepted.clone(), &fixture.control)
@@ -950,10 +1451,12 @@ async fn every_fact_relation_kind_reconstructs_through_the_runtime_graph_source(
         store
             .apply_project_memory_fact_curation(
                 request(
+                    &fixture.db,
                     &fixture.owner,
                     &format!("fixture.link.graph-source.{index}"),
                     relation(&fixture.owner, &source, &target, vec![evidence], kind),
-                ),
+                )
+                .await,
                 &fixture.control,
             )
             .await
@@ -983,6 +1486,7 @@ async fn graph_source_excludes_relations_after_an_endpoint_becomes_unavailable()
     store
         .apply_project_memory_fact_curation(
             request(
+                &fixture.db,
                 &fixture.owner,
                 "fixture.link.graph-hidden-endpoint",
                 relation(
@@ -992,7 +1496,8 @@ async fn graph_source_excludes_relations_after_an_endpoint_becomes_unavailable()
                     vec![evidence],
                     FactRelationKindV1::Supports,
                 ),
-            ),
+            )
+            .await,
             &fixture.control,
         )
         .await
@@ -1073,13 +1578,18 @@ async fn cross_owner_and_invalid_evidence_are_rejected_without_mutation() {
         None,
         Confidence::new(0.5).expect("minimum confidence"),
         vec![ProjectMemoryFactCurationOperationV1::LinkFacts(
-            ProjectMemoryFactLinkV1::new(relation(
-                &fixture.owner,
-                &source,
-                &target,
-                vec![valid_evidence.clone()],
-                FactRelationKindV1::Supports,
-            ))
+            ProjectMemoryFactLinkV1::new(
+                relation(
+                    &fixture.owner,
+                    &source,
+                    &target,
+                    vec![valid_evidence.clone()],
+                    FactRelationKindV1::Supports,
+                ),
+                reviewed_ref(&fixture.db, &fixture.owner, &source).await,
+                reviewed_ref(&fixture.db, &fixture.owner, &target).await,
+                vec![reviewed_ref(&fixture.db, &fixture.owner, &valid_evidence).await],
+            )
             .expect("link operation"),
         )],
     );
@@ -1115,6 +1625,7 @@ async fn cross_owner_and_invalid_evidence_are_rejected_without_mutation() {
     let result = DatabaseFactStore::new(&fixture.db)
         .apply_project_memory_fact_curation(
             request(
+                &fixture.db,
                 &fixture.owner,
                 operation_id.as_str(),
                 relation(
@@ -1124,7 +1635,8 @@ async fn cross_owner_and_invalid_evidence_are_rejected_without_mutation() {
                     vec![missing_evidence],
                     FactRelationKindV1::Supports,
                 ),
-            ),
+            )
+            .await,
             &fixture.control,
         )
         .await;
@@ -1152,6 +1664,7 @@ async fn controlled_precommit_cancellation_rolls_back_link_and_receipt() {
     let result = store
         .apply_project_memory_fact_curation(
             request(
+                &fixture.db,
                 &fixture.owner,
                 operation_id.as_str(),
                 relation(
@@ -1161,7 +1674,8 @@ async fn controlled_precommit_cancellation_rolls_back_link_and_receipt() {
                     vec![evidence],
                     FactRelationKindV1::Contradicts,
                 ),
-            ),
+            )
+            .await,
             &control,
         )
         .await;

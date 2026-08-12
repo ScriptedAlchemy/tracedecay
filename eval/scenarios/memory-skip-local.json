@@ -35,7 +35,7 @@
           "args": {
             "content": "The local release color is teal-7.",
             "category": "general",
-            "source": "eval-agent"
+            "source_label": "eval-agent"
           }
         },
         {

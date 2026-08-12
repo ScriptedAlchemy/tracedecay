@@ -98,7 +98,6 @@ fn test_tool_definitions_complete() {
         "tracedecay_fact_store_update",
         "tracedecay_fact_store_remove",
         "tracedecay_fact_store_list",
-        "tracedecay_fact_store_curate",
     ] {
         assert!(
             tool_names.contains(&tool_name),
@@ -331,22 +330,6 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 }
 
 #[test]
-fn fact_store_curate_definition_supports_canonical_output_formats() {
-    let definition = get_tool_definitions()
-        .expect("tool definitions")
-        .into_iter()
-        .find(|definition| definition.name == "tracedecay_fact_store_curate")
-        .expect("fact_store_curate definition");
-    assert_eq!(
-        definition.input_schema["properties"]["format"]["enum"],
-        json!(["markdown", "json"]),
-    );
-    assert!(super::super::definitions::tool_defaults_to_markdown(
-        &definition.name
-    ));
-}
-
-#[test]
 fn every_advertised_application_surface_uses_canonical_output_formats() {
     let tools = get_tool_definitions().expect("tool definitions");
     for operation in APPLICATION_SURFACE_OPERATIONS {
@@ -407,7 +390,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_fact_store_add",
         "tracedecay_fact_store_update",
         "tracedecay_fact_store_remove",
-        "tracedecay_fact_store_curate",
         "tracedecay_fact_feedback",
         "tracedecay_session_refresh",
         "tracedecay_configuration_set",

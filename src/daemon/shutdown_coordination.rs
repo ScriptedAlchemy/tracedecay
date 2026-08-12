@@ -113,6 +113,15 @@ pub(super) struct ShutdownReceipt {
 }
 
 impl ShutdownReceipt {
+    pub(super) fn extend(&mut self, other: Self) {
+        self.owners.extend(other.owners);
+        for owner in other.unfinished {
+            if !self.unfinished.contains(&owner) {
+                self.unfinished.push(owner);
+            }
+        }
+    }
+
     pub(super) fn unfinished(&self) -> &[&'static str] {
         &self.unfinished
     }

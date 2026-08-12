@@ -1,5 +1,6 @@
 //! Project-owned CI retention and code-anchor stores for advisory production open.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracedecay_application::RequestContext;
@@ -23,7 +24,6 @@ use super::production::{
 };
 use crate::advisory::context_allows_feedback_operation;
 use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
-use crate::tracedecay::TraceDecay;
 use tracedecay_runtime_core::db::Database;
 
 const RETAINED_KEY_DOMAIN_V1: &str = "tracedecay.advisory.ci.retained-key.v1";
@@ -179,7 +179,7 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
 /// Graph-backed CI code-anchor resolver over the sealed project index.
 #[derive(Clone)]
 pub struct ProjectCiCodeAnchorStoreV1 {
-    graph: Arc<TraceDecay>,
+    project_root: PathBuf,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     scope: FeedbackScopeV1,
     code_index_identity:
@@ -188,13 +188,13 @@ pub struct ProjectCiCodeAnchorStoreV1 {
 
 impl ProjectCiCodeAnchorStoreV1 {
     pub fn new(
-        graph: Arc<TraceDecay>,
+        project_root: PathBuf,
         scope: FeedbackScopeV1,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     ) -> Option<Self> {
         scope.validate().ok()?;
         Some(Self {
-            graph,
+            project_root,
             code_graph,
             scope,
             code_index_identity: None,
@@ -202,14 +202,14 @@ impl ProjectCiCodeAnchorStoreV1 {
     }
 
     pub fn new_with_code_index_identity(
-        graph: Arc<TraceDecay>,
+        project_root: PathBuf,
         scope: FeedbackScopeV1,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         code_index_identity: Arc<
             dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
         >,
     ) -> Option<Self> {
-        let mut store = Self::new(graph, scope, code_graph)?;
+        let mut store = Self::new(project_root, scope, code_graph)?;
         store.code_index_identity = Some(code_index_identity);
         Some(store)
     }
@@ -269,7 +269,7 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
             else {
                 return Some(partial_code_evidence());
             };
-            let Ok(source) = std::fs::read_to_string(self.graph.project_root().join(&path)) else {
+            let Ok(source) = std::fs::read_to_string(self.project_root.join(&path)) else {
                 return Some(partial_code_evidence());
             };
             let Some(source_digest) =
@@ -281,10 +281,7 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
                 return Some(partial_code_evidence());
             }
             let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref() {
-                let Some(identity) = resolver
-                    .resolve(self.graph.project_root().to_path_buf())
-                    .await
-                else {
+                let Some(identity) = resolver.resolve(self.project_root.clone()).await else {
                     return Some(partial_code_evidence());
                 };
                 if identity.source_revision() != Some(&request.scope.head_commit_id) {

@@ -137,6 +137,11 @@ where
     S: SemanticProviderPort,
     D: DiagnosticSnapshotPort,
 {
+    /// Exact workspace admitted by the daemon owner for this runtime actor.
+    pub fn workspace(&self) -> &AuthorizedLspWorkspace {
+        self.lifecycle.gateway.workspace()
+    }
+
     /// Admits one bridge-owned frame without ambiguous post-dispatch
     /// backpressure. A consumed frame is never reported as retryable.
     pub fn try_handle_client_payload(

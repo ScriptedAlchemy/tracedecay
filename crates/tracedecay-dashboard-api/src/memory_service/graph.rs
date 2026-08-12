@@ -1,273 +1,621 @@
-//! Memory graph payload (fact/category/bank/entity nodes and edges).
+//! Canonical project-memory graph payload.
+//!
+//! Grafeo is the verified relation authority. Canonical fact payloads are
+//! hydrated by the fact store through `ProjectMemoryGraphPageV1`; this module
+//! never reconstructs topology from dashboard summary rows.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::{Map, Value, json};
-use tracedecay_domain::FactId;
-
-use super::super::DashboardState;
-use super::facts::{
-    dashboard_overview, fact_matches_query, fact_summary_json, target_legacy_fact_id,
+use schemars::JsonSchema;
+use serde::Serialize;
+use tracedecay_domain::{
+    FactAssertionId, FactCategoryV1, FactId, PayloadAccessState, ProjectMemoryGraphRelationKindV1,
+    RetrievalAnchorId,
 };
-use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_store::{
-    MAX_PROJECT_MEMORY_GRAPH_RELATIONS, ProjectMemoryDashboardEntityV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1, ProjectMemoryGraphQueryV1,
-    ProjectMemoryGraphRelationKindV1, ProjectMemoryGraphTargetV1,
+    FactReadControl, FactStoreError, MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
+    ProjectMemoryDashboardEntityV1, ProjectMemoryFactProjectionV1, ProjectMemoryGraphPageV1,
+    ProjectMemoryGraphQueryV1, ProjectMemoryGraphTargetV1,
 };
+use tracedecay_usecases::memory::MemoryApplicationError;
 
-/// Resolves a fact target to its legacy numeric id, accepting either a legacy
-/// query target or a canonical target (mapped through `canonical_to_legacy`).
-fn link_legacy_fact_id(
-    target: &ProjectMemoryFactTargetV1,
-    canonical_to_legacy: &HashMap<String, i64>,
-) -> Option<i64> {
-    if let Some(legacy) = target_legacy_fact_id(target) {
-        return Some(legacy);
-    }
-    let canonical = target.canonical_fact_id()?;
-    canonical_to_legacy.get(canonical.as_str()).copied()
+use super::super::read_model::{DashboardCoverageV1, DashboardDomainStateV1};
+use super::super::{DashboardHttpRequestControlV1, DashboardState};
+use super::facts::dashboard_overview;
+use crate::tracedecay::facts::memory_application_for_db;
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MemoryGraphNodeV1 {
+    Fact {
+        id: String,
+        label: String,
+        fact_id: FactId,
+        payload_access: PayloadAccessState,
+        projected_as_of: i64,
+        content: Option<String>,
+        category: Option<String>,
+        trust_score: Option<f64>,
+        retrieval_count: Option<u64>,
+        helpful_count: Option<u64>,
+    },
+    Entity {
+        id: String,
+        label: String,
+        entity_id: String,
+    },
+    Assertion {
+        id: String,
+        label: String,
+        assertion_id: FactAssertionId,
+        fact_id: FactId,
+    },
+    RetrievalAnchor {
+        id: String,
+        label: String,
+        anchor_id: RetrievalAnchorId,
+    },
 }
 
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryGraphEdgeV1 {
+    source: String,
+    target: String,
+    kind: ProjectMemoryGraphRelationKindV1,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryGraphPayloadV1 {
+    pub nodes: Vec<MemoryGraphNodeV1>,
+    pub edges: Vec<MemoryGraphEdgeV1>,
+    pub coverage: DashboardCoverageV1,
+    pub fact_universe_count: u64,
+    pub fact_candidates_examined: usize,
+    pub unavailable_fact_candidates: usize,
+    pub root_count: usize,
+    pub relation_limit: usize,
+    pub relation_count: usize,
+}
+
+#[derive(Debug)]
+pub enum DashboardGraphReadError {
+    Conflicting(String),
+    Unavailable(String),
+    ResetRequired(String),
+    Cancelled(String),
+    BudgetExhausted(String),
+    TimedOut(String),
+    Internal(String),
+}
+
+impl DashboardGraphReadError {
+    pub const fn state(&self) -> DashboardDomainStateV1 {
+        match self {
+            Self::Conflicting(_) => DashboardDomainStateV1::Conflicting,
+            Self::Unavailable(_) => DashboardDomainStateV1::Offline,
+            Self::Cancelled(_) => DashboardDomainStateV1::Cancelled,
+            Self::ResetRequired(_) | Self::BudgetExhausted(_) | Self::Internal(_) => {
+                DashboardDomainStateV1::Error
+            }
+            Self::TimedOut(_) => DashboardDomainStateV1::TimedOut,
+        }
+    }
+
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Conflicting(_) => "graph_conflict",
+            Self::Unavailable(_) => "graph_unavailable",
+            Self::ResetRequired(_) => "graph_reset_required",
+            Self::Cancelled(_) => "graph_cancelled",
+            Self::BudgetExhausted(_) => "graph_budget_exhausted",
+            Self::TimedOut(_) => "graph_deadline_exceeded",
+            Self::Internal(_) => "graph_error",
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Conflicting(message)
+            | Self::Unavailable(message)
+            | Self::ResetRequired(message)
+            | Self::Cancelled(message)
+            | Self::BudgetExhausted(message)
+            | Self::TimedOut(message)
+            | Self::Internal(message) => message,
+        }
+    }
+}
+
+fn graph_authority_error(
+    error: MemoryApplicationError,
+    request_timed_out: bool,
+    request_cancelled: bool,
+) -> DashboardGraphReadError {
+    let message = error.to_string();
+    match error {
+        MemoryApplicationError::Store(FactStoreError::GraphDeadlineExceeded) => {
+            DashboardGraphReadError::TimedOut(message)
+        }
+        MemoryApplicationError::Store(FactStoreError::GraphResetRequired { reason, .. }) => {
+            DashboardGraphReadError::ResetRequired(reason)
+        }
+        _ if request_timed_out => DashboardGraphReadError::TimedOut(message),
+        _ if request_cancelled => DashboardGraphReadError::Cancelled(message),
+        MemoryApplicationError::Store(FactStoreError::GraphConflict) => {
+            DashboardGraphReadError::Conflicting(message)
+        }
+        MemoryApplicationError::Store(FactStoreError::GraphUnavailable) => {
+            DashboardGraphReadError::Unavailable(message)
+        }
+        MemoryApplicationError::Store(FactStoreError::GraphCancelled) => {
+            DashboardGraphReadError::Cancelled(message)
+        }
+        MemoryApplicationError::Store(FactStoreError::GraphBudgetExhausted) => {
+            DashboardGraphReadError::BudgetExhausted(message)
+        }
+        _ => DashboardGraphReadError::Internal(message),
+    }
+}
+
+fn request_terminal_error(
+    control: &DashboardHttpRequestControlV1,
+    message: impl Into<String>,
+) -> Option<DashboardGraphReadError> {
+    let message = message.into();
+    if control
+        .deadline()
+        .is_elapsed_at(crate::application::context::application_observed_at())
+    {
+        Some(DashboardGraphReadError::TimedOut(message))
+    } else if control.cancellation().is_cancelled() {
+        Some(DashboardGraphReadError::Cancelled(message))
+    } else {
+        None
+    }
+}
+
+fn category_name(category: FactCategoryV1) -> &'static str {
+    match category {
+        FactCategoryV1::General => "general",
+        FactCategoryV1::UserPref => "user_pref",
+        FactCategoryV1::Project => "project",
+        FactCategoryV1::Tool => "tool",
+        FactCategoryV1::Decision => "decision",
+        FactCategoryV1::CodeArea => "code_area",
+    }
+}
+
+fn fact_matches_query(fact: &ProjectMemoryFactProjectionV1, query: &str) -> bool {
+    let ProjectMemoryFactProjectionV1::Available(fact) = fact else {
+        return false;
+    };
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let query = query.to_ascii_lowercase();
+    fact.content().to_ascii_lowercase().contains(&query)
+        || fact
+            .tags()
+            .iter()
+            .any(|tag| tag.to_ascii_lowercase().contains(&query))
+        || fact
+            .entities()
+            .iter()
+            .any(|entity| entity.to_ascii_lowercase().contains(&query))
+}
+
+fn fact_node_id(fact_id: &FactId) -> String {
+    format!("fact:{}", fact_id.as_str())
+}
+
+fn fact_node(fact: &ProjectMemoryFactProjectionV1) -> MemoryGraphNodeV1 {
+    let id = fact_node_id(fact.fact_id());
+    match fact {
+        ProjectMemoryFactProjectionV1::Available(fact) => {
+            let telemetry = fact.telemetry();
+            MemoryGraphNodeV1::Fact {
+                id,
+                label: fact.content().to_owned(),
+                fact_id: fact.fact_id().clone(),
+                payload_access: PayloadAccessState::Eligible,
+                projected_as_of: fact.projected_as_of().0,
+                content: Some(fact.content().to_owned()),
+                category: Some(category_name(fact.category()).to_owned()),
+                trust_score: Some(fact.trust().as_f64()),
+                retrieval_count: Some(telemetry.retrieval_count()),
+                helpful_count: Some(telemetry.helpful_count()),
+            }
+        }
+        ProjectMemoryFactProjectionV1::Unavailable(fact) => MemoryGraphNodeV1::Fact {
+            id,
+            label: fact.fact_id().as_str().to_owned(),
+            fact_id: fact.fact_id().clone(),
+            payload_access: fact.payload_access(),
+            projected_as_of: fact.status().projected_as_of().0,
+            content: None,
+            category: None,
+            trust_score: None,
+            retrieval_count: None,
+            helpful_count: None,
+        },
+    }
+}
+
+fn graph_target_node(
+    target: &ProjectMemoryGraphTargetV1,
+    hydrated_facts: &BTreeMap<FactId, &ProjectMemoryFactProjectionV1>,
+    entity_names: &BTreeMap<String, &str>,
+) -> Result<(String, MemoryGraphNodeV1), String> {
+    match target {
+        ProjectMemoryGraphTargetV1::Fact(fact) => {
+            let fact_id = fact.fact_id();
+            let hydrated = hydrated_facts.get(fact_id).ok_or_else(|| {
+                format!(
+                    "verified memory graph relation references unhydrated canonical fact {}",
+                    fact_id.as_str()
+                )
+            })?;
+            Ok((fact_node_id(fact_id), fact_node(hydrated)))
+        }
+        ProjectMemoryGraphTargetV1::Entity(entity) => {
+            let entity_id = entity.entity();
+            let id = format!("entity:{entity_id}");
+            let label = entity_names.get(entity_id).copied().unwrap_or(entity_id);
+            Ok((
+                id.clone(),
+                MemoryGraphNodeV1::Entity {
+                    id,
+                    label: label.to_owned(),
+                    entity_id: entity_id.to_owned(),
+                },
+            ))
+        }
+        ProjectMemoryGraphTargetV1::Assertion {
+            fact_id,
+            assertion_id,
+            ..
+        } => {
+            if !hydrated_facts.contains_key(fact_id) {
+                return Err(format!(
+                    "verified memory graph assertion references unhydrated canonical fact {}",
+                    fact_id.as_str()
+                ));
+            }
+            let id = format!("assertion:{}", assertion_id.as_str());
+            Ok((
+                id.clone(),
+                MemoryGraphNodeV1::Assertion {
+                    id,
+                    label: assertion_id.as_str().to_owned(),
+                    assertion_id: assertion_id.clone(),
+                    fact_id: fact_id.clone(),
+                },
+            ))
+        }
+        ProjectMemoryGraphTargetV1::RetrievalAnchor { anchor_id, .. } => {
+            let id = format!("anchor:{}", anchor_id.as_str());
+            Ok((
+                id.clone(),
+                MemoryGraphNodeV1::RetrievalAnchor {
+                    id,
+                    label: anchor_id.as_str().to_owned(),
+                    anchor_id: anchor_id.clone(),
+                },
+            ))
+        }
+    }
+}
+
+fn render_verified_graph(
+    page: &ProjectMemoryGraphPageV1,
+    entity_names: &BTreeMap<String, &str>,
+) -> Result<(Vec<MemoryGraphNodeV1>, Vec<MemoryGraphEdgeV1>), String> {
+    let mut hydrated_facts = BTreeMap::new();
+    for fact in page.facts() {
+        if hydrated_facts
+            .insert(fact.fact_id().clone(), fact)
+            .is_some()
+        {
+            return Err(format!(
+                "verified memory graph returned duplicate canonical fact {}",
+                fact.fact_id().as_str()
+            ));
+        }
+    }
+    let mut nodes: BTreeMap<String, MemoryGraphNodeV1> = hydrated_facts
+        .values()
+        .map(|fact| (fact_node_id(fact.fact_id()), fact_node(fact)))
+        .collect();
+    let mut edges = Vec::with_capacity(page.relations().len());
+
+    for relation in page.relations() {
+        let (source, source_node) =
+            graph_target_node(relation.source(), &hydrated_facts, entity_names)?;
+        let (target, target_node) =
+            graph_target_node(relation.target(), &hydrated_facts, entity_names)?;
+        nodes.entry(source.clone()).or_insert(source_node);
+        nodes.entry(target.clone()).or_insert(target_node);
+        edges.push(MemoryGraphEdgeV1 {
+            source,
+            target,
+            kind: relation.kind(),
+        });
+    }
+
+    Ok((nodes.into_values().collect(), edges))
+}
+
+fn relation_page_is_proven_complete(relation_count: usize, relation_limit: usize) -> bool {
+    relation_count < relation_limit
+}
+
+/// Reads and renders the verified project-memory topology.
+///
+/// The caller must derive `read_control` from the admitted request's live
+/// cancellation signal. Supplying a fresh or snapshotted token here would
+/// sever disconnect cancellation from the Grafeo read.
 pub async fn graph_payload(
     state: &DashboardState,
     query: &str,
     limit: i64,
-) -> Result<Value, String> {
-    let limit = usize::try_from(limit.max(1)).map_err(|error| error.to_string())?;
-    let overview = dashboard_overview(state, 100, limit.min(1000)).await?;
-    let fact_rows: Vec<Value> = overview
-        .facts
-        .iter()
-        .filter_map(fact_summary_json)
-        .filter(|fact| fact_matches_query(fact, query))
-        .take(limit)
-        .collect();
-
-    let mut nodes: Map<String, Value> = Map::new();
-    let mut edges: Vec<Value> = Vec::new();
-    let mut fact_ids: Vec<i64> = Vec::new();
-    let mut category_counts: Map<String, Value> = Map::new();
-
-    for fact in &fact_rows {
-        let fact_id = fact.get("fact_id").and_then(Value::as_i64).unwrap_or(0);
-        let category = fact
-            .get("category")
-            .and_then(Value::as_str)
-            .unwrap_or("general")
-            .to_string();
-        let has_hrr = fact.get("has_hrr").and_then(Value::as_i64).unwrap_or(0) != 0;
-        fact_ids.push(fact_id);
-
-        let fact_node = format!("fact:{fact_id}");
-        let category_node = format!("category:{category}");
-        let bank_node = format!("bank:{category}");
-
-        nodes.entry(fact_node.clone()).or_insert_with(|| {
-            json!({
-                "id": fact_node,
-                "kind": "fact",
-                "label": format!("#{fact_id}"),
-                "fact_id": fact_id,
-                "category": category,
-                "content": fact.get("content").cloned().unwrap_or(Value::Null),
-                "trust_score": fact.get("trust_score").cloned().unwrap_or(Value::Null),
-                "retrieval_count": fact.get("retrieval_count").cloned().unwrap_or(Value::Null),
-                "helpful_count": fact.get("helpful_count").cloned().unwrap_or(Value::Null),
-                "has_hrr": has_hrr,
-            })
-        });
-        nodes.entry(category_node.clone()).or_insert_with(|| {
-            json!({ "id": category_node, "kind": "category", "label": category, "category": category })
-        });
-        edges.push(json!({ "source": category_node, "target": fact_node, "kind": "contains" }));
-        if has_hrr {
-            nodes.entry(bank_node.clone()).or_insert_with(|| {
-                json!({ "id": bank_node, "kind": "bank", "label": category, "category": category })
-            });
-            edges.push(json!({ "source": bank_node, "target": fact_node, "kind": "bundles" }));
-        }
-
-        let count = category_counts
-            .get(&category)
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
-        category_counts.insert(category, json!(count + 1));
+    request_control: &DashboardHttpRequestControlV1,
+    read_control: &FactReadControl,
+) -> Result<MemoryGraphPayloadV1, DashboardGraphReadError> {
+    if read_control.interrupted() {
+        return Err(request_terminal_error(
+            request_control,
+            "verified memory graph request lifecycle ended",
+        )
+        .unwrap_or_else(|| {
+            DashboardGraphReadError::Cancelled(
+                "verified memory graph read was cancelled".to_owned(),
+            )
+        }));
+    }
+    let limit = usize::try_from(limit.max(1))
+        .map_err(|error| DashboardGraphReadError::Internal(error.to_string()))?;
+    let relation_limit = limit.min(MAX_PROJECT_MEMORY_GRAPH_RELATIONS);
+    let overview = dashboard_overview(state, 100, limit.min(1000), read_control)
+        .await
+        .map_err(|error| {
+            request_terminal_error(request_control, error.clone())
+                .unwrap_or(DashboardGraphReadError::Unavailable(error))
+        })?;
+    if read_control.interrupted() {
+        return Err(request_terminal_error(
+            request_control,
+            "verified memory graph request lifecycle ended",
+        )
+        .unwrap_or_else(|| {
+            DashboardGraphReadError::Cancelled(
+                "verified memory graph read was cancelled".to_owned(),
+            )
+        }));
     }
 
-    let entity_by_id: HashMap<i64, &ProjectMemoryDashboardEntityV1> = overview
+    let mut matching_fact_ids = overview
+        .facts
+        .iter()
+        .filter(|summary| fact_matches_query(&summary.fact, query))
+        .map(|summary| summary.fact.fact_id().clone());
+    let graph_roots: Vec<FactId> = matching_fact_ids.by_ref().take(limit).collect();
+    let roots_limited = matching_fact_ids.next().is_some();
+    let examined_fact_count = overview.facts.len();
+    let unavailable_fact_candidates = overview
+        .facts
+        .iter()
+        .filter(|summary| matches!(&summary.fact, ProjectMemoryFactProjectionV1::Unavailable(_)))
+        .count();
+    let fact_universe_complete =
+        u64::try_from(examined_fact_count).is_ok_and(|examined| examined == overview.fact_count);
+    let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+        .map_err(|error| DashboardGraphReadError::Internal(error.to_string()))?;
+
+    if graph_roots.is_empty() {
+        let mut omission_reasons = Vec::new();
+        if !fact_universe_complete {
+            omission_reasons.push("fact_universe_bounded");
+        }
+        if unavailable_fact_candidates != 0 {
+            omission_reasons.push("unavailable_fact_roots");
+        }
+        let coverage = if omission_reasons.is_empty() {
+            DashboardCoverageV1::complete(0, "memory_graph_roots")
+        } else {
+            let mut coverage = DashboardCoverageV1::unknown();
+            coverage.omission_reasons = omission_reasons.into_iter().map(str::to_owned).collect();
+            coverage
+        };
+        return Ok(MemoryGraphPayloadV1 {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            coverage,
+            fact_universe_count: overview.fact_count,
+            fact_candidates_examined: examined_fact_count,
+            unavailable_fact_candidates,
+            root_count: 0,
+            relation_limit,
+            relation_count: 0,
+        });
+    }
+
+    let page = application
+        .project_memory_graph(
+            ProjectMemoryGraphQueryV1::new(
+                state.memory_owner.clone(),
+                graph_roots.clone(),
+                relation_limit,
+            )
+            .map_err(|error| DashboardGraphReadError::Internal(error.to_string()))?,
+            read_control,
+        )
+        .await
+        .map_err(|error| {
+            graph_authority_error(
+                error,
+                request_control
+                    .deadline()
+                    .is_elapsed_at(crate::application::context::application_observed_at()),
+                request_control.cancellation().is_cancelled(),
+            )
+        })?;
+
+    let entity_names: BTreeMap<String, &str> = overview
         .entities
         .iter()
-        .map(|entity| (entity.target.legacy_entity_id(), entity))
-        .collect();
-    // Fact-entity links carry canonical fact targets; map them back to the
-    // legacy numeric ids the graph nodes are keyed on.
-    let canonical_to_legacy: HashMap<String, i64> = overview
-        .facts
-        .iter()
-        .filter_map(|summary| match &summary.fact {
-            ProjectMemoryFactProjectionV1::Available(fact) => {
-                Some((fact.fact_id().as_str().to_owned(), fact.legacy_fact_id()?))
-            }
-            ProjectMemoryFactProjectionV1::Unavailable(_) => None,
+        .map(|entity: &ProjectMemoryDashboardEntityV1| {
+            (entity.target.entity().to_owned(), entity.name.as_str())
         })
         .collect();
-    let fact_ids: HashSet<i64> = fact_ids.into_iter().collect();
-    let graph_roots = canonical_to_legacy
-        .iter()
-        .filter(|(_, legacy)| fact_ids.contains(legacy))
-        .map(|(canonical, _)| FactId::new(canonical.clone()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    let memory_graph = if graph_roots.is_empty() {
-        None
+    let (nodes, edges) =
+        render_verified_graph(&page, &entity_names).map_err(DashboardGraphReadError::Internal)?;
+
+    let mut omission_reasons = BTreeSet::new();
+    if !fact_universe_complete {
+        omission_reasons.insert("fact_universe_bounded");
+    }
+    if roots_limited {
+        omission_reasons.insert("root_limit_reached");
+    }
+    if unavailable_fact_candidates != 0 {
+        omission_reasons.insert("unavailable_fact_roots");
+    }
+    if !relation_page_is_proven_complete(page.relations().len(), relation_limit) {
+        omission_reasons.insert("relation_limit_reached");
+    }
+    let coverage = if omission_reasons.is_empty() {
+        DashboardCoverageV1::complete(graph_roots.len() as u64, "memory_graph_roots")
     } else {
-        Some(
-            memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
-                .map_err(|error| error.to_string())?
-                .project_memory_graph(
-                    ProjectMemoryGraphQueryV1::new(
-                        state.memory_owner.clone(),
-                        graph_roots,
-                        MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
-                    )
-                    .map_err(|error| error.to_string())?,
-                )
-                .await
-                .map_err(|error| error.to_string())?,
-        )
+        let mut coverage = DashboardCoverageV1::unknown();
+        coverage.omission_reasons = omission_reasons.into_iter().map(str::to_owned).collect();
+        coverage
     };
-    for link in &overview.fact_entity_links {
-        let Some(fact_id) = link_legacy_fact_id(&link.fact, &canonical_to_legacy) else {
-            continue;
-        };
-        if !fact_ids.contains(&fact_id) {
-            continue;
-        }
-        let entity_id = link.entity.legacy_entity_id();
-        let Some(entity) = entity_by_id.get(&entity_id) else {
-            continue;
-        };
-        let entity_node = format!("entity:{entity_id}");
-        let fact_node = format!("fact:{fact_id}");
-        nodes.entry(entity_node.clone()).or_insert_with(|| {
-            json!({
-                "id": entity_node,
-                "kind": "entity",
-                "label": entity.name,
-                "entity_id": entity_id,
-                "entity_type": entity.entity_type,
-            })
+
+    Ok(MemoryGraphPayloadV1 {
+        nodes,
+        edges,
+        coverage,
+        fact_universe_count: overview.fact_count,
+        fact_candidates_examined: examined_fact_count,
+        unavailable_fact_candidates,
+        root_count: graph_roots.len(),
+        relation_limit,
+        relation_count: page.relations().len(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_verified_relation_kind_has_a_distinct_canonical_wire_name() {
+        let names = [
+            ProjectMemoryGraphRelationKindV1::Supports,
+            ProjectMemoryGraphRelationKindV1::Contradicts,
+            ProjectMemoryGraphRelationKindV1::Supersedes,
+            ProjectMemoryGraphRelationKindV1::DerivedFrom,
+            ProjectMemoryGraphRelationKindV1::Mentions,
+            ProjectMemoryGraphRelationKindV1::ActiveAssertion,
+            ProjectMemoryGraphRelationKindV1::EvidenceAnchor,
+        ]
+        .map(|kind| {
+            serde_json::to_value(kind)
+                .expect("serialize relation kind")
+                .as_str()
+                .expect("relation kind serializes as a string")
+                .to_owned()
         });
-        edges.push(json!({ "source": fact_node, "target": entity_node, "kind": "mentions" }));
+
+        assert_eq!(
+            names,
+            [
+                "supports".to_owned(),
+                "contradicts".to_owned(),
+                "supersedes".to_owned(),
+                "derived_from".to_owned(),
+                "mentions".to_owned(),
+                "active_assertion".to_owned(),
+                "evidence_anchor".to_owned(),
+            ]
+        );
+        assert_eq!(names.into_iter().collect::<BTreeSet<_>>().len(), 7);
     }
 
-    for relation in memory_graph
-        .as_ref()
-        .into_iter()
-        .flat_map(|page| page.relations())
-    {
-        if relation.kind() == ProjectMemoryGraphRelationKindV1::Mentions {
-            continue;
-        }
-        let target_id = |target: &ProjectMemoryGraphTargetV1| -> Option<(String, Value)> {
-            match target {
-                ProjectMemoryGraphTargetV1::Fact(fact) => {
-                    let legacy = canonical_to_legacy.get(fact.fact_id().as_str())?;
-                    fact_ids.contains(legacy).then(|| {
-                        let id = format!("fact:{legacy}");
-                        (id.clone(), json!({ "id": id, "kind": "fact", "label": format!("#{legacy}"), "fact_id": legacy }))
-                    })
-                }
-                ProjectMemoryGraphTargetV1::Entity(entity) => {
-                    let legacy = entity.legacy_entity_id();
-                    let id = format!("entity:{legacy}");
-                    Some((
-                        id.clone(),
-                        json!({ "id": id, "kind": "entity", "label": format!("Entity #{legacy}"), "entity_id": legacy }),
-                    ))
-                }
-                ProjectMemoryGraphTargetV1::Assertion { assertion_id, .. } => {
-                    let id = format!("assertion:{}", assertion_id.as_str());
-                    Some((
-                        id.clone(),
-                        json!({ "id": id, "kind": "assertion", "label": "Assertion", "assertion_id": assertion_id.as_str() }),
-                    ))
-                }
-                ProjectMemoryGraphTargetV1::RetrievalAnchor { anchor_id, .. } => {
-                    let id = format!("anchor:{}", anchor_id.as_str());
-                    Some((
-                        id.clone(),
-                        json!({ "id": id, "kind": "retrieval_anchor", "label": "Evidence anchor", "anchor_id": anchor_id.as_str() }),
-                    ))
-                }
-            }
+    #[test]
+    fn graph_wire_serializes_canonical_relation_and_payload_access_states() {
+        let fact_id =
+            FactId::new("fact.v1.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .expect("canonical fact id");
+        let node = MemoryGraphNodeV1::Fact {
+            id: fact_node_id(&fact_id),
+            label: fact_id.as_str().to_owned(),
+            fact_id,
+            payload_access: PayloadAccessState::Redacted,
+            projected_as_of: 42,
+            content: None,
+            category: None,
+            trust_score: None,
+            retrieval_count: None,
+            helpful_count: None,
         };
-        let Some((source, source_node)) = target_id(relation.source()) else {
-            continue;
+        let edge = MemoryGraphEdgeV1 {
+            source: "fact:source".to_owned(),
+            target: "fact:target".to_owned(),
+            kind: ProjectMemoryGraphRelationKindV1::DerivedFrom,
         };
-        let Some((target, target_node)) = target_id(relation.target()) else {
-            continue;
-        };
-        nodes.entry(source.clone()).or_insert(source_node);
-        nodes.entry(target.clone()).or_insert(target_node);
-        let kind = match relation.kind() {
-            ProjectMemoryGraphRelationKindV1::Supports => "supports",
-            ProjectMemoryGraphRelationKindV1::Contradicts => "contradicts",
-            ProjectMemoryGraphRelationKindV1::Supersedes => "supersedes",
-            ProjectMemoryGraphRelationKindV1::DerivedFrom => "derived_from",
-            ProjectMemoryGraphRelationKindV1::ActiveAssertion => "active_assertion",
-            ProjectMemoryGraphRelationKindV1::EvidenceAnchor => "evidence_anchor",
-            ProjectMemoryGraphRelationKindV1::Mentions => continue,
-        };
-        edges.push(json!({ "source": source, "target": target, "kind": kind }));
+
+        let node = serde_json::to_value(node).expect("serialize graph node");
+        let edge = serde_json::to_value(edge).expect("serialize graph edge");
+        assert_eq!(node["kind"], "fact");
+        assert_eq!(node["payload_access"], "redacted");
+        assert_eq!(edge["kind"], "derived_from");
     }
 
-    for bank in &overview.memory_banks {
-        let bank_name = bank.name.as_str();
-        let category = bank_name.to_owned();
-        let bank_node_id = format!("bank:{bank_name}");
-        let category_node_id = format!("category:{category}");
-        if let Some(existing) = nodes.get_mut(&bank_node_id) {
-            if let Some(obj) = existing.as_object_mut() {
-                obj.insert("dim".into(), json!(bank.dimension));
-                obj.insert("fact_count".into(), json!(bank.fact_count));
-                obj.insert(
-                    "updated_at".into(),
-                    json!(bank.updated_at.map(|value| value.0)),
-                );
-            }
-        } else if nodes.contains_key(&category_node_id) {
-            nodes.insert(
-                bank_node_id.clone(),
-                json!({
-                    "id": bank_node_id,
-                    "kind": "bank",
-                    "label": bank_name,
-                    "category": category,
-                    "dim": bank.dimension,
-                    "fact_count": bank.fact_count,
-                    "updated_at": bank.updated_at.map(|value| value.0),
-                }),
-            );
-        }
-        if nodes.contains_key(&category_node_id) && nodes.contains_key(&bank_node_id) {
-            edges.push(
-                json!({ "source": category_node_id, "target": bank_node_id, "kind": "bank" }),
-            );
-        }
+    #[test]
+    fn typed_graph_deadline_and_request_terminal_state_have_precedence() {
+        let error = graph_authority_error(
+            MemoryApplicationError::Store(FactStoreError::GraphDeadlineExceeded),
+            true,
+            true,
+        );
+
+        assert!(matches!(error, DashboardGraphReadError::TimedOut(_)));
+
+        let error = graph_authority_error(
+            MemoryApplicationError::Store(FactStoreError::GraphConflict),
+            true,
+            true,
+        );
+        assert!(matches!(error, DashboardGraphReadError::TimedOut(_)));
+
+        let error = graph_authority_error(
+            MemoryApplicationError::Store(FactStoreError::GraphUnavailable),
+            false,
+            true,
+        );
+        assert!(matches!(error, DashboardGraphReadError::Cancelled(_)));
+
+        let error = graph_authority_error(
+            MemoryApplicationError::Store(FactStoreError::GraphResetRequired {
+                owner: tracedecay_domain::FactOwnerV1::Profile,
+                reason: "verified snapshot is incompatible".to_owned(),
+            }),
+            true,
+            true,
+        );
+        let DashboardGraphReadError::ResetRequired(message) = error else {
+            panic!("typed graph reset must not be collapsed into request timeout or cancellation");
+        };
+        assert!(message.contains("verified snapshot is incompatible"));
     }
 
-    for (category, count) in &category_counts {
-        if let Some(node) = nodes.get_mut(&format!("category:{category}"))
-            && let Some(obj) = node.as_object_mut()
-        {
-            obj.insert("fact_count".into(), count.clone());
-        }
+    #[test]
+    fn exact_relation_limit_cannot_prove_complete_graph_coverage() {
+        assert!(relation_page_is_proven_complete(9, 10));
+        assert!(!relation_page_is_proven_complete(10, 10));
     }
-
-    Ok(json!({
-        "nodes": nodes.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
-        "edges": edges,
-    }))
 }

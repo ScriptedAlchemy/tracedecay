@@ -21,9 +21,11 @@ use tracedecay_usecases::graph::{
 pub(crate) struct VerifiedGraphQuery {
     reader: CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
+    request_context: Option<tracedecay_application::RequestContext>,
 }
 
 impl VerifiedGraphQuery {
+    #[cfg(test)]
     pub(crate) fn from_reader(
         reader: CodeGraphInteractiveReader,
         cancellation: Arc<dyn GraphCancellation>,
@@ -31,7 +33,26 @@ impl VerifiedGraphQuery {
         Self {
             reader,
             cancellation,
+            request_context: None,
         }
+    }
+
+    fn from_admitted_reader(
+        reader: CodeGraphInteractiveReader,
+        cancellation: Arc<dyn GraphCancellation>,
+        request_context: tracedecay_application::RequestContext,
+    ) -> Self {
+        Self {
+            reader,
+            cancellation,
+            request_context: Some(request_context),
+        }
+    }
+
+    pub(crate) fn request_context(&self) -> Result<&tracedecay_application::RequestContext> {
+        self.request_context.as_ref().ok_or_else(|| {
+            graph_invalid_request("verified graph query is missing its admitted request context")
+        })
     }
 
     pub(crate) fn manager(&self) -> GraphQueryManager<'_> {
@@ -378,6 +399,10 @@ impl TraceDecay {
         let reader = verified
             .reader_with_cancellation(&context, observed_at, Arc::clone(&graph_cancellation))
             .map_err(map_code_graph_read_runtime_error)?;
-        Ok(VerifiedGraphQuery::from_reader(reader, graph_cancellation))
+        Ok(VerifiedGraphQuery::from_admitted_reader(
+            reader,
+            graph_cancellation,
+            context,
+        ))
     }
 }

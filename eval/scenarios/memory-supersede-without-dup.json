@@ -2,10 +2,10 @@
   "schema_version": 1,
   "id": "memory-supersede-without-dup",
   "title": "Preference pivots update the existing fact instead of duplicating it",
-  "description": "When a stored preference is superseded (npm -> pnpm), a well-behaved agent updates the existing fact. If a naive add leaves both facts, curation dry-run must propose deleting the older superseded preference.",
+  "description": "When a stored preference is superseded (npm -> pnpm), a well-behaved agent updates the existing fact. If a naive add leaves both facts, the agent-managed curator must remove the older superseded preference.",
   "adapted_from": "mnemon `memory-merge-supersede` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
   "contract": "stable",
-  "contract_notes": "Write-time add remains report-only for supersession, but deterministic curation dry-run enforces hygiene by proposing deletion of the older superseded fact.",
+  "contract_notes": "The violation phase requires a configured automation backend. Accepted curator operations settle automatically without a separate approval or apply step.",
   "setup": {
     "facts": [
       {
@@ -37,12 +37,11 @@
           "args": {
             "content": "User prefers pnpm as the package manager for this project (supersedes earlier npm preference).",
             "category": "user_pref",
-            "source": "eval-agent"
+            "source_label": "eval-agent"
           }
         },
         {
-          "kind": "curate",
-          "apply": false
+          "kind": "memory-curation"
         }
       ]
     }
@@ -79,8 +78,8 @@
       "phase": "well-behaved-only"
     },
     {
-      "kind": "curate-deletes-source",
-      "name": "dry_run_proposes_deleting_seeded_npm_preference",
+      "kind": "curation-removes-source",
+      "name": "curator_removes_seeded_npm_preference",
       "source": "eval-seed",
       "expected": true,
       "phase": "violation-only"

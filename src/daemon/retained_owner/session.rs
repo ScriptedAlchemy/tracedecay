@@ -13,8 +13,8 @@ use tracedecay_application::retained_surfaces::{
     TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1, WorkflowsRequestV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
-    RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    ApplicationOutcome, CancellationStage, RequestAdmission, RetainedSessionExecutionPortV1,
+    RetainedSessionRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1, now_micros,
 };
 use tracedecay_domain::{
@@ -125,7 +125,9 @@ impl DirectRetainedSessionPortV1 {
         // this CAS; after it wins, cancellation cannot drop the in-flight DB
         // transaction and misreport an unknown effect as a pre-admission error.
         if !context.cancellation_signal.try_begin_commit() {
-            return Err(RetainedSurfaceExecutionErrorV1::Cancelled);
+            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                CancellationStage::BeforeEffect,
+            ));
         }
         let handled = self.authorities.refresh.execute(command).await;
         let projected = match operation {
@@ -203,7 +205,9 @@ impl DirectRetainedSessionPortV1 {
         F: std::future::Future<Output = Result<T, TraceDecayError>>,
     {
         tokio::select! {
-            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled),
+            () = context.cancellation_signal.cancelled() => Err(
+                RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
+            ),
             result = super::bounded_execution(context, future) => result,
         }
     }
@@ -449,7 +453,9 @@ impl MessageSearchInput {
                 return Err(RetainedSurfaceExecutionErrorV1::Saturated);
             }
             SessionRetrievalServiceOutcome::Cancelled => {
-                return Err(RetainedSurfaceExecutionErrorV1::Cancelled);
+                return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                    CancellationStage::DuringRead,
+                ));
             }
         }
         Ok(result)
@@ -523,20 +529,10 @@ fn ensure_project_message_scope(
             .project_path
             .as_deref()
             .is_some_and(|path| Path::new(path) != authorities.project_root.as_path())
-        || request.project_selector.as_ref().is_some_and(|selector| {
-            selector
-                .project_id
-                .as_deref()
-                .is_some_and(|project_id| project_id != authorities.project_id.as_str())
-                || selector
-                    .path
-                    .as_deref()
-                    .is_some_and(|path| Path::new(path) != authorities.project_root.as_path())
-                || selector
-                    .project_path
-                    .as_deref()
-                    .is_some_and(|path| Path::new(path) != authorities.project_root.as_path())
-        })
+        || request
+            .project_selector
+            .as_ref()
+            .is_some_and(|selector| selector.project_id.as_str() != authorities.project_id.as_str())
     {
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     }
@@ -626,8 +622,16 @@ async fn retrieve_bounded(
     let now = now_micros();
     match context.request_context.admission_at(now) {
         RequestAdmission::Admitted => {}
-        RequestAdmission::Cancelled => return Err(RetainedSurfaceExecutionErrorV1::Cancelled),
-        RequestAdmission::TimedOut => return Err(RetainedSurfaceExecutionErrorV1::TimedOut),
+        RequestAdmission::Cancelled => {
+            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                CancellationStage::BeforeRead,
+            ));
+        }
+        RequestAdmission::TimedOut => {
+            return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                CancellationStage::BeforeRead,
+            ));
+        }
     }
     let remaining = context
         .request_context
@@ -638,7 +642,9 @@ async fn retrieve_bounded(
     let remaining = u64::try_from(remaining)
         .ok()
         .map(Duration::from_micros)
-        .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut)?;
+        .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
+            CancellationStage::BeforeRead,
+        ))?;
     let retrieval = service.retrieve_admitted_with_cancellation(
         context.request_context,
         context.cancellation_signal,
@@ -646,10 +652,14 @@ async fn retrieve_bounded(
     );
     tokio::select! {
         _ = context.cancellation_signal.cancelled() => {
-            Err(RetainedSurfaceExecutionErrorV1::Cancelled)
+            Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                CancellationStage::DuringRead,
+            ))
         }
         outcome = tokio::time::timeout(remaining, retrieval) => {
-            outcome.map_err(|_| RetainedSurfaceExecutionErrorV1::TimedOut)
+            outcome.map_err(|_| {
+                RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::DuringRead)
+            })
         }
     }
 }

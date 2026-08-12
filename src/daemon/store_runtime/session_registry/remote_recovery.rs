@@ -41,8 +41,8 @@ pub(super) use publication::remote_restore_activated_open_identity;
 
 use artifacts::{
     BackupSnapshotV1, RemoteBackupManifestV1, classify_runtime_error, converge_interrupted_restore,
-    digest_bytes, digest_from_bytes, read_json_manifest, safe_digest_suffix, sha256_bytes,
-    sha256_file, sqlite_identity, validate_isolated_restore,
+    digest_bytes, digest_from_bytes, read_json_manifest, sha256_bytes, sha256_file,
+    sqlite_identity, validate_isolated_restore,
 };
 use support::{
     RecoveryRuntimeProbeV1, authority_key, backup_id, committed_restore,

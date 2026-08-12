@@ -8,14 +8,12 @@
  *
  * Two truths this surface exists to keep:
  *
- *   - An event whose detail is `legacy_redacted` HAS a detail that was withheld,
+ *   - An event whose detail is `redacted` HAS a detail that was withheld,
  *     and one whose availability is `unknown` never recorded whether it had one.
  *     Both render as their own state chip rather than as a blank note, which is
  *     what a plain optional `note` would have made of them. These are the first
  *     two supplied-backend uses of the `redacted` and `unknown` chips in a
  *     workspace, and they are the daemon's words, not this dashboard's.
- *   - A store whose feedback-history repair is unfinished or unknown has NOT
- *     said this audit is whole. That sentence sits above the list, not under it.
  */
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
@@ -25,9 +23,9 @@ import {
   type TrustHistoryEvent,
   type TrustHistoryPayload,
 } from '../../data/query/memory.ts';
-import { trustDetailState, trustHistoryReading } from './memoryModel.ts';
+import { formatUtcMicros, trustDetailState, trustHistoryReading } from './memoryModel.ts';
 
-export function FactTrustHistory({ factId }: { factId: number | null }) {
+export function FactTrustHistory({ factId }: { factId: string | null }) {
   const history = useFactTrustHistory(factId);
   if (factId == null) return null;
   return (
@@ -51,13 +49,21 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
     );
   }
   const reading = trustHistoryReading(data);
+  const complete = data.completeness === 'complete';
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-3xs leading-relaxed text-text-muted">{reading.repair}</p>
+      {complete ? null : (
+        <p role="status" className="text-3xs leading-relaxed text-state-partial">
+          This is a partial history window of at most {data.limit.toLocaleString()}{' '}
+          events. A continuation is available; all tallies below describe this
+          window only.
+        </p>
+      )}
       {reading.count === 0 ? (
         <p className="text-2xs leading-relaxed text-text-secondary">
-          no feedback has ever been recorded against this fact — its trust is the score it
-          was stored with, not a score anything has moved
+          {complete
+            ? 'no feedback has ever been recorded against this fact — its trust is the score it was stored with, not a score anything has moved'
+            : 'no feedback events were returned in this partial window'}
         </p>
       ) : (
         <>
@@ -83,12 +89,12 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
           </dl>
           <div className="flex items-end gap-3 border-t border-edge-subtle pt-2">
             <Readout
-              label="opening"
+              label={complete ? "opening" : "window opening"}
               size="sm"
               value={reading.opening == null ? '—' : reading.opening.toFixed(3)}
             />
             <Readout
-              label="net"
+              label={complete ? "net" : "window net"}
               size="sm"
               value={
                 reading.net == null
@@ -97,17 +103,19 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
               }
             />
             <Readout
-              label="closing"
+              label={complete ? "closing" : "window closing"}
               size="sm"
               value={reading.closing == null ? '—' : reading.closing.toFixed(3)}
             />
           </div>
-          {reading.availability.legacy_redacted > 0 || reading.availability.unknown > 0 ? (
+          {reading.availability.redacted > 0 || reading.availability.unknown > 0 ? (
             <p className="text-3xs leading-relaxed text-text-muted">
-              {reading.availability.legacy_redacted.toLocaleString()} of{' '}
+              {reading.availability.redacted.toLocaleString()} of{' '}
               {reading.count.toLocaleString()} events had their detail withheld and{' '}
               {reading.availability.unknown.toLocaleString()} never recorded whether they had
-              one — the trust arithmetic below is still exact.
+              one — {complete
+                ? 'the trust arithmetic remains exact.'
+                : 'arithmetic is limited to the returned window.'}
             </p>
           ) : null}
           {/* The audit is a list of rows with no focusable content of its own,
@@ -122,8 +130,8 @@ function TrustHistoryBody({ data }: { data: TrustHistoryPayload }) {
             tabIndex={0}
             className="flex max-h-64 flex-col gap-1.5 overflow-auto"
           >
-            {[...data.trust_history].reverse().map((event, index) => (
-              <TrustEventRow key={`${event.timestamp}-${index}`} event={event} />
+            {[...data.trust_history].reverse().map((event) => (
+              <TrustEventRow key={event.event_id} event={event} />
             ))}
           </ol>
         </>
@@ -139,7 +147,7 @@ function TrustEventRow({ event }: { event: TrustHistoryEvent }) {
     <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
       <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">
         <span className="td-value" data-cell="numeric">
-          {event.timestamp}
+          {formatUtcMicros(event.timestamp)}
         </span>
         <span className="text-text-secondary">{event.action}</span>
         <span className="td-value" data-cell="numeric">
@@ -156,7 +164,7 @@ function TrustEventRow({ event }: { event: TrustHistoryEvent }) {
           kind={detailState}
           detail={
             detailState === 'redacted'
-              ? 'detail withheld by an earlier writer'
+              ? 'feedback detail withheld'
               : 'detail state never recorded'
           }
         />

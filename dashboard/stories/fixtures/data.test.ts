@@ -41,6 +41,7 @@ import {
   GraphPathPayloadV1Schema,
   GraphSubgraphPayloadV1Schema,
   MemoryOverviewPayloadV1Schema,
+  MemoryAutomationRunResultV1Schema,
   MemoryStatusPayloadV1Schema,
   ObservatoryReadModelV1Schema,
   ProjectContextPayloadV1Schema,
@@ -102,6 +103,9 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/plugins/analytics/usage': DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
   '/api/plugins/analytics/agents': DashboardEnvelopeV1Schema(AnalyticsAgentsPayloadV1Schema),
   '/api/automation/scheduler/status': AutomationSchedulerStatusV1Schema,
+  '/api/automation/run/memory-curator': z
+    .object({ run: MemoryAutomationRunResultV1Schema })
+    .strict(),
   '/api/observatory': DashboardEnvelopeV1Schema(ObservatoryReadModelV1Schema),
   '/api/costs': DashboardEnvelopeV1Schema(CostsReadModelV1Schema),
   '/api/code-index/freshness': DashboardEnvelopeV1Schema(CodeIndexFreshnessPayloadV1Schema),
@@ -149,6 +153,8 @@ const UNCONTRACTED: Readonly<Record<string, string>> = {
   '/api/automation/automatic-fact-receipts':
     'automatic_fact_receipts_api::list answers with a bare Value',
   '/api/automation/runs': 'automation_run_api::run_list answers with a bare Value',
+  '/api/automation/outcomes':
+    'automation_outcomes_api::outcomes answers with a bare Value',
 };
 
 /**

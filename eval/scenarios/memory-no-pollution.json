@@ -17,7 +17,7 @@
         "args": {
           "content": "Durable decision: memory eval scenarios gate hygiene regressions before broader host expansion.",
           "category": "decision",
-          "source": "eval-agent"
+          "source_label": "eval-agent"
         }
       }
     ],
@@ -30,7 +30,7 @@
           "args": {
             "content": "Temporary task token 742913 is active for this run.",
             "category": "general",
-            "source": "eval-agent"
+            "source_label": "eval-agent"
           }
         }
       ]

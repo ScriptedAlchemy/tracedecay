@@ -1,350 +1,322 @@
 #![cfg(feature = "test-transport")]
 
+//! Production-boundary coverage for retained code-index publication and reopen.
+//!
+//! The retired relational graph-rebuild facade owned its own checkpoint/status
+//! vocabulary. The final-V2 authority is the daemon's sealed code generation:
+//! status reports the serving generation while reconciliation is in progress,
+//! and only a complete replacement becomes current. Process cancellation and
+//! restart during partial work remain covered by the mounted incremental
+//! lifecycle journey in `daemon_suite/indexing_lifecycle_test.rs`; this target
+//! exercises the complementary public background-refresh, reopen, and MCP
+//! status journey without recreating that substrate.
+
+use std::fmt::Write as _;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
-use tracedecay::mcp::McpServer;
-use tracedecay::tracedecay::{
-    GraphRebuildAvailabilityV1, GraphRebuildStatusV1, TraceDecay, TraceDecayOpenOptions,
-};
-use tracedecay_store::ProjectId;
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay::mcp::JsonRpcResponse;
 
-const FILE_COUNT: usize = 4_001;
-const CHECKPOINT_BATCH_SIZE: usize = 1_024;
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
 
 fn git(project: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let output = Command::new("git")
+        .args(["-c", "core.hooksPath=.git/no-hooks"])
+        .args(["-c", "gc.auto=0"])
+        .args(["-c", "gc.autoDetach=false"])
+        .args(["-c", "maintenance.auto=false"])
         .args(args)
         .current_dir(project)
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed");
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run git {args:?}: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
-async fn wait_for_status(
-    graph: &TraceDecay,
-    predicate: impl Fn(&GraphRebuildStatusV1) -> bool,
-) -> GraphRebuildStatusV1 {
-    tokio::time::timeout(Duration::from_secs(90), async {
-        loop {
-            let status = graph
-                .graph_rebuild_status()
-                .await
-                .expect("read graph rebuild status");
-            if predicate(&status) {
-                return status;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("graph rebuild reaches expected state")
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn graph_rebuild_is_nonblocking_resumable_and_honestly_reported() {
-    std::fs::create_dir_all("target").expect("repo-local target directory");
-    let root = tempfile::Builder::new()
-        .prefix("graph-rebuild-")
-        .tempdir_in("target")
-        .expect("repo-local temporary fixture");
-    let project = root.path().join("project");
-    let profile = root.path().join("profile");
-    std::fs::create_dir_all(project.join("src")).expect("project source directory");
-    for index in 0..4_000 {
-        std::fs::write(
-            project.join("src").join(format!("filler_{index:04}.rs")),
-            format!("pub fn filler_{index:04}() -> usize {{ {index} }}\n"),
-        )
-        .expect("filler source");
-    }
-    std::fs::write(project.join("src/lib.rs"), "pub fn before_rebuild() {}\n")
-        .expect("initial source");
-    git(&project, &["init", "-q", "-b", "main"]);
-    git(&project, &["add", "."]);
+fn commit_all(project: &Path, message: &str) {
+    git(project, &["add", "."]);
     git(
-        &project,
+        project,
         &[
             "-c",
             "user.name=TraceDecay Test",
             "-c",
-            "user.email=test@tracedecay.local",
+            "user.email=tracedecay-test@example.com",
             "commit",
-            "-qm",
-            "fixture",
+            "-m",
+            message,
         ],
     );
-    git(&project, &["branch", "feature"]);
+}
 
-    let options = TraceDecayOpenOptions {
-        profile_root: Some(profile.clone()),
-        global_db_path: Some(profile.join("global.db")),
-    };
-    let runtime = HostAdmissionTestRuntimeV1::project(
-        &profile,
+fn head(project: &Path) -> String {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project)
+        .output()
+        .expect("read git HEAD");
+    assert!(output.status.success(), "git rev-parse HEAD failed");
+    String::from_utf8(output.stdout)
+        .expect("git HEAD is UTF-8")
+        .trim()
+        .to_owned()
+}
+
+fn tool_payload(response: &JsonRpcResponse) -> Value {
+    assert!(response.error.is_none(), "{response:?}");
+    let result = response.result.as_ref().expect("tool result");
+    assert_ne!(result["isError"], true, "tool effect failed: {result}");
+    let text = result["content"][0]["text"].as_str().expect("tool text");
+    serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("tool returned invalid JSON: {error}; text={text}"))
+}
+
+async fn tool(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    name: &str,
+    arguments: Value,
+) -> Value {
+    tool_payload(
+        &harness
+            .call_tool(project, name, arguments)
+            .await
+            .unwrap_or_else(|error| panic!("{name} failed: {error}")),
+    )
+}
+
+async fn status(harness: &ProductionProjectCompositionHarnessV1, project: &Path) -> Value {
+    tool(
+        harness,
+        project,
+        "tracedecay_status",
+        json!({
+            "format": "json",
+            "include_branch_diagnostics": false,
+            "include_storage_health": false,
+            "include_session_ingest": false,
+            "include_staleness": false,
+        }),
+    )
+    .await
+}
+
+async fn search(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    query: &str,
+) -> Value {
+    tool(
+        harness,
+        project,
+        "tracedecay_search",
+        json!({"query": query, "limit": 20, "format": "json"}),
+    )
+    .await
+}
+
+fn result_paths(search: &Value) -> Vec<&str> {
+    search["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|result| result["display"]["path"].as_str())
+        .collect()
+}
+
+async fn wait_for_current_generation(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    expected_revision: &str,
+    query: &str,
+) -> String {
+    let mut last_status = Value::Null;
+    let mut last_search = Value::Null;
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            last_status = status(harness, project).await;
+            let worktree = &last_status["code_index_freshness"]["worktree"];
+            let generation = worktree["latest_generation_id"].as_str().map(str::to_owned);
+            if last_status["code_index_freshness"]["status"] == "current"
+                && worktree["coverage"] == "complete"
+                && worktree["staleness_state"] == "fresh"
+                && worktree["source_reference"] == "refs/heads/main"
+                && worktree["source_revision"] == expected_revision
+                && generation.is_some()
+            {
+                last_search = search(harness, project, query).await;
+                if last_search["code_generation"].as_str() == generation.as_deref()
+                    && !result_paths(&last_search).is_empty()
+                {
+                    assert!(
+                        last_status.get("code_index_freshness_warning").is_none(),
+                        "a current generation must not carry a warming warning: {last_status}"
+                    );
+                    return generation.expect("current generation");
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out waiting for current generation; status={last_status}; search={last_search}"
+        )
+    })
+}
+
+async fn wait_for_background_refresh(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    old_generation: &str,
+    old_revision: &str,
+) {
+    let mut last_status = Value::Null;
+    tokio::time::timeout(RECEIPT_TIMEOUT, async {
+        loop {
+            last_status = status(harness, project).await;
+            let worktree = &last_status["code_index_freshness"]["worktree"];
+            if last_status["code_index_freshness"]["status"] == "warming"
+                && worktree["latest_generation_id"] == old_generation
+                && worktree["source_reference"] == "refs/heads/main"
+                && worktree["source_revision"] == old_revision
+                && worktree["coverage"] == "partial_refresh_in_progress"
+                && worktree["staleness_state"] == "refreshing"
+            {
+                assert!(
+                    last_status["code_index_freshness_warning"]
+                        .as_str()
+                        .is_some_and(|warning| warning.contains("counts are not authoritative")),
+                    "warming status omitted its non-authoritative warning: {last_status}"
+                );
+                let stale = search(harness, project, "before_reopen").await;
+                assert_eq!(stale["code_generation"], old_generation, "{stale}");
+                assert_eq!(stale["coverage"]["recall"], "partial", "{stale}");
+                assert!(
+                    result_paths(&stale).contains(&"src/lib.rs"),
+                    "the last complete generation stopped serving: {stale}"
+                );
+                for lane in ["exact", "lexical", "graph"] {
+                    assert_eq!(stale["coverage"][lane]["status"], "stale", "{stale}");
+                    assert_eq!(
+                        stale["coverage"][lane]["generation"], old_generation,
+                        "{stale}"
+                    );
+                }
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("reopen omitted background-refresh status: {last_status}"));
+}
+
+fn install_background_batch(isolation_root: &Path, project: &Path) {
+    let staging = isolation_root.join("refresh-batch-staging");
+    fs::create_dir_all(&staging).expect("background batch staging directory");
+    for file_index in 0..768_u32 {
+        let mut source = String::new();
+        for symbol_index in 0..128_u32 {
+            writeln!(
+                source,
+                "pub fn refresh_probe_{file_index:04}_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}"
+            )
+            .expect("format background source");
+        }
+        fs::write(staging.join(format!("file_{file_index:04}.rs")), source)
+            .expect("write background source");
+    }
+    fs::rename(&staging, project.join("src/refresh_batch"))
+        .expect("atomically install background batch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_refresh_and_reopen_report_only_servable_generations() {
+    let isolation = tempfile::TempDir::new().expect("isolated production root");
+    let project = isolation.path().join("project");
+    fs::create_dir_all(project.join("src")).expect("project source directory");
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn before_reopen() -> &'static str { \"sealed\" }\n",
+    )
+    .expect("initial source");
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
+    commit_all(&project, "initial source");
+    let initial_revision = head(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("open initial production composition");
+    let initial_generation =
+        wait_for_current_generation(&harness, &project, &initial_revision, "before_reopen").await;
+
+    install_background_batch(isolation.path(), &project);
+    commit_all(&project, "install background refresh batch");
+    let refreshed_revision = head(&project);
+    let receipt = tool(
+        &harness,
         &project,
-        ProjectId::new("project.graph-rebuild").expect("project id"),
+        "tracedecay_admin_sync",
+        json!({"force": true, "format": "json"}),
     )
-    .await
-    .expect("registered project runtime");
-    TraceDecay::configure_graph_rebuild_for_test(0, 0, false);
-    let initialized = runtime
-        .initialize_project_graph_for_test(&project, options.clone())
-        .await
-        .expect("initialize fixture");
-    let full_index = initialized.index_all().await.expect("seed old generation");
-    assert_eq!(full_index.file_count, FILE_COUNT);
-    git(&project, &["checkout", "-q", "feature"]);
-    let feature_seed = runtime
-        .open_project_graph_for_test(&project, options.clone())
-        .await
-        .expect("auto-track peer branch through retained runtime");
-    assert_eq!(feature_seed.serving_branch(), Some("feature"));
-    feature_seed.close();
-    git(&project, &["checkout", "-q", "main"]);
-
-    initialized.close();
-    TraceDecay::configure_graph_rebuild_for_test(0, 0, false);
-    let compatible = runtime
-        .open_project_graph_for_test(&project, options.clone())
-        .await
-        .expect("reopen the freshly indexed graph");
-    assert!(matches!(
-        compatible
-            .graph_rebuild_status()
-            .await
-            .expect("read current generation status"),
-        GraphRebuildStatusV1::Current { .. }
-    ));
-    assert_eq!(
-        TraceDecay::graph_rebuild_extractions_for_test(),
-        0,
-        "a current graph generation must not trigger extraction"
-    );
-
-    std::fs::write(project.join("src/lib.rs"), "pub fn after_rebuild() {}\n")
-        .expect("updated source");
-    compatible
-        .db()
-        .set_metadata("graph_generation_schema_version", "16")
-        .await
-        .expect("stamp old graph generation");
-    compatible
-        .db()
-        .execute_write_batch(
-            "prepare stale graph generation fixture",
-            "DELETE FROM metadata WHERE key = 'graph_rebuild_state_v1';",
-        )
-        .await
-        .expect("clear the rebuild marker");
-    compatible.close();
-
-    TraceDecay::configure_graph_rebuild_for_test(1, 750, false);
-    let admission_started = Instant::now();
-    let opened = runtime
-        .open_project_graph_for_test(&project, options.clone())
-        .await
-        .expect("open the stale-generation project");
-    let admission_elapsed = admission_started.elapsed();
-    assert!(
-        admission_elapsed.as_millis().saturating_mul(4) < u128::from(full_index.duration_ms),
-        "admission took {admission_elapsed:?}, not a small fraction of the measured full index ({:?})",
-        Duration::from_millis(full_index.duration_ms)
-    );
-    assert!(matches!(
-        opened
-            .graph_rebuild_status()
-            .await
-            .expect("read pending rebuild status"),
-        GraphRebuildStatusV1::Indexing {
-            availability: GraphRebuildAvailabilityV1::Stale,
-            ..
-        }
-    ));
-
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !opened.store_layout().dirty_path.exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("background rebuild publishes its live store marker");
-    let peer = tokio::time::timeout(
-        Duration::from_secs(2),
-        runtime.open_project_branch_for_test(&project, "feature", options.clone()),
-    )
-    .await
-    .expect("live rebuild marker must not block a peer branch")
-    .expect("peer branch opens while rebuild owns the store marker");
-    peer.close();
-
-    assert_eq!(
-        opened
-            .get_nodes_by_name("before_rebuild")
-            .await
-            .expect("read old generation")
-            .len(),
-        1
-    );
-    assert!(
-        opened
-            .get_nodes_by_name("after_rebuild")
-            .await
-            .expect("new generation remains hidden")
-            .is_empty()
-    );
-
-    let failed = wait_for_status(&opened, |status| {
-        matches!(status, GraphRebuildStatusV1::Failed { .. })
-    })
     .await;
-    assert!(matches!(
-        failed,
-        GraphRebuildStatusV1::Failed {
-            retryable: true,
-            ..
-        }
-    ));
+    assert_eq!(receipt["status"], "queued", "refresh receipt: {receipt}");
     assert_eq!(
-        TraceDecay::graph_rebuild_extractions_for_test(),
-        CHECKPOINT_BATCH_SIZE
+        receipt["reconcile_scope"], "authoritative_project",
+        "refresh escaped the mounted project authority: {receipt}"
     );
-    let mut active_sync_lock_name = opened
-        .db_path()
-        .file_name()
-        .expect("active graph database filename")
-        .to_os_string();
-    active_sync_lock_name.push(".sync.lock");
-    let checkpoint_root = opened
-        .db_path()
-        .with_file_name(active_sync_lock_name)
-        .with_extension("graph-rebuild-checkpoint-v1");
-    assert!(
-        std::fs::read_dir(&checkpoint_root)
-            .expect("checkpoint directory")
-            .filter_map(std::result::Result::ok)
-            .any(|entry| entry.file_name().to_string_lossy().starts_with("batch-")),
-        "the interrupted worker must leave a durable checkpoint batch"
-    );
+    wait_for_background_refresh(&harness, &project, &initial_generation, &initial_revision).await;
 
-    TraceDecay::configure_graph_rebuild_for_test(0, 0, true);
-    opened
-        .db()
-        .execute_write_batch(
-            "simulate a lost rebuild marker",
-            "DELETE FROM metadata WHERE key = 'graph_rebuild_state_v1'",
-        )
-        .await
-        .expect("delete the rebuild state");
-    opened.close();
-    let markerless = runtime
-        .open_project_graph_for_test(&project, options.clone())
-        .await
-        .expect("reopen markerless migrated generation");
-    assert!(matches!(
-        markerless
-            .graph_rebuild_status()
-            .await
-            .expect("read markerless status"),
-        GraphRebuildStatusV1::Indexing {
-            completed_files: 0,
-            availability: GraphRebuildAvailabilityV1::Stale,
-            ..
-        }
-    ));
-    markerless.close();
-
-    TraceDecay::configure_graph_rebuild_for_test(0, 0, false);
-    let resumed = runtime
-        .open_project_graph_for_test(&project, options.clone())
-        .await
-        .expect("resume the interrupted rebuild");
-    wait_for_status(&resumed, |status| {
-        matches!(status, GraphRebuildStatusV1::Current { .. })
-    })
-    .await;
-    assert_eq!(
-        TraceDecay::graph_rebuild_extractions_for_test(),
-        FILE_COUNT - CHECKPOINT_BATCH_SIZE,
-        "resume must extract only files absent from the durable checkpoint"
-    );
-    assert!(
-        resumed
-            .get_nodes_by_name("before_rebuild")
-            .await
-            .expect("old generation replaced")
-            .is_empty()
-    );
-    assert_eq!(
-        resumed
-            .get_nodes_by_name("after_rebuild")
-            .await
-            .expect("new generation published")
-            .len(),
-        1
-    );
-
-    TraceDecay::configure_graph_rebuild_for_test(0, 0, true);
-    resumed
-        .db()
-        .execute_write_batch(
-            "prepare an unavailable graph generation",
-            "DELETE FROM edges;
-             DELETE FROM unresolved_refs;
-             DELETE FROM nodes;
-             DELETE FROM files;
-             DELETE FROM metadata WHERE key = 'graph_rebuild_state_v1';
-             UPDATE metadata SET value = '16'
-             WHERE key = 'graph_generation_schema_version';",
-        )
-        .await
-        .expect("clear old graph generation");
-    resumed.close();
-    let unavailable = runtime
-        .open_project_graph_for_test(&project, options)
-        .await
-        .expect("open the unavailable graph generation");
-    assert!(matches!(
-        unavailable
-            .graph_rebuild_status()
-            .await
-            .expect("read unavailable status"),
-        GraphRebuildStatusV1::Indexing {
-            availability: GraphRebuildAvailabilityV1::Unavailable,
-            ..
-        }
-    ));
-
-    let server = McpServer::new(unavailable, None).await;
-    let status = server
-        .call_tool_for_test(
-            "tracedecay_status",
-            json!({
-                "format": "json",
-                "include_branch_diagnostics": false,
-                "include_storage_health": false,
-                "include_session_ingest": false,
-                "include_staleness": false,
-            }),
-        )
-        .await
-        .expect("query typed unavailable status");
-    let payload: Value = serde_json::from_str(
-        status.value["content"][0]["text"]
-            .as_str()
-            .expect("status JSON text"),
+    let refreshed_generation = wait_for_current_generation(
+        &harness,
+        &project,
+        &refreshed_revision,
+        "refresh_probe_0000_000",
     )
-    .expect("parse status JSON");
-    assert_eq!(payload["graph_rebuild"]["state"], "indexing");
-    assert_eq!(payload["graph_rebuild"]["availability"], "unavailable");
-    assert!(
-        payload["graph_rebuild_warning"]
-            .as_str()
-            .is_some_and(|warning| warning.contains("counts are not authoritative"))
+    .await;
+    assert_ne!(
+        refreshed_generation, initial_generation,
+        "the completed refresh must atomically replace the retained generation"
     );
+    harness.shutdown().await;
 
-    TraceDecay::configure_graph_rebuild_for_test(0, 0, false);
+    fs::write(
+        project.join("src/after_reopen.rs"),
+        "pub fn after_reopen() -> &'static str { \"current\" }\n",
+    )
+    .expect("post-shutdown source");
+    commit_all(&project, "change source while daemon is closed");
+    let reopened_revision = head(&project);
+
+    let reopened = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .expect("reopen production composition after an offline change");
+    let reopened_generation =
+        wait_for_current_generation(&reopened, &project, &reopened_revision, "after_reopen").await;
+    assert_ne!(
+        reopened_generation, refreshed_generation,
+        "reopen must publish the offline source change before reporting current"
+    );
+    reopened.shutdown().await;
+
+    let unchanged =
+        ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+            .await
+            .expect("reopen unchanged production composition");
+    assert_eq!(
+        wait_for_current_generation(&unchanged, &project, &reopened_revision, "after_reopen").await,
+        reopened_generation,
+        "an unchanged reopen must retain the same sealed generation"
+    );
+    unchanged.shutdown().await;
 }

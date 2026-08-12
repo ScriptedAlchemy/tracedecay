@@ -4,7 +4,17 @@ use super::{CURRENT_SURFACES, RetainedSurfaceOperation, RetainedSurfaceSpec};
 
 const MEMORY_SCOPE: &[ScopeDimension] = &[ScopeDimension::Resource];
 
-pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
+pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
+    RetainedSurfaceSpec {
+        operation: RetainedSurfaceOperation::MemoryAutomationRun,
+        summary: "Run canonical automatic memory maintenance",
+        description: "Executes one admitted automatic-memory run with durable inner mutation receipts and reconciliation.",
+        example: r#"{"run_id":"run.memory.example","task":{"kind":"memory_curator","options":{"fact_review_limit":24,"min_confidence_millionths":720000}}}"#,
+        effect: EffectClass::Administrative,
+        scope: &[ScopeDimension::Project],
+        paginated: false,
+        surfaces: &[],
+    },
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::FactStoreAdd,
         summary: "Add a retained fact",
@@ -62,7 +72,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         example: "Find retained facts contradicting this claim",
         effect: EffectClass::Read,
         scope: MEMORY_SCOPE,
-        paginated: true,
+        paginated: false,
         surfaces: CURRENT_SURFACES,
     },
     RetainedSurfaceSpec {
@@ -126,3 +136,31 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
         surfaces: CURRENT_SURFACES,
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::SPECS;
+    use crate::retained_surfaces::RetainedSurfaceOperation;
+
+    #[test]
+    fn contradiction_is_bounded_while_resumable_memory_reads_are_paginated() {
+        let paginated = |operation| {
+            SPECS
+                .iter()
+                .find(|spec| spec.operation == operation)
+                .expect("memory operation has a retained catalog entry")
+                .paginated
+        };
+
+        assert!(!paginated(RetainedSurfaceOperation::FactStoreContradict));
+        for operation in [
+            RetainedSurfaceOperation::FactStoreSearch,
+            RetainedSurfaceOperation::FactStoreProbe,
+            RetainedSurfaceOperation::FactStoreRelated,
+            RetainedSurfaceOperation::FactStoreReason,
+            RetainedSurfaceOperation::FactStoreList,
+        ] {
+            assert!(paginated(operation));
+        }
+    }
+}

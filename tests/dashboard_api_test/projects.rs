@@ -1,8 +1,8 @@
 use crate::dashboard_api_support::*;
 use std::path::PathBuf;
-use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+use tracedecay_domain::FactId;
 
-async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, Arc<TraceDecay>) {
+pub(crate) async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, Arc<TraceDecay>) {
     let target_root = fixture
         ._tmp
         .path()
@@ -192,23 +192,15 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
 
         let (_target_root, target_cg) = setup_target_project(&fixture).await;
         let target_project_id = project_id(&target_cg);
-        // Seed through the canonical fact facade so the compatibility
-        // projection and its canonical mirror binding stay coherent. The
-        // dashboard reads facts through that projection, so a manufactured
-        // `memory_facts` row (without a `canonical_fact_id` binding) is
-        // intentionally invisible.
-        target_cg
-            .add_fact(AddFactRequest {
-                content: "Target daemon project selector fact".to_string(),
-                category: MemoryCategory::Project,
-                source: Some("dashboard-fixture".to_string()),
-                tags: vec!["selector".to_string()],
-                entities: Vec::new(),
-                trust: Some(0.91),
-                metadata: serde_json::json!({}),
-            })
-            .await
-            .expect("target fact should seed via canonical add");
+        let target_fact_id = seed_dashboard_fact(
+            &target_cg,
+            "Target daemon project selector fact",
+            tracedecay_domain::FactCategoryV1::Project,
+            0.91,
+            &["selector"],
+            &[],
+        )
+        .await;
         target_cg
             .checkpoint()
             .await
@@ -243,10 +235,81 @@ fn project_scoped_plugin_routes_read_selected_project_store() {
             .as_array()
             .unwrap_or_else(|| panic!("expected selected project facts: {selected_payload}"));
         assert_eq!(selected_facts.len(), 1);
+        let selected_fact_id = selected_facts[0]["fact_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("dashboard fact identity must be canonical text: {selected_payload}"));
+        assert_eq!(selected_fact_id, target_fact_id.as_str());
+        FactId::new(selected_fact_id.to_owned())
+            .unwrap_or_else(|error| panic!("dashboard returned invalid canonical fact id: {error}"));
         assert_eq!(
             selected_facts[0]["content"],
             "Target daemon project selector fact"
         );
+        assert_eq!(
+            selected_payload["payload"]["holographic"]["graph"]["coverage"]["state"],
+            "complete",
+            "mounted selected-project graph must report explicit complete coverage: {selected_payload}"
+        );
+        let graph_nodes = selected_payload["payload"]["holographic"]["graph"]["nodes"]
+            .as_array()
+            .unwrap_or_else(|| panic!("selected project graph nodes must be an array"));
+        assert!(
+            graph_nodes.iter().any(|node| {
+                node["fact_id"].as_str() == Some(target_fact_id.as_str())
+            }),
+            "selected project graph must hydrate the exact target fact: {selected_payload}"
+        );
+        assert!(
+            graph_nodes.iter().all(|node| {
+                node.get("fact_id")
+                    .is_none_or(|fact_id| fact_id.as_str().is_some())
+            }),
+            "graph fact identities must remain canonical strings: {selected_payload}"
+        );
+    });
+}
+
+#[test]
+fn project_scoped_gateway_refuses_profile_owned_automation_skills() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture(false).await;
+        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
+        let (_target_root, target_cg) = setup_target_project(&fixture).await;
+        let target_project_id = project_id(&target_cg);
+        let active_project_id = fixture.host_runtime.project_id().as_str().to_owned();
+
+        let (active_status, active_skills) = get_json(
+            &agent,
+            &format!("{}/api/automation/skills", fixture.base_url),
+        );
+        assert_eq!(
+            active_status, 200,
+            "profile-owned automation skills must remain mounted at their canonical route: {active_skills}"
+        );
+        assert!(active_skills["skills"].is_array(), "{active_skills}");
+
+        for project_id in [active_project_id, target_project_id] {
+            for tail in ["automation/skills", "automation/skills/repo-hygiene"] {
+                let (status, refused) = get_json(
+                    &agent,
+                    &format!(
+                        "{}/api/projects/{project_id}/{tail}",
+                        fixture.base_url
+                    ),
+                );
+                assert_eq!(
+                    status, 404,
+                    "project-qualified profile authority must be refused: {refused}"
+                );
+                assert_eq!(refused["status"], "not_project_scoped");
+                assert_eq!(refused["project_id"], project_id);
+                assert!(refused.get("skills").is_none());
+            }
+        }
     });
 }
 
@@ -294,80 +357,5 @@ fn project_scoped_gateway_reports_registry_read_failures_as_unavailable() {
         assert_eq!(gateway_status, 200, "{gateway}");
         assert_eq!(gateway["domain_state"], "unknown", "{gateway}");
         assert_eq!(gateway["payload"]["status"], "registry_unavailable");
-    });
-}
-
-#[test]
-fn project_scoped_mutations_are_rejected_for_non_active_projects() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_dashboard_fixture_without_memory().await;
-        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
-
-        let (_target_root, target_cg) = setup_target_project(&fixture).await;
-        let target_project_id = project_id(&target_cg);
-        drop(target_cg);
-
-        let (status, body) = post_json_body(
-            &agent,
-            &format!(
-                "{}/api/projects/{}/application/retained/fact_store_curate",
-                fixture.base_url, target_project_id
-            ),
-            &serde_json::json!({
-                "memory_scope": "project",
-                "min_confidence": 0.9,
-                "operations": []
-            }),
-        );
-        assert_eq!(status, 405);
-        assert_eq!(body["status"], "read_only_project");
-    });
-}
-
-#[test]
-fn active_project_scoped_curation_uses_the_canonical_retained_route() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let fixture = start_dashboard_memory_curation_fixture().await;
-        let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
-        let fact_id = fixture_fact_id(
-            &agent,
-            &fixture,
-            "Cache invalidation policy must be explicit",
-        );
-        let active_project_id = fixture.host_runtime.project_id().as_str();
-
-        let (status, body) = post_json_body(
-            &agent,
-            &format!(
-                "{}/api/projects/{}/application/retained/fact_store_curate",
-                fixture.base_url, active_project_id
-            ),
-            &serde_json::json!({
-                "memory_scope": "project",
-                "min_confidence": 0.9,
-                "operations": [{
-                    "kind": "normalize_tags",
-                    "fact_id": fact_id.as_str(),
-                    "tags": ["canonical", "scoped"],
-                    "evidence_fact_ids": [fact_id.as_str()],
-                    "confidence": 0.95
-                }]
-            }),
-        );
-
-        assert_eq!(status, 200, "active scoped curation failed: {body}");
-        assert_eq!(body["value"]["outcome"]["outcome"], "effect");
-        assert_eq!(
-            body["value"]["outcome"]["value"]["payload"]["normalized_tags"],
-            1
-        );
     });
 }

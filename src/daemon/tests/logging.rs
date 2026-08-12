@@ -14,6 +14,69 @@ fn daemon_log_line_formats_stable_key_value_fields() {
         "[tracedecay] event=scheduler_task task=memory_curator outcome=\"not due yet\" project=\"/tmp/example project\""
     );
 }
+
+#[test]
+fn scheduler_application_problem_log_excludes_hostile_payload() {
+    use tracedecay_application::retained_surfaces::{
+        MemoryAutomationRunProblemV1, MemoryAutomationTaskV1,
+    };
+    use tracedecay_application::{
+        ApplicationProblem, ApplicationProblemEnvelope, LegalAction, RequestId, ResolvedScope,
+        RetainedSurfaceOperation, RetryDirective, SafeDiagnostic,
+        retained_surface_application_operation,
+    };
+    use tracedecay_domain::{ProjectId, RepositoryId, RunId, WorktreeId};
+
+    const SECRET: &str = "sk-scheduler-log-canary-1234567890";
+    let request_id = RequestId::new("request.scheduler.log-privacy").unwrap();
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
+            .unwrap();
+    let envelope = ApplicationProblemEnvelope::new(
+        operation.result_contract().clone(),
+        request_id.clone(),
+        ApplicationProblem::ResetRequired {
+            diagnostic: SafeDiagnostic::new(
+                "application.memory-automation-run.reset-required",
+                format!("hostile automatic fact content api_key={SECRET}"),
+            )
+            .unwrap(),
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::Reset],
+        },
+    )
+    .unwrap();
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.scheduler-log-privacy").unwrap(),
+        RepositoryId::new("repository.scheduler-log-privacy").unwrap(),
+        WorktreeId::new("worktree.scheduler-log-privacy").unwrap(),
+        None,
+    )
+    .unwrap();
+    let problem = MemoryAutomationRunProblemV1::new(
+        RunId::new("run.scheduler-log-privacy").unwrap(),
+        MemoryAutomationTaskV1::MemoryCurator,
+        scope,
+        envelope,
+        Vec::new(),
+        &request_id,
+    )
+    .unwrap();
+    let fields = super::super::scheduler::scheduler_application_problem_log_fields(
+        std::path::Path::new("/projects/log-privacy"),
+        tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
+        &problem,
+    );
+    let line = super::super::format_daemon_log_line("scheduler_task_application_problem", &fields);
+
+    assert!(!line.contains(SECRET));
+    assert!(!line.contains("hostile automatic fact content"));
+    assert!(line.contains("request.scheduler.log-privacy"));
+    assert!(line.contains("run.scheduler-log-privacy"));
+    assert!(line.contains("problem_kind=reset_required"));
+    assert!(line.contains("problem_code=application.memory-automation-run.reset-required"));
+    assert!(line.contains("committed_receipt_count=0"));
+}
 #[test]
 fn daemon_log_line_escapes_quotes_and_backslashes() {
     let line = super::super::format_daemon_log_line(
@@ -95,6 +158,7 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
         artifacts: Vec::new(),
         started_at: "1000".to_string(),
         completed_at: "1001".to_string(),
+        completed_at_micros: 1_001_000_000,
     };
 
     let line = super::super::daemon_scheduler_record_log_line(

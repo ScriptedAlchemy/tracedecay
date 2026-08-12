@@ -303,9 +303,8 @@ const AutomaticFactReceiptsPayloadSchema = z
           item: AnyObject.optional(),
           validation: AnyObject.optional(),
           quarantine_reason: z.string().optional(),
-          applied_canonical_fact_id: z.string().optional(),
-          applied_fact_id: z.number().nullable().optional(),
-          recorded_at: z.number(),
+          applied_fact_id: z.string().optional(),
+          recorded_at_micros: z.number().int(),
         })
         .passthrough(),
     ),
@@ -438,7 +437,11 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     const facts = data.holographic.facts ?? [];
     expect(facts.length).toBeGreaterThanOrEqual(25);
     // Trust spread: facts land in more than one histogram bucket.
-    const buckets = new Set(facts.map((f) => Math.floor(f.trust_score * 10)));
+    const trustScores = facts.flatMap((fact) =>
+      fact.trust_score === null ? [] : [fact.trust_score],
+    );
+    expect(trustScores.length).toBeGreaterThanOrEqual(25);
+    const buckets = new Set(trustScores.map((trustScore) => Math.floor(trustScore * 10)));
     expect(buckets.size).toBeGreaterThanOrEqual(6);
     expect((data.holographic.overview?.trust_histogram ?? []).length).toBe(10);
     expect((data.holographic.entities ?? []).length).toBeGreaterThanOrEqual(6);

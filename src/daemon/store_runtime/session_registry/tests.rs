@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use tracedecay_domain::BrainNodeId;
+use tracedecay_domain::{
+    BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactId, FactLineageEventKindV1,
+    FactOwnerV1, FactRelationKindV1,
+};
 use tracedecay_rusqlite_runtime::remote::{
     RemoteSpoolKeyV1, RemoteSpoolKeyringV1, RemoteSqliteStorageErrorV1,
 };
@@ -16,7 +19,14 @@ use tracedecay_graph_db::{
     GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphNamespace,
     GraphProjectionId, GraphProjectionIdentity, GraphWatermark, SourceGeneration,
 };
-use tracedecay_store::{FactReadControl, RetainedGraphStoreLeaseV1};
+use tracedecay_store::{
+    FactReadControl, FactWriteControl, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
+};
+use tracedecay_usecases::memory::{
+    MemoryOperationContext, ProjectMemoryCurationOperation, ProjectMemoryFactAddRequest,
+    ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
+};
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
 
@@ -96,6 +106,40 @@ async fn wait_for_schema_convergence(
     .expect("registered schema convergence must reach a terminal state")
 }
 
+fn accepting_memory_write_control() -> FactWriteControl {
+    FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
+}
+
+async fn add_profile_schema_fact(database: &crate::db::Database, label: &str) -> FactId {
+    let memory = memory_application_for_db(FactOwnerV1::Profile, database)
+        .expect("profile memory application");
+    let preflight = memory
+        .preflight_project_memory_fact_add(
+            ProjectMemoryFactAddRequest {
+                content: format!("canonical profile schema fixture {label}"),
+                category: FactCategoryV1::UserPref,
+                source_label: Some("profile-schema-verification".to_owned()),
+                tags: vec![label.to_owned()],
+                entities: Vec::new(),
+                trust: Some(Confidence::new(0.9).expect("profile fact confidence")),
+                metadata: serde_json::json!({"fixture": label}),
+            },
+            None,
+        )
+        .expect("preflight profile schema fact");
+    let outcome = memory
+        .add_preflighted_project_memory_fact(preflight, &accepting_memory_write_control())
+        .await
+        .expect("commit profile schema fact");
+    let ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome else {
+        panic!("profile schema fixture must pass privacy admission");
+    };
+    let ProjectMemoryFactProjectionV1::Available(fact) = outcome.fact() else {
+        panic!("profile schema fixture payload must remain available");
+    };
+    fact.fact_id().clone()
+}
+
 #[test]
 fn fallback_runtime_generation_always_fits_sqlite_integer() {
     assert_eq!(
@@ -167,12 +211,13 @@ async fn daemon_restart_fences_the_previous_session_runtime_binding() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn existing_profile_memory_is_schema_verified_before_exposure() {
+async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage() {
     let temporary = tempfile::tempdir().expect("temporary profile parent");
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
-    let memory_path = crate::memory::user::user_memory_db_path(identity.profile_root());
+    let memory_path =
+        tracedecay_runtime_core::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
     crate::db::migrations::create_schema_connection(&seed)
         .await
@@ -186,6 +231,55 @@ async fn existing_profile_memory_is_schema_verified_before_exposure() {
         .profile_memory()
         .await
         .expect("mounted profile memory");
+    let source = add_profile_schema_fact(&database, "source").await;
+    let target = add_profile_schema_fact(&database, "target").await;
+    let evidence = add_profile_schema_fact(&database, "evidence").await;
+    let owner = FactOwnerV1::Profile;
+    let memory = memory_application_for_db(owner.clone(), &database)
+        .expect("mounted profile memory application");
+    memory
+        .apply_project_memory_curation(
+            vec![ProjectMemoryCurationOperation::LinkFacts {
+                source_fact_id: source.clone(),
+                target_fact_id: target.clone(),
+                relation: FactRelationKindV1::Supports,
+                evidence_fact_ids: vec![evidence],
+                confidence: Confidence::new(0.9).expect("profile relation confidence"),
+                source_label: "profile-schema-verification".to_owned(),
+                metadata: serde_json::json!({"fixture": "canonical-linked-lineage"}),
+            }],
+            Confidence::new(0.5).expect("profile curation threshold"),
+            MemoryOperationContext::generated(
+                &owner,
+                "profile schema verification linked lineage",
+                None,
+            )
+            .expect("profile curation operation identity"),
+            None,
+            &accepting_memory_write_control(),
+        )
+        .await
+        .expect("commit canonical linked lineage");
+    let history = memory
+        .get_project_memory_history(
+            ProjectMemoryFactHistoryQueryV1::new(
+                ProjectMemoryFactIdV1::new(owner, source).expect("owner-bound profile source fact"),
+                None,
+                16,
+            )
+            .expect("bounded profile fact history query"),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .expect("read canonical profile fact lineage");
+    assert!(history.events().iter().any(|event| matches!(
+        event.kind(),
+        FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::Linked { relation },
+            ..
+        } if relation.kind() == FactRelationKindV1::Supports
+    )));
+
     let mut rows = database
         .conn()
         .query(
@@ -203,7 +297,10 @@ async fn existing_profile_memory_is_schema_verified_before_exposure() {
         .get(0)
         .expect("decode schema count");
 
-    assert_eq!(table_count, 1);
+    assert_eq!(
+        table_count, 0,
+        "mounted final memory must not recreate the retired relation projection"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

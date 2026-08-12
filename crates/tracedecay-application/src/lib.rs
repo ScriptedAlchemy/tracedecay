@@ -200,11 +200,6 @@ pub use invocation::{
 };
 pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
 pub use mcp_catalog::mcp_executable_binding_registry;
-pub use memory::{
-    DerivedMemoryConvergenceReport, DerivedMemoryConvergenceState,
-    DerivedMemoryFeedbackHistoryRepair, DerivedMemoryRepairPort, DerivedMemoryRepairStats,
-    converge_derived_memory,
-};
 pub use multi_root::{
     AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,
     AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootContinuationV1,
@@ -226,14 +221,15 @@ pub use policy::{
     RegisteredPolicyCapabilityV1,
 };
 pub use result::{
-    APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationOutcome, ApplicationProblem,
-    ApplicationProblemEnvelope, ApplicationProblemKind, ApplicationProblemRecord,
-    ApplicationResult, AuthorityReceipt, BudgetClass, CancellationObservation, CancellationStage,
-    CoverageCompleteness, CoverageDomainState, EffectId, EffectReceipt, EffectResult,
-    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity,
-    EvidencePacket, EvidenceScore, EvidenceScoreKind, EvidenceScoreValue, FreshnessState,
-    IdempotencyKey, LegalAction, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage,
-    OperationReceipt, OperationTermination, PageState, PolicyDecisionRef, PreviewId, PreviewResult,
+    APPLICATION_PROBLEM_REVISION, ApplicationEnvelope, ApplicationExecutionFailureClassV1,
+    ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
+    ApplicationProblemRecord, ApplicationResult, ApplicationUnavailableClassV1, AuthorityReceipt,
+    BudgetClass, CancellationObservation, CancellationStage, CoverageCompleteness,
+    CoverageDomainState, EffectId, EffectReceipt, EffectResult, EffectTermination,
+    EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket,
+    EvidenceScore, EvidenceScoreKind, EvidenceScoreValue, FreshnessState, IdempotencyKey,
+    LegalAction, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage, OperationReceipt,
+    OperationTermination, PageCursor, PageState, PolicyDecisionRef, PreviewId, PreviewResult,
     ProblemOwningLayer, ProblemTerminality, ReconciliationState, ResultContractRef, ResumeToken,
     RetrievalEvidence, RetrieverContribution, RetrieverContributionState, RetryDirective,
     RetryScope, SafeDiagnostic, ScoreId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
@@ -247,7 +243,8 @@ pub use retained_surfaces::{
     RetainedSurfaceServiceV1, retained_surface_application_operation,
     retained_surface_catalog_contribution, retained_surface_executable_binding_registry,
     retained_surface_execution_problem, retained_surface_handler_descriptors,
-    retained_surface_operation_is_effect,
+    retained_surface_operation_is_effect, retained_surface_outcome_matches_terminal,
+    retained_surface_problem_matches_terminal,
 };
 pub use retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,

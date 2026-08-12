@@ -1,11 +1,11 @@
 //! Typed retained projections for daemon-owned session refresh outcomes.
 
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_application::retained_surfaces::{
     RetainedErrorV1, RetainedOutcomeStatusV1, RetainedSurfaceResultV1, SessionRefreshBeginResultV1,
     SessionRefreshCancelResultV1, SessionRefreshProgressV1, SessionRefreshReceiptV1,
     SessionRefreshStatusResultV1,
 };
+use tracedecay_application::{CancellationStage, RetainedSurfaceExecutionErrorV1};
 
 use crate::mcp::tools::{
     SessionRefreshProgressView, SessionRefreshReceiptView, SessionRefreshServiceOutcome,
@@ -231,8 +231,12 @@ fn effect_error(outcome: SessionRefreshServiceOutcome) -> RetainedSurfaceExecuti
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
         SessionRefreshServiceOutcome::Stale => RetainedSurfaceExecutionErrorV1::Stale,
-        SessionRefreshServiceOutcome::Aborted => RetainedSurfaceExecutionErrorV1::Cancelled,
-        SessionRefreshServiceOutcome::DeadlineExceeded => RetainedSurfaceExecutionErrorV1::TimedOut,
+        SessionRefreshServiceOutcome::Aborted => {
+            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::EffectInFlight)
+        }
+        SessionRefreshServiceOutcome::DeadlineExceeded => {
+            RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::EffectInFlight)
+        }
         SessionRefreshServiceOutcome::Running(_) => RetainedSurfaceExecutionErrorV1::Conflict,
         SessionRefreshServiceOutcome::Unavailable
         | SessionRefreshServiceOutcome::Complete(_)

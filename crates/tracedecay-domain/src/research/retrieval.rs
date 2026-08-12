@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::canonical::canonical_sha256;
@@ -178,7 +179,7 @@ pub struct RetrievalExpansionRecipeV1 {
     pub bounded_arguments_digest: PrivacyDomainBoundLocatorDigest,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PayloadAccessState {
     Eligible,

@@ -88,7 +88,8 @@ pub(super) fn record_scheduler_run(
     let producer = engine
         .invocation
         .service
-        .observability_producer_for_project_id(project_id);
+        .observability_producer_for_project_root(project_path)
+        .filter(|producer| producer.identity().authorized_scope_ref == project_id.as_str());
     record_run_with_producer(producer.as_deref(), project_path, record, "scheduler");
 }
 
@@ -215,6 +216,7 @@ mod tests {
             artifacts: Vec::new(),
             started_at: "1700000000".to_owned(),
             completed_at: "1700000001".to_owned(),
+            completed_at_micros: 1_700_000_001_000_000,
         }
     }
 

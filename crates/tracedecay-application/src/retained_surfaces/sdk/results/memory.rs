@@ -1,8 +1,13 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::{FactAssertionId, FactEventId, FactId, UtcMicros};
 
-use super::RetainedOutcomeStatusV1;
-use crate::retained_surfaces::{FactCategoryV1, FactFeedbackActionV1, FactMetadataV1};
+pub use crate::memory::{
+    FactCommitOwnerV1, FactIdentitySourceResultV1, FactPayloadAccessV1, FactProjectionV1,
+    FactSearchCursorV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1,
+    FactSearchScoresV1, FactStatusV1, FactTelemetryV1, FactV1,
+};
+use crate::retained_surfaces::FactFeedbackActionV1;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -12,257 +17,403 @@ pub enum FactCommitDispositionV1 {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum FactCommitOwnerV1 {
-    Profile,
-    Project { project_id: String },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FactCommitReceiptV1 {
     pub disposition: FactCommitDispositionV1,
-    pub fact_id: String,
+    pub fact_id: FactId,
     pub owner: FactCommitOwnerV1,
-    pub expected_last_event_id: Option<String>,
-    pub committed_event_ids: Vec<String>,
-    pub last_event_id: String,
-    pub active_assertion_id: Option<String>,
+    pub committed_event_ids: Vec<FactEventId>,
+    pub last_event_id: FactEventId,
+    pub active_assertion_id: Option<FactAssertionId>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FactMutationReceiptV1 {
-    pub operation_id: String,
-    pub input_digest: String,
-    pub commit: FactCommitReceiptV1,
-    pub expected_last_event_id: Option<String>,
-    pub committed_generation: String,
-    pub replayed: bool,
+macro_rules! fact_search_result {
+    ($name:ident) => {
+        #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+        #[serde(deny_unknown_fields)]
+        pub struct $name {
+            pub owner: FactCommitOwnerV1,
+            pub hits: Vec<FactSearchHitV1>,
+            pub next_after: Option<FactSearchCursorV1>,
+            pub graph_coverage: FactSearchGraphCoverageV1,
+        }
+    };
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FactV1 {
-    pub fact_id: i64,
-    pub content: String,
-    pub category: FactCategoryV1,
-    pub tags: Vec<String>,
-    pub entities: Vec<String>,
-    pub trust_score: f64,
-    pub source: Option<String>,
-    pub retrieval_count: i64,
-    pub access_count: i64,
-    pub helpful_count: i64,
-    pub unhelpful_count: i64,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub last_retrieved_at: Option<i64>,
-    pub last_recalled_at: Option<i64>,
-    pub last_feedback_at: Option<i64>,
-    pub metadata: FactMetadataV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FactSearchHitV1 {
-    pub fact: FactV1,
-    pub score: f64,
-    pub fts_score: f64,
-    pub jaccard_score: f64,
-    pub holographic_score: f64,
-    pub trust_score: f64,
-    pub why: Option<String>,
-}
+fact_search_result!(FactStoreSearchResultV1);
+fact_search_result!(FactStoreProbeResultV1);
+fact_search_result!(FactStoreRelatedResultV1);
+fact_search_result!(FactStoreReasonResultV1);
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactContradictionV1 {
     pub existing_fact: FactV1,
     pub new_content: String,
-    pub score: f64,
+    pub score_millionths: u32,
     pub why: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(untagged)]
-pub enum FactCollectionEntryV1 {
-    Search(FactSearchHitV1),
-    Contradiction(FactContradictionV1),
-    Fact(FactV1),
+#[serde(deny_unknown_fields)]
+pub struct FactStoreContradictResultV1 {
+    pub owner: FactCommitOwnerV1,
+    pub contradictions: Vec<FactContradictionV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "disposition", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FactStoreAddCommitV1 {
+    Added {
+        fact: FactProjectionV1,
+        commit: FactCommitReceiptV1,
+    },
+    NearDuplicate {
+        fact: FactProjectionV1,
+        closest_fact_id: FactId,
+        similarity_millionths: u32,
+        commit: FactCommitReceiptV1,
+    },
+    PossibleConflict {
+        fact: FactProjectionV1,
+        closest_fact_id: FactId,
+        similarity_millionths: u32,
+        commit: FactCommitReceiptV1,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FactStoreAddResultV1 {
+    SecretRejected,
+    NormalizedDuplicate {
+        fact: FactProjectionV1,
+        closest_fact_id: FactId,
+    },
+    Committed {
+        result: FactStoreAddCommitV1,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum FactDiffKindV1 {
-    Add,
-    NearDuplicate,
-    PossibleConflict,
-    RejectedSecretLike,
+pub enum FactFeedbackDetailsAvailabilityV1 {
+    Available,
+    Redacted,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TrustHistoryEntryV1 {
-    pub timestamp: i64,
+    pub event_id: FactEventId,
+    pub occurred_at: UtcMicros,
     pub action: FactFeedbackActionV1,
-    pub old_trust: f64,
-    pub new_trust: f64,
-    pub delta: f64,
-    pub source: String,
-    pub note: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FactStoreResultV1 {
-    pub action: String,
-    pub count: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub closest_fact_id: Option<Option<i64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diff: Option<FactDiffKindV1>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fact: Option<Option<FactV1>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub facts: Option<Vec<FactCollectionEntryV1>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub removed: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub results: Option<Vec<FactCollectionEntryV1>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub similarity: Option<Option<f64>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trust_history: Option<Vec<TrustHistoryEntryV1>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mutation: Option<FactMutationReceiptV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FactStoreAddResultV1 {
-    pub count: usize,
-    pub fact: Option<FactV1>,
-    pub diff: FactDiffKindV1,
-    pub closest_fact_id: Option<i64>,
-    pub similarity: Option<f64>,
+    pub old_trust_millionths: u32,
+    pub new_trust_millionths: u32,
+    pub source_label: Option<String>,
     pub reason: Option<String>,
-    pub mutation: Option<FactMutationReceiptV1>,
+    pub details_availability: FactFeedbackDetailsAvailabilityV1,
 }
-
-macro_rules! fact_collection_result {
-    ($name:ident) => {
-        #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
-        #[serde(deny_unknown_fields)]
-        pub struct $name {
-            pub count: usize,
-            pub facts: Vec<FactCollectionEntryV1>,
-            pub results: Vec<FactCollectionEntryV1>,
-        }
-    };
-}
-
-fact_collection_result!(FactStoreSearchResultV1);
-fact_collection_result!(FactStoreProbeResultV1);
-fact_collection_result!(FactStoreRelatedResultV1);
-fact_collection_result!(FactStoreReasonResultV1);
-fact_collection_result!(FactStoreContradictResultV1);
-fact_collection_result!(FactStoreListResultV1);
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactStoreGetResultV1 {
-    pub count: usize,
-    pub fact: Option<FactV1>,
+    pub fact: FactProjectionV1,
     pub trust_history: Vec<TrustHistoryEntryV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactStoreUpdateResultV1 {
-    pub count: usize,
-    pub fact: Option<FactV1>,
-    pub diff: Option<FactDiffKindV1>,
-    pub reason: Option<String>,
-    pub error: Option<String>,
-    pub mutation: Option<FactMutationReceiptV1>,
+    pub fact: FactProjectionV1,
+    pub trust_delta_millionths: i32,
+    pub commit: FactCommitReceiptV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FactStoreRemoveResultV1 {
+    Removed {
+        fact: FactProjectionV1,
+        remaining_fact_count: u64,
+        commit: FactCommitReceiptV1,
+    },
+    AlreadyRemoved {
+        fact: FactProjectionV1,
+        remaining_fact_count: u64,
+    },
+    NotFound {
+        remaining_fact_count: u64,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct FactStoreRemoveResultV1 {
-    pub count: usize,
-    pub removed: bool,
-    pub mutation: Option<FactMutationReceiptV1>,
+pub struct FactStoreListResultV1 {
+    pub owner: FactCommitOwnerV1,
+    pub facts: Vec<FactProjectionV1>,
+    pub next_after_fact_id: Option<FactId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactFeedbackV1 {
-    pub event_id: i64,
-    pub fact_id: i64,
+    pub event_id: FactEventId,
+    pub fact_id: FactId,
     pub action: FactFeedbackActionV1,
-    pub old_trust: f64,
-    pub new_trust: f64,
-    pub trust_delta: f64,
-    pub helpful_count: i64,
-    pub unhelpful_count: i64,
+    pub old_trust_millionths: u32,
+    pub new_trust_millionths: u32,
+    pub trust_delta_millionths: i32,
+    pub helpful_count: u64,
+    pub unhelpful_count: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactFeedbackResultV1 {
-    pub status: RetainedOutcomeStatusV1,
+    pub fact: FactProjectionV1,
     pub feedback: FactFeedbackV1,
-    pub mutation: FactMutationReceiptV1,
+    pub commit: FactCommitReceiptV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct MemoryRepairStatsV1 {
-    pub missing_vectors_repaired: usize,
-    pub banks_rebuilt: usize,
+pub struct MemoryAlgebraV1 {
+    pub name: String,
+    pub hrr_dim: u64,
+    pub estimated_capacity: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryFeedbackFunnelV1 {
-    pub retrieval_count_total: i64,
-    pub access_count_total: i64,
-    pub retrieved_fact_count: usize,
-    pub rated_fact_count: usize,
-    pub feedback_total: usize,
-    pub seen_to_feedback_ratio: Option<i64>,
+    pub retrieval_count_total: u64,
+    pub access_count_total: u64,
+    pub retrieved_fact_count: u64,
+    pub rated_fact_count: u64,
+    pub feedback_total: u64,
+    pub seen_to_feedback_ratio: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryStatusV1 {
-    pub fact_count: usize,
-    pub entity_count: usize,
-    pub bank_count: usize,
-    pub algebra_name: String,
-    pub hrr_dim: usize,
-    pub estimated_capacity: usize,
-    pub trust_0_025_count: usize,
-    pub trust_025_050_count: usize,
-    pub trust_050_075_count: usize,
-    pub trust_075_100_count: usize,
-    pub below_default_recall_threshold_count: usize,
-    pub helpful_count: usize,
-    pub unhelpful_count: usize,
-    pub missing_vector_count: usize,
-    pub repair: MemoryRepairStatsV1,
+    pub owner: FactCommitOwnerV1,
+    pub fact_count: u64,
+    pub entity_count: u64,
+    pub algebra: MemoryAlgebraV1,
+    pub trust_0_025_count: u64,
+    pub trust_025_050_count: u64,
+    pub trust_050_075_count: u64,
+    pub trust_075_100_count: u64,
+    pub below_default_recall_threshold_count: u64,
+    pub helpful_count: u64,
+    pub unhelpful_count: u64,
     pub feedback_funnel: MemoryFeedbackFunnelV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryStatusResultV1 {
-    pub status: RetainedOutcomeStatusV1,
     pub memory: MemoryStatusV1,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        FactCommitReceiptV1, FactStoreAddCommitV1, FactStoreAddResultV1,
+        FactStoreContradictResultV1, FactStoreSearchResultV1, MemoryStatusResultV1,
+    };
+
+    fn canonical_projection() -> serde_json::Value {
+        json!({
+            "kind": "available",
+            "fact": {
+                "owner": {"kind": "profile"},
+                "fact_id": "fact.test",
+                "content": "remember",
+                "category": "general",
+                "tags": [],
+                "entities": [],
+                "trust_score_millionths": 500_000,
+                "source": {"kind": "application", "operation_id": "operation.test"},
+                "source_label": null,
+                "active_assertion_id": "assertion.active",
+                "last_event_id": "event.created",
+                "projected_as_of": 1,
+                "telemetry": {
+                    "retrieval_count": 0,
+                    "access_count": 0,
+                    "helpful_count": 0,
+                    "unhelpful_count": 0,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "last_retrieved_at": null,
+                    "last_recalled_at": null,
+                    "last_feedback_at": null
+                },
+                "metadata": {}
+            }
+        })
+    }
+
+    fn canonical_receipt() -> serde_json::Value {
+        json!({
+            "disposition": "committed",
+            "fact_id": "fact.test",
+            "owner": {"kind": "profile"},
+            "committed_event_ids": ["event.created"],
+            "last_event_id": "event.created",
+            "active_assertion_id": "assertion.active"
+        })
+    }
+
+    #[test]
+    fn fact_commit_receipt_rejects_synthetic_and_numeric_identity_fields() {
+        let receipt = json!({
+            "disposition": "committed",
+            "fact_id": "fact.test",
+            "owner": {"kind": "project", "project_id": "project.alpha"},
+            "committed_event_ids": ["event.created"],
+            "last_event_id": "event.created",
+            "active_assertion_id": "assertion.active"
+        });
+        serde_json::from_value::<FactCommitReceiptV1>(receipt.clone())
+            .expect("canonical commit receipt");
+
+        let mut synthetic = receipt.clone();
+        synthetic["expected_last_event_id"] = json!("event.previous");
+        assert!(serde_json::from_value::<FactCommitReceiptV1>(synthetic).is_err());
+
+        let mut numeric = receipt;
+        numeric["fact_id"] = json!(41);
+        assert!(serde_json::from_value::<FactCommitReceiptV1>(numeric).is_err());
+    }
+
+    #[test]
+    fn fact_add_result_has_only_finite_outcomes() {
+        serde_json::from_value::<FactStoreAddResultV1>(json!({
+            "outcome": "secret_rejected"
+        }))
+        .expect("secret rejection is a truthful no-write outcome");
+        assert!(
+            serde_json::from_value::<FactStoreAddResultV1>(json!({
+                "count": 0,
+                "fact": null,
+                "diff": "rejected_secret_like",
+                "closest_fact_id": null,
+                "similarity": null,
+                "reason": "secret-like",
+                "mutation": null
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn committed_add_disposition_makes_comparison_fields_structural() {
+        let added = json!({
+            "disposition": "added",
+            "fact": canonical_projection(),
+            "commit": canonical_receipt()
+        });
+        serde_json::from_value::<FactStoreAddCommitV1>(added.clone())
+            .expect("added commit has no comparison fields");
+
+        let mut invalid_added = added;
+        invalid_added["closest_fact_id"] = json!("fact.closest");
+        assert!(serde_json::from_value::<FactStoreAddCommitV1>(invalid_added).is_err());
+
+        assert!(
+            serde_json::from_value::<FactStoreAddCommitV1>(json!({
+                "disposition": "near_duplicate",
+                "fact": canonical_projection(),
+                "commit": canonical_receipt()
+            }))
+            .is_err()
+        );
+        serde_json::from_value::<FactStoreAddCommitV1>(json!({
+            "disposition": "near_duplicate",
+            "fact": canonical_projection(),
+            "closest_fact_id": "fact.closest",
+            "similarity_millionths": 900_000,
+            "commit": canonical_receipt()
+        }))
+        .expect("semantic near-duplicate commit requires its comparison");
+    }
+
+    #[test]
+    fn fact_search_page_requires_typed_graph_coverage() {
+        let page = json!({
+            "owner": {"kind": "project", "project_id": "project.alpha"},
+            "hits": [],
+            "next_after": null,
+            "graph_coverage": {"kind": "not_mounted"}
+        });
+        serde_json::from_value::<FactStoreSearchResultV1>(page.clone())
+            .expect("canonical search page");
+
+        let mut missing_coverage = page;
+        missing_coverage
+            .as_object_mut()
+            .expect("page is an object")
+            .remove("graph_coverage");
+        assert!(serde_json::from_value::<FactStoreSearchResultV1>(missing_coverage).is_err());
+    }
+
+    #[test]
+    fn bounded_contradiction_result_rejects_false_continuations() {
+        let result = json!({
+            "owner": {"kind": "profile"},
+            "contradictions": []
+        });
+        serde_json::from_value::<FactStoreContradictResultV1>(result.clone())
+            .expect("canonical bounded contradiction result");
+
+        for field in ["next_after", "next_cursor", "cursor"] {
+            let mut paginated = result.clone();
+            paginated[field] = json!("cursor.test");
+            assert!(serde_json::from_value::<FactStoreContradictResultV1>(paginated).is_err());
+        }
+    }
+
+    #[test]
+    fn memory_status_rejects_unknown_fields() {
+        let status = json!({
+            "memory": {
+                "owner": {"kind": "profile"},
+                "fact_count": 0,
+                "entity_count": 0,
+                "algebra": {
+                    "name": "amari_fhrr",
+                    "hrr_dim": 2048,
+                    "estimated_capacity": 1024
+                },
+                "trust_0_025_count": 0,
+                "trust_025_050_count": 0,
+                "trust_050_075_count": 0,
+                "trust_075_100_count": 0,
+                "below_default_recall_threshold_count": 0,
+                "helpful_count": 0,
+                "unhelpful_count": 0,
+                "feedback_funnel": {
+                    "retrieval_count_total": 0,
+                    "access_count_total": 0,
+                    "retrieved_fact_count": 0,
+                    "rated_fact_count": 0,
+                    "feedback_total": 0,
+                    "seen_to_feedback_ratio": null
+                }
+            }
+        });
+        serde_json::from_value::<MemoryStatusResultV1>(status.clone())
+            .expect("canonical memory status");
+
+        let mut unknown = status;
+        unknown["memory"]["unknown"] = json!(true);
+        assert!(serde_json::from_value::<MemoryStatusResultV1>(unknown).is_err());
+    }
 }

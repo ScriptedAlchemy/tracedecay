@@ -223,7 +223,7 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
         .filter(|(binding, _)| {
             match HttpApplicationOperation::from_catalog_name(binding.operation().as_str()) {
                 Some(operation) => !operation.is_http_exposed(),
-                None => RetainedSurfaceOperation::from_name(binding.operation().as_str())
+                None => RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
                     .is_none_or(|operation| !operation.is_callable()),
             }
         })
@@ -239,10 +239,12 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
     assert!(documents.iter().all(|document| {
         HttpApplicationOperation::from_catalog_name(&document.operation)
             .is_some_and(|operation| operation.application_route_path() == document.path)
-            || RetainedSurfaceOperation::from_name(&document.operation).is_some_and(|operation| {
-                operation.is_callable()
-                    && retained_application_route_path(operation) == document.path
-            })
+            || RetainedSurfaceOperation::from_operation_name(&document.operation).is_some_and(
+                |operation| {
+                    operation.is_callable()
+                        && retained_application_route_path(operation) == document.path
+                },
+            )
     }));
     assert!(documents.iter().all(|document| {
         !matches!(document.operation.as_str(), "git_preview" | "git_apply")

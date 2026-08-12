@@ -18,7 +18,8 @@ use super::{
 };
 use crate::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, CancellationSignal,
-    EffectReceipt, LegalAction, RequestAdmission, RequestContext, RetryDirective, SafeDiagnostic,
+    CancellationStage, EffectReceipt, LegalAction, RequestAdmission, RequestContext,
+    RetryDirective, SafeDiagnostic,
 };
 
 pub type RetainedSurfaceExecutionFutureV1<'a> = Pin<
@@ -50,8 +51,8 @@ pub enum RetainedSurfaceExecutionErrorV1 {
     Unavailable,
     ProfileResetRequired,
     ProjectResetRequired,
-    Cancelled,
-    TimedOut,
+    Cancelled(CancellationStage),
+    TimedOut(CancellationStage),
 }
 
 /// Exact admitted input handed to the daemon-owned retained runtime.
@@ -457,14 +458,14 @@ fn ensure_post_execution_cancellation(
 ) -> Result<(), ApplicationProblem> {
     if !retained_surface_operation_is_effect(operation) && cancellation.is_cancelled() {
         Err(retained_surface_execution_problem(
-            RetainedSurfaceExecutionErrorV1::Cancelled,
+            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead),
         ))
     } else {
         Ok(())
     }
 }
 
-fn outcome_matches_operation(
+pub(super) fn outcome_matches_operation(
     operation: RetainedSurfaceOperation,
     outcome: &ApplicationOutcome<RetainedSurfaceResultV1>,
 ) -> bool {
@@ -478,6 +479,11 @@ fn outcome_matches_operation(
         ApplicationOutcome::Effect(effect) => effect.payload.as_ref(),
         ApplicationOutcome::Preview(_) => None,
     };
+    if let Some(RetainedSurfaceResultV1::MemoryAutomationRun(result)) = result {
+        return operation == RetainedSurfaceOperation::MemoryAutomationRun
+            && class_matches
+            && result.matches_terminal();
+    }
     class_matches
         && matches!(
             (operation, result),
@@ -564,7 +570,8 @@ fn outcome_matches_operation(
 pub const fn retained_surface_operation_is_effect(operation: RetainedSurfaceOperation) -> bool {
     matches!(
         operation,
-        RetainedSurfaceOperation::FactStoreAdd
+        RetainedSurfaceOperation::MemoryAutomationRun
+            | RetainedSurfaceOperation::FactStoreAdd
             | RetainedSurfaceOperation::FactStoreUpdate
             | RetainedSurfaceOperation::FactStoreRemove
             | RetainedSurfaceOperation::FactFeedback
@@ -654,17 +661,22 @@ pub fn retained_surface_execution_problem(
                 "The retained project store requires an explicit reset before it can serve requests.",
             ))
         }
-        RetainedSurfaceExecutionErrorV1::Cancelled => {
-            ApplicationProblem::cancelled_before_admission()
-        }
-        RetainedSurfaceExecutionErrorV1::TimedOut => {
-            ApplicationProblem::timed_out_before_admission()
-        }
+        RetainedSurfaceExecutionErrorV1::Cancelled(stage) => ApplicationProblem::Cancelled {
+            stage,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        },
+        RetainedSurfaceExecutionErrorV1::TimedOut(stage) => ApplicationProblem::TimedOut {
+            stage,
+            retry: RetryDirective::Never,
+            legal_actions: Vec::new(),
+        },
     }
 }
 
 fn unavailable_problem(code: &'static str, message: &'static str) -> ApplicationProblem {
     ApplicationProblem::Unavailable {
+        classification: crate::ApplicationUnavailableClassV1::Authority,
         diagnostic: diagnostic(code, message),
         retry: RetryDirective::AfterDelay,
         legal_actions: vec![LegalAction::Retry],
@@ -764,7 +776,7 @@ mod tests {
         RetainedSurfaceRequestV1::FactStoreSearch(FactStoreSearchRequestV1 {
             query: "retained fixture".to_owned(),
             options: FactReadOptionsV1::default(),
-            format: None,
+            after: None,
         })
     }
 
@@ -802,11 +814,11 @@ mod tests {
     fn runtime_terminal_states_remain_typed() {
         for (error, expected) in [
             (
-                RetainedSurfaceExecutionErrorV1::Cancelled,
+                RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::BeforeRead),
                 ApplicationProblemKind::Cancelled,
             ),
             (
-                RetainedSurfaceExecutionErrorV1::TimedOut,
+                RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::BeforeRead),
                 ApplicationProblemKind::TimedOut,
             ),
             (

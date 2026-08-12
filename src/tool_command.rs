@@ -21,17 +21,23 @@
 //! - `--args <json|file|->` — escape hatch. Treats the value as the entire
 //!   argument object; mutually exclusive with `--key value` flags. Use for
 //!   complex shapes like `tracedecay_multi_str_replace`'s array-of-pairs.
-//!   As a whole-payload argument it follows the same convention as
-//!   `memory curate --llm-ops`: inline JSON, `-` for stdin, or a file path
-//!   (`--args payload.json`; a leading `@` also works for symmetry with
-//!   per-key values). Reading from a file or stdin sidesteps the kernel's
-//!   128 KiB per-argv-string cap for large payloads.
+//!   A whole payload accepts inline JSON, `-` for stdin, or a file path
+//!   (`--args payload.json`; a leading `@` also works for symmetry with per-key
+//!   values). Reading from a file or stdin sidesteps the kernel's 128 KiB
+//!   per-argv-string cap for large payloads.
 //!
 //! For per-`--key` values, a leading `@` opts into file/stdin reading
 //! (`--key @path`, `--key @-`) — the sigil is required there because a bare
 //! value is a literal. This makes multi-line strings (replacements, ast-grep
 //! patterns, decision text) ergonomic. stdin is read once and memoized, so it
 //! can be referenced by more than one field in a single invocation.
+//!
+//! Memory curation uses the same public MCP interfaces through this dynamic
+//! command: `tracedecay tool memory_automation_run` launches the daemon-owned
+//! curator, while `automation_run_list`, `automation_run_view`, and
+//! `automation_run_artifact_view` inspect its durable result. The launch tool
+//! accepts only review bounds; direct fact add, update, and remove remain
+//! separate exact administrative tools.
 
 use std::collections::BTreeMap;
 use std::io::Write;

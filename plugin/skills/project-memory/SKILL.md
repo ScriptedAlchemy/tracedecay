@@ -21,7 +21,8 @@ Announce: "Using tracedecay:project-memory to <recall/store/curate>."
 | A durable decision/correction/pitfall just surfaced | `tracedecay_fact_store_add` (`content`, `category`, `tags`, `trust`) — proactively, do NOT wait to be asked, and do NOT write MEMORY.md instead |
 | User rates a recalled fact | `tracedecay_fact_feedback` (`helpful`/`unhelpful`) |
 | A recalled fact you were shown helped or misled you | `tracedecay_fact_feedback` on its `fact_id` (`helpful`/`unhelpful`) — don't wait to be asked |
-| User asks to clean/merge/delete memory | Curation flow below |
+| User asks to run or inspect broad memory cleanup | Agent-managed curation flow below |
+| User gives an exact fact add/update/remove instruction | Use the matching retained fact command; confirm only an ambiguous destructive target |
 
 Trust calibration for adds: `0.85+` independently verified decisions, `~0.7`
 ordinary well-sourced facts, `~0.5` plausible-but-uncertain. The add path
@@ -38,28 +39,30 @@ Do NOT capture: secrets/credentials/PII, transient errors,
 environment-specific failures, one-off narratives, task progress, or
 soon-stale session outcomes — those belong to session transcripts.
 
-## Curation (mutation — parent agent only, approval required)
+## Curation (agent-managed mutation)
 
 Read [references/curation.md](references/curation.md) for the full protocol:
-read-mostly inventory → native dry-run (`tracedecay memory curate`) →
-candidate buckets → narrow apply (`tracedecay_fact_store_add`,
-`tracedecay_fact_store_update`, or `tracedecay_fact_store_remove`) → read-only verify (`tracedecay_memory_status` for its canonical
-fact/entity/trust/feedback/holographic-algebra status snapshot). Hard rules that always
+read-only inventory → `tracedecay_memory_automation_run` (or `tracedecay
+automation run memory-curation`) → `tracedecay_automation_run_list` →
+`tracedecay_automation_run_view` → advertised artifact inspection →
+read-only fact verification. The curator validates and applies supported
+operations during that one run. Its public trigger accepts only review bounds,
+never caller-supplied operations or effect authority. Hard rules that always
 apply:
 
-- Deletion is permanent (no soft-delete, no undo). Explicit approval
-  immediately before every `remove`, hard delete, or merge-loser removal,
-  showing fact id, content summary, and reason. Prefer update/merge when
-  provenance should survive.
+- Deletion is permanent (no soft-delete, no undo). A direct fact deletion is
+  separate exact administration. If the user's target is ambiguous, show the
+  resolved fact id and content summary and confirm that target before removal;
+  an exact deletion instruction needs no redundant confirmation.
 - Subagents may inspect and recommend only — never let a subagent call
   `tracedecay_fact_store_add`, `tracedecay_fact_store_update`,
-  `tracedecay_fact_store_remove`, or `tracedecay_fact_feedback`, or apply curation ops.
+  `tracedecay_fact_store_remove`, or `tracedecay_fact_feedback`.
 - Do not lower trust merely for age; cite newer evidence or a contradiction.
 
 ## If tools are deferred or MCP fails
 
 - Deferred: one ToolSearch call —
-  `select:tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_message_search,tracedecay_fact_feedback`.
+  `select:tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_message_search,tracedecay_fact_feedback,tracedecay_memory_automation_run,tracedecay_automation_run_list,tracedecay_automation_run_view,tracedecay_automation_run_artifact_view`.
 - MCP error: `tracedecay tool tracedecay_fact_store_search --query …` (see
   `tracedecay:using-the-cli`). An MCP failure is not a reason to write
   MEMORY.md — the CLI reaches the same store.
@@ -69,5 +72,6 @@ apply:
 Recall: the prior context/decisions found, with source and trust — or an
 explicit "no stored fact matches", after which storing the fresh answer is the
 default next step. Store: the fact id(s) written and any duplicate/conflict
-flags handled. Curate: facts changed/skipped, approvals obtained,
-verification result. Report any `tracedecay_metrics:` line.
+flags handled. Curate: run id, terminal status, applied/rejected operations,
+advertised artifacts inspected, and verification result. Report any
+`tracedecay_metrics:` line.

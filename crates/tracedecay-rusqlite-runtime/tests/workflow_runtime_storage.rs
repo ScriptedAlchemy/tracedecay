@@ -129,15 +129,6 @@ impl EffectAuthorityBinding {
     };
 }
 
-fn effect_context(actor: &str, grant_revision: u64, grant_digest: char) -> RequestContext {
-    effect_context_for_request(
-        actor,
-        grant_revision,
-        grant_digest,
-        "request.workflow.runtime-store",
-    )
-}
-
 fn effect_context_for_request(
     actor: &str,
     grant_revision: u64,

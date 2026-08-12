@@ -3,9 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracedecay_agent_hosts::ports::project_runtime::{
-    MemoryCurateOptions, ProjectRuntime, RuntimeFuture,
-};
+use tracedecay_agent_hosts::ports::project_runtime::{ProjectRuntime, RuntimeFuture};
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
     RenameSymbolBindingV1,
@@ -65,21 +63,6 @@ impl ProjectRuntime for TraceDecay {
         Box::pin(TraceDecay::open_project_store_db(self))
     }
 
-    fn curate_memory<'a>(
-        &'a self,
-        options: &'a MemoryCurateOptions,
-    ) -> RuntimeFuture<'a, serde_json::Value> {
-        Box::pin(async move {
-            let options = crate::dashboard::memory_curate::MemoryCurateOptions {
-                apply: options.apply,
-                llm: options.llm,
-                llm_ops: options.llm_ops.clone(),
-                max_clusters: options.max_clusters,
-                min_confidence: options.min_confidence,
-            };
-            crate::dashboard::memory_curate::run_memory_curate(self, &options).await
-        })
-    }
 }
 
 impl DashboardProjectRuntime for TraceDecay {

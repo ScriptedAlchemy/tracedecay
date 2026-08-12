@@ -1,15 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
+use std::{path::PathBuf, sync::Arc};
 use tracedecay_domain::FactOwnerV1;
 use tracedecay_store::ProjectMemoryFactStore;
 
 use super::user_automation_root;
 use crate::automation::automatic_facts::{
-    AutomaticFactReceipt, AutomaticFactState, dispose_shipped_fact_proposals,
+    AutomaticFactReceipt, AutomaticFactState, SettledAutomaticFactReceipt,
     record_session_automatic_facts,
 };
 use crate::automation::backend::{
@@ -17,14 +15,14 @@ use crate::automation::backend::{
 };
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::{
-    AgentRunFinalizer, AgentTaskRunContext, BackendTaskRun, SchedulerGate,
-    failed_backend_fallback_report, task_skip_reason,
+    AgentRunFinalizer, AgentTaskRunContext, AutomationCommittedReceipt, AutomationRunControl,
+    AutomationRunError, AutomationRunResult, BackendTaskRun, NonEmptyAutomaticFactReceipts,
+    SchedulerGate, failed_backend_fallback_report,
 };
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::automation::session_reflector::validate_fact_candidates;
 use crate::errors::{Result, TraceDecayError};
-use crate::ports::project_runtime::ProfileRuntime;
-use crate::ports::project_runtime::TraceDecay;
+use crate::ports::project_runtime::{ProfileRuntime, TraceDecay};
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 use tracedecay_domain::configuration::ConfigurationRevisionId;
@@ -33,7 +31,6 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 use tracedecay_usecases::memory::MemoryApplication;
 
 use super::curation::{evaluate_session_curation, unpersisted_rejected_parts};
-
 use super::evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome,
     build_session_reflector_evidence,
@@ -108,6 +105,10 @@ pub struct SessionReflectorAutomationRun {
     pub ledger_record: AutomationRunLedgerRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_response: Option<AgentTaskResponse>,
+    /// Canonical committed authority result retained in-process until the
+    /// daemon persists the outer automation application terminal.
+    #[serde(skip)]
+    pub committed_receipt: Option<AutomationCommittedReceipt>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,25 +156,101 @@ pub struct SessionFactCurationReceipt {
     pub applied_fact_ids: Vec<String>,
 }
 
-fn session_fact_curation_receipt(
+trait AutomaticFactReceiptSummary {
+    fn summary_apply_id(&self) -> &str;
+    fn summary_state(&self) -> AutomaticFactState;
+    fn summary_applied_fact_id(&self) -> Option<&str>;
+}
+
+impl AutomaticFactReceiptSummary for AutomaticFactReceipt {
+    fn summary_apply_id(&self) -> &str {
+        &self.apply_id
+    }
+
+    fn summary_state(&self) -> AutomaticFactState {
+        self.state
+    }
+
+    fn summary_applied_fact_id(&self) -> Option<&str> {
+        self.applied_fact_id.as_deref()
+    }
+}
+
+impl AutomaticFactReceiptSummary for SettledAutomaticFactReceipt {
+    fn summary_apply_id(&self) -> &str {
+        self.apply_id()
+    }
+
+    fn summary_state(&self) -> AutomaticFactState {
+        self.state()
+    }
+
+    fn summary_applied_fact_id(&self) -> Option<&str> {
+        self.applied_fact_id()
+    }
+}
+
+fn values_digest(values: &[Value]) -> Result<String> {
+    let bytes = serde_json::to_vec(values).map_err(TraceDecayError::from)?;
+    Ok(crate::automation::artifact_refs::sha256_bytes(&bytes))
+}
+
+fn fact_collection_summary(values: &[Value]) -> Result<Value> {
+    Ok(json!({
+        "count": values.len(),
+        "sha256": values_digest(values)?,
+    }))
+}
+
+fn automatic_fact_receipt_summary<T: AutomaticFactReceiptSummary>(receipt: &T) -> Value {
+    json!({
+        "apply_id": receipt.summary_apply_id(),
+        "state": receipt.summary_state(),
+        "applied_fact_id": receipt.summary_applied_fact_id(),
+    })
+}
+
+fn session_fact_ledger_summary(
+    proposed: &[Value],
+    accepted: &[Value],
+    admitted: &[Value],
+    quarantined: &[Value],
+) -> Result<Value> {
+    Ok(json!({
+        "schema_version": 1,
+        "proposed": fact_collection_summary(proposed)?,
+        "accepted": fact_collection_summary(accepted)?,
+        "admitted": fact_collection_summary(admitted)?,
+        "quarantined": fact_collection_summary(quarantined)?,
+    }))
+}
+
+fn validation_repairs_summary(repairs: &[Value]) -> Result<Value> {
+    Ok(json!({
+        "count": repairs.len(),
+        "sha256": values_digest(repairs)?,
+    }))
+}
+
+fn session_fact_curation_receipt<T: AutomaticFactReceiptSummary>(
     admitted_count: usize,
     validation_quarantined_count: usize,
     repair_attempted: bool,
     retry_required: bool,
-    receipts: &[AutomaticFactReceipt],
+    receipts: &[T],
 ) -> SessionFactCurationReceipt {
     let applied_fact_ids = receipts
         .iter()
-        .filter_map(|receipt| receipt.applied_canonical_fact_id.clone())
+        .filter_map(|receipt| receipt.summary_applied_fact_id().map(ToOwned::to_owned))
         .collect::<Vec<_>>();
     let applied_count = receipts
         .iter()
-        .filter(|receipt| receipt.state == AutomaticFactState::Applied)
+        .filter(|receipt| receipt.summary_state() == AutomaticFactState::Applied)
         .count();
     let quarantined_count = validation_quarantined_count.saturating_add(
         receipts
             .iter()
-            .filter(|receipt| receipt.state == AutomaticFactState::Quarantined)
+            .filter(|receipt| receipt.summary_state() == AutomaticFactState::Quarantined)
             .count(),
     );
     SessionFactCurationReceipt {
@@ -191,7 +268,7 @@ fn session_fact_curation_receipt(
         retry_required,
         automatic_fact_receipt_ids: receipts
             .iter()
-            .map(|receipt| receipt.apply_id.clone())
+            .map(|receipt| receipt.summary_apply_id().to_owned())
             .collect(),
         applied_fact_ids,
     }
@@ -258,10 +335,11 @@ pub(super) fn build_session_reflector_prompt(evidence: &Value) -> String {
 
 pub(super) async fn validate_session_fact_candidates<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
+    run_control: &AutomationRunControl,
     proposals: &[Value],
     evidence: &Value,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
-    validate_fact_candidates(memory, proposals, evidence).await
+    validate_fact_candidates(memory, run_control, proposals, evidence).await
 }
 
 async fn skipped_session_reflector_run(
@@ -277,6 +355,7 @@ async fn skipped_session_reflector_run(
         report,
         ledger_record: record,
         backend_response: None,
+        committed_receipt: None,
     })
 }
 
@@ -285,7 +364,7 @@ fn rejected_session_reflector_run(
     config: &AutomationConfig,
     reason: &str,
     evidence_hash: Option<String>,
-) -> SessionReflectorAutomationRun {
+) -> Result<SessionReflectorAutomationRun> {
     let (report, record) = unpersisted_rejected_parts(
         run,
         config,
@@ -293,13 +372,14 @@ fn rejected_session_reflector_run(
         reason,
         evidence_hash,
         "session_reflector",
-    );
-    SessionReflectorAutomationRun {
+    )?;
+    Ok(SessionReflectorAutomationRun {
         run_id: run.run_id.clone(),
         report,
         ledger_record: record,
         backend_response: None,
-    }
+        committed_receipt: None,
+    })
 }
 
 /// Validates and automatically applies the `facts` half of a reflector (or
@@ -309,7 +389,6 @@ pub(super) struct ProposedAgentOutput<'a> {
     pub(super) retry_report: &'a AgentTaskRetryReport,
     pub(super) evidence: &'a Value,
     pub(super) evidence_hash: Option<String>,
-    pub(super) proposed_ops: &'a Value,
     pub(super) proposals: &'a [Value],
 }
 
@@ -317,15 +396,19 @@ pub(super) enum SessionReflectorFinalization {
     Completed {
         report: Value,
         record: AutomationRunLedgerRecord,
+        committed_receipt: Option<AutomationCommittedReceipt>,
     },
     FailedRecorded {
-        error: TraceDecayError,
-        record: AutomationRunLedgerRecord,
+        run_id: String,
+        committed_receipt: AutomationCommittedReceipt,
+        record: Option<AutomationRunLedgerRecord>,
+        detail: &'static str,
     },
 }
 
 pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
+    run_control: &AutomationRunControl,
     config: &AutomationConfig,
     authority: &tracedecay_policy::CurationApplyAuthorityV1,
     finalizer: &AgentRunFinalizer<'_>,
@@ -337,12 +420,12 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         retry_report,
         evidence,
         evidence_hash,
-        proposed_ops,
         proposals,
+        ..
     } = output;
     let run_id = finalizer.run_id();
     let (accepted_facts, rejected_facts) =
-        validate_session_fact_candidates(memory, proposals, evidence).await?;
+        validate_session_fact_candidates(memory, run_control, proposals, evidence).await?;
     let curation_decision =
         evaluate_session_curation(config, authority, evidence_hash.as_deref(), &accepted_facts)?;
     let mut terminal_rejections = rejected_facts.clone();
@@ -354,53 +437,120 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
     };
     let admitted_count = admitted_facts.len();
     let quarantined_input_count = terminal_rejections.len();
-    let apply_batch =
-        record_session_automatic_facts(memory, run_id, evidence_hash.as_deref(), admitted_facts)
-            .await?;
+    let apply_batch = record_session_automatic_facts(
+        memory,
+        run_control,
+        run_id,
+        evidence_hash.as_deref(),
+        admitted_facts,
+    )
+    .await?;
     let automatic_fact_receipts = apply_batch.receipts;
-    let receipt = session_fact_curation_receipt(
-        admitted_count,
-        quarantined_input_count,
-        !validation_repairs.is_empty(),
-        apply_batch.retry_error.is_some(),
-        &automatic_fact_receipts,
-    );
-    let applied_receipt_ids: Vec<String> = automatic_fact_receipts
-        .iter()
-        .filter(|record| record.state == AutomaticFactState::Applied)
-        .map(|record| record.apply_id.clone())
-        .collect();
-    let total_quarantined_count = receipt.quarantined_count;
-    let fully_applied = admitted_count > 0 && receipt.applied_count == admitted_count;
+    let settled_receipts = apply_batch.settled_receipts;
+    let receipt = if apply_batch.retry_error.is_some() {
+        session_fact_curation_receipt(
+            admitted_count,
+            quarantined_input_count,
+            !validation_repairs.is_empty(),
+            true,
+            &settled_receipts,
+        )
+    } else {
+        session_fact_curation_receipt(
+            admitted_count,
+            quarantined_input_count,
+            !validation_repairs.is_empty(),
+            false,
+            &automatic_fact_receipts,
+        )
+    };
+    let applied_receipt_ids: Vec<String> = if apply_batch.retry_error.is_some() {
+        settled_receipts
+            .iter()
+            .filter(|record| record.state() == AutomaticFactState::Applied)
+            .map(|record| record.apply_id().to_owned())
+            .collect()
+    } else {
+        automatic_fact_receipts
+            .iter()
+            .filter(|record| record.state == AutomaticFactState::Applied)
+            .map(|record| record.apply_id.clone())
+            .collect()
+    };
+    let fully_applied = receipt.outcome == SessionFactCurationOutcome::Applied;
     if let Some(error) = apply_batch.retry_error {
-        let record = finalizer
+        if settled_receipts.is_empty() {
+            return Err(error);
+        }
+        let settled_values = settled_receipts
+            .iter()
+            .map(automatic_fact_receipt_summary)
+            .collect::<Vec<_>>();
+        let authority_quarantines = settled_receipts
+            .iter()
+            .filter(|receipt| receipt.state() == AutomaticFactState::Quarantined)
+            .map(automatic_fact_receipt_summary)
+            .collect::<Vec<_>>();
+        let mut all_rejections = terminal_rejections.clone();
+        all_rejections.extend(authority_quarantines.iter().cloned());
+        let proposed_summary = session_fact_ledger_summary(
+            proposals,
+            &accepted_facts,
+            admitted_facts,
+            &terminal_rejections,
+        )?;
+        let rejected_summary = fact_collection_summary(&all_rejections)?;
+        let repairs_summary = validation_repairs_summary(validation_repairs)?;
+        let terminal_accepted_count = receipt.applied_count;
+        let terminal_rejected_count = receipt.quarantined_count;
+        let committed_receipt = NonEmptyAutomaticFactReceipts::from_vec(
+            settled_receipts
+                .into_iter()
+                .map(SettledAutomaticFactReceipt::into_authority_result)
+                .collect(),
+        )
+        .map(AutomationCommittedReceipt::AutomaticFacts)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "automatic fact settlement lost its committed authority receipt".to_owned(),
+        })?;
+        let record = match finalizer
             .append_failed_record_with_effects(
                 response.model.clone(),
                 evidence_hash,
-                Some(json!({
-                    "facts": proposed_ops.get("facts").cloned().unwrap_or_else(|| json!([])),
-                    "accepted_facts": accepted_facts,
-                    "admitted_facts": admitted_facts,
-                    "quarantined_facts": terminal_rejections,
-                })),
+                Some(proposed_summary),
                 error.to_string(),
                 retry_report,
                 Some(json!({
-                    "automatic_fact_receipts": automatic_fact_receipts,
+                    "automatic_fact_receipts": settled_values,
                     "applied_receipt_ids": applied_receipt_ids,
                 })),
-                Some(json!(terminal_rejections)),
+                Some(rejected_summary),
                 Some(json!({
                     "status": receipt.outcome,
                     "receipt": receipt,
-                    "validation_repairs": validation_repairs,
+                    "validation_repairs": repairs_summary,
                 })),
-                admitted_count,
-                total_quarantined_count,
+                terminal_accepted_count,
+                terminal_rejected_count,
             )
-            .await?;
-        return Ok(SessionReflectorFinalization::FailedRecorded { error, record });
+            .await
+        {
+            Ok(record) => Some(record),
+            Err(_) => None,
+        };
+        return Ok(SessionReflectorFinalization::FailedRecorded {
+            run_id: run_id.to_owned(),
+            committed_receipt,
+            record,
+            detail: "Automatic facts committed, but their canonical projection failed; reconcile the committed receipt before another run.",
+        });
     }
+    terminal_rejections.extend(
+        automatic_fact_receipts
+            .iter()
+            .filter(|receipt| receipt.state == AutomaticFactState::Quarantined)
+            .map(automatic_fact_receipt_summary),
+    );
     let curation_policy = json!({
         "decision": curation_decision,
         "effect": {
@@ -431,23 +581,22 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
             .get("evidence_hash")
             .and_then(Value::as_str)
             .map(str::to_string),
-        Some(json!({
-            "facts": proposed_ops.get("facts").cloned().unwrap_or_else(|| json!([])),
-            "accepted_facts": report.get("accepted_facts").cloned().unwrap_or_else(|| json!([])),
-            "admitted_facts": report.get("admitted_facts").cloned().unwrap_or_else(|| json!([])),
-            "quarantined_facts": report.get("quarantined_facts").cloned().unwrap_or_else(|| json!([])),
-            "automatic_fact_receipt_ids": report.pointer("/receipt/automatic_fact_receipt_ids").cloned().unwrap_or_else(|| json!([])),
-        })),
-        admitted_count,
-        total_quarantined_count,
-    );
+        Some(session_fact_ledger_summary(
+            proposals,
+            &accepted_facts,
+            admitted_facts,
+            &terminal_rejections,
+        )?),
+        receipt.applied_count,
+        receipt.quarantined_count,
+    )?;
     record.backend_attempt_count = retry_report.attempt_count();
     record.backend_attempts = retry_report.attempts().to_vec();
     record.applied_ops = report
         .pointer("/curation_policy/effect/applied_receipt_ids")
         .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
         .cloned();
-    record.rejected_ops = report.get("quarantined_facts").cloned();
+    record.rejected_ops = Some(fact_collection_summary(&terminal_rejections)?);
     let applied_receipt_ids = report
         .pointer("/curation_policy/effect/applied_receipt_ids")
         .cloned()
@@ -456,9 +605,9 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         "status": report.get("status").cloned().unwrap_or_else(|| json!("no_candidate")),
         "dry_run": report.get("dry_run").cloned().unwrap_or(json!(false)),
         "admitted_count": admitted_count,
-        "quarantined_count": total_quarantined_count,
+        "quarantined_count": receipt.quarantined_count,
         "receipt": report.get("receipt").cloned().unwrap_or_else(|| json!({})),
-        "validation_repairs": validation_repairs,
+        "validation_repairs": validation_repairs_summary(validation_repairs)?,
         "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
     });
     if let Some(object) = validation_report.as_object_mut() {
@@ -466,12 +615,23 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
             "applied_receipts".to_string(),
             json!({
             "receipt_ids": applied_receipt_ids,
-            "admitted_facts": report.get("admitted_facts").cloned().unwrap_or_else(|| json!([])),
+            "admitted_count": admitted_count,
             }),
         );
     }
     record.validation_report = Some(validation_report);
-    Ok(SessionReflectorFinalization::Completed { report, record })
+    let committed_receipt = NonEmptyAutomaticFactReceipts::from_vec(
+        settled_receipts
+            .into_iter()
+            .map(SettledAutomaticFactReceipt::into_authority_result)
+            .collect(),
+    )
+    .map(AutomationCommittedReceipt::AutomaticFacts);
+    Ok(SessionReflectorFinalization::Completed {
+        report,
+        record,
+        committed_receipt,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -481,11 +641,11 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     retrieval: &dyn AutomationSessionRetrieval,
     memory: &MemoryApplication<A>,
     config: &AutomationConfig,
+    run_control: &AutomationRunControl,
     authority: &tracedecay_policy::CurationApplyAuthorityV1,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
-) -> Result<SessionReflectorAutomationRun> {
-    dispose_shipped_fact_proposals(&dashboard_root).await?;
+) -> AutomationRunResult<SessionReflectorAutomationRun> {
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
         sessions_db,
@@ -495,11 +655,14 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
         config,
         AgentTaskKind::SessionReflector,
     );
-    if let Some(reason @ ("automation_disabled" | "session_reflector_disabled")) =
-        task_skip_reason(config, AgentTaskKind::SessionReflector)
-    {
-        return Ok(rejected_session_reflector_run(&run, config, reason, None));
-    }
+    let _run_lock = match run.gate().await? {
+        SchedulerGate::Proceed(lock) => lock,
+        SchedulerGate::Skip(reason) => {
+            return skipped_session_reflector_run(&run, reason, None)
+                .await
+                .map_err(Into::into);
+        }
+    };
     let SessionReflectorEvidenceBundle {
         evidence,
         evidence_hash,
@@ -509,24 +672,15 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             reason,
             evidence_hash,
         } => {
-            return Ok(rejected_session_reflector_run(
-                &run,
-                config,
-                reason,
-                evidence_hash,
-            ));
-        }
-    };
-    let _run_lock = match run.gate().await? {
-        SchedulerGate::Proceed(lock) => lock,
-        SchedulerGate::Skip(reason) => {
-            return skipped_session_reflector_run(&run, reason, evidence_hash.clone()).await;
+            return rejected_session_reflector_run(&run, config, reason, evidence_hash)
+                .map_err(Into::into);
         }
     };
     crate::automation::outcomes::refresh_fact_outcomes(
         &run.dashboard_root,
         memory,
         current_timestamp(),
+        run_control.read_control(),
     )
     .await?;
 
@@ -557,6 +711,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                 report: failed_backend_fallback_report(&record),
                 ledger_record: record,
                 backend_response: None,
+                committed_receipt: None,
             });
         }
     };
@@ -573,7 +728,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
         crate::automation::backend::BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
     let mut validation_repairs = Vec::new();
     let (initial_accepted_facts, rejected_facts) =
-        validate_session_fact_candidates(memory, &proposals, &evidence).await?;
+        validate_session_fact_candidates(memory, run_control, &proposals, &evidence).await?;
     if !rejected_facts.is_empty() {
         validation_repairs.push(json!({
             "attempt": 1,
@@ -624,21 +779,26 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                     .append_failed_record_with_effects(
                         None,
                         evidence_hash,
-                        Some(proposed_ops),
+                        Some(session_fact_ledger_summary(
+                            &proposals,
+                            &initial_accepted_facts,
+                            &[],
+                            &rejected_facts,
+                        )?),
                         error.to_string(),
                         &retry_report,
                         None,
-                        Some(json!(rejected_facts.clone())),
+                        Some(fact_collection_summary(&rejected_facts)?),
                         Some(json!({
                             "status": receipt.outcome,
                             "receipt": receipt,
-                            "validation_repairs": validation_repairs,
+                            "validation_repairs": validation_repairs_summary(&validation_repairs)?,
                         })),
                         initial_accepted_facts.len(),
                         rejected_facts.len(),
                     )
                     .await?;
-                return Err(error);
+                return Err(error.into());
             }
         };
         retry_report.append(repair_retry_report);
@@ -652,8 +812,9 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             )
             .await?;
     }
-    let (report, record) = match finalize_session_reflector_success(
+    let (report, record, committed_receipt) = match finalize_session_reflector_success(
         memory,
+        run_control,
         config,
         authority,
         &finalizer,
@@ -662,15 +823,30 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             retry_report: &retry_report,
             evidence: &evidence,
             evidence_hash: evidence_hash.clone(),
-            proposed_ops: &proposed_ops,
             proposals: &proposals,
         },
         &validation_repairs,
     )
     .await
     {
-        Ok(SessionReflectorFinalization::Completed { report, record }) => (report, record),
-        Ok(SessionReflectorFinalization::FailedRecorded { error, .. }) => return Err(error),
+        Ok(SessionReflectorFinalization::Completed {
+            report,
+            record,
+            committed_receipt,
+        }) => (report, record, committed_receipt),
+        Ok(SessionReflectorFinalization::FailedRecorded {
+            run_id,
+            committed_receipt,
+            record,
+            detail,
+        }) => {
+            return Err(AutomationRunError::PartialEffect {
+                run_id,
+                committed_receipt,
+                ledger_record: record,
+                detail,
+            });
+        }
         Err(err) => {
             finalizer
                 .append_failed_record(
@@ -681,29 +857,45 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                     &retry_report,
                 )
                 .await?;
-            return Err(err);
+            return Err(err.into());
         }
     };
-    let record = finalizer
+    let record = match finalizer
         .append_success_record(&request, &response, &retry_report, record)
-        .await?;
+        .await
+    {
+        Ok(record) => record,
+        Err(error) => {
+            if let Some(committed_receipt) = committed_receipt {
+                return Err(AutomationRunError::PartialEffect {
+                    run_id: run.run_id.clone(),
+                    committed_receipt,
+                    ledger_record: None,
+                    detail: "Automatic facts committed, but the automation terminal could not be published; reconcile the committed receipt before another run.",
+                });
+            }
+            return Err(error.into());
+        }
+    };
 
     Ok(SessionReflectorAutomationRun {
         run_id: run.run_id,
         report,
         ledger_record: record,
         backend_response: Some(response),
+        committed_receipt,
     })
 }
 
 pub async fn run_session_reflector_with_backend_and_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: SessionReflectorAutomationOptions,
-) -> Result<SessionReflectorAutomationRun> {
+) -> AutomationRunResult<SessionReflectorAutomationRun> {
     let authority = super::project_curation_authority(
         cg,
         "automation:session-reflector",
@@ -726,6 +918,7 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
         retrieval,
         &memory,
         config,
+        run_control,
         &authority,
         backend,
         options,
@@ -736,14 +929,16 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
 pub async fn run_session_reflector_with_backend(
     cg: &TraceDecay,
     config: &AutomationConfig,
+    run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
-) -> Result<SessionReflectorAutomationRun> {
+) -> AutomationRunResult<SessionReflectorAutomationRun> {
     let retrieval = production_project_automation_retrieval(cg).await;
     run_session_reflector_with_backend_and_retrieval(
         cg,
         config,
+        run_control,
         configuration_revision_id,
         backend,
         retrieval.as_ref(),
@@ -756,38 +951,18 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
     profile_root: &std::path::Path,
     session_registry: Arc<dyn ProfileRuntime>,
     config: &AutomationConfig,
+    run_control: &AutomationRunControl,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: SessionReflectorAutomationOptions,
-) -> Result<SessionReflectorAutomationRun> {
+) -> AutomationRunResult<SessionReflectorAutomationRun> {
     let authority = super::profile_curation_authority(
         session_registry.as_ref(),
         "automation:session-reflector",
         configuration_revision_id,
     )?;
     let sessions_db = session_registry.profile_sessions().await?;
-    if let SessionReflectorEvidenceOutcome::Skipped {
-        reason,
-        evidence_hash,
-    } = build_session_reflector_evidence(retrieval, &options).await?
-    {
-        let run = AgentTaskRunContext::new(
-            user_automation_root(profile_root),
-            Arc::clone(&sessions_db),
-            options.run_id.clone(),
-            "session_reflector",
-            options.trigger,
-            config,
-            AgentTaskKind::SessionReflector,
-        );
-        return Ok(rejected_session_reflector_run(
-            &run,
-            config,
-            reason,
-            evidence_hash,
-        ));
-    }
     let memory_db = session_registry.open_user_memory_db().await?;
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&memory_db))
         .map_err(|error| TraceDecayError::Config {
@@ -801,6 +976,7 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
         retrieval,
         &memory,
         config,
+        run_control,
         &authority,
         backend,
         options,
@@ -809,30 +985,4 @@ pub(crate) async fn run_user_session_reflector_with_backend_and_retrieval(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::SessionFactCurationOutcome;
-
-    #[test]
-    fn session_fact_receipt_outcome_tracks_terminal_effects_and_retry_need() {
-        let cases = [
-            ((0, 0, 0, false), SessionFactCurationOutcome::NoCandidate),
-            ((2, 2, 0, false), SessionFactCurationOutcome::Applied),
-            ((0, 0, 2, false), SessionFactCurationOutcome::Quarantined),
-            ((2, 1, 1, false), SessionFactCurationOutcome::Partial),
-            ((2, 1, 0, true), SessionFactCurationOutcome::Partial),
-            ((2, 0, 0, true), SessionFactCurationOutcome::Retry),
-        ];
-
-        for ((admitted, applied, quarantined, retry_required), expected) in cases {
-            assert_eq!(
-                SessionFactCurationOutcome::classify(
-                    admitted,
-                    applied,
-                    quarantined,
-                    retry_required,
-                ),
-                expected,
-            );
-        }
-    }
-}
+mod tests;

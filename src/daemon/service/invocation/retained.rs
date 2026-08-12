@@ -79,9 +79,10 @@ pub(super) async fn execute_retained_application(
                 outcome,
             },
         ),
-        Err(problem) => DaemonInvocationResponse::with_outcome(
+        Err(problem) => DaemonInvocationResponse::retained_application_problem(
             request_id,
-            DaemonInvocationOutcome::ApplicationProblem { problem },
+            registered.scope,
+            problem,
         ),
     }
 }

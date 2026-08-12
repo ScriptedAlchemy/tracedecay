@@ -1,7 +1,6 @@
 //! Strict advisory runtime acceptance over authentic provider response captures.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,26 +17,22 @@ use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadReque
 #[cfg(feature = "test-transport")]
 use tracedecay_application::now_micros;
 use tracedecay_application::{
-    CancellationContext, CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId, ResolvedScope,
 };
-use tracedecay_code_index::graph_projection::{
-    CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
-};
-use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
 use tracedecay_domain::feedback::{
-    FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCommentIdV1,
+    FeedbackAdvisoryProviderStateV1, FeedbackCycleTerminationV1, FeedbackDiagnosticProducerV1,
+    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCommentIdV1,
     GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
     ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
-    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, SanitizedCodeFileV1,
-    SnapshotFileDispositionV1, SourceSpan, UtcMicros, WorktreeId,
+    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros,
+    WorktreeId,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
-use tracedecay_graph_db::NeverCancelled;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::advisory::ci_runtime::GitHubCiOfficialResponseDecoderV1;
 #[cfg(feature = "test-transport")]
@@ -62,10 +57,6 @@ use tracedecay_usecases::advisory::{
     GitHubOfficialResponseDecoderV1, GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1,
     GitHubReadOnlyCredentialV1, GitHubReadResponseDecoderV1, GitHubRepositoryTargetV1,
     GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
-};
-use tracedecay_usecases::graph::{
-    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadFuture, CodeGraphReadRequest,
-    VerifiedCodeGraphRead,
 };
 
 #[cfg(feature = "test-transport")]
@@ -115,7 +106,11 @@ use tracedecay_usecases::advisory::proximity_runtime::{
 #[cfg(feature = "test-transport")]
 use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
 
+#[path = "advisory_runtime_acceptance/code_graph.rs"]
+mod code_graph;
 mod common;
+
+use code_graph::{hermetic_advisory_code_graph, hermetic_ci_code_graph};
 
 struct NoAnchors;
 
@@ -165,93 +160,6 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for FixtureAnchors {
             })
         })
     }
-}
-
-#[derive(Clone)]
-struct HermeticAdvisoryCodeGraphV1 {
-    scope: ResolvedScope,
-    store: Arc<CodeGraphProjectionStore>,
-}
-
-impl CodeGraphProjectionReadPort for HermeticAdvisoryCodeGraphV1 {
-    fn open<'a>(&'a self, request: CodeGraphReadRequest<'a>) -> CodeGraphReadFuture<'a> {
-        Box::pin(async move {
-            request
-                .context
-                .validate()
-                .map_err(|error| CodeGraphReadError::InvalidRequest {
-                    detail: error.to_string(),
-                })?;
-            if request.context.scope() != &self.scope {
-                return Err(CodeGraphReadError::Denied);
-            }
-            if request.cancellation.is_cancelled() {
-                return Err(CodeGraphReadError::Cancelled);
-            }
-            match request.context.admission_at(request.observed_at) {
-                RequestAdmission::Admitted => {}
-                RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
-                RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
-            }
-            VerifiedCodeGraphRead::new(self.scope.clone(), Arc::clone(&self.store))
-        })
-    }
-}
-
-fn hermetic_advisory_code_graph(
-    scope: &FeedbackScopeV1,
-    project_root: &Path,
-    logical_path: &str,
-) -> Arc<dyn CodeGraphProjectionReadPort> {
-    let resolved_scope = ResolvedScope::new(
-        scope.project_id.clone(),
-        scope.repository_id.clone(),
-        scope.worktree_id.clone(),
-        Some(RefId::new(scope.branch_ref.clone()).expect("fixture branch reference")),
-    )
-    .expect("fixture graph scope");
-    let bytes = std::fs::read(project_root.join(logical_path)).expect("fixture graph source");
-    let source_digest = hex::encode(Sha256::digest(&bytes));
-    let generation = CodeGenerationId::new(format!(
-        "generation.advisory.github.{}",
-        &source_digest[..16]
-    ))
-    .expect("fixture graph generation");
-    let cancellation = CancellationSignal::active("cancel.advisory.github.graph")
-        .expect("fixture graph cancellation");
-    let projection = HermeticCodeGraphProjectionStore::memory(&cancellation)
-        .expect("hermetic advisory graph projection");
-    let files = [SanitizedCodeFileV1 {
-        file_occurrence_id: FileOccurrenceId::new(format!(
-            "file.advisory.github.{}",
-            &source_digest[..16]
-        ))
-        .expect("fixture graph file identity"),
-        logical_path: logical_path.to_owned(),
-        language: None,
-        content_digest: ContentDigest::new(format!("sha256:{source_digest}"))
-            .expect("fixture graph content digest"),
-        disposition: SnapshotFileDispositionV1::Present,
-    }];
-    let symbols = GenerationSymbolIndexV1::new(generation.clone(), Vec::new())
-        .expect("fixture graph symbol index");
-    projection
-        .publish_indexed_with_cancellation(
-            &generation,
-            &[],
-            &[],
-            &files,
-            &symbols,
-            Arc::new(NeverCancelled),
-        )
-        .expect("publish fixture graph generation");
-    let store = projection
-        .verified_store(&generation)
-        .expect("verify fixture graph generation");
-    Arc::new(HermeticAdvisoryCodeGraphV1 {
-        scope: resolved_scope,
-        store: Arc::new(store),
-    })
 }
 
 #[cfg(feature = "test-transport")]
@@ -887,9 +795,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
 
     let mut scope = scope();
     scope.head_commit_id = CommitId::new(head).unwrap();
-    let graph = TraceDecay::init(&project).await.expect("canonical graph");
-    graph.index_all().await.expect("canonical graph index");
-    let graph = Arc::new(graph);
+    let code_graph = hermetic_ci_code_graph(&scope, &project);
     let mut provider_record =
         tracedecay_usecases::advisory::fixtures::load_advisory_source_backed_composite_fixture_v1()
             .unwrap()
@@ -926,7 +832,8 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
             observed_at: now_micros(),
         },
     };
-    let store = ProjectCiCodeAnchorStoreV1::new(graph.clone(), scope.clone()).unwrap();
+    let store = ProjectCiCodeAnchorStoreV1::new(project.clone(), scope.clone(), code_graph.clone())
+        .unwrap();
     let evidence = store
         .resolve(&ci_context(&scope, now_micros()), &request, &retained)
         .await
@@ -962,7 +869,7 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
         stale_scope.head_commit_id.as_str().to_owned();
     stale_record.provider_record.check_run.head_sha =
         stale_scope.head_commit_id.as_str().to_owned();
-    let stale = ProjectCiCodeAnchorStoreV1::new(graph, stale_scope.clone())
+    let stale = ProjectCiCodeAnchorStoreV1::new(project, stale_scope.clone(), code_graph)
         .unwrap()
         .resolve(
             &ci_context(&stale_scope, now_micros()),
@@ -1660,9 +1567,7 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
     let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
 
     let graph = TraceDecay::init(&project).await.expect("canonical graph");
-    graph.index_all().await.expect("canonical graph index");
     let database = graph.db().clone();
-    let graph = Arc::new(graph);
 
     let resolved = ResolvedScope::new(
         ProjectId::new("project.advisory.four-pillar").unwrap(),
@@ -1727,11 +1632,13 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
             observed_at: now,
         },
     };
-    let ci_code_evidence = ProjectCiCodeAnchorStoreV1::new(graph.clone(), scope.clone())
-        .unwrap()
-        .resolve(&context, &ci_request, &retained)
-        .await
-        .expect("production CI localization over the canonical graph");
+    let code_graph = hermetic_ci_code_graph(&scope, &project);
+    let ci_code_evidence =
+        ProjectCiCodeAnchorStoreV1::new(project.clone(), scope.clone(), code_graph)
+            .unwrap()
+            .resolve(&context, &ci_request, &retained)
+            .await
+            .expect("production CI localization over the canonical graph");
     assert_eq!(
         ci_code_evidence.state,
         tracedecay_domain::feedback::CiFailureLocalizationStateV1::Complete,
@@ -1930,10 +1837,19 @@ async fn one_saved_edit_cycle_returns_all_four_advisory_pillars_together() {
         .advisory_findings(validity)
         .expect("proximity advisory contribution");
     let advisory = FeedbackCycleAdvisoryV1 {
-        provider_states: vec![
-            github_batch.provider_state,
-            ci_batch.provider_state,
-            proximity_batch.provider_state,
+        providers: vec![
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::GitHubReview,
+                state: github_batch.provider_state,
+            },
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::CiLocalization,
+                state: ci_batch.provider_state,
+            },
+            FeedbackAdvisoryProviderStateV1 {
+                producer: FeedbackDiagnosticProducerV1::Proximity,
+                state: proximity_batch.provider_state,
+            },
         ],
         findings: github_batch
             .findings

@@ -24,7 +24,7 @@
         "args": {
           "content": "Use pnpm instead of npm",
           "category": "user_pref",
-          "source": "new-pnpm",
+          "source_label": "new-pnpm",
           "trust": 0.7
         }
       }

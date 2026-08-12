@@ -167,6 +167,7 @@ async fn link_facts(
             Confidence::new(0.5).expect("curation threshold"),
             MemoryOperationContext::generated(owner, operation, None)
                 .expect("graph curation operation"),
+            None,
             &lifecycle.write_control(),
         )
         .await
@@ -521,7 +522,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
     let long_path = graph(
         &first_database,
         &lifecycle,
-        first_owner,
+        first_owner.clone(),
         vec![chain[0].clone()],
         LONG_PATH_RELATIONS,
     )

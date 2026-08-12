@@ -684,35 +684,6 @@ pub(crate) struct HomeEnvGuard {
     pub(crate) previous_data_dir: Option<OsString>,
 }
 
-#[cfg(feature = "test-transport")]
-pub(crate) struct TestEnvVarGuard {
-    pub(crate) key: &'static str,
-    pub(crate) previous: Option<OsString>,
-}
-
-#[cfg(feature = "test-transport")]
-impl TestEnvVarGuard {
-    pub(crate) fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var_os(key);
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self { key, previous }
-    }
-}
-
-#[cfg(feature = "test-transport")]
-impl Drop for TestEnvVarGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match self.previous.take() {
-                Some(value) => std::env::set_var(self.key, value),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
 impl HomeEnvGuard {
     pub(crate) fn set(home: &Path) -> Self {
         let previous_home = std::env::var_os("HOME");
@@ -832,15 +803,6 @@ pub(crate) struct TestEnv {
     pub(crate) _env_lock: MutexGuard<'static, ()>,
 }
 
-#[cfg(feature = "test-transport")]
-pub(crate) struct CrossProjectMemoryEnv {
-    pub(crate) _dir: TestTempDir,
-    pub(crate) _storage_guard: common::TraceDecayStorageEnvGuard,
-    // Drop order = declaration order: the env lock must outlive the storage
-    // guard above so its env restore happens while the lock is still held.
-    pub(crate) _env_lock: MutexGuard<'static, ()>,
-}
-
 pub(crate) struct TestTraceDecay {
     pub(crate) inner: Option<TraceDecay>,
 }
@@ -946,76 +908,6 @@ pub(crate) async fn setup_empty_project() -> (TestTraceDecay, TestEnv, TestTempD
 }
 
 #[cfg(feature = "test-transport")]
-pub(crate) async fn setup_cross_project_memory_projects()
--> (TestTraceDecay, TestTraceDecay, CrossProjectMemoryEnv) {
-    let env_lock = GLOBAL_DB_ENV_LOCK.lock().await;
-    let dir = test_temp_dir();
-    let storage_guard = common::isolated_tracedecay_storage(&dir);
-
-    let active_project = dir.path().join("active");
-    let target_project = dir.path().join("target");
-    fs::create_dir_all(active_project.join("src")).unwrap();
-    fs::create_dir_all(target_project.join("src")).unwrap();
-    fs::write(active_project.join("src/lib.rs"), "pub fn active() {}\n").unwrap();
-    fs::write(target_project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
-
-    // Both graphs must be enrolled in *one* profile. A default-option open
-    // gives each test project its own standalone test profile, and a project
-    // store is keyed by (profile, project), so a selector resolved against the
-    // active profile could never reach a store enrolled in another one.
-    let shared_profile = tracedecay::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(storage_guard.profile_root().to_path_buf()),
-        global_db_path: Some(storage_guard.global_db_path().to_path_buf()),
-    };
-    let active = TestTraceDecay::new(
-        fixture::init_project_from_template_with_options(&active_project, shared_profile.clone())
-            .await
-            .unwrap(),
-    );
-    let target = TestTraceDecay::new(
-        fixture::init_project_from_template_with_options(&target_project, shared_profile)
-            .await
-            .unwrap(),
-    );
-
-    // A selector resolves against the registry of the runtime serving the
-    // call, which is the active project's. Both roots therefore have to be
-    // registered there — under the identity their store was opened with —
-    // because initializing a graph does not register it, and registering the
-    // target through its own runtime lands in a registry no reader consults.
-    let registry = active
-        .test_runtime_for_test()
-        .expect("cross-project fixture active runtime");
-    for graph in [&active, &target] {
-        let project_id = graph
-            .store_layout()
-            .identity
-            .project_id
-            .clone()
-            .expect("cross-project fixture project identity");
-        registry
-            .upsert_code_project(&project_id, graph.project_root(), None, None, Some("main"))
-            .await
-            .expect("cross-project fixture registers both projects");
-    }
-
-    (
-        active,
-        target,
-        CrossProjectMemoryEnv {
-            _dir: dir,
-            _env_lock: env_lock,
-            _storage_guard: storage_guard,
-        },
-    )
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) fn lcm_payload_dir(cg: &TraceDecay) -> PathBuf {
-    cg.store_layout().lcm_payload_root.clone()
-}
-
-#[cfg(feature = "test-transport")]
 pub(crate) async fn open_active_project_session_db(
     cg: &TraceDecay,
 ) -> Arc<HostAdmissionTestRuntimeV1> {
@@ -1074,33 +966,6 @@ pub(crate) fn assert_fact_results(payload: &Value, included: &str, excluded: &st
         !results.contains(excluded),
         "{context} should not include {excluded:?}: {payload}"
     );
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn extract_lcm_json_following_handle(cg: &TraceDecay, value: &Value) -> Value {
-    let payload = extract_json(value);
-    if payload.get("truncated").and_then(Value::as_bool) != Some(true) {
-        return payload;
-    }
-    let handle = payload["handle"]
-        .as_str()
-        .expect("truncated LCM payload should include a retrieve handle");
-    let retrieved = handle_tool_call(
-        cg,
-        "tracedecay_retrieve",
-        json!({"handle": handle}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let retrieved_payload = extract_json(&retrieved.value);
-    serde_json::from_str(
-        retrieved_payload["content"]
-            .as_str()
-            .expect("retrieved LCM payload should carry original JSON content"),
-    )
-    .unwrap()
 }
 
 pub(crate) fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> String {
@@ -1275,18 +1140,6 @@ pub(crate) async fn seed_lcm_session_message_for_provider(
             .await
             .unwrap()
     );
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn seed_lcm_tool_result_message(
-    cg: &TraceDecay,
-    session_id: &str,
-    message_id: &str,
-    text: impl Into<String>,
-    ordinal: i64,
-) {
-    seed_lcm_tool_result_message_for_provider(cg, "cursor", session_id, message_id, text, ordinal)
-        .await;
 }
 
 #[cfg(feature = "test-transport")]
@@ -1715,74 +1568,8 @@ pub(crate) async fn persist_temporal_lcm_observation_with_access(
 }
 
 #[cfg(feature = "test-transport")]
-pub(crate) async fn seed_lcm_session_message_in_db(
-    runtime: &HostAdmissionTestRuntimeV1,
-    project_path: &Path,
-    session_id: &str,
-    message_id: &str,
-    text: impl Into<String>,
-    ordinal: i64,
-) {
-    assert!(
-        runtime
-            .upsert_session_for_test(
-                HostAdmissionScope::Project,
-                &SessionRecord {
-                    provider: "cursor".to_string(),
-                    session_id: session_id.to_string(),
-                    project_key: project_path.to_string_lossy().to_string(),
-                    project_path: project_path.to_string_lossy().to_string(),
-                    title: Some(format!("LCM session {session_id}")),
-                    started_at: Some(ordinal),
-                    ended_at: None,
-                    transcript_path: Some(format!("{session_id}.jsonl")),
-                    metadata_json: None,
-                    parent_session_id: None,
-                    is_subagent: false,
-                    agent_id: None,
-                    parent_tool_use_id: None,
-                }
-            )
-            .await
-            .unwrap()
-    );
-    assert!(
-        runtime
-            .upsert_session_message_for_test(
-                HostAdmissionScope::Project,
-                &SessionMessageRecord {
-                    provider: "cursor".to_string(),
-                    message_id: message_id.to_string(),
-                    session_id: session_id.to_string(),
-                    role: "assistant".to_string(),
-                    timestamp: Some(ordinal + 1),
-                    ordinal,
-                    text: text.into(),
-                    kind: Some("message".to_string()),
-                    model: Some("test-model".to_string()),
-                    tool_names: None,
-                    source_path: Some(format!("{session_id}.jsonl")),
-                    source_offset: Some(0),
-                    metadata_json: None,
-                },
-            )
-            .await
-            .unwrap()
-    );
-}
-
-#[cfg(feature = "test-transport")]
 pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> Arc<HostAdmissionTestRuntimeV1> {
     open_active_project_session_db(cg).await
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn lcm_fts_match_count(cg: &TraceDecay, query: &str) -> i64 {
-    project_lcm_conn(cg)
-        .await
-        .lcm_raw_message_fts_count_for_test(query)
-        .await
-        .unwrap()
 }
 
 #[cfg(feature = "test-transport")]
@@ -1802,42 +1589,4 @@ pub(crate) async fn lcm_raw_store_id_for_provider(
         .await
         .expect("LCM raw message fixture")
         .store_id
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn lcm_raw_message_count(cg: &TraceDecay, session_id: &str) -> i64 {
-    project_lcm_conn(cg)
-        .await
-        .lcm_raw_message_count_for_test(HostAdmissionScope::Project, session_id)
-        .await
-        .unwrap()
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &str) -> i64 {
-    let conn = tracedecay_rusqlite_runtime::open_immutable_reader(db_path).unwrap();
-    conn.query_row(
-        "SELECT COUNT(*) FROM lcm_raw_messages WHERE session_id = ?1",
-        [session_id],
-        |row| row.get(0),
-    )
-    .unwrap()
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn wipe_lcm_raw_fts(cg: &TraceDecay) {
-    project_lcm_conn(cg)
-        .await
-        .wipe_lcm_raw_fts_for_test(HostAdmissionScope::Project, None)
-        .await
-        .unwrap();
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) async fn wipe_lcm_raw_fts_for_message(cg: &TraceDecay, message_id: &str) {
-    project_lcm_conn(cg)
-        .await
-        .wipe_lcm_raw_fts_for_test(HostAdmissionScope::Project, Some(message_id))
-        .await
-        .unwrap();
 }

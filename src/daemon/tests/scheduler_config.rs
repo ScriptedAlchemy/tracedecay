@@ -470,95 +470,6 @@ async fn concurrent_reenable_creates_one_live_scheduler_owner() {
 }
 
 #[cfg(unix)]
-#[tokio::test(flavor = "current_thread")]
-async fn daemon_memory_repair_scheduler_starts_without_automation_configuration() {
-    let dir = TempDir::new().expect("temp dir");
-    let project = dir.path().canonicalize().expect("canonical temp dir");
-    let client_identity = test_client_identity_for(project.join("profile"));
-    std::fs::create_dir_all(project.join("src")).expect("src dir");
-    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let handshake = DaemonHandshake {
-        project_path: Some(project.clone()),
-        client_identity,
-        ..test_handshake_defaults()
-    };
-    initialize_test_project(&project, &handshake.client_identity).await;
-    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
-    let _database_scope = enter_test_daemon_database_scope(
-        &handshake.client_identity.profile_root,
-        "memory-repair-scheduler-test",
-    );
-    let cg = super::super::open_project_for_handshake(
-        &project,
-        &handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open memory repair scheduler fixture through daemon authority");
-    let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
-    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
-    engine
-        .store_administration
-        .project_servers()
-        .lock()
-        .await
-        .insert(key.clone(), server);
-
-    engine
-        .ensure_memory_repair_scheduler(key.clone(), project.clone(), handshake.clone())
-        .await;
-    engine
-        .ensure_memory_repair_scheduler(key.clone(), project, handshake)
-        .await;
-
-    let schedulers = engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await;
-    assert!(schedulers.contains_key(&key));
-    assert_eq!(schedulers.len(), 1);
-    drop(schedulers);
-    engine.shutdown_all().await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn daemon_memory_repair_tick_runs_without_automation_configuration() {
-    let dir = TempDir::new().expect("temp dir");
-    let project = dir.path().canonicalize().expect("canonical temp dir");
-    let client_identity = test_client_identity_for(project.join("profile"));
-    std::fs::create_dir_all(project.join("src")).expect("src dir");
-    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let handshake = DaemonHandshake {
-        project_path: Some(project.clone()),
-        client_identity,
-        ..test_handshake_defaults()
-    };
-    initialize_test_project(&project, &handshake.client_identity).await;
-    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
-    let _database_scope = enter_test_daemon_database_scope(
-        &handshake.client_identity.profile_root,
-        "memory-repair-tick-test",
-    );
-    let cg = super::super::open_project_for_handshake(
-        &project,
-        &handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open memory repair tick fixture through daemon authority");
-    let decision = super::super::run_memory_repair_scheduler_tick(&project, &cg)
-        .await
-        .expect("memory repair tick must not depend on automation configuration");
-
-    assert!(
-        matches!(decision, super::super::MemoryRepairPassDecision::Idle),
-        "a fresh project has no repair backlog"
-    );
-}
-
-#[cfg(unix)]
 #[tokio::test]
 async fn unavailable_host_admission_spool_does_not_block_project_server_open() {
     let dir = TempDir::new().expect("temp dir");
@@ -1076,8 +987,15 @@ async fn automation_scheduler_tick_respects_pause_control_without_backend_call()
     .await
     .expect("save paused scheduler control");
 
+    let run_control = tracedecay_agent_hosts::automation::AutomationRunControl::from_interrupted(
+        std::sync::Arc::new(|| false),
+    );
     Box::pin(super::super::run_automation_scheduler_tick(
-        &project, &cg, &handshake, &engine,
+        &project,
+        &cg,
+        &handshake,
+        &engine,
+        &run_control,
     ))
     .await
     .expect("paused scheduler tick should exit cleanly");

@@ -348,9 +348,6 @@ mod tests {
         RetainedSurfaceRequestV1::MemoryStatus(MemoryStatusRequestV1 {
             memory_scope: Some(MemoryScopeV1::User),
             project_selector: None,
-            project_id: None,
-            project_path: None,
-            format: None,
         })
     }
 

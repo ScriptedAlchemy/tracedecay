@@ -3,7 +3,6 @@ mod branch;
 mod daemon;
 mod gain;
 mod index;
-mod memory;
 mod profile_storage;
 mod scope;
 mod settings;
@@ -14,7 +13,6 @@ pub(crate) use branch::handle_branch_action;
 pub(crate) use daemon::daemon_tool_json;
 pub use gain::handle_gain;
 pub(crate) use index::{handle_init, handle_no_command, handle_sync};
-pub(crate) use memory::handle_memory_action;
 pub(crate) use profile_storage::handle_profile_storage_action;
 pub(crate) use scope::resolve_project_scope;
 pub(crate) use settings::{

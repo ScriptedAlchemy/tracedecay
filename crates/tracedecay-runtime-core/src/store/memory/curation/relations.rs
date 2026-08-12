@@ -128,6 +128,55 @@ async fn ensure_relation_conflict_free_tx(
     })
 }
 
+pub(super) async fn exact_relation_exists_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    relation: &tracedecay_domain::FactRelationV1,
+) -> FactStoreResult<bool> {
+    let key = OwnerKey::new(owner)?;
+    let mut rows = transaction
+        .query(
+            "SELECT event_json FROM memory_v2_lineage_events
+             WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id = ?3
+               AND json_extract(event_json, '$.kind.kind') = 'curated'
+               AND json_extract(event_json, '$.kind.action.kind') = 'linked'
+               AND json_extract(event_json, '$.kind.action.relation.target_fact_id') = ?4
+             ORDER BY event_sequence",
+            params![
+                key.kind,
+                key.project_id.as_str(),
+                relation.source_fact_id().as_str(),
+                relation.target_fact_id().as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?
+    {
+        let event = serde_json::from_str::<FactLineageEventV1>(&row_string(
+            &row,
+            0,
+            PROJECT_MEMORY_WRITE_OPERATION,
+        )?)
+        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+        if let FactLineageEventKindV1::Curated {
+            action: FactCurationActionV1::Linked { relation: existing },
+            ..
+        } = event.kind()
+            && existing.owner() == relation.owner()
+            && existing.source_fact_id() == relation.source_fact_id()
+            && existing.target_fact_id() == relation.target_fact_id()
+            && existing.kind() == relation.kind()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn normalize_tags(tags: &[String]) -> Vec<String> {
     tags.iter()
         .map(|tag| {
@@ -166,15 +215,15 @@ pub(in crate::store::memory) async fn available_curation_fact_tx(
 pub(in crate::store::memory) async fn curation_evidence_ids_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    evidence: &[ProjectMemoryFactIdV1],
+    evidence: &[tracedecay_store::ProjectMemoryFactCurationReviewRefV1],
 ) -> FactStoreResult<Vec<FactId>> {
     let mut ids = Vec::with_capacity(evidence.len());
     let mut seen = BTreeSet::new();
     for target in evidence {
-        if target.owner() != owner {
+        if target.fact().owner() != owner {
             return Err(FactStoreError::OwnerMismatch);
         }
-        let fact = available_curation_fact_tx(transaction, target).await?;
+        let fact = available_curation_fact_tx(transaction, target.fact()).await?;
         if !seen.insert(fact.fact_id().clone()) {
             return Err(storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
@@ -192,27 +241,18 @@ pub(super) async fn link_facts_tx(
     actor: Option<&ActorId>,
     operation: &ProjectMemoryFactLinkV1,
     now: UtcMicros,
-) -> FactStoreResult<(Vec<FactId>, FactCommitReceipt)> {
+) -> FactStoreResult<(Vec<FactId>, Option<FactCommitReceipt>)> {
     let relation = operation.relation();
     if relation.owner() != owner {
         return Err(FactStoreError::OwnerMismatch);
     }
-    let source = available_curation_fact_tx(
-        transaction,
-        &ProjectMemoryFactIdV1::new(owner.clone(), relation.source_fact_id().clone())?,
-    )
-    .await?;
-    available_curation_fact_tx(
-        transaction,
-        &ProjectMemoryFactIdV1::new(owner.clone(), relation.target_fact_id().clone())?,
-    )
-    .await?;
-    for fact_id in relation.evidence_fact_ids() {
-        available_curation_fact_tx(
-            transaction,
-            &ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
-        )
-        .await?;
+    let source = available_curation_fact_tx(transaction, operation.source().fact()).await?;
+    available_curation_fact_tx(transaction, operation.target().fact()).await?;
+    for fact in operation.evidence_facts() {
+        available_curation_fact_tx(transaction, fact.fact()).await?;
+    }
+    if exact_relation_exists_tx(transaction, owner, relation).await? {
+        return Ok((Vec::new(), None));
     }
     ensure_relation_conflict_free_tx(transaction, owner, relation).await?;
     let event = FactLineageEventV1::new(
@@ -242,7 +282,7 @@ pub(super) async fn link_facts_tx(
             relation.source_fact_id().clone(),
             relation.target_fact_id().clone(),
         ],
-        receipt,
+        Some(receipt),
     ))
 }
 
@@ -332,7 +372,7 @@ pub(super) async fn normalize_tags_tx(
 ) -> FactStoreResult<(FactId, FactCommitReceipt)> {
     let evidence_fact_ids =
         curation_evidence_ids_tx(transaction, owner, operation.evidence_facts()).await?;
-    let fact = available_curation_fact_tx(transaction, operation.fact()).await?;
+    let fact = available_curation_fact_tx(transaction, operation.fact().fact()).await?;
     let payload = fact
         .payload()
         .ok_or(FactStoreError::PayloadAccessMismatch)?;

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
     ActorId, Confidence, DomainError, FactCategoryV1, FactEventId, FactOwnerV1, FactPayloadV1,
@@ -388,6 +389,9 @@ impl ProjectMemoryFactUpdateCommandV1 {
     pub fn target(&self) -> &ProjectMemoryFactIdV1 {
         &self.target
     }
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.target.owner()
+    }
     pub fn operation_id(&self) -> &ProvenanceId {
         &self.operation_id
     }
@@ -434,6 +438,9 @@ impl ProjectMemoryFactRemoveCommandV1 {
 
     pub fn target(&self) -> &ProjectMemoryFactIdV1 {
         &self.target
+    }
+    pub fn owner(&self) -> &FactOwnerV1 {
+        self.target.owner()
     }
     pub fn operation_id(&self) -> &ProvenanceId {
         &self.operation_id
@@ -522,7 +529,8 @@ impl ProjectMemoryFactFeedbackCommandV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ProjectMemoryFactAddDispositionV1 {
     Added,
     NearDuplicate,

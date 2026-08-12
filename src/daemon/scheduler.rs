@@ -3,7 +3,10 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
+use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, task_key};
+use tracedecay_agent_hosts::automation::{AutomationRunControl, AutomationRunError};
 
+use crate::daemon::automation_effect::AutomationEffectAdmission;
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -11,6 +14,17 @@ use super::branch_admin::MaintenanceReaperKind;
 use super::{
     DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
 };
+
+pub(crate) mod effect_admission;
+mod run_control;
+mod termination;
+pub(super) use effect_admission::run_automation_scheduler_tick;
+use effect_admission::{
+    log_scheduler_pre_admission_problem, scheduler_automation_effect,
+    synchronize_scheduler_effect_control,
+};
+use run_control::AutomationSchedulerStop;
+pub(super) use termination::MaintenanceTaskTermination;
 
 pub(super) fn scheduler_task_log_fields(
     project_path: &Path,
@@ -27,10 +41,7 @@ pub(super) fn scheduler_task_log_fields(
     ]
 }
 
-fn log_scheduler_task_start(
-    project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
-) {
+fn log_scheduler_task_start(project_path: &Path, task: AgentTaskKind) {
     log_daemon_event(
         "scheduler_task",
         &scheduler_task_log_fields(project_path, task, "start"),
@@ -61,6 +72,91 @@ fn log_scheduler_task_error(
         "scheduler_task_error",
         &scheduler_task_error_log_fields(project_path, task, error),
     );
+}
+
+fn log_scheduler_automation_replay(
+    project_path: &Path,
+    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    terminal: &crate::daemon::automation_effect::AutomationSettledTerminal,
+) {
+    log_daemon_event(
+        "scheduler_task_application_replay",
+        &[
+            ("project", project_path.display().to_string()),
+            (
+                "task",
+                tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+            ),
+            (
+                "terminal",
+                if terminal.is_completed() {
+                    "completed"
+                } else if terminal.problem().is_some() {
+                    "problem"
+                } else {
+                    "skipped"
+                }
+                .to_owned(),
+            ),
+        ],
+    );
+}
+
+async fn settle_scheduler_automation_error(
+    engine: &DaemonEngine,
+    project_id: &tracedecay_domain::ProjectId,
+    project_path: &Path,
+    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    run_control: &AutomationRunControl,
+    effect: crate::daemon::automation_effect::AutomationEffectAuthority,
+    error: AutomationRunError,
+) -> Option<TraceDecayError> {
+    synchronize_scheduler_effect_control(run_control);
+    if let AutomationRunError::PartialEffect {
+        ledger_record: Some(record),
+        ..
+    } = &error
+    {
+        record_scheduler_run(engine, project_id, project_path, record);
+    }
+    match effect.settle_problem(&error).await {
+        Ok(Some(problem)) => {
+            log_daemon_event(
+                "scheduler_task_application_problem",
+                &scheduler_application_problem_log_fields(project_path, task, &problem),
+            );
+            None
+        }
+        Ok(None) => match error {
+            AutomationRunError::Runtime(error) => {
+                log_scheduler_task_error(project_path, task, &error);
+                Some(error)
+            }
+            AutomationRunError::PartialEffect { .. } => Some(TraceDecayError::Config {
+                message: "automation partial effect did not produce an application terminal"
+                    .to_owned(),
+            }),
+        },
+        Err(error) => Some(error),
+    }
+}
+
+pub(super) fn scheduler_application_problem_log_fields(
+    project_path: &Path,
+    task: AgentTaskKind,
+    problem: &crate::daemon::automation_effect::AutomationSettledProblem,
+) -> Vec<(&'static str, String)> {
+    let record = &problem.problem.problem;
+    let receipt_count = problem.committed_receipts.len().to_string();
+    vec![
+        ("project", project_path.display().to_string()),
+        ("task", task_key(task).to_owned()),
+        ("run_id", problem.run_id.to_string()),
+        ("request_id", problem.problem.request_id.to_string()),
+        ("problem_kind", record.source().canonical_code().to_owned()),
+        ("problem_code", record.code.clone()),
+        ("committed_receipt_count", receipt_count),
+    ]
 }
 
 fn scheduler_record_log_fields(
@@ -132,6 +228,7 @@ pub(super) struct AutomationSchedulerHandle {
     pub(super) completion: Arc<()>,
     pub(super) generation: Arc<std::sync::atomic::AtomicU64>,
     pub(super) lifecycle: AutomationSchedulerLifecycle,
+    stop_requested: AutomationSchedulerStop,
     termination: Arc<MaintenanceTaskTermination>,
 }
 
@@ -144,35 +241,9 @@ impl AutomationSchedulerHandle {
             completion: Arc::new(()),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             lifecycle: AutomationSchedulerLifecycle::Running,
+            stop_requested: AutomationSchedulerStop::default(),
             termination: Arc::new(MaintenanceTaskTermination::pending()),
         }
-    }
-}
-
-pub(super) struct MaintenanceTaskTermination {
-    finished: tokio::sync::watch::Sender<bool>,
-}
-
-impl MaintenanceTaskTermination {
-    pub(super) fn pending() -> Self {
-        let (finished, _) = tokio::sync::watch::channel(false);
-        Self { finished }
-    }
-
-    pub(super) async fn wait(&self) {
-        self.wait_for_finish(self.finished.subscribe()).await;
-    }
-
-    async fn wait_for_finish(&self, mut finished: tokio::sync::watch::Receiver<bool>) {
-        while !*finished.borrow_and_update() {
-            if finished.changed().await.is_err() {
-                return;
-            }
-        }
-    }
-
-    pub(super) fn finish(&self) {
-        self.finished.send_replace(true);
     }
 }
 
@@ -183,39 +254,6 @@ pub(super) struct AutomationSchedulerRetirement {
 impl AutomationSchedulerRetirement {
     pub(super) async fn wait(self) {
         self.termination.wait().await;
-    }
-}
-
-#[cfg(test)]
-mod maintenance_task_termination_tests {
-    use std::time::Duration;
-
-    use tokio::time::timeout;
-
-    use super::MaintenanceTaskTermination;
-
-    #[tokio::test(start_paused = true)]
-    async fn finish_before_wait_is_latched() {
-        let termination = MaintenanceTaskTermination::pending();
-        termination.finish();
-
-        timeout(Duration::from_secs(1), termination.wait())
-            .await
-            .expect("finish before wait must not hang");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn finish_between_registration_and_condition_check_is_latched() {
-        let termination = MaintenanceTaskTermination::pending();
-        let registered = termination.finished.subscribe();
-        termination.finish();
-
-        timeout(
-            Duration::from_secs(1),
-            termination.wait_for_finish(registered),
-        )
-        .await
-        .expect("finish after waiter registration must not hang");
     }
 }
 
@@ -630,6 +668,8 @@ impl DaemonEngine {
         let loop_completion = Arc::clone(&completion);
         let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let loop_generation = Arc::clone(&generation);
+        let stop_requested = AutomationSchedulerStop::default();
+        let run_control = stop_requested.run_control(self.lifecycle.clone());
         let termination = Arc::new(MaintenanceTaskTermination::pending());
         let administration = self.store_administration.clone();
         let scheduler_engine = self.clone();
@@ -648,6 +688,7 @@ impl DaemonEngine {
                 loop_key,
                 loop_completion,
                 loop_generation,
+                run_control,
                 #[cfg(test)]
                 exit_barrier,
             ))
@@ -669,6 +710,7 @@ impl DaemonEngine {
                 completion,
                 generation,
                 lifecycle: AutomationSchedulerLifecycle::Running,
+                stop_requested,
                 termination,
             },
         );
@@ -770,6 +812,7 @@ impl DaemonEngine {
                     .cloned()?
             };
             let handle = schedulers.get_mut(&owner)?;
+            handle.stop_requested.request();
             handle.lifecycle = AutomationSchedulerLifecycle::Retiring;
             handle
                 .generation
@@ -904,6 +947,7 @@ async fn run_automation_scheduler_loop(
     key: ProjectServerKey,
     completion: Arc<()>,
     generation: Arc<std::sync::atomic::AtomicU64>,
+    run_control: AutomationRunControl,
     #[cfg(test)] exit_barrier: Option<Arc<AutomationSchedulerExitBarrier>>,
 ) {
     let mut consecutive_open_failures: u32 = 0;
@@ -1014,6 +1058,7 @@ async fn run_automation_scheduler_loop(
             &cg,
             &handshake,
             &engine,
+            &run_control,
         ))
         .await
         {
@@ -1031,6 +1076,7 @@ async fn run_automation_scheduler_loop(
             &cg,
             &handshake,
             &engine,
+            &run_control,
         ))
         .await
         {
@@ -1063,8 +1109,14 @@ async fn run_automation_scheduler_loop(
                         () = wake.notified() => {}
                     }
                 }
-                if let Err(error) =
-                    Box::pin(run_host_receipt_review(&project_path, &cg, &handshake, &engine)).await
+                if let Err(error) = Box::pin(run_host_receipt_review(
+                    &project_path,
+                    &cg,
+                    &handshake,
+                    &engine,
+                    &run_control,
+                ))
+                .await
                 {
                     log_daemon_event(
                         "host_receipt_review",
@@ -1315,216 +1367,12 @@ async fn maybe_run_global_retention(
     reservation.finish(std::time::Instant::now(), succeeded);
 }
 
-pub(super) async fn run_automation_scheduler_tick(
-    project_path: &Path,
-    cg: &TraceDecay,
-    handshake: &DaemonHandshake,
-    engine: &DaemonEngine,
-) -> Result<()> {
-    use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, CodexAppServerBackend};
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-    use tracedecay_agent_hosts::automation::runner::{
-        CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
-        SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-        registered_project_automation_retrieval, run_combined_review_with_backend_and_retrieval,
-        run_memory_curator_with_backend, run_session_reflector_with_backend_and_retrieval,
-        run_skill_writer_with_backend_and_retrieval,
-    };
-
-    let control = tracedecay_agent_hosts::automation::scheduler::load_scheduler_control(
-        &cg.store_layout().dashboard_root,
-    )
-    .await?;
-    if control.paused {
-        log_daemon_event(
-            "scheduler_tick",
-            &[
-                ("project", project_path.display().to_string()),
-                ("outcome", "skipped".to_string()),
-                ("reason", "paused".to_string()),
-            ],
-        );
-        return Ok(());
-    }
-    let configuration = effective_automation_config_for_project(cg).await?;
-    let config = &configuration.settings;
-    if !automation_scheduler_has_work(cg, config).await? {
-        log_daemon_event(
-            "scheduler_tick",
-            &[
-                ("project", project_path.display().to_string()),
-                ("outcome", "skipped".to_string()),
-                ("reason", "not_configured".to_string()),
-            ],
-        );
-        return Ok(());
-    }
-    if let Ok(profile_database) = engine
-        .store_administration
-        .registered_profile_database()
-        .await
-    {
-        maybe_run_global_retention(profile_database.as_ref(), &cg.get_config().sync.retention)
-            .await;
-    }
-    let backend = CodexAppServerBackend::from_automation_config(config);
-    let authoritative_project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "automation scheduler requires an authoritative project identity".to_string(),
-        })?;
-    let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "automation scheduler has an invalid authoritative project identity: {error}"
-            ),
-        })?;
-    let session_database = engine
-        .store_administration
-        .registered_project_session_database(project_path, cg.store_layout())
-        .await?;
-    let profile_identity = engine.store_administration.profile_identity()?.clone();
-    let retrieval =
-        registered_project_automation_retrieval(session_database, &profile_identity, &project_id)
-            .await?;
-    let mut first_error: Option<TraceDecayError> = None;
-
-    log_scheduler_task_start(project_path, AgentTaskKind::MemoryCurator);
-    match run_memory_curator_with_backend(
-        cg,
-        config,
-        &configuration.configuration_revision_id,
-        &backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            ..MemoryCuratorAutomationOptions::default()
-        },
-    )
-    .await
-    {
-        Ok(run) => record_scheduler_run(engine, &project_id, project_path, &run.ledger_record),
-        Err(e) => {
-            log_scheduler_task_error(project_path, AgentTaskKind::MemoryCurator, &e);
-            first_error.get_or_insert(e);
-        }
-    }
-    // When both the reflector and the skill writer are due in this tick, the
-    // combined path serves them with one backend call. Any other outcome
-    // (combined mode disabled, only one task due, missing evidence) falls
-    // back to the sequential per-task runs below.
-    let mut combined_handled = false;
-    if config.combine_due_tasks {
-        log_scheduler_task_start(project_path, AgentTaskKind::CombinedReview);
-        match run_combined_review_with_backend_and_retrieval(
-            cg,
-            config,
-            &configuration.configuration_revision_id,
-            &backend,
-            retrieval.as_ref(),
-            CombinedReviewAutomationOptions {
-                skill_writer: SkillWriterAutomationOptions {
-                    profile_root: Some(profile_identity.profile_root().to_path_buf()),
-                    ..SkillWriterAutomationOptions::default()
-                },
-                ..CombinedReviewAutomationOptions::default()
-            },
-        )
-        .await
-        {
-            Ok(CombinedReviewDispatch::Ran(run)) => {
-                record_combined_scheduler_run(engine, &project_id, project_path, &run);
-                combined_handled = true;
-            }
-            Ok(CombinedReviewDispatch::RecordedFailure { run, error }) => {
-                record_combined_scheduler_run(engine, &project_id, project_path, &run);
-                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
-                first_error.get_or_insert(error);
-                combined_handled = true;
-            }
-            Ok(CombinedReviewDispatch::NotCombined { reason }) => {
-                log_daemon_event(
-                    "scheduler_task",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("task", "combined_review".to_string()),
-                        ("outcome", "not_combined".to_string()),
-                        ("reason", reason.to_string()),
-                    ],
-                );
-            }
-            Err(e) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &e);
-            }
-        }
-    }
-    if !combined_handled {
-        log_scheduler_task_start(project_path, AgentTaskKind::SessionReflector);
-        match run_session_reflector_with_backend_and_retrieval(
-            cg,
-            config,
-            &configuration.configuration_revision_id,
-            &backend,
-            retrieval.as_ref(),
-            SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                ..SessionReflectorAutomationOptions::default()
-            },
-        )
-        .await
-        {
-            Ok(run) => record_scheduler_run(engine, &project_id, project_path, &run.ledger_record),
-            Err(e) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &e);
-                first_error.get_or_insert(e);
-            }
-        }
-        log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
-        match run_skill_writer_with_backend_and_retrieval(
-            cg,
-            config,
-            &configuration.configuration_revision_id,
-            &backend,
-            retrieval.as_ref(),
-            SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                profile_root: Some(profile_identity.profile_root().to_path_buf()),
-                ..SkillWriterAutomationOptions::default()
-            },
-        )
-        .await
-        {
-            Ok(run) => record_scheduler_run(engine, &project_id, project_path, &run.ledger_record),
-            Err(e) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &e);
-                first_error.get_or_insert(e);
-            }
-        }
-    }
-    run_user_jobs_scheduler_pass(
-        engine,
-        &project_id,
-        project_path,
-        &handshake.client_identity.profile_root,
-        cg,
-        config,
-        &backend,
-        &mut first_error,
-    )
-    .await;
-    match first_error {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
-}
-
 async fn run_host_receipt_review(
     project_path: &Path,
     cg: &TraceDecay,
     _handshake: &DaemonHandshake,
     engine: &DaemonEngine,
+    run_control: &AutomationRunControl,
 ) -> Result<()> {
     use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
     use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
@@ -1602,32 +1450,103 @@ async fn run_host_receipt_review(
         registered_project_automation_retrieval(session_database, &profile_identity, &project_id)
             .await?;
     let backend = CodexAppServerBackend::from_automation_config(config);
-    let result = run_combined_review_with_backend_and_retrieval(
+    let host_run_id = format!("host_receipt_{}", pending.generation);
+    let combined_options = CombinedReviewAutomationOptions {
+        session_reflector: SessionReflectorAutomationOptions {
+            trigger: AutomationTrigger::HostReceipt,
+            provider: "hermes".to_string(),
+            session_id,
+            ..SessionReflectorAutomationOptions::default()
+        },
+        skill_writer: SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::HostReceipt,
+            provider: "hermes".to_string(),
+            profile_root: Some(profile_identity.profile_root().to_path_buf()),
+            ..SkillWriterAutomationOptions::default()
+        },
+        trigger: AutomationTrigger::HostReceipt,
+        ..CombinedReviewAutomationOptions::default()
+    };
+    let (admission, run_id, effect_run_control) = scheduler_automation_effect(
+        engine,
+        cg,
+        run_control,
+        project_path,
+        &cg.store_layout().dashboard_root,
+        Some(&host_run_id),
+        configuration.configuration_digest.clone(),
+        |run_id| {
+            crate::daemon::automation_effect::session_reflector_run_request(
+                run_id,
+                &combined_options.session_reflector,
+            )
+        },
+    )
+    .await?;
+    let effect = match admission {
+        AutomationEffectAdmission::PreAdmissionProblem(problem) => {
+            log_scheduler_pre_admission_problem(
+                project_path,
+                AgentTaskKind::CombinedReview,
+                &problem,
+            );
+            return Ok(());
+        }
+        AutomationEffectAdmission::Execute(effect) => effect,
+        AutomationEffectAdmission::Replay(terminal) => {
+            log_scheduler_automation_replay(project_path, AgentTaskKind::CombinedReview, &terminal);
+            if terminal.is_completed() {
+                tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
+                    &dashboard_root,
+                    &pending.session_key,
+                    pending.generation,
+                )
+                .await?;
+            }
+            return Ok(());
+        }
+    };
+    let result = match run_combined_review_with_backend_and_retrieval(
         cg,
         config,
         &configuration.configuration_revision_id,
         &backend,
         retrieval.as_ref(),
         CombinedReviewAutomationOptions {
-            run_id: Some(format!("host_receipt_{}", pending.generation)),
-            session_reflector: SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::HostReceipt,
-                provider: "hermes".to_string(),
-                session_id,
-                ..SessionReflectorAutomationOptions::default()
-            },
-            skill_writer: SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::HostReceipt,
-                provider: "hermes".to_string(),
-                profile_root: Some(profile_identity.profile_root().to_path_buf()),
-                ..SkillWriterAutomationOptions::default()
-            },
-            trigger: AutomationTrigger::HostReceipt,
+            run_id: Some(run_id),
+            ..combined_options
         },
+        &effect_run_control,
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(error) = settle_scheduler_automation_error(
+                engine,
+                &project_id,
+                project_path,
+                AgentTaskKind::CombinedReview,
+                &effect_run_control,
+                effect,
+                AutomationRunError::Runtime(error),
+            )
+            .await
+            {
+                return Err(error);
+            }
+            return Ok(());
+        }
+    };
     match result {
         CombinedReviewDispatch::Ran(run) => {
+            synchronize_scheduler_effect_control(&effect_run_control);
+            effect
+                .settle_run(
+                    &run.session_reflector.ledger_record,
+                    run.session_reflector.committed_receipt.as_ref(),
+                )
+                .await?;
             record_combined_scheduler_run(engine, &project_id, project_path, &run);
             if run.session_reflector.ledger_record.status
                 == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
@@ -1642,11 +1561,82 @@ async fn run_host_receipt_review(
                 .await?;
             }
         }
+        CombinedReviewDispatch::MemoryCompletedSkillFailure {
+            session_reflector,
+            skill_writer_record,
+            error,
+        } => {
+            synchronize_scheduler_effect_control(&effect_run_control);
+            effect
+                .settle_run(
+                    &session_reflector.ledger_record,
+                    session_reflector.committed_receipt.as_ref(),
+                )
+                .await?;
+            record_scheduler_run(
+                engine,
+                &project_id,
+                project_path,
+                &session_reflector.ledger_record,
+            );
+            if let Some(record) = skill_writer_record.as_ref() {
+                record_scheduler_run(engine, &project_id, project_path, record);
+            }
+            log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &error);
+            tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
+                &dashboard_root,
+                &pending.session_key,
+                pending.generation,
+            )
+            .await?;
+        }
         CombinedReviewDispatch::RecordedFailure { run, error } => {
             record_combined_scheduler_run(engine, &project_id, project_path, &run);
-            return Err(error);
+            if let Some(error) = settle_scheduler_automation_error(
+                engine,
+                &project_id,
+                project_path,
+                AgentTaskKind::CombinedReview,
+                &effect_run_control,
+                effect,
+                AutomationRunError::Runtime(error),
+            )
+            .await
+            {
+                return Err(error);
+            }
+        }
+        CombinedReviewDispatch::PartialEffect {
+            run,
+            run_id,
+            committed_receipt,
+            detail,
+        } => {
+            if let Some(run) = run {
+                record_combined_scheduler_run(engine, &project_id, project_path, &run);
+            }
+            let error = AutomationRunError::PartialEffect {
+                run_id,
+                committed_receipt,
+                ledger_record: None,
+                detail,
+            };
+            if let Some(error) = settle_scheduler_automation_error(
+                engine,
+                &project_id,
+                project_path,
+                AgentTaskKind::CombinedReview,
+                &effect_run_control,
+                effect,
+                error,
+            )
+            .await
+            {
+                return Err(error);
+            }
         }
         CombinedReviewDispatch::NotCombined { reason } => {
+            effect.abandon_uncommitted().await?;
             log_daemon_event(
                 "host_receipt_review",
                 &[
@@ -1662,6 +1652,7 @@ async fn run_host_receipt_review(
 
 struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
+    configuration_digest: tracedecay_domain::ManifestDigest,
     settings: tracedecay_agent_hosts::automation::config::AutomationConfig,
 }
 
@@ -1679,8 +1670,15 @@ async fn effective_automation_config_for_project(
     let settings = tracedecay_agent_hosts::automation::config::from_configuration_snapshot(
         &configuration.snapshot,
     )?;
+    let configuration_digest =
+        crate::daemon::automation_effect::pinned_automation_configuration_digest(
+            &configuration.revision_id,
+            &configuration.snapshot.effective_behavior_digest,
+            &configuration.snapshot.resolution_provenance_digest,
+        )?;
     Ok(PinnedAutomationConfiguration {
         configuration_revision_id: configuration.revision_id,
+        configuration_digest,
         settings,
     })
 }
@@ -1770,10 +1768,7 @@ async fn run_user_jobs_scheduler_pass(
         .iter()
         .filter(|job| tracedecay_agent_hosts::automation::jobs::job_is_schedulable(job))
     {
-        log_scheduler_task_start(
-            project_path,
-            tracedecay_agent_hosts::automation::backend::AgentTaskKind::UserJob,
-        );
+        log_scheduler_task_start(project_path, AgentTaskKind::UserJob);
         match tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend(
             &dashboard_root,
             config,
@@ -1791,11 +1786,7 @@ async fn run_user_jobs_scheduler_pass(
         {
             Ok(run) => record_scheduler_run(engine, project_id, project_path, &run.ledger_record),
             Err(e) => {
-                log_scheduler_task_error(
-                    project_path,
-                    tracedecay_agent_hosts::automation::backend::AgentTaskKind::UserJob,
-                    &e,
-                );
+                log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &e);
                 first_error.get_or_insert(e);
             }
         }

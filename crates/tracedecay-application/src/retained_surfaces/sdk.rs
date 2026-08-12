@@ -4,22 +4,30 @@
 //! daemon-owned retained-surface service.  The old MCP handlers may still
 //! render Markdown, but they must not grow a competing request DTO.
 
+mod automation;
 mod fact_store;
 mod results;
 
+pub use crate::memory::{FactCategoryV1, FactMetadataV1};
+pub use automation::{
+    MemoryAutomationRunRequestV1, MemoryAutomationTaskRequestV1, MemoryAutomationTaskV1,
+    MemoryCuratorRunInputV1, SessionReflectorRunInputV1,
+};
 pub use fact_store::{
-    FactStoreAddRequestV1, FactStoreContradictRequestV1, FactStoreGetRequestV1,
-    FactStoreListRequestV1, FactStoreProbeRequestV1, FactStoreReasonRequestV1,
-    FactStoreRelatedRequestV1, FactStoreRemoveRequestV1, FactStoreRequestV1,
+    FactSourceLabelPatchV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
+    FactStoreGetRequestV1, FactStoreListRequestV1, FactStoreProbeRequestV1,
+    FactStoreReasonRequestV1, FactStoreRelatedRequestV1, FactStoreRemoveRequestV1,
     FactStoreSearchRequestV1, FactStoreUpdateRequestV1,
 };
 pub use results::{
-    ClosedUtcIntervalV1, CompactLineageEdgeV1, CorrelationIndexV1, FactCollectionEntryV1,
-    FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1, FactContradictionV1,
-    FactDiffKindV1, FactFeedbackResultV1, FactFeedbackV1, FactMutationReceiptV1, FactSearchHitV1,
-    FactStoreAddResultV1, FactStoreContradictResultV1, FactStoreGetResultV1, FactStoreListResultV1,
+    ClosedUtcIntervalV1, CompactLineageEdgeV1, CorrelationIndexV1, FactCommitDispositionV1,
+    FactCommitOwnerV1, FactCommitReceiptV1, FactContradictionV1, FactFeedbackDetailsAvailabilityV1,
+    FactFeedbackResultV1, FactFeedbackV1, FactIdentitySourceResultV1, FactPayloadAccessV1,
+    FactProjectionV1, FactSearchCursorV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1,
+    FactSearchHitV1, FactSearchScoresV1, FactStatusV1, FactStoreAddCommitV1, FactStoreAddResultV1,
+    FactStoreContradictResultV1, FactStoreGetResultV1, FactStoreListResultV1,
     FactStoreProbeResultV1, FactStoreReasonResultV1, FactStoreRelatedResultV1,
-    FactStoreRemoveResultV1, FactStoreResultV1, FactStoreSearchResultV1, FactStoreUpdateResultV1,
+    FactStoreRemoveResultV1, FactStoreSearchResultV1, FactStoreUpdateResultV1, FactTelemetryV1,
     FactV1, GitScopeV1, HydrationStateResultV1, LcmAuthorityOutcomeV1, LcmConfigStatusV1,
     LcmContentRangeV1, LcmDagDepthStatusV1, LcmDagStatusV1, LcmDescribeExternalPayloadV1,
     LcmDescribeResultV1, LcmDescribeSourceOverviewV1, LcmDescribeSummaryNodeV1, LcmDescriptionV1,
@@ -32,25 +40,41 @@ pub use results::{
     LcmRawMessageOverviewV1, LcmRawMessageV1, LcmRedactionStatusV1, LcmRetrievalOutcomeV1,
     LcmSourcePaginationV1, LcmSourceRefV1, LcmStatusResultV1, LcmStatusV1, LcmStorageKindV1,
     LcmStoreStatusV1, LcmStoreTokenCoverageV1, LcmSummaryNodeOverviewV1, LcmSummaryNodeV1,
-    LcmTemporalFieldsV1, MemoryFeedbackFunnelV1, MemoryRepairStatsV1, MemoryStatusResultV1,
-    MemoryStatusV1, MessageSearchFreshnessV1, MessageSearchHitV1, MessageSearchResultV1,
-    MessageSearchRootV1, MessageSearchSkipV1, RetainedErrorV1, RetainedNextActionV1,
-    RetainedOutcomeStatusV1, RetainedSurfaceResultV1, RetrievalWorkerStatusV1,
-    SessionCorrelationHitV1, SessionCoverageIntervalV1, SessionCoverageModeV1,
-    SessionCoverageReasonV1, SessionCoverageRequestV1, SessionCoverageStateV1, SessionMessageV1,
-    SessionRecordV1, SessionRefreshBeginResultV1, SessionRefreshCancelResultV1,
-    SessionRefreshFrontierResultV1, SessionRefreshProgressV1, SessionRefreshReceiptV1,
-    SessionRefreshResultV1, SessionRefreshStatusResultV1, SessionRefreshTerminalStateResultV1,
-    SessionSourceCoverageV1, SessionsForResultV1, TemporalCoverageV1, TemporalExplanationV1,
-    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalWatermarksV1,
-    TrustHistoryEntryV1, ValidCoverageIntervalV1, WorkflowAgentV1, WorkflowCoverageV1,
-    WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1, WorkflowsResultV1,
+    LcmTemporalFieldsV1, MemoryAlgebraV1, MemoryAutomationCommittedReceiptV1,
+    MemoryAutomationCurationAddDispositionV1, MemoryAutomationCurationLinkDispositionV1,
+    MemoryAutomationCurationMergeV1, MemoryAutomationCurationOperationEffectV1,
+    MemoryAutomationCurationReceiptV1, MemoryAutomationCurationRelationKindV1,
+    MemoryAutomationCurationRelationProvenanceV1, MemoryAutomationCurationRelationV1,
+    MemoryAutomationCurationRemoveDispositionV1, MemoryAutomationCurationResultV1,
+    MemoryAutomationFactConflictSourceV1, MemoryAutomationFactConflictValidationV1,
+    MemoryAutomationFactDedupeValidationV1, MemoryAutomationFactDispositionV1,
+    MemoryAutomationFactEffectV1, MemoryAutomationFactEvidenceItemV1,
+    MemoryAutomationFactEvidenceSourceSpanV1, MemoryAutomationFactEvidenceTrustBucketV1,
+    MemoryAutomationFactEvidenceTrustV1, MemoryAutomationFactEvidenceV1,
+    MemoryAutomationFactInputDigestError, MemoryAutomationFactInputDigestV1,
+    MemoryAutomationFactNearestMatchV1, MemoryAutomationFactReceiptV1,
+    MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1, MemoryAutomationFactTargetV1,
+    MemoryAutomationFactValidationStatusV1, MemoryAutomationFactValidationV1,
+    MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1, MemoryAutomationRunSummaryV1,
+    MemoryAutomationRunTerminalV1, MemoryAutomationSkipReasonV1, MemoryFeedbackFunnelV1,
+    MemoryStatusResultV1, MemoryStatusV1, MessageSearchFreshnessV1, MessageSearchHitV1,
+    MessageSearchResultV1, MessageSearchRootV1, MessageSearchSkipV1, RetainedErrorV1,
+    RetainedNextActionV1, RetainedOutcomeStatusV1, RetainedSurfaceResultV1,
+    RetrievalWorkerStatusV1, SessionCorrelationHitV1, SessionCoverageIntervalV1,
+    SessionCoverageModeV1, SessionCoverageReasonV1, SessionCoverageRequestV1,
+    SessionCoverageStateV1, SessionMessageV1, SessionRecordV1, SessionRefreshBeginResultV1,
+    SessionRefreshCancelResultV1, SessionRefreshFrontierResultV1, SessionRefreshProgressV1,
+    SessionRefreshReceiptV1, SessionRefreshResultV1, SessionRefreshStatusResultV1,
+    SessionRefreshTerminalStateResultV1, SessionSourceCoverageV1, SessionsForResultV1,
+    TemporalCoverageV1, TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1,
+    TemporalOmissionV1, TemporalWatermarksV1, TrustHistoryEntryV1, ValidCoverageIntervalV1,
+    WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1,
+    WorkflowsResultV1,
 };
-
-use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::{FactEventId, FactId, ProjectId};
 
 use super::RetainedSurfaceOperation;
 
@@ -64,16 +88,11 @@ pub enum RetainedOutputFormatV1 {
     Json,
 }
 
-/// A registered-project selector shared by the memory and message reads.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+/// Exact registered-project selector shared by retained reads.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedProjectSelectorV1 {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_path: Option<String>,
+    pub project_id: ProjectId,
 }
 
 /// The temporal filter intentionally retains the established integer-or-text
@@ -85,37 +104,12 @@ pub enum RetainedTimeFilterV1 {
     Expression(String),
 }
 
-/// Public fact identifier accepts the mounted numeric-string compatibility
-/// form without erasing the distinction before validation.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum RetainedFactIdV1 {
-    Numeric(u64),
-    Text(String),
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryScopeV1 {
     Project,
     User,
 }
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum FactCategoryV1 {
-    General,
-    UserPref,
-    Project,
-    Tool,
-    Decision,
-    CodeArea,
-}
-
-/// JSON-valued metadata remains deliberately open because the mounted
-/// fact-store contract explicitly permits arbitrary structured metadata. It
-/// is scoped to this metadata field, never used as an operation payload.
-pub type FactMetadataV1 = BTreeMap<String, serde_json::Value>;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -130,10 +124,6 @@ pub struct FactReadOptionsV1 {
     pub limit: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_selector: Option<RetainedProjectSelectorV1>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub project_path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -146,26 +136,27 @@ pub enum FactFeedbackActionV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FactFeedbackRequestV1 {
-    pub fact_id: RetainedFactIdV1,
-    pub action: Option<FactFeedbackActionV1>,
-    pub helpful: Option<bool>,
-    pub unhelpful: Option<bool>,
-    pub trust_delta: Option<f64>,
-    pub source: Option<String>,
-    pub metadata: Option<FactMetadataV1>,
-    pub note: Option<String>,
+    pub fact_id: FactId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_last_event_id: Option<FactEventId>,
+    pub action: FactFeedbackActionV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_scope: Option<MemoryScopeV1>,
-    pub format: Option<RetainedOutputFormatV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_selector: Option<RetainedProjectSelectorV1>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryStatusRequestV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_scope: Option<MemoryScopeV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_selector: Option<RetainedProjectSelectorV1>,
-    pub project_id: Option<String>,
-    pub project_path: Option<String>,
-    pub format: Option<RetainedOutputFormatV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]

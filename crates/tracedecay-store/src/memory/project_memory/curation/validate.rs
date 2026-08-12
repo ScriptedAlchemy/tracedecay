@@ -2,7 +2,7 @@ use tracedecay_domain::{Confidence, DomainError, FactOwnerV1};
 
 use super::super::super::{FactStoreError, FactStoreResult};
 use super::super::ProjectMemoryFactIdV1;
-use super::MAX_PROJECT_MEMORY_CURATION_TARGETS;
+use super::{MAX_PROJECT_MEMORY_CURATION_TARGETS, ProjectMemoryFactCurationReviewRefV1};
 
 pub(super) fn validate_curation_confidence(
     confidence: Confidence,
@@ -28,7 +28,7 @@ pub(super) fn validate_curation_fact_target(
 
 pub(super) fn validate_curation_evidence(
     owner: &FactOwnerV1,
-    evidence_facts: &[ProjectMemoryFactIdV1],
+    evidence_facts: &[ProjectMemoryFactCurationReviewRefV1],
 ) -> FactStoreResult<()> {
     if evidence_facts.is_empty() || evidence_facts.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS {
         return Err(FactStoreError::InvalidQueryLimit {
@@ -37,10 +37,10 @@ pub(super) fn validate_curation_evidence(
         });
     }
     for (index, evidence) in evidence_facts.iter().enumerate() {
-        validate_curation_fact_target(owner, evidence)?;
+        validate_curation_fact_target(owner, evidence.fact())?;
         if evidence_facts[..index]
             .iter()
-            .any(|previous| previous == evidence)
+            .any(|previous| previous.fact() == evidence.fact())
         {
             return Err(FactStoreError::Contract(DomainError::NonCanonical {
                 field: "curation evidence",

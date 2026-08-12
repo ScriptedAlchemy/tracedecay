@@ -1,9 +1,15 @@
 use super::super::skill_usage::SkillUsageRecord;
 use super::*;
+use crate::automation::AutomationRunControl;
+use std::sync::Arc;
 
 static OUTCOME_PERSISTENCE_DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const DAY: i64 = SECS_PER_DAY;
+
+fn outcome_read_control() -> AutomationRunControl {
+    AutomationRunControl::from_interrupted(Arc::new(|| false))
+}
 
 fn summary(skill_id: &str) -> SkillUsageRecord {
     SkillUsageRecord {
@@ -385,6 +391,7 @@ async fn seed_activated_skill(profile_root: &Path) {
 
 async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database {
     use crate::application::memory::MemoryApplication;
+    use crate::automation::AutomationRunControl;
     use crate::automation::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
     use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
     use crate::store::memory::DatabaseFactStore;
@@ -402,15 +409,21 @@ async fn seed_applied_fact_database(database_path: &Path) -> crate::db::Database
     .unwrap();
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
+    let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let run_control = AutomationRunControl::from_interrupted({
+        let interrupted = std::sync::Arc::clone(&interrupted);
+        std::sync::Arc::new(move || interrupted.load(std::sync::atomic::Ordering::Acquire))
+    });
     let batch = record_session_automatic_facts(
         &memory,
+        &run_control,
         "run-outcome-lock",
         None,
         &[json!({
             "add_fact_request": {
                 "content": "Keep automation outcome snapshots atomically consistent",
                 "category": "project",
-                "source": "outcome-test",
+                "source_label": "outcome-test",
                 "tags": ["automation"],
                 "entities": ["TraceDecay"],
                 "trust": 0.9,
@@ -440,10 +453,11 @@ async fn concurrent_refreshes_preserve_both_snapshot_halves() {
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let now = crate::tracedecay::current_timestamp();
+    let run_control = outcome_read_control();
 
     let (skills, facts) = tokio::join!(
         refresh_skill_outcomes(&profile_root, &dashboard_root, now),
-        refresh_fact_outcomes(&dashboard_root, &memory, now),
+        refresh_fact_outcomes(&dashboard_root, &memory, now, run_control.read_control()),
     );
     let skills = skills.unwrap();
     let facts = facts.unwrap();
@@ -474,6 +488,7 @@ async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
     let malformed = b"{not-valid-json";
     tokio::fs::write(&path, malformed).await.unwrap();
     let now = crate::tracedecay::current_timestamp();
+    let run_control = outcome_read_control();
 
     let skill_error = refresh_skill_outcomes(&profile_root, &dashboard_root, now)
         .await
@@ -481,9 +496,10 @@ async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
     assert!(skill_error.to_string().contains("failed to parse"));
     assert_eq!(tokio::fs::read(&path).await.unwrap(), malformed);
 
-    let fact_error = refresh_fact_outcomes(&dashboard_root, &memory, now)
-        .await
-        .unwrap_err();
+    let fact_error =
+        refresh_fact_outcomes(&dashboard_root, &memory, now, run_control.read_control())
+            .await
+            .unwrap_err();
     assert!(fact_error.to_string().contains("failed to parse"));
     assert_eq!(tokio::fs::read(&path).await.unwrap(), malformed);
 }

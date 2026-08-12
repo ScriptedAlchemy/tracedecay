@@ -53,13 +53,16 @@ use tracedecay_usecases::primitives::{
 };
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
+mod automation_effect_recovery;
 mod code_index_reads;
 mod lsp_registration;
 mod query_authority_upgrade;
 mod source_edit_owner;
 
+pub(crate) use automation_effect_recovery::reconcile_project_open_automation_effects;
 pub(crate) use code_index_reads::{
     project_code_graph_projection_read_port, project_code_index_generation_census_reader,
+    project_code_index_ignored_dependency_admission_port,
 };
 
 use lsp_registration::production_lsp_registration;

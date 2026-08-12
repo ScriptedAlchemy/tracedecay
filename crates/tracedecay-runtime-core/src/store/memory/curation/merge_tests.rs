@@ -7,7 +7,8 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     FactStoreError, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddMaterialV1,
-    ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactStore,
+    ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeTargetV1,
+    ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdatePatchV1,
 };
 
 use crate::db::engine::params;
@@ -109,7 +110,39 @@ fn add_command(owner: FactOwnerV1, label: &str) -> ProjectMemoryFactAddCommandV1
     .expect("canonical merge add command")
 }
 
-fn merge_command(
+async fn merge_target(
+    database: &Database,
+    owner: &FactOwnerV1,
+    target: &ProjectMemoryFactIdV1,
+) -> ProjectMemoryFactMergeTargetV1 {
+    let key = OwnerKey::new(owner).expect("canonical merge owner key");
+    let writer = database
+        .writer_connection("read canonical merge target event")
+        .await
+        .expect("canonical merge writer connection");
+    let mut rows = writer
+        .query_engine(
+            "SELECT last_event_id FROM memory_v2_current_facts
+             WHERE owner_kind = ?1 AND project_id = ?2 AND fact_id = ?3",
+            params![key.kind, key.project_id.as_str(), target.fact_id().as_str()],
+        )
+        .await
+        .expect("query canonical merge target event");
+    let row = rows
+        .next()
+        .await
+        .expect("next canonical merge target event")
+        .expect("canonical merge target event");
+    let event_id = FactEventId::new(
+        row_string(&row, 0, "read canonical merge target event").expect("merge target event id"),
+    )
+    .expect("typed merge target event id");
+    ProjectMemoryFactMergeTargetV1::new(target.clone(), event_id)
+        .expect("snapshot canonical merge target")
+}
+
+async fn merge_command(
+    database: &Database,
     owner: &FactOwnerV1,
     operation_id: &str,
     winner: &ProjectMemoryFactIdV1,
@@ -119,8 +152,8 @@ fn merge_command(
     ProjectMemoryFactMergeCommandV1::new(
         owner.clone(),
         provenance_id(operation_id),
-        winner.clone(),
-        vec![loser.clone()],
+        merge_target(database, owner, winner).await,
+        vec![merge_target(database, owner, loser).await],
         merged_content.map(ToOwned::to_owned),
         None,
     )
@@ -214,21 +247,25 @@ async fn initial_merge_returns_exact_canonical_commit_receipts() {
     let loser = fixture.seed("initial-loser").await;
     let operation_id = provenance_id("merge.initial.receipts");
     let command = merge_command(
+        &fixture.database,
         &fixture.owner,
         operation_id.as_str(),
         &winner,
         &loser,
         Some("The merged canonical fact retains exact receipt evidence."),
-    );
+    )
+    .await;
     let expected_input_digest = command.input_digest().expect("canonical merge digest");
     assert_eq!(
         merge_command(
+            &fixture.database,
             &fixture.owner,
             "merge.initial.receipts.equivalent-operation",
             &winner,
             &loser,
             Some("The merged canonical fact retains exact receipt evidence."),
         )
+        .await
         .input_digest()
         .expect("equivalent canonical merge digest"),
         expected_input_digest
@@ -275,12 +312,14 @@ async fn exact_merge_replay_verifies_and_returns_the_durable_receipt_without_wri
     let loser = fixture.seed("replay-loser").await;
     let operation_id = provenance_id("merge.exact.replay");
     let command = merge_command(
+        &fixture.database,
         &fixture.owner,
         operation_id.as_str(),
         &winner,
         &loser,
         Some("The exact canonical merge replays its committed evidence."),
-    );
+    )
+    .await;
     let committed = fixture
         .store()
         .merge_project_memory_facts(command.clone(), &fixture.control)
@@ -320,8 +359,15 @@ async fn changed_merge_input_conflicts_without_mutating_canonical_evidence() {
     let winner = fixture.seed("changed-winner").await;
     let loser = fixture.seed("changed-loser").await;
     let operation_id = provenance_id("merge.changed.input");
-    let committed_command =
-        merge_command(&fixture.owner, operation_id.as_str(), &winner, &loser, None);
+    let committed_command = merge_command(
+        &fixture.database,
+        &fixture.owner,
+        operation_id.as_str(),
+        &winner,
+        &loser,
+        None,
+    )
+    .await;
     fixture
         .store()
         .merge_project_memory_facts(committed_command, &fixture.control)
@@ -332,12 +378,14 @@ async fn changed_merge_input_conflicts_without_mutating_canonical_evidence() {
         stored_merge_receipt(&fixture.database, &fixture.owner, &operation_id).await;
 
     let changed = merge_command(
+        &fixture.database,
         &fixture.owner,
         operation_id.as_str(),
         &winner,
         &loser,
         Some("Changed input cannot reuse a committed merge identity."),
-    );
+    )
+    .await;
     assert!(matches!(
         fixture
             .store()
@@ -365,7 +413,15 @@ async fn merge_without_content_update_never_fabricates_a_winner_commit_receipt()
     let outcome = fixture
         .store()
         .merge_project_memory_facts(
-            merge_command(&fixture.owner, operation_id.as_str(), &winner, &loser, None),
+            merge_command(
+                &fixture.database,
+                &fixture.owner,
+                operation_id.as_str(),
+                &winner,
+                &loser,
+                None,
+            )
+            .await,
             &fixture.control,
         )
         .await
@@ -382,5 +438,61 @@ async fn merge_without_content_update_never_fabricates_a_winner_commit_receipt()
     assert_eq!(
         durable.event_id.as_ref(),
         Some(outcome.commit_receipts()[0].last_event_id())
+    );
+}
+
+#[tokio::test]
+async fn stale_last_loser_cas_rejects_before_any_merge_write() {
+    let fixture = Fixture::new("all-loser-cas").await;
+    let winner = fixture.seed("cas-winner").await;
+    let loser_a = fixture.seed("cas-loser-a").await;
+    let loser_b = fixture.seed("cas-loser-b").await;
+    let winner_target = merge_target(&fixture.database, &fixture.owner, &winner).await;
+    let loser_a_target = merge_target(&fixture.database, &fixture.owner, &loser_a).await;
+    let loser_b_target = merge_target(&fixture.database, &fixture.owner, &loser_b).await;
+    let update = ProjectMemoryFactUpdateCommandV1::new(
+        loser_b.clone(),
+        provenance_id("merge.cas.advance.last-loser"),
+        Some(loser_b_target.expected_last_event_id().clone()),
+        ProjectMemoryFactUpdatePatchV1::new(
+            Some("The last loser advanced after the merge review.".to_owned()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("last-loser update patch"),
+        None,
+    )
+    .expect("last-loser update command");
+    fixture
+        .store()
+        .update_project_memory_fact(update, &fixture.control)
+        .await
+        .expect("advance the final loser after review");
+    let before = lineage_event_ids(&fixture.database, &fixture.owner).await;
+    let merge = ProjectMemoryFactMergeCommandV1::new(
+        fixture.owner.clone(),
+        provenance_id("merge.cas.all-participants"),
+        winner_target,
+        vec![loser_a_target, loser_b_target],
+        Some("This merge must never partially commit.".to_owned()),
+        None,
+    )
+    .expect("all-participant CAS merge command");
+
+    assert!(matches!(
+        fixture
+            .store()
+            .merge_project_memory_facts(merge, &fixture.control)
+            .await,
+        Err(FactStoreError::CommitConflict { .. })
+    ));
+    assert_eq!(
+        lineage_event_ids(&fixture.database, &fixture.owner).await,
+        before,
+        "winner and earlier losers must remain untouched when the final loser is stale"
     );
 }

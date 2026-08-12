@@ -1374,6 +1374,19 @@ pub struct ProblemError {
 
 impl ProblemError {
     fn new(status: u16, envelope: Value) -> Result<Self, ClientError> {
+        let mut canonical_envelope = envelope.clone();
+        if let Some(object) = canonical_envelope.as_object_mut() {
+            object.remove("binding_id");
+        }
+        let decoded: tracedecay_application::ApplicationProblemEnvelope =
+            serde_json::from_value(canonical_envelope)
+                .map_err(|error| protocol(status, format!("invalid problem envelope: {error}")))?;
+        if !status_matches_problem(status, decoded.problem.kind()) {
+            return Err(protocol(
+                status,
+                "HTTP status does not match the canonical application problem",
+            ));
+        }
         let envelope_object = object(Some(&envelope), status, "problem envelope")?;
         let contract = object(envelope_object.get("contract"), status, "problem contract")?;
         string(
@@ -1407,9 +1420,12 @@ impl ProblemError {
             "invalid_request"
                 | "not_found_or_not_authorized"
                 | "conflict"
+                | "partial_effect"
                 | "stale"
                 | "unsupported"
                 | "unavailable"
+                | "execution_failed"
+                | "reset_required"
                 | "saturated"
                 | "cancelled"
                 | "timed_out"
@@ -1424,7 +1440,7 @@ impl ProblemError {
             None => return Err(protocol(status, "problem.diagnostic is required")),
         }
         string(problem.get("owning_layer"), status, "problem.owning_layer")?;
-        string(problem.get("terminality"), status, "problem.terminality")?;
+        let terminality = string(problem.get("terminality"), status, "problem.terminality")?;
         let retryable = problem
             .get("retryable")
             .and_then(Value::as_bool)
@@ -1450,15 +1466,35 @@ impl ProblemError {
             Some(value) => Some(unsigned(Some(value), status, "problem.retry_after_millis")?),
             None => return Err(protocol(status, "problem.retry_after_millis is required")),
         };
-        if !matches!(
+        let cancellation_stage = nullable_canonical_string(
             problem.get("cancellation_stage"),
-            Some(Value::Null | Value::String(_))
-        ) {
-            return Err(protocol(
-                status,
-                "problem.cancellation_stage must be null or a string",
-            ));
-        }
+            status,
+            "problem.cancellation_stage",
+            &[
+                "before_admission",
+                "before_read",
+                "during_read",
+                "before_effect",
+                "effect_in_flight",
+            ],
+        )?;
+        let unavailable_classification = nullable_canonical_string(
+            problem.get("unavailable_classification"),
+            status,
+            "problem.unavailable_classification",
+            &[
+                "authority",
+                "backend_unavailable",
+                "backend_disconnected",
+                "backend_retryable",
+            ],
+        )?;
+        let execution_failure_classification = nullable_canonical_string(
+            problem.get("execution_failure_classification"),
+            status,
+            "problem.execution_failure_classification",
+            &["denied", "malformed_output", "permanent"],
+        )?;
         if string(problem.get("request_id"), status, "problem.request_id")? != request_id {
             return Err(protocol(status, "problem request identity is inconsistent"));
         }
@@ -1483,6 +1519,32 @@ impl ProblemError {
         if !problem.contains_key("coverage") {
             return Err(protocol(status, "problem.coverage is required"));
         }
+        let has_committed_receipt =
+            matches!(problem.get("committed_receipt"), Some(value) if !value.is_null());
+        let admitted_stage = cancellation_stage.is_some_and(|stage| stage != "before_admission");
+        let admitted_unavailable =
+            unavailable_classification.is_some_and(|classification| classification != "authority");
+        let expected_admitted = matches!(
+            kind,
+            "partial_effect" | "reset_required" | "execution_failed"
+        ) || admitted_stage
+            || admitted_unavailable;
+        if terminality
+            != if expected_admitted {
+                "admitted_terminal"
+            } else {
+                "pre_admission"
+            }
+            || (kind == "partial_effect") != has_committed_receipt
+            || (kind == "unavailable") != unavailable_classification.is_some()
+            || (kind == "execution_failed") != execution_failure_classification.is_some()
+            || matches!(kind, "cancelled" | "timed_out") != cancellation_stage.is_some()
+        {
+            return Err(protocol(
+                status,
+                "problem terminal identity is inconsistent",
+            ));
+        }
         if retryable != (retry != "never") {
             return Err(protocol(
                 status,
@@ -1503,6 +1565,40 @@ impl ProblemError {
             retry: retry.to_owned(),
             envelope,
         })
+    }
+}
+
+fn status_matches_problem(
+    status: u16,
+    kind: tracedecay_application::ApplicationProblemKind,
+) -> bool {
+    use tracedecay_application::ApplicationProblemKind;
+    status
+        == match kind {
+            ApplicationProblemKind::InvalidRequest => 400,
+            ApplicationProblemKind::NotFoundOrNotAuthorized => 404,
+            ApplicationProblemKind::Conflict
+            | ApplicationProblemKind::PartialEffect
+            | ApplicationProblemKind::Stale => 409,
+            ApplicationProblemKind::Unsupported => 422,
+            ApplicationProblemKind::Unavailable | ApplicationProblemKind::ResetRequired => 503,
+            ApplicationProblemKind::ExecutionFailed => 500,
+            ApplicationProblemKind::Saturated => 429,
+            ApplicationProblemKind::Cancelled => 408,
+            ApplicationProblemKind::TimedOut => 504,
+        }
+}
+
+fn nullable_canonical_string<'a>(
+    value: Option<&'a Value>,
+    status: u16,
+    field: &str,
+    allowed: &[&str],
+) -> Result<Option<&'a str>, ClientError> {
+    match value {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if allowed.contains(&value.as_str()) => Ok(Some(value)),
+        _ => Err(protocol(status, format!("{field} is not canonical"))),
     }
 }
 

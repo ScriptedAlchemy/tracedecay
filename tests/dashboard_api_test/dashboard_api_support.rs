@@ -16,15 +16,32 @@ pub(crate) use serde_json::Value;
 pub(crate) use tempfile::TempDir;
 pub(crate) use tracedecay::config::USER_DATA_DIR_ENV;
 pub(crate) use tracedecay::dashboard;
-pub(crate) use tracedecay::memory::types::{
-    AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory,
-};
 pub(crate) use tracedecay::storage::{EnrollmentMarker, StorageMode, write_enrollment_marker};
 pub(crate) use tracedecay::tracedecay::TraceDecay;
-pub(crate) use tracedecay_domain::ProjectId;
+pub(crate) use tracedecay_domain::{
+    ActorId, Confidence, FactCategoryV1, FactEventId, FactId, ProjectId,
+};
 pub(crate) use tracedecay_sessions::runtime::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
 pub(crate) use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 pub(crate) use tracedecay_usecases::host_admission::HostAdmissionScope;
+
+pub(crate) fn test_fact_write_control() -> tracedecay_store::FactWriteControl {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let commit_started = Arc::new(AtomicBool::new(false));
+    tracedecay_store::FactWriteControl::new(
+        {
+            let interrupted = Arc::clone(&interrupted);
+            Arc::new(move || interrupted.load(Ordering::Acquire))
+        },
+        Arc::new(move || {
+            commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        }),
+    )
+}
 
 pub(crate) struct MessageDetails<'a> {
     pub(crate) timestamp: i64,
@@ -246,7 +263,7 @@ pub(crate) async fn open_dashboard_host_runtime(cg: &TraceDecay) -> Arc<Dashboar
 
 pub(crate) struct DashboardAutomaticFactReceipt {
     pub(crate) apply_id: String,
-    pub(crate) canonical_fact_id: String,
+    pub(crate) fact_id: String,
 }
 
 fn dashboard_fixture_project_owner(cg: &TraceDecay) -> tracedecay_domain::FactOwnerV1 {
@@ -268,8 +285,8 @@ pub(crate) async fn record_dashboard_automatic_fact(
     run_id: &str,
     content: &str,
 ) -> DashboardAutomaticFactReceipt {
-    use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
     use tracedecay::store::memory::DatabaseFactStore;
+    use tracedecay_agent_hosts::automation::AutomationRunControl;
     use tracedecay_agent_hosts::automation::automatic_facts::{
         AutomaticFactState, record_session_automatic_facts,
     };
@@ -278,17 +295,22 @@ pub(crate) async fn record_dashboard_automatic_fact(
     let owner = dashboard_fixture_project_owner(cg);
     let memory = MemoryApplication::new(owner, DatabaseFactStore::new(cg.db()))
         .unwrap_or_else(|error| panic!("initialize outcome memory application: {error}"));
-    let request = AddFactRequest {
+    let request = tracedecay_usecases::memory::ProjectMemoryFactAddRequest {
         content: content.to_string(),
-        category: MemoryCategory::Project,
-        source: Some("dashboard-outcome-test".to_string()),
+        category: FactCategoryV1::Project,
+        source_label: Some("dashboard-outcome-test".to_string()),
         tags: vec!["automation".to_string(), "outcome".to_string()],
         entities: vec!["TraceDecay".to_string()],
-        trust: Some(0.9),
+        trust: Some(
+            Confidence::new(0.9)
+                .unwrap_or_else(|error| panic!("build automatic fact trust: {error}")),
+        ),
         metadata: serde_json::json!({"origin": "dashboard-outcome-test"}),
     };
+    let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
     let batch = record_session_automatic_facts(
         &memory,
+        &run_control,
         run_id,
         Some("dashboard-outcome-test"),
         &[serde_json::json!({
@@ -311,7 +333,7 @@ pub(crate) async fn record_dashboard_automatic_fact(
     assert_eq!(receipt.state, AutomaticFactState::Applied);
     DashboardAutomaticFactReceipt {
         apply_id: receipt.apply_id,
-        canonical_fact_id: receipt.applied_canonical_fact_id.unwrap_or_else(|| {
+        fact_id: receipt.applied_fact_id.unwrap_or_else(|| {
             panic!("applied outcome automatic fact receipt needs canonical fact identity")
         }),
     }
@@ -322,11 +344,6 @@ pub(crate) async fn delete_dashboard_automatic_fact(
     receipt: &DashboardAutomaticFactReceipt,
 ) {
     use tracedecay::store::memory::DatabaseFactStore;
-    use tracedecay_domain::FactId;
-    use tracedecay_store::{
-        ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
-        ProjectMemoryFactTargetV1,
-    };
     use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
 
     let owner = dashboard_fixture_project_owner(cg);
@@ -339,63 +356,92 @@ pub(crate) async fn delete_dashboard_automatic_fact(
         None,
     )
     .unwrap_or_else(|error| panic!("derive outcome deletion identity: {error}"));
-    let canonical_fact_id = FactId::new(receipt.canonical_fact_id.clone())
+    let canonical_fact_id = FactId::new(receipt.fact_id.clone())
         .unwrap_or_else(|error| panic!("parse outcome canonical fact identity: {error}"));
-    let target = ProjectMemoryFactTargetV1::Canonical(
-        ProjectMemoryFactIdV1::new(owner, canonical_fact_id)
-            .unwrap_or_else(|error| panic!("build outcome canonical fact target: {error}")),
-    );
-    let expected_last_event_id = match memory
-        .get_project_memory_fact(target.clone())
-        .await
-        .unwrap_or_else(|error| panic!("inspect outcome fact before deletion: {error}"))
-    {
-        Some(ProjectMemoryFactProjectionV1::Available(fact)) => fact.fact().last_event_id().clone(),
-        other => panic!("outcome fact must be available before deletion: {other:?}"),
-    };
     assert!(
         memory
-            .remove_project_memory_fact(
-                ProjectMemoryFactRemoveCommandV1::new(
-                    target,
-                    context.operation_id().clone(),
-                    Some(expected_last_event_id),
-                    None,
-                )
-                .unwrap_or_else(|error| panic!("build outcome deletion command: {error}")),
-            )
+            .remove_canonical_fact(canonical_fact_id, context, &test_fact_write_control(),)
             .await
             .unwrap_or_else(|error| panic!("delete outcome fact: {error:?}"))
-            .removed()
+            .was_removed()
     );
 }
 
 pub(crate) struct DashboardMemoryFixture {
-    pub(crate) near_duplicate_fact_id: i64,
+    pub(crate) near_duplicate_fact_id: FactId,
+    pub(crate) near_duplicate_last_event_id: FactEventId,
+}
+
+pub(crate) async fn seed_dashboard_fact(
+    cg: &TraceDecay,
+    content: &str,
+    category: FactCategoryV1,
+    trust: f64,
+    tags: &[&str],
+    entities: &[&str],
+) -> FactId {
+    use tracedecay::store::memory::DatabaseFactStore;
+    use tracedecay_store::ProjectMemoryFactProjectionV1;
+    use tracedecay_usecases::memory::{
+        MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+    };
+
+    let owner = dashboard_fixture_project_owner(cg);
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
+        .unwrap_or_else(|error| panic!("initialize dashboard memory fixture: {error}"));
+    let request = ProjectMemoryFactAddRequest {
+        content: content.to_owned(),
+        category,
+        source_label: Some("dashboard-fixture".to_owned()),
+        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+        entities: entities.iter().map(|entity| (*entity).to_owned()).collect(),
+        trust: Some(
+            Confidence::new(trust)
+                .unwrap_or_else(|error| panic!("dashboard fixture trust: {error}")),
+        ),
+        metadata: serde_json::json!({}),
+    };
+    let actor = ActorId::new("actor.dashboard-fixture".to_owned())
+        .unwrap_or_else(|error| panic!("build dashboard fixture actor: {error}"));
+    let preflight = memory
+        .preflight_project_memory_fact_add(request, Some(actor))
+        .unwrap_or_else(|error| panic!("preflight dashboard fact: {error}"));
+    let write_control = test_fact_write_control();
+    let outcome = memory
+        .add_preflighted_project_memory_fact(preflight, &write_control)
+        .await
+        .unwrap_or_else(|error| panic!("seed dashboard fact: {error}"));
+    let ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome else {
+        panic!("dashboard fixture fact was rejected by the privacy authority: {content}");
+    };
+    let ProjectMemoryFactProjectionV1::Available(fact) = outcome.fact() else {
+        panic!("dashboard fixture fact payload is unavailable: {content}");
+    };
+    assert_eq!(fact.content(), content);
+    fact.fact_id().clone()
 }
 
 pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) -> DashboardMemoryFixture {
-    // Seed through the public TraceDecay facade so the canonical fact/event
-    // store and its compatibility projection stay coherent. Dashboard tests
-    // must not manufacture post-cutover legacy rows directly.
+    // Seed through the canonical application preflight and write authorities
+    // so fixture facts use the same sanitization and commit path as production.
     let fixtures = [
         (
             "Cache invalidation policy must be explicit",
-            MemoryCategory::Project,
+            FactCategoryV1::Project,
             0.97,
             vec!["cache", "policy"],
             vec!["CachePolicy"],
         ),
         (
             "Cache invalidation policy must stay explicit",
-            MemoryCategory::Project,
+            FactCategoryV1::Project,
             0.95,
             vec!["cache", "policy"],
             vec!["CachePolicy"],
         ),
         (
             LONG_FACT_CONTENT,
-            MemoryCategory::Tool,
+            FactCategoryV1::Tool,
             0.71,
             vec!["lcm", "ux"],
             vec!["LCMTab", "SimilarityView"],
@@ -403,43 +449,76 @@ pub(crate) async fn seed_memory_fixture(cg: &TraceDecay) -> DashboardMemoryFixtu
     ];
     let mut fact_ids = Vec::with_capacity(fixtures.len());
     for (content, category, trust, tags, entities) in fixtures {
-        let outcome = cg
-            .add_fact(AddFactRequest {
-                content: content.to_string(),
-                category,
-                source: Some("dashboard-fixture".to_string()),
-                tags: tags.into_iter().map(ToString::to_string).collect(),
-                entities: entities.into_iter().map(ToString::to_string).collect(),
-                trust: Some(trust),
-                metadata: serde_json::json!({}),
-            })
-            .await
-            .unwrap_or_else(|error| panic!("failed to seed dashboard fact: {error}"));
-        let fact = outcome
-            .fact
-            .unwrap_or_else(|| panic!("dashboard fixture fact was not accepted: {content}"));
-        assert_eq!(fact.content, content);
-        fact_ids.push(fact.fact_id);
+        fact_ids.push(seed_dashboard_fact(cg, content, category, trust, &tags, &entities).await);
     }
-    let tool_fact_id = fact_ids[2];
+    let tool_fact_id = fact_ids[2].clone();
     for (action, note) in [
         (
-            FeedbackAction::Helpful,
+            tracedecay_store::ProjectMemoryFactFeedbackActionV1::Helpful,
             Some("confirmed durable".to_string()),
         ),
-        (FeedbackAction::Unhelpful, None),
+        (
+            tracedecay_store::ProjectMemoryFactFeedbackActionV1::Unhelpful,
+            None,
+        ),
     ] {
-        cg.record_fact_feedback(FeedbackRequest {
-            fact_id: tool_fact_id,
-            action,
-            source: Some("dashboard-test".to_string()),
-            note,
-        })
-        .await
-        .unwrap_or_else(|error| panic!("failed to seed dashboard feedback: {error:?}"));
+        use tracedecay::store::memory::DatabaseFactStore;
+        use tracedecay_store::{ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactIdV1};
+        use tracedecay_usecases::memory::{MemoryApplication, MemoryOperationContext};
+
+        let owner = dashboard_fixture_project_owner(cg);
+        let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
+            .unwrap_or_else(|error| panic!("initialize dashboard feedback fixture: {error}"));
+        let context = MemoryOperationContext::from_logical_effect(
+            &owner,
+            "dashboard-fixture-feedback",
+            &serde_json::json!({
+                "fact_id": tool_fact_id.as_str(),
+                "action": format!("{action:?}"),
+            }),
+            None,
+        )
+        .unwrap_or_else(|error| panic!("derive dashboard feedback identity: {error}"));
+        memory
+            .record_project_memory_fact_feedback(
+                ProjectMemoryFactFeedbackCommandV1::new(
+                    ProjectMemoryFactIdV1::new(owner, tool_fact_id.clone())
+                        .unwrap_or_else(|error| panic!("dashboard feedback target: {error}")),
+                    context.operation_id().clone(),
+                    None,
+                    action,
+                    None,
+                    Some("dashboard-test".to_owned()),
+                    note,
+                )
+                .unwrap_or_else(|error| panic!("dashboard feedback command: {error}")),
+                &test_fact_write_control(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("seed dashboard feedback: {error:?}"));
     }
+    use tracedecay::store::memory::DatabaseFactStore;
+    use tracedecay_store::{FactReadControl, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1};
+    use tracedecay_usecases::memory::MemoryApplication;
+    let near_duplicate_fact_id = fact_ids[1].clone();
+    let owner = dashboard_fixture_project_owner(cg);
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
+        .unwrap_or_else(|error| panic!("initialize dashboard memory fixture: {error}"));
+    let projection = memory
+        .get_project_memory_fact(
+            ProjectMemoryFactIdV1::new(owner, near_duplicate_fact_id.clone())
+                .unwrap_or_else(|error| panic!("dashboard fixture target: {error}")),
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("read dashboard fixture target: {error}"))
+        .unwrap_or_else(|| panic!("dashboard fixture target disappeared"));
+    let ProjectMemoryFactProjectionV1::Available(projection) = projection else {
+        panic!("dashboard fixture target payload unavailable");
+    };
     DashboardMemoryFixture {
-        near_duplicate_fact_id: fact_ids[1],
+        near_duplicate_fact_id,
+        near_duplicate_last_event_id: projection.last_event_id().clone(),
     }
 }
 
@@ -449,7 +528,7 @@ pub(crate) fn fixture_fact_id(
     agent: &ureq::Agent,
     fixture: &DashboardFixture,
     content_prefix: &str,
-) -> i64 {
+) -> FactId {
     let (status, overview) = get_json(
         agent,
         &format!("{}/api/plugins/holographic/?limit=100", fixture.base_url),
@@ -462,7 +541,8 @@ pub(crate) fn fixture_fact_id(
                 fact.get("content")
                     .and_then(Value::as_str)
                     .filter(|content| content.starts_with(content_prefix))
-                    .and_then(|_| fact.get("fact_id").and_then(Value::as_i64))
+                    .and_then(|_| fact.get("fact_id").and_then(Value::as_str))
+                    .and_then(|fact_id| FactId::new(fact_id.to_owned()).ok())
             })
         })
         .unwrap_or_else(|| panic!("seeded dashboard fact not found for prefix: {content_prefix}"))
@@ -676,7 +756,7 @@ pub(crate) struct FakeCodexAppServer {
 }
 
 impl FakeCodexAppServer {
-    pub(crate) fn new_memory_curator(delete_fact_id: i64) -> Self {
+    pub(crate) fn new_memory_curator(fact_id: FactId, last_event_id: FactEventId) -> Self {
         let temp = tempdir_or_panic();
         let script_path = temp.path().join("codex.py");
         let bin = fake_codex_bin(temp.path());
@@ -689,7 +769,8 @@ if len(sys.argv) != 2 or sys.argv[1] != "app-server":
     sys.exit(42)
 if os.environ.get("TRACEDECAY_CODEX_SUMMARY_CHILD") != "1":
     sys.exit(43)
-delete_fact_id = __DELETE_FACT_ID__
+fact_id = __FACT_ID__
+last_event_id = __LAST_EVENT_ID__
 
 for line in sys.stdin:
     msg = json.loads(line)
@@ -705,10 +786,18 @@ for line in sys.stdin:
         payload = {
             "ops": [{
                 "cluster_id": "cluster-0000",
-                "op": "delete",
-                "fact_id": delete_fact_id,
+                "op": "normalize_tags",
+                "target": {
+                    "fact_id": fact_id,
+                    "expected_last_event_id": last_event_id,
+                },
+                "tags": ["cache", "curated", "policy"],
+                "evidence_facts": [{
+                    "fact_id": fact_id,
+                    "expected_last_event_id": last_event_id,
+                }],
                 "confidence": 0.98,
-                "reason": "near duplicate of the paired dashboard fact"
+                "reason": "normalize reviewed dashboard fact tags"
             }]
         }
         print(json.dumps({
@@ -718,7 +807,16 @@ for line in sys.stdin:
         print(json.dumps({"method": "turn/completed"}), flush=True)
         break
 "#
-        .replace("__DELETE_FACT_ID__", &delete_fact_id.to_string());
+        .replace(
+            "__FACT_ID__",
+            &serde_json::to_string(fact_id.as_str())
+                .unwrap_or_else(|error| panic!("encode fake curator fact id: {error}")),
+        )
+        .replace(
+            "__LAST_EVENT_ID__",
+            &serde_json::to_string(last_event_id.as_str())
+                .unwrap_or_else(|error| panic!("encode fake curator event id: {error}")),
+        );
         write_file(&script_path, &script);
         install_fake_codex_launcher(&script_path, &bin);
         Self { _temp: temp, bin }
@@ -735,6 +833,10 @@ pub(crate) async fn start_dashboard_fixture_without_memory() -> DashboardFixture
 
 pub(crate) async fn start_dashboard_configuration_fixture() -> DashboardFixture {
     start_dashboard_fixture_with_options(false, false, true).await
+}
+
+pub(crate) async fn start_dashboard_retained_memory_fixture() -> DashboardFixture {
+    start_dashboard_fixture_with_options(false, true, true).await
 }
 
 async fn start_dashboard_fixture_with_options(

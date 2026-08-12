@@ -17,7 +17,7 @@
         "args": {
           "content": "Continuity note: eval-first memory regression stays in the long memory suite.",
           "category": "decision",
-          "source": "eval-agent"
+          "source_label": "eval-agent"
         }
       },
       {
@@ -37,7 +37,7 @@
           "args": {
             "content": "Continuity note: eval-first memory regression stays in the long memory suite.",
             "category": "decision",
-            "source": "eval-agent"
+            "source_label": "eval-agent"
           }
         }
       ]

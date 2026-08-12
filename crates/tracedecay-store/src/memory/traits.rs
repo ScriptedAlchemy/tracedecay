@@ -1,6 +1,8 @@
 use std::future::Future;
+use tracedecay_domain::RunId;
 use tracedecay_domain::{FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2};
 
+use super::ProjectMemoryAutomationRunReceiptsV1;
 use super::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactReadControl,
@@ -260,4 +262,14 @@ pub trait ProjectMemoryFactStore: FactStore {
         limit: usize,
         read_control: &FactReadControl,
     ) -> impl Future<Output = FactStoreResult<ProjectMemoryAutomaticFactReceiptPageV1>> + Send;
+
+    /// Reads the immutable receipt material committed for one exact
+    /// owner-bound automation run. Implementations must reject overflow or
+    /// ambiguous curation receipts rather than truncate or choose one.
+    fn project_memory_automation_run_receipts(
+        &self,
+        owner: FactOwnerV1,
+        run_id: RunId,
+        read_control: &FactReadControl,
+    ) -> impl Future<Output = FactStoreResult<ProjectMemoryAutomationRunReceiptsV1>> + Send;
 }

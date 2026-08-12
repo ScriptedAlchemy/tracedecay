@@ -15,6 +15,7 @@ pub mod analysis;
 mod analytics;
 mod application_surface;
 pub mod ast_grep_search;
+mod automation_runs;
 pub mod dashboard;
 mod dashboard_git_correlation;
 // Only reached by the test-transport dashboard git-correlation fixture
@@ -29,6 +30,7 @@ mod dashboard_lcm;
 #[cfg(feature = "test-transport")]
 pub(crate) use dashboard_lcm::DashboardLcmReadAdapter;
 mod dependency_hints;
+mod dispatch_controls;
 mod dispatch_groups;
 pub mod edit;
 pub mod git;
@@ -37,7 +39,6 @@ pub mod grep;
 pub mod health;
 pub mod hook_runtime;
 pub mod info;
-pub mod memory;
 mod multi_root;
 mod project_registry;
 pub mod redundancy;
@@ -98,6 +99,15 @@ mod dispatch_test_support;
     clippy::uninlined_format_args
 )]
 mod dispatch_tests;
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::await_holding_lock,
+    clippy::redundant_closure_for_method_calls,
+    clippy::uninlined_format_args
+)]
+mod retained_timeout_dispatch_tests;
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -364,7 +374,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
         }
         if args.get("memory_scope").and_then(Value::as_str) == Some("user")
             && matches!(
-                RetainedSurfaceOperation::from_name(tool_name),
+                RetainedSurfaceOperation::from_tool_name(tool_name),
                 Some(
                     RetainedSurfaceOperation::FactStoreAdd
                         | RetainedSurfaceOperation::FactStoreSearch
@@ -376,7 +386,6 @@ pub fn handle_tool_call_with_registry_options<'a>(
                         | RetainedSurfaceOperation::FactStoreUpdate
                         | RetainedSurfaceOperation::FactStoreRemove
                         | RetainedSurfaceOperation::FactStoreList
-                        | RetainedSurfaceOperation::FactStoreCurate
                         | RetainedSurfaceOperation::FactFeedback
                         | RetainedSurfaceOperation::MemoryStatus
                 )
@@ -409,12 +418,12 @@ pub fn handle_tool_call_with_registry_options<'a>(
                     // User-scoped retained/LCM calls return before the root
                     // dispatch guard below. Keep the canonical availability
                     // decision ahead of every profile handler and store effect.
-                    if RetainedSurfaceOperation::from_name(tool_name).is_some()
+                    if RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
                         || tool_name == "tracedecay_message_search"
                     {
                         ensure_mcp_dispatch_available(tool_name)?;
                     }
-                    if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
+                    if let Some(operation) = RetainedSurfaceOperation::from_tool_name(tool_name) {
                         let dispatch: std::pin::Pin<
                             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
                         > = Box::pin(dispatch_profile_retained_application_tool(
@@ -658,12 +667,24 @@ pub fn handle_tool_call_with_registry_options<'a>(
                 | None => Err(unknown_tool_error(tool_name)),
             }
         };
-        match tokio::time::timeout(dispatch_budget, dispatched).await {
-            Ok(result) => result,
-            Err(_elapsed) => Err(dispatch_groups::tool_dispatch_deadline_error(
-                tool_name,
-                dispatch_budget,
-            )),
+        if matches!(
+            dispatch_group,
+            Some(McpToolDispatchGroup::RetainedApplication)
+        ) || super::binding::tool_requires_canonical_effect_settlement(tool_name)
+        {
+            // Canonically settled effects complete their own deadline and
+            // cancellation protocol before this adapter receives a terminal.
+            // Dropping that terminal in the generic transport timeout would
+            // erase an admitted Effect or PartialEffect receipt.
+            dispatched.await
+        } else {
+            match tokio::time::timeout(dispatch_budget, dispatched).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(dispatch_groups::tool_dispatch_deadline_error(
+                    tool_name,
+                    dispatch_budget,
+                )),
+            }
         }
     })
 }
@@ -700,8 +721,7 @@ fn classify_mcp_tool_dispatch_group(
     if let Some(group) = dispatch_group_for_tool(tool_name) {
         return Some(group);
     }
-    RetainedSurfaceOperation::from_name(tool_name)
-        .filter(|operation| *operation != RetainedSurfaceOperation::FactStore)
+    RetainedSurfaceOperation::from_tool_name(tool_name)
         .map(|_| McpToolDispatchGroup::RetainedApplication)
 }
 

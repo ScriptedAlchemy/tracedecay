@@ -29,7 +29,11 @@ import {
 } from "../scope/store.ts";
 import {
   AutomationSchedulerStatusV1Schema,
+  MemoryAutomationRunProblemV1Schema,
+  MemoryAutomationRunResultV1Schema,
   type AutomationSchedulerStatusV1,
+  type MemoryAutomationRunProblemV1,
+  type MemoryAutomationRunResultV1,
 } from "../../contracts/generated.ts";
 
 // Re-export the generated validator for the query-layer tests and consumers.
@@ -253,9 +257,8 @@ const AutomaticFactReceiptSchema = z
     item: z.unknown().optional(),
     validation: z.unknown().optional(),
     quarantine_reason: z.string().optional(),
-    applied_canonical_fact_id: z.string().optional(),
-    applied_fact_id: z.number().nullable().optional(),
-    recorded_at: z.number(),
+    applied_fact_id: z.string().optional(),
+    recorded_at_micros: z.number().int(),
   })
   .passthrough();
 
@@ -301,47 +304,6 @@ export function useAutomationFactReceipts() {
   );
 }
 
-/** A deployment receipt may accompany a skill activation. The arrays are
- * deliberately open because each host materializer owns its item shape. */
-const SkillDeploymentSchema = z
-  .object({
-    status: z.enum(["complete", "partial_failure", "unavailable"]),
-    exports: z.array(z.unknown()),
-    materialization_scopes: z.array(
-      z
-        .object({
-          scope: z.string(),
-          materialized: z.array(z.unknown()),
-          removed: z.array(z.unknown()),
-          errors: z.array(z.string()),
-        })
-        .passthrough(),
-    ),
-    errors: z.array(z.string()),
-    reason: z.string().optional(),
-    retry_required: z.boolean(),
-  })
-  .passthrough();
-
-export type ManagedSkillDeploymentReceipt = z.infer<
-  typeof SkillDeploymentSchema
->;
-
-/** Optional automatic-policy receipts are read as open values: the daemon may
- * add a new receipt without invalidating an otherwise readable run row. */
-const RunReceiptFields = {
-  activation_policy: z.string().optional(),
-  created_skills: z.array(z.unknown()).optional(),
-  updated_skills: z.array(z.unknown()).optional(),
-  applied_consolidations: z.array(z.unknown()).optional(),
-  rejected_skills: z.array(z.unknown()).optional(),
-  validation_repairs: z.array(z.unknown()).optional(),
-  receipts: z.array(z.unknown()).optional(),
-  llm_apply: z.unknown().optional(),
-  deployment: SkillDeploymentSchema.optional(),
-  curation_policy: z.unknown().optional(),
-};
-
 /** `automation_run_api::run_list` (`/api/automation/runs`): the newest ledger
  * records, projected by `run_history_row`. Every payload key below is
  * unconditional; `model` and `error` are nullable because the writer emits
@@ -365,15 +327,17 @@ const RunsPayloadSchema = z
           started_at: z.string(),
           completed_at: z.string(),
           artifact_kinds: z.array(z.string()),
-          ...RunReceiptFields,
         })
-        .passthrough(),
+        .strict(),
     ),
     count: z.number(),
     limit: z.number(),
+    has_more: z.boolean(),
+    malformed_row_count: z.number().int().nonnegative(),
+    completeness: z.enum(["known", "partial"]),
     error: z.string(),
   })
-  .passthrough();
+  .strict();
 
 /** `automation_run_api::artifact_list` (`/api/automation/runs/{id}/artifacts`):
  * the run's recorded artifacts plus the handler's own chain summary, which
@@ -407,17 +371,33 @@ const RunArtifactsPayloadSchema = z
   })
   .passthrough();
 
+/** The existing read-only payload route for one recorded artifact. The
+ * artifact kind owns its payload shape, so the dashboard retains that value as
+ * unknown and displays the daemon's JSON rather than inventing a parallel DTO. */
+const RunArtifactPayloadSchema = z
+  .object({
+    run_id: z.string(),
+    artifact: z
+      .object({
+        kind: z.string(),
+        path: z.string(),
+        sha256: z.string(),
+        summary: z.string().optional(),
+        created_at: z.string(),
+      })
+      .passthrough(),
+    payload: z.unknown(),
+    error: z.literal(""),
+  })
+  .passthrough();
+
 export type RunRow = z.infer<typeof RunsPayloadSchema>["runs"][number];
+export type RunsPayload = z.infer<typeof RunsPayloadSchema>;
 export type RunArtifactsPayload = z.infer<typeof RunArtifactsPayloadSchema>;
 export type RunArtifactRow = RunArtifactsPayload["artifacts"][number];
+export type RunArtifactPayload = z.infer<typeof RunArtifactPayloadSchema>;
 
 const SkillOutcomeVerdictSchema = z.enum(["adopted", "ignored", "too_early"]);
-const FactOutcomeVerdictSchema = z.enum([
-  "recalled_and_helpful",
-  "recalled",
-  "never_recalled",
-  "deleted",
-]);
 
 const SkillOutcomeSchema = z
   .object({
@@ -431,22 +411,84 @@ const SkillOutcomeSchema = z
   })
   .passthrough();
 
-const FactOutcomeSchema = z
+const FactOutcomeIdentityFields = {
+  apply_id: z.string(),
+  run_id: z.string().optional(),
+  recorded_at: z.number().int(),
+  days_since_recorded: z.number().int(),
+} as const;
+
+const AvailableFactTelemetryFields = {
+  retrieval_count: z.number().int().nonnegative(),
+  access_count: z.number().int().nonnegative(),
+  helpful_count: z.number().int().nonnegative(),
+  unhelpful_count: z.number().int().nonnegative(),
+  last_recalled_at: z.number().int().optional(),
+} as const;
+
+const AbsentFactTelemetryFields = {
+  retrieval_count: z.never().optional(),
+  access_count: z.never().optional(),
+  helpful_count: z.never().optional(),
+  unhelpful_count: z.never().optional(),
+  last_recalled_at: z.never().optional(),
+} as const;
+
+const AvailableFactOutcomeSchema = z
   .object({
-    proposal_id: z.string(),
-    run_id: z.string(),
-    fact_id: z.string(),
-    applied_at: z.number(),
-    days_since_applied: z.number(),
-    retrieval_count: z.number(),
-    access_count: z.number(),
-    helpful_count: z.number(),
-    unhelpful_count: z.number(),
-    last_recalled_at: z.number().nullable().optional(),
-    still_exists: z.boolean(),
-    verdict: FactOutcomeVerdictSchema,
+    ...FactOutcomeIdentityFields,
+    state: z.literal("applied"),
+    canonical_fact_id: z.string(),
+    ...AvailableFactTelemetryFields,
+    still_exists: z.literal(true),
+    verdict: z.enum([
+      "recalled_and_helpful",
+      "recalled",
+      "never_recalled",
+    ]),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((record, context) => {
+    const recalled =
+      record.access_count > 0 || record.last_recalled_at !== undefined;
+    const expectedVerdict =
+      recalled && record.helpful_count > 0
+        ? "recalled_and_helpful"
+        : recalled
+          ? "recalled"
+          : "never_recalled";
+    if (record.verdict !== expectedVerdict) {
+      context.addIssue({
+        code: "custom",
+        path: ["verdict"],
+        message: "fact outcome verdict contradicts its recall telemetry",
+      });
+    }
+  });
+
+const FactOutcomeSchema = z.union([
+  AvailableFactOutcomeSchema,
+  z
+    .object({
+      ...FactOutcomeIdentityFields,
+      state: z.literal("applied"),
+      canonical_fact_id: z.string(),
+      ...AbsentFactTelemetryFields,
+      still_exists: z.literal(false),
+      verdict: z.enum(["deleted", "quarantined", "unavailable"]),
+    })
+    .passthrough(),
+  z
+    .object({
+      ...FactOutcomeIdentityFields,
+      state: z.literal("quarantined"),
+      canonical_fact_id: z.never().optional(),
+      ...AbsentFactTelemetryFields,
+      still_exists: z.literal(false),
+      verdict: z.literal("quarantined"),
+    })
+    .passthrough(),
+]);
 
 /** Read-only adoption and recall outcomes produced by the daemon. */
 export const AutomationOutcomesPayloadSchema = z
@@ -469,6 +511,623 @@ export type AutomationOutcomesPayload = z.infer<
 >;
 export type SkillOutcome = AutomationOutcomesPayload["skills"][number];
 export type FactOutcome = AutomationOutcomesPayload["facts"][number];
+
+const AutomaticCuratorResponseSchema = z
+  .object({ run: MemoryAutomationRunResultV1Schema })
+  .strict();
+
+const ApplicationProblemResponseSchema = z
+  .object({ kind: z.literal("problem"), value: z.unknown() })
+  .strict();
+
+const ApplicationProblemKindSchema = z
+  .object({
+    problem: z
+      .object({ problem: z.object({ kind: z.string() }).passthrough() })
+      .passthrough(),
+  })
+  .passthrough();
+
+export type AutomaticCuratorRun = MemoryAutomationRunResultV1;
+export type AutomaticCuratorPartialEffect = MemoryAutomationRunProblemV1;
+export type AutomaticCuratorResetRequired = MemoryAutomationRunProblemV1;
+
+export type AutomaticCuratorResult =
+  | { outcome: "ok"; run: AutomaticCuratorRun }
+  | { outcome: "partial_effect"; problem: AutomaticCuratorPartialEffect }
+  | { outcome: "reset_required"; problem: AutomaticCuratorResetRequired }
+  | { outcome: "not_dispatched"; writability: ScopeWritability }
+  | {
+      outcome:
+        | "offline"
+        | "unauthorized"
+        | "denied"
+        | "read_only_scope"
+        | "conflicting"
+        | "cancelled"
+        | "timed_out"
+        | "unavailable"
+        | "error"
+        | "unsupported_schema";
+      detail: string;
+    };
+
+export async function runAutomaticCurator(
+  url = "/api/automation/run/memory-curator",
+): Promise<AutomaticCuratorResult> {
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+  } catch {
+    return { outcome: "offline", detail: "the daemon could not be reached" };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return {
+      outcome: "unsupported_schema",
+      detail: "the daemon returned a body that is not JSON",
+    };
+  }
+
+  if (response.ok) {
+    const result = AutomaticCuratorResponseSchema.safeParse(body);
+    return result.success && await automaticCuratorRunMatchesEndpoint(result.data.run)
+      ? { outcome: "ok", run: result.data.run }
+      : {
+          outcome: "unsupported_schema",
+          detail: "the automatic curator result does not match this build",
+        };
+  }
+
+  const problemResponse = ApplicationProblemResponseSchema.safeParse(body);
+  if (problemResponse.success) {
+    const terminal = MemoryAutomationRunProblemV1Schema.safeParse(
+      problemResponse.data.value,
+    );
+    if (
+      response.status === 409 &&
+      terminal.success &&
+      await automaticCuratorProblemMatchesEndpoint(terminal.data, "partial_effect", url)
+    ) {
+      return { outcome: "partial_effect", problem: terminal.data };
+    }
+    if (
+      response.status === 503 &&
+      terminal.success &&
+      await automaticCuratorProblemMatchesEndpoint(terminal.data, "reset_required", url)
+    ) {
+      return { outcome: "reset_required", problem: terminal.data };
+    }
+    const problemKind = ApplicationProblemKindSchema.safeParse(
+      problemResponse.data.value,
+    );
+    if (
+      (response.status === 409 &&
+        problemKind.success &&
+        problemKind.data.problem.problem.kind === "partial_effect") ||
+      (response.status === 503 &&
+        problemKind.success &&
+        problemKind.data.problem.problem.kind === "reset_required")
+    ) {
+      return {
+        outcome: "unsupported_schema",
+        detail: "the application terminal does not match its canonical contract",
+      };
+    }
+  }
+
+  switch (response.status) {
+    case 401:
+      return { outcome: "unauthorized", detail: "automation authorization is required" };
+    case 403:
+      return { outcome: "denied", detail: "the automation authority denied this run" };
+    case 405:
+      return { outcome: "read_only_scope", detail: "this project scope is read-only" };
+    case 409:
+      return { outcome: "conflicting", detail: "the automation request conflicted" };
+    case 408:
+      return { outcome: "cancelled", detail: "the automatic run was cancelled" };
+    case 429:
+    case 503:
+      return { outcome: "unavailable", detail: "the automation authority is unavailable" };
+    case 504:
+      return { outcome: "timed_out", detail: "the automatic run timed out" };
+    default:
+      return { outcome: "error", detail: `the automatic run failed with HTTP ${response.status}` };
+  }
+}
+
+async function automaticCuratorRunMatchesEndpoint(
+  run: MemoryAutomationRunResultV1,
+): Promise<boolean> {
+  if (run.task !== "memory_curator") return false;
+  const summary = run.terminal.summary;
+  if (run.terminal.status === "skipped") {
+    return (
+      summary.reviewed_count === 0 &&
+      summary.accepted_count === 0 &&
+      summary.rejected_count === 0 &&
+      summary.skipped_count === 1 &&
+      memoryCuratorSkipReason(run.terminal.reason) &&
+      run.committed_receipts.length === 0
+    );
+  }
+  if (
+    summary.skipped_count !== 0 ||
+    summary.reviewed_count !== summary.accepted_count + summary.rejected_count ||
+    summary.rejected_count !== 0 ||
+    run.committed_receipts.length > 1
+  ) {
+    return false;
+  }
+  const receiptsMatch = (await Promise.all(run.committed_receipts.map(
+    (receipt) => receipt.kind === "curation" &&
+      automaticCurationReceiptMatches(run.run_id, receipt.receipt),
+  ))).every(Boolean);
+  return receiptsMatch && summary.accepted_count === run.committed_receipts.reduce(
+    (count, receipt) =>
+      count +
+      (receipt.kind === "curation"
+        ? receipt.receipt.receipt.accepted_operations
+        : 0),
+    0,
+  );
+}
+
+function memoryCuratorSkipReason(reason: string): boolean {
+  return [
+    "automation_disabled",
+    "backend_disabled",
+    "delegated_host_mode",
+    "memory_curator_disabled",
+    "nothing_to_review",
+    "partial_coverage_no_candidates",
+    "scheduler_cooldown_active",
+    "scheduler_cron_not_due",
+    "scheduler_idle_window_active",
+    "scheduler_interval_not_elapsed",
+    "scheduler_lock_active",
+    "scheduler_non_retryable_failure",
+    "scheduler_schedule_invalid",
+    "scheduler_schedule_manual",
+    "similarity_authority_unavailable",
+    "task_not_schedulable",
+  ].includes(reason);
+}
+
+const MEMORY_AUTOMATION_RESULT_SCHEMA_ID =
+  "schema.application.retained.memory-automation-run.result";
+const MEMORY_AUTOMATION_USE_CASE_ID =
+  "use-case.application.retained.memory-automation-run";
+
+async function automaticCuratorProblemMatchesEndpoint(
+  terminal: MemoryAutomationRunProblemV1,
+  kind: "partial_effect" | "reset_required",
+  requestUrl: string,
+): Promise<boolean> {
+  const envelope = terminal.problem;
+  const problem = envelope.problem;
+  if (
+    terminal.task !== "memory_curator" ||
+    envelope.contract.schema_id !== MEMORY_AUTOMATION_RESULT_SCHEMA_ID ||
+    envelope.contract.schema_revision !== 1 ||
+    envelope.request_id !== problem.request_id ||
+    problem.kind !== kind ||
+    !urlProjectMatchesScope(requestUrl, terminal.scope.project_id) ||
+    !await resolvedScopeDigestMatches(terminal.scope)
+  ) {
+    return false;
+  }
+  const receipt = problem.committed_receipt;
+  if (kind === "reset_required") {
+    return receipt === null && terminal.committed_receipts.length === 0;
+  }
+  if (
+    receipt === null ||
+    receipt.operation !== MEMORY_AUTOMATION_USE_CASE_ID ||
+    receipt.request_id !== envelope.request_id ||
+    receipt.outcome !== "partial" ||
+    receipt.committed_state === null ||
+    !sameResolvedScope(receipt.scope, terminal.scope) ||
+    terminal.committed_receipts.length === 0
+  ) {
+    return false;
+  }
+  const receiptIdentities = new Set<string>();
+  for (const committed of terminal.committed_receipts) {
+    if (committed.kind !== "curation") return false;
+    const identity = canonicalJson([
+      committed.receipt.receipt.owner,
+      committed.receipt.receipt.operation_id,
+    ]);
+    if (receiptIdentities.has(identity)) return false;
+    receiptIdentities.add(identity);
+  }
+  const receiptsMatch = (await Promise.all(terminal.committed_receipts.map(
+    (committed) => committed.kind === "curation" &&
+      automaticCurationReceiptMatches(terminal.run_id, committed.receipt),
+  ))).every(Boolean);
+  return receiptsMatch && receipt.committed_state === await canonicalSha256([
+    "tracedecay.memory-automation-run.partial-state.v1",
+    terminal.run_id,
+    terminal.committed_receipts,
+  ]);
+}
+
+type CurationReceipt = Extract<
+  MemoryAutomationRunResultV1["committed_receipts"][number],
+  { kind: "curation" }
+>["receipt"];
+
+async function automaticCurationReceiptMatches(
+  runId: string,
+  settled: CurationReceipt,
+): Promise<boolean> {
+  const receipt = settled.receipt;
+  if (
+    receipt.automation_run_id !== runId ||
+    !/^[0-9a-f]{64}$/.test(receipt.input_digest) ||
+    settled.canonical_digest !== await canonicalSha256([
+      "tracedecay.memory-automation-run.curation-receipt.v1",
+      receipt,
+    ]) ||
+    receipt.operation_effects.length === 0 ||
+    receipt.operation_effects.length > 256 ||
+    receipt.accepted_operations !== receipt.operation_effects.length ||
+    receipt.changed_fact_ids.length > 256
+  ) {
+    return false;
+  }
+  const changedFactIds: string[] = [];
+  const committedEventIds = new Set<string>();
+  const ownerDigest = await canonicalSha256([
+    "fact-owner.v1",
+    receipt.owner,
+  ]);
+  if (ownerDigest === null) return false;
+  const ownerBinding = ownerDigest.slice("sha256:".length);
+  let factsAdded = 0;
+  let factsUpdated = 0;
+  let factsMerged = 0;
+  let factsRemoved = 0;
+  let normalizedTags = 0;
+  let factsLinked = 0;
+  let disposition: string | undefined;
+  let firstCommit: CurationCommit | undefined;
+  const operationIdentities = new Set<string>();
+  const appendChanged = (factId: string) => {
+    if (!changedFactIds.includes(factId)) changedFactIds.push(factId);
+  };
+  const acceptCommit = (
+    commit: CurationCommit,
+    factId: string,
+    eventCount: number | undefined,
+    assertion: "any" | "present" | "absent",
+  ): boolean => {
+    if (
+      canonicalJson(commit.owner) !== canonicalJson(receipt.owner) ||
+      commit.fact_id !== factId ||
+      commit.committed_event_ids.length === 0 ||
+      (eventCount !== undefined && commit.committed_event_ids.length !== eventCount) ||
+      commit.committed_event_ids.at(-1) !== commit.last_event_id ||
+      (assertion === "present" && commit.active_assertion_id === null) ||
+      (assertion === "absent" && commit.active_assertion_id !== null) ||
+      (disposition !== undefined && commit.disposition !== disposition) ||
+      commit.committed_event_ids.some((eventId) => {
+        if (committedEventIds.has(eventId)) return true;
+        committedEventIds.add(eventId);
+        return false;
+      })
+    ) {
+      return false;
+    }
+    disposition = commit.disposition;
+    firstCommit ??= commit;
+    return true;
+  };
+  for (const effect of receipt.operation_effects) {
+    switch (effect.kind) {
+      case "add": {
+        const comparisonMatches = effect.closest_fact_id !== null &&
+          effect.closest_fact_id !== effect.fact_id &&
+          effect.similarity_millionths !== null &&
+          effect.similarity_millionths <= 1_000_000;
+        const snapshotMatches = effect.disposition === "added"
+          ? effect.commit !== null && effect.closest_fact_id === null &&
+            effect.similarity_millionths === null
+          : effect.disposition === "near_duplicate"
+          ? (effect.commit === null && effect.closest_fact_id === effect.fact_id &&
+              effect.similarity_millionths === 1_000_000) ||
+            (effect.commit !== null && comparisonMatches)
+          : effect.commit !== null && comparisonMatches;
+        if (
+          !snapshotMatches ||
+          !factIdMatchesOwner(effect.fact_id, ownerBinding) ||
+          (effect.closest_fact_id !== null &&
+            !factIdMatchesOwner(effect.closest_fact_id, ownerBinding)) ||
+          (effect.commit !== null &&
+            !acceptCommit(effect.commit, effect.fact_id, undefined, "present"))
+        ) return false;
+        if (effect.commit !== null) {
+          factsAdded += 1;
+          appendChanged(effect.fact_id);
+        }
+        break;
+      }
+      case "update":
+        if (
+          !factIdMatchesOwner(effect.fact_id, ownerBinding) ||
+          effect.trust_delta_millionths < -1_000_000 ||
+          effect.trust_delta_millionths > 1_000_000 ||
+          !acceptCommit(effect.commit, effect.fact_id, undefined, "present")
+        ) return false;
+        factsUpdated += 1;
+        appendChanged(effect.fact_id);
+        break;
+      case "merge": {
+        const outcome = effect.outcome;
+        const expectedCommits = outcome.deleted_loser_fact_ids.length +
+          (outcome.content_updated ? 1 : 0);
+        if (
+          !/^[0-9a-f]{64}$/.test(outcome.input_digest) ||
+          !factIdMatchesOwner(outcome.winner_fact_id, ownerBinding) ||
+          outcome.deleted_loser_fact_ids.length === 0 ||
+          outcome.deleted_loser_fact_ids.length > 256 ||
+          outcome.commit_receipts.length !== expectedCommits ||
+          new Set(outcome.deleted_loser_fact_ids).size !==
+            outcome.deleted_loser_fact_ids.length ||
+          outcome.deleted_loser_fact_ids.some((factId) =>
+            factId === outcome.winner_fact_id ||
+            !factIdMatchesOwner(factId, ownerBinding))
+        ) return false;
+        let commitIndex = 0;
+        if (outcome.content_updated) {
+          if (!acceptCommit(
+            outcome.commit_receipts[0]!,
+            outcome.winner_fact_id,
+            2,
+            "present",
+          )) return false;
+          appendChanged(outcome.winner_fact_id);
+          commitIndex = 1;
+        }
+        for (const [index, loser] of outcome.deleted_loser_fact_ids.entries()) {
+          if (!acceptCommit(
+            outcome.commit_receipts[commitIndex + index]!,
+            loser,
+            2,
+            "absent",
+          )) return false;
+          appendChanged(loser);
+        }
+        factsMerged += outcome.deleted_loser_fact_ids.length;
+        break;
+      }
+      case "remove":
+        if (
+          !factIdMatchesOwner(effect.target_fact_id, ownerBinding) ||
+          (effect.disposition === "removed") !== (effect.commit !== null) ||
+          (effect.disposition !== "removed" && effect.commit !== null) ||
+          (effect.commit !== null &&
+            !acceptCommit(effect.commit, effect.target_fact_id, 1, "absent"))
+        ) return false;
+        if (effect.commit !== null) {
+          factsRemoved += 1;
+          appendChanged(effect.target_fact_id);
+        }
+        break;
+      case "normalize_tags": {
+        const identity = `normalize_tags:${effect.fact_id}`;
+        if (
+          operationIdentities.has(identity) ||
+          !factIdMatchesOwner(effect.fact_id, ownerBinding) ||
+          !acceptCommit(effect.commit, effect.fact_id, 2, "present")
+        ) return false;
+        operationIdentities.add(identity);
+        normalizedTags += 1;
+        appendChanged(effect.fact_id);
+        break;
+      }
+      case "link_facts": {
+        const identity = `link_facts:${effect.source_fact_id}:${effect.target_fact_id}:${effect.relation.kind}`;
+        if (
+          operationIdentities.has(identity) ||
+          !factIdMatchesOwner(effect.source_fact_id, ownerBinding) ||
+          !factIdMatchesOwner(effect.target_fact_id, ownerBinding) ||
+          !automaticCurationRelationMatches(effect, ownerBinding) ||
+          (effect.disposition === "linked" &&
+            (effect.commit === null ||
+              !acceptCommit(effect.commit, effect.source_fact_id, 1, "any"))) ||
+          (effect.disposition === "already_linked" && effect.commit !== null)
+        ) return false;
+        operationIdentities.add(identity);
+        if (effect.commit !== null) {
+          factsLinked += 1;
+          appendChanged(effect.source_fact_id);
+          appendChanged(effect.target_fact_id);
+        }
+        break;
+      }
+    }
+  }
+  return (
+    receipt.replay_fact_id === (firstCommit?.fact_id ?? null) &&
+    receipt.replay_event_id === (firstCommit?.last_event_id ?? null) &&
+    receipt.facts_added === factsAdded &&
+    receipt.facts_updated === factsUpdated &&
+    receipt.facts_merged === factsMerged &&
+    receipt.facts_removed === factsRemoved &&
+    receipt.normalized_tags === normalizedTags &&
+    receipt.facts_linked === factsLinked &&
+    receipt.changed_fact_ids.length === changedFactIds.length &&
+    receipt.changed_fact_ids.every((factId, index) => factId === changedFactIds[index])
+  );
+}
+
+type CurationEffect = CurationReceipt["receipt"]["operation_effects"][number];
+type CurationCommit = Extract<CurationEffect, { kind: "normalize_tags" }>["commit"];
+
+function automaticCurationRelationMatches(
+  effect: Extract<
+    Extract<
+      MemoryAutomationRunResultV1["committed_receipts"][number],
+      { kind: "curation" }
+    >["receipt"]["receipt"]["operation_effects"][number],
+    { kind: "link_facts" }
+  >,
+  ownerBinding: string,
+): boolean {
+  const relation = effect.relation;
+  const sourceLabel = relation.provenance.source_label;
+  const sanitization = relation.provenance.sanitization_receipt;
+  return (
+    effect.source_fact_id !== effect.target_fact_id &&
+    relation.evidence_fact_ids.length > 0 &&
+    relation.evidence_fact_ids.length <= 256 &&
+    relation.evidence_fact_ids.every((factId) =>
+      factIdMatchesOwner(factId, ownerBinding)) &&
+    relation.evidence_fact_ids.every(
+      (factId, index, facts) => index === 0 || facts[index - 1]! < factId,
+    ) &&
+    relation.confidence_millionths <= 1_000_000 &&
+    sourceLabel.length > 0 &&
+    new TextEncoder().encode(sourceLabel).length <= 4_096 &&
+    sourceLabel.trim() === sourceLabel &&
+    !/\p{Cc}/u.test(sourceLabel) &&
+    (sanitization.disposition === "accepted" ||
+      sanitization.disposition === "redacted") &&
+    sanitization.payload !== null
+  );
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+async function canonicalSha256(value: unknown): Promise<string | null> {
+  try {
+    const bytes = new TextEncoder().encode(canonicalJson(value));
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return `sha256:${Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0")).join("")}`;
+  } catch {
+    return null;
+  }
+}
+
+function factIdMatchesOwner(
+  factId: string,
+  ownerBinding: string,
+): boolean {
+  const match = /^fact\.v1\.([0-9a-f]{64})\.([0-9a-f]{64})$/.exec(factId);
+  return match !== null && match[1] === ownerBinding;
+}
+
+function urlProjectMatchesScope(requestUrl: string, projectId: string): boolean {
+  // The unprefixed gateway is the active project's authority. Its terminal is
+  // therefore self-identifying through the canonical resolved scope carried
+  // in the response; requiring a project segment here rejected every truthful
+  // partial/reset terminal issued from the dashboard's default scope.
+  if (requestUrl === "/api/automation/run/memory-curator") return true;
+  const match = /^\/api\/projects\/([^/]+)\//.exec(requestUrl);
+  if (match === null) return false;
+  try {
+    return decodeURIComponent(match[1]!) === projectId;
+  } catch {
+    return false;
+  }
+}
+
+async function resolvedScopeDigestMatches(
+  scope: MemoryAutomationRunProblemV1["scope"],
+): Promise<boolean> {
+  return scope.scope_digest === await canonicalSha256([
+    "tracedecay.application.scope.v1",
+    scope.project_id,
+    scope.repository_id,
+    scope.worktree_id,
+    scope.reference,
+  ]);
+}
+
+function sameResolvedScope(
+  left: MemoryAutomationRunProblemV1["scope"],
+  right: MemoryAutomationRunProblemV1["scope"],
+): boolean {
+  return (
+    left.project_id === right.project_id &&
+    left.repository_id === right.repository_id &&
+    left.worktree_id === right.worktree_id &&
+    left.reference === right.reference &&
+    left.scope_digest === right.scope_digest
+  );
+}
+
+export function useAutomaticCurator() {
+  const scope = useScope((state) => state.scope);
+  const writability = scopeWritable(scope);
+  const currentScopeKey = scopeKey(scope);
+  const client = useQueryClient();
+  const dispatch = {
+    scopeKey: currentScopeKey,
+    url: scopedUrl(scope, "/api/automation/run/memory-curator"),
+    writability,
+  };
+  const mutation = useMutation<
+    { scopeKey: string; result: AutomaticCuratorResult },
+    never,
+    typeof dispatch
+  >({
+    mutationKey: ["automation", "memory-curator", "run", currentScopeKey],
+    mutationFn: async (issued) => ({
+      scopeKey: issued.scopeKey,
+      result:
+        issued.writability.state === "writable"
+          ? await runAutomaticCurator(issued.url)
+          : { outcome: "not_dispatched", writability: issued.writability },
+    }),
+    onSuccess: ({ result }) => {
+      if (
+        result.outcome !== "ok" &&
+        result.outcome !== "partial_effect" &&
+        result.outcome !== "reset_required"
+      ) {
+        return;
+      }
+      void client.invalidateQueries({ queryKey: ["automation", "runs"] });
+      void client.invalidateQueries({ queryKey: ["automation", "outcomes"] });
+      void client.invalidateQueries({
+        queryKey: ["automation", "automatic-fact-receipts"],
+      });
+    },
+  });
+  return {
+    ...mutation,
+    isPending:
+      mutation.isPending && mutation.variables?.scopeKey === currentScopeKey,
+    data:
+      mutation.data?.scopeKey === currentScopeKey
+        ? mutation.data.result
+        : undefined,
+    mutate: () => mutation.mutate(dispatch),
+    mutateAsync: async () => (await mutation.mutateAsync(dispatch)).result,
+    writability,
+  };
+}
 
 export function useAutomationRuns() {
   return usePayload(
@@ -494,6 +1153,20 @@ export function useAutomationRunArtifacts(runId: string, enabled: boolean) {
     ["automation", "run-artifacts", runId],
     `/api/automation/runs/${encodeURIComponent(runId)}/artifacts`,
     RunArtifactsPayloadSchema,
+    { enabled },
+  );
+}
+
+/** Read one artifact only after its own disclosure opens. */
+export function useAutomationRunArtifactPayload(
+  runId: string,
+  kind: string,
+  enabled: boolean,
+) {
+  return usePayload(
+    ["automation", "run-artifact-payload", runId, kind],
+    `/api/automation/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(kind)}`,
+    RunArtifactPayloadSchema,
     { enabled },
   );
 }
@@ -527,6 +1200,54 @@ export function tallied<Row>(
   };
 }
 
+/** A tallied list whose handler also names the request cap it applied. */
+export function talliedCapped<Row>(
+  rows: readonly Row[],
+  count: number,
+  limit: number,
+  noun: string,
+  pageDescription = `the first ${limit} ${noun}`,
+): ListReading<Row> {
+  const coherent = tallied(rows, count, noun);
+  if (!coherent.complete) return coherent;
+  if (count < limit) return coherent;
+  if (count > limit) {
+    return {
+      complete: false,
+      rows,
+      reason: `the daemon sent ${count} ${noun} under a request cap of ${limit}, so this body is not this route's answer`,
+    };
+  }
+  return {
+    complete: false,
+    rows,
+    reason: `this is ${pageDescription}, the request cap, so there may be more`,
+  };
+}
+
+/** The ledger reader reports truncation and skipped malformed rows directly. */
+export function automationRunsReading(
+  data: Pick<
+    RunsPayload,
+    "runs" | "count" | "has_more" | "malformed_row_count" | "completeness"
+  >,
+): ListReading<RunRow> {
+  const coherent = tallied(data.runs, data.count, "runs");
+  if (!coherent.complete) return coherent;
+  const omissions: string[] = [];
+  if (data.has_more) omissions.push("older ledger records were outside this page");
+  if (data.malformed_row_count > 0) {
+    omissions.push(
+      `${data.malformed_row_count} malformed ledger ${data.malformed_row_count === 1 ? "row was" : "rows were"} omitted`,
+    );
+  }
+  if (data.completeness === "known" && omissions.length === 0) return coherent;
+  if (omissions.length === 0) {
+    omissions.push("the daemon marked ledger coverage partial");
+  }
+  return { complete: false, rows: data.runs, reason: omissions.join("; ") };
+}
+
 /**
  * The same check for the automatic receipt list, which additionally has a cap.
  *
@@ -541,22 +1262,5 @@ export function talliedFactReceipts(
   count: number,
   limit: number,
 ): ListReading<AutomaticFactReceipt> {
-  const coherent = tallied(rows, count, "fact application outcomes");
-  if (!coherent.complete) return coherent;
-  if (count < limit) return coherent;
-  if (count > limit) {
-    // The query cannot return more rows than the cap it ran under, so this is
-    // the same class of incoherent body as a mismatched tally and must not be
-    // described as a full page — it would understate what arrived.
-    return {
-      complete: false,
-      rows,
-      reason: `the daemon sent ${count} fact application outcomes under a request cap of ${limit}, so this body is not this route's answer`,
-    };
-  }
-  return {
-    complete: false,
-    rows,
-    reason: `this is the first ${limit} fact application outcomes, the request cap, so there may be more`,
-  };
+  return talliedCapped(rows, count, limit, "fact application outcomes");
 }

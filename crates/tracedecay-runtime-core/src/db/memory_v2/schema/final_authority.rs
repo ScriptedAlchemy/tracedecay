@@ -62,6 +62,18 @@ pub(super) const FINAL_MEMORY_SUPPORT_SCHEMA: &str =
             ON memory_v2_operation_receipts(
                 fact_id, owner_kind, project_id, recorded_at
             );
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_operation_receipts_automation_run
+            ON memory_v2_operation_receipts(
+                owner_kind, project_id, operation_kind,
+                json_extract(receipt_json, '$.automation_run_id'),
+                recorded_at, operation_id
+            );
+        CREATE INDEX IF NOT EXISTS idx_memory_v2_automatic_fact_receipts_automation_run
+            ON memory_v2_automatic_fact_receipts(
+                owner_kind, project_id,
+                json_extract(request_json, '$.automation_run_id'),
+                recorded_at, apply_id
+            );
         CREATE INDEX IF NOT EXISTS idx_memory_v2_feedback_history_fact
             ON memory_v2_feedback_history(
                 owner_kind, project_id, fact_id, occurred_at, event_id

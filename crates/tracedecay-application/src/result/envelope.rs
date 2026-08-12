@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de::MapAccess, de::SeqAccess, de::Visitor};
 use std::fmt;
 use tracedecay_tool_catalog::{SchemaId, SchemaRef};
@@ -6,7 +7,8 @@ use crate::context::{RequestId, ResolvedScope};
 use crate::error::ApplicationContractError;
 
 use super::{
-    ApplicationProblem, ApplicationProblemKind, CancellationStage, EffectReceipt, EffectResult,
+    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemKind,
+    ApplicationUnavailableClassV1, CancellationStage, EffectReceipt, EffectResult,
     EvidenceCoverage, EvidencePacket, LegalAction, PreviewResult, ProblemOwningLayer,
     ProblemTerminality, RetryDirective, RetryScope, SafeDiagnostic,
 };
@@ -21,7 +23,7 @@ pub const MAX_RETRY_AFTER_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 pub const DEFAULT_RETRY_AFTER_MILLIS: u64 = 250;
 
 /// Versioned schema identity for an application result contract.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
 pub struct ResultContractRef {
     schema_id: SchemaId,
@@ -141,7 +143,7 @@ impl<T> ApplicationEnvelope<T> {
 }
 
 /// Stable application problem record shared verbatim by every adapter.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationProblemRecord {
     pub revision: u32,
@@ -152,6 +154,7 @@ pub struct ApplicationProblemRecord {
     /// A committed effect is present only for an admitted partial effect.
     /// The nullable field is always serialized: omitting it would create a
     /// compatibility/default path that could hide a missing receipt.
+    #[schemars(with = "RequiredNullable<EffectReceipt>")]
     pub committed_receipt: Option<EffectReceipt>,
     pub owning_layer: ProblemOwningLayer,
     pub terminality: ProblemTerminality,
@@ -159,13 +162,19 @@ pub struct ApplicationProblemRecord {
     pub retry: RetryDirective,
     pub retry_scope: Option<RetryScope>,
     pub retry_after_millis: Option<u64>,
+    #[schemars(with = "RequiredNullable<CancellationStage>")]
     pub cancellation_stage: Option<CancellationStage>,
+    #[schemars(with = "RequiredNullable<ApplicationUnavailableClassV1>")]
+    pub unavailable_classification: Option<ApplicationUnavailableClassV1>,
+    #[schemars(with = "RequiredNullable<ApplicationExecutionFailureClassV1>")]
+    pub execution_failure_classification: Option<ApplicationExecutionFailureClassV1>,
     pub request_id: RequestId,
     pub trace_id: RequestId,
     pub details: Vec<SafeDiagnostic>,
     pub legal_actions: Vec<LegalAction>,
     pub coverage: Option<EvidenceCoverage>,
     #[serde(skip)]
+    #[schemars(skip)]
     source: ApplicationProblem,
 }
 
@@ -189,7 +198,9 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             retry: RetryDirective,
             retry_scope: Option<RetryScope>,
             retry_after_millis: Option<u64>,
-            cancellation_stage: Option<CancellationStage>,
+            cancellation_stage: RequiredNullable<CancellationStage>,
+            unavailable_classification: RequiredNullable<ApplicationUnavailableClassV1>,
+            execution_failure_classification: RequiredNullable<ApplicationExecutionFailureClassV1>,
             request_id: RequestId,
             trace_id: RequestId,
             details: Vec<SafeDiagnostic>,
@@ -245,6 +256,23 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             }
             (ApplicationProblemKind::Unavailable, Some(diagnostic), None) => {
                 ApplicationProblem::Unavailable {
+                    classification: wire.unavailable_classification.0.ok_or_else(|| {
+                        serde::de::Error::custom(
+                            "unavailable problem is missing its classification",
+                        )
+                    })?,
+                    diagnostic,
+                    retry: wire.retry,
+                    legal_actions: wire.legal_actions.clone(),
+                }
+            }
+            (ApplicationProblemKind::ExecutionFailed, Some(diagnostic), None) => {
+                ApplicationProblem::ExecutionFailed {
+                    classification: wire.execution_failure_classification.0.ok_or_else(|| {
+                        serde::de::Error::custom(
+                            "execution-failed problem is missing its classification",
+                        )
+                    })?,
                     diagnostic,
                     retry: wire.retry,
                     legal_actions: wire.legal_actions.clone(),
@@ -265,10 +293,16 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
                 }
             }
             (ApplicationProblemKind::Cancelled, None, None) => ApplicationProblem::Cancelled {
+                stage: wire.cancellation_stage.0.ok_or_else(|| {
+                    serde::de::Error::custom("cancelled problem is missing its cancellation stage")
+                })?,
                 retry: wire.retry,
                 legal_actions: wire.legal_actions.clone(),
             },
             (ApplicationProblemKind::TimedOut, None, None) => ApplicationProblem::TimedOut {
+                stage: wire.cancellation_stage.0.ok_or_else(|| {
+                    serde::de::Error::custom("timed-out problem is missing its cancellation stage")
+                })?,
                 retry: wire.retry,
                 legal_actions: wire.legal_actions.clone(),
             },
@@ -293,7 +327,9 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
             retry: wire.retry,
             retry_scope: wire.retry_scope,
             retry_after_millis: wire.retry_after_millis,
-            cancellation_stage: wire.cancellation_stage,
+            cancellation_stage: wire.cancellation_stage.0,
+            unavailable_classification: wire.unavailable_classification.0,
+            execution_failure_classification: wire.execution_failure_classification.0,
             request_id: wire.request_id,
             trace_id: wire.trace_id,
             details: wire.details,
@@ -309,6 +345,8 @@ impl<'de> Deserialize<'de> for ApplicationProblemRecord {
 /// Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
 /// from an omitted field. New terminal-state fields must be present on every
 /// record so a missing committed receipt cannot be mistaken for `None`.
+#[derive(JsonSchema)]
+#[schemars(transparent)]
 struct RequiredNullable<T>(Option<T>);
 
 impl<'de, T> Deserialize<'de> for RequiredNullable<T>
@@ -398,7 +436,7 @@ impl ApplicationProblemRecord {
             diagnostic,
             committed_receipt,
             owning_layer: ProblemOwningLayer::Application,
-            terminality: kind.terminality(),
+            terminality: source.terminality(),
             retryable: retry != RetryDirective::Never,
             retry,
             retry_scope,
@@ -409,11 +447,9 @@ impl ApplicationProblemRecord {
             // better figure override via `with_retry_after_millis`.
             retry_after_millis: (retry == RetryDirective::AfterDelay)
                 .then_some(DEFAULT_RETRY_AFTER_MILLIS),
-            cancellation_stage: matches!(
-                kind,
-                ApplicationProblemKind::Cancelled | ApplicationProblemKind::TimedOut
-            )
-            .then_some(CancellationStage::BeforeAdmission),
+            cancellation_stage: source.cancellation_stage(),
+            unavailable_classification: source.unavailable_classification(),
+            execution_failure_classification: source.execution_failure_classification(),
             trace_id: request_id.clone(),
             request_id,
             details: Vec::new(),
@@ -432,11 +468,14 @@ impl ApplicationProblemRecord {
         self.source.validate()?;
         if self.revision != APPLICATION_PROBLEM_REVISION
             || self.kind != self.source.kind()
-            || self.terminality != self.kind.terminality()
+            || self.terminality != self.source.terminality()
             || self.retry != self.source.retry()
             || self.retryable != (self.retry != RetryDirective::Never)
             || self.legal_actions != self.source.legal_actions()
             || self.request_id != self.trace_id
+            || self.unavailable_classification != self.source.unavailable_classification()
+            || self.execution_failure_classification
+                != self.source.execution_failure_classification()
             || self.details.len() > MAX_PROBLEM_DETAILS
         {
             return Err(ApplicationContractError::Inconsistent {
@@ -479,11 +518,7 @@ impl ApplicationProblemRecord {
             });
         }
 
-        let expected_cancellation_stage = matches!(
-            self.kind,
-            ApplicationProblemKind::Cancelled | ApplicationProblemKind::TimedOut
-        )
-        .then_some(CancellationStage::BeforeAdmission);
+        let expected_cancellation_stage = self.source.cancellation_stage();
         if self.cancellation_stage != expected_cancellation_stage {
             return Err(ApplicationContractError::Inconsistent {
                 field: "problem cancellation stage",
@@ -492,7 +527,9 @@ impl ApplicationProblemRecord {
 
         if matches!(
             self.kind,
-            ApplicationProblemKind::PartialEffect | ApplicationProblemKind::ResetRequired
+            ApplicationProblemKind::PartialEffect
+                | ApplicationProblemKind::ExecutionFailed
+                | ApplicationProblemKind::ResetRequired
         ) && self.retry != RetryDirective::Never
         {
             return Err(ApplicationContractError::Inconsistent {
@@ -544,7 +581,7 @@ impl ApplicationProblemRecord {
 /// Stable application failure envelope. Partial effects and reset-required
 /// states are admitted terminals; partial effects carry their committed
 /// receipt directly while reset-required states carry an explicit action.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ApplicationProblemEnvelope {
     pub contract: ResultContractRef,
@@ -635,6 +672,7 @@ impl ApplicationProblemEnvelope {
 mod tests {
     use super::*;
     use crate::{EffectTermination, IdempotencyKey};
+    use serde_json::Value;
     use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
     use tracedecay_tool_catalog::{EffectClass, SchemaId, UseCaseId};
 
@@ -779,6 +817,96 @@ mod tests {
             .expect("problem object")
             .remove("committed_receipt");
         assert!(serde_json::from_value::<ApplicationProblemEnvelope>(missing_receipt).is_err());
+    }
+
+    #[test]
+    fn cancellation_record_preserves_stage_and_derives_exact_terminality() {
+        let request_id = RequestId::new("request.cancelled.fixture").expect("request");
+        let envelope = ApplicationProblemEnvelope::new(
+            contract(),
+            request_id,
+            ApplicationProblem::cancelled(CancellationStage::BeforeEffect)
+                .expect("admitted cancellation"),
+        )
+        .expect("problem envelope");
+        let wire = serde_json::to_value(&envelope).expect("envelope serializes");
+        assert_eq!(wire["problem"]["cancellation_stage"], "before_effect");
+        assert_eq!(wire["problem"]["terminality"], "admitted_terminal");
+        assert_eq!(wire["problem"]["unavailable_classification"], Value::Null);
+        assert_eq!(
+            wire["problem"]["execution_failure_classification"],
+            Value::Null
+        );
+        assert_eq!(
+            serde_json::from_value::<ApplicationProblemEnvelope>(wire.clone())
+                .expect("canonical cancellation decodes"),
+            envelope
+        );
+
+        let mut downgraded = wire.clone();
+        downgraded["problem"]["terminality"] = serde_json::json!("pre_admission");
+        assert!(serde_json::from_value::<ApplicationProblemEnvelope>(downgraded).is_err());
+
+        let mut after_commit = wire;
+        after_commit["problem"]["cancellation_stage"] = serde_json::json!("after_commit");
+        assert!(serde_json::from_value::<ApplicationProblemEnvelope>(after_commit).is_err());
+    }
+
+    #[test]
+    fn problem_schema_is_closed_and_requires_a_nullable_committed_receipt() {
+        fn schema_accepts_null(schema: &serde_json::Value) -> bool {
+            schema == &serde_json::json!({ "type": "null" })
+                || schema["type"] == "null"
+                || schema["type"]
+                    .as_array()
+                    .is_some_and(|types| types.iter().any(|ty| ty == "null"))
+                || schema["anyOf"]
+                    .as_array()
+                    .is_some_and(|branches| branches.iter().any(schema_accepts_null))
+                || schema["oneOf"]
+                    .as_array()
+                    .is_some_and(|branches| branches.iter().any(schema_accepts_null))
+        }
+
+        let record_schema = serde_json::to_value(schemars::schema_for!(ApplicationProblemRecord))
+            .expect("problem record schema serializes");
+        assert_eq!(record_schema["additionalProperties"], false);
+        assert!(
+            record_schema["required"]
+                .as_array()
+                .expect("record schema has required fields")
+                .iter()
+                .any(|field| field == "committed_receipt")
+        );
+        assert!(schema_accepts_null(
+            &record_schema["properties"]["committed_receipt"]
+        ));
+        assert!(record_schema["properties"].get("source").is_none());
+        for required_nullable in [
+            "cancellation_stage",
+            "unavailable_classification",
+            "execution_failure_classification",
+        ] {
+            assert!(
+                record_schema["required"]
+                    .as_array()
+                    .expect("record schema has required fields")
+                    .iter()
+                    .any(|field| field == required_nullable)
+            );
+            assert!(schema_accepts_null(
+                &record_schema["properties"][required_nullable]
+            ));
+        }
+
+        let envelope_schema =
+            serde_json::to_value(schemars::schema_for!(ApplicationProblemEnvelope))
+                .expect("problem envelope schema serializes");
+        assert_eq!(envelope_schema["additionalProperties"], false);
+        assert_eq!(
+            envelope_schema["required"],
+            serde_json::json!(["contract", "request_id", "problem"])
+        );
     }
 }
 

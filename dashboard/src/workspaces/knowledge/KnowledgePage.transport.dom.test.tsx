@@ -60,7 +60,6 @@ describe("KnowledgePage under HTTP transport faults", () => {
       // No quantity of any size, under any of the rail's legends.
       expect(readout("facts")).toBeNull();
       expect(readout("entities")).toBeNull();
-      expect(readout("banks")).toBeNull();
       // ...and specifically not a zero, which is the reading a reader would
       // act on as "this store is empty, go build it".
       expect(container.textContent).not.toMatch(/\b0 recorded\b/);

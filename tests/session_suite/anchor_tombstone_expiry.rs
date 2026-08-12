@@ -2,6 +2,8 @@
 //! redaction, and deletion must resolve as safe typed tombstones with deletion
 //! lineage preserved and no payload bytes in any returned structure.
 
+use std::sync::Arc;
+
 use tempfile::TempDir;
 use tracedecay::db::Database;
 use tracedecay::store::memory::DatabaseFactStore;
@@ -20,7 +22,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
-    FactWriteBatch, RetrievalAnchorQuery,
+    FactWriteBatch, FactWriteControl, RetrievalAnchorQuery,
 };
 use tracedecay_usecases::memory::MemoryApplication;
 
@@ -38,6 +40,10 @@ where
 
 fn owner() -> FactOwnerV1 {
     FactOwnerV1::Profile
+}
+
+fn write_control() -> FactWriteControl {
+    FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }
 
 async fn make_store() -> (Database, TempDir) {
@@ -118,6 +124,7 @@ fn fact_payload(content: &str, operation: &str) -> FactPayloadV1 {
         tags,
         entities,
         metadata,
+        None,
         receipt,
         RetentionClass::new(format!("retention.tombstone.{operation}")).unwrap(),
     )
@@ -176,12 +183,11 @@ async fn commit_fact(
         vec![anchor],
         vec![],
         None,
-        None,
     )
     .unwrap()
     .with_identity_material(identity)
     .unwrap();
-    let receipt = match memory.commit_fact(batch).await.unwrap() {
+    let receipt = match memory.commit_fact(batch, &write_control()).await.unwrap() {
         FactCommitOutcome::Committed(receipt) => receipt,
         outcome => panic!("initial fact commit must commit, got {outcome:?}"),
     };
@@ -217,11 +223,10 @@ async fn change_payload_access(
         vec![event],
         vec![],
         vec![],
-        None,
         Some(fact.last_event_id.clone()),
     )
     .unwrap();
-    let receipt = match memory.commit_fact(batch).await.unwrap() {
+    let receipt = match memory.commit_fact(batch, &write_control()).await.unwrap() {
         FactCommitOutcome::Committed(receipt) => receipt,
         outcome => panic!("payload access change must commit, got {outcome:?}"),
     };

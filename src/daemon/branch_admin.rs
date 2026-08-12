@@ -15,8 +15,6 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use super::ProjectServerKey;
 use super::StoreOwnerKey;
 use super::git_transactions::DaemonGitIndexTransactionServiceRegistry;
-#[cfg(unix)]
-use super::memory_repair_scheduler::MemoryRepairSchedulerHandle;
 use super::profile_host_admission_replay::{
     ProfileHostAdmissionBootstrapOperation, ProfileHostAdmissionBootstrapStatus,
     ProfileHostAdmissionReplayRegistry,
@@ -70,7 +68,6 @@ pub(super) fn graph_writer_scope(
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum MaintenanceReaperKind {
     Automation,
-    MemoryRepair,
 }
 
 #[cfg(unix)]
@@ -436,9 +433,6 @@ pub(super) struct StoreAdministration {
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
-    #[cfg(unix)]
-    memory_repair_schedulers:
-        Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, MemoryRepairSchedulerHandle>>>,
     session_temporal_refresh_schedulers: Arc<SessionTemporalRefreshSchedulerRegistry>,
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
     native_integration_services:
@@ -476,8 +470,6 @@ impl Default for StoreAdministration {
             store_telemetry_sampling: super::maintenance::StoreTelemetrySamplingRegistry::default(),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            #[cfg(unix)]
-            memory_repair_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_temporal_refresh_schedulers: Arc::new(
                 SessionTemporalRefreshSchedulerRegistry::default(),
             ),
@@ -938,13 +930,6 @@ impl StoreAdministration {
         &self.automation_schedulers
     }
 
-    #[cfg(unix)]
-    pub(super) fn memory_repair_schedulers(
-        &self,
-    ) -> &Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, MemoryRepairSchedulerHandle>>> {
-        &self.memory_repair_schedulers
-    }
-
     pub(super) fn session_temporal_refresh_schedulers(
         &self,
     ) -> &Arc<SessionTemporalRefreshSchedulerRegistry> {
@@ -1374,9 +1359,6 @@ impl StoreAdministration {
             #[cfg(unix)]
             let scheduler_busy = cached_scheduler_owns_selected(
                 &*self.automation_schedulers.lock().await,
-                &database_paths,
-            ) || cached_scheduler_owns_selected(
-                &*self.memory_repair_schedulers.lock().await,
                 &database_paths,
             ) || refresh_scheduler_busy;
             #[cfg(not(unix))]

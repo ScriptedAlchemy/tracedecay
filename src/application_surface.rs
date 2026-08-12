@@ -40,11 +40,11 @@ use tracedecay_application::retrieval::{
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
-    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
-    LegalAction, ObservatoryReadRequestV1, OpaqueCursor, OperationTermination, PageRequest,
-    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection,
-    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, SafeDiagnostic,
-    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
+    ApplicationResult, CancellationContext, CancellationSignal, CancellationStage, Deadline,
+    HealthReadRequest, LegalAction, ObservatoryReadRequestV1, OpaqueCursor, OperationTermination,
+    PageRequest, ProblemOwningLayer, RequestContext, RequestId, ResultContractRef,
+    ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective,
+    SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
 };
 pub use tracedecay_application::{
     ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
@@ -106,6 +106,7 @@ use tracedecay_usecases::primitives::{
 mod configuration_wire;
 mod handoff;
 mod multi_root_http;
+mod registered_http;
 pub(crate) mod retained;
 mod work;
 mod workflow;
@@ -116,6 +117,8 @@ use configuration_wire::{
 };
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
+pub(crate) use registered_http::RegisteredHttpOperation;
+use registered_http::validated_daemon_outcome;
 pub(crate) use workflow::invoke_workflow_operation;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
@@ -960,16 +963,6 @@ fn application_contract_error_response(error: ApplicationContractError) -> Respo
 /// Core and attempt operations differ only in which daemon payload carries them
 /// and which outcome they answer with, so both arrive here: one binding lookup,
 /// one cancellation policy, one problem taxonomy.
-pub(crate) trait RegisteredHttpOperation: Copy {
-    fn operation_id(self) -> String;
-    fn is_read_only(self) -> bool;
-    fn problem_family(self) -> &'static str;
-    fn display_family(self) -> &'static str;
-    fn registry(
-        self,
-    ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>;
-}
-
 impl RegisteredHttpOperation for WorkOperation {
     fn operation_id(self) -> String {
         WorkOperation::operation_id_str(self).to_owned()
@@ -1132,7 +1125,7 @@ async fn invoke_registered_http<T, O>(
     request_id: RequestId,
     controls: HttpApplicationControls,
     invocation: crate::daemon_contract::DaemonInvocationRequest,
-    select_outcome: fn(
+    select_outcome: impl FnOnce(
         crate::daemon_contract::DaemonInvocationOutcome,
     ) -> Option<(
         tracedecay_application::ResolvedScope,
@@ -1204,11 +1197,15 @@ where
     let response = executor
         .invoke_controlled(invocation, controls.deadline, controls.cancellation, policy)
         .await;
-    let problem = match response {
-        Ok(crate::daemon_contract::DaemonInvocationResponse { outcome, .. }) => match outcome {
+    let problem = match validated_daemon_outcome(operation, &request_id, response) {
+        Ok(outcome) => match outcome {
             crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
                 problem
             }
+            crate::daemon_contract::DaemonInvocationOutcome::RetainedApplicationProblem {
+                problem,
+                ..
+            } => problem,
             crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => match problem {
                 crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
                 | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
@@ -1264,18 +1261,7 @@ where
                 }),
             },
         },
-        Err(DaemonInvocationError::Cancelled { .. }) => {
-            ApplicationProblem::cancelled_before_admission()
-        }
-        Err(DaemonInvocationError::TimedOut { .. }) => {
-            ApplicationProblem::timed_out_before_admission()
-        }
-        Err(DaemonInvocationError::Unavailable) => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: problem_code("transport_unavailable"),
-                message: format!("The {family} application transport is unavailable"),
-            })
-        }
+        Err(problem) => problem,
     };
     let problem = match ApplicationProblemEnvelope::new(result_contract, request_id, problem) {
         Ok(problem) => problem.with_owning_layer(ProblemOwningLayer::Runtime),
@@ -1782,6 +1768,7 @@ fn operation_event_failure_from_invocation(
                 OperationEventInvocationFailure::Stream(OperationEventError::ResumeUnavailable)
             }
             tracedecay_application::ApplicationProblemKind::PartialEffect
+            | tracedecay_application::ApplicationProblemKind::ExecutionFailed
             | tracedecay_application::ApplicationProblemKind::ResetRequired => {
                 OperationEventInvocationFailure::Application(*problem)
             }
@@ -2265,6 +2252,7 @@ fn operation_event_problem(request_id: &RequestId, error: OperationEventError) -
             legal_actions: vec![LegalAction::Refresh],
         },
         OperationEventError::RequestNotAdmitted => ApplicationProblem::TimedOut {
+            stage: CancellationStage::BeforeAdmission,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         },

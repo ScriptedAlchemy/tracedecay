@@ -76,27 +76,15 @@ pub fn dashboard_automation_authority_for_test(
     profile_root: impl AsRef<std::path::Path>,
 ) -> crate::errors::Result<(DashboardAutomationAuthorityV1, DashboardAutomationWriter)> {
     let profile_root = profile_root.as_ref().canonicalize()?;
-    let retained_root = cg.project_root().canonicalize()?;
-    let retained_graph = std::sync::Arc::clone(&cg);
-    let resolver: tracedecay_dashboard_api::project_graph::RetainedProjectGraphResolver =
-        std::sync::Arc::new(move |request| {
-            let retained_graph = std::sync::Arc::clone(&retained_graph);
-            let retained_root = retained_root.clone();
-            Box::pin(async move {
-                let requested_root = request.registered_root.canonicalize().ok();
-                Ok((requested_root.as_ref() == Some(&retained_root)).then_some(retained_graph))
-            })
-        });
     let writer = standalone_dashboard_automation_writer();
     let resident_memory = std::sync::Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
         ),
     );
-    let authority = crate::daemon::dashboard_automation::compose_dashboard_automation_authority(
+    let authority = crate::daemon::dashboard_automation::compose_dashboard_automation_authority_for_test(
         profile_root,
-        cg.store_runtime_registry().profile_id().clone(),
-        resolver,
+        cg,
         std::sync::Arc::clone(&writer),
         crate::daemon::DaemonInvocationService::with_code_index_schedulers(
             crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_resident_memory(

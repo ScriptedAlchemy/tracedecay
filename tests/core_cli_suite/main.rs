@@ -11,8 +11,6 @@ mod cli_non_interactive_test;
 #[path = "../common/mod.rs"]
 mod common;
 mod config_test;
-#[cfg(unix)]
-mod fact_store_curate_cli_test;
 mod gain_test;
 mod monitor_test;
 mod sync_test;

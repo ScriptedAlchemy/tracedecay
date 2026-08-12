@@ -43,6 +43,7 @@ fn record(run_id: &str, status: AutomationRunStatus) -> AutomationRunLedgerRecor
         artifacts: Vec::new(),
         started_at: "2026-06-24T05:00:00Z".to_string(),
         completed_at: "2026-06-24T05:00:01Z".to_string(),
+        completed_at_micros: 1_772_000_401_000_000,
     }
 }
 
@@ -197,7 +198,7 @@ async fn run_ledger_limit_and_malformed_lines_are_handled() {
 }
 
 #[tokio::test]
-async fn run_ledger_loads_legacy_records_without_new_optional_fields() {
+async fn run_ledger_loads_records_without_optional_fields() {
     let temp = tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
     let legacy = serde_json::json!({
@@ -214,7 +215,8 @@ async fn run_ledger_loads_legacy_records_without_new_optional_fields() {
         "rejected_count": 0,
         "error": null,
         "started_at": "2026-06-24T05:00:00Z",
-        "completed_at": "2026-06-24T05:00:01Z"
+        "completed_at": "2026-06-24T05:00:01Z",
+        "completed_at_micros": 1_772_000_401_000_000_i64
     });
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
     tokio::fs::write(run_ledger_path(&dashboard_root), format!("{legacy}\n"))
@@ -227,6 +229,7 @@ async fn run_ledger_loads_legacy_records_without_new_optional_fields() {
     assert_eq!(loaded[0].host_mode, None);
     assert_eq!(loaded[0].input_hash, None);
     assert_eq!(loaded[0].applied_ops, None);
+    assert_eq!(loaded[0].completed_at_micros, 1_772_000_401_000_000);
     assert_eq!(loaded[0].fallback_status, None);
     assert!(loaded[0].artifacts.is_empty());
 }

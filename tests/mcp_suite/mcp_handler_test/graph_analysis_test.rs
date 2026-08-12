@@ -327,7 +327,7 @@ async fn test_branch_list_reports_live_vs_serving_drift_state() {
     git(project, &["commit", "-m", "initial"]);
     git(project, &["branch", "-M", "main"]);
 
-    let cg = TestTraceDecay::new(TraceDecay::init(project).await.unwrap());
+    let _initialized = TestTraceDecay::new(TraceDecay::init(project).await.unwrap());
     let tracedecay_dir = resolve_layout_for_current_profile(project)
         .unwrap()
         .data_root;

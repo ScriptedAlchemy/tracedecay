@@ -4,9 +4,11 @@ import { PayloadBoundary } from "../../ui/ReadSection.tsx";
 import { relativeAge } from "../../ui/time.ts";
 import { cn } from "../../ui/cn";
 import {
-  tallied,
+  automationRunsReading,
+  useAutomationRunArtifactPayload,
   useAutomationRunArtifacts,
   useAutomationRuns,
+  type RunArtifactRow,
   type RunArtifactsPayload,
   type RunRow,
 } from "../../data/query/automation.ts";
@@ -17,7 +19,7 @@ import {
  * artifacts and the server-computed chain-integrity verdict.
  *
  * Everything here is a reading of the ledger. The row prints the record's own
- * status word and automatic application tallies; the artifact panel prints the handler's
+ * status word and canonical acceptance tallies; the artifact panel prints the handler's
  * `integrity_status` rather than deciding integrity in the browser — the
  * publication chain lives beside the ledger on disk, and only the daemon can
  * compare them.
@@ -31,7 +33,7 @@ export function RunHistory() {
       result={runs.data}
     >
       {(data) => {
-        const reading = tallied(data.runs, data.count, "runs");
+        const reading = automationRunsReading(data);
         if (reading.rows.length === 0) {
           // The ledger route answers an absent ledger file with an empty list,
           // which is the truthful reading: no run has ever been recorded here.
@@ -58,17 +60,11 @@ export function RunHistory() {
                 Showing a partial list: {reading.reason}.
               </p>
             )}
-            {/* The route serves the tail of the ledger, newest last; the
-             * history reads newest first. */}
-            {[...reading.rows].reverse().map((run) => (
+            {/* The route already projects its bounded ledger tail newest
+             * first, so preserve that canonical order. */}
+            {reading.rows.map((run) => (
               <RunLine key={run.run_id} run={run} />
             ))}
-            {data.count === data.limit ? (
-              <p className="pt-1.5 text-3xs leading-relaxed text-text-muted">
-                the newest {data.limit} runs, the request cap — older records
-                remain in the ledger
-              </p>
-            ) : null}
           </div>
         );
       }}
@@ -115,7 +111,7 @@ function RunLine({ run }: { run: RunRow }) {
           {run.status}
         </span>
         <span className="tabular shrink-0 text-2xs text-text-muted">
-          {run.accepted_count} applied · {run.rejected_count} quarantined
+          {run.accepted_count} accepted · {run.rejected_count} rejected
         </span>
         {/* The record's timestamp verbatim when it does not parse as epoch
          * seconds: a raw string is a truthful oddity, a blank is a lie. */}
@@ -128,51 +124,10 @@ function RunLine({ run }: { run: RunRow }) {
           {run.error}
         </p>
       ) : null}
-      <RunOutcomeSummary run={run} />
       {open ? (
         <RunArtifacts runId={run.run_id} recordedKinds={run.artifact_kinds} />
       ) : null}
     </div>
-  );
-}
-
-/** Optional receipts are shown only when the daemon recorded them. Missing is
- * not interpreted as an empty effect, which keeps older ledger rows truthful. */
-function RunOutcomeSummary({ run }: { run: RunRow }) {
-  const details: string[] = [];
-  if (run.activation_policy)
-    details.push(`skill policy: ${run.activation_policy}`);
-  if (run.curation_policy && typeof run.curation_policy === "object") {
-    const policy = run.curation_policy as Record<string, unknown>;
-    if (typeof policy["decision"] === "string")
-      details.push(`curation: ${policy["decision"]}`);
-    if (typeof policy["effect"] === "string")
-      details.push(`effect: ${policy["effect"]}`);
-  }
-  if (run.validation_repairs && run.validation_repairs.length > 0) {
-    details.push(`${run.validation_repairs.length} validation repair`);
-  }
-  if (run.created_skills && run.created_skills.length > 0) {
-    details.push(`${run.created_skills.length} skill activated`);
-  }
-  if (run.updated_skills && run.updated_skills.length > 0) {
-    details.push(`${run.updated_skills.length} skill updated`);
-  }
-  if (run.applied_consolidations && run.applied_consolidations.length > 0) {
-    details.push(`${run.applied_consolidations.length} consolidation applied`);
-  }
-  const deployment = run.deployment;
-  if (deployment) {
-    details.push(`deployment: ${deployment.status}`);
-    if (deployment.retry_required) details.push("retry required");
-    if (deployment.errors.length > 0)
-      details.push(`${deployment.errors.length} deployment error`);
-  }
-  if (details.length === 0) return null;
-  return (
-    <p className="pb-1.5 pl-5 text-3xs leading-relaxed text-text-secondary">
-      {details.join(" · ")}
-    </p>
   );
 }
 
@@ -226,29 +181,62 @@ function ArtifactList({ data }: { data: RunArtifactsPayload }) {
         {missing.length > 0 ? ` · not recorded: ${missing.join(", ")}` : ""}
       </p>
       {data.artifacts.map((artifact) => (
-        <div
-          key={artifact.kind}
-          className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5"
-        >
-          <span className="shrink-0 text-2xs text-text-primary">
-            {artifact.kind}
-          </span>
-          {artifact.summary ? (
-            <span
-              className="min-w-0 flex-1 truncate text-2xs text-text-muted"
-              title={artifact.summary}
-            >
-              {artifact.summary}
-            </span>
-          ) : null}
-          <span
-            className="tabular shrink-0 font-mono text-3xs text-text-muted"
-            title={artifact.sha256}
-          >
-            {artifact.sha256.slice(0, 12)}
-          </span>
-        </div>
+        <ArtifactLine key={artifact.kind} runId={data.run_id} artifact={artifact} />
       ))}
+    </div>
+  );
+}
+
+function ArtifactLine({
+  runId,
+  artifact,
+}: {
+  runId: string;
+  artifact: RunArtifactRow;
+}) {
+  const [open, setOpen] = useState(false);
+  const payload = useAutomationRunArtifactPayload(runId, artifact.kind, open);
+  return (
+    <div className="flex flex-col gap-1 border-l border-edge-subtle pl-2">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-left"
+      >
+        <span className="shrink-0 text-2xs text-text-primary">
+          {open ? "Hide" : "Inspect"} {artifact.kind.replaceAll("_", " ")}
+        </span>
+        {artifact.summary ? (
+          <span className="min-w-0 flex-1 truncate text-2xs text-text-muted" title={artifact.summary}>
+            {artifact.summary}
+          </span>
+        ) : null}
+        <span className="tabular shrink-0 font-mono text-3xs text-text-muted" title={artifact.sha256}>
+          {artifact.sha256.slice(0, 12)}
+        </span>
+      </button>
+      {open ? (
+        <PayloadBoundary title={`${artifact.kind} artifact`} pending={payload.isPending} result={payload.data}>
+          {(data) =>
+            data.run_id === runId &&
+            data.artifact.kind === artifact.kind &&
+            data.artifact.path === artifact.path &&
+            data.artifact.sha256 === artifact.sha256 ? (
+              <pre
+                aria-label={`${artifact.kind} artifact payload`}
+                className="max-h-64 overflow-auto whitespace-pre-wrap break-words border border-edge-subtle bg-surface-1 p-2 font-mono text-3xs text-text-secondary"
+              >
+                {JSON.stringify(data.payload, null, 2)}
+              </pre>
+            ) : (
+              <p role="status" className="text-2xs text-state-error">
+                the artifact payload does not belong to this run and kind
+              </p>
+            )
+          }
+        </PayloadBoundary>
+      ) : null}
     </div>
   );
 }

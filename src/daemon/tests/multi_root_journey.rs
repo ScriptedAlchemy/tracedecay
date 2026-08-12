@@ -275,15 +275,7 @@ async fn run_multi_root_quiescence() {
         ),
     ];
     for (request, expected) in interrupted {
-        let response = engine
-            .invocation
-            .invoke_for_project(
-                &engine.store_administration,
-                Some(&project_root),
-                request,
-                None,
-            )
-            .await;
+        let response = execute_daemon_invocation(&engine, &handshake, request).await;
         assert!(matches!(
             response.outcome,
             DaemonInvocationOutcome::ApplicationProblem { problem }
@@ -349,15 +341,7 @@ async fn run_multi_root_quiescence() {
     ];
 
     for request in requests {
-        let response = engine
-            .invocation
-            .invoke_for_project(
-                &engine.store_administration,
-                Some(&project_root),
-                request,
-                None,
-            )
-            .await;
+        let response = execute_daemon_invocation(&engine, &handshake, request).await;
         assert!(matches!(
             response.outcome,
             DaemonInvocationOutcome::Problem {

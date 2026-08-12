@@ -537,7 +537,7 @@ mod tests {
 
     use super::{
         HookProjectRouteCache, MAX_HOOK_ROUTE_CACHE_ENTRIES, SharedHookProjectRouteCache,
-        project_route_identity_matches,
+        WorkspaceProjectRoute, project_route_identity_matches,
     };
     use crate::daemon::{HookAgent, HookRouteMetadata, ProductionProjectCompositionHarnessV1};
     use crate::mcp::hook_events::{HookEvent, HookEventKind};

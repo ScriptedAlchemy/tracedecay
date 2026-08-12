@@ -59,6 +59,7 @@ impl RemoteOperationalStatusV1 {
 
 fn invalid_status() -> ApplicationProblem {
     ApplicationProblem::Unavailable {
+        classification: crate::ApplicationUnavailableClassV1::Authority,
         diagnostic: SafeDiagnostic::new(
             "remote_operational_status_invalid",
             "Remote operational readiness could not be verified.",

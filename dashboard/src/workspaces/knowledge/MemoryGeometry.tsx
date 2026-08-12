@@ -1,23 +1,24 @@
 /**
  * MEMORY GEOMETRY — the store's semantic space, and what it implies.
  *
- * Two routes that are two halves of one computation. `/projection` decomposes
- * every fact's phase vector — embedded as `[cos(p), sin(p)]` so wrapped phases
- * compare correctly — into its two principal components; `/similarity` scores
- * the pairs that decomposition implies, by phase cosine, over the same vectors.
- * They are drawn together because a cluster in the scatter and a high-scoring
- * pair in the list are the same fact about the store said twice.
+ * Two routes that inspect the same query-time encoding method over their own
+ * admitted fact sets. `/projection` may filter and cap facts before deriving
+ * FHRR phase encodings and decomposing `[cos(p), sin(p)]` coordinates into two
+ * principal components. `/similarity` derives encodings for its own bounded
+ * fact set and scores them by phase cosine. They are drawn together because
+ * both expose relationships in the canonical fact store without persisting a
+ * vector authority.
  *
  * The load-bearing honesty here is `method`. The daemon emits `"pca"` only when
- * it actually decomposed at least two equal-width vectors; a store with one
- * vectored fact, no vectors, or a failed decomposition comes back `"none"` with
- * points at the origin. A scatter drawn from `none` is indistinguishable from a
+ * it actually decomposed at least two equal-width encodings. One eligible fact
+ * returns one origin point; no encodable facts or a failed decomposition return
+ * no points. A scatter drawn from `none` would misstate either condition as a
  * real projection, so this surface refuses to draw one and says why instead.
  *
  * Likewise the similarity panel prints three denominators rather than one.
- * `count` is vectored facts, `total_pairs` is pairs scored above the
- * computation's floor, and `pairs.length` is what survived this request's floor
- * and cap. Reporting any one as "the store" misstates the other two.
+ * `count` is query-time encoded facts, `total_pairs` is every finite pair the
+ * computation scored, and `pairs.length` is the bounded list returned for this
+ * request's floor. Reporting any one as "the store" misstates the other two.
  */
 import { useMemo, useState } from "react";
 import type { EChartsOption } from "echarts";
@@ -38,12 +39,10 @@ import { projectionReading, similarityReading } from "./memoryModel.ts";
 /**
  * The similarity floors this panel offers.
  *
- * Discrete rather than a slider: each request recomputes nothing (the daemon
- * caches against the store fingerprint) but does re-sort and re-cap, and a
- * continuous control would issue a request per pixel of drag. The values are
- * the ones that mean something against phase cosine — 0.95 is the dedup
- * planner's own threshold, 0.6 is roughly where the classifier stops calling a
- * pair related at all.
+ * Discrete rather than a slider: the daemon can reuse its store-fingerprinted
+ * sorted pair prefix, but a continuous control would still issue one request
+ * per pixel of drag. The values are representative phase-cosine cutoffs from a
+ * strict 0.95 near-match view to a broader 0.6 relationship view.
  */
 const FLOORS = [0.95, 0.85, 0.75, 0.6] as const;
 
@@ -68,7 +67,7 @@ export function MemoryGeometry() {
             }}
             label="Restrict the projection"
             placeholder="Restrict the projection"
-            hint="an empty query projects every vectored fact"
+            hint="an empty query projects a bounded page of query-time encoded facts"
             submitted={applied}
           />
           <PayloadBoundary
@@ -131,6 +130,7 @@ function FloorControl({
 
 function ProjectionBody({ data }: { data: ProjectionPayload }) {
   const reading = projectionReading(data);
+  const coverageComplete = data.coverage.completeness === "complete";
   const option = useMemo<EChartsOption>(
     () => ({
       xAxis: {
@@ -166,10 +166,20 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
       <p className="text-2xs leading-relaxed text-text-secondary">
         {reading.note}
       </p>
+      {coverageComplete ? null : (
+        <p role="status" className="text-3xs leading-relaxed text-state-partial">
+          Projection coverage is {data.coverage.completeness}; examined{" "}
+          {data.coverage.examined.toLocaleString()} under a limit of{" "}
+          {data.coverage.limit.toLocaleString()}
+          {data.coverage.omission_reasons.length > 0
+            ? `; omissions: ${data.coverage.omission_reasons.join(", ")}.`
+            : "."}
+        </p>
+      )}
       {reading.projected ? (
         <>
           <Chart
-            ariaLabel={`Principal-component scatter of ${reading.points.length.toLocaleString()} facts by phase vector. The axes are unitless directions of greatest variance; the accessible reading of this projection is the category census and extents printed beneath it.`}
+            ariaLabel={`Principal-component scatter of ${reading.points.length.toLocaleString()} facts by query-time-derived FHRR phase encoding. The axes are unitless directions of greatest variance; the accessible reading of this projection is the category census and extents printed beneath it.`}
             height={260}
             option={option}
           />
@@ -212,9 +222,13 @@ function ProjectionBody({ data }: { data: ProjectionPayload }) {
       ) : (
         <StateChip
           kind={
-            reading.points.length === 0 ? "complete_zero_findings" : "partial"
+            reading.points.length === 0 && coverageComplete
+              ? "complete_zero_findings"
+              : reading.points.length === 0
+                ? "unknown"
+                : "partial"
           }
-          detail={`method reported as "${data.method}"`}
+          detail={`method reported as "${data.method}" for a request bounded to ${data.limit.toLocaleString()} facts`}
         />
       )}
     </div>
@@ -235,38 +249,49 @@ function SimilarityBody({ data }: { data: SimilarityPayload }) {
       <p className="text-2xs leading-relaxed text-text-secondary">
         {reading.denominators}
       </p>
+      <p className="text-3xs leading-relaxed text-text-muted">
+        Global distribution over all{" "}
+        {data.score_distribution.total_pairs.toLocaleString()} scored pairs;
+        these statistics are not limited to the threshold-matching list below.
+      </p>
       <div className="flex flex-wrap items-end gap-4 border-y border-edge-subtle py-2">
         <Readout
-          label="mean"
+          label="global mean"
           size="sm"
           value={
             reading.average == null ? "unmeasured" : reading.average.toFixed(4)
           }
         />
         <Readout
-          label="min"
+          label="global min"
           size="sm"
           value={reading.min == null ? "unmeasured" : reading.min.toFixed(4)}
         />
         <Readout
-          label="max"
+          label="global max"
           size="sm"
           value={reading.max == null ? "unmeasured" : reading.max.toFixed(4)}
         />
       </div>
-      {reading.capped ? (
-        <p className="text-3xs leading-relaxed text-text-muted">
-          the list below stops at this request's cap of{" "}
-          {data.limit.toLocaleString()} pairs — it is the top of the ranking,
-          not all of it
+      {reading.capped === null ? (
+        <p role="status" className="text-3xs leading-relaxed text-state-partial">
+          Threshold-list coverage is unknown: {reading.returned.toLocaleString()}{" "}
+          {reading.returned === 1 ? "pair" : "pairs"} returned at or above{" "}
+          {data.min_similarity.toFixed(2)}, filling this request's limit of{" "}
+          {data.limit.toLocaleString()}. The response cannot distinguish an
+          exact fit from a truncated list.
         </p>
-      ) : null}
+      ) : (
+        <p className="text-3xs leading-relaxed text-text-muted">
+          Threshold-list coverage is bounded: {reading.returned.toLocaleString()}{" "}
+          {reading.returned === 1 ? "pair" : "pairs"} returned at or above{" "}
+          {data.min_similarity.toFixed(2)}; the response ended before this
+          request's limit of {data.limit.toLocaleString()}.
+        </p>
+      )}
       {reading.returned === 0 ? (
         <p className="text-2xs leading-relaxed text-text-muted">
-          no pair scores at or above {data.min_similarity.toFixed(2)}
-          {reading.scored > 0
-            ? ` — ${reading.scored.toLocaleString()} pairs were scored below it`
-            : ""}
+          no pair was returned at or above {data.min_similarity.toFixed(2)}
         </p>
       ) : (
         // Named and tab-reachable: the pair list scrolls and holds no
@@ -280,12 +305,12 @@ function SimilarityBody({ data }: { data: SimilarityPayload }) {
         >
           {data.pairs.map((pair) => (
             <li
-              key={`${pair.a_id}-${pair.b_id}`}
+              key={JSON.stringify([pair.a_id, pair.b_id])}
               className="flex flex-col gap-1 border-l-2 border-edge-subtle pl-2"
             >
               <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">
                 <span className="td-value" data-cell="numeric">
-                  #{pair.a_id} ↔ #{pair.b_id}
+                  {pair.a_id} ↔ {pair.b_id}
                 </span>
                 <span className="td-value" data-cell="numeric">
                   {pair.similarity.toFixed(4)}
@@ -312,8 +337,8 @@ function SimilarityBody({ data }: { data: SimilarityPayload }) {
       )}
       <p className="text-3xs leading-relaxed text-text-muted">
         a scored pair is a measurement, not a proposal — the Curation view
-        reports the daemon's automatic post-validation outcomes and
-        enable/disable control
+        reports the daemon's automatic post-validation outcomes and explicit
+        policy-owned run control
       </p>
     </div>
   );

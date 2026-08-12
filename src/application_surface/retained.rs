@@ -69,6 +69,17 @@ impl RegisteredHttpOperation for RetainedSurfaceOperation {
         "retained"
     }
 
+    fn application_problem_is_bound(
+        self,
+        request_id: &tracedecay_application::RequestId,
+        scope: Option<&tracedecay_application::ResolvedScope>,
+        problem: &tracedecay_application::ApplicationProblem,
+    ) -> bool {
+        tracedecay_application::retained_surface_problem_matches_terminal(
+            self, request_id, scope, problem,
+        )
+    }
+
     fn registry(
         self,
     ) -> Result<tracedecay_tool_catalog::ExecutableBindingRegistryV1, ApplicationSurfaceAdapterError>
@@ -112,15 +123,22 @@ async fn invoke_operation(
         controls.deadline.clone(),
         controls.cancellation.context(),
     );
+    let selected_request_id = request_id.clone();
     invoke_registered_http::<RetainedSurfaceResultV1, _>(
         executor.as_ref(),
         operation,
         request_id,
         controls,
         invocation,
-        |outcome| match outcome {
+        move |outcome| match outcome {
             DaemonInvocationOutcome::RetainedApplication { scope, outcome } => {
-                Some((scope, outcome))
+                tracedecay_application::retained_surface_outcome_matches_terminal(
+                    operation,
+                    &selected_request_id,
+                    &scope,
+                    &outcome,
+                )
+                .then_some((scope, outcome))
             }
             _ => None,
         },
@@ -202,7 +220,8 @@ pub(crate) fn decode_request(
         RetainedSurfaceOperation::LcmExpandQuery => {
             decode!(LcmExpandQueryRequestV1, LcmExpandQuery)
         }
-        RetainedSurfaceOperation::FactStore | RetainedSurfaceOperation::SessionRefresh => None,
+        RetainedSurfaceOperation::SessionRefresh
+        | RetainedSurfaceOperation::MemoryAutomationRun => None,
     }
 }
 

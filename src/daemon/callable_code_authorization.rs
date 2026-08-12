@@ -172,6 +172,7 @@ fn map_graph_admission_problem(
         ApplicationProblemKind::Cancelled => CodeGraphReadError::Cancelled,
         ApplicationProblemKind::TimedOut => CodeGraphReadError::TimedOut,
         ApplicationProblemKind::PartialEffect
+        | ApplicationProblemKind::ExecutionFailed
         | ApplicationProblemKind::Unsupported
         | ApplicationProblemKind::Unavailable
         | ApplicationProblemKind::Saturated => CodeGraphReadError::Unavailable {

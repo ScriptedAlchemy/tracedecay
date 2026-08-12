@@ -1169,10 +1169,22 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
     let mut tool_arguments = json!({"query": "needle", "session_id": raw_session});
     crate::mcp::project_route::protect_tool_structural_ids(&mut tool_arguments)
         .expect("protect routed tool identities");
-    let routed = routes.apply_to_tool_arguments("tracedecay_grep", tool_arguments);
+    let expected_arguments = tool_arguments.clone();
+    let selected = match routes.workspace_route_for_arguments(&tool_arguments) {
+        Some(crate::mcp::project_route::WorkspaceProjectRoute::Resolved(selected)) => selected,
+        Some(crate::mcp::project_route::WorkspaceProjectRoute::Failed(failure)) => {
+            panic!("the durable hook route failed: {}", failure.detail)
+        }
+        None => panic!("the durable hook route must remain available"),
+    };
+    let routed = tool_arguments;
     assert_eq!(
-        routed["project_selector"]["path"], registered.canonical_root,
-        "the same connection must route tools after durable append"
+        routed, expected_arguments,
+        "the same connection must not mutate tool arguments after durable append"
+    );
+    assert_eq!(
+        selected.owner.project.canonical_root, registered.canonical_root,
+        "the same connection must carry the exact project route out of band"
     );
     assert_eq!(
         routed["session_id"],

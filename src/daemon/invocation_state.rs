@@ -91,6 +91,10 @@ impl Default for DaemonInvocationState {
 }
 
 impl DaemonInvocationState {
+    pub(super) fn invocation_service(&self) -> DaemonInvocationService {
+        self.service.clone()
+    }
+
     pub(super) async fn retire_remote_deleted_project(
         &self,
         profile_id: &tracedecay_domain::configuration::UserProfileId,

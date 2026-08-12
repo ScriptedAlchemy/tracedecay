@@ -2,8 +2,10 @@
 
 use sha2::{Digest, Sha256};
 
+use tracedecay_domain::RunId;
 use tracedecay_domain::{FactId, FactLineageEventV1, FactOwnerV1, LocatorDigest, ProvenanceId};
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
+use tracedecay_store::ProjectMemoryAutomationRunReceiptsV1;
 use tracedecay_store::{
     FactReadControl, FactWriteControl, ProjectMemoryAutomaticFactApplyDispositionV1,
     ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryAutomaticFactEvidenceV1,
@@ -496,6 +498,32 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             &page,
         )?;
         Ok(page)
+    }
+
+    pub async fn project_memory_automation_run_receipts(
+        &self,
+        run_id: RunId,
+        read_control: &FactReadControl,
+    ) -> Result<ProjectMemoryAutomationRunReceiptsV1, MemoryApplicationError> {
+        run_id
+            .validate()
+            .map_err(|_| MemoryApplicationError::InvalidInput {
+                invariant: "memory automation run identity",
+            })?;
+        let receipts = self
+            .authority
+            .project_memory_automation_run_receipts(
+                self.owner.clone(),
+                run_id.clone(),
+                read_control,
+            )
+            .await?;
+        if receipts.owner() != &self.owner || receipts.run_id() != &run_id {
+            return Err(MemoryApplicationError::InvalidAuthorityResult {
+                invariant: "memory automation receipt recovery identity",
+            });
+        }
+        Ok(receipts)
     }
 }
 

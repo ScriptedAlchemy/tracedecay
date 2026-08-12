@@ -944,6 +944,188 @@
       ],
       "type": "object"
     },
+    "ApplicationExecutionFailureClassV1": {
+      "description": "Stable non-retryable class for an admitted execution failure.",
+      "enum": [
+        "denied",
+        "malformed_output",
+        "permanent"
+      ],
+      "type": "string"
+    },
+    "ApplicationProblemEnvelope": {
+      "additionalProperties": false,
+      "description": "Stable application failure envelope. Partial effects and reset-required\nstates are admitted terminals; partial effects carry their committed\nreceipt directly while reset-required states carry an explicit action.",
+      "properties": {
+        "contract": {
+          "$ref": "#/$defs/ResultContractRef"
+        },
+        "problem": {
+          "$ref": "#/$defs/ApplicationProblemRecord"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "request_id",
+        "problem"
+      ],
+      "type": "object"
+    },
+    "ApplicationProblemKind": {
+      "description": "Stable problem-code taxonomy for request failures and admitted terminals.",
+      "enum": [
+        "invalid_request",
+        "not_found_or_not_authorized",
+        "conflict",
+        "partial_effect",
+        "stale",
+        "unsupported",
+        "unavailable",
+        "execution_failed",
+        "reset_required",
+        "saturated",
+        "cancelled",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "ApplicationProblemRecord": {
+      "additionalProperties": false,
+      "description": "Stable application problem record shared verbatim by every adapter.",
+      "properties": {
+        "cancellation_stage": {
+          "$ref": "#/$defs/RequiredNullable2"
+        },
+        "code": {
+          "type": "string"
+        },
+        "committed_receipt": {
+          "$ref": "#/$defs/RequiredNullable",
+          "description": "A committed effect is present only for an admitted partial effect.\nThe nullable field is always serialized: omitting it would create a\ncompatibility/default path that could hide a missing receipt."
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceCoverage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "details": {
+          "items": {
+            "$ref": "#/$defs/SafeDiagnostic"
+          },
+          "type": "array"
+        },
+        "diagnostic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SafeDiagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_failure_classification": {
+          "$ref": "#/$defs/RequiredNullable4"
+        },
+        "kind": {
+          "$ref": "#/$defs/ApplicationProblemKind"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/LegalAction"
+          },
+          "type": "array"
+        },
+        "message": {
+          "type": "string"
+        },
+        "owning_layer": {
+          "$ref": "#/$defs/ProblemOwningLayer"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryDirective"
+        },
+        "retry_after_millis": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retry_scope": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "terminality": {
+          "$ref": "#/$defs/ProblemTerminality"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "unavailable_classification": {
+          "$ref": "#/$defs/RequiredNullable3"
+        }
+      },
+      "required": [
+        "revision",
+        "kind",
+        "code",
+        "message",
+        "diagnostic",
+        "committed_receipt",
+        "owning_layer",
+        "terminality",
+        "retryable",
+        "retry",
+        "retry_scope",
+        "retry_after_millis",
+        "cancellation_stage",
+        "unavailable_classification",
+        "execution_failure_classification",
+        "request_id",
+        "trace_id",
+        "details",
+        "legal_actions",
+        "coverage"
+      ],
+      "type": "object"
+    },
+    "ApplicationUnavailableClassV1": {
+      "description": "Stable reason an application authority is unavailable.",
+      "enum": [
+        "authority",
+        "backend_unavailable",
+        "backend_disconnected",
+        "backend_retryable"
+      ],
+      "type": "string"
+    },
     "ApplyWorkRelationReplanRequestV1": {
       "additionalProperties": false,
       "properties": {
@@ -1479,6 +1661,19 @@
       ],
       "type": "object"
     },
+    "CancellationStage": {
+      "description": "Exact stage at which cancellation or deadline state was observed.",
+      "enum": [
+        "before_admission",
+        "before_read",
+        "during_read",
+        "before_effect",
+        "effect_in_flight",
+        "reconciling",
+        "after_commit"
+      ],
+      "type": "string"
+    },
     "CanonicalGitRefNameV1": {
       "description": "A validated full native Git ref name, such as `refs/heads/main`.",
       "type": "string"
@@ -1627,6 +1822,10 @@
       ],
       "type": "string"
     },
+    "ComponentVersion": {
+      "description": "Strongly typed canonical identity: `ComponentVersion`.",
+      "type": "string"
+    },
     "ConfigurationRevisionId": {
       "description": "Strongly typed canonical identity: `ConfigurationRevisionId`.",
       "type": "string"
@@ -1689,6 +1888,31 @@
         "estimated_cost",
         "latency",
         "pricing_revision"
+      ],
+      "type": "object"
+    },
+    "CoverageCompleteness": {
+      "description": "Completeness is explicit; unknown never renders as clean.",
+      "enum": [
+        "complete",
+        "partial",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "CoverageDomainState": {
+      "additionalProperties": false,
+      "properties": {
+        "completeness": {
+          "$ref": "#/$defs/CoverageCompleteness"
+        },
+        "domain": {
+          "$ref": "#/$defs/EvidenceDomain"
+        }
+      },
+      "required": [
+        "domain",
+        "completeness"
       ],
       "type": "object"
     },
@@ -5222,6 +5446,115 @@
       ],
       "type": "string"
     },
+    "EffectClass": {
+      "description": "The stable effect classification of one application operation.\n\nGit index writes remain separate classes so policy cannot accidentally\nsubstitute one index mutation for another.",
+      "enum": [
+        "read",
+        "preview",
+        "source_edit",
+        "git_index_stage",
+        "git_index_unstage",
+        "git_index_commit",
+        "configuration_write",
+        "administrative"
+      ],
+      "type": "string"
+    },
+    "EffectReceipt": {
+      "additionalProperties": false,
+      "description": "Durable effect proof. It records identities and receipts, never credentials\nor arbitrary command text.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "catalog_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "committed_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configuration_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "effect_class": {
+          "$ref": "#/$defs/EffectClass"
+        },
+        "expected_state": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "external_proof": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrievalAnchorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "operation": {
+          "$ref": "#/$defs/UseCaseId"
+        },
+        "outcome": {
+          "$ref": "#/$defs/EffectTermination"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "privacy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/ResolvedScope"
+        }
+      },
+      "required": [
+        "operation",
+        "request_id",
+        "actor",
+        "scope",
+        "effect_class",
+        "idempotency_key",
+        "input_digest",
+        "expected_state",
+        "policy_digest",
+        "configuration_digest",
+        "catalog_digest",
+        "privacy_digest",
+        "outcome",
+        "committed_state",
+        "external_proof"
+      ],
+      "type": "object"
+    },
+    "EffectTermination": {
+      "description": "Durable effect receipt terminal state.",
+      "enum": [
+        "completed",
+        "cancelled",
+        "timed_out",
+        "failed",
+        "partial",
+        "effect_unknown"
+      ],
+      "type": "string"
+    },
     "EnvironmentSettingsPayloadV1": {
       "properties": {
         "global_accounting_enabled": {
@@ -5273,6 +5606,71 @@
         "description"
       ],
       "type": "object"
+    },
+    "EvidenceCoverage": {
+      "additionalProperties": false,
+      "description": "Deterministic coverage fold input for an evidence packet.",
+      "properties": {
+        "completeness": {
+          "$ref": "#/$defs/CoverageCompleteness"
+        },
+        "domains": {
+          "items": {
+            "$ref": "#/$defs/CoverageDomainState"
+          },
+          "type": "array"
+        },
+        "eligible": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "requested_domains": {
+          "items": {
+            "$ref": "#/$defs/EvidenceDomain"
+          },
+          "type": "array"
+        },
+        "returned": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "visited": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "requested_domains",
+        "visited",
+        "eligible",
+        "returned",
+        "completeness",
+        "domains"
+      ],
+      "type": "object"
+    },
+    "EvidenceDomain": {
+      "description": "Requested evidence domain for bounded coverage and omissions.",
+      "enum": [
+        "symbol",
+        "source",
+        "graph",
+        "test",
+        "temporal",
+        "anchor",
+        "operational",
+        "diagnostic"
+      ],
+      "type": "string"
     },
     "ExecutionBlockedCauseV1": {
       "description": "Cause a work item was blocked for.",
@@ -6193,6 +6591,7 @@
         "complete",
         "partial",
         "cancelled",
+        "timed_out",
         "error"
       ],
       "type": "string"
@@ -6404,6 +6803,7 @@
         "completed",
         "partial",
         "cancelled",
+        "timed_out",
         "error"
       ],
       "type": "string"
@@ -6604,6 +7004,112 @@
       ],
       "type": "object"
     },
+    "FactAssertionId": {
+      "description": "Strongly typed canonical identity: `FactAssertionId`.",
+      "type": "string"
+    },
+    "FactCategoryV1": {
+      "enum": [
+        "general",
+        "user_pref",
+        "project",
+        "tool",
+        "decision",
+        "code_area"
+      ],
+      "type": "string"
+    },
+    "FactCommitDispositionV1": {
+      "enum": [
+        "committed",
+        "idempotent_replay"
+      ],
+      "type": "string"
+    },
+    "FactCommitOwnerV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "profile",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "project_id": {
+              "$ref": "#/$defs/ProjectId"
+            }
+          },
+          "required": [
+            "kind",
+            "project_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FactCommitReceiptV1": {
+      "additionalProperties": false,
+      "properties": {
+        "active_assertion_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactAssertionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "committed_event_ids": {
+          "items": {
+            "$ref": "#/$defs/FactEventId"
+          },
+          "type": "array"
+        },
+        "disposition": {
+          "$ref": "#/$defs/FactCommitDispositionV1"
+        },
+        "fact_id": {
+          "$ref": "#/$defs/FactId"
+        },
+        "last_event_id": {
+          "$ref": "#/$defs/FactEventId"
+        },
+        "owner": {
+          "$ref": "#/$defs/FactCommitOwnerV1"
+        }
+      },
+      "required": [
+        "disposition",
+        "fact_id",
+        "owner",
+        "committed_event_ids",
+        "last_event_id",
+        "active_assertion_id"
+      ],
+      "type": "object"
+    },
+    "FactEventId": {
+      "description": "Strongly typed canonical identity: `FactEventId`.",
+      "type": "string"
+    },
+    "FactId": {
+      "description": "Strongly typed canonical identity: `FactId`.",
+      "type": "string"
+    },
     "FactMatchArmV1": {
       "properties": {
         "collision_warning": {
@@ -6683,6 +7189,93 @@
         "arms"
       ],
       "type": "object"
+    },
+    "FactSearchGraphCoverageV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "not_applicable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "not_mounted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "expanded_fact_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "complete",
+              "type": "string"
+            },
+            "relation_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "root_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "root_count",
+            "relation_count",
+            "expanded_fact_count"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "degraded",
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/$defs/FactSearchGraphDegradationV1"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FactSearchGraphDegradationV1": {
+      "enum": [
+        "conflict",
+        "unavailable",
+        "budget_exhausted",
+        "deadline_exceeded"
+      ],
+      "type": "string"
     },
     "FeedbackCoverageV1": {
       "enum": [
@@ -8624,6 +9217,19 @@
       ],
       "type": "string"
     },
+    "LegalAction": {
+      "description": "Bounded action an adapter may offer without inferring executable authority.",
+      "enum": [
+        "correct_request",
+        "reauthorize",
+        "refresh",
+        "retry",
+        "reconcile",
+        "reset",
+        "contact_administrator"
+      ],
+      "type": "string"
+    },
     "LinkAcceptedWorkAttemptRequestV1": {
       "additionalProperties": false,
       "properties": {
@@ -9125,24 +9731,653 @@
       "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
       "type": "string"
     },
-    "MemoryBankV1": {
+    "MemoryAlgebraStatusV1": {
+      "additionalProperties": false,
       "properties": {
-        "bank_name": {
+        "estimated_capacity": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hrr_dim": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "hrr_dim",
+        "estimated_capacity"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationCommittedReceiptV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "curation",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/MemoryAutomationCurationReceiptV1"
+            }
+          },
+          "required": [
+            "kind",
+            "receipt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "automatic_fact",
+              "type": "string"
+            },
+            "receipt": {
+              "$ref": "#/$defs/MemoryAutomationFactReceiptV1"
+            }
+          },
+          "required": [
+            "kind",
+            "receipt"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MemoryAutomationCurationAddDispositionV1": {
+      "enum": [
+        "added",
+        "near_duplicate",
+        "possible_conflict"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationCurationMergeV1": {
+      "additionalProperties": false,
+      "properties": {
+        "commit_receipts": {
+          "items": {
+            "$ref": "#/$defs/FactCommitReceiptV1"
+          },
+          "type": "array"
+        },
+        "content_updated": {
+          "type": "boolean"
+        },
+        "deleted_loser_fact_ids": {
+          "items": {
+            "$ref": "#/$defs/FactId"
+          },
+          "type": "array"
+        },
+        "input_digest": {
           "type": "string"
         },
-        "bundled_fact_count": {
-          "format": "int64",
+        "operation_id": {
+          "$ref": "#/$defs/ProvenanceId"
+        },
+        "winner_fact_id": {
+          "$ref": "#/$defs/FactId"
+        }
+      },
+      "required": [
+        "operation_id",
+        "input_digest",
+        "winner_fact_id",
+        "content_updated",
+        "deleted_loser_fact_ids",
+        "commit_receipts"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationCurationOperationEffectV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "closest_fact_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FactId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "commit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FactCommitReceiptV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "disposition": {
+              "$ref": "#/$defs/MemoryAutomationCurationAddDispositionV1"
+            },
+            "fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "kind": {
+              "const": "add",
+              "type": "string"
+            },
+            "similarity_millionths": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "fact_id",
+            "disposition",
+            "closest_fact_id",
+            "similarity_millionths",
+            "commit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "$ref": "#/$defs/FactCommitReceiptV1"
+            },
+            "fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "kind": {
+              "const": "update",
+              "type": "string"
+            },
+            "trust_delta_millionths": {
+              "format": "int32",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "fact_id",
+            "trust_delta_millionths",
+            "commit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "merge",
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/MemoryAutomationCurationMergeV1"
+            }
+          },
+          "required": [
+            "kind",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FactCommitReceiptV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "disposition": {
+              "$ref": "#/$defs/MemoryAutomationCurationRemoveDispositionV1"
+            },
+            "kind": {
+              "const": "remove",
+              "type": "string"
+            },
+            "remaining_fact_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target_fact_id": {
+              "$ref": "#/$defs/FactId"
+            }
+          },
+          "required": [
+            "kind",
+            "target_fact_id",
+            "disposition",
+            "remaining_fact_count",
+            "commit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "$ref": "#/$defs/FactCommitReceiptV1"
+            },
+            "fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "kind": {
+              "const": "normalize_tags",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "fact_id",
+            "commit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "commit": {
+              "$ref": "#/$defs/FactCommitReceiptV1"
+            },
+            "kind": {
+              "const": "link_facts",
+              "type": "string"
+            },
+            "relation": {
+              "$ref": "#/$defs/MemoryAutomationCurationRelationV1"
+            },
+            "source_fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "target_fact_id": {
+              "$ref": "#/$defs/FactId"
+            }
+          },
+          "required": [
+            "kind",
+            "source_fact_id",
+            "target_fact_id",
+            "relation",
+            "commit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MemoryAutomationCurationReceiptV1": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "receipt": {
+          "$ref": "#/$defs/MemoryAutomationCurationResultV1"
+        }
+      },
+      "required": [
+        "receipt",
+        "canonical_digest"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationCurationRelationKindV1": {
+      "enum": [
+        "supports",
+        "contradicts",
+        "supersedes",
+        "derived_from"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationCurationRelationProvenanceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "sanitization_receipt": {
+          "$ref": "#/$defs/SanitizationReceiptV1"
+        },
+        "source_label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_label",
+        "sanitization_receipt"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationCurationRelationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence_millionths": {
+          "format": "uint32",
+          "minimum": 0,
           "type": "integer"
         },
-        "dim": {
-          "format": "int64",
+        "evidence_fact_ids": {
+          "items": {
+            "$ref": "#/$defs/FactId"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/MemoryAutomationCurationRelationKindV1"
+        },
+        "provenance": {
+          "$ref": "#/$defs/MemoryAutomationCurationRelationProvenanceV1"
+        }
+      },
+      "required": [
+        "kind",
+        "evidence_fact_ids",
+        "confidence_millionths",
+        "provenance"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationCurationRemoveDispositionV1": {
+      "enum": [
+        "removed",
+        "already_removed",
+        "not_found"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationCurationResultV1": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_operations": {
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
-        "fact_count": {
-          "format": "int64",
+        "automation_run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "changed_fact_ids": {
+          "items": {
+            "$ref": "#/$defs/FactId"
+          },
+          "type": "array"
+        },
+        "facts_added": {
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
-        "updated_at": {
+        "facts_linked": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "facts_merged": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "facts_removed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "facts_updated": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "input_digest": {
+          "type": "string"
+        },
+        "normalized_tags": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation_effects": {
+          "items": {
+            "$ref": "#/$defs/MemoryAutomationCurationOperationEffectV1"
+          },
+          "type": "array"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/ProvenanceId"
+        },
+        "owner": {
+          "$ref": "#/$defs/FactCommitOwnerV1"
+        },
+        "replay_event_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactEventId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "replay_fact_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "owner",
+        "operation_id",
+        "input_digest",
+        "automation_run_id",
+        "operation_effects",
+        "replay_fact_id",
+        "replay_event_id",
+        "changed_fact_ids",
+        "accepted_operations",
+        "facts_added",
+        "facts_updated",
+        "facts_merged",
+        "facts_removed",
+        "normalized_tags",
+        "facts_linked"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationFactConflictSourceV1": {
+      "enum": [
+        "apply_time_add_fact_diff"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationFactConflictValidationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "note": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/MemoryAutomationFactConflictSourceV1"
+        }
+      },
+      "required": [
+        "source",
+        "note"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationFactDedupeValidationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "near_duplicate_threshold": {
+          "format": "double",
+          "type": "number"
+        },
+        "nearest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryAutomationFactNearestMatchV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "nearest",
+        "near_duplicate_threshold"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationFactDispositionV1": {
+      "enum": [
+        "applied",
+        "already_applied",
+        "quarantined"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationFactEffectV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "assertion_id": {
+              "$ref": "#/$defs/FactAssertionId"
+            },
+            "event_id": {
+              "$ref": "#/$defs/FactEventId"
+            },
+            "fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "state": {
+              "const": "applied",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/MemoryAutomationFactTargetV1"
+            }
+          },
+          "required": [
+            "state",
+            "fact_id",
+            "target",
+            "assertion_id",
+            "event_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "quarantined",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MemoryAutomationFactEvidenceItemV1": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/FactCategoryV1"
+        },
+        "content": {
+          "type": "string"
+        },
+        "entities": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source_span": {
+          "$ref": "#/$defs/MemoryAutomationFactEvidenceSourceSpanV1"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "trust": {
+          "$ref": "#/$defs/MemoryAutomationFactEvidenceTrustV1"
+        }
+      },
+      "required": [
+        "content",
+        "category",
+        "trust",
+        "source_span",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationFactEvidenceSourceSpanV1": {
+      "additionalProperties": false,
+      "properties": {
+        "message_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "store_id": {
           "format": "int64",
           "type": [
             "integer",
@@ -9150,22 +10385,440 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "MemoryAutomationFactEvidenceTrustBucketV1": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationFactEvidenceTrustV1": {
+      "anyOf": [
+        {
+          "format": "double",
+          "type": "number"
+        },
+        {
+          "$ref": "#/$defs/MemoryAutomationFactEvidenceTrustBucketV1"
+        }
+      ]
+    },
+    "MemoryAutomationFactEvidenceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "item": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryAutomationFactEvidenceItemV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryAutomationFactValidationV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "MemoryAutomationFactInputDigestV1": {
+      "description": "Store-owned raw SHA-256 input digest. This intentionally has no algorithm\nprefix because the canonical fact command does not expose one.",
+      "type": "string"
+    },
+    "MemoryAutomationFactNearestMatchV1": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_fact_id": {
+          "$ref": "#/$defs/FactId"
+        },
+        "category": {
+          "$ref": "#/$defs/FactCategoryV1"
+        },
+        "score": {
+          "format": "double",
+          "type": "number"
+        }
+      },
       "required": [
-        "bank_name",
-        "dim",
-        "fact_count",
-        "bundled_fact_count",
-        "updated_at"
+        "canonical_fact_id",
+        "score",
+        "category"
       ],
       "type": "object"
     },
+    "MemoryAutomationFactReceiptV1": {
+      "additionalProperties": false,
+      "description": "Exact public projection of one canonical automatic-fact authority result.",
+      "properties": {
+        "apply_id": {
+          "$ref": "#/$defs/ProvenanceId"
+        },
+        "automation_run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "canonical_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "disposition": {
+          "$ref": "#/$defs/MemoryAutomationFactDispositionV1"
+        },
+        "effect": {
+          "$ref": "#/$defs/MemoryAutomationFactEffectV1"
+        },
+        "evidence": {
+          "$ref": "#/$defs/MemoryAutomationFactEvidenceV1"
+        },
+        "owner": {
+          "$ref": "#/$defs/FactCommitOwnerV1"
+        },
+        "recorded_at_micros": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "request": {
+          "$ref": "#/$defs/MemoryAutomationFactRequestV1"
+        },
+        "state": {
+          "$ref": "#/$defs/MemoryAutomationFactStateV1"
+        }
+      },
+      "required": [
+        "apply_id",
+        "owner",
+        "state",
+        "disposition",
+        "automation_run_id",
+        "request",
+        "evidence",
+        "effect",
+        "recorded_at_micros",
+        "canonical_digest"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationFactRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "category": {
+          "$ref": "#/$defs/FactCategoryV1"
+        },
+        "content": {
+          "type": "string"
+        },
+        "default_trust_millionths": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/MemoryAutomationFactInputDigestV1"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/ProvenanceId"
+        },
+        "sanitization_receipt": {
+          "$ref": "#/$defs/SanitizationReceiptV1"
+        },
+        "source_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "operation_id",
+        "input_digest",
+        "actor",
+        "sanitization_receipt",
+        "content",
+        "category",
+        "source_label",
+        "tags",
+        "entities",
+        "default_trust_millionths",
+        "metadata"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationFactStateV1": {
+      "enum": [
+        "applied",
+        "quarantined"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationFactTargetV1": {
+      "additionalProperties": false,
+      "properties": {
+        "fact_id": {
+          "$ref": "#/$defs/FactId"
+        },
+        "owner": {
+          "$ref": "#/$defs/FactCommitOwnerV1"
+        }
+      },
+      "required": [
+        "owner",
+        "fact_id"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationFactValidationStatusV1": {
+      "enum": [
+        "accepted"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationFactValidationV1": {
+      "additionalProperties": false,
+      "properties": {
+        "conflict": {
+          "$ref": "#/$defs/MemoryAutomationFactConflictValidationV1"
+        },
+        "dedupe": {
+          "$ref": "#/$defs/MemoryAutomationFactDedupeValidationV1"
+        },
+        "status": {
+          "$ref": "#/$defs/MemoryAutomationFactValidationStatusV1"
+        }
+      },
+      "required": [
+        "status",
+        "dedupe",
+        "conflict"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationRunProblemV1": {
+      "additionalProperties": false,
+      "description": "Canonical admitted problem for one automatic-memory run.\n\nThe generic application receipt binds the outer operation. The ordered\nreceipts retain the exact canonical memory effects needed to reconcile a\npartial terminal without inventing an endpoint-specific payload.",
+      "properties": {
+        "committed_receipts": {
+          "items": {
+            "$ref": "#/$defs/MemoryAutomationCommittedReceiptV1"
+          },
+          "type": "array"
+        },
+        "problem": {
+          "$ref": "#/$defs/ApplicationProblemEnvelope"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "scope": {
+          "$ref": "#/$defs/ResolvedScope"
+        },
+        "task": {
+          "$ref": "#/$defs/MemoryAutomationTaskV1"
+        }
+      },
+      "required": [
+        "run_id",
+        "task",
+        "scope",
+        "problem",
+        "committed_receipts"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationRunResultV1": {
+      "additionalProperties": false,
+      "description": "Durable terminal payload for one admitted automatic-memory run.\n\nAn empty receipt list is valid for completed or skipped zero-effect runs.\nPartial effects are represented only by an application problem carrying a\nnon-empty committed effect receipt.",
+      "properties": {
+        "committed_receipts": {
+          "items": {
+            "$ref": "#/$defs/MemoryAutomationCommittedReceiptV1"
+          },
+          "type": "array"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "task": {
+          "$ref": "#/$defs/MemoryAutomationTaskV1"
+        },
+        "terminal": {
+          "$ref": "#/$defs/MemoryAutomationRunTerminalV1"
+        }
+      },
+      "required": [
+        "run_id",
+        "task",
+        "terminal",
+        "committed_receipts"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationRunSummaryV1": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rejected_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reviewed_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reviewed_count",
+        "accepted_count",
+        "rejected_count",
+        "skipped_count"
+      ],
+      "type": "object"
+    },
+    "MemoryAutomationRunTerminalV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "const": "completed",
+              "type": "string"
+            },
+            "summary": {
+              "$ref": "#/$defs/MemoryAutomationRunSummaryV1"
+            }
+          },
+          "required": [
+            "status",
+            "summary"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/MemoryAutomationSkipReasonV1"
+            },
+            "status": {
+              "const": "skipped",
+              "type": "string"
+            },
+            "summary": {
+              "$ref": "#/$defs/MemoryAutomationRunSummaryV1"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "summary"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MemoryAutomationSkipReasonV1": {
+      "enum": [
+        "automation_disabled",
+        "memory_curator_disabled",
+        "session_reflector_disabled",
+        "delegated_host_mode",
+        "backend_disabled",
+        "scheduler_lock_active",
+        "task_not_schedulable",
+        "scheduler_schedule_invalid",
+        "scheduler_schedule_manual",
+        "scheduler_idle_window_active",
+        "scheduler_non_retryable_failure",
+        "scheduler_cooldown_active",
+        "scheduler_interval_not_elapsed",
+        "scheduler_cron_not_due",
+        "no_new_session_activity",
+        "similarity_authority_unavailable",
+        "partial_coverage_no_candidates",
+        "nothing_to_review",
+        "session_evidence_filter_unavailable",
+        "session_evidence_retrieval_unavailable",
+        "session_evidence_unavailable",
+        "session_evidence_partial",
+        "session_evidence_stale",
+        "session_evidence_denied",
+        "session_evidence_locked",
+        "session_evidence_reset_required",
+        "session_cursor_manifest_limit_exceeded",
+        "session_evidence_budget_exhausted",
+        "session_evidence_cancelled",
+        "no_session_evidence",
+        "shipped_fact_proposal_history_retired"
+      ],
+      "type": "string"
+    },
+    "MemoryAutomationTaskV1": {
+      "description": "Automatic memory capability selected after one registered application\nadmission. Skill-only automation remains outside this effect family.",
+      "enum": [
+        "memory_curator",
+        "session_reflector"
+      ],
+      "type": "string"
+    },
     "MemoryCategoryCountV1": {
+      "additionalProperties": false,
       "properties": {
         "category": {
           "type": "string"
         },
         "count": {
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         }
       },
@@ -9176,30 +10829,10 @@
       "type": "object"
     },
     "MemoryEntityRowV1": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
-        "aliases": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "created_at": {
-          "format": "int64",
-          "type": "integer"
-        },
         "entity_id": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "entity_type": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "fact_count": {
           "format": "uint64",
@@ -9213,30 +10846,12 @@
       "required": [
         "entity_id",
         "name",
-        "entity_type",
-        "aliases",
-        "created_at",
         "fact_count"
       ],
       "type": "object"
     },
-    "MemoryEntityTypeCountV1": {
-      "properties": {
-        "count": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "entity_type": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "entity_type",
-        "count"
-      ],
-      "type": "object"
-    },
     "MemoryFactDetailPayloadV1": {
+      "additionalProperties": false,
       "properties": {
         "error": {
           "type": "string"
@@ -9259,11 +10874,15 @@
       "type": "object"
     },
     "MemoryFactRowV1": {
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "access_count": {
-          "format": "int64",
-          "type": "integer"
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "category": {
           "type": [
@@ -9279,11 +10898,14 @@
         },
         "created_at": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "entities": {
           "items": {
-            "$ref": "#/$defs/MemoryEntityRowV1"
+            "type": "string"
           },
           "type": [
             "array",
@@ -9291,19 +10913,15 @@
           ]
         },
         "fact_id": {
-          "format": "int64",
-          "type": "integer"
+          "$ref": "#/$defs/FactId"
         },
-        "has_hrr": {
-          "format": "int64",
+        "helpful_count": {
+          "format": "uint64",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
           ]
-        },
-        "helpful_count": {
-          "format": "int64",
-          "type": "integer"
         },
         "last_recalled_at": {
           "format": "int64",
@@ -9312,10 +10930,44 @@
             "null"
           ]
         },
+        "linked_entities": {
+          "items": {
+            "$ref": "#/$defs/MemoryEntityRowV1"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "metadata": true,
-        "retrieval_count": {
+        "payload_access": {
+          "$ref": "#/$defs/PayloadAccessState"
+        },
+        "projected_as_of": {
           "format": "int64",
           "type": "integer"
+        },
+        "retrieval_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "score_millionths": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "source_label": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tags": {
           "items": {
@@ -9328,19 +10980,36 @@
         },
         "trust_score": {
           "format": "double",
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "unhelpful_count": {
-          "format": "int64",
-          "type": "integer"
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "updated_at": {
           "format": "int64",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "why": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "fact_id",
+        "payload_access",
         "trust_score",
         "retrieval_count",
         "access_count",
@@ -9348,70 +11017,94 @@
         "unhelpful_count",
         "created_at",
         "updated_at",
+        "projected_as_of",
         "last_recalled_at",
-        "has_hrr",
         "content",
         "category",
         "tags",
         "metadata",
-        "entities"
+        "source_label",
+        "entities",
+        "linked_entities"
       ],
       "type": "object"
     },
     "MemoryFactsCoverageV1": {
+      "additionalProperties": false,
       "properties": {
         "completeness": {
-          "type": "string"
+          "$ref": "#/$defs/DashboardCoverageCompletenessV1"
+        },
+        "eligible": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "examined": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "graph": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FactSearchGraphCoverageV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "limit": {
-          "format": "int64",
+          "format": "uint",
+          "maximum": 100,
+          "minimum": 1,
           "type": "integer"
-        },
-        "query_applied_after_limit": {
-          "type": "boolean"
         }
       },
       "required": [
         "completeness",
-        "limit",
-        "query_applied_after_limit"
+        "limit"
       ],
       "type": "object"
     },
-    "MemoryFeedbackFunnel": {
-      "description": "Fact-store adoption funnel: seen (retrieved/accessed) vs. rated\n(helpful/unhelpful). A dead funnel — facts seen many times but never\nrated — means trust scores stay entirely seed-time values, never earned.",
+    "MemoryFeedbackFunnelV1": {
+      "additionalProperties": false,
       "properties": {
         "access_count_total": {
-          "description": "Sum of `memory_facts.access_count` across all facts — total\nrecall-search-return accesses (see [`crate::memory::types::FactRecord::access_count`]).",
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
         "feedback_total": {
-          "description": "`helpful_count + unhelpful_count` summed across all facts — total\nfeedback events recorded.",
-          "format": "uint",
+          "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "rated_fact_count": {
-          "description": "Facts that have ever received at least one helpful or unhelpful\nrating via `tracedecay_fact_feedback`.",
-          "format": "uint",
+          "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "retrieval_count_total": {
-          "description": "Sum of `memory_facts.retrieval_count` across all facts — total times\nany fact was returned by a recall/search query.",
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
         "retrieved_fact_count": {
-          "description": "Facts that have ever been retrieved at least once\n(`retrieval_count > 0`).",
-          "format": "uint",
+          "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "seen_to_feedback_ratio": {
-          "description": "`(retrieval_count_total + access_count_total) / feedback_total`,\nrounded down. `None` when `feedback_total` is zero (undefined ratio;\nthe loop is entirely dead rather than merely sparse).",
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
@@ -9428,43 +11121,259 @@
       ],
       "type": "object"
     },
-    "MemoryFeedbackHistoryRepairV1": {
+    "MemoryGraphEdgeV1": {
+      "additionalProperties": false,
       "properties": {
-        "processed": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
+        "kind": {
+          "$ref": "#/$defs/ProjectMemoryGraphRelationKindV1"
         },
-        "remaining": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+        "source": {
+          "type": "string"
         },
-        "state": {
+        "target": {
           "type": "string"
         }
       },
       "required": [
-        "state",
-        "processed",
-        "remaining"
+        "source",
+        "target",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "MemoryGraphNodeV1": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "category": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "content": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "helpful_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "fact",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            },
+            "payload_access": {
+              "$ref": "#/$defs/PayloadAccessState"
+            },
+            "projected_as_of": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "retrieval_count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "trust_score": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "label",
+            "fact_id",
+            "payload_access",
+            "projected_as_of",
+            "content",
+            "category",
+            "trust_score",
+            "retrieval_count",
+            "helpful_count"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "entity_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "entity",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "label",
+            "entity_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "assertion_id": {
+              "$ref": "#/$defs/FactAssertionId"
+            },
+            "fact_id": {
+              "$ref": "#/$defs/FactId"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "assertion",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "label",
+            "assertion_id",
+            "fact_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "anchor_id": {
+              "$ref": "#/$defs/RetrievalAnchorId"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "retrieval_anchor",
+              "type": "string"
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "label",
+            "anchor_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MemoryGraphPayloadV1": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/MemoryGraphEdgeV1"
+          },
+          "type": "array"
+        },
+        "fact_candidates_examined": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fact_universe_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/MemoryGraphNodeV1"
+          },
+          "type": "array"
+        },
+        "relation_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "relation_limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "root_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unavailable_fact_candidates": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "nodes",
+        "edges",
+        "coverage",
+        "fact_universe_count",
+        "fact_candidates_examined",
+        "unavailable_fact_candidates",
+        "root_count",
+        "relation_limit",
+        "relation_count"
       ],
       "type": "object"
     },
     "MemoryGrowthPointV1": {
+      "additionalProperties": false,
       "properties": {
         "cumulative_facts": {
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
         "date": {
           "type": "string"
         },
         "facts": {
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         }
       },
@@ -9476,6 +11385,7 @@
       "type": "object"
     },
     "MemoryHolographicPayloadV1": {
+      "additionalProperties": false,
       "properties": {
         "entities": {
           "items": {
@@ -9499,8 +11409,7 @@
           "$ref": "#/$defs/MemoryFactsCoverageV1"
         },
         "graph": {
-          "additionalProperties": true,
-          "type": "object"
+          "$ref": "#/$defs/MemoryGraphPayloadV1"
         },
         "overview": {
           "anyOf": [
@@ -9535,68 +11444,8 @@
       ],
       "type": "object"
     },
-    "MemoryHrrCoverageV1": {
-      "properties": {
-        "bank_fact_count": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "bank_name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "category": {
-          "type": "string"
-        },
-        "coverage": {
-          "format": "double",
-          "type": "number"
-        },
-        "dim": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "facts": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "hrr_vectors": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "status": {
-          "type": "string"
-        },
-        "updated_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "category",
-        "facts",
-        "hrr_vectors",
-        "coverage",
-        "bank_name",
-        "bank_fact_count",
-        "dim",
-        "updated_at",
-        "status"
-      ],
-      "type": "object"
-    },
     "MemoryOverviewPayloadV1": {
+      "additionalProperties": false,
       "properties": {
         "holographic": {
           "$ref": "#/$defs/MemoryHolographicPayloadV1"
@@ -9622,11 +11471,8 @@
       "type": "object"
     },
     "MemoryOverviewSummaryV1": {
+      "additionalProperties": false,
       "properties": {
-        "banks": {
-          "format": "int64",
-          "type": "integer"
-        },
         "categories": {
           "items": {
             "$ref": "#/$defs/MemoryCategoryCountV1"
@@ -9634,34 +11480,18 @@
           "type": "array"
         },
         "entities": {
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
-        "entity_types": {
-          "items": {
-            "$ref": "#/$defs/MemoryEntityTypeCountV1"
-          },
-          "type": "array"
-        },
         "facts": {
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
         "growth": {
           "items": {
             "$ref": "#/$defs/MemoryGrowthPointV1"
-          },
-          "type": "array"
-        },
-        "hrr_coverage": {
-          "items": {
-            "$ref": "#/$defs/MemoryHrrCoverageV1"
-          },
-          "type": "array"
-        },
-        "memory_banks": {
-          "items": {
-            "$ref": "#/$defs/MemoryBankV1"
           },
           "type": "array"
         },
@@ -9675,18 +11505,21 @@
       "required": [
         "facts",
         "entities",
-        "banks",
         "categories",
-        "entity_types",
-        "hrr_coverage",
-        "memory_banks",
         "trust_histogram",
         "growth"
       ],
       "type": "object"
     },
     "MemoryReadStatusV1": {
+      "additionalProperties": false,
       "properties": {
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "string",
@@ -9694,7 +11527,7 @@
           ]
         },
         "state": {
-          "type": "string"
+          "$ref": "#/$defs/DashboardDomainStateV1"
         }
       },
       "required": [
@@ -9702,124 +11535,8 @@
       ],
       "type": "object"
     },
-    "MemoryRepairStats": {
-      "properties": {
-        "banks_rebuilt": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "missing_vectors_repaired": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "missing_vectors_repaired",
-        "banks_rebuilt"
-      ],
-      "type": "object"
-    },
-    "MemoryStatus": {
-      "properties": {
-        "algebra_name": {
-          "type": "string"
-        },
-        "bank_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "below_default_recall_threshold_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "entity_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "estimated_capacity": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "fact_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "feedback_funnel": {
-          "$ref": "#/$defs/MemoryFeedbackFunnel",
-          "description": "Adoption-funnel numbers for the fact store's feedback loop: how many\nfacts get seen (retrieved) vs. how many ever get rated. Surfaced so a\nmodel or user can see funnel health in one call instead of running\nad-hoc SQL against `memory_facts` / `memory_feedback_events`."
-        },
-        "helpful_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "hrr_dim": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "missing_vector_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "repair": {
-          "$ref": "#/$defs/MemoryRepairStats"
-        },
-        "trust_025_050_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "trust_050_075_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "trust_075_100_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "trust_0_025_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "unhelpful_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "fact_count",
-        "entity_count",
-        "bank_count",
-        "algebra_name",
-        "hrr_dim",
-        "estimated_capacity",
-        "trust_0_025_count",
-        "trust_025_050_count",
-        "trust_050_075_count",
-        "trust_075_100_count",
-        "below_default_recall_threshold_count",
-        "helpful_count",
-        "unhelpful_count",
-        "missing_vector_count",
-        "repair",
-        "feedback_funnel"
-      ],
-      "type": "object"
-    },
     "MemoryStatusPayloadV1": {
+      "additionalProperties": false,
       "properties": {
         "error": {
           "type": "string"
@@ -9827,19 +11544,8 @@
         "exists": {
           "type": "boolean"
         },
-        "feedback_history_repair": {
-          "$ref": "#/$defs/MemoryFeedbackHistoryRepairV1"
-        },
-        "largest_bank_fact_count": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "largest_bank_utilization_pct": {
-          "format": "double",
-          "type": "number"
-        },
         "memory": {
-          "$ref": "#/$defs/MemoryStatus"
+          "$ref": "#/$defs/MemoryStatusV1"
         },
         "path": {
           "type": "string"
@@ -9849,21 +11555,91 @@
         "path",
         "exists",
         "memory",
-        "largest_bank_fact_count",
-        "largest_bank_utilization_pct",
-        "feedback_history_repair",
         "error"
       ],
       "type": "object"
     },
+    "MemoryStatusV1": {
+      "additionalProperties": false,
+      "properties": {
+        "algebra": {
+          "$ref": "#/$defs/MemoryAlgebraStatusV1"
+        },
+        "below_default_recall_threshold_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entity_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fact_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feedback_funnel": {
+          "$ref": "#/$defs/MemoryFeedbackFunnelV1"
+        },
+        "helpful_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trust_025_050_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trust_050_075_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trust_075_100_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trust_0_025_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unhelpful_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fact_count",
+        "entity_count",
+        "algebra",
+        "trust_0_025_count",
+        "trust_025_050_count",
+        "trust_050_075_count",
+        "trust_075_100_count",
+        "below_default_recall_threshold_count",
+        "helpful_count",
+        "unhelpful_count",
+        "feedback_funnel"
+      ],
+      "type": "object"
+    },
     "MemoryTrustBucketV1": {
+      "additionalProperties": false,
       "properties": {
         "bucket": {
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
         "count": {
-          "format": "int64",
+          "format": "uint64",
+          "minimum": 0,
           "type": "integer"
         },
         "label": {
@@ -10655,6 +12431,40 @@
       "title": "PauseWorkRunCommand",
       "type": "object"
     },
+    "PayloadAccessState": {
+      "enum": [
+        "eligible",
+        "redacted",
+        "quarantined",
+        "retention_expired",
+        "deleted",
+        "unavailable",
+        "ambiguous"
+      ],
+      "type": "string"
+    },
+    "PayloadDigestV1": {
+      "description": "Strongly typed canonical identity: `PayloadDigestV1`.",
+      "type": "string"
+    },
+    "PayloadReferenceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "byte_len": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "$ref": "#/$defs/PayloadDigestV1"
+        }
+      },
+      "required": [
+        "digest",
+        "byte_len"
+      ],
+      "type": "object"
+    },
     "PerformanceComparisonReadModelV1": {
       "properties": {
         "baseline_build": {
@@ -10864,6 +12674,24 @@
       ],
       "type": "object"
     },
+    "ProblemOwningLayer": {
+      "description": "Layer that owns resolving the problem rather than merely presenting it.",
+      "enum": [
+        "adapter",
+        "application",
+        "runtime",
+        "port"
+      ],
+      "type": "string"
+    },
+    "ProblemTerminality": {
+      "description": "Whether the problem occurred before admission or is an admitted terminal.",
+      "enum": [
+        "pre_admission",
+        "admitted_terminal"
+      ],
+      "type": "string"
+    },
     "ProjectAliasRecord": {
       "properties": {
         "alias_path": {
@@ -10974,6 +12802,19 @@
     },
     "ProjectId": {
       "description": "Strongly typed canonical identity: `ProjectId`.",
+      "type": "string"
+    },
+    "ProjectMemoryGraphRelationKindV1": {
+      "description": "The finite relationship vocabulary exposed by the verified project-memory graph.",
+      "enum": [
+        "supports",
+        "contradicts",
+        "supersedes",
+        "derived_from",
+        "mentions",
+        "active_assertion",
+        "evidence_anchor"
+      ],
       "type": "string"
     },
     "ProjectRegistryEntry": {
@@ -11378,6 +13219,10 @@
         }
       ]
     },
+    "ProvenanceId": {
+      "description": "Strongly typed canonical identity: `ProvenanceId`.",
+      "type": "string"
+    },
     "ProviderId": {
       "description": "Strongly typed canonical identity: `ProviderId`.",
       "type": "string"
@@ -11720,6 +13565,50 @@
       ],
       "type": "object"
     },
+    "RequiredNullable": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EffectReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
+    },
+    "RequiredNullable2": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CancellationStage"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
+    },
+    "RequiredNullable3": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApplicationUnavailableClassV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
+    },
+    "RequiredNullable4": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApplicationExecutionFailureClassV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
+    },
     "ResolvedScope": {
       "additionalProperties": false,
       "description": "The resolved configuration scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
@@ -11753,6 +13642,25 @@
         "worktree_id",
         "reference",
         "scope_digest"
+      ],
+      "type": "object"
+    },
+    "ResultContractRef": {
+      "additionalProperties": false,
+      "description": "Versioned schema identity for an application result contract.",
+      "properties": {
+        "schema_id": {
+          "$ref": "#/$defs/SchemaId"
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_id",
+        "schema_revision"
       ],
       "type": "object"
     },
@@ -11801,6 +13709,26 @@
     },
     "RetrievalAnchorId": {
       "description": "Strongly typed canonical identity: `RetrievalAnchorId`.",
+      "type": "string"
+    },
+    "RetryDirective": {
+      "description": "Safe adapter-independent retry instruction. Adapters preserve it verbatim.",
+      "enum": [
+        "never",
+        "same_request",
+        "after_delay",
+        "after_revalidate",
+        "after_reconcile"
+      ],
+      "type": "string"
+    },
+    "RetryScope": {
+      "description": "Request identity boundary within which a retry remains valid.",
+      "enum": [
+        "same_request",
+        "same_operation",
+        "fresh_request"
+      ],
       "type": "string"
     },
     "RetryWorkAttemptCommandV1": {
@@ -11965,6 +13893,84 @@
     },
     "RunId": {
       "description": "Strongly typed canonical identity: `RunId`.",
+      "type": "string"
+    },
+    "SafeDiagnostic": {
+      "additionalProperties": false,
+      "description": "Sanitized detail that may cross the application boundary.",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "SanitizationReceiptId": {
+      "description": "Strongly typed canonical identity: `SanitizationReceiptId`.",
+      "type": "string"
+    },
+    "SanitizationReceiptRefV1": {
+      "additionalProperties": false,
+      "description": "Reference to a capture-owned sanitization receipt.\n\nReceipt references are the explicit boundary between untrusted wire data and\nthe proof-carrying text types below. They do not claim that the domain crate\nran a sanitizer; the capture layer owns issuance and persistence of receipts.",
+      "properties": {
+        "receipt_id": {
+          "$ref": "#/$defs/SanitizationReceiptId"
+        },
+        "sanitizer_version": {
+          "$ref": "#/$defs/ComponentVersion"
+        }
+      },
+      "required": [
+        "receipt_id",
+        "sanitizer_version"
+      ],
+      "type": "object"
+    },
+    "SanitizationReceiptV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/SanitizerDispositionV1"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PayloadReferenceV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt": {
+          "$ref": "#/$defs/SanitizationReceiptRefV1"
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/SensitivityV1"
+        }
+      },
+      "required": [
+        "receipt",
+        "disposition",
+        "sensitivity",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "SanitizerDispositionV1": {
+      "enum": [
+        "accepted",
+        "redacted",
+        "rejected",
+        "quarantined"
+      ],
       "type": "string"
     },
     "SavingsAccountingSummaryV1": {
@@ -12489,6 +14495,10 @@
       ],
       "type": "object"
     },
+    "SchemaId": {
+      "description": "Stable, canonical catalog identity for `SchemaId`.",
+      "type": "string"
+    },
     "ScopeOutcome_for_Array_of_AnyValue": {
       "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
       "oneOf": [
@@ -12707,6 +14717,15 @@
         "sealed_value_digest"
       ],
       "type": "object"
+    },
+    "SensitivityV1": {
+      "enum": [
+        "unclassified",
+        "non_sensitive",
+        "sensitive",
+        "secret"
+      ],
+      "type": "string"
     },
     "SessionId": {
       "description": "Strongly typed canonical identity: `SessionId`.",
@@ -14542,6 +16561,10 @@
         "lifecycle",
         "verbose"
       ],
+      "type": "string"
+    },
+    "UseCaseId": {
+      "description": "Stable, canonical catalog identity for `UseCaseId`.",
       "type": "string"
     },
     "UserProfileId": {
@@ -22561,6 +24584,12 @@
     "analytics_usage": {
       "$ref": "#/$defs/DashboardEnvelopeV116"
     },
+    "automation_memory_problem": {
+      "$ref": "#/$defs/MemoryAutomationRunProblemV1"
+    },
+    "automation_memory_run": {
+      "$ref": "#/$defs/MemoryAutomationRunResultV1"
+    },
     "automation_scheduler_status": {
       "$ref": "#/$defs/AutomationSchedulerStatusV1",
       "description": "Served identically by `GET /api/automation/scheduler/status` and by the\n`pause`/`resume` controls, which re-read rather than acknowledge."
@@ -22968,7 +24997,9 @@
     "multi_root_scope_set_cas_result",
     "multi_root_execute_request",
     "multi_root_query",
-    "automation_scheduler_status"
+    "automation_scheduler_status",
+    "automation_memory_run",
+    "automation_memory_problem"
   ],
   "schemaRevision": 1,
   "title": "DashboardContractCatalogV1",

@@ -30,7 +30,8 @@ use tracedecay_domain::{
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactCommitConflict, FactCommitOutcome, FactCommitReceipt,
     FactContradictionStateV1, FactCurrentQuery, FactLineageQuery, FactStore, FactStoreError,
-    FactWriteBatch, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery, StoredFactV1,
+    FactWriteBatch, FactWriteControl, MAX_FACT_QUERY_CONTRADICTIONS, RetrievalAnchorQuery,
+    StoredFactV1,
 };
 
 struct TestDb {
@@ -98,6 +99,7 @@ fn payload(content: &str, receipt_id: &str) -> FactPayloadV1 {
         vec!["fmh".to_owned()],
         vec!["TraceDecay".to_owned()],
         json!({}),
+        None,
         receipt,
         RetentionClass::new("durable.fmh").unwrap(),
     )
@@ -189,10 +191,14 @@ fn recorded_event(
 }
 
 async fn commit(store: &DatabaseFactStore<'_>, batch: FactWriteBatch) -> FactCommitReceipt {
-    match store.commit_fact(batch).await.unwrap() {
+    match store.commit_fact(batch, &write_control()).await.unwrap() {
         FactCommitOutcome::Committed(receipt) => receipt,
         other => panic!("expected a committed outcome, got {other:?}"),
     }
+}
+
+fn write_control() -> FactWriteControl {
+    FactWriteControl::new(std::sync::Arc::new(|| false), std::sync::Arc::new(|| true))
 }
 
 async fn current(
@@ -293,7 +299,6 @@ async fn commit_initial(
         vec![anchor.clone()],
         Vec::new(),
         None,
-        None,
     )
     .unwrap()
     .with_identity_material(identity)
@@ -340,7 +345,6 @@ async fn commit_assertion(
         vec![event],
         Vec::new(),
         referenced_anchor_ids,
-        None,
         Some(expected_last.clone()),
     )
     .unwrap();
@@ -452,7 +456,6 @@ async fn merge_and_hydration_preserve_source_and_privacy_identity() {
         ],
         Vec::new(),
         Vec::new(),
-        None,
         Some(drop.receipt.last_event_id().clone()),
     )
     .unwrap();
@@ -761,7 +764,6 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
         vec![curated],
         Vec::new(),
         Vec::new(),
-        None,
         Some(first.receipt.last_event_id().clone()),
     )
     .unwrap();
@@ -835,11 +837,13 @@ async fn contradictions_are_recorded_explicitly_in_lineage() {
         vec![rejected],
         Vec::new(),
         Vec::new(),
-        None,
         Some(last_event_id),
     )
     .unwrap();
-    let error = store.commit_fact(batch).await.unwrap_err();
+    let error = store
+        .commit_fact(batch, &write_control())
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, FactStoreError::Storage { .. }),
         "missing curation target should fail as a storage error, got {error:?}"
@@ -904,13 +908,15 @@ async fn failed_fact_batch_rolls_back_identity_assertion_anchor_and_lineage() {
         vec![new_anchor.clone()],
         Vec::new(),
         None,
-        None,
     )
     .unwrap()
     .with_identity_material(identity)
     .unwrap();
 
-    let error = store.commit_fact(batch).await.unwrap_err();
+    let error = store
+        .commit_fact(batch, &write_control())
+        .await
+        .unwrap_err();
     assert!(
         matches!(error, FactStoreError::Storage { .. }),
         "missing curation target should fail after staged writes, got {error:?}"
@@ -1015,7 +1021,6 @@ async fn as_of_projection_cannot_see_future_knowledge() {
         vec![trust_event],
         Vec::new(),
         Vec::new(),
-        None,
         Some(correction_receipt.last_event_id().clone()),
     )
     .unwrap();
@@ -1103,7 +1108,6 @@ async fn denied_payloads_never_hydrate() {
         vec![deleted],
         Vec::new(),
         Vec::new(),
-        None,
         Some(fixture.receipt.last_event_id().clone()),
     )
     .unwrap();
@@ -1205,7 +1209,6 @@ async fn redacted_frontiers_stay_redacted() {
         vec![redacted],
         Vec::new(),
         Vec::new(),
-        None,
         Some(fixture.receipt.last_event_id().clone()),
     )
     .unwrap();
@@ -1303,11 +1306,10 @@ async fn redacted_frontiers_stay_redacted() {
         vec![retained],
         vec![unredacted],
         Vec::new(),
-        None,
         Some(anchored.receipt.last_event_id().clone()),
     )
     .unwrap();
-    let outcome = store.commit_fact(batch).await.unwrap();
+    let outcome = store.commit_fact(batch, &write_control()).await.unwrap();
     assert!(
         matches!(
             outcome,
@@ -1586,7 +1588,6 @@ async fn payload_redaction_preserves_frontier_denominators() {
             vec![redacted],
             Vec::new(),
             Vec::new(),
-            None,
             Some(fixture.receipt.last_event_id().clone()),
         )
         .unwrap(),
@@ -1678,7 +1679,6 @@ async fn contradiction_metadata_transitions_at_the_as_of_cutoff() {
             vec![first_contradiction],
             Vec::new(),
             Vec::new(),
-            None,
             Some(source.receipt.last_event_id().clone()),
         )
         .unwrap(),
@@ -1728,7 +1728,6 @@ async fn contradiction_metadata_transitions_at_the_as_of_cutoff() {
             vec![second_contradiction],
             Vec::new(),
             Vec::new(),
-            None,
             Some(first_receipt.last_event_id().clone()),
         )
         .unwrap(),

@@ -36,6 +36,17 @@ pub(crate) struct DaemonConnection {
     pub(super) authority_record: Option<authority::DaemonAuthorityRecord>,
 }
 
+impl DaemonConnection {
+    #[cfg(test)]
+    pub(crate) fn unauthenticated_for_test(endpoint: DaemonEndpoint) -> Self {
+        Self {
+            endpoint,
+            auth_token: None,
+            authority_record: None,
+        }
+    }
+}
+
 pub(crate) fn current_daemon_connection() -> Result<DaemonConnection> {
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),

@@ -678,7 +678,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: BranchAction,
     },
-    /// Holographic memory maintenance (curation without the dashboard)
+    /// Inspect canonical memory and derived recall health
     #[command(long_about = MEMORY_LONG_ABOUT, after_help = MEMORY_AFTER_HELP)]
     Memory {
         #[command(subcommand)]
@@ -1095,34 +1095,6 @@ pub enum MemoryAction {
         /// Registered project root path or alias to inspect instead of discovering from cwd
         #[arg(long, conflicts_with_all = ["path", "project_id"])]
         project_path: Option<String>,
-    },
-    /// Similarity-dedup curation (and the LLM-review plan/apply halves),
-    /// suitable for a cron job — no dashboard server required.
-    ///
-    /// Default is a dry-run preview. The LLM tier never calls a model from
-    /// this binary: `--llm` emits the review request (clusters + chat
-    /// messages); run it through your own LLM and feed the strict-JSON ops
-    /// back with `--llm-ops <file>` to validate and (with `--apply`) execute
-    /// them.
-    Curate {
-        /// Apply the proposed deletions/ops instead of previewing them
-        #[arg(long)]
-        apply: bool,
-        /// Include the LLM-review request (clusters + messages) in the report
-        #[arg(long)]
-        llm: bool,
-        /// JSON file with externally produced LLM ops ({"ops": [...]}); "-" reads stdin
-        #[arg(long, value_name = "FILE")]
-        llm_ops: Option<String>,
-        /// Maximum candidate clusters included in the LLM review request
-        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS)]
-        max_clusters: usize,
-        /// Confidence floor below which LLM ops are rejected
-        #[arg(long, default_value_t = tracedecay::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE)]
-        min_confidence: f64,
-        /// Project path (default: current directory, with discovery)
-        #[arg(short, long)]
-        path: Option<String>,
     },
 }
 

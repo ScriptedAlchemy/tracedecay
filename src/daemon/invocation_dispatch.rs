@@ -56,6 +56,7 @@ async fn await_project_open_with_semantic_control<Output>(
         biased;
         () = tokio::time::sleep_until(deadline) => {
             Err(tracedecay_application::ApplicationProblem::TimedOut {
+                stage: tracedecay_application::CancellationStage::BeforeAdmission,
                 retry: tracedecay_application::RetryDirective::Never,
                 legal_actions: Vec::new(),
             })

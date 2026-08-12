@@ -80,6 +80,7 @@ async fn automation_run_artifact_mcp_tool_reads_verified_payload() {
             artifacts: vec![artifact],
             started_at: "1782283199".to_string(),
             completed_at: "1782283200".to_string(),
+            completed_at_micros: 1_782_283_200_000_000,
         },
     )
     .await

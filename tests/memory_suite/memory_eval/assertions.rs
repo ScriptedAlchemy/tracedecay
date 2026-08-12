@@ -52,7 +52,7 @@ pub(super) enum Assertion {
         #[serde(default)]
         phase: AssertionPhase,
     },
-    CurateDeletesSource {
+    CurationRemovesSource {
         name: String,
         source: String,
         expected: bool,

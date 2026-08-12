@@ -2,59 +2,39 @@
 
 use std::collections::BTreeSet;
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_domain::{
     ActorId, FactAssertionId, FactAssertionKindV1, FactCurationActionV1, FactEventId, FactId,
     FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
     UtcMicros,
 };
 use tracedecay_store::{
-    FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
-    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1,
-    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1,
-    ProjectMemoryFactMergeOutcomeV1,
+    FactCommitConflict, FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
+    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationEffectV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
 };
 
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 
-use super::super::crud::{commit_batch_tx, sanitize_payload};
+use super::super::crud::{
+    add_project_memory_fact_tx, commit_batch_tx, remove_project_memory_fact_tx, sanitize_payload,
+    update_project_memory_fact_tx,
+};
 use super::super::envelope::{
-    ProjectMemoryOperationReceiptV1, project_memory_digest,
-    project_memory_lookup_operation_receipt_tx, project_memory_record_operation_receipt_tx,
+    ProjectMemoryOperationReceiptV1, project_memory_lookup_operation_receipt_tx,
+    project_memory_record_operation_receipt_tx,
 };
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_event_time, project_memory_now,
     row_i64, row_optional_string, row_string, storage_error, storage_message,
 };
 use super::relations::normalize_tags;
+use super::review::verify_curation_review_tx;
 use super::{
     available_curation_fact_tx, curated_correction_batch, link_facts_tx, normalize_tags_tx,
 };
-
-fn fact_identity(target: &ProjectMemoryFactIdV1) -> Value {
-    json!({ "fact_id": target.fact_id().as_str() })
-}
-
-fn curation_operation_digest(operation: &ProjectMemoryFactCurationOperationV1) -> Value {
-    match operation {
-        ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => json!({
-            "kind": "normalize_tags",
-            "fact": fact_identity(operation.fact()),
-            "tags": operation.tags(),
-            "evidence": operation
-                .evidence_facts()
-                .iter()
-                .map(fact_identity)
-                .collect::<Vec<_>>(),
-            "confidence": operation.confidence().as_f64(),
-        }),
-        ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => json!({
-            "kind": "link_facts",
-            "relation": operation.relation(),
-        }),
-    }
-}
 
 fn canonical_fact_ids(
     owner: &FactOwnerV1,
@@ -104,58 +84,17 @@ async fn replay_curation(
     if receipt.owner() != request.owner()
         || receipt.operation_id() != request.operation_id()
         || receipt.input_digest() != input_digest
-        || envelope.fact_id.as_ref() != Some(receipt.replay_fact_id())
-        || envelope.event_id.as_ref() != Some(receipt.replay_event_id())
+        || receipt.automation_run_id() != request.automation_run_id()
+        || envelope.fact_id.as_ref() != receipt.replay_fact_id()
+        || envelope.event_id.as_ref() != receipt.replay_event_id()
     {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
             "curation operation receipt material does not match the request",
         ));
     }
-    let (changed, normalized_tags, facts_linked) = curation_receipt_material(request)?;
-    if receipt.changed_facts() != changed
-        || receipt.normalized_tags() != normalized_tags
-        || receipt.facts_linked() != facts_linked
-    {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "curation operation receipt summary does not match the immutable request",
-        ));
-    }
     verify_curation_replay_events_tx(transaction, request, &receipt).await?;
     Ok(receipt.into_replayed())
-}
-
-fn curation_receipt_material(
-    request: &ProjectMemoryFactCurationBatchV1,
-) -> FactStoreResult<(Vec<ProjectMemoryFactIdV1>, u64, u64)> {
-    let mut changed = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut normalized_tags = 0_u64;
-    let mut facts_linked = 0_u64;
-    for operation in request.operations() {
-        match operation {
-            ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
-                if seen.insert(operation.fact().fact_id().clone()) {
-                    changed.push(operation.fact().clone());
-                }
-                normalized_tags += 1;
-            }
-            ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
-                let relation = operation.relation();
-                for fact_id in [relation.source_fact_id(), relation.target_fact_id()] {
-                    if seen.insert(fact_id.clone()) {
-                        changed.push(ProjectMemoryFactIdV1::new(
-                            request.owner().clone(),
-                            fact_id.clone(),
-                        )?);
-                    }
-                }
-                facts_linked += 1;
-            }
-        }
-    }
-    Ok((changed, normalized_tags, facts_linked))
 }
 
 async fn verify_curation_replay_events_tx(
@@ -163,20 +102,113 @@ async fn verify_curation_replay_events_tx(
     request: &ProjectMemoryFactCurationBatchV1,
     receipt: &ProjectMemoryFactCurationReceiptV1,
 ) -> FactStoreResult<()> {
-    if receipt.commit_receipts().len() != request.operations().len() {
+    if receipt.operation_effects().len() != request.operations().len() {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
             "curation commit receipt count does not match the immutable request",
         ));
     }
     let key = OwnerKey::new(request.owner())?;
-    for (operation, commit) in request.operations().iter().zip(receipt.commit_receipts()) {
-        let (expected_fact_id, expected_event_count) = match operation {
-            ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
-                (operation.fact().fact_id(), 2_usize)
+    for (operation, effect) in request.operations().iter().zip(receipt.operation_effects()) {
+        let direct_matches = match operation {
+            ProjectMemoryFactCurationOperationV1::Add(operation) => {
+                Some(effect.matches_add_outcome(
+                    &add_project_memory_fact_tx(transaction, operation.command()).await?,
+                ))
             }
-            ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
+            ProjectMemoryFactCurationOperationV1::Update(operation) => {
+                Some(effect.matches_update_outcome(
+                    &update_project_memory_fact_tx(transaction, operation.command()).await?,
+                ))
+            }
+            ProjectMemoryFactCurationOperationV1::Merge(operation) => {
+                Some(effect.matches_merge_outcome(
+                    &merge_project_memory_facts_tx(transaction, operation.command()).await?,
+                ))
+            }
+            ProjectMemoryFactCurationOperationV1::Remove(operation) => {
+                Some(effect.matches_remove_outcome(
+                    operation.command().target(),
+                    &remove_project_memory_fact_tx(transaction, operation.command()).await?,
+                ))
+            }
+            ProjectMemoryFactCurationOperationV1::NormalizeTags(_)
+            | ProjectMemoryFactCurationOperationV1::LinkFacts(_) => None,
+        };
+        if let Some(matches) = direct_matches {
+            if !matches {
+                return Err(storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "curation effect does not match the canonical child operation replay",
+                ));
+            }
+            continue;
+        }
+        if let (
+            ProjectMemoryFactCurationOperationV1::LinkFacts(operation),
+            ProjectMemoryFactCurationOperationEffectV1::LinkFacts {
+                relation,
+                disposition:
+                    tracedecay_store::ProjectMemoryFactCurationLinkDispositionV1::AlreadyLinked,
+                commit: None,
+            },
+        ) = (operation, effect)
+        {
+            if !relation.matches_relation(operation.relation())
+                || !super::relations::exact_relation_exists_tx(
+                    transaction,
+                    request.owner(),
+                    operation.relation(),
+                )
+                .await?
+            {
+                return Err(storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "curation no-op link receipt does not match canonical relation state",
+                ));
+            }
+            continue;
+        }
+        let commits = effect.commit_receipts();
+        let [commit] = commits.as_slice() else {
+            return Err(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "curation commit receipt boundary does not match the immutable operation",
+            ));
+        };
+        let (expected_fact_id, expected_event_count) = match operation {
+            ProjectMemoryFactCurationOperationV1::NormalizeTags(operation)
+                if matches!(
+                    effect,
+                    ProjectMemoryFactCurationOperationEffectV1::NormalizeTags { fact, .. }
+                        if fact == operation.fact().fact()
+                ) =>
+            {
+                (operation.fact().fact().fact_id(), 2_usize)
+            }
+            ProjectMemoryFactCurationOperationV1::LinkFacts(operation)
+                if matches!(
+                    effect,
+                    ProjectMemoryFactCurationOperationEffectV1::LinkFacts { relation, .. }
+                        if relation.matches_relation(operation.relation())
+                ) =>
+            {
                 (operation.relation().source_fact_id(), 1_usize)
+            }
+            ProjectMemoryFactCurationOperationV1::Add(_)
+            | ProjectMemoryFactCurationOperationV1::Update(_)
+            | ProjectMemoryFactCurationOperationV1::Merge(_)
+            | ProjectMemoryFactCurationOperationV1::Remove(_) => {
+                return Err(storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "curation direct operation reached lineage-only replay verification",
+                ));
+            }
+            _ => {
+                return Err(storage_message(
+                    PROJECT_MEMORY_WRITE_OPERATION,
+                    "curation effect does not match the immutable request operation",
+                ));
             }
         };
         if commit.owner() != request.owner()
@@ -223,7 +255,7 @@ async fn verify_curation_replay_events_tx(
                 let mut expected_evidence_fact_ids = operation
                     .evidence_facts()
                     .iter()
-                    .map(|evidence| evidence.fact_id().clone())
+                    .map(|evidence| evidence.fact().fact_id().clone())
                     .collect::<Vec<_>>();
                 expected_evidence_fact_ids.sort_unstable();
                 let assertion_id = match recorded.kind() {
@@ -239,8 +271,8 @@ async fn verify_curation_replay_events_tx(
                         ));
                     }
                 };
-                if recorded.fact_id() != operation.fact().fact_id()
-                    || normalized.fact_id() != operation.fact().fact_id()
+                if recorded.fact_id() != operation.fact().fact().fact_id()
+                    || normalized.fact_id() != operation.fact().fact().fact_id()
                     || recorded.actor_id() != request.actor()
                     || normalized.actor_id() != request.actor()
                     || recorded.occurred_at().0.checked_add(1) != Some(normalized.occurred_at().0)
@@ -265,7 +297,7 @@ async fn verify_curation_replay_events_tx(
                 let payload = correction_assertion_payload_tx(
                     transaction,
                     &key,
-                    operation.fact().fact_id(),
+                    operation.fact().fact().fact_id(),
                     assertion_id,
                     request.actor(),
                     recorded.occurred_at(),
@@ -486,17 +518,7 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactCurationBatchV1,
 ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
-    let operations = request
-        .operations()
-        .iter()
-        .map(curation_operation_digest)
-        .collect::<Vec<_>>();
-    let input_digest = project_memory_digest(json!({
-        "owner": request.owner(),
-        "actor": request.actor().map(ActorId::as_str),
-        "min_confidence": request.min_confidence().as_f64(),
-        "operations": operations,
-    }))?;
+    let input_digest = request.input_digest()?;
     if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
@@ -509,12 +531,12 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
         return replay_curation(transaction, request, &receipt, &input_digest).await;
     }
 
+    verify_curation_review_tx(transaction, request).await?;
+
     let now = project_memory_now()?;
     let mut changed_ids = Vec::new();
-    let mut commits = Vec::new();
+    let mut effects = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut normalized_tags = 0_u64;
-    let mut facts_linked = 0_u64;
     for (index, operation) in request.operations().iter().enumerate() {
         let offset = i64::try_from(index)
             .ok()
@@ -527,6 +549,51 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
             })?;
         let operation_time = project_memory_event_time(now, offset)?;
         match operation {
+            ProjectMemoryFactCurationOperationV1::Add(operation) => {
+                let outcome = add_project_memory_fact_tx(transaction, operation.command()).await?;
+                if outcome.commit_receipt().is_some()
+                    && seen.insert(outcome.fact().fact_id().clone())
+                {
+                    changed_ids.push(outcome.fact().fact_id().clone());
+                }
+                effects.push(ProjectMemoryFactCurationOperationEffectV1::add(&outcome)?);
+            }
+            ProjectMemoryFactCurationOperationV1::Update(operation) => {
+                let outcome =
+                    update_project_memory_fact_tx(transaction, operation.command()).await?;
+                if seen.insert(outcome.fact().fact_id().clone()) {
+                    changed_ids.push(outcome.fact().fact_id().clone());
+                }
+                effects.push(ProjectMemoryFactCurationOperationEffectV1::update(
+                    &outcome,
+                )?);
+            }
+            ProjectMemoryFactCurationOperationV1::Merge(operation) => {
+                let outcome =
+                    merge_project_memory_facts_tx(transaction, operation.command()).await?;
+                if outcome.content_updated() && seen.insert(outcome.winner().fact_id().clone()) {
+                    changed_ids.push(outcome.winner().fact_id().clone());
+                }
+                for loser in outcome.deleted_losers() {
+                    if seen.insert(loser.fact_id().clone()) {
+                        changed_ids.push(loser.fact_id().clone());
+                    }
+                }
+                effects.push(ProjectMemoryFactCurationOperationEffectV1::merge(outcome));
+            }
+            ProjectMemoryFactCurationOperationV1::Remove(operation) => {
+                let outcome =
+                    remove_project_memory_fact_tx(transaction, operation.command()).await?;
+                if outcome.was_removed()
+                    && seen.insert(operation.command().target().fact_id().clone())
+                {
+                    changed_ids.push(operation.command().target().fact_id().clone());
+                }
+                effects.push(ProjectMemoryFactCurationOperationEffectV1::remove(
+                    operation.command().target().clone(),
+                    &outcome,
+                )?);
+            }
             ProjectMemoryFactCurationOperationV1::NormalizeTags(operation) => {
                 let (fact_id, receipt) = normalize_tags_tx(
                     transaction,
@@ -539,11 +606,13 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
                 if seen.insert(fact_id.clone()) {
                     changed_ids.push(fact_id);
                 }
-                commits.push(receipt);
-                normalized_tags += 1;
+                effects.push(ProjectMemoryFactCurationOperationEffectV1::normalize_tags(
+                    operation.fact().fact().clone(),
+                    receipt,
+                )?);
             }
             ProjectMemoryFactCurationOperationV1::LinkFacts(operation) => {
-                let (fact_ids, receipt) = link_facts_tx(
+                let (fact_ids, commit) = link_facts_tx(
                     transaction,
                     request.owner(),
                     request.actor(),
@@ -556,8 +625,15 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
                         changed_ids.push(fact_id);
                     }
                 }
-                commits.push(receipt);
-                facts_linked += 1;
+                effects.push(match commit {
+                    Some(receipt) => ProjectMemoryFactCurationOperationEffectV1::link_facts(
+                        operation.relation().clone(),
+                        receipt,
+                    )?,
+                    None => ProjectMemoryFactCurationOperationEffectV1::already_linked(
+                        operation.relation().clone(),
+                    )?,
+                });
             }
         }
     }
@@ -573,10 +649,9 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
         request.owner().clone(),
         request.operation_id().clone(),
         input_digest.clone(),
-        commits,
+        request.automation_run_id().cloned(),
+        effects,
         changed,
-        normalized_tags,
-        facts_linked,
     )?;
     let durable_receipt = curation_receipt_value(&receipt)?;
     project_memory_record_operation_receipt_tx(
@@ -585,8 +660,8 @@ pub(in crate::store::memory) async fn apply_project_memory_fact_curation_tx(
         request.operation_id(),
         "curation",
         &input_digest,
-        Some(receipt.replay_fact_id()),
-        Some(receipt.replay_event_id()),
+        receipt.replay_fact_id(),
+        receipt.replay_event_id(),
         &durable_receipt,
         now,
     )
@@ -718,7 +793,7 @@ async fn verify_merge_replay_events_tx(
             }
         }
     }
-    for (loser, commit) in request.losers().iter().zip(commits.by_ref()) {
+    for (loser, commit) in request.loser_facts().zip(commits.by_ref()) {
         let events =
             verified_merge_commit_events_tx(transaction, &key, request.owner(), commit).await?;
         match events.as_slice() {
@@ -775,7 +850,7 @@ async fn replay_merge(
         || outcome.operation_id() != request.operation_id()
         || outcome.input_digest() != input_digest
         || outcome.winner() != request.winner()
-        || outcome.deleted_losers() != request.losers()
+        || !outcome.deleted_losers().iter().eq(request.loser_facts())
         || outcome.content_updated() != request.merged_content().is_some()
         || envelope.fact_id.as_ref() != Some(first_commit.fact_id())
         || envelope.event_id.as_ref() != Some(first_commit.last_event_id())
@@ -808,6 +883,27 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
 
     let now = project_memory_now()?;
     let winner_fact = available_curation_fact_tx(transaction, request.winner()).await?;
+    if winner_fact.last_event_id() != request.winner_target().expected_last_event_id() {
+        return Err(FactStoreError::CommitConflict {
+            conflict: FactCommitConflict::LastEventMismatch {
+                expected: Some(request.winner_target().expected_last_event_id().clone()),
+                actual: Some(winner_fact.last_event_id().clone()),
+            },
+        });
+    }
+    let mut loser_facts = Vec::with_capacity(request.loser_targets().len());
+    for target in request.loser_targets() {
+        let loser = available_curation_fact_tx(transaction, target.fact()).await?;
+        if loser.last_event_id() != target.expected_last_event_id() {
+            return Err(FactStoreError::CommitConflict {
+                conflict: FactCommitConflict::LastEventMismatch {
+                    expected: Some(target.expected_last_event_id().clone()),
+                    actual: Some(loser.last_event_id().clone()),
+                },
+            });
+        }
+        loser_facts.push((target, loser));
+    }
     let mut commits = Vec::new();
     let content_updated = if let Some(content) = request.merged_content() {
         let payload = winner_fact
@@ -839,9 +935,8 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
         false
     };
 
-    let mut deleted_losers = Vec::with_capacity(request.losers().len());
-    for target in request.losers() {
-        let loser = available_curation_fact_tx(transaction, target).await?;
+    let mut deleted_losers = Vec::with_capacity(request.loser_targets().len());
+    for (target, loser) in loser_facts {
         if loser.fact_id() == winner_fact.fact_id() {
             return Err(storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
@@ -852,13 +947,13 @@ pub(in crate::store::memory) async fn merge_project_memory_facts_tx(
             loser.fact_id(),
             request.owner(),
             loser.payload_access(),
-            loser.last_event_id(),
+            target.expected_last_event_id(),
             winner_fact.fact_id(),
             request.actor().cloned(),
             now,
         )?;
         commits.push(commit_batch_tx(transaction, &batch).await?.0);
-        deleted_losers.push(target.clone());
+        deleted_losers.push(target.fact().clone());
     }
 
     let outcome = ProjectMemoryFactMergeOutcomeV1::new(

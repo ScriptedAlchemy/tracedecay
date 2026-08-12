@@ -1,9 +1,9 @@
 //! Typed wire projections shared by the primitive graph handlers.
 
 use tracedecay_application::retrieval::{
-    ContextMemoryFactV1, ContextMemoryMatchV1, PrimitiveLaneCompleteV1, PrimitiveLaneStateV1,
-    PrimitiveLaneStatusV1, PrimitiveNotFoundV1, PrimitiveRecallV1, PrimitiveSearchCoverageV1,
-    PrimitiveSemanticModeV1, PrimitiveSymbolLocationV1,
+    PrimitiveLaneCompleteV1, PrimitiveLaneStateV1, PrimitiveLaneStatusV1, PrimitiveNotFoundV1,
+    PrimitiveRecallV1, PrimitiveSearchCoverageV1, PrimitiveSemanticModeV1,
+    PrimitiveSymbolLocationV1,
 };
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 
@@ -78,37 +78,6 @@ pub(super) fn symbol_location(
         end_line: graph_symbol_end_line(metadata)?.saturating_add(1),
         unavailable_fields: vec!["attrs_start_line".to_owned()],
     })
-}
-
-pub(super) fn memory_match(hit: &crate::memory::types::FactSearchResult) -> ContextMemoryMatchV1 {
-    let fact = &hit.fact;
-    ContextMemoryMatchV1 {
-        fact: ContextMemoryFactV1 {
-            fact_id: fact.fact_id,
-            content: fact.content.clone(),
-            category: fact.category.to_string(),
-            tags: fact.tags.clone(),
-            entities: fact.entities.clone(),
-            trust_score: fact.trust_score,
-            source: fact.source.clone(),
-            retrieval_count: fact.retrieval_count,
-            access_count: fact.access_count,
-            helpful_count: fact.helpful_count,
-            unhelpful_count: fact.unhelpful_count,
-            created_at: fact.created_at,
-            updated_at: fact.updated_at,
-            last_retrieved_at: fact.last_retrieved_at,
-            last_recalled_at: fact.last_recalled_at,
-            last_feedback_at: fact.last_feedback_at,
-            metadata: fact.metadata.clone(),
-        },
-        score: hit.score,
-        fts_score: hit.fts_score,
-        jaccard_score: hit.jaccard_score,
-        holographic_score: hit.holographic_score,
-        trust_score: hit.trust_score,
-        why: hit.why.clone(),
-    }
 }
 
 pub(super) fn node_not_found(node_id: &str) -> Result<ToolResult> {

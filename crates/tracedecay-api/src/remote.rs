@@ -440,6 +440,7 @@ fn remote_protocol_response<T: Serialize>(response: RemoteHttpResponseV1<T>) -> 
             ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
             ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
             ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
             ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,

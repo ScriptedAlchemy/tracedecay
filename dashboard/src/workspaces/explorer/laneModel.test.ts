@@ -16,9 +16,13 @@ import {
   laneHits,
   laneStateDetail,
   laneStateKind,
+  runIsTerminal,
+  runStateKind,
   searchLane,
   type ExplorerLaneReadModel,
 } from './laneModel.ts';
+
+const KNOWLEDGE_FACT_ID = `fact.${'a'.repeat(64)}.${'7'.padStart(64, '0')}`;
 
 /**
  * Every source fixture is parsed through the generated schema, so a shape the
@@ -143,7 +147,7 @@ describe('laneFromSourceProgress', () => {
             limit: 25,
             total: null,
             next_offset: null,
-            rows: [{ fact_id: 7, content: 'real fact' }],
+            rows: [{ fact_id: KNOWLEDGE_FACT_ID, content: 'real fact' }],
             metadata: {},
           },
         }),
@@ -154,7 +158,7 @@ describe('laneFromSourceProgress', () => {
       lane: 'knowledge',
       reportedTotal: null,
       unreadableRows: 0,
-      hits: [{ key: 'knowledge:7', title: 'real fact' }],
+      hits: [{ key: `knowledge:${KNOWLEDGE_FACT_ID}`, title: 'real fact' }],
     });
   });
 
@@ -402,6 +406,13 @@ describe('searchLane', () => {
     expect(new Set(conditions.map((read) => read.state)).size).toBe(6);
     // Only the source that answered may contribute rows or a count.
     expect(conditions.filter((read) => read.state === 'ready')).toHaveLength(1);
+  });
+});
+
+describe('run state', () => {
+  it('keeps a timed-out coordinator run terminal and visibly timed out', () => {
+    expect(runIsTerminal('timed_out')).toBe(true);
+    expect(runStateKind('timed_out')).toBe('timed_out');
   });
 });
 

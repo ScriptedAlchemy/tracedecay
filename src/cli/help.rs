@@ -556,21 +556,17 @@ Related: tracedecay tool branch_search / branch_diff / branch_list
 (cross-branch queries without switching checkout).";
 
 pub(crate) const MEMORY_LONG_ABOUT: &str = "\
-Inspects and curates the holographic memory store from the terminal — health \
-status plus similarity-dedup curation with an explicit LLM review loop — \
-without running the dashboard. Curation defaults to a dry-run preview; \
-nothing is deleted without --apply.";
+Inspects the canonical memory store from the terminal without opening the \
+dashboard. Automatic memory curation is daemon-owned and agent-managed; this \
+command remains a read-only health and capacity view.";
 
 pub(crate) const MEMORY_AFTER_HELP: &str = "\
 Examples:
   tracedecay memory status --json                Memory health and counts
-  tracedecay memory curate                       Dry-run dedup preview
-  tracedecay memory curate --apply               Apply proposed deletions
-  tracedecay memory curate --llm > review.json   Emit the LLM review request
-  tracedecay memory curate --llm-ops ops.json --apply
 
-Related: tracedecay dashboard (visual curation), tracedecay tool fact_store
-(read/write individual facts), tracedecay sessions (transcript recall).";
+Related: tracedecay automation (agent-managed curation and terminal receipts),
+tracedecay tool fact_store (canonical fact operations), tracedecay sessions
+(transcript recall).";
 
 pub(crate) const AUTOMATION_LONG_ABOUT: &str = "\
 Configures and drives the self-improvement automation loop (memory curator, \
@@ -591,7 +587,7 @@ Examples:
   tracedecay automation facts list               Terminal automatic fact receipts
 
 Related: tracedecay install --agent codex --automation (enable at install),
-tracedecay dashboard (automation outcomes), tracedecay memory curate.";
+tracedecay dashboard (automation outcomes), tracedecay memory status.";
 
 pub(crate) const STORAGE_LONG_ABOUT: &str = "\
 Profile-storage maintenance: read-only per-store size and retention reporting, \

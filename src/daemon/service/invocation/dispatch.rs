@@ -187,7 +187,7 @@ impl DaemonInvocationService {
                 deadline,
                 cancellation,
                 ..
-            } => admit_lsp_control(request_id.clone(), deadline, cancellation).err(),
+            } => lsp::admit_lsp_control(request_id.clone(), deadline, cancellation).err(),
             _ => None,
         };
         if let Some(response) = pre_admission_response {

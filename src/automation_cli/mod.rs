@@ -71,7 +71,7 @@ mod tests {
         );
 
         let (path, request) = automation_run_rpc_request(AutomationRunAction::MemoryCuration {
-            max_clusters: 9,
+            fact_review_limit: 9,
             min_confidence: 0.7,
             path: Some("/repo".to_string()),
         })
@@ -82,7 +82,7 @@ mod tests {
             serde_json::json!({
                 "action": "automation_run",
                 "task": "memory_curation",
-                "options": { "max_clusters": 9, "min_confidence": 0.7 },
+                "options": { "fact_review_limit": 9, "min_confidence": 0.7 },
             })
         );
 
@@ -147,7 +147,10 @@ mod tests {
     #[test]
     fn automation_rpc_preserves_response_shape() {
         let payload = serde_json::json!({ "run": { "run_id": "run-5", "status": "ok" } });
-        assert_eq!(automation_run_result(&payload).unwrap(), &payload["run"]);
+        assert!(matches!(
+            automation_run_result(&payload).unwrap(),
+            AutomationRunRpcOutcome::Run(run) if run == &payload["run"]
+        ));
         assert!(automation_run_result(&serde_json::json!({})).is_err());
     }
 

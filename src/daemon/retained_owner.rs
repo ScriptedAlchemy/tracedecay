@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_application::{
-    RequestAdmission, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
-    RetainedSurfacePortsV1, now_micros,
+    CancellationStage, RequestAdmission, RetainedSurfaceExecutionContextV1,
+    RetainedSurfaceExecutionErrorV1, RetainedSurfacePortsV1, now_micros,
 };
 use tracedecay_domain::ManifestDigest;
 
@@ -16,12 +16,21 @@ use crate::tracedecay::TraceDecay;
 
 mod lcm;
 mod memory;
+mod memory_mapping;
+mod memory_mutation;
+mod memory_stage;
+mod memory_target;
+mod memory_tracking;
 mod profile;
 mod receipts;
 mod session;
 pub(crate) mod session_queries;
 mod session_receipts;
 pub(crate) mod session_refresh;
+
+pub(crate) use memory_mapping::public_search_page;
+pub(crate) use memory_target::{MemoryTargetAccessV1, open_project_retained_memory_target};
+pub(crate) use receipts::{PreparedRetainedEffect, prepare_retained_effect};
 
 pub(crate) use profile::{
     ProfileRetainedAuthoritiesV1, ProfileRetainedConnectionAuthorityV1,
@@ -109,8 +118,16 @@ where
     let now = now_micros();
     match context.request_context.admission_at(now) {
         RequestAdmission::Admitted => {}
-        RequestAdmission::Cancelled => return Err(RetainedSurfaceExecutionErrorV1::Cancelled),
-        RequestAdmission::TimedOut => return Err(RetainedSurfaceExecutionErrorV1::TimedOut),
+        RequestAdmission::Cancelled => {
+            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                CancellationStage::BeforeRead,
+            ));
+        }
+        RequestAdmission::TimedOut => {
+            return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                CancellationStage::BeforeRead,
+            ));
+        }
     }
     let remaining = context
         .request_context
@@ -121,11 +138,15 @@ where
     let remaining = u64::try_from(remaining)
         .ok()
         .map(Duration::from_micros)
-        .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut)?;
+        .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
+            CancellationStage::BeforeRead,
+        ))?;
     match tokio::time::timeout(remaining, future).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(map_execution_error(error)),
-        Err(_) => Err(RetainedSurfaceExecutionErrorV1::TimedOut),
+        Err(_) => Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+            CancellationStage::DuringRead,
+        )),
     }
 }
 

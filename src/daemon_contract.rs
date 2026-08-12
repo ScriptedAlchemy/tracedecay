@@ -16,6 +16,7 @@
 //! application-DTO conversions travel with the types they belong to.
 
 mod git_surface;
+mod problem_response;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -2786,6 +2787,10 @@ pub(crate) enum DaemonInvocationOutcome {
         outcome:
             ApplicationOutcome<tracedecay_application::retained_surfaces::RetainedSurfaceResultV1>,
     },
+    RetainedApplicationProblem {
+        scope: ResolvedScope,
+        problem: ApplicationProblem,
+    },
     MultiRootScopeSetRead {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<Option<AuthorizedScopeSet>>,
@@ -2918,27 +2923,6 @@ pub(crate) enum HandoffApplicationOutcomeV1 {
 }
 
 impl DaemonInvocationResponse {
-    pub(crate) fn problem(request_id: impl Into<String>, problem: DaemonInvocationProblem) -> Self {
-        Self {
-            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
-            revision: DAEMON_INVOCATION_REVISION,
-            request_id: request_id.into(),
-            outcome: DaemonInvocationOutcome::Problem { problem },
-        }
-    }
-
-    pub(crate) fn application_problem(
-        request_id: impl Into<String>,
-        problem: ApplicationProblem,
-    ) -> Self {
-        Self {
-            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
-            revision: DAEMON_INVOCATION_REVISION,
-            request_id: request_id.into(),
-            outcome: DaemonInvocationOutcome::ApplicationProblem { problem },
-        }
-    }
-
     pub(crate) fn lsp_opened(
         request_id: String,
         session: DaemonLspSessionAccess,

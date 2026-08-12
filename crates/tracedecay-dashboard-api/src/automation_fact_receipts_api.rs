@@ -1,11 +1,13 @@
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Extension, Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::DashboardState;
 use super::util::{JsonQuery, coerce_limit, http_detail};
+use super::{DashboardHttpRequestControlV1, DashboardState};
+use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
+use crate::read_model::DashboardDomainStateV1;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_agent_hosts::automation::automatic_facts::{
     AutomaticFactReceipt, AutomaticFactState, list_automatic_fact_receipts,
@@ -21,8 +23,17 @@ pub struct ListParams {
 
 pub async fn list(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     JsonQuery(params): JsonQuery<ListParams>,
 ) -> (StatusCode, Json<Value>) {
+    let Some(Extension(control)) = control else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(http_detail(
+                "dashboard HTTP request admission is unavailable",
+            )),
+        );
+    };
     let receipt_state = match params.state.as_deref() {
         Some(value) => match AutomaticFactState::parse(value) {
             Ok(state) => Some(state),
@@ -47,7 +58,21 @@ pub async fn list(
             );
         }
     };
-    match list_automatic_fact_receipts(&memory, receipt_state, limit).await {
+    let result =
+        list_automatic_fact_receipts(&memory, receipt_state, limit, &fact_read_control(&control))
+            .await;
+    if let Some(state) = request_terminal_state(&control) {
+        let (code, detail) = terminal_read_code(state);
+        return (
+            if state == DashboardDomainStateV1::TimedOut {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::REQUEST_TIMEOUT
+            },
+            Json(json!({"detail": detail, "code": code})),
+        );
+    }
+    match result {
         Ok(receipts) => {
             let count = receipts.len();
             (
@@ -71,8 +96,17 @@ pub async fn list(
 
 pub async fn view(
     State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
     AxumPath(id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
+    let Some(Extension(control)) = control else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(http_detail(
+                "dashboard HTTP request admission is unavailable",
+            )),
+        );
+    };
     let memory = match memory_application_for_db(state.memory_owner.clone(), state.mem_db.as_ref())
     {
         Ok(memory) => memory,
@@ -85,7 +119,19 @@ pub async fn view(
             );
         }
     };
-    match load_automatic_fact_receipt(&memory, &id).await {
+    let result = load_automatic_fact_receipt(&memory, &id, &fact_read_control(&control)).await;
+    if let Some(state) = request_terminal_state(&control) {
+        let (code, detail) = terminal_read_code(state);
+        return (
+            if state == DashboardDomainStateV1::TimedOut {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::REQUEST_TIMEOUT
+            },
+            Json(json!({"detail": detail, "code": code})),
+        );
+    }
+    match result {
         Ok(Some(receipt)) => (StatusCode::OK, Json(receipt_payload(&receipt))),
         Ok(None) => (
             StatusCode::NOT_FOUND,

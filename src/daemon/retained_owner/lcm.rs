@@ -14,9 +14,9 @@ use tracedecay_application::retained_surfaces::{
     RetainedSurfaceResultV1, RetainedTimeFilterV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, CancellationSignal, RequestContext, RetainedLcmExecutionPortV1,
-    RetainedLcmRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
-    RetainedSurfaceExecutionFutureV1,
+    ApplicationOutcome, CancellationSignal, CancellationStage, RequestContext,
+    RetainedLcmExecutionPortV1, RetainedLcmRequestV1, RetainedSurfaceExecutionContextV1,
+    RetainedSurfaceExecutionErrorV1, RetainedSurfaceExecutionFutureV1,
 };
 use tracedecay_domain::{SessionId, TemporalModeV1, UtcMicros};
 use tracedecay_global_db::{
@@ -523,8 +523,12 @@ fn validate_receipt(
 fn execution_error(outcome: LcmAuthorityOutcome) -> RetainedSurfaceExecutionErrorV1 {
     match outcome {
         LcmAuthorityOutcome::Denied => RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized,
-        LcmAuthorityOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled,
-        LcmAuthorityOutcome::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut,
+        LcmAuthorityOutcome::Cancelled => {
+            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
+        }
+        LcmAuthorityOutcome::TimedOut => {
+            RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::DuringRead)
+        }
         LcmAuthorityOutcome::Ready
         | LcmAuthorityOutcome::Unavailable { .. }
         | LcmAuthorityOutcome::Failed { .. } => RetainedSurfaceExecutionErrorV1::Unavailable,

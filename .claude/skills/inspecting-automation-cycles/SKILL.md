@@ -1,6 +1,6 @@
 ---
 name: inspecting-automation-cycles
-description: 'TraceDecay Dev: Use when auditing TraceDecay automation loops, skipped runs, memory-curator/session-reflector/skill-writer output, apply policy, or run artifacts.'
+description: 'TraceDecay Dev: Use when auditing TraceDecay automation loops, skipped runs, memory-curator/session-reflector/skill-writer output, automatic application/deployment receipts, or run artifacts.'
 ---
 
 # TraceDecay Dev: Inspecting Automation Cycles
@@ -12,7 +12,7 @@ analytics prove whether generated output was adopted.
 ## Workflow
 
 1. Start with `tracedecay automation config get` to identify enabled tasks,
-   schedules, locks, profile paths, and apply policy.
+   schedules, locks, profile paths, backend, and host mode.
 2. List recent runs with `tracedecay automation runs list --limit 100`; group
    by task and status before opening individual artifacts.
 3. For failures or suspicious skips, open the relevant artifact with
@@ -33,7 +33,7 @@ analytics prove whether generated output was adopted.
 | `scheduler_lock_active` | Another run owns the loop | Check age before calling stale. |
 | `no_new_session_activity` | Nothing new to process | Verify transcript ingest if surprising. |
 | `validation_gate` artifact | Mutation passed validation | Inspect automatic application/deployment receipts. |
-| Many fact proposal records | Inspect validation/apply telemetry | Use `tracedecay:project-memory`. |
+| Many automatic fact outcome records | Inspect validation/application receipts | Use `tracedecay:project-memory`. |
 | Active managed skills with zero use | Adoption telemetry gap | Use `tracedecay:diagnosing-analytics`. |
 
 ## Guardrails

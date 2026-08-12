@@ -297,6 +297,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::daemon::store_writer_gate::{StoreWriterClass, WriterScope};
 
     fn owner(project_id: &str) -> StoreOwnerKey {
         StoreOwnerKey {
@@ -341,10 +342,7 @@ mod tests {
             .quiesce_project_identity(std::path::Path::new("/profile"), "project-a", &roots)
             .await
             .expect("quiesce project-open identity");
-        let scope = super::WriterScope::store(
-            "/profile/projects/project-a",
-            super::StoreWriterClass::Owner,
-        );
+        let scope = WriterScope::store("/profile/projects/project-a", StoreWriterClass::Owner);
         let writer = administration.gate.acquire(&scope).await;
         let fence = Arc::new(ProjectRetirementFenceV1::new(
             invocation,

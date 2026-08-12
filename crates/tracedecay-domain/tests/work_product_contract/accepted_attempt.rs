@@ -99,8 +99,15 @@ fn execution_admission_precedes_identity_linking_and_task_evidence_stays_separat
             .legal_actions_for(&task_id)
             .unwrap()
             .clone();
-    assert!(before_actions.contains(&tracedecay_domain::WorkLegalActionV1::AdmitExecution));
-    assert!(!before_actions.contains(&tracedecay_domain::WorkLegalActionV1::LinkAcceptedAttempt));
+    // Execution admission is an atomic graph mutation, not a Kanban action;
+    // the card affordances remain stable while the graph enforces link order.
+    let expected_actions = BTreeSet::from([
+        tracedecay_domain::WorkLegalActionV1::ViewEvidence,
+        tracedecay_domain::WorkLegalActionV1::LinkAcceptedAttempt,
+        tracedecay_domain::WorkLegalActionV1::AcceptTask,
+        tracedecay_domain::WorkLegalActionV1::Handoff,
+    ]);
+    assert_eq!(before_actions, expected_actions);
 
     let admitted = admit_execution(accepted, &task_id, UtcMicros(25));
     let item = admitted.item(&task_id).unwrap();
@@ -114,8 +121,7 @@ fn execution_admission_precedes_identity_linking_and_task_evidence_stays_separat
             .legal_actions_for(&task_id)
             .unwrap()
             .clone();
-    assert!(!admitted_actions.contains(&tracedecay_domain::WorkLegalActionV1::AdmitExecution));
-    assert!(admitted_actions.contains(&tracedecay_domain::WorkLegalActionV1::LinkAcceptedAttempt));
+    assert_eq!(admitted_actions, expected_actions);
 
     let graph = link_accepted_attempt(admitted, &task_id, identity.clone(), UtcMicros(30));
     assert!(

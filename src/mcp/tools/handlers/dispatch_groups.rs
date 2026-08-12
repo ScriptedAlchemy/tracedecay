@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ResultContractRef,
-    RetryDirective, SafeDiagnostic,
+    ApplicationProblem, ApplicationProblemEnvelope, ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_tool_catalog::BindingSurface;
 
@@ -19,11 +18,12 @@ use super::ToolCallRegistryOptions;
 use super::tool_call_support::handle_retrieve;
 use super::unknown_tool_error;
 use super::{
-    admin_cli, admin_project, analysis, analytics, application_surface, ast_grep_search, dashboard,
-    edit, git, graph, grep, hook_runtime, info, skills, workflow,
+    admin_cli, admin_project, analysis, application_surface, ast_grep_search, automation_runs,
+    dashboard, dispatch_controls, edit, git, graph, grep, hook_runtime, info, skills, workflow,
 };
 
 mod health_dispatch;
+mod retained_response;
 pub(super) use health_dispatch::dispatch_health_tools;
 
 fn graph_read_unavailable(detail: &str) -> TraceDecayError {
@@ -136,6 +136,7 @@ pub(crate) const LONG_RUNNING_TOOL_DISPATCH_CEILING: std::time::Duration =
 /// bounded without touching this file.
 const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
     "tracedecay_run_affected_tests",
+    "tracedecay_memory_automation_run",
     "tracedecay_admin_cli",
     "tracedecay_admin_project",
     "tracedecay_admin_sync",
@@ -453,13 +454,55 @@ pub(super) async fn dispatch_admin_tools(
             .await
         }
         "tracedecay_admin_project" => {
+            let deadline =
+                options
+                    .application_deadline
+                    .clone()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: "admin project request deadline is unavailable".to_owned(),
+                    })?;
+            let cancellation = options.application_cancellation.clone().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "admin project cancellation authority is unavailable".to_owned(),
+                }
+            })?;
             admin_project::handle_admin_project(
                 cg,
                 args,
                 options.global_db.map(std::sync::Arc::as_ref),
-                options.automation_scheduler_reconciler.clone(),
+                options.automation_scheduler_reconciler,
                 options.profile_root,
                 options.daemon_invocation_service,
+                options.application_request_id,
+                deadline,
+                cancellation,
+            )
+            .await
+        }
+        "tracedecay_memory_automation_run" => {
+            let args = admin_project::public_memory_automation_args(args)?;
+            let deadline =
+                options
+                    .application_deadline
+                    .clone()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: "memory automation request deadline is unavailable".to_owned(),
+                    })?;
+            let cancellation = options.application_cancellation.clone().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "memory automation cancellation authority is unavailable".to_owned(),
+                }
+            })?;
+            admin_project::handle_admin_project(
+                cg,
+                args,
+                options.global_db.map(std::sync::Arc::as_ref),
+                options.automation_scheduler_reconciler,
+                options.profile_root,
+                options.daemon_invocation_service,
+                options.application_request_id,
+                deadline,
+                cancellation,
             )
             .await
         }
@@ -816,75 +859,12 @@ pub(super) async fn dispatch_retained_application_tools(
                             == crate::daemon_contract::DAEMON_INVOCATION_REVISION
                         && response.request_id == request_id.as_str() =>
                 {
-                    match response.outcome {
-                        crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication {
-                            scope,
-                            outcome,
-                        } => Ok(ApplicationEnvelope {
-                            contract: result_contract.clone(),
-                            request_id: request_id.clone(),
-                            scope,
-                            outcome,
-                        }),
-                        crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem {
-                            problem,
-                        } => Err(retained_problem_envelope(
-                            result_contract.clone(),
-                            request_id.clone(),
-                            problem,
-                        )?),
-                        crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => {
-                            let problem = match problem {
-                                crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
-                                | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
-                                    ApplicationProblem::InvalidRequest {
-                                        diagnostic: retained_safe_diagnostic(
-                                            "application.surface.invalid_request",
-                                            "The daemon rejected the retained application request",
-                                        )?,
-                                        retry: RetryDirective::Never,
-                                        legal_actions: Vec::new(),
-                                    }
-                                }
-                                crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-                                    ApplicationProblem::not_found_or_not_authorized(
-                                        RetryDirective::Never,
-                                    )
-                                }
-                                crate::daemon_contract::DaemonInvocationProblem::ResetRequired => {
-                                    ApplicationProblem::reset_required(retained_safe_diagnostic(
-                                        "application.surface.reset_required",
-                                        "The retained application store requires an explicit reset",
-                                    )?)
-                                }
-                                crate::daemon_contract::DaemonInvocationProblem::ApplicationContractViolation => {
-                                    ApplicationProblem::unavailable(retained_safe_diagnostic(
-                                        "application.surface.contract_violation",
-                                        "The retained application result violated its canonical contract",
-                                    )?)
-                                }
-                                crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
-                                    ApplicationProblem::unavailable(retained_safe_diagnostic(
-                                        "application.surface.unavailable",
-                                        "The retained application service is unavailable",
-                                    )?)
-                                }
-                            };
-                            Err(retained_problem_envelope(
-                                result_contract.clone(),
-                                request_id.clone(),
-                                problem,
-                            )?)
-                        }
-                        _ => Err(retained_problem_envelope(
-                            result_contract.clone(),
-                            request_id.clone(),
-                            ApplicationProblem::unavailable(retained_safe_diagnostic(
-                                "application.surface.invalid_response",
-                                "The daemon returned an invalid retained application response",
-                            )?),
-                        )?),
-                    }
+                    retained_response::validated_retained_response(
+                        response.outcome,
+                        retained_operation,
+                        &request_id,
+                        &result_contract,
+                    )?
                 }
                 Ok(_) => Err(retained_problem_envelope(
                     result_contract.clone(),
@@ -928,22 +908,12 @@ pub(super) async fn dispatch_memory_tools(
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     match tool_name {
+        "tracedecay_automation_run_list" => automation_runs::handle_list(cg, args).await,
+        "tracedecay_automation_run_view" => automation_runs::handle_view(cg, args).await,
         "tracedecay_automation_run_artifact_view" => {
             skills::handle_automation_run_artifact_view(cg, args).await
         }
-        "tracedecay_analytics" => {
-            analytics::handle_analytics(
-                cg,
-                args,
-                options.global_db.map(std::sync::Arc::as_ref),
-                options.accounting_db,
-                options
-                    .session_authorities
-                    .project_registered
-                    .map(std::sync::Arc::as_ref),
-            )
-            .await
-        }
+        "tracedecay_analytics" => dispatch_controls::dispatch_analytics(cg, args, options).await,
         "tracedecay_skill_list" => skills::handle_skill_list(cg, args, options.accounting_db).await,
         "tracedecay_skill_view" => skills::handle_skill_view(cg, args, options.accounting_db).await,
         "tracedecay_hermes_skill_bridge" => skills::handle_hermes_skill_bridge(cg, &args),

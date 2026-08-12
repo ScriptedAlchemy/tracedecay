@@ -73,9 +73,7 @@ async fn operation<O>(
 where
     O: RetainedApplicationOwner,
 {
-    let Some(operation) =
-        RetainedSurfaceOperation::from_name(&segment).filter(|operation| operation.is_callable())
-    else {
+    let Some(operation) = retained_http_operation(&segment) else {
         return adapter_problem_response(
             request_id,
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
@@ -96,6 +94,11 @@ where
             body,
         })
         .await
+}
+
+fn retained_http_operation(segment: &str) -> Option<RetainedSurfaceOperation> {
+    RetainedSurfaceOperation::from_operation_name(segment)
+        .filter(|operation| operation.is_callable())
 }
 
 pub fn retained_invalid_request_response(request_id: RequestId) -> Response {
@@ -126,7 +129,18 @@ mod tests {
 
     #[test]
     fn broad_translator_names_are_not_callable_routes() {
-        assert!(!RetainedSurfaceOperation::FactStore.is_callable());
         assert!(!RetainedSurfaceOperation::SessionRefresh.is_callable());
+    }
+
+    #[test]
+    fn http_operation_segments_accept_only_the_bare_canonical_name() {
+        assert_eq!(
+            retained_http_operation("fact_store_search"),
+            Some(RetainedSurfaceOperation::FactStoreSearch)
+        );
+        assert_eq!(
+            retained_http_operation("tracedecay_fact_store_search"),
+            None
+        );
     }
 }

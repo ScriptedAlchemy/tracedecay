@@ -16,8 +16,8 @@ use tracedecay_domain::{
 
 use crate::work::work_authority;
 use crate::{
-    ApplicationProblem, LegalAction, RequestAdmission, RequestContext, RetryDirective,
-    SafeDiagnostic,
+    ApplicationProblem, CancellationStage, LegalAction, RequestAdmission, RequestContext,
+    RetryDirective, SafeDiagnostic,
 };
 
 pub const MAX_WORK_LEAK_EVIDENCE_REFS_V1: usize = 8;
@@ -371,6 +371,7 @@ fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
             "The Work leak evidence changed during inspection.",
         ),
         WorkLeakEvidenceErrorV1::TimedOut => ApplicationProblem::TimedOut {
+            stage: CancellationStage::DuringRead,
             retry: RetryDirective::AfterRevalidate,
             legal_actions: vec![LegalAction::Refresh],
         },

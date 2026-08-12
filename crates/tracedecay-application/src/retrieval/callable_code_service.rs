@@ -14,7 +14,8 @@ use crate::context::RequestContext;
 use crate::error::ApplicationContractError;
 use crate::handlers::ApplicationOperation;
 use crate::result::{
-    ApplicationProblem, ApplicationResult, AuthorityReceipt, RetryDirective, SafeDiagnostic,
+    ApplicationProblem, ApplicationResult, AuthorityReceipt, PageCursor, RetryDirective,
+    SafeDiagnostic,
 };
 
 use super::callable_code::{
@@ -475,13 +476,18 @@ fn validate_code_query_outcome<T>(
             (None, None) => true,
             _ => false,
         };
+        let cursor_matches = match (&evidence.page.cursor, &page.next_cursor) {
+            (Some(PageCursor::Opaque { cursor }), Some(next_cursor)) => cursor == next_cursor,
+            (None, None) => true,
+            _ => false,
+        };
         if returned > u64::from(requested_page_size)
             || (page.next_cursor.is_some() && page.total == Some(returned))
             || !cursor_state_valid
             || evidence.page.returned != returned
             || evidence.coverage.returned != returned
             || evidence.page.total != page.total
-            || evidence.page.cursor != page.next_cursor
+            || !cursor_matches
         {
             return Err(invalid_code_query_outcome_problem());
         }

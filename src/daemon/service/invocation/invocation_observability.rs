@@ -167,21 +167,25 @@ pub(super) fn invocation_response_outcome(
                 FeedbackOutcomeV1::Completed
             }
         }
-        DaemonInvocationOutcome::ApplicationProblem { problem } => match problem.kind() {
-            ApplicationProblemKind::InvalidRequest => FeedbackOutcomeV1::Rejected,
-            ApplicationProblemKind::NotFoundOrNotAuthorized => FeedbackOutcomeV1::Denied,
-            ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
-                FeedbackOutcomeV1::Stale
+        DaemonInvocationOutcome::ApplicationProblem { problem }
+        | DaemonInvocationOutcome::RetainedApplicationProblem { problem, .. } => {
+            match problem.kind() {
+                ApplicationProblemKind::InvalidRequest => FeedbackOutcomeV1::Rejected,
+                ApplicationProblemKind::NotFoundOrNotAuthorized => FeedbackOutcomeV1::Denied,
+                ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => {
+                    FeedbackOutcomeV1::Stale
+                }
+                ApplicationProblemKind::Unsupported | ApplicationProblemKind::Unavailable => {
+                    FeedbackOutcomeV1::Unavailable
+                }
+                ApplicationProblemKind::ExecutionFailed => FeedbackOutcomeV1::Failed,
+                ApplicationProblemKind::Saturated => FeedbackOutcomeV1::AtCapacity,
+                ApplicationProblemKind::Cancelled => FeedbackOutcomeV1::Cancelled,
+                ApplicationProblemKind::TimedOut => FeedbackOutcomeV1::TimedOut,
+                ApplicationProblemKind::PartialEffect => FeedbackOutcomeV1::Partial,
+                ApplicationProblemKind::ResetRequired => FeedbackOutcomeV1::ResetRequired,
             }
-            ApplicationProblemKind::Unsupported | ApplicationProblemKind::Unavailable => {
-                FeedbackOutcomeV1::Unavailable
-            }
-            ApplicationProblemKind::Saturated => FeedbackOutcomeV1::AtCapacity,
-            ApplicationProblemKind::Cancelled => FeedbackOutcomeV1::Cancelled,
-            ApplicationProblemKind::TimedOut => FeedbackOutcomeV1::TimedOut,
-            ApplicationProblemKind::PartialEffect => FeedbackOutcomeV1::Partial,
-            ApplicationProblemKind::ResetRequired => FeedbackOutcomeV1::ResetRequired,
-        },
+        }
         DaemonInvocationOutcome::Problem { problem } => match problem {
             DaemonInvocationProblem::InvalidRequest
             | DaemonInvocationProblem::UnsupportedRevision => FeedbackOutcomeV1::Rejected,
@@ -201,6 +205,7 @@ pub(super) fn invocation_rejected_argument(
             invocation_problem_rejected_argument(*problem)
         }
         DaemonInvocationOutcome::ApplicationProblem { problem }
+        | DaemonInvocationOutcome::RetainedApplicationProblem { problem, .. }
             if problem.kind() == ApplicationProblemKind::InvalidRequest =>
         {
             Some((

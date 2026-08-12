@@ -603,7 +603,8 @@ fn malformed_success_and_problem_fields_are_protocol_errors() {
                 "owning_layer": "application", "terminality": "terminal",
                 "retryable": true, "retry": "after_delay",
                 "retry_scope": "same_operation", "retry_after_millis": 1,
-                "cancellation_stage": null, "request_id": "request.sdk",
+                "cancellation_stage": null, "unavailable_classification": "authority",
+                "execution_failure_classification": null, "request_id": "request.sdk",
                 "trace_id": "trace.sdk", "details": [], "legal_actions": ["retry"],
                 "coverage": null
             }

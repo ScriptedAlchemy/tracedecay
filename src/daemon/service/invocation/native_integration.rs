@@ -716,6 +716,7 @@ pub(super) fn live_cancellation_signal(
 
 fn unavailable_native_integration() -> ApplicationProblem {
     ApplicationProblem::Unavailable {
+        classification: tracedecay_application::ApplicationUnavailableClassV1::Authority,
         diagnostic: SafeDiagnostic {
             code: "native_integration_runtime_unavailable".to_owned(),
             message: "The native-integration runtime did not complete the request".to_owned(),

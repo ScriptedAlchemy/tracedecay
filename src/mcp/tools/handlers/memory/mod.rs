@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
+use crate::daemon::store_runtime::session_registry::{
+    DaemonSessionRuntimeRegistryV1, open_user_memory_db,
+};
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
-use crate::memory::user::open_user_memory_db;
 use crate::store::DatabaseFactStore;
 use crate::store::memory::ProjectMemoryDbHandle;
 use crate::tracedecay::TraceDecay;
@@ -135,16 +136,19 @@ pub(super) fn memory_application<'a>(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use tracedecay_domain::FactCategoryV1;
+    use tracedecay_store::{FactWriteControl, ProjectMemoryFactProjectionV1};
+    use tracedecay_usecases::memory::{
+        ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+    };
 
     use super::*;
-    use crate::memory::types::{AddFactRequest, MemoryCategory};
-    use tracedecay_usecases::memory::MemoryOperationContext;
 
-    fn fact(content: &str) -> AddFactRequest {
-        AddFactRequest {
+    fn fact(content: &str) -> ProjectMemoryFactAddRequest {
+        ProjectMemoryFactAddRequest {
             content: content.to_owned(),
-            category: MemoryCategory::General,
-            source: None,
+            category: FactCategoryV1::General,
+            source_label: None,
             tags: Vec::new(),
             entities: Vec::new(),
             trust: None,
@@ -235,16 +239,21 @@ mod tests {
             cg.project_memory_db().await.unwrap().into_fact_store(),
         )
         .unwrap();
+        let preflight = memory
+            .preflight_project_memory_fact_add(fact(content), None)
+            .unwrap();
+        let outcome = memory
+            .add_preflighted_project_memory_fact(
+                preflight,
+                &FactWriteControl::new(std::sync::Arc::new(|| false), std::sync::Arc::new(|| true)),
+            )
+            .await
+            .unwrap();
+        let ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome else {
+            panic!("fixture fact '{content}' must pass privacy admission");
+        };
         assert!(
-            memory
-                .add_fact(
-                    fact(content),
-                    MemoryOperationContext::generated(&owner, content, None).unwrap(),
-                )
-                .await
-                .unwrap()
-                .fact
-                .is_some(),
+            matches!(outcome.fact(), ProjectMemoryFactProjectionV1::Available(_)),
             "fixture fact '{content}' must persist"
         );
     }

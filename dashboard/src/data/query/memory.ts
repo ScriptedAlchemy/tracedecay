@@ -8,9 +8,7 @@
  * reads them through {@link useEnvelope}. Every route below answers a bare
  * `Json<Value>`: they are NOT in the contract catalog, there is nothing for
  * codegen to emit, and the house ladder for that tier is `usePayload` plus a
- * local zod schema written against the handler — the same construction
- * `CurationConsole.tsx` uses for the read-only `/curation/{status,activity,runs}`
- * and daemon-settings routes.
+ * local zod schema written against the handler.
  *
  * So these schemas are hand-written on purpose, and each one names the `json!`
  * literal it mirrors. Two rules follow from that provenance and are load-bearing
@@ -28,18 +26,9 @@
  * `.passthrough()` throughout: these handlers carry more than any one surface
  * reads, and a field added server-side must not fail an unrelated panel.
  */
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 
-import { fetchPayloadWrite, type PayloadWriteResult } from "./payload.ts";
-import { payloadQueryKey, usePayload } from "./usePayload.ts";
-import {
-  scopeKey,
-  scopeWritable,
-  scopedUrl,
-  useScope,
-  type ScopeWritability,
-} from "../scope/store.ts";
+import { usePayload } from "./usePayload.ts";
 
 /** The plugin mount every route below hangs off (`lib.rs` `project_api_router`). */
 export const MEMORY_BASE = "/api/plugins/holographic";
@@ -49,16 +38,13 @@ export const MEMORY_BASE = "/api/plugins/holographic";
 /**
  * How much of a feedback event this store can still account for.
  *
- * `memory_api::fact_trust_history_payload` maps
- * `ProjectMemoryFactFeedbackDetailsAvailabilityV1` onto these three words, and
- * the distinction is the whole point of the field: `legacy_redacted` is a row
- * whose detail was deliberately dropped by an older writer, `unknown` is a row
- * whose detail state was never recorded. Neither is "no detail" and neither may
- * render as blank.
+ * `memory_api::fact_trust_history_payload` maps the canonical feedback-detail
+ * availability directly. A redacted row has withheld detail; an unknown row
+ * never recorded its detail state. Neither may render as blank.
  */
 export const TrustDetailAvailabilitySchema = z.enum([
   "available",
-  "legacy_redacted",
+  "redacted",
   "unknown",
 ]);
 export type TrustDetailAvailability = z.infer<
@@ -76,7 +62,8 @@ export type TrustDetailAvailability = z.infer<
  */
 export const TrustHistoryEventSchema = z
   .object({
-    timestamp: z.string(),
+    event_id: z.string(),
+    timestamp: z.number().int(),
     action: z.enum(["helpful", "unhelpful"]),
     old_trust: z.number(),
     new_trust: z.number(),
@@ -88,31 +75,40 @@ export const TrustHistoryEventSchema = z
   .passthrough();
 export type TrustHistoryEvent = z.infer<typeof TrustHistoryEventSchema>;
 
-/**
- * The audit's own account of how complete it is.
- *
- * `processed`/`remaining` come off `ProjectMemoryFeedbackRepairProgressV1`, whose
- * `Unknown` and `NotRequired` variants report neither — so both are nullable,
- * and a surface that printed `0` for them would be inventing a measurement the
- * repair never took.
- */
-export const TrustRepairSchema = z
-  .object({
-    state: z.enum(["unknown", "not_required", "complete", "incomplete"]),
-    processed: z.number().nullable(),
-    remaining: z.number().nullable(),
-  })
-  .passthrough();
-
 /** `GET /fact/{id}/trust-history` (`memory_api::fact_trust_history`). */
 export const TrustHistoryPayloadSchema = z
   .object({
-    fact_id: z.number(),
+    fact_id: z.string(),
     trust_history: z.array(TrustHistoryEventSchema),
-    repair: TrustRepairSchema,
+    limit: z.number().int().positive(),
+    completeness: z.enum(["complete", "partial"]),
+    next_after: z
+      .object({
+        occurred_at: z.number().int(),
+        event_id: z.string(),
+      })
+      .strict()
+      .nullable(),
     error: z.string(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((payload, context) => {
+    const partial = payload.completeness === "partial";
+    if (partial !== (payload.next_after !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["next_after"],
+        message: "trust-history completeness contradicts its continuation",
+      });
+    }
+    if (payload.trust_history.length > payload.limit) {
+      context.addIssue({
+        code: "custom",
+        path: ["trust_history"],
+        message: "trust history exceeds its declared limit",
+      });
+    }
+  });
 export type TrustHistoryPayload = z.infer<typeof TrustHistoryPayloadSchema>;
 
 /**
@@ -120,14 +116,14 @@ export type TrustHistoryPayload = z.infer<typeof TrustHistoryPayloadSchema>;
  *
  * Keyed by fact id so switching selection is a different cache entry rather
  * than a refetch into the previous fact's slot. `enabled` gates on a supplied
- * id: the route takes an `i64` path segment and would 404 on an empty one, and
+ * id: the route takes a canonical string identity and rejects an empty one, and
  * a 404 is a reading this surface must not manufacture by asking a question it
  * has no subject for.
  */
-export function useFactTrustHistory(factId: number | null) {
+export function useFactTrustHistory(factId: string | null) {
   return usePayload(
     ["memory", "trust-history", String(factId ?? "")],
-    `${MEMORY_BASE}/fact/${encodeURIComponent(String(factId ?? 0))}/trust-history`,
+    `${MEMORY_BASE}/fact/${encodeURIComponent(factId ?? "")}/trust-history`,
     TrustHistoryPayloadSchema,
     { enabled: factId != null },
   );
@@ -138,24 +134,31 @@ export function useFactTrustHistory(factId: number | null) {
 /**
  * One projected fact (`memory_service::projection::projection_point`).
  *
- * Every key in that `json!` is unconditional, with `unwrap_or` defaults, so
- * nothing here is optional. `metadata`, `bank_id` and `bank_name` fall back to
- * `Value::Null`, so they are nullable — a fact with no bank is a real reading.
+ * Every key in the projection payload is unconditional, so nothing here is
+ * optional.
  */
 export const ProjectionPointSchema = z
   .object({
-    fact_id: z.number(),
+    fact_id: z.string(),
+    payload_access: z.literal("eligible"),
     x: z.number(),
     y: z.number(),
     category: z.string(),
     content: z.string(),
     trust_score: z.number(),
     retrieval_count: z.number(),
+    access_count: z.number(),
+    helpful_count: z.number(),
+    unhelpful_count: z.number(),
     created_at: z.number(),
     updated_at: z.number(),
-    bank_name: z.string().nullable(),
+    projected_as_of: z.number(),
+    last_recalled_at: z.number().nullable(),
+    tags: z.array(z.string()),
+    entities: z.array(z.string()),
+    metadata: z.unknown(),
+    source_label: z.string().optional(),
     entity_count: z.number(),
-    connection_count: z.number(),
   })
   .passthrough();
 export type ProjectionPoint = z.infer<typeof ProjectionPointSchema>;
@@ -177,18 +180,44 @@ export const ProjectionPayloadSchema = z
     limit: z.number(),
     method: z.string(),
     points: z.array(ProjectionPointSchema),
+    coverage: z
+      .object({
+        completeness: z.enum(["complete", "bounded", "unknown"]),
+        examined: z.number().int().nonnegative(),
+        limit: z.number().int().positive(),
+        omission_reasons: z.array(z.string()),
+      })
+      .strict(),
     error: z.string(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((payload, context) => {
+    if (payload.coverage.limit !== payload.limit) {
+      context.addIssue({
+        code: "custom",
+        path: ["coverage", "limit"],
+        message: "projection coverage limit contradicts the request limit",
+      });
+    }
+    if (payload.points.length > payload.coverage.examined) {
+      context.addIssue({
+        code: "custom",
+        path: ["points"],
+        message: "projection returned more points than it examined",
+      });
+    }
+  });
 export type ProjectionPayload = z.infer<typeof ProjectionPayloadSchema>;
 
 /**
  * The 2D phase projection.
  *
- * The daemon caches this against the store's vector fingerprint and recomputes
- * on a blocking thread when it moves, so it is cheap on repeat and expensive
- * exactly once. A long `staleTime` keeps a workspace visit from paying that
- * cost per remount; it is a projection of the whole store, not a live reading.
+ * The daemon caches this bounded projection against the store's vector
+ * fingerprint and recomputes on a blocking thread when it moves, so it is
+ * cheap on repeat and expensive exactly once. A long `staleTime` keeps a
+ * workspace visit from paying that cost per remount. The current payload has
+ * no whole-store denominator or continuation, so callers must keep its
+ * coverage unknown even when the returned page is empty.
  */
 export function useMemoryProjection(query: string, limit = 400) {
   const search =
@@ -208,8 +237,8 @@ export function useMemoryProjection(query: string, limit = 400) {
  * therefore left to `.passthrough()` rather than guessed at here. */
 export const SimilarityPairSchema = z
   .object({
-    a_id: z.number(),
-    b_id: z.number(),
+    a_id: z.string(),
+    b_id: z.string(),
     a_content: z.string(),
     b_content: z.string(),
     a_category: z.string(),
@@ -277,115 +306,16 @@ export function useMemorySimilarity(minSimilarity: number, limit = 25) {
   );
 }
 
-
-/* ---- curation runs ------------------------------------------------------- */
-
-/**
- * One ledger record (`AutomationRunLedgerRecord`), as the sidecar serializes it.
- *
- * `run_id`, `trigger`, `task`, `backend`, `status`, the application counts and the two
- * timestamps have no `skip_serializing_if`, so they are required. `model`,
- * `error`, `host_mode` and `fallback_status` all carry
- * `skip_serializing_if = "Option::is_none"` and are therefore ABSENT rather than
- * null when unset — `.optional().nullable()` would accept a null this writer
- * cannot emit and let a null-vs-absent regression through.
- */
-export const CurationRunRecordSchema = z
-  .object({
-    run_id: z.string(),
-    trigger: z.string(),
-    task: z.string(),
-    backend: z.string(),
-    status: z.string(),
-    reviewed_count: z.number(),
-    accepted_count: z.number(),
-    rejected_count: z.number(),
-    skipped_count: z.number(),
-    started_at: z.string(),
-    completed_at: z.string(),
-    model: z.string().optional(),
-    host_mode: z.string().optional(),
-    error: z.string().optional(),
-    fallback_status: z.string().optional(),
-    activation_policy: z.string().optional(),
-    created_skills: z.array(z.unknown()).optional(),
-    updated_skills: z.array(z.unknown()).optional(),
-    applied_consolidations: z.array(z.unknown()).optional(),
-    rejected_skills: z.array(z.unknown()).optional(),
-    validation_repairs: z.array(z.unknown()).optional(),
-    receipts: z.array(z.unknown()).optional(),
-    llm_apply: z.unknown().optional(),
-    curation_policy: z.unknown().optional(),
-    deployment: z
-      .object({
-        status: z.enum(["complete", "partial_failure", "unavailable"]),
-        exports: z.array(z.unknown()),
-        materialization_scopes: z.array(z.unknown()),
-        errors: z.array(z.string()),
-        reason: z.string().optional(),
-        retry_required: z.boolean(),
-      })
-      .passthrough()
-      .optional(),
-  })
-  .passthrough();
-export type CurationRunRecord = z.infer<typeof CurationRunRecordSchema>;
-
-/**
- * `GET /curation/runs` (`memory_api::curation_runs`).
- *
- * A ledger that failed to load answers `{records: [], count: 0, …, error}` with
- * HTTP 200. `error` is therefore the only thing that tells an unreadable ledger
- * apart from a project that has never run automation, and the panel must read it
- * before it reads `records`.
- */
-export const CurationRunsPayloadSchema = z
-  .object({
-    records: z.array(CurationRunRecordSchema),
-    count: z.number(),
-    limit: z.number(),
-    error: z.string(),
-  })
-  .passthrough();
-export type CurationRunsPayload = z.infer<typeof CurationRunsPayloadSchema>;
-
-export function useCurationRuns(limit = 50) {
-  return usePayload(
-    ["memory", "curation", "runs", limit],
-    `${MEMORY_BASE}/curation/runs?limit=${limit}`,
-    CurationRunsPayloadSchema,
-  );
-}
-
 /* ---- oplog --------------------------------------------------------------- */
 
-/**
- * One memory operation's detail, in the three shapes the handler emits.
- *
- * `memory_api::oplog` switches over `ProjectMemoryDashboardOplogDetailsV1` and
- * writes a DIFFERENT object per variant: `{summary}` when the detail survives,
- * `{redacted: true}` when it was deliberately withheld, `{availability:
- * "unknown"}` when the store cannot say. A union rather than one loose object,
- * because those are three distinct domain states — `ready`, `redacted`,
- * `unknown` — and collapsing them into an optional `summary` would render a
- * privacy redaction and a missing record identically.
- */
-export const OplogDetailSchema = z.union([
-  z.object({ summary: z.string() }).passthrough(),
-  z.object({ redacted: z.literal(true) }).passthrough(),
-  z.object({ availability: z.literal("unknown") }).passthrough(),
-]);
-export type OplogDetail = z.infer<typeof OplogDetailSchema>;
-
-/** One oplog row. `fact_id` is `target_legacy_fact_id`, which is `None` for an
- * operation with no legacy-addressable fact — serialized as null, not absent. */
+/** One canonical lineage operation. Operations without a fact target serialize
+ * `fact_id` as null; the route does not expose mutation detail. */
 export const OplogEventSchema = z
   .object({
-    id: z.union([z.string(), z.number()]),
-    ts: z.string(),
+    id: z.number().int(),
+    ts: z.number().int(),
     op: z.string(),
-    fact_id: z.number().nullable(),
-    detail: OplogDetailSchema,
+    fact_id: z.string().nullable(),
   })
   .passthrough();
 export type OplogEvent = z.infer<typeof OplogEventSchema>;
@@ -408,190 +338,4 @@ export function useMemoryOplog(limit = 100) {
     `${MEMORY_BASE}/oplog?limit=${limit}`,
     OplogPayloadSchema,
   );
-}
-
-/* ---- curation config ----------------------------------------------------- */
-
-/** One scheduled task's configuration (`AutomationTaskSettingsV1`). Every
- * optional duration is serialized as `null`, not omitted, by the domain
- * contract. */
-export const AutomationTaskConfigSchema = z
-  .object({
-    enabled: z.boolean(),
-    schedule: z.string().nullable(),
-    interval_secs: z.number().nullable(),
-    cooldown_secs: z.number().nullable(),
-    min_idle_secs: z.number().nullable(),
-    stale_lock_secs: z.number().nullable(),
-  })
-  .passthrough();
-export type AutomationTaskConfigReading = z.infer<
-  typeof AutomationTaskConfigSchema
->;
-
-/** A resolved daemon-pinned `AutomationSettingsV1`. */
-export const AutomationConfigSchema = z
-  .object({
-    schema_version: z.number(),
-    enabled: z.boolean(),
-    backend: z.string(),
-    host_mode: z.string(),
-    model_id: z.string().nullable(),
-    timeout_secs: z.number(),
-    scheduler_tick_secs: z.number(),
-    combine_due_tasks: z.boolean(),
-    allow_job_commands: z.boolean(),
-    tasks: z
-      .object({
-        memory_curator: AutomationTaskConfigSchema,
-        session_reflector: AutomationTaskConfigSchema,
-        skill_writer: AutomationTaskConfigSchema,
-      })
-      .passthrough(),
-  })
-  .passthrough();
-export type AutomationConfigReading = z.infer<typeof AutomationConfigSchema>;
-
-/**
- * The project overlay, as `AutomationConfigPatch` serializes.
- *
- * Every member skips when `None`, so an overlay that sets nothing is `{}` and an
- * overlay that was never written at all is `null`. Both are real and different:
- * the first is a project file that overrides nothing, the second is a project
- * with no automation file. The config surface says which.
- */
-export const AutomationConfigOverlaySchema = z.record(z.string(), z.unknown());
-
-/** `GET|PATCH /curation/config` (`automation_config_api`). The daemon returns
- * the pinned revision together with the effective settings; no browser-side
- * global/project layering is authoritative. */
-export const CurationConfigPayloadSchema = z
-  .object({
-    configuration_revision_id: z.string(),
-    source: z.literal("daemon_pinned_snapshot"),
-    effective: AutomationConfigSchema,
-    backend_availability: z
-      .object({
-        backend: z.string(),
-        available: z.boolean(),
-        executable: z.string().nullable().optional(),
-        reason: z.string().nullable().optional(),
-      })
-      .passthrough(),
-    application_outcome: z.unknown().optional(),
-  })
-  .passthrough();
-export type CurationConfigPayload = z.infer<typeof CurationConfigPayloadSchema>;
-
-export const curationConfigKey = ["memory", "curation", "config"] as const;
-export const curationConfigUrl = `${MEMORY_BASE}/curation/config`;
-
-export function useCurationConfig() {
-  return usePayload(
-    curationConfigKey,
-    curationConfigUrl,
-    CurationConfigPayloadSchema,
-  );
-}
-
-/**
-/** The one setting this surface exposes. Validation and application policy are
- * daemon-owned and are never browser toggles. */
-export interface CurationConfigPatch {
-  readonly enabled: boolean;
-}
-
-export interface CurationConfigMutation extends CurationConfigPatch {
-  readonly expected_revision_id: string;
-  readonly idempotency_key: string;
-}
-
-export const CurationConfigMutationSchema = z
-  .object({
-    enabled: z.boolean(),
-    expected_revision_id: z.string(),
-    idempotency_key: z.string(),
-  })
-  .strict();
-
-/**
- * What a config write produced, including the case where there was none.
- *
- * `not_dispatched` mirrors {@link import('./automation.ts').SchedulerControlResult}:
- * nothing was sent, so nothing changed, and the surface must not imply the
- * daemon was asked and refused.
- */
-export type CurationConfigWriteResult =
-  | PayloadWriteResult<CurationConfigPayload>
-  | { outcome: "not_dispatched"; writability: ScopeWritability };
-
-/** The scope a write was issued under, captured at dispatch — see
- * `useSchedulerControl`, where settling against the render's current scope
- * instead of the dispatch's wrote one project's answer into another's entry. */
-interface ConfigDispatch {
-  readonly configKey: readonly unknown[];
-}
-
-/**
- * The guarded config write.
- *
- * PATCH answers with the same payload GET does — the handler re-reads and
- * returns the resolved layering — so, exactly as with the scheduler control,
- * there is no optimistic update here: the server's own re-read is written into
- * the read's cache entry and the surface never shows a setting it has not
- * observed. A failed patch leaves the last real reading on screen.
- */
-export function useCurationConfigPatch() {
-  const scope = useScope((s) => s.scope);
-  const client = useQueryClient();
-  const configKey = payloadQueryKey(
-    scope,
-    curationConfigKey,
-    curationConfigUrl,
-  );
-  const writability = scopeWritable(scope);
-  const mutation = useMutation<
-    CurationConfigWriteResult,
-    Error,
-    CurationConfigMutation,
-    ConfigDispatch
-  >({
-    mutationKey: [...curationConfigKey, scopeKey(scope)],
-    onMutate: () => ({ configKey }),
-    mutationFn: async (patch: CurationConfigMutation) => {
-      // Nothing leaves the browser unless the scope is known to accept it. The
-      // control is disabled on this same reading, so arriving here means the
-      // disable was bypassed, and dispatching anyway would trade a stated
-      // reason for a 405 this layer cannot tell from a route that has gone away.
-      if (writability.state !== "writable") {
-        return { outcome: "not_dispatched", writability };
-      }
-      const parsed = CurationConfigMutationSchema.safeParse(patch);
-      if (!parsed.success) {
-        return {
-          outcome: "error",
-          detail: "invalid automation configuration mutation",
-        };
-      }
-      return fetchPayloadWrite(
-        scopedUrl(scope, curationConfigUrl),
-        CurationConfigPayloadSchema,
-        {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(patch),
-        },
-      );
-    },
-    onSuccess: (result, _patch, dispatch) => {
-      const target = dispatch.configKey;
-      if (result.outcome === "ok") {
-        client.setQueryData(target, result);
-        return;
-      }
-      if (result.outcome === "not_dispatched") return;
-      void client.invalidateQueries({ queryKey: target });
-    },
-  });
-  return { ...mutation, writability };
 }

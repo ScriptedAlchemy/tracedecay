@@ -1,8 +1,15 @@
 //! Rendering and memory enrichment support for the verified context handler.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
+use tracedecay_application::memory::{FactCategoryV1, FactSearchHitV1};
+use tracedecay_domain::Confidence;
+use tracedecay_store::{
+    FactReadControl, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
+    ProjectMemoryFactSearchQuery,
+};
 
 use crate::context::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
@@ -11,7 +18,6 @@ use crate::context::{
     CONTEXT_TEST_COVERAGE_HEADING,
 };
 use crate::errors::Result;
-use crate::memory::types::{FactSearchResult, SearchFactsRequest};
 use crate::text::utf8_prefix_at_or_before;
 use crate::tracedecay::TraceDecay;
 
@@ -90,7 +96,7 @@ fn context_lane_budget(lane_key: &str) -> usize {
 
 pub(super) fn insert_context_memory_section(
     output: &mut String,
-    memory_matches: &[FactSearchResult],
+    memory_matches: &[FactSearchHitV1],
     memory_matches_error: Option<&str>,
 ) {
     let Some(section) = context_memory_section(memory_matches, memory_matches_error) else {
@@ -104,7 +110,7 @@ pub(super) fn insert_context_memory_section(
 }
 
 pub(super) fn context_memory_section(
-    memory_matches: &[FactSearchResult],
+    memory_matches: &[FactSearchHitV1],
     memory_matches_error: Option<&str>,
 ) -> Option<String> {
     let mut section = String::new();
@@ -118,9 +124,9 @@ pub(super) fn context_memory_section(
                 section,
                 "- fact_id={} category={} trust={:.2} score={:.3}: {}",
                 fact.fact_id,
-                fact.category,
-                fact.trust_score,
-                hit.score,
+                fact_category_name(fact.category),
+                f64::from(fact.trust_score_millionths) / 1_000_000.0,
+                f64::from(hit.scores.score_millionths) / 1_000_000.0,
                 compact_memory_content(&fact.content)
             );
         }
@@ -137,6 +143,17 @@ pub(super) fn context_memory_section(
         return Some(section);
     }
     None
+}
+
+fn fact_category_name(category: FactCategoryV1) -> &'static str {
+    match category {
+        FactCategoryV1::General => "general",
+        FactCategoryV1::UserPref => "user_pref",
+        FactCategoryV1::Project => "project",
+        FactCategoryV1::Tool => "tool",
+        FactCategoryV1::Decision => "decision",
+        FactCategoryV1::CodeArea => "code_area",
+    }
 }
 
 fn compact_memory_content(content: &str) -> String {
@@ -177,12 +194,12 @@ pub(super) fn context_memory_enabled(options: &ContextMemoryOptions) -> bool {
 
 pub(super) fn context_memory_analytics_value(
     options: &ContextMemoryOptions,
-    memory_matches: &[FactSearchResult],
+    memory_matches: &[FactSearchHitV1],
     memory_matches_error: Option<&str>,
 ) -> Value {
     let fact_ids: Vec<Value> = memory_matches
         .iter()
-        .map(|hit| Value::from(hit.fact.fact_id))
+        .map(|hit| Value::from(hit.fact.fact_id.as_str()))
         .collect();
     json!({
         "include_memory": options.include_memory,
@@ -198,13 +215,47 @@ pub(super) async fn context_memory_matches(
     cg: &TraceDecay,
     task: &str,
     options: &ContextMemoryOptions,
-) -> Result<Vec<FactSearchResult>> {
-    cg.search_facts_untracked(SearchFactsRequest {
-        query: task.to_string(),
-        category: None,
-        limit: Some(options.limit),
-        min_trust: Some(options.min_trust),
-        include_why: false,
-    })
-    .await
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<Vec<FactSearchHitV1>> {
+    let owner = cg.project_memory_owner()?;
+    let filter = ProjectMemoryFactSearchFilterV1::new(
+        None,
+        Some(Confidence::new(options.min_trust).map_err(memory_search_error)?),
+        None,
+    )
+    .map_err(memory_search_error)?;
+    let query = ProjectMemoryFactSearchQuery::with_filter(
+        owner,
+        ProjectMemoryFactSearchKindV1::Search,
+        Some(task.to_owned()),
+        filter,
+        None,
+        options.limit,
+    )
+    .map_err(memory_search_error)?;
+    let read_control = FactReadControl::new(Arc::new(move || {
+        cancellation
+            .as_ref()
+            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+            || deadline.as_ref().is_some_and(|deadline| {
+                deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+            })
+    }));
+    let memory = cg.project_memory_application().await?;
+    let page = memory
+        .search_project_memory_facts(query, &read_control)
+        .await
+        .map_err(memory_search_error)?;
+    crate::daemon::retained_owner::public_search_page(&page)
+        .map(|page| page.hits)
+        .map_err(|error| crate::errors::TraceDecayError::Config {
+            message: format!("context memory projection failed: {error:?}"),
+        })
+}
+
+fn memory_search_error(
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::database_operation("context memory search", error)
 }

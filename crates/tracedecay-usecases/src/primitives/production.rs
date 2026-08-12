@@ -22,8 +22,8 @@ use tracedecay_application::retrieval::{
 use tracedecay_application::{
     ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
     EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission, RequestContext, ResolvedScope,
-    RetrievalEvidence, TemporalState,
+    OpaqueCursor, OperationBudgetUsage, PageCursor, PageState, RequestAdmission, RequestContext,
+    ResolvedScope, RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
@@ -266,7 +266,7 @@ fn diagnostics_result(
         .map(|cursor| cursor.as_str().to_owned());
     let mut page = PageState::first_page(PRIMITIVE_SORT_CONTRACT.clone(), 1, Some(total), returned)
         .unwrap_or_else(|_| panic!("diagnostic result page"));
-    page.cursor = next_cursor;
+    page.cursor = next_cursor.map(|cursor| PageCursor::Opaque { cursor });
     page.expires_at = page.cursor.as_ref().and_then(|_| {
         finished_at
             .0
@@ -3315,7 +3315,7 @@ mod affected_tests_tests {
             CoverageCompleteness::Complete
         );
         assert_eq!(evidence.coverage.eligible, Some(2));
-        assert_eq!(evidence.page.cursor, Some(cursor));
+        assert_eq!(evidence.page.cursor, Some(PageCursor::from(cursor)));
         assert!(evidence.page.expires_at.is_some());
         assert!(!evidence.payload.expect("payload").findings_cleared);
     }

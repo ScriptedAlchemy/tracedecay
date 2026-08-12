@@ -1,33 +1,22 @@
-/** Read-only observability and configuration for scheduler-owned curation. */
-import { mintBrowserIdempotencyKey } from "../../data/identity.ts";
+/** Agent-managed curation control plus automation-owned run observability. */
 import {
+  useAutomaticCurator,
   useAutomationOutcomes,
+  type AutomaticCuratorRun,
+  type AutomaticCuratorResult,
   type AutomationOutcomesPayload,
 } from "../../data/query/automation.ts";
+import type {
+  FactCommitReceiptV1,
+  MemoryAutomationCurationOperationEffectV1,
+} from "../../contracts/generated.ts";
 import { PayloadBoundary } from "../../ui/ReadSection.tsx";
 import { Panel, Readout } from "../../ui/instrument.tsx";
-import { StateChip } from "../../ui/StateChip.tsx";
-import {
-  scopeWriteSentence,
-  type ScopeWritability,
-} from "../../data/scope/store.ts";
-import {
-  useCurationConfig,
-  useCurationConfigPatch,
-  useCurationRuns,
-  type CurationConfigMutation,
-  type CurationConfigPayload,
-  type CurationConfigWriteResult,
-  type CurationRunRecord,
-  type CurationRunsPayload,
-} from "../../data/query/memory.ts";
-import { runStatusState } from "./memoryModel.ts";
+import { RunHistory } from "../automations/RunHistory.tsx";
 
 export function CurationConsole() {
-  const runs = useCurationRuns();
+  const curator = useAutomaticCurator();
   const outcomes = useAutomationOutcomes();
-  const config = useCurationConfig();
-  const patch = useCurationConfigPatch();
 
   return (
     <div
@@ -36,14 +25,16 @@ export function CurationConsole() {
       tabIndex={0}
       className="flex h-full flex-col gap-3 overflow-auto p-3"
     >
+      <Panel legend="Automatic memory curator" elevation="well">
+        <AutomaticCuratorControl
+          result={curator.data}
+          pending={curator.isPending}
+          writability={curator.writability}
+          run={() => curator.mutate()}
+        />
+      </Panel>
       <Panel legend="Automatic run history" elevation="well">
-        <PayloadBoundary
-          title="Automatic run history"
-          pending={runs.isPending}
-          result={runs.data}
-        >
-          {(data) => <RunsBody data={data} />}
-        </PayloadBoundary>
+        <RunHistory />
       </Panel>
       <Panel legend="Post-activation outcomes" elevation="well">
         <PayloadBoundary
@@ -54,148 +45,249 @@ export function CurationConsole() {
           {(data) => <OutcomesBody data={data} />}
         </PayloadBoundary>
       </Panel>
-      <Panel legend="Automation configuration">
-        <PayloadBoundary
-          title="Automation configuration"
-          pending={config.isPending}
-          result={config.data}
-        >
-          {(data) => (
-            <ConfigBody
-              data={data}
-              writability={patch.writability}
-              pending={patch.isPending}
-              failure={configWriteFailure(patch.data)}
-              onPatch={(next) => patch.mutate(next)}
-            />
-          )}
-        </PayloadBoundary>
-      </Panel>
     </div>
   );
 }
 
-function RunsBody({ data }: { data: CurationRunsPayload }) {
-  if (data.error !== "") {
-    return (
-      <p role="status" className="text-2xs leading-relaxed text-state-error">
-        the automatic run ledger could not be read: {data.error}
-      </p>
-    );
-  }
-  if (data.records.length === 0) {
-    return (
-      <p className="text-2xs leading-relaxed text-text-muted">
-        the automatic run ledger is readable and holds no records
-      </p>
-    );
-  }
+function AutomaticCuratorControl({
+  result,
+  pending,
+  writability,
+  run,
+}: {
+  result: AutomaticCuratorResult | undefined;
+  pending: boolean;
+  writability: ReturnType<typeof useAutomaticCurator>["writability"];
+  run: () => void;
+}) {
+  const unavailableReason =
+    writability.state === "writable" ? null : writability.reason;
   return (
     <div className="flex flex-col gap-2">
-      <p className="text-3xs leading-relaxed text-text-muted">
-        These are scheduler-owned automatic runs recorded by the automation
-        authority.
+      <p className="text-2xs leading-relaxed text-text-muted">
+        Start one agent-managed review against the active project. Policy owns
+        the review limit and confidence threshold; this control does not approve
+        or apply individual facts.
       </p>
-      <div className="flex flex-wrap items-end gap-4">
-        <Readout
-          label="runs"
-          size="sm"
-          value={data.records.length.toLocaleString()}
-        />
-        <Readout
-          label="non-completed"
-          size="sm"
-          value={data.records
-            .filter((record) => record.status !== "completed")
-            .length.toLocaleString()}
-        />
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={pending || unavailableReason !== null}
+          onClick={run}
+          className="border border-edge-strong bg-surface-2 px-2.5 py-1.5 text-2xs font-medium text-text-secondary disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {pending ? "Running automatic curator…" : "Run automatic curator now"}
+        </button>
+        {writability.state === "writable" ? (
+          <span className="text-3xs text-text-muted">
+            target: {writability.target}
+          </span>
+        ) : null}
       </div>
-      <ol
-        role="region"
-        aria-label="Automatic run records"
-        tabIndex={0}
-        className="flex max-h-80 flex-col gap-1.5 overflow-auto"
-      >
-        {data.records.map((record) => (
-          <RunRecordLine key={record.run_id} record={record} />
-        ))}
-      </ol>
+      {unavailableReason ? (
+        <p role="status" className="text-2xs leading-relaxed text-state-locked">
+          {unavailableReason}
+        </p>
+      ) : null}
+      {result ? <AutomaticCuratorSettlement result={result} /> : null}
     </div>
   );
 }
 
-function RunRecordLine({ record }: { record: CurationRunRecord }) {
-  const details: string[] = [
-    `${record.accepted_count.toLocaleString()} applied`,
-    `${record.rejected_count.toLocaleString()} quarantined`,
-    `${record.skipped_count.toLocaleString()} skipped`,
-  ];
-  if (record.validation_repairs && record.validation_repairs.length > 0) {
-    details.push(`${record.validation_repairs.length} validation repair`);
-  }
-  if (record.deployment) {
-    details.push(`deployment ${record.deployment.status}`);
-    if (record.deployment.retry_required) details.push("retry required");
-  }
-  return (
-    <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
-      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-3xs text-text-muted">
-        <StateChip
-          kind={runStatusState(record.status)}
-          detail={record.status}
-        />
-        <span className="text-text-secondary">{record.task}</span>
-        <span>{record.trigger}</span>
-        <span>{record.backend}</span>
-        {record.model ? (
-          <span>{record.model}</span>
-        ) : (
-          <span>model unrecorded</span>
-        )}
-      </p>
-      <p className="td-value text-3xs text-text-muted" data-cell="numeric">
-        {record.started_at} → {record.completed_at} · {details.join(" · ")}
-      </p>
-      {record.error ? (
-        <p className="text-2xs leading-relaxed text-state-error">
-          {record.error}
+function AutomaticCuratorSettlement({
+  result,
+}: {
+  result: AutomaticCuratorResult;
+}) {
+  switch (result.outcome) {
+    case "ok":
+      return (
+        <div role="status" className="flex flex-col gap-1 text-2xs leading-relaxed text-state-ready">
+          <p>
+            automatic curator run {result.run.run_id} settled {result.run.terminal.status}
+            {result.run.committed_receipts.length > 0
+              ? ` · ${result.run.committed_receipts.length.toLocaleString()} committed receipt`
+              : " · no committed effects"}
+          </p>
+          <TerminalSummary summary={result.run.terminal.summary} />
+          <CommittedCurationEffects run={result.run} />
+        </div>
+      );
+    case "partial_effect": {
+      const receipt = result.problem.problem.problem.committed_receipt;
+      if (receipt === null) {
+        return (
+          <p role="status" className="text-2xs leading-relaxed text-state-error">
+            the canonical partial terminal omitted its committed effect receipt
+          </p>
+        );
+      }
+      return (
+        <div role="status" className="text-2xs leading-relaxed text-state-partial">
+          <p>{result.problem.problem.problem.message}</p>
+          <p>
+            reconciliation required · {result.problem.committed_receipts.length.toLocaleString()} canonical receipt
+            {result.problem.committed_receipts.length === 1 ? "" : "s"} · admitted effect {receipt.operation} · request {receipt.request_id}
+          </p>
+          <p>
+            committed before failure · {acceptedEffectCount(result.problem).toLocaleString()} accepted effect
+            {acceptedEffectCount(result.problem) === 1 ? "" : "s"}
+          </p>
+          <CommittedCurationEffects run={result.problem} />
+        </div>
+      );
+    }
+    case "reset_required":
+      return (
+        <p role="status" className="text-2xs leading-relaxed text-state-error">
+          reset required · {result.problem.problem.problem.message}
         </p>
-      ) : null}
-    </li>
+      );
+    case "not_dispatched":
+      return result.writability.state === "writable" ? null : (
+        <p role="status" className="text-2xs leading-relaxed text-state-locked">
+          {result.writability.reason}
+        </p>
+      );
+    default:
+      return (
+        <p role="status" className="text-2xs leading-relaxed text-state-error">
+          {result.detail}
+        </p>
+      );
+  }
+}
+
+function TerminalSummary({
+  summary,
+}: {
+  summary: AutomaticCuratorRun["terminal"]["summary"];
+}) {
+  return (
+    <p>
+      reviewed {summary.reviewed_count.toLocaleString()} · accepted {summary.accepted_count.toLocaleString()} · rejected {summary.rejected_count.toLocaleString()}
+    </p>
   );
+}
+
+function acceptedEffectCount({
+  committed_receipts: receipts,
+}: Pick<AutomaticCuratorRun, "committed_receipts">): number {
+  return receipts.reduce(
+    (count, receipt) => count +
+      (receipt.kind === "curation"
+        ? receipt.receipt.receipt.accepted_operations
+        : 0),
+    0,
+  );
+}
+
+function CommittedCurationEffects({
+  run,
+}: {
+  run: Pick<AutomaticCuratorRun, "committed_receipts">;
+}) {
+  const effects = run.committed_receipts.flatMap((committed) =>
+    committed.kind === "curation"
+      ? committed.receipt.receipt.operation_effects
+      : [],
+  );
+  if (effects.length === 0) return null;
+  return (
+    <ol aria-label="Committed curator effects" className="flex flex-col gap-1 border-l border-edge-subtle pl-2">
+      {effects.map((effect, index) => (
+        <li key={`${effect.kind}:${index}`} className="text-3xs text-text-secondary">
+          <CurationEffect effect={effect} />
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function CurationEffect({
+  effect,
+}: {
+  effect: MemoryAutomationCurationOperationEffectV1;
+}) {
+  switch (effect.kind) {
+    case "add":
+      return (
+        <>
+          add fact · fact {effect.fact_id} · {displayToken(effect.disposition)}
+          {effect.closest_fact_id === null
+            ? null
+            : ` · closest ${effect.closest_fact_id} · similarity ${effect.similarity_millionths}`}
+          <CommitSummary commit={effect.commit} />
+        </>
+      );
+    case "update":
+      return (
+        <>
+          update fact · fact {effect.fact_id} · trust delta {effect.trust_delta_millionths}
+          <CommitSummary commit={effect.commit} />
+        </>
+      );
+    case "merge":
+      return (
+        <>
+          merge facts · winner {effect.outcome.winner_fact_id} · deleted losers {effect.outcome.deleted_loser_fact_ids.join(", ")} · content {effect.outcome.content_updated ? "updated" : "unchanged"} · events {effect.outcome.commit_receipts.flatMap((commit) => commit.committed_event_ids).join(", ")}
+        </>
+      );
+    case "remove":
+      return (
+        <>
+          remove fact · target {effect.target_fact_id} · {displayToken(effect.disposition)} · remaining {effect.remaining_fact_count}
+          <CommitSummary commit={effect.commit} />
+        </>
+      );
+    case "normalize_tags":
+      return (
+        <>
+          normalize tags · fact {effect.fact_id}
+          <CommitSummary commit={effect.commit} />
+        </>
+      );
+    case "link_facts":
+      return (
+        <>
+          link facts · {effect.source_fact_id} → {effect.target_fact_id} · {displayToken(effect.relation.kind)}
+          <CommitSummary commit={effect.commit} />
+        </>
+      );
+  }
+}
+
+function CommitSummary({
+  commit,
+}: {
+  commit: FactCommitReceiptV1 | null;
+}) {
+  return commit === null
+    ? <> · no commit</>
+    : <> · {displayToken(commit.disposition)} · events {commit.committed_event_ids.join(", ")}</>;
+}
+
+function displayToken(value: string): string {
+  return value.replaceAll("_", " ");
 }
 
 function OutcomesBody({ data }: { data: AutomationOutcomesPayload }) {
-  if (data.error !== "") {
-    return (
-      <p role="status" className="text-2xs leading-relaxed text-state-error">
-        automatic outcomes could not be refreshed: {data.error}
-      </p>
-    );
-  }
   return (
     <div className="flex flex-col gap-2">
+      {data.error !== "" ? (
+        <p role="status" className="text-2xs leading-relaxed text-state-partial">
+          outcome rows were refreshed, but their activation snapshot is unavailable: {data.error}
+        </p>
+      ) : null}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Readout
-          label="skills"
-          size="sm"
-          value={data.skills.length.toLocaleString()}
-        />
-        <Readout
-          label="facts"
-          size="sm"
-          value={data.facts.length.toLocaleString()}
-        />
+        <Readout label="skills" size="sm" value={data.skills.length.toLocaleString()} />
+        <Readout label="facts" size="sm" value={data.facts.length.toLocaleString()} />
         <Readout
           label="snapshot"
           size="sm"
           value={data.snapshot.available ? "available" : "unavailable"}
         />
-        <Readout
-          label="generated"
-          size="sm"
-          value={data.generated_at.toLocaleString()}
-        />
+        <Readout label="generated" size="sm" value={data.generated_at.toLocaleString()} />
       </div>
       {data.skills.length > 0 ? (
         <p className="text-2xs text-text-secondary">
@@ -217,134 +309,4 @@ function summarizeOutcomes(values: readonly string[]): string {
   return [...counts]
     .map(([value, count]) => `${count} ${value.replaceAll("_", " ")}`)
     .join(" · ");
-}
-
-function ConfigBody({
-  data,
-  writability,
-  pending,
-  failure,
-  onPatch,
-}: {
-  data: CurationConfigPayload;
-  writability: ScopeWritability;
-  pending: boolean;
-  failure: string | null;
-  onPatch: (patch: CurationConfigMutation) => void;
-}) {
-  const blocked = writability.state !== "writable";
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <StateChip
-          kind={data.backend_availability.available ? "ready" : "unavailable"}
-          detail={
-            data.backend_availability.available
-              ? (data.backend_availability.executable ??
-                data.backend_availability.backend)
-              : (data.backend_availability.reason ??
-                `backend ${data.backend_availability.backend}`)
-          }
-        />
-        <span className="text-2xs text-text-secondary">
-          source {data.source} · revision {data.configuration_revision_id}
-        </span>
-      </div>
-      <p className="text-3xs leading-relaxed text-text-muted">
-        The daemon validates and applies memory operations and activates skills
-        automatically. This control only enables or disables future scheduler
-        runs; it does not approve individual facts or skills.
-      </p>
-      <label className="flex items-center gap-1.5 text-2xs">
-        <input
-          type="checkbox"
-          className="td-check"
-          checked={data.effective.enabled}
-          disabled={pending || blocked}
-          aria-describedby="curation-config-scope"
-          onChange={(event) =>
-            onPatch({
-              enabled: event.target.checked,
-              expected_revision_id: data.configuration_revision_id,
-              idempotency_key: mintBrowserIdempotencyKey("dashboard-settings"),
-            })
-          }
-        />
-        <span>
-          <span className="text-text-primary">Automation enabled</span>
-          <span className="block text-3xs text-text-muted">
-            the scheduler runs automatic validation and application when tasks
-            come due
-          </span>
-        </span>
-      </label>
-      <p
-        id="curation-config-scope"
-        data-scope-writability={writability.state}
-        className="text-2xs text-text-secondary"
-      >
-        {scopeWriteSentence(writability, {
-          writable: (target) => `Applies to ${target}.`,
-        })}
-      </p>
-      {failure ? (
-        <p role="status" className="text-2xs text-text-secondary">
-          {failure}
-        </p>
-      ) : null}
-      <dl className="grid grid-cols-1 gap-x-3 gap-y-0.5 border-t border-edge-subtle pt-2 text-2xs sm:grid-cols-3">
-        {(["memory_curator", "session_reflector", "skill_writer"] as const).map(
-          (task) => {
-            const taskConfig = data.effective.tasks[task];
-            return (
-              <div key={task} className="flex flex-col gap-0.5">
-                <dt className="td-legend">{task}</dt>
-                <dd className="text-3xs text-text-secondary">
-                  {taskConfig.enabled ? "enabled" : "disabled"}
-                  {taskConfig.schedule === null
-                    ? " · no schedule"
-                    : ` · ${taskConfig.schedule}`}
-                  {taskConfig.interval_secs == null
-                    ? " · interval unset"
-                    : ` · every ${taskConfig.interval_secs.toLocaleString()}s`}
-                </dd>
-              </div>
-            );
-          },
-        )}
-      </dl>
-    </div>
-  );
-}
-
-export function configWriteFailure(
-  result: CurationConfigWriteResult | undefined,
-): string | null {
-  if (result === undefined || result.outcome === "ok") return null;
-  switch (result.outcome) {
-    case "offline":
-      return "The daemon did not answer, so the automation setting was not changed.";
-    case "unauthorized":
-      return "The daemon accepted no identity for the automation setting change.";
-    case "denied":
-      return "This identity is not permitted to change the automation setting.";
-    case "error":
-      return `The daemon refused the automation setting change (${result.detail}).`;
-    case "unsupported_schema":
-      return "The daemon answered in a shape this dashboard cannot read, so whether the automation setting changed is unknown — reload to re-read it.";
-    case "unavailable":
-      return `The automation setting was not changed: ${result.reason ?? result.status}.`;
-    case "read_only_scope":
-      return `The automation setting was not changed: ${result.refusal.detail}.`;
-    case "not_dispatched":
-      return scopeWriteSentence(result.writability, {
-        writable: (target) =>
-          `Nothing was sent, though writes to ${target} are accepted — reload to re-read the automation setting.`,
-        refused: (reason) => `Nothing was sent. ${reason}`,
-      });
-    default: {
-      const exhaustive: never = result;
-      return exhaustive;
-    }
-  }
 }

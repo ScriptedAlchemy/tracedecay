@@ -87,7 +87,7 @@ struct ApplicationSurfaceDispatch<'a> {
 fn requires_application_invocation_executor(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
         || crate::mcp::tools::binding::work_operation_for_tool(tool_name).is_some()
-        || tracedecay_application::RetainedSurfaceOperation::from_name(tool_name).is_some()
+        || tracedecay_application::RetainedSurfaceOperation::from_tool_name(tool_name).is_some()
 }
 
 /// Retained name for this module's call sites; the saturating clamp is the one

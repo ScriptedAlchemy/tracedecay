@@ -1,16 +1,23 @@
 //! Memory fact, entity, and overview payloads for the dashboard memory API.
 
+use schemars::JsonSchema;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::super::DashboardState;
-use super::projection::PROJECTION_POINT_CAP;
+use super::super::read_model::DashboardCoverageCompletenessV1;
 use crate::tracedecay::facts::memory_application_for_db;
-use tracedecay_runtime_core::memory::types::MemoryCategory;
+use tracedecay_application::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
+use tracedecay_domain::{FactId, PayloadAccessState};
 use tracedecay_store::{
-    ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactSummaryV1,
-    ProjectMemoryDashboardHrrStateV1, ProjectMemoryDashboardMemoryOverviewV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
+    FactReadControl, ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactSummaryV1,
+    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactSearchGraphCoverageV1, ProjectMemoryFactSearchKindV1,
+    ProjectMemoryFactSearchQuery,
 };
+
+pub const MEMORY_FACT_LIMIT_MINIMUM: i64 = 1;
+pub const MEMORY_FACT_LIMIT_MAXIMUM: i64 = 100;
 
 pub fn providers_payload() -> Value {
     json!({
@@ -18,7 +25,7 @@ pub fn providers_payload() -> Value {
         "memory_options": [
             {
                 "name": "tracedecay",
-                "description": "TraceDecay holographic memory store (resolved project memory_facts)."
+                "description": "TraceDecay canonical project fact store with query-time holographic retrieval."
             }
         ],
         "context_engine": "tracedecay",
@@ -28,126 +35,234 @@ pub fn providers_payload() -> Value {
     })
 }
 
-fn legacy_fact_id(projection: &ProjectMemoryFactProjectionV1) -> Option<i64> {
-    match projection {
-        ProjectMemoryFactProjectionV1::Available(fact) => fact.legacy_fact_id(),
-        ProjectMemoryFactProjectionV1::Unavailable(_) => None,
+/// Converts one canonical fact projection without fabricating payload fields.
+/// Unavailable facts remain visible to operators through their exact
+/// payload-access state, but never receive content, category, or metadata.
+pub(super) fn fact_summary_json(summary: &ProjectMemoryDashboardFactSummaryV1) -> Value {
+    match &summary.fact {
+        ProjectMemoryFactProjectionV1::Available(fact) => {
+            let telemetry = fact.telemetry();
+            let mut row = Map::new();
+            row.insert("fact_id".into(), json!(fact.fact_id().as_str()));
+            row.insert("payload_access".into(), json!(PayloadAccessState::Eligible));
+            row.insert("trust_score".into(), json!(fact.trust().as_f64()));
+            row.insert("retrieval_count".into(), json!(telemetry.retrieval_count()));
+            row.insert("access_count".into(), json!(telemetry.access_count()));
+            row.insert("helpful_count".into(), json!(telemetry.helpful_count()));
+            row.insert("unhelpful_count".into(), json!(telemetry.unhelpful_count()));
+            row.insert("created_at".into(), json!(telemetry.created_at().0));
+            row.insert("updated_at".into(), json!(telemetry.updated_at().0));
+            row.insert("projected_as_of".into(), json!(fact.projected_as_of().0));
+            row.insert(
+                "last_recalled_at".into(),
+                json!(telemetry.last_recalled_at().map(|value| value.0)),
+            );
+            row.insert("content".into(), json!(fact.content()));
+            row.insert("category".into(), json!(fact.category()));
+            row.insert("tags".into(), json!(fact.tags()));
+            row.insert("entities".into(), json!(fact.entities()));
+            row.insert("metadata".into(), fact.metadata().clone());
+            if let Some(source_label) = fact.source_label() {
+                row.insert("source_label".into(), json!(source_label));
+            }
+            Value::Object(row)
+        }
+        ProjectMemoryFactProjectionV1::Unavailable(fact) => json!({
+            "fact_id": fact.fact_id().as_str(),
+            "payload_access": fact.payload_access(),
+            "projected_as_of": fact.status().projected_as_of().0,
+        }),
     }
-}
-
-pub(super) fn target_legacy_fact_id(target: &ProjectMemoryFactTargetV1) -> Option<i64> {
-    target
-        .legacy_query()
-        .map(tracedecay_store::LegacyFactQuery::legacy_fact_id)
-}
-
-/// Converts only an available, mapped compatibility fact. Unavailable or
-/// redacted payload fields stay omitted; dashboard handlers never invent them.
-pub(super) fn fact_summary_json(summary: &ProjectMemoryDashboardFactSummaryV1) -> Option<Value> {
-    let ProjectMemoryFactProjectionV1::Available(fact) = &summary.fact else {
-        return None;
-    };
-    let fact_id = fact.legacy_fact_id()?;
-    let telemetry = fact.telemetry();
-    let mut row = Map::new();
-    row.insert("fact_id".into(), json!(fact_id));
-    row.insert("trust_score".into(), json!(fact.fact().trust().as_f64()));
-    row.insert("retrieval_count".into(), json!(telemetry.retrieval_count()));
-    row.insert("access_count".into(), json!(telemetry.access_count()));
-    row.insert("helpful_count".into(), json!(telemetry.helpful_count()));
-    row.insert("unhelpful_count".into(), json!(telemetry.unhelpful_count()));
-    row.insert("created_at".into(), json!(telemetry.created_at().0));
-    row.insert("updated_at".into(), json!(telemetry.updated_at().0));
-    row.insert(
-        "last_recalled_at".into(),
-        json!(telemetry.last_recalled_at().map(|value| value.0)),
-    );
-    row.insert("has_hrr".into(), json!(i64::from(summary.has_hrr_vector)));
-    if let Some(content) = fact.content() {
-        row.insert("content".into(), json!(content));
-    }
-    if let Some(category) = fact.category() {
-        row.insert(
-            "category".into(),
-            json!(MemoryCategory::from(category).as_str()),
-        );
-    }
-    if let Some(tags) = fact.tags() {
-        row.insert("tags".into(), json!(tags));
-    }
-    if let Some(metadata) = fact.metadata() {
-        row.insert("metadata".into(), metadata.clone());
-    }
-    Some(Value::Object(row))
 }
 
 fn entity_json(entity: &ProjectMemoryDashboardEntityV1) -> Value {
     json!({
-        "entity_id": entity.target.legacy_entity_id(),
+        "entity_id": entity.target.entity(),
         "name": entity.name,
-        "entity_type": entity.entity_type,
-        "aliases": entity.aliases,
-        "created_at": entity.created_at.0,
         "fact_count": entity.fact_count,
     })
-}
-
-pub(super) fn fact_matches_query(fact: &Value, query: &str) -> bool {
-    let query = query.trim();
-    if query.is_empty() {
-        return true;
-    }
-    let query = query.to_ascii_lowercase();
-    fact.get("content")
-        .and_then(Value::as_str)
-        .is_some_and(|content| content.to_ascii_lowercase().contains(&query))
-        || fact
-            .get("tags")
-            .and_then(Value::as_array)
-            .is_some_and(|tags| {
-                tags.iter()
-                    .filter_map(Value::as_str)
-                    .any(|tag| tag.to_ascii_lowercase().contains(&query))
-            })
 }
 
 pub(super) async fn dashboard_overview(
     state: &DashboardState,
     fact_limit: usize,
     graph_limit: usize,
+    read_control: &FactReadControl,
 ) -> Result<ProjectMemoryDashboardMemoryOverviewV1, String> {
     memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?
-        .dashboard_overview(fact_limit, graph_limit)
+        .dashboard_overview(fact_limit, graph_limit, read_control)
         .await
         .map_err(|error| error.to_string())
+}
+
+pub struct FactRowsPayload {
+    pub rows: Vec<Value>,
+    pub coverage: MemoryFactsCoverageV1,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryFactsCoverageV1 {
+    pub completeness: DashboardCoverageCompletenessV1,
+    #[schemars(range(min = MEMORY_FACT_LIMIT_MINIMUM, max = MEMORY_FACT_LIMIT_MAXIMUM))]
+    pub limit: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<FactSearchGraphCoverageV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub examined: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible: Option<u64>,
+}
+
+pub struct EntityRowsPayload {
+    pub rows: Vec<Value>,
+    pub bounded: bool,
+}
+
+fn public_graph_coverage(
+    coverage: ProjectMemoryFactSearchGraphCoverageV1,
+) -> FactSearchGraphCoverageV1 {
+    match coverage {
+        ProjectMemoryFactSearchGraphCoverageV1::NotApplicable => {
+            FactSearchGraphCoverageV1::NotApplicable
+        }
+        ProjectMemoryFactSearchGraphCoverageV1::NotMounted => {
+            FactSearchGraphCoverageV1::NotMounted
+        }
+        ProjectMemoryFactSearchGraphCoverageV1::Complete {
+            root_count,
+            relation_count,
+            expanded_fact_count,
+        } => FactSearchGraphCoverageV1::Complete {
+            root_count,
+            relation_count,
+            expanded_fact_count,
+        },
+        ProjectMemoryFactSearchGraphCoverageV1::Degraded { reason } => {
+            FactSearchGraphCoverageV1::Degraded {
+                reason: match reason {
+                    tracedecay_store::ProjectMemoryFactSearchGraphDegradationV1::Conflict => {
+                        FactSearchGraphDegradationV1::Conflict
+                    }
+                    tracedecay_store::ProjectMemoryFactSearchGraphDegradationV1::Unavailable => {
+                        FactSearchGraphDegradationV1::Unavailable
+                    }
+                    tracedecay_store::ProjectMemoryFactSearchGraphDegradationV1::BudgetExhausted => {
+                        FactSearchGraphDegradationV1::BudgetExhausted
+                    }
+                    tracedecay_store::ProjectMemoryFactSearchGraphDegradationV1::DeadlineExceeded => {
+                        FactSearchGraphDegradationV1::DeadlineExceeded
+                    }
+                },
+            }
+        }
+    }
 }
 
 pub async fn fetch_facts(
     state: &DashboardState,
     query: &str,
     limit: i64,
-) -> Result<Vec<Value>, String> {
-    let limit = usize::try_from(limit.max(1)).map_err(|error| error.to_string())?;
-    let overview = dashboard_overview(state, limit.min(100), 1).await?;
-    Ok(overview
+    read_control: &FactReadControl,
+) -> Result<FactRowsPayload, String> {
+    if read_control.interrupted() {
+        return Err("memory fact read was cancelled".to_owned());
+    }
+    let limit = usize::try_from(limit.clamp(MEMORY_FACT_LIMIT_MINIMUM, MEMORY_FACT_LIMIT_MAXIMUM))
+        .map_err(|error| error.to_string())?;
+    if !query.trim().is_empty() {
+        let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
+            .map_err(|error| error.to_string())?;
+        let page = application
+            .search_project_memory_facts(
+                ProjectMemoryFactSearchQuery::new(
+                    state.memory_owner.clone(),
+                    ProjectMemoryFactSearchKindV1::Search,
+                    Some(query.trim().to_owned()),
+                    None,
+                    limit,
+                )
+                .map_err(|error| error.to_string())?,
+                read_control,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let rows = page
+            .hits()
+            .iter()
+            .map(|hit| {
+                let mut row = fact_summary_json(&ProjectMemoryDashboardFactSummaryV1 {
+                    fact: ProjectMemoryFactProjectionV1::Available(Box::new(hit.fact().clone())),
+                });
+                if let Some(object) = row.as_object_mut() {
+                    object.insert("score_millionths".into(), json!(hit.score_millionths()));
+                    if let Some(why) = hit.why() {
+                        object.insert("why".into(), json!(why));
+                    }
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        let graph_coverage = public_graph_coverage(page.graph_coverage());
+        return Ok(FactRowsPayload {
+            coverage: MemoryFactsCoverageV1 {
+                completeness: if page.next_after().is_some() {
+                    DashboardCoverageCompletenessV1::Partial
+                } else {
+                    DashboardCoverageCompletenessV1::Complete
+                },
+                limit,
+                graph: Some(graph_coverage),
+                examined: None,
+                eligible: None,
+            },
+            rows,
+        });
+    }
+    let overview = dashboard_overview(state, limit, 1, read_control).await?;
+    if read_control.interrupted() {
+        return Err("memory fact read was cancelled".to_owned());
+    }
+    let rows = overview
         .facts
         .iter()
-        .filter_map(fact_summary_json)
-        .filter(|fact| fact_matches_query(fact, query))
+        .map(fact_summary_json)
         .take(limit)
-        .collect())
+        .collect();
+    Ok(FactRowsPayload {
+        coverage: MemoryFactsCoverageV1 {
+            completeness: if overview.fact_count > overview.facts.len() as u64 {
+                DashboardCoverageCompletenessV1::Partial
+            } else {
+                DashboardCoverageCompletenessV1::Complete
+            },
+            limit,
+            graph: None,
+            examined: Some(overview.facts.len()),
+            eligible: Some(overview.fact_count),
+        },
+        rows,
+    })
 }
 
-pub async fn fetch_entities(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {
+pub async fn fetch_entities(
+    state: &DashboardState,
+    limit: i64,
+    read_control: &FactReadControl,
+) -> Result<EntityRowsPayload, String> {
     let limit = usize::try_from(limit.max(1)).map_err(|error| error.to_string())?;
-    let overview = dashboard_overview(state, 1, limit.min(1000)).await?;
-    Ok(overview
+    let overview = dashboard_overview(state, 1, limit.min(1000), read_control).await?;
+    let rows: Vec<Value> = overview
         .entities
         .iter()
         .map(entity_json)
         .take(limit)
-        .collect())
+        .collect();
+    Ok(EntityRowsPayload {
+        bounded: overview.entity_count > rows.len() as u64,
+        rows,
+    })
 }
 
 fn trust_histogram(overview: &ProjectMemoryDashboardMemoryOverviewV1) -> Vec<Value> {
@@ -161,9 +276,7 @@ fn trust_histogram(overview: &ProjectMemoryDashboardMemoryOverviewV1) -> Vec<Val
         })
         .collect();
     for row in &overview.trust_histogram {
-        // The store emits bucket rows named "trust-<n>" (see
-        // dashboard_compatibility_named_counts_tx); a bare-number parse fails
-        // on every real row and left this histogram permanently zero.
+        // The canonical dashboard authority emits bucket rows as `trust-<n>`.
         let name = row.name.strip_prefix("trust-").unwrap_or(&row.name);
         let Ok(idx) = name.parse::<usize>() else {
             continue;
@@ -178,52 +291,15 @@ fn trust_histogram(overview: &ProjectMemoryDashboardMemoryOverviewV1) -> Vec<Val
     buckets
 }
 
-pub async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
-    let overview = dashboard_overview(state, 100, 1000).await?;
-    let hrr_coverage: Vec<Value> = overview
-        .hrr_coverage
-        .iter()
-        .map(|coverage| {
-            let state = match &coverage.state {
-                ProjectMemoryDashboardHrrStateV1::Ready => "ready",
-                ProjectMemoryDashboardHrrStateV1::MissingVectors => "missing_vectors",
-                ProjectMemoryDashboardHrrStateV1::MissingBank => "missing_bank",
-            };
-            json!({
-                "category": coverage.category,
-                "facts": coverage.fact_count,
-                "hrr_vectors": coverage.hrr_vector_count,
-                "coverage": f64::from(coverage.coverage_basis_points) / 10_000.0,
-                "bank_name": coverage.bank_name,
-                "bank_fact_count": coverage.bank_fact_count,
-                "dim": coverage.dimension,
-                "updated_at": coverage.updated_at.map(|value| value.0),
-                "status": state,
-            })
-        })
-        .collect();
+pub async fn overview_payload(
+    state: &DashboardState,
+    read_control: &FactReadControl,
+) -> Result<Value, String> {
+    let overview = dashboard_overview(state, 100, 1000, read_control).await?;
     let categories: Vec<Value> = overview
         .categories
         .iter()
         .map(|row| json!({ "category": row.name, "count": row.count }))
-        .collect();
-    let entity_types: Vec<Value> = overview
-        .entity_types
-        .iter()
-        .map(|row| json!({ "entity_type": row.name, "count": row.count }))
-        .collect();
-    let memory_banks: Vec<Value> = overview
-        .memory_banks
-        .iter()
-        .map(|bank| {
-            json!({
-                "bank_name": bank.name,
-                "dim": bank.dimension,
-                "fact_count": bank.fact_count,
-                "bundled_fact_count": bank.bundled_fact_count,
-                "updated_at": bank.updated_at.map(|value| value.0),
-            })
-        })
         .collect();
     let growth: Vec<Value> = overview
         .growth
@@ -240,11 +316,7 @@ pub async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
     Ok(json!({
         "facts": overview.fact_count,
         "entities": overview.entity_count,
-        "banks": overview.bank_count,
         "categories": categories,
-        "entity_types": entity_types,
-        "hrr_coverage": hrr_coverage,
-        "memory_banks": memory_banks,
         "trust_histogram": trust_histogram(&overview),
         "growth": growth,
     }))
@@ -252,44 +324,25 @@ pub async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
 
 pub async fn fact_detail_payload(
     state: &DashboardState,
-    fact_id: i64,
+    fact_id: FactId,
+    read_control: &FactReadControl,
 ) -> Result<Option<Value>, String> {
     let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;
     let Some(detail) = application
-        .dashboard_fact_detail(fact_id)
+        .dashboard_fact_detail(fact_id, read_control)
         .await
         .map_err(|error| error.to_string())?
     else {
         return Ok(None);
     };
-    let vector_state = application
-        .dashboard_vector_points(None, PROJECTION_POINT_CAP as usize)
-        .await
-        .ok()
-        .map(|points| {
-            points.into_iter().find_map(|point| {
-                (legacy_fact_id(&point.fact.fact) == Some(fact_id))
-                    .then_some(point.vector.is_some())
-            })
-        });
-    let mut fact = fact_summary_json(&ProjectMemoryDashboardFactSummaryV1 {
-        fact: detail.fact,
-        has_hrr_vector: vector_state.flatten().unwrap_or(false),
-    });
-    if vector_state.is_none()
-        && let Some(fact) = fact.as_mut().and_then(Value::as_object_mut)
-    {
-        fact.remove("has_hrr");
+    let mut fact = fact_summary_json(&ProjectMemoryDashboardFactSummaryV1 { fact: detail.fact });
+    let entities: Vec<Value> = detail.entities.iter().map(entity_json).collect();
+    if let Some(obj) = fact.as_object_mut() {
+        obj.insert("linked_entities".into(), json!(entities));
     }
-    Ok(fact.map(|mut fact| {
-        let entities: Vec<Value> = detail.entities.iter().map(entity_json).collect();
-        if let Some(obj) = fact.as_object_mut() {
-            obj.insert("entities".into(), json!(entities));
-        }
-        json!({
-            "fact": fact,
-            "error": "",
-        })
-    }))
+    Ok(Some(json!({
+        "fact": fact,
+        "error": "",
+    })))
 }

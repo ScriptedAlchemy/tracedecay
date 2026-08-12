@@ -177,6 +177,7 @@ pub fn configuration_application_problem_error(
         ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }
+        ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
         ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
         ApplicationProblemKind::Cancelled => StatusCode::CONFLICT,
         ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,

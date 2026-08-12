@@ -47,47 +47,6 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn daemon_memory_repair_scheduler_shutdown_aborts_and_joins_every_loop() {
-    let engine = DaemonEngine::default();
-    let key = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profiles/memory-repair-shutdown-test"),
-            global_db_path: PathBuf::from("/profiles/memory-repair-shutdown-test/global.db"),
-            project_id: Some("memory-repair-shutdown-test".to_string()),
-            store_root: PathBuf::from("/stores/memory-repair-shutdown-test"),
-            graph_db_path: PathBuf::from("/stores/memory-repair-shutdown-test/graph.db"),
-        },
-        project_root: PathBuf::from("/projects/memory-repair-shutdown-test"),
-        scope_prefix: None,
-    };
-    let task = tokio::spawn(std::future::pending::<()>());
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(key, MemoryRepairSchedulerHandle::for_test(task));
-
-    engine.lifecycle.begin_draining();
-    tokio::time::timeout(
-        tokio::time::Duration::from_secs(1),
-        engine.shutdown_memory_repair_schedulers(),
-    )
-    .await
-    .expect("memory-repair shutdown should not wait for its retry delay");
-
-    assert!(
-        engine
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await
-            .is_empty()
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
     let engine = DaemonEngine::default();
     let key = ProjectServerKey {
@@ -157,80 +116,6 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
     })
     .await
     .expect("automation shutdown reaper did not release owner state");
-    assert!(stale_task.is_finished());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn repair_shutdown_timeout_keeps_unfinished_task_tracked() {
-    let engine = DaemonEngine::default();
-    let key = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profiles/repair-shutdown-timeout-test"),
-            global_db_path: PathBuf::from("/profiles/repair-shutdown-timeout-test/global.db"),
-            project_id: Some("repair-shutdown-timeout-test".to_string()),
-            store_root: PathBuf::from("/stores/repair-shutdown-timeout-test"),
-            graph_db_path: PathBuf::from("/stores/repair-shutdown-timeout-test/graph.db"),
-        },
-        project_root: PathBuf::from("/projects/repair-shutdown-timeout-test"),
-        scope_prefix: None,
-    };
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
-    started_rx
-        .await
-        .expect("noncooperative repair owner started");
-    let stale_task = task.abort_handle();
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(key.clone(), MemoryRepairSchedulerHandle::for_test(task));
-
-    engine.lifecycle.begin_draining();
-    engine.shutdown_memory_repair_schedulers().await;
-
-    assert!(
-        !stale_task.is_finished(),
-        "noncooperative repair owner must remain live until released"
-    );
-    assert!(
-        engine
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await
-            .is_empty(),
-        "shutdown must transfer repair-map ownership to the tracked reaper"
-    );
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        1,
-        "timed-out repair shutdown must retain one tracked join reaper"
-    );
-
-    release.release();
-    tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx)
-        .await
-        .expect("noncooperative repair owner completion timed out")
-        .expect("noncooperative repair owner completed");
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if engine
-                .store_administration
-                .memory_repair_schedulers()
-                .lock()
-                .await
-                .is_empty()
-                && engine.store_administration.retirement_reaper_count().await == 0
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("repair shutdown reaper did not release owner state");
     assert!(stale_task.is_finished());
 }
 
@@ -520,112 +405,8 @@ async fn project_reaper_settle_ignores_unrelated_pending_registration() {
 }
 
 #[cfg(unix)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cancelled_contended_repair_retirement_blocks_restart_until_join() {
-    use super::super::memory_repair_scheduler::MemoryRepairSchedulerReconcileOutcome;
-
-    let engine = DaemonEngine::default();
-    let key = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profiles/repair-registration-cancel-test"),
-            global_db_path: PathBuf::from("/profiles/repair-registration-cancel-test/global.db"),
-            project_id: Some("repair-registration-cancel-test".to_string()),
-            store_root: PathBuf::from("/stores/repair-registration-cancel-test"),
-            graph_db_path: PathBuf::from("/stores/repair-registration-cancel-test/old.db"),
-        },
-        project_root: PathBuf::from("/projects/repair-registration-cancel-test"),
-        scope_prefix: None,
-    };
-    let mut replacement = key.clone();
-    replacement.owner.graph_db_path =
-        PathBuf::from("/stores/repair-registration-cancel-test/new.db");
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
-    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, started_rx)
-        .await
-        .expect("noncooperative repair owner start timed out")
-        .expect("noncooperative repair owner started");
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(key.clone(), MemoryRepairSchedulerHandle::for_test(task));
-    let barrier = engine
-        .store_administration
-        .install_retirement_reaper_registration_barrier_for_test();
-    let retirement_engine = engine.clone();
-    let retirement_key = key.clone();
-    let retirement = tokio::spawn(async move {
-        retirement_engine
-            .retire_memory_repair_scheduler_locked(&retirement_key)
-            .await
-    });
-    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, barrier.wait_until_reached())
-        .await
-        .expect("repair registration barrier was not reached");
-
-    retirement.abort();
-    barrier.release();
-    let _ = tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, retirement)
-        .await
-        .expect("cancelled repair retirement did not unwind");
-    tokio::time::timeout(
-        MAINTENANCE_TEST_DEADLINE,
-        engine
-            .store_administration
-            .wait_for_retirement_reaper_count_for_test(1),
-    )
-    .await
-    .expect("repair reaper was not registered after caller cancellation");
-    let repeated = engine
-        .retire_memory_repair_scheduler_locked(&key)
-        .await
-        .expect("repeated repair retirement must reuse the tombstone");
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        1
-    );
-    assert_eq!(
-        engine
-            .ensure_memory_repair_scheduler(
-                replacement,
-                PathBuf::from("/moved-project"),
-                test_handshake_defaults(),
-            )
-            .await,
-        MemoryRepairSchedulerReconcileOutcome::Retiring,
-        "repair restart must remain blocked until the old task joins"
-    );
-
-    release.release();
-    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, completed_rx)
-        .await
-        .expect("repair owner completion timed out")
-        .expect("repair owner completion sender dropped");
-    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, repeated.wait())
-        .await
-        .expect("repeated repair retirement did not complete");
-    tokio::time::timeout(
-        MAINTENANCE_TEST_DEADLINE,
-        engine
-            .store_administration
-            .wait_for_retirement_reaper_count_for_test(0),
-    )
-    .await
-    .expect("repair reaper ownership did not converge to zero");
-    assert!(
-        engine
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await
-            .is_empty()
-    );
-}
-
-#[cfg(unix)]
 #[tokio::test]
-async fn panicked_retired_tasks_release_both_scheduler_registrations() {
+async fn panicked_retired_task_releases_scheduler_registration() {
     let engine = DaemonEngine::default();
     let automation_key = ProjectServerKey {
         owner: StoreOwnerKey {
@@ -640,22 +421,8 @@ async fn panicked_retired_tasks_release_both_scheduler_registrations() {
         project_root: PathBuf::from("/projects/panicked-automation-retirement-test"),
         scope_prefix: None,
     };
-    let repair_key = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profiles/panicked-repair-retirement-test"),
-            global_db_path: PathBuf::from("/profiles/panicked-repair-retirement-test/global.db"),
-            project_id: Some("panicked-repair-retirement-test".to_string()),
-            store_root: PathBuf::from("/stores/panicked-repair-retirement-test"),
-            graph_db_path: PathBuf::from("/stores/panicked-repair-retirement-test/graph.db"),
-        },
-        project_root: PathBuf::from("/projects/panicked-repair-retirement-test"),
-        scope_prefix: None,
-    };
     let automation_task = tokio::spawn(async {
         panic!("panicked automation owner");
-    });
-    let repair_task = tokio::spawn(async {
-        panic!("panicked repair owner");
     });
     engine
         .store_administration
@@ -666,30 +433,13 @@ async fn panicked_retired_tasks_release_both_scheduler_registrations() {
             automation_key.clone(),
             test_automation_scheduler_handle(automation_task),
         );
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(
-            repair_key.clone(),
-            MemoryRepairSchedulerHandle::for_test(repair_task),
-        );
-
     let automation_retirement = engine
         .retire_automation_scheduler_locked(&automation_key)
         .await
         .expect("panicked automation retirement");
-    let repair_retirement = engine
-        .retire_memory_repair_scheduler_locked(&repair_key)
+    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, automation_retirement.wait())
         .await
-        .expect("panicked repair retirement");
-    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, async {
-        automation_retirement.wait().await;
-        repair_retirement.wait().await;
-    })
-    .await
-    .expect("panicked scheduler retirements did not complete");
+        .expect("panicked scheduler retirement did not complete");
     tokio::time::timeout(
         MAINTENANCE_TEST_DEADLINE,
         engine
@@ -702,14 +452,6 @@ async fn panicked_retired_tasks_release_both_scheduler_registrations() {
         engine
             .store_administration
             .automation_schedulers()
-            .lock()
-            .await
-            .is_empty()
-    );
-    assert!(
-        engine
-            .store_administration
-            .memory_repair_schedulers()
             .lock()
             .await
             .is_empty()
@@ -737,17 +479,8 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
         .lock()
         .await
         .insert(
-            key.clone(),
-            test_automation_scheduler_handle(tokio::spawn(std::future::pending::<()>())),
-        );
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(
             key,
-            MemoryRepairSchedulerHandle::for_test(tokio::spawn(std::future::pending::<()>())),
+            test_automation_scheduler_handle(tokio::spawn(std::future::pending::<()>())),
         );
     let (gate_entered_tx, gate_entered_rx) = tokio::sync::oneshot::channel();
     let (gate_release_tx, gate_release_rx) = tokio::sync::oneshot::channel();
@@ -767,10 +500,7 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
     engine.lifecycle.begin_draining();
     let shutdown_engine = engine.clone();
     let mut shutdown = tokio::spawn(async move {
-        tokio::join!(
-            shutdown_engine.shutdown_automation_schedulers(),
-            shutdown_engine.shutdown_memory_repair_schedulers(),
-        );
+        shutdown_engine.shutdown_automation_schedulers().await;
     });
     let completed_without_gate =
         tokio::time::timeout(std::time::Duration::from_millis(250), &mut shutdown)

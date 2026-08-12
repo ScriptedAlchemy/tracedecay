@@ -42,8 +42,7 @@ use context_support::{
     context_memory_matches, context_memory_options, insert_context_memory_section,
 };
 use primitive_surface::{
-    memory_match as context_memory_match, node_not_found as node_not_found_result,
-    search_coverage as primitive_search_coverage,
+    node_not_found as node_not_found_result, search_coverage as primitive_search_coverage,
     semantic_search_mode as primitive_semantic_search_mode,
     symbol_location as primitive_symbol_location,
 };
@@ -529,8 +528,8 @@ pub(super) async fn handle_context(
             cursor: None,
             mode: semantic_mode,
             authority: search_authority.cloned(),
-            deadline,
-            cancellation,
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
         },
     )
     .await;
@@ -595,7 +594,7 @@ pub(super) async fn handle_context(
     related.truncate(max_nodes);
     let memory_options = context_memory_options(&args);
     let (memory_matches, memory_matches_error) = if context_memory_enabled(&memory_options) {
-        match context_memory_matches(cg, task, &memory_options).await {
+        match context_memory_matches(cg, task, &memory_options, deadline, cancellation).await {
             Ok(matches) => (matches, None),
             Err(err) => (Vec::new(), Some(err.to_string())),
         }
@@ -677,7 +676,7 @@ pub(super) async fn handle_context(
         related_symbols: related_values,
         code: code_blocks,
         coverage: primitive_search_coverage(&complete.coverage),
-        memory_matches: memory_matches.iter().map(context_memory_match).collect(),
+        memory_matches: memory_matches.clone(),
         memory_matches_error: memory_matches_error.clone(),
     };
     let mut value = serde_json::to_value(result)?;
@@ -1734,7 +1733,47 @@ fn collect_method_bodies(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::types::{FactRecord, FactSearchResult, MemoryCategory};
+    use tracedecay_application::memory::FactSearchHitV1;
+
+    fn context_memory_hit(content: String) -> FactSearchHitV1 {
+        serde_json::from_value(json!({
+            "fact": {
+                "owner": {"kind": "profile"},
+                "fact_id": "fact.test",
+                "content": content,
+                "category": "project",
+                "tags": [],
+                "entities": [],
+                "trust_score_millionths": 900_000,
+                "source": {"kind": "application", "operation_id": "operation.test"},
+                "source_label": "test",
+                "active_assertion_id": "assertion.active",
+                "last_event_id": "event.created",
+                "projected_as_of": 1,
+                "telemetry": {
+                    "retrieval_count": 0,
+                    "access_count": 0,
+                    "helpful_count": 0,
+                    "unhelpful_count": 0,
+                    "created_at": 1,
+                    "updated_at": 1,
+                    "last_retrieved_at": null,
+                    "last_recalled_at": null,
+                    "last_feedback_at": null
+                },
+                "metadata": {}
+            },
+            "scores": {
+                "score_millionths": 500_000,
+                "fts_score_millionths": 250_000,
+                "jaccard_score_millionths": 250_000,
+                "holographic_score_millionths": 0,
+                "trust_score_millionths": 900_000
+            },
+            "why": null
+        }))
+        .expect("canonical context-memory hit")
+    }
 
     /// A warm response must render exactly as it did before coverage existed:
     /// every lane complete, no coverage section, no added lines.
@@ -1957,33 +1996,7 @@ mod tests {
     #[test]
     fn context_memory_section_keeps_full_content_for_retrieval_handle() {
         let content = format!("{}tail-marker", "long memory body ".repeat(100));
-        let hit = FactSearchResult {
-            fact: FactRecord {
-                fact_id: 7,
-                content: content.clone(),
-                category: MemoryCategory::Project,
-                trust_score: 0.9,
-                source: Some("test".to_string()),
-                entities: vec![],
-                tags: vec![],
-                metadata: serde_json::Value::Null,
-                created_at: 0,
-                updated_at: 0,
-                access_count: 0,
-                last_retrieved_at: None,
-                retrieval_count: 0,
-                helpful_count: 0,
-                unhelpful_count: 0,
-                last_feedback_at: None,
-                last_recalled_at: None,
-            },
-            score: 0.5,
-            fts_score: 0.25,
-            jaccard_score: 0.25,
-            holographic_score: 0.0,
-            trust_score: 0.9,
-            why: None,
-        };
+        let hit = context_memory_hit(content.clone());
 
         let Some(section) = context_memory_section(&[hit], None) else {
             panic!("memory hit should render");
@@ -1997,33 +2010,7 @@ mod tests {
 
     #[test]
     fn context_memory_section_compacts_multiline_content() {
-        let hit = FactSearchResult {
-            fact: FactRecord {
-                fact_id: 7,
-                content: "first line\n# heading\n- item".to_string(),
-                category: MemoryCategory::Project,
-                trust_score: 0.9,
-                source: Some("test".to_string()),
-                entities: vec![],
-                tags: vec![],
-                metadata: serde_json::Value::Null,
-                created_at: 0,
-                updated_at: 0,
-                access_count: 0,
-                last_retrieved_at: None,
-                retrieval_count: 0,
-                helpful_count: 0,
-                unhelpful_count: 0,
-                last_feedback_at: None,
-                last_recalled_at: None,
-            },
-            score: 0.5,
-            fts_score: 0.25,
-            jaccard_score: 0.25,
-            holographic_score: 0.0,
-            trust_score: 0.9,
-            why: None,
-        };
+        let hit = context_memory_hit("first line\n# heading\n- item".to_owned());
 
         let Some(section) = context_memory_section(&[hit], None) else {
             panic!("memory hit should render");

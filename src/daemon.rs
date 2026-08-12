@@ -33,10 +33,6 @@ use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use branch_add::{branch_add_response, parse_branch_add_request};
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
 #[cfg(all(unix, test))]
-use memory_repair_scheduler::{
-    MemoryRepairPassDecision, MemoryRepairSchedulerHandle, run_memory_repair_scheduler_tick,
-};
-#[cfg(all(unix, test))]
 use scheduler::{
     AutomationSchedulerHandle, automation_scheduler_configured,
     automation_scheduler_tick_secs_for_project, daemon_scheduler_record_log_line,
@@ -128,6 +124,7 @@ pub fn error_message_is_read_deadline(message: &str) -> bool {
 }
 
 mod authority;
+pub(crate) mod automation_effect;
 mod bootstrap;
 mod bootstrap_route;
 use bootstrap_route::{
@@ -249,8 +246,6 @@ mod maintenance;
 mod maintenance_tasks;
 pub use maintenance_tasks::mark_process_long_lived_for_session_maintenance;
 use maintenance_tasks::spawn_semantic_artifact_gc_maintenance;
-#[cfg(unix)]
-mod memory_repair_scheduler;
 #[cfg(unix)]
 pub mod pr_autotrack;
 mod production_harness;

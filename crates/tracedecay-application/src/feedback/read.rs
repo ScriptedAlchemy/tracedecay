@@ -25,7 +25,7 @@ use crate::handlers::ApplicationOperation;
 use crate::result::{
     ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
     AuthorityReceipt, EvidencePacket, LegalAction, OpaqueCursor, OperationReceipt,
-    OperationTermination, RetrievalEvidence, RetryDirective, SafeDiagnostic,
+    OperationTermination, PageCursor, RetrievalEvidence, RetryDirective, SafeDiagnostic,
 };
 use crate::retrieval::{
     AnchorExpandRequest, AnchorExpandResult, PageRequest, RetrievalPortOutcome,
@@ -606,7 +606,7 @@ fn valid_list(
             .all(|pair| pair[0].finding.finding_id < pair[1].finding.finding_id)
         && matches!(
             (&evidence.page.cursor, evidence.page.expires_at),
-            (Some(_), Some(_)) | (None, None)
+            (Some(PageCursor::Opaque { .. }), Some(_)) | (None, None)
         )
         && evidence.page.total.is_none_or(|total| count <= total)
 }

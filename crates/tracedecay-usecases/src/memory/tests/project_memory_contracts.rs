@@ -9,15 +9,18 @@ use tracedecay_store::{
     ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
     ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
     ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
-    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1,
-    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStatusV1,
+    ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationOperationEffectV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1, ProjectMemoryFactMergeCommandV1,
+    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactMergeTargetV1,
+    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStatusV1,
     ProjectMemoryFactUnavailableV1,
 };
 
 use super::{FakeAuthority, batch, committed_outcome, fact_add_request, fact_id, id, owner};
 use crate::memory::{
-    MemoryApplication, MemoryApplicationError, MemoryMutationError, MemoryOperationContext,
-    ProjectMemoryFactAddPreflight, ProjectMemoryFactAddRequestOutcome, automatic_fact_add_command,
+    MemoryApplication, MemoryMutationError, MemoryOperationContext, ProjectMemoryFactAddPreflight,
+    ProjectMemoryFactAddRequestOutcome, automatic_fact_add_command,
 };
 
 #[test]
@@ -267,23 +270,24 @@ async fn merge_rejects_a_mismatched_authority_digest_without_losing_the_outcome(
         fact_id(owner.clone(), "operation.memory.merge-loser"),
     )
     .unwrap();
+    let winner_last_event: FactEventId = id("event.memory.merge-winner.last");
+    let loser_last_event: FactEventId = id("event.memory.merge-loser.last");
     let command = ProjectMemoryFactMergeCommandV1::new(
         owner.clone(),
         id("operation.memory.merge"),
-        winner.clone(),
-        vec![loser.clone()],
+        ProjectMemoryFactMergeTargetV1::new(winner.clone(), winner_last_event).unwrap(),
+        vec![ProjectMemoryFactMergeTargetV1::new(loser.clone(), loser_last_event.clone()).unwrap()],
         None,
         None,
     )
     .unwrap();
     let expected_digest = command.input_digest().unwrap();
     let first_event: FactEventId = id("event.memory.merge-loser.first");
-    let last_event: FactEventId = id("event.memory.merge-loser.last");
     let commit = FactCommitReceipt::new(
         loser.fact_id().clone(),
         owner.clone(),
-        vec![first_event, last_event.clone()],
-        last_event,
+        vec![first_event, loser_last_event.clone()],
+        loser_last_event,
         None,
     )
     .unwrap();
@@ -403,18 +407,74 @@ fn relation_provenance_keeps_metadata_bound_to_its_receipt() {
     );
 }
 
-#[test]
-fn relation_evidence_sorts_unique_input_and_rejects_duplicates() {
-    let first = fact_id(owner(), "operation.relation.evidence.first");
-    let second = fact_id(owner(), "operation.relation.evidence.second");
-    let mut evidence = vec![second, first];
-    super::super::dashboard::canonicalize_relation_evidence(&owner(), &mut evidence).unwrap();
-    assert!(evidence.windows(2).all(|pair| pair[0] < pair[1]));
-    let fact_id = fact_id(owner(), "operation.relation.evidence.duplicate");
-    let mut evidence = vec![fact_id.clone(), fact_id];
+#[tokio::test]
+async fn curation_rejects_a_mismatched_authority_digest_without_losing_the_receipt() {
+    let owner = owner();
+    let fact_id = fact_id(owner.clone(), "operation.curation.digest");
+    let fact = ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone()).unwrap();
+    let reviewed = tracedecay_store::ProjectMemoryFactCurationReviewRefV1::new(
+        fact,
+        FactEventId::new("event.curation.digest.review".to_owned()).unwrap(),
+    );
+    let operation_id = ProvenanceId::new("operation.curation.digest".to_owned()).unwrap();
+    let request = ProjectMemoryFactCurationBatchV1::new(
+        owner.clone(),
+        operation_id.clone(),
+        None,
+        Confidence::new(0.5).unwrap(),
+        vec![ProjectMemoryFactCurationOperationV1::NormalizeTags(
+            ProjectMemoryFactNormalizeTagsV1::new(
+                reviewed.clone(),
+                vec!["canonical".to_owned()],
+                vec![reviewed],
+                Confidence::new(0.9).unwrap(),
+            )
+            .unwrap(),
+        )],
+    )
+    .unwrap();
+    let fact_event_id = FactEventId::new("event.curation.digest.fact".to_owned()).unwrap();
+    let provenance_event_id =
+        FactEventId::new("event.curation.digest.provenance".to_owned()).unwrap();
+    let commit = FactCommitReceipt::new(
+        fact_id,
+        owner.clone(),
+        vec![fact_event_id, provenance_event_id.clone()],
+        provenance_event_id,
+        None,
+    )
+    .unwrap();
+    let authority_receipt = ProjectMemoryFactCurationReceiptV1::new(
+        owner.clone(),
+        operation_id,
+        "f".repeat(64),
+        None,
+        vec![
+            ProjectMemoryFactCurationOperationEffectV1::normalize_tags(fact.clone(), commit)
+                .unwrap(),
+        ],
+        vec![fact],
+    )
+    .unwrap();
+    assert_ne!(
+        request.input_digest().unwrap(),
+        authority_receipt.input_digest()
+    );
+    assert_eq!(authority_receipt.accepted_operations(), 1);
+    let authority = FakeAuthority::default();
+    *authority.curation_receipt.lock().unwrap() = Some(authority_receipt.clone());
+    let application = MemoryApplication::new(owner, authority).unwrap();
 
-    let error = super::super::dashboard::canonicalize_relation_evidence(&owner(), &mut evidence)
+    let error = application
+        .dashboard_curation(request, &super::write_control())
+        .await
         .unwrap_err();
 
-    assert!(matches!(error, MemoryApplicationError::InvalidInput { .. }));
+    let MemoryMutationError::InvalidAuthorityResult {
+        authority_result, ..
+    } = error
+    else {
+        panic!("wrong curation digest must retain the authority receipt");
+    };
+    assert_eq!(authority_result, authority_receipt);
 }

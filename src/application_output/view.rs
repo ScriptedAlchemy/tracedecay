@@ -56,13 +56,14 @@ impl CanonicalHumanView {
                         view.code("Freshness", scalar(&packet.temporal.freshness)?);
                         view.push_coverage(&packet.coverage)?;
                         view.push_omissions(&packet.omissions)?;
-                        view.code(
-                            "Cursor",
-                            packet.page.cursor.as_ref().map_or_else(
-                                || "none".to_owned(),
-                                |cursor| cursor.as_str().to_owned(),
-                            ),
-                        );
+                        let cursor = packet
+                            .page
+                            .cursor
+                            .as_ref()
+                            .map(scalar)
+                            .transpose()?
+                            .unwrap_or_else(|| "none".to_owned());
+                        view.code("Cursor", cursor);
                         view.code("Page returned", packet.page.returned.to_string());
                         view.code(
                             "Page total",

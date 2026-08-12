@@ -7,6 +7,10 @@ use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
+use tracedecay_application::retained_surfaces::{
+    FactProjectionV1, FactStoreAddCommitV1, FactStoreAddResultV1, FactStoreGetResultV1,
+    FactTelemetryV1,
+};
 
 struct ScopedProductionContextFixture {
     harness: ProductionProjectCompositionHarnessV1,
@@ -97,6 +101,53 @@ async fn call_production_tool(
     Ok(ToolResult::new(value, Vec::new()))
 }
 
+fn retained_payload(result: &ToolResult) -> Value {
+    let envelope: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    envelope
+        .pointer("/outcome/value/payload")
+        .cloned()
+        .unwrap_or_else(|| panic!("retained tool returned no canonical payload: {envelope}"))
+}
+
+fn added_fact_id(result: &ToolResult) -> String {
+    let result: FactStoreAddResultV1 = serde_json::from_value(retained_payload(result)).unwrap();
+    let projection = match result {
+        FactStoreAddResultV1::Committed { result } => match result {
+            FactStoreAddCommitV1::Added { fact, .. }
+            | FactStoreAddCommitV1::NearDuplicate { fact, .. }
+            | FactStoreAddCommitV1::PossibleConflict { fact, .. } => fact,
+        },
+        FactStoreAddResultV1::NormalizedDuplicate { fact, .. } => fact,
+        FactStoreAddResultV1::SecretRejected => panic!("canonical test fact was rejected"),
+    };
+    match projection {
+        FactProjectionV1::Available { fact } => fact.fact_id.as_str().to_owned(),
+        FactProjectionV1::Unavailable { status } => {
+            panic!(
+                "new canonical fact is unavailable: {}",
+                status.fact_id.as_str()
+            )
+        }
+    }
+}
+
+async fn fact_telemetry(fixture: &ProductionCompositionFixture, fact_id: &str) -> FactTelemetryV1 {
+    let result = call_production_tool(
+        fixture,
+        "tracedecay_fact_store_get",
+        json!({"format": "json", "fact_id": fact_id}),
+    )
+    .await
+    .unwrap();
+    let result: FactStoreGetResultV1 = serde_json::from_value(retained_payload(&result)).unwrap();
+    match result.fact {
+        FactProjectionV1::Available { fact } => fact.telemetry,
+        FactProjectionV1::Unavailable { status } => {
+            panic!("canonical fact is unavailable: {}", status.fact_id.as_str())
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_context_appends_index_coverage_hint_for_skipped_generated_dirs() {
     let fixture = setup_production_generated_dir_project().await;
@@ -141,9 +192,9 @@ async fn test_context() {
 
 #[tokio::test]
 async fn context_includes_matching_memory_facts() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let added = handle_tool_call(
-        &cg,
+    let fixture = setup_production_project().await;
+    let added = call_production_tool(
+        &fixture,
         "tracedecay_fact_store_add",
         json!({
             "format": "json",
@@ -154,21 +205,16 @@ async fn context_includes_matching_memory_facts() {
             "trust": 0.91,
             "source": "mcp-context-test"
         }),
-        None,
-        None,
     )
     .await
     .unwrap();
-    let added: Value = serde_json::from_str(extract_text(&added.value)).unwrap();
-    let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
-    let before_context = cg.get_fact(fact_id).await.unwrap().unwrap();
+    let fact_id = added_fact_id(&added);
+    let before_context = fact_telemetry(&fixture, &fact_id).await;
 
-    let markdown_result = handle_tool_call(
-        &cg,
+    let markdown_result = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({"task": "helper function durable memory review"}),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -177,12 +223,10 @@ async fn context_includes_matching_memory_facts() {
     assert!(markdown.contains(&format!("fact_id={fact_id}")));
     assert!(markdown.contains("Helper function reviews should check durable memory"));
 
-    let json_result = handle_tool_call(
-        &cg,
+    let json_result = call_production_tool(
+        &fixture,
         "tracedecay_context",
         json!({"task": "helper function durable memory review", "format": "json"}),
-        None,
-        None,
     )
     .await
     .unwrap();
@@ -198,10 +242,10 @@ async fn context_includes_matching_memory_facts() {
     assert!(payload["memory_matches"].as_array().is_some_and(|matches| {
         matches
             .iter()
-            .any(|hit| hit["fact"]["fact_id"].as_i64() == Some(fact_id))
+            .any(|hit| hit["fact"]["fact_id"].as_str() == Some(fact_id.as_str()))
     }));
 
-    let after_context = cg.get_fact(fact_id).await.unwrap().unwrap();
+    let after_context = fact_telemetry(&fixture, &fact_id).await;
     assert_eq!(
         after_context.retrieval_count, before_context.retrieval_count,
         "context memory enrichment should not count as an explicit memory retrieval"
@@ -210,6 +254,7 @@ async fn context_includes_matching_memory_facts() {
         after_context.access_count, before_context.access_count,
         "context memory enrichment should not count as an explicit memory recall"
     );
+    fixture.harness.shutdown().await;
 }
 
 #[tokio::test]

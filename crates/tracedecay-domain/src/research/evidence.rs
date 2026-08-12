@@ -1,5 +1,6 @@
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::error::DomainError;
@@ -10,7 +11,9 @@ use super::id::{ComponentVersion, SanitizationReceiptId};
 /// Receipt references are the explicit boundary between untrusted wire data and
 /// the proof-carrying text types below. They do not claim that the domain crate
 /// ran a sanitizer; the capture layer owns issuance and persistence of receipts.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(deny_unknown_fields)]
 pub struct SanitizationReceiptRefV1 {
     receipt_id: SanitizationReceiptId,

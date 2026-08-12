@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracedecay_domain::{
-    ActorId, DomainError, FactId, FactOwnerV1, ProvenanceId, canonical_sha256,
+    ActorId, DomainError, FactEventId, FactId, FactOwnerV1, ProvenanceId, canonical_sha256,
 };
 
 use super::super::super::{FactCommitReceipt, FactStoreError, FactStoreResult};
@@ -10,12 +10,44 @@ use super::super::{ProjectMemoryFactIdV1, validate_project_memory_text};
 use super::MAX_PROJECT_MEMORY_CURATION_TARGETS;
 use super::validate::validate_curation_fact_target;
 
+/// One exact fact snapshot admitted for a canonical merge.
+///
+/// Autonomous curation must never reinterpret a reviewed merge against a
+/// newer winner or loser. Keeping the event identity beside the target makes
+/// that compare-and-set authority structural for every participant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectMemoryFactMergeTargetV1 {
+    fact: ProjectMemoryFactIdV1,
+    expected_last_event_id: FactEventId,
+}
+
+impl ProjectMemoryFactMergeTargetV1 {
+    pub fn new(
+        fact: ProjectMemoryFactIdV1,
+        expected_last_event_id: FactEventId,
+    ) -> FactStoreResult<Self> {
+        expected_last_event_id.validate()?;
+        Ok(Self {
+            fact,
+            expected_last_event_id,
+        })
+    }
+
+    pub fn fact(&self) -> &ProjectMemoryFactIdV1 {
+        &self.fact
+    }
+
+    pub fn expected_last_event_id(&self) -> &FactEventId {
+        &self.expected_last_event_id
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectMemoryFactMergeCommandV1 {
     owner: FactOwnerV1,
     operation_id: ProvenanceId,
-    winner: ProjectMemoryFactIdV1,
-    losers: Vec<ProjectMemoryFactIdV1>,
+    winner: ProjectMemoryFactMergeTargetV1,
+    losers: Vec<ProjectMemoryFactMergeTargetV1>,
     merged_content: Option<String>,
     actor: Option<ActorId>,
 }
@@ -24,29 +56,34 @@ impl ProjectMemoryFactMergeCommandV1 {
     pub fn new(
         owner: FactOwnerV1,
         operation_id: ProvenanceId,
-        winner: ProjectMemoryFactIdV1,
-        losers: Vec<ProjectMemoryFactIdV1>,
+        winner: ProjectMemoryFactMergeTargetV1,
+        losers: Vec<ProjectMemoryFactMergeTargetV1>,
         merged_content: Option<String>,
         actor: Option<ActorId>,
     ) -> FactStoreResult<Self> {
         owner.validate()?;
         operation_id.validate()?;
-        validate_curation_fact_target(&owner, &winner)?;
+        validate_curation_fact_target(&owner, winner.fact())?;
         if let Some(actor) = &actor {
             actor.validate()?;
         }
         if let Some(content) = &merged_content {
             validate_project_memory_text(content, "merge content")?;
         }
-        if losers.is_empty() || losers.len() > MAX_PROJECT_MEMORY_CURATION_TARGETS {
+        let changed_fact_count = losers.len() + usize::from(merged_content.is_some());
+        if losers.is_empty() || changed_fact_count > MAX_PROJECT_MEMORY_CURATION_TARGETS {
             return Err(FactStoreError::InvalidQueryLimit {
-                limit: losers.len(),
+                limit: changed_fact_count,
                 max: MAX_PROJECT_MEMORY_CURATION_TARGETS,
             });
         }
         for (index, loser) in losers.iter().enumerate() {
-            validate_curation_fact_target(&owner, loser)?;
-            if loser == &winner || losers[..index].iter().any(|previous| previous == loser) {
+            validate_curation_fact_target(&owner, loser.fact())?;
+            if loser.fact() == winner.fact()
+                || losers[..index]
+                    .iter()
+                    .any(|previous| previous.fact() == loser.fact())
+            {
                 return Err(FactStoreError::Contract(DomainError::NonCanonical {
                     field: "merge targets",
                 }));
@@ -71,11 +108,19 @@ impl ProjectMemoryFactMergeCommandV1 {
     }
 
     pub fn winner(&self) -> &ProjectMemoryFactIdV1 {
+        self.winner.fact()
+    }
+
+    pub fn winner_target(&self) -> &ProjectMemoryFactMergeTargetV1 {
         &self.winner
     }
 
-    pub fn losers(&self) -> &[ProjectMemoryFactIdV1] {
+    pub fn loser_targets(&self) -> &[ProjectMemoryFactMergeTargetV1] {
         &self.losers
+    }
+
+    pub fn loser_facts(&self) -> impl ExactSizeIterator<Item = &ProjectMemoryFactIdV1> {
+        self.losers.iter().map(ProjectMemoryFactMergeTargetV1::fact)
     }
 
     pub fn merged_content(&self) -> Option<&str> {
@@ -87,16 +132,17 @@ impl ProjectMemoryFactMergeCommandV1 {
     }
 
     pub fn input_digest(&self) -> FactStoreResult<String> {
-        let loser_fact_ids = self
+        let losers = self
             .losers
             .iter()
-            .map(ProjectMemoryFactIdV1::fact_id)
+            .map(|target| (target.fact().fact_id(), target.expected_last_event_id()))
             .collect::<Vec<_>>();
         let digest = canonical_sha256(&(
             "tracedecay.project-memory.fact-merge-input.v1",
             &self.owner,
-            self.winner.fact_id(),
-            loser_fact_ids,
+            self.winner.fact().fact_id(),
+            self.winner.expected_last_event_id(),
+            losers,
             self.merged_content.as_deref(),
             self.actor.as_ref().map(ActorId::as_str),
         ))?;

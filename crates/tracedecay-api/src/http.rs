@@ -508,7 +508,7 @@ pub fn http_route_documents(
             Some(_) => continue,
             None => {
                 let Some(operation) =
-                    RetainedSurfaceOperation::from_name(binding.operation().as_str())
+                    RetainedSurfaceOperation::from_operation_name(binding.operation().as_str())
                         .filter(|operation| operation.is_callable())
                 else {
                     continue;
@@ -659,6 +659,7 @@ fn application_problem_status(kind: ApplicationProblemKind) -> StatusCode {
         ApplicationProblemKind::ResetRequired | ApplicationProblemKind::Unavailable => {
             StatusCode::SERVICE_UNAVAILABLE
         }
+        ApplicationProblemKind::ExecutionFailed => StatusCode::INTERNAL_SERVER_ERROR,
         ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
         ApplicationProblemKind::Cancelled => StatusCode::REQUEST_TIMEOUT,
         ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,

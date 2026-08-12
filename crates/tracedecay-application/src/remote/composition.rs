@@ -324,6 +324,7 @@ fn aggregate_coverage<T>(
 
 fn remote_unavailable(code: &str, message: &str) -> ApplicationProblem {
     ApplicationProblem::Unavailable {
+        classification: crate::ApplicationUnavailableClassV1::Authority,
         diagnostic: SafeDiagnostic::new(code, message)
             .expect("static remote problem diagnostic is valid"),
         retry: RetryDirective::AfterRevalidate,

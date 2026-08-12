@@ -162,10 +162,12 @@ pub(super) fn work_topology_problem(
             Ok(tracedecay_application::WorkAttemptTopologyStateV1::Absent)
         }
         WorkTopologyError::Cancelled => Err(ApplicationProblem::Cancelled {
+            stage: tracedecay_application::CancellationStage::DuringRead,
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         }),
         WorkTopologyError::BudgetExhausted => Err(ApplicationProblem::TimedOut {
+            stage: tracedecay_application::CancellationStage::DuringRead,
             retry: RetryDirective::AfterDelay,
             legal_actions: Vec::new(),
         }),

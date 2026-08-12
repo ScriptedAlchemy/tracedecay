@@ -5,12 +5,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_domain::configuration::{ConfigurationRevisionId, UserProfileId};
-use tracedecay_domain::{FactOwnerV1, SessionId, TemporalCoverageCountsV1};
+use tracedecay_domain::{Confidence, FactId, FactOwnerV1, SessionId, TemporalCoverageCountsV1};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
 use super::*;
-use crate::application::memory::{MemoryApplication, MemoryOperationContext};
+use crate::application::memory::{
+    MemoryApplication, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
+};
+use crate::automation::AutomationRunControl;
 use crate::automation::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
 };
@@ -19,8 +22,7 @@ use crate::automation::config::{
 };
 use crate::automation::run_ledger::AutomationRunStatus;
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
-use crate::memory::types::{AddFactRequest, MemoryCategory, MemoryGroomingOperation};
-use crate::ports::project_runtime::{MemoryCurateOptions, ProfileRuntime, RuntimeFuture};
+use crate::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use crate::store::memory::DatabaseFactStore;
 
 struct FixtureProfileRuntime {
@@ -40,15 +42,6 @@ impl ProfileRuntime for FixtureProfileRuntime {
 
     fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database> {
         Box::pin(async { Ok(self.memory.clone()) })
-    }
-
-    fn curate_user_memory<'a>(
-        &'a self,
-        _profile_root: &'a std::path::Path,
-        _automation_root: &'a std::path::Path,
-        options: &'a MemoryCurateOptions,
-    ) -> RuntimeFuture<'a, Value> {
-        Box::pin(fixture_user_memory_curate(&self.memory, options))
     }
 }
 
@@ -102,179 +95,12 @@ fn configuration_revision() -> ConfigurationRevisionId {
     ConfigurationRevisionId::new("config.user-automation-test.v1").expect("configuration revision")
 }
 
-async fn fixture_user_memory_curate(
-    database: &Database,
-    options: &MemoryCurateOptions,
-) -> crate::errors::Result<Value> {
-    let owner = FactOwnerV1::Profile;
-    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(database)).map_err(
-        |error| TraceDecayError::Config {
-            message: format!("initialize profile memory fixture: {error}"),
-        },
-    )?;
-    if options.llm {
-        let facts = memory
-            .list_facts_untracked(None, None, 100)
-            .await
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("read profile memory fixture: {error}"),
-            })?;
-        let allowed_fact_ids = facts.iter().map(|fact| fact.fact_id).collect::<Vec<_>>();
-        return Ok(json!({
-            "llm_review": {
-                "status": if facts.len() >= 2 {
-                    "needs_llm_review"
-                } else {
-                    "up_to_date"
-                },
-                "clusters_reviewed": usize::from(facts.len() >= 2),
-                "allowed_fact_ids": allowed_fact_ids,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Return strict JSON memory curation operations."
-                    },
-                    {
-                        "role": "user",
-                        "content": "Review the bounded profile memory fixture."
-                    }
-                ]
-            }
-        }));
-    }
-
-    let raw_ops = options
-        .llm_ops
-        .as_ref()
-        .and_then(|value| value.get("ops"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut accepted = Vec::new();
-    let mut rejected = Vec::new();
-    for operation in raw_ops {
-        let kind = operation.get("op").and_then(Value::as_str);
-        let confidence = operation
-            .get("confidence")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        if kind == Some("keep") {
-            continue;
-        }
-        let valid = confidence >= options.min_confidence
-            && match kind {
-                Some("delete") => operation.get("fact_id").and_then(Value::as_i64).is_some(),
-                Some("merge") => {
-                    operation.get("winner_id").and_then(Value::as_i64).is_some()
-                        && operation
-                            .get("loser_ids")
-                            .and_then(Value::as_array)
-                            .is_some_and(|losers| !losers.is_empty())
-                }
-                Some(
-                    "normalize_tags" | "merge_entities" | "add_alias" | "link_facts"
-                    | "repair_vector",
-                ) => serde_json::from_value::<MemoryGroomingOperation>(operation.clone()).is_ok(),
-                _ => false,
-            };
-        if valid {
-            accepted.push(operation);
-        } else {
-            rejected.push(json!({
-                "op": operation,
-                "rejected_reason": "invalid fixture curation operation"
-            }));
-        }
-    }
-
-    let mut applied = 0usize;
-    if options.apply {
-        let mut grooming = Vec::new();
-        for operation in &accepted {
-            let context = MemoryOperationContext::generated(
-                &owner,
-                "apply profile memory fixture curation",
-                None,
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("create profile memory fixture operation: {error}"),
-            })?;
-            match operation.get("op").and_then(Value::as_str) {
-                Some("delete") => {
-                    let fact_id = operation
-                        .get("fact_id")
-                        .and_then(Value::as_i64)
-                        .expect("validated delete fixture");
-                    applied += usize::from(memory.remove_fact(fact_id, context).await.map_err(
-                        |error| TraceDecayError::Config {
-                            message: format!("delete profile memory fixture fact: {error}"),
-                        },
-                    )?);
-                }
-                Some("merge") => {
-                    let winner_id = operation
-                        .get("winner_id")
-                        .and_then(Value::as_i64)
-                        .expect("validated merge winner");
-                    let loser_ids = operation
-                        .get("loser_ids")
-                        .and_then(Value::as_array)
-                        .expect("validated merge losers")
-                        .iter()
-                        .filter_map(Value::as_i64)
-                        .collect();
-                    let merged_content = operation
-                        .get("merged_content")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    memory
-                        .dashboard_merge_fact_ids(winner_id, loser_ids, merged_content, context)
-                        .await
-                        .map_err(|error| TraceDecayError::Config {
-                            message: format!("merge profile memory fixture facts: {error}"),
-                        })?;
-                    applied += 1;
-                }
-                Some(
-                    "normalize_tags" | "merge_entities" | "add_alias" | "link_facts"
-                    | "repair_vector",
-                ) => grooming.push(
-                    serde_json::from_value(operation.clone())
-                        .expect("validated grooming fixture operation"),
-                ),
-                _ => {}
-            }
-        }
-        if !grooming.is_empty() {
-            let context = MemoryOperationContext::generated(
-                &owner,
-                "apply profile memory fixture grooming",
-                None,
-            )
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("create profile grooming fixture operation: {error}"),
-            })?;
-            let report = memory
-                .dashboard_apply_grooming(grooming, options.min_confidence, context)
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("groom profile memory fixture: {error}"),
-                })?;
-            applied += report.normalized_tags
-                + report.merged_entities
-                + report.aliases_added
-                + report.facts_linked
-                + report.vectors_repaired;
-        }
-    }
-
-    Ok(json!({
-        "llm_apply": {
-            "ops": accepted,
-            "rejected_ops": rejected,
-            "applied": applied
-        }
-    }))
+fn test_run_control() -> AutomationRunControl {
+    let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    AutomationRunControl::from_interrupted({
+        let interrupted = Arc::clone(&interrupted);
+        Arc::new(move || interrupted.load(std::sync::atomic::Ordering::Acquire))
+    })
 }
 
 struct JsonBackend {
@@ -453,6 +279,7 @@ async fn projectless_reflection_uses_caller_supplied_automation_configuration() 
         &harness.profile_root,
         Arc::clone(&harness.registry),
         &config,
+        &test_run_control(),
         &configuration_revision(),
         &backend,
         &retrieval,
@@ -471,7 +298,10 @@ async fn projectless_reflection_uses_caller_supplied_automation_configuration() 
         .expect("profile memory authority");
     assert_eq!(
         memory
-            .list_facts_untracked(None, None, 10)
+            .query_current_facts(
+                tracedecay_store::CurrentFactsQuery::new(FactOwnerV1::Profile, None, 10)
+                    .expect("canonical profile fact query"),
+            )
             .await
             .expect("profile facts")
             .len(),
@@ -540,6 +370,7 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
             &harness.profile_root,
             Arc::clone(&harness.registry),
             &config,
+            &test_run_control(),
             &configuration_revision(),
             &reflector_backend,
             &retrieval,
@@ -576,6 +407,7 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
         &harness.profile_root,
         Arc::clone(&harness.registry),
         &config,
+        &test_run_control(),
         &configuration_revision(),
         &reflector_backend,
         &retrieval,
@@ -605,19 +437,19 @@ async fn terminal_evidence_rejections_do_not_run_user_backends() {
 }
 
 #[tokio::test]
-async fn projectless_memory_curator_applies_validated_delete() {
-    let harness = UserRuntimeHarness::open("user-curator-delete").await;
+async fn projectless_memory_curator_quarantines_deprecated_operations() {
+    let harness = UserRuntimeHarness::open("user-curator-deprecated").await;
     let database = harness.memory().await;
-    let seeded = seed_user_duplicate_facts(&database).await;
+    let run_control = test_run_control();
+    let seeded = seed_user_duplicate_facts(&database, &run_control).await;
     let backend = JsonBackend::new(
         AgentTaskKind::MemoryCurator,
         json!({
             "ops": [{
-                "cluster_id": "cluster-0000",
                 "op": "delete",
                 "fact_id": seeded.loser_id,
                 "confidence": 0.99,
-                "reason": "The older duplicate is no longer relevant"
+                "reason": "legacy operation must not mutate canonical memory"
             }]
         }),
     );
@@ -629,83 +461,99 @@ async fn projectless_memory_curator_applies_validated_delete() {
         &configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions::default(),
+        &run_control,
+    )
+    .await
+    .expect("profile memory curator");
+
+    assert_eq!(run.report["llm_apply"]["applied"], json!(0));
+    assert_eq!(run.ledger_record.rejected_count, 1);
+    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
+        .expect("profile memory authority");
+    assert!(
+        memory
+            .get_project_memory_fact(
+                tracedecay_store::ProjectMemoryFactIdV1::new(FactOwnerV1::Profile, seeded.loser_id)
+                    .expect("canonical loser target"),
+                run_control.read_control(),
+            )
+            .await
+            .expect("canonical loser projection")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn projectless_memory_curator_links_profile_memory_with_canonical_ids() {
+    let harness = UserRuntimeHarness::open("user-curator-link").await;
+    let database = harness.memory().await;
+    let run_control = test_run_control();
+    let seeded = seed_user_duplicate_facts(&database, &run_control).await;
+    let backend = JsonBackend::new(
+        AgentTaskKind::MemoryCurator,
+        json!({
+            "ops": [{
+                "op": "link_facts",
+                "source": {
+                    "fact_id": seeded.winner_id,
+                    "expected_last_event_id": seeded.winner_event_id,
+                },
+                "target": {
+                    "fact_id": seeded.loser_id,
+                    "expected_last_event_id": seeded.loser_event_id,
+                },
+                "relation": "supports",
+                "evidence_facts": [{
+                    "fact_id": seeded.winner_id,
+                    "expected_last_event_id": seeded.winner_event_id,
+                }],
+                "confidence": 0.99,
+                "source_label": "user-scope-fixture",
+                "metadata": {"reason": "The durable profile preferences support each other"}
+            }]
+        }),
+    );
+
+    let run = run_user_memory_curator_with_backend(
+        &harness.profile_root,
+        Arc::clone(&harness.registry),
+        &enabled_user_config(),
+        &configuration_revision(),
+        &backend,
+        MemoryCuratorAutomationOptions::default(),
+        &run_control,
     )
     .await
     .expect("profile memory curator");
 
     assert_eq!(run.report["llm_apply"]["applied"], json!(1));
-    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
-        .expect("profile memory authority");
-    assert!(
-        memory
-            .get_fact(seeded.loser_id)
-            .await
-            .expect("deleted fact")
-            .is_none()
-    );
-}
-
-#[tokio::test]
-async fn projectless_memory_curator_merges_and_updates_profile_memory() {
-    let harness = UserRuntimeHarness::open("user-curator-merge").await;
-    let database = harness.memory().await;
-    let seeded = seed_user_duplicate_facts(&database).await;
-    let backend = JsonBackend::new(
-        AgentTaskKind::MemoryCurator,
-        json!({
-            "ops": [{
-                "cluster_id": "cluster-0000",
-                "op": "merge",
-                "winner_id": seeded.winner_id,
-                "loser_ids": [seeded.loser_id],
-                "merged_content": "General projectless conversations belong in profile memory",
-                "confidence": 0.99,
-                "reason": "Consolidate the duplicate preference"
-            }]
-        }),
-    );
-
-    run_user_memory_curator_with_backend(
-        &harness.profile_root,
-        Arc::clone(&harness.registry),
-        &enabled_user_config(),
-        &configuration_revision(),
-        &backend,
-        MemoryCuratorAutomationOptions::default(),
-    )
-    .await
-    .expect("profile memory curator");
-
-    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
-        .expect("profile memory authority");
-    let facts = memory
-        .list_facts_untracked(None, None, 10)
-        .await
-        .expect("profile facts");
-    assert_eq!(facts.len(), 1);
-    assert_eq!(facts[0].fact_id, seeded.winner_id);
     assert_eq!(
-        facts[0].content,
-        "General projectless conversations belong in profile memory"
+        run.report["llm_apply"]["receipts"][0]["receipt"]["facts_linked"],
+        json!(1)
     );
 }
 
 #[tokio::test]
-async fn projectless_memory_curator_grooms_profile_memory() {
-    let harness = UserRuntimeHarness::open("user-curator-groom").await;
+async fn projectless_memory_curator_normalizes_profile_fact_tags() {
+    let harness = UserRuntimeHarness::open("user-curator-normalize-tags").await;
     let database = harness.memory().await;
-    let seeded = seed_user_duplicate_facts(&database).await;
+    let run_control = test_run_control();
+    let seeded = seed_user_duplicate_facts(&database, &run_control).await;
     let backend = JsonBackend::new(
         AgentTaskKind::MemoryCurator,
         json!({
             "ops": [{
-                "cluster_id": "cluster-0000",
                 "op": "normalize_tags",
-                "fact_id": seeded.winner_id,
+                "target": {
+                    "fact_id": seeded.winner_id,
+                    "expected_last_event_id": seeded.winner_event_id,
+                },
                 "tags": ["memory", "projectless"],
-                "evidence_fact_ids": [seeded.loser_id],
+                "evidence_facts": [{
+                    "fact_id": seeded.loser_id,
+                    "expected_last_event_id": seeded.loser_event_id,
+                }],
                 "confidence": 0.99,
-                "reason": "Normalize the reviewed preference tags"
             }]
         }),
     );
@@ -717,6 +565,7 @@ async fn projectless_memory_curator_grooms_profile_memory() {
         &configuration_revision(),
         &backend,
         MemoryCuratorAutomationOptions::default(),
+        &run_control,
     )
     .await
     .expect("profile memory curator");
@@ -724,51 +573,76 @@ async fn projectless_memory_curator_grooms_profile_memory() {
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database))
         .expect("profile memory authority");
     let fact = memory
-        .get_fact(seeded.winner_id)
+        .get_project_memory_fact(
+            tracedecay_store::ProjectMemoryFactIdV1::new(FactOwnerV1::Profile, seeded.winner_id)
+                .expect("canonical winner target"),
+            run_control.read_control(),
+        )
         .await
-        .expect("groomed fact")
+        .expect("normalized fact")
         .expect("fact remains");
-    assert_eq!(fact.tags, ["memory", "projectless"]);
+    let tracedecay_store::ProjectMemoryFactProjectionV1::Available(fact) = fact else {
+        panic!("normalized fact payload must remain available");
+    };
+    assert_eq!(fact.tags(), ["memory", "projectless"]);
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SeededUserDuplicateFacts {
-    winner_id: i64,
-    loser_id: i64,
+    winner_id: FactId,
+    winner_event_id: tracedecay_domain::FactEventId,
+    loser_id: FactId,
+    loser_event_id: tracedecay_domain::FactEventId,
 }
 
-async fn seed_user_duplicate_facts(database: &Database) -> SeededUserDuplicateFacts {
+async fn seed_user_duplicate_facts(
+    database: &Database,
+    run_control: &AutomationRunControl,
+) -> SeededUserDuplicateFacts {
     let owner = FactOwnerV1::Profile;
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(database))
         .expect("profile memory authority");
-    let mut fact_ids = [0_i64; 2];
-    for (index, content) in [
+    let mut facts = Vec::with_capacity(2);
+    for content in [
         "General conversations belong in user memory.",
         "General conversations belong in user memory!",
     ]
     .into_iter()
-    .enumerate()
     {
-        let outcome = memory
-            .add_fact(
-                AddFactRequest {
+        let preflight = memory
+            .preflight_project_memory_fact_add(
+                ProjectMemoryFactAddRequest {
                     content: content.to_string(),
-                    category: MemoryCategory::UserPref,
-                    source: Some("user-scope-fixture".to_string()),
+                    category: tracedecay_domain::FactCategoryV1::UserPref,
+                    source_label: Some("user-scope-fixture".to_string()),
                     tags: vec!["memory".to_string()],
                     entities: Vec::new(),
-                    trust: Some(0.95),
+                    trust: Some(Confidence::new(0.95).expect("fixture confidence")),
                     metadata: json!({}),
                 },
-                MemoryOperationContext::generated(&owner, "seed user duplicate fact", None)
-                    .expect("memory operation"),
+                None,
             )
+            .expect("preflight profile fact");
+        let write_control = run_control.write_control();
+        let outcome = memory
+            .add_preflighted_project_memory_fact(preflight, &write_control)
             .await
             .expect("seed profile fact");
-        fact_ids[index] = outcome.fact.expect("compatibility fact").fact_id;
+        let ProjectMemoryFactAddRequestOutcome::Applied(outcome) = outcome else {
+            panic!("fixture add must apply");
+        };
+        let tracedecay_store::ProjectMemoryFactProjectionV1::Available(fact) = outcome.fact()
+        else {
+            panic!("fixture fact payload must remain available");
+        };
+        facts.push((fact.fact_id().clone(), fact.last_event_id().clone()));
     }
+    let (winner_id, winner_event_id) = facts.remove(0);
+    let (loser_id, loser_event_id) = facts.remove(0);
     SeededUserDuplicateFacts {
-        winner_id: fact_ids[0],
-        loser_id: fact_ids[1],
+        winner_id,
+        winner_event_id,
+        loser_id,
+        loser_event_id,
     }
 }

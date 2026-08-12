@@ -6,9 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::sync::Mutex;
-use tracedecay_agent_hosts::ports::project_runtime::{
-    MemoryCurateOptions as AgentMemoryCurateOptions, ProfileRuntime, RuntimeFuture,
-};
+use tracedecay_agent_hosts::ports::project_runtime::{ProfileRuntime, RuntimeFuture};
 use tracedecay_domain::BrainNodeId;
 use tracedecay_store::{
     AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
@@ -36,6 +34,7 @@ mod code_reads;
 mod maintenance;
 mod memory_graph_reconciliation_tasks;
 mod mounts;
+mod profile_memory;
 mod remote_recovery;
 mod retained_hook_tasks;
 
@@ -44,6 +43,7 @@ use memory_graph_reconciliation_tasks::RetainedMemoryGraphReconciliationTasksV1;
 use retained_hook_tasks::RetainedHookTasks;
 
 pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
+pub(crate) use profile_memory::open_user_memory_db;
 
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 
@@ -225,34 +225,9 @@ impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
     }
 
     fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database> {
-        Box::pin(crate::memory::user::open_user_memory_db(self))
+        Box::pin(open_user_memory_db(self))
     }
 
-    fn curate_user_memory<'a>(
-        &'a self,
-        profile_root: &'a Path,
-        automation_root: &'a Path,
-        options: &'a AgentMemoryCurateOptions,
-    ) -> RuntimeFuture<'a, serde_json::Value> {
-        Box::pin(async move {
-            let memory_db = crate::memory::user::open_user_memory_db(self).await?;
-            let options = crate::dashboard::memory_curate::MemoryCurateOptions {
-                apply: options.apply,
-                llm: options.llm,
-                llm_ops: options.llm_ops.clone(),
-                max_clusters: options.max_clusters,
-                min_confidence: options.min_confidence,
-            };
-            crate::dashboard::memory_curate::run_user_memory_curate(
-                &memory_db,
-                memory_db.database_path(),
-                profile_root,
-                automation_root,
-                &options,
-            )
-            .await
-        })
-    }
 }
 
 fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {

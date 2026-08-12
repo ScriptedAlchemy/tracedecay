@@ -12,6 +12,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+function canonicalFactId(seed: number): string {
+  return `fact.${'a'.repeat(64)}.${seed.toString(16).padStart(64, '0')}`;
+}
+
 describe('codeHits', () => {
   it('preserves daemon order and labels degree as a measured field, not relevance', () => {
     const hits = codeHits(
@@ -105,26 +109,28 @@ describe('sessionHits', () => {
 
 describe('knowledgeHits', () => {
   it('retains fact trust and category without inventing missing values', () => {
+    const factId = canonicalFactId(42);
     const [hit] = knowledgeHits(
       [
         {
-          fact_id: 42,
+          fact_id: factId,
           content: 'Use the graph endpoint',
           category: 'decision',
           tags: ['dashboard', 'api'],
           trust_score: 0.75,
-          last_recalled_at: 123,
+          last_recalled_at: 1_754_006_400_000_000,
         },
       ],
       ['graph'],
     );
 
     expect(hit).toMatchObject({
-      key: 'knowledge:42',
+      key: `knowledge:${factId}`,
       facet: 'decision',
       context: 'dashboard · api',
       contextFields: ['tags'],
       matchedIn: ['content'],
+      stamp: 1_754_006_400,
       stampField: 'last_recalled_at',
       orderLabel: 'bounded fact endpoint rows',
       signal: {
@@ -136,10 +142,19 @@ describe('knowledgeHits', () => {
       },
     });
   });
+
+  it('keeps a nullable trust score absent instead of manufacturing zero trust', () => {
+    const [hit] = knowledgeHits(
+      [{ fact_id: canonicalFactId(43), content: 'Trust has not been projected', trust_score: null }],
+      [],
+    );
+
+    expect(hit?.signal).toBeUndefined();
+  });
 });
 
 describe('LANES', () => {
-  it('describes the bounded compatibility fields without claiming evidence or all providers', () => {
+  it('describes the bounded canonical fields without claiming evidence or all providers', () => {
     expect(LANES.map(({ id, searches }) => [id, searches])).toEqual([
       ['code', 'name, qualified_name, signature, and file_path'],
       ['sessions', 'message content and summary text in the active LCM store'],
@@ -152,10 +167,10 @@ describe('facetCounts', () => {
   it('counts loaded rows only and sorts ties by label', () => {
     const hits = knowledgeHits(
       [
-        { fact_id: 1, content: 'one', category: 'project' },
-        { fact_id: 2, content: 'two', category: 'decision' },
-        { fact_id: 3, content: 'three', category: 'project' },
-        { fact_id: 4, content: 'four' },
+        { fact_id: canonicalFactId(1), content: 'one', category: 'project' },
+        { fact_id: canonicalFactId(2), content: 'two', category: 'decision' },
+        { fact_id: canonicalFactId(3), content: 'three', category: 'project' },
+        { fact_id: canonicalFactId(4), content: 'four' },
       ],
       [],
     );

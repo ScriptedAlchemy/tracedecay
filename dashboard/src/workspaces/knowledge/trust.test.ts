@@ -1,20 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
-  type MemoryHrrCoverageV1,
-} from '../../contracts/generated.ts';
-import {
   composeTrustDistribution,
   factsBelow,
-  hrrStatusLabel,
-  summarizeHrrCoverage,
   summarizeLoadedTrust,
   trustSourceNote,
 } from './trust.ts';
 
-/** Exactly what the daemon served on 2026-07-25: ten buckets, every one zero,
- * because the producer names its rows `trust-<n>` and the consumer parses them
- * as a bare integer. */
-const BROKEN_HISTOGRAM = Array.from({ length: 10 }, (_, bucket) => ({
+/** A canonical empty histogram for an empty store. */
+const EMPTY_HISTOGRAM = Array.from({ length: 10 }, (_, bucket) => ({
   bucket,
   label: `${(bucket / 10).toFixed(1)}–${((bucket + 1) / 10).toFixed(1)}`,
   count: 0,
@@ -29,8 +22,8 @@ const LIVE_STATUS = {
 };
 
 describe('composeTrustDistribution', () => {
-  it('falls through the empty histogram to the status bands', () => {
-    const distribution = composeTrustDistribution(BROKEN_HISTOGRAM, LIVE_STATUS, []);
+  it('uses the current status bands when a canonical histogram carries no facts', () => {
+    const distribution = composeTrustDistribution(EMPTY_HISTOGRAM, LIVE_STATUS, []);
     expect(distribution.source).toBe('status_bands');
     expect(distribution.total).toBe(182);
     expect(distribution.occupied).toBe(2);
@@ -39,7 +32,7 @@ describe('composeTrustDistribution', () => {
   });
 
   it('prefers the ten-bucket histogram whenever it carries any mass', () => {
-    const histogram = BROKEN_HISTOGRAM.map((bucket) =>
+    const histogram = EMPTY_HISTOGRAM.map((bucket) =>
       bucket.bucket === 9 ? { ...bucket, count: 40 } : bucket,
     );
     const distribution = composeTrustDistribution(histogram, LIVE_STATUS, []);
@@ -51,7 +44,7 @@ describe('composeTrustDistribution', () => {
   });
 
   it('falls all the way through to the loaded facts when no store source answers', () => {
-    const distribution = composeTrustDistribution(BROKEN_HISTOGRAM, undefined, [
+    const distribution = composeTrustDistribution(EMPTY_HISTOGRAM, undefined, [
       { trust_score: 1 },
       { trust_score: 0.95 },
       { trust_score: 0.42 },
@@ -64,7 +57,7 @@ describe('composeTrustDistribution', () => {
   });
 
   it('reports nothing rather than a plate of zeroes when every source is empty', () => {
-    const distribution = composeTrustDistribution(BROKEN_HISTOGRAM, undefined, []);
+    const distribution = composeTrustDistribution(EMPTY_HISTOGRAM, undefined, []);
     expect(distribution.source).toBe('none');
     expect(distribution.bands).toEqual([]);
     expect(distribution.total).toBe(0);
@@ -87,7 +80,9 @@ describe('summarizeLoadedTrust', () => {
 
   it('measures the loaded slice and calls it flat', () => {
     const summary = summarizeLoadedTrust(LOADED)!;
-    expect(summary.count).toBe(96);
+    expect(summary.total).toBe(96);
+    expect(summary.measured).toBe(96);
+    expect(summary.unavailable).toBe(0);
     expect(summary.min).toBeCloseTo(0.9, 5);
     expect(summary.max).toBe(1);
     expect(summary.atMax).toBe(46);
@@ -107,13 +102,22 @@ describe('summarizeLoadedTrust', () => {
     expect(summary.spread).toBeCloseTo(0.91, 5);
   });
 
+  it('keeps loaded rows separate from the subset with a trust measurement', () => {
+    const summary = summarizeLoadedTrust([{ trust_score: 0.8 }, { trust_score: null }])!;
+    expect(summary.total).toBe(2);
+    expect(summary.measured).toBe(1);
+    expect(summary.unavailable).toBe(1);
+    expect(summary.min).toBe(0.8);
+    expect(summary.max).toBe(0.8);
+  });
+
   it('has nothing to measure in an empty list', () => {
     expect(summarizeLoadedTrust([])).toBeNull();
   });
 });
 
 describe('factsBelow', () => {
-  const distribution = composeTrustDistribution(BROKEN_HISTOGRAM, LIVE_STATUS, []);
+  const distribution = composeTrustDistribution(EMPTY_HISTOGRAM, LIVE_STATUS, []);
 
   it('counts the store facts the loaded slice never reaches', () => {
     expect(factsBelow(distribution, 0.75)).toBe(21);
@@ -128,62 +132,5 @@ describe('factsBelow', () => {
 
   it('answers null when there is no distribution at all', () => {
     expect(factsBelow(composeTrustDistribution([], undefined, []), 0.75)).toBeNull();
-  });
-});
-
-describe('summarizeHrrCoverage', () => {
-  const row = (
-    category: string,
-    coverage: number,
-    status: MemoryHrrCoverageV1['status'],
-  ): MemoryHrrCoverageV1 =>
-    ({ category, coverage, status, facts: 10, hrr_vectors: 10 }) as MemoryHrrCoverageV1;
-
-  /** The live six: uniformly near-total coverage, four banks not ready. */
-  const LIVE = [
-    row('decision', 0.9558, 'missing_vectors'),
-    row('user_pref', 0.9729, 'missing_vectors'),
-    row('project', 1, 'stale_bank'),
-    row('code_area', 1, 'ready'),
-    row('tool', 1, 'stale_bank'),
-    row('general', 1, 'ready'),
-  ];
-
-  it('states the uniformity once and draws only the exceptions', () => {
-    const summary = summarizeHrrCoverage(LIVE)!;
-    expect(summary.categories).toBe(6);
-    expect(summary.line).toContain('All 6 categories are at least 95%');
-    expect(summary.line).toContain('4 of 6 banks are not ready');
-    expect(summary.exceptions.map((e) => e.category)).toEqual([
-      'decision',
-      'user_pref',
-      'project',
-      'tool',
-    ]);
-  });
-
-  it('says so plainly when every bank is ready', () => {
-    const summary = summarizeHrrCoverage([row('a', 1, 'ready'), row('b', 0.99, 'ready')])!;
-    expect(summary.exceptions).toHaveLength(0);
-    expect(summary.line).toContain('Every bank is ready');
-  });
-
-  it('reports a real range instead of claiming uniformity when there is spread', () => {
-    const summary = summarizeHrrCoverage([
-      row('a', 1, 'ready'),
-      row('b', 0.4, 'missing_vectors'),
-    ])!;
-    expect(summary.line).toContain('40% to 100%');
-  });
-
-  it('has nothing to say about no categories', () => {
-    expect(summarizeHrrCoverage([])).toBeNull();
-  });
-
-  it('spells statuses out rather than printing identifiers', () => {
-    expect(hrrStatusLabel('missing_vectors')).toBe('missing vectors');
-    expect(hrrStatusLabel('stale_bank')).toBe('stale bank');
-    expect(hrrStatusLabel('missing_bank')).toBe('no bank');
-    expect(hrrStatusLabel('ready')).toBe('ready');
   });
 });

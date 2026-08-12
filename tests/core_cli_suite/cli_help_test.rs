@@ -78,7 +78,6 @@ fn nested_subcommands_accept_help() {
         &["branch", "list", "--help"],
         &["branch", "add", "--help"],
         &["memory", "status", "--help"],
-        &["memory", "curate", "--help"],
         &["automation", "config", "--help"],
         &["automation", "config", "get", "--help"],
         &["automation", "run", "--help"],

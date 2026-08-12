@@ -1,33 +1,102 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  MemoryFactRowV1,
+  MemoryGraphPayloadV1,
+  MemoryHolographicPayloadV1,
+  MemoryOverviewPayloadV1,
+  MemoryOverviewSummaryV1,
+} from '../../contracts/generated.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { FeedbackSplit, KnowledgePage } from './KnowledgePage.tsx';
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  useScope.getState().selectAllProjects();
 });
 
 /** A `MemoryFactRowV1` as `fact_summary_json` emits it: the summary never
  * attaches entities, and the counters are real columns rather than absences. */
-function fact(over: Record<string, unknown>) {
+function fact(over: Partial<MemoryFactRowV1>): MemoryFactRowV1 {
   return {
-    fact_id: 0,
+    fact_id: 'fact-project-default',
+    payload_access: 'eligible',
     trust_score: 0,
     retrieval_count: 0,
     access_count: 0,
     helpful_count: 0,
     unhelpful_count: 0,
-    created_at: 1_784_000_000,
-    updated_at: 1_784_000_000,
+    created_at: 1_784_000_000_000_000,
+    updated_at: 1_784_000_000_000_000,
     last_recalled_at: null,
-    has_hrr: 1,
-    content: null,
-    category: null,
-    tags: null,
-    entities: null,
+    projected_as_of: 1_784_000_000_000_000,
+    content: 'fixture fact',
+    category: 'general',
+    tags: [],
+    entities: [],
+    metadata: {},
+    source_label: null,
+    linked_entities: null,
     ...over,
+  };
+}
+
+function memoryGraph(facts: readonly MemoryFactRowV1[]): MemoryGraphPayloadV1 {
+  const graphRoots = facts.filter(
+    (fact) => fact.payload_access === 'eligible',
+  );
+  const unavailableFactCandidates = facts.length - graphRoots.length;
+  const coverage: MemoryGraphPayloadV1['coverage'] =
+    unavailableFactCandidates === 0
+      ? {
+          completeness: 'complete',
+          eligible: graphRoots.length,
+          examined: graphRoots.length,
+          matched: graphRoots.length,
+          excluded: 0,
+          omitted: 0,
+          unknown: 0,
+          denominator: graphRoots.length,
+          unit: 'memory_graph_roots',
+          omission_reasons: [],
+        }
+      : {
+          completeness: 'unknown',
+          eligible: null,
+          examined: null,
+          matched: null,
+          excluded: null,
+          omitted: null,
+          unknown: null,
+          denominator: null,
+          unit: null,
+          omission_reasons: ['unavailable_fact_roots'],
+        };
+  return {
+    nodes: graphRoots.map((fact) => ({
+      id: `fact:${fact.fact_id}`,
+      kind: 'fact',
+      label: fact.content === null ? fact.fact_id : fact.content,
+      fact_id: fact.fact_id,
+      payload_access: fact.payload_access,
+      projected_as_of: fact.projected_as_of,
+      content: fact.content,
+      category: fact.category,
+      trust_score: fact.trust_score,
+      retrieval_count: fact.retrieval_count,
+      helpful_count: fact.helpful_count,
+    })),
+    edges: [],
+    coverage,
+    fact_universe_count: facts.length,
+    fact_candidates_examined: facts.length,
+    unavailable_fact_candidates: unavailableFactCandidates,
+    root_count: graphRoots.length,
+    relation_limit: 100,
+    relation_count: 0,
   };
 }
 
@@ -35,9 +104,10 @@ function fact(over: Record<string, unknown>) {
  * anything, so `reads` and `facts_coverage` are always present — a body without
  * them is one the route cannot produce. */
 function memoryOverview(
-  holographic: Record<string, unknown>,
-  over: Record<string, unknown> = {},
-) {
+  holographic: Partial<MemoryHolographicPayloadV1>,
+  over: Partial<MemoryOverviewPayloadV1> = {},
+): MemoryOverviewPayloadV1 {
+  const facts = holographic.facts ?? [];
   return {
     query: '',
     limit: 100,
@@ -46,15 +116,15 @@ function memoryOverview(
       path: '/fast/projects/tracedecay/.tracedecay/memory.db',
       exists: true,
       error: '',
-      facts: [],
+      facts,
       entities: [],
-      graph: { nodes: [], edges: [] },
+      graph: memoryGraph(facts),
       reads: {
         facts: { state: 'ready' },
         entities: { state: 'ready' },
         graph: { state: 'ready' },
       },
-      facts_coverage: { completeness: 'bounded', limit: 100, query_applied_after_limit: false },
+      facts_coverage: { completeness: 'partial', limit: 100 },
       overview: null,
       ...holographic,
     },
@@ -62,15 +132,13 @@ function memoryOverview(
   };
 }
 
-function memorySummary(over: Record<string, unknown> = {}) {
+function memorySummary(
+  over: Partial<MemoryOverviewSummaryV1> = {},
+): MemoryOverviewSummaryV1 {
   return {
     facts: 0,
     entities: 0,
-    banks: 0,
     categories: [],
-    entity_types: [],
-    hrr_coverage: [],
-    memory_banks: [],
     trust_histogram: [],
     growth: [],
     ...over,
@@ -83,19 +151,15 @@ function memoryStatus(memory: Record<string, unknown> = {}) {
     path: '/fast/projects/tracedecay/.tracedecay/memory.db',
     exists: true,
     error: '',
-    largest_bank_fact_count: 0,
-    largest_bank_utilization_pct: 0,
-    feedback_history_repair: { state: 'not_required', processed: 0, remaining: null },
     memory: {
-      algebra_name: 'amari_fhrr',
-      bank_count: 0,
-      hrr_dim: 2048,
+      algebra: {
+        name: 'amari_fhrr',
+        hrr_dim: 2048,
+        estimated_capacity: 354_304,
+      },
       entity_count: 0,
-      estimated_capacity: 354_304,
       fact_count: 0,
       below_default_recall_threshold_count: 0,
-      missing_vector_count: 0,
-      repair: { banks_rebuilt: 0, missing_vectors_repaired: 0 },
       trust_0_025_count: 0,
       trust_025_050_count: 0,
       trust_050_075_count: 0,
@@ -123,20 +187,17 @@ describe('KnowledgePage fact detail', () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         calls.push(url);
-        if (url.includes('/api/plugins/holographic/fact/7')) {
+        if (url.includes('/api/plugins/holographic/fact/fact-project-7')) {
           return jsonResponse(envelope({
             error: '',
             fact: fact({
-              fact_id: 7,
+              fact_id: 'fact-project-7',
               trust_score: 0.8,
               content: 'full authoritative fact detail',
-              entities: [
+              linked_entities: [
                 {
-                  entity_id: 2,
+                  entity_id: 'entity-project-2',
                   name: 'FactDetail',
-                  entity_type: 'type',
-                  aliases: [],
-                  created_at: 1_784_000_000,
                   fact_count: 1,
                 },
               ],
@@ -153,7 +214,13 @@ describe('KnowledgePage fact detail', () => {
               entities: 1,
               trust_histogram: [{ bucket: 8, label: '0.8–0.9', count: 1 }],
             }),
-            facts: [fact({ fact_id: 7, trust_score: 0.8, content: 'list-truncated fact…' })],
+            facts: [
+              fact({
+                fact_id: 'fact-project-7',
+                trust_score: 0.8,
+                content: 'list-truncated fact…',
+              }),
+            ],
           })),
         );
       }),
@@ -172,7 +239,46 @@ describe('KnowledgePage fact detail', () => {
     await userEvent.click(await screen.findByText('list-truncated fact…'));
 
     expect(await screen.findByText('full authoritative fact detail')).toBeTruthy();
-    expect(calls.some((url) => url.includes('/api/plugins/holographic/fact/7'))).toBe(true);
+    expect(screen.getByText('amari_fhrr')).toBeTruthy();
+    expect(screen.getByText(/2,048 dimensions/)).toBeTruthy();
+    expect(
+      calls.some((url) => url.includes('/api/plugins/holographic/fact/fact-project-7')),
+    ).toBe(true);
+  });
+
+  it("drops project A's selected fact immediately when scope changes to project B", async () => {
+    const pendingProjectB = new Promise<Response>(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/api/projects/project-b/')) return pendingProjectB;
+        if (url.includes('/fact/fact-project-a')) {
+          return jsonResponse(envelope({
+            error: '',
+            fact: fact({
+              fact_id: 'fact-project-a',
+              content: 'canonical project A detail',
+            }),
+          }));
+        }
+        if (url.includes('/status')) return jsonResponse(envelope(memoryStatus()));
+        return jsonResponse(envelope(memoryOverview({
+          overview: memorySummary({ facts: 1 }),
+          facts: [fact({ fact_id: 'fact-project-a', content: 'project A summary' })],
+        })));
+      }),
+    );
+    useScope.getState().selectProject('project-a', 'Project A', 'active');
+    renderKnowledge();
+
+    await userEvent.click(await screen.findByText('project A summary'));
+    expect(await screen.findByText('canonical project A detail')).toBeTruthy();
+
+    act(() => {
+      useScope.getState().selectProject('project-b', 'Project B', 'active');
+    });
+    expect(screen.queryByText('canonical project A detail')).toBeNull();
   });
 
   it('distinguishes unreported feedback counts from a reported zero', () => {
@@ -184,6 +290,48 @@ describe('KnowledgePage fact detail', () => {
     render(<FeedbackSplit helpful={0} unhelpful={0} />);
     expect(screen.getByText('no feedback recorded')).toBeTruthy();
     expect(screen.queryByText('feedback counts not reported')).toBeNull();
+  });
+
+  it('separates loaded facts from the subset with a trust measurement', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/status')) {
+          return jsonResponse(envelope(memoryStatus({ fact_count: 2, trust_075_100_count: 1 })));
+        }
+        return jsonResponse(
+          envelope(
+            memoryOverview({
+              overview: memorySummary({ facts: 2 }),
+              facts: [
+                fact({ fact_id: 'fact-project-eligible', trust_score: 0.8 }),
+                fact({
+                  fact_id: 'fact-project-redacted',
+                  payload_access: 'redacted',
+                  trust_score: null,
+                  retrieval_count: null,
+                  access_count: null,
+                  helpful_count: null,
+                  unhelpful_count: null,
+                  created_at: null,
+                  updated_at: null,
+                  last_recalled_at: null,
+                  content: null,
+                  category: null,
+                  tags: null,
+                  entities: null,
+                  metadata: null,
+                }),
+              ],
+            }),
+          ),
+        );
+      }),
+    );
+    renderKnowledge();
+
+    expect(await screen.findByText(/2 facts loaded · 1 with trust · 1 unavailable/)).toBeTruthy();
   });
 
   it('does not render a failed fact sub-read as an empty memory store', async () => {
@@ -206,11 +354,159 @@ describe('KnowledgePage fact detail', () => {
     );
     renderKnowledge();
 
-    expect(await screen.findByText(/fact list read failed/i)).toBeTruthy();
+    expect(await screen.findByText(/fact list read is error/i)).toBeTruthy();
     expect(screen.queryByText(/no facts recorded/i)).toBeNull();
   });
 
-  it('labels a negative query as bounded to the loaded top-100 slice', async () => {
+  it.each([
+    ['unknown', 'unknown'],
+    ['cancelled', 'cancelled'],
+    ['timed_out', 'timed out'],
+    ['offline', 'offline'],
+  ] as const)(
+    'does not render a %s fact sub-read as an empty memory store',
+    async (state, label) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.includes('/status')) return jsonResponse(envelope(memoryStatus()));
+          return jsonResponse(
+            envelope(memoryOverview({
+              overview: memorySummary({ facts: 42 }),
+              reads: {
+                facts: { state, error: 'the bounded read did not finish' },
+                entities: { state: 'ready' },
+                graph: { state: 'ready' },
+              },
+            })),
+          );
+        }),
+      );
+      renderKnowledge();
+
+      expect(await screen.findByText(new RegExp(`fact list read is ${label}`, 'i'))).toBeTruthy();
+      expect(screen.queryByText(/no facts recorded/i)).toBeNull();
+    },
+  );
+
+  it('states partial fact coverage instead of calling an incomplete result empty', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/status')) return jsonResponse(envelope(memoryStatus()));
+        return jsonResponse(
+          envelope(memoryOverview({
+            overview: memorySummary({ facts: 42 }),
+            facts_coverage: { completeness: 'partial', limit: 100 },
+            reads: {
+              facts: { state: 'partial', code: 'fact_coverage_incomplete' },
+              entities: { state: 'ready' },
+              graph: { state: 'ready' },
+            },
+          })),
+        );
+      }),
+    );
+    renderKnowledge();
+
+    expect(await screen.findByText(/fact coverage is partial/i)).toBeTruthy();
+    expect(screen.queryByText(/no facts recorded/i)).toBeNull();
+  });
+
+  it('does not call a partial fact read empty when its coverage field says complete', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/status')) return jsonResponse(envelope(memoryStatus()));
+        return jsonResponse(
+          envelope(memoryOverview({
+            overview: memorySummary({ facts: 42 }),
+            facts_coverage: { completeness: 'complete', limit: 100 },
+            reads: {
+              facts: { state: 'partial', code: 'fact_coverage_incomplete' },
+              entities: { state: 'ready' },
+              graph: { state: 'ready' },
+            },
+          })),
+        );
+      }),
+    );
+    renderKnowledge();
+
+    expect(await screen.findByText(/fact read is partial/i)).toBeTruthy();
+    expect(screen.queryByText(/no facts recorded/i)).toBeNull();
+  });
+
+  it('surfaces graph reset and graph coverage instead of implying complete topology', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/status')) return jsonResponse(envelope(memoryStatus()));
+        const reading = memoryOverview({
+          overview: memorySummary(),
+          reads: {
+            facts: { state: 'ready' },
+            entities: { state: 'ready' },
+            graph: {
+              state: 'error',
+              code: 'graph_reset_required',
+              error: 'the graph schema changed',
+            },
+          },
+        });
+        reading.holographic.graph.coverage = {
+          completeness: 'unknown',
+          eligible: null,
+          examined: null,
+          matched: null,
+          excluded: null,
+          omitted: null,
+          unknown: null,
+          denominator: null,
+          unit: null,
+          omission_reasons: ['graph_reset_required'],
+        };
+        return jsonResponse(envelope(reading));
+      }),
+    );
+    renderKnowledge();
+
+    expect(await screen.findByText(/memory graph reset required: the graph schema changed/i)).toBeTruthy();
+    expect(screen.getByText(/memory graph coverage is unknown/i)).toBeTruthy();
+  });
+
+  it('accepts a complete zero-finding graph read as complete coverage', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/status')) return jsonResponse(envelope(memoryStatus()));
+        return jsonResponse(
+          envelope(
+            memoryOverview({
+              overview: memorySummary(),
+              facts_coverage: { completeness: 'complete', limit: 100 },
+              reads: {
+                facts: { state: 'complete_zero_findings' },
+                entities: { state: 'complete_zero_findings' },
+                graph: { state: 'complete_zero_findings' },
+              },
+            }),
+          ),
+        );
+      }),
+    );
+    renderKnowledge();
+
+    expect(await screen.findByText(/no facts recorded/i)).toBeTruthy();
+    expect(screen.queryByText(/memory graph coverage is/i)).toBeNull();
+  });
+
+  it('reports a canonical query with no matching facts', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
@@ -221,9 +517,8 @@ describe('KnowledgePage fact detail', () => {
             {
               overview: memorySummary({ facts: 420 }),
               facts_coverage: {
-                completeness: 'bounded',
+                completeness: 'partial',
                 limit: 100,
-                query_applied_after_limit: true,
               },
             },
             { query: url.includes('q=needle') ? 'needle' : '' },
@@ -237,8 +532,9 @@ describe('KnowledgePage fact detail', () => {
     await userEvent.type(input, 'needle');
     await userEvent.keyboard('{Enter}');
 
-    expect(await screen.findByText(/no match in the loaded top-100 slice/i)).toBeTruthy();
-    expect(screen.queryByText(/no facts match/i)).toBeNull();
+    expect(await screen.findByText(/no loaded facts match “needle”/i)).toBeTruthy();
+    expect(screen.getByText(/fact coverage is partial/i)).toBeTruthy();
+    expect(screen.queryByText(/loaded top-100 slice/i)).toBeNull();
   });
 });
 

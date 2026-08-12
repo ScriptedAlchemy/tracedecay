@@ -571,6 +571,7 @@ pub fn remote_protocol_problem(
             legal_actions: vec![LegalAction::Retry],
         },
         RemoteProtocolFailureV1::AuthorityUnavailable => ApplicationProblem::Unavailable {
+            classification: crate::ApplicationUnavailableClassV1::Authority,
             diagnostic: safe_diagnostic(
                 "remote.authority_unavailable",
                 "The authenticated remote authority is unavailable",

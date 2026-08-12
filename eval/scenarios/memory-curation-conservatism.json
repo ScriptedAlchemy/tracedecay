@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "id": "memory-curation-conservatism",
-  "title": "Curation never proposes deleting high-access, high-trust facts absent strong similarity",
-  "description": "The similarity-dedup curator (dry-run and apply) must collapse genuine near-duplicates while leaving dissimilar high-trust, high-access facts untouched. Machinery-only scenario: no real-model layer.",
+  "title": "Curation preserves high-access, high-trust facts absent strong similarity",
+  "description": "The agent-managed memory curator must collapse genuine near-duplicates while leaving dissimilar high-trust, high-access facts untouched.",
   "adapted_from": "Adapted from the mnemon memory-deep curation rubric (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
   "contract": "stable",
-  "contract_notes": "Covers the built-in similarity-dedup tier today. The sibling curator-hygiene work may extend curation with LLM-review ops; the conservatism assertions here stay the contract for the deterministic tier.",
+  "contract_notes": "Requires a configured automation backend. The curator validates and automatically settles its six-operation final-V2 contract without a separate approval or apply step.",
   "setup": {
     "facts": [
       {
@@ -50,12 +50,7 @@
   "deterministic": {
     "well_behaved": [
       {
-        "kind": "curate",
-        "apply": false
-      },
-      {
-        "kind": "curate",
-        "apply": true
+        "kind": "memory-curation"
       }
     ],
     "violation": null
@@ -63,20 +58,20 @@
   "real_model": null,
   "assertions": [
     {
-      "kind": "curate-deletes-source",
-      "name": "dry_run_spares_protected_facts",
+      "kind": "curation-removes-source",
+      "name": "curator_spares_protected_facts",
       "source": "eval-protected",
       "expected": false
     },
     {
-      "kind": "curate-deletes-source",
-      "name": "dry_run_collapses_near_duplicates",
+      "kind": "curation-removes-source",
+      "name": "curator_removes_near_duplicate",
       "source": "eval-dup",
       "expected": true
     },
     {
       "kind": "source-count",
-      "name": "protected_facts_survive_apply",
+      "name": "protected_facts_survive_curation",
       "source": "eval-protected",
       "op": "eq",
       "value": 3,
@@ -92,7 +87,7 @@
     },
     {
       "kind": "source-count",
-      "name": "duplicates_collapsed_after_apply",
+      "name": "duplicates_collapsed_after_curation",
       "source": "eval-dup",
       "op": "eq",
       "value": 1,

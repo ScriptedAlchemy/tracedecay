@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_domain::{
-    DomainError, FactAssertionId, FactEventId, FactId, FactOwnerV1, ProvenanceId, UtcMicros,
+    ActorId, Confidence, DomainError, FactAssertionId, FactCategoryV1, FactEventId, FactId,
+    FactOwnerV1, ManifestDigest, ProvenanceId, SanitizationReceiptV1, UtcMicros, canonical_sha256,
 };
 
 use super::super::{
@@ -10,6 +11,36 @@ use super::super::{
 use super::{ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1};
 
 pub const MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS: usize = 200;
+
+#[derive(Serialize)]
+struct AutomaticFactDigestProjection<'a> {
+    domain: &'static str,
+    apply_id: &'a ProvenanceId,
+    owner: &'a FactOwnerV1,
+    state: ProjectMemoryAutomaticFactStateV1,
+    operation_id: &'a ProvenanceId,
+    input_digest: &'a str,
+    actor: Option<&'a ActorId>,
+    sanitization_receipt: &'a SanitizationReceiptV1,
+    content: &'a str,
+    category: FactCategoryV1,
+    source_label: Option<&'a str>,
+    tags: &'a [String],
+    entities: &'a [String],
+    default_trust: Confidence,
+    metadata: &'a Value,
+    automation_run_id: Option<&'a str>,
+    evidence: &'a ProjectMemoryAutomaticFactEvidenceV1,
+    effect_state: ProjectMemoryAutomaticFactStateV1,
+    fact_id: Option<&'a FactId>,
+    target_owner: Option<&'a FactOwnerV1>,
+    target_fact_id: Option<&'a FactId>,
+    assertion_id: Option<&'a FactAssertionId>,
+    event_id: Option<&'a FactEventId>,
+    quarantine_reason: Option<&'a str>,
+    recorded_at_micros: UtcMicros,
+    disposition: &'static str,
+}
 
 /// The only durable outcomes of an automatic fact apply. Candidate discovery
 /// and in-flight work are owned by the automation run receipt, never this
@@ -299,6 +330,52 @@ impl ProjectMemoryAutomaticFactApplyResultV1 {
 
     pub const fn disposition(&self) -> ProjectMemoryAutomaticFactApplyDispositionV1 {
         self.disposition
+    }
+
+    /// Canonical digest of the complete authority result, including evidence,
+    /// durable effect identity, timestamp, and replay disposition.
+    pub fn canonical_digest(&self) -> FactStoreResult<ManifestDigest> {
+        let receipt = self.receipt();
+        let disposition = match self.disposition {
+            ProjectMemoryAutomaticFactApplyDispositionV1::Applied => "applied",
+            ProjectMemoryAutomaticFactApplyDispositionV1::AlreadyApplied => "already_applied",
+            ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined => "quarantined",
+        };
+        let request = receipt.request();
+        let (target_owner, target_fact_id) = receipt
+            .effect()
+            .applied_target()
+            .map(|target| (Some(target.owner()), Some(target.fact_id())))
+            .unwrap_or((None, None));
+        canonical_sha256(&AutomaticFactDigestProjection {
+            domain: "tracedecay.project-memory.automatic-fact-apply-result.v1",
+            apply_id: receipt.apply_id(),
+            owner: receipt.owner(),
+            state: receipt.state(),
+            operation_id: request.operation_id(),
+            input_digest: request.input_digest(),
+            actor: request.actor(),
+            sanitization_receipt: request.sanitization_receipt(),
+            content: request.content(),
+            category: request.category(),
+            source_label: request.source_label(),
+            tags: request.tags(),
+            entities: request.entities(),
+            default_trust: request.default_trust(),
+            metadata: request.metadata(),
+            automation_run_id: request.automation_run_id(),
+            evidence: receipt.evidence(),
+            effect_state: receipt.effect().state(),
+            fact_id: receipt.effect().applied_fact_id(),
+            target_owner,
+            target_fact_id,
+            assertion_id: receipt.effect().applied_assertion_id(),
+            event_id: receipt.effect().applied_event_id(),
+            quarantine_reason: receipt.effect().quarantine_reason(),
+            recorded_at_micros: receipt.recorded_at(),
+            disposition,
+        })
+        .map_err(FactStoreError::Contract)
     }
 }
 

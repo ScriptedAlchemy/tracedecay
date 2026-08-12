@@ -1,25 +1,18 @@
 /**
  * MEMORY OPLOG — the store's own record of what changed.
  *
- * `/oplog` reads the authoritative compatibility audit, newest first. Its rows
- * are the only place a memory mutation is accounted for after the fact: the
- * curation activity stream is in-process and dies with the daemon, and the run
- * ledger records automation invocations rather than the store operations they
- * caused.
+ * `/oplog` reads canonical lineage operations, newest first. Its rows account
+ * for committed memory mutations; the separate automation run ledger records
+ * invocations and their terminal outcomes rather than replacing store lineage.
  *
- * The detail column is why this view exists as its own surface rather than a
- * list of strings. `memory_api::oplog` emits three DIFFERENT objects per row —
- * `{summary}`, `{redacted: true}`, `{availability: "unknown"}` — and they are
- * three distinct domain states, not one optional string. A redacted row has a
- * detail this reader may not see; an unknown row never recorded whether it had
- * one. Rendering both as an empty cell would claim the second is the first, and
- * claim of the first that nothing was ever written. Both keep their chip.
+ * The route reports canonical lineage identity only: event sequence, time,
+ * operation, and optional canonical fact ID. It does not expose mutation
+ * detail.
  */
 import { PayloadBoundary } from '../../ui/ReadSection.tsx';
 import { Panel, Readout } from '../../ui/instrument.tsx';
-import { StateChip } from '../../ui/StateChip.tsx';
 import { useMemoryOplog, type OplogEvent, type OplogPayload } from '../../data/query/memory.ts';
-import { oplogDetailReading, oplogReading } from './memoryModel.ts';
+import { formatUtcMicros, oplogReading } from './memoryModel.ts';
 
 export function MemoryOplog() {
   const oplog = useMemoryOplog();
@@ -46,7 +39,8 @@ function OplogBody({ data }: { data: OplogPayload }) {
       </p>
     );
   }
-  if (reading.events.length === 0) {
+  const tallyMatches = reading.events.length === data.count;
+  if (reading.events.length === 0 && tallyMatches) {
     return (
       <p className="text-2xs leading-relaxed text-text-muted">
         the audit is readable and holds no operations — nothing has ever written to this
@@ -56,14 +50,17 @@ function OplogBody({ data }: { data: OplogPayload }) {
   }
   return (
     <div className="flex min-h-0 flex-col gap-2">
+      {!tallyMatches ? (
+        <p role="status" className="text-2xs leading-relaxed text-state-partial">
+          the store counted {data.count.toLocaleString()} operations but sent {reading.events.length.toLocaleString()}, so this list is incomplete
+        </p>
+      ) : reading.events.length >= data.limit ? (
+        <p role="status" className="text-2xs leading-relaxed text-state-partial">
+          this is the first {data.limit.toLocaleString()} operations, the request cap, so older operations may exist
+        </p>
+      ) : null}
       <div className="flex flex-wrap items-end gap-4">
         <Readout label="operations" size="sm" value={reading.events.length.toLocaleString()} />
-        <Readout label="detail withheld" size="sm" value={reading.redacted.toLocaleString()} />
-        <Readout
-          label="detail unrecorded"
-          size="sm"
-          value={reading.unknownDetail.toLocaleString()}
-        />
       </div>
       <ul
         aria-label="Operations by kind"
@@ -76,8 +73,7 @@ function OplogBody({ data }: { data: OplogPayload }) {
         ))}
       </ul>
       <p className="text-3xs leading-relaxed text-text-muted">
-        the {reading.events.length.toLocaleString()} most recent of the last{' '}
-        {data.limit.toLocaleString()} operations this store will report, newest first
+        {reading.events.length.toLocaleString()} most recent operations returned, newest first
       </p>
       {/* The log is the one thing on this view that scrolls, and it holds no
         * focusable content of its own — so it takes the tab stop and carries
@@ -97,25 +93,18 @@ function OplogBody({ data }: { data: OplogPayload }) {
 }
 
 function OplogRow({ event }: { event: OplogEvent }) {
-  const detail = oplogDetailReading(event.detail);
   return (
     <li className="flex flex-col gap-0.5 border-l-2 border-edge-subtle pl-2">
       <p className="flex flex-wrap items-baseline gap-x-2 text-3xs text-text-muted">
         <span className="td-value" data-cell="numeric">
-          {event.ts}
+          {formatUtcMicros(event.ts)}
         </span>
         <span className="text-text-secondary">{event.op}</span>
-        {/* `fact_id` is null for an operation with no legacy-addressable fact,
-          * which is a real reading rather than a missing one. */}
+        {/* `fact_id` is null only for an operation with no canonical fact target. */}
         <span className="td-value" data-cell="numeric">
-          {event.fact_id == null ? 'no fact target' : `fact #${event.fact_id}`}
+          {event.fact_id == null ? 'no fact target' : event.fact_id}
         </span>
       </p>
-      {detail.kind === 'summary' ? (
-        <p className="text-2xs leading-relaxed text-text-secondary">{detail.summary}</p>
-      ) : (
-        <StateChip kind={detail.state} detail={detail.sentence} />
-      )}
     </li>
   );
 }

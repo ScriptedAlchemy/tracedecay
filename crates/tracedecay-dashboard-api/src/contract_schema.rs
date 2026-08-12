@@ -3,6 +3,9 @@
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
+use tracedecay_application::retained_surfaces::{
+    MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1,
+};
 use tracedecay_application::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
     AdmitWorkSynthesisCommand, AuthorizedScopeSet, CancelWorkAttemptCommand, CostsReadModelV1,
@@ -170,6 +173,8 @@ struct DashboardContractCatalogV1 {
     /// Served identically by `GET /api/automation/scheduler/status` and by the
     /// `pause`/`resume` controls, which re-read rather than acknowledge.
     automation_scheduler_status: AutomationSchedulerStatusV1,
+    automation_memory_run: MemoryAutomationRunResultV1,
+    automation_memory_problem: MemoryAutomationRunProblemV1,
 }
 
 #[derive(JsonSchema)]
@@ -239,6 +244,20 @@ mod tests {
     #[test]
     fn registered_dashboard_route_responses_are_contracted() {
         render_dashboard_contract_schema().expect("render validated dashboard contracts");
+    }
+
+    #[test]
+    fn memory_automation_terminal_contracts_are_registered() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let definitions = schema["$defs"]
+            .as_object()
+            .expect("dashboard contracts expose schema definitions");
+
+        assert!(definitions.contains_key("MemoryAutomationRunResultV1"));
+        assert!(definitions.contains_key("MemoryAutomationRunProblemV1"));
     }
 
     #[test]
@@ -417,5 +436,107 @@ mod tests {
                 "dashboard response {response} is absent from the contract catalog"
             );
         }
+    }
+
+    fn schema_references(value: &serde_json::Value, definition: &str) -> bool {
+        if value.get("$ref").and_then(serde_json::Value::as_str) == Some(definition) {
+            return true;
+        }
+        match value {
+            serde_json::Value::Array(values) => values
+                .iter()
+                .any(|value| schema_references(value, definition)),
+            serde_json::Value::Object(fields) => fields
+                .values()
+                .any(|value| schema_references(value, definition)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn memory_overview_schema_uses_closed_canonical_graph_and_payload_states() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let definitions = schema["$defs"]
+            .as_object()
+            .expect("dashboard contracts expose schema definitions");
+
+        for (contract, field, definition) in [
+            (
+                "MemoryFactRowV1",
+                "payload_access",
+                "#/$defs/PayloadAccessState",
+            ),
+            (
+                "MemoryReadStatusV1",
+                "state",
+                "#/$defs/DashboardDomainStateV1",
+            ),
+            (
+                "MemoryFactsCoverageV1",
+                "graph",
+                "#/$defs/FactSearchGraphCoverageV1",
+            ),
+            (
+                "MemoryHolographicPayloadV1",
+                "graph",
+                "#/$defs/MemoryGraphPayloadV1",
+            ),
+            (
+                "MemoryGraphEdgeV1",
+                "kind",
+                "#/$defs/ProjectMemoryGraphRelationKindV1",
+            ),
+            (
+                "MemoryGraphPayloadV1",
+                "coverage",
+                "#/$defs/DashboardCoverageV1",
+            ),
+        ] {
+            let field_schema = &definitions[contract]["properties"][field];
+            assert!(
+                schema_references(field_schema, definition),
+                "{contract}.{field} must reference canonical {definition}, got {field_schema}"
+            );
+        }
+
+        assert_eq!(
+            definitions["PayloadAccessState"]["enum"],
+            serde_json::json!([
+                "eligible",
+                "redacted",
+                "quarantined",
+                "retention_expired",
+                "deleted",
+                "unavailable",
+                "ambiguous",
+            ])
+        );
+        assert_eq!(
+            definitions["ProjectMemoryGraphRelationKindV1"]["enum"],
+            serde_json::json!([
+                "supports",
+                "contradicts",
+                "supersedes",
+                "derived_from",
+                "mentions",
+                "active_assertion",
+                "evidence_anchor",
+            ])
+        );
+    }
+
+    #[test]
+    fn memory_facts_coverage_schema_preserves_admitted_limit_range() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let limit = &schema["$defs"]["MemoryFactsCoverageV1"]["properties"]["limit"];
+
+        assert_eq!(limit["minimum"], serde_json::json!(1));
+        assert_eq!(limit["maximum"], serde_json::json!(100));
     }
 }

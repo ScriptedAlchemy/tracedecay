@@ -6,6 +6,7 @@
 //! idempotent replay or a typed conflict, never a second writer.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -35,8 +36,12 @@ use tracedecay_domain::{
 use tracedecay_store::FactStoreError;
 use tracedecay_store::{
     CurrentFactsQuery, FactCommitConflict, FactCommitOutcome, FactCurrentQuery, FactLineageQuery,
-    FactStore, FactWriteBatch, RetrievalAnchorQuery, StoredFactV1,
+    FactStore, FactWriteBatch, FactWriteControl, RetrievalAnchorQuery, StoredFactV1,
 };
+
+fn write_control() -> FactWriteControl {
+    FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
+}
 
 fn profile_owner() -> FactOwnerV1 {
     FactOwnerV1::Profile
@@ -79,6 +84,7 @@ fn payload(content: &str, receipt_id: &str) -> FactPayloadV1 {
         vec!["database".to_owned()],
         vec!["TraceDecay".to_owned()],
         json!({}),
+        None,
         receipt,
         RetentionClass::new("retention.fact-anchor-authority").unwrap(),
     )
@@ -170,7 +176,6 @@ fn assertion_batch(
         vec![event],
         vec![anchor],
         vec![],
-        None,
         expected_last_event_id,
     )
     .unwrap()
@@ -205,7 +210,6 @@ fn trust_batch(
         vec![event],
         vec![],
         vec![],
-        None,
         expected_last_event_id,
     )
     .unwrap()
@@ -301,14 +305,17 @@ async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
         None,
     );
     let fact_id = batch.fact_id().clone();
-    let receipt = committed(store.commit_fact(batch).await.unwrap());
+    let receipt = committed(store.commit_fact(batch, &write_control()).await.unwrap());
     let last_event_id = receipt.last_event_id().clone();
 
     // Revoke the authority scope underneath the retained database handle.
     drop(scope);
 
     let error = store
-        .commit_fact(trust_batch(&owner, &fact_id, 2, Some(last_event_id)))
+        .commit_fact(
+            trust_batch(&owner, &fact_id, 2, Some(last_event_id)),
+            &write_control(),
+        )
         .await
         .expect_err("a write with a revoked authority must fail closed");
     match &error {
@@ -356,11 +363,14 @@ async fn stale_fact_authority_cas_conflict_is_typed_and_leaves_lineage_untouched
         None,
     );
     let fact_id = batch.fact_id().clone();
-    let first = committed(store.commit_fact(batch).await.unwrap());
+    let first = committed(store.commit_fact(batch, &write_control()).await.unwrap());
     let first_event = first.last_event_id().clone();
     let second = committed(
         store
-            .commit_fact(trust_batch(&owner, &fact_id, 2, Some(first_event.clone())))
+            .commit_fact(
+                trust_batch(&owner, &fact_id, 2, Some(first_event.clone())),
+                &write_control(),
+            )
             .await
             .unwrap(),
     );
@@ -369,7 +379,10 @@ async fn stale_fact_authority_cas_conflict_is_typed_and_leaves_lineage_untouched
     // A stale authority retained the pre-append frontier (`first_event`) and
     // tries to write against it after the frontier already advanced.
     let stale = store
-        .commit_fact(trust_batch(&owner, &fact_id, 3, Some(first_event.clone())))
+        .commit_fact(
+            trust_batch(&owner, &fact_id, 3, Some(first_event.clone())),
+            &write_control(),
+        )
         .await
         .unwrap();
     match stale {
@@ -562,7 +575,7 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
         None,
     );
     let fact_id = batch.fact_id().clone();
-    committed(store.commit_fact(batch).await.unwrap());
+    committed(store.commit_fact(batch, &write_control()).await.unwrap());
     assert_eq!(
         current(&store, &owner, &fact_id)
             .await
@@ -631,7 +644,12 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
         None,
     );
     let anchor_id = left.new_anchors()[0].anchor_id().clone();
-    let (left, right) = tokio::join!(store_left.commit_fact(left), store_right.commit_fact(right));
+    let left_control = write_control();
+    let right_control = write_control();
+    let (left, right) = tokio::join!(
+        store_left.commit_fact(left, &left_control),
+        store_right.commit_fact(right, &right_control)
+    );
     let outcomes = [left.unwrap(), right.unwrap()];
     let committed_receipt = outcomes
         .iter()
@@ -682,7 +700,12 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
     let fact_id = left.fact_id().clone();
     let left_event = left.events()[0].event_id().clone();
     let right_event = right.events()[0].event_id().clone();
-    let (left, right) = tokio::join!(store_left.commit_fact(left), store_right.commit_fact(right));
+    let left_control = write_control();
+    let right_control = write_control();
+    let (left, right) = tokio::join!(
+        store_left.commit_fact(left, &left_control),
+        store_right.commit_fact(right, &right_control)
+    );
     let outcomes = [left.unwrap(), right.unwrap()];
     let winner = outcomes
         .iter()
@@ -748,7 +771,12 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
     assert_eq!(anchor_id, right.new_anchors()[0].anchor_id().clone());
     let left_fact_id = left.fact_id().clone();
     let right_fact_id = right.fact_id().clone();
-    let (left, right) = tokio::join!(store_left.commit_fact(left), store_right.commit_fact(right));
+    let left_control = write_control();
+    let right_control = write_control();
+    let (left, right) = tokio::join!(
+        store_left.commit_fact(left, &left_control),
+        store_right.commit_fact(right, &right_control)
+    );
     let outcomes = [left.unwrap(), right.unwrap()];
     outcomes
         .iter()
@@ -849,7 +877,7 @@ async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_toke
         None,
     );
     let fact_id = batch.fact_id().clone();
-    committed(store.commit_fact(batch).await.unwrap());
+    committed(store.commit_fact(batch, &write_control()).await.unwrap());
     assert_eq!(
         lineage(&store, &owner, &fact_id).await.len(),
         1,

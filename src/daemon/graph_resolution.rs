@@ -34,7 +34,19 @@ pub(super) fn retained_project_server_resolver(
     Arc::new(move |request| {
         let administration = administration.clone();
         Box::pin(async move {
-            let mounted_servers = administration.mounted_project_servers().await;
+            let expected_profile_id = administration.profile_identity()?.profile_id().clone();
+            let mounted_servers = {
+                let servers = administration.project_servers().lock().await;
+                servers
+                    .values()
+                    .filter(|server| {
+                        server
+                            .profile_identity()
+                            .is_some_and(|identity| identity.profile_id() == &expected_profile_id)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
             let mut servers = Vec::with_capacity(mounted_servers.len());
             for server in mounted_servers {
                 servers.push((Arc::clone(&server), server.cg().await));

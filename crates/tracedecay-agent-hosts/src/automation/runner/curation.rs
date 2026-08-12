@@ -13,7 +13,6 @@ use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::AgentTaskRunContext;
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus};
 use crate::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub(super) fn evaluate_session_curation(
     config: &AutomationConfig,
@@ -116,8 +115,9 @@ pub(super) fn unpersisted_rejected_parts(
     reason: &str,
     evidence_hash: Option<String>,
     report_task: &'static str,
-) -> (Value, AutomationRunLedgerRecord) {
-    let completed_at = current_timestamp().to_string();
+) -> Result<(Value, AutomationRunLedgerRecord)> {
+    let completed_at_micros = crate::automation::run_ledger::current_timestamp_micros()?;
+    let completed_at = (completed_at_micros / 1_000_000).to_string();
     let contract = agent_task_contract(task);
     let report = json!({
         "status": "skipped",
@@ -156,12 +156,13 @@ pub(super) fn unpersisted_rejected_parts(
         backend_attempts: Vec::new(),
         fallback_status: Some(reason.to_string()),
         report_ref: Some(json!({
-            "dashboard_runs": "/api/plugins/holographic/curation/runs",
+            "dashboard_runs": "/api/automation/runs",
             "run_id": run.run_id,
         })),
         artifacts: Vec::new(),
         started_at: run.started_at().to_string(),
         completed_at,
+        completed_at_micros,
     };
-    (report, record)
+    Ok((report, record))
 }

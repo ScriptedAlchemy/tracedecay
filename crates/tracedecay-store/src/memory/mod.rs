@@ -18,6 +18,7 @@ pub use graph::{
     MAX_PROJECT_MEMORY_GRAPH_RELATIONS, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
     ProjectMemoryGraphRelationV1, ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
 };
+pub use project_memory::ProjectMemoryAutomationRunReceiptsV1;
 pub use project_memory::{
     MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS, MAX_PROJECT_MEMORY_SEARCH_SCORE_MILLIONTHS,
     ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
@@ -33,11 +34,17 @@ pub use project_memory::{
     ProjectMemoryEntityIdV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddDispositionV1,
     ProjectMemoryFactAddMaterialV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
-    ProjectMemoryFactContradictionV1, ProjectMemoryFactCurationBatchV1,
-    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
-    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactFeedbackOutcomeV1,
-    ProjectMemoryFactHistoryV1, ProjectMemoryFactIdV1, ProjectMemoryFactInspectionV1,
-    ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
+    ProjectMemoryFactContradictionV1, ProjectMemoryFactCurationAddV1,
+    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationEvidenceV1,
+    ProjectMemoryFactCurationLinkDispositionV1, ProjectMemoryFactCurationLinkEffectV1,
+    ProjectMemoryFactCurationMergeV1, ProjectMemoryFactCurationMutationKindV1,
+    ProjectMemoryFactCurationOperationEffectV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactCurationRemoveDispositionV1,
+    ProjectMemoryFactCurationRemoveV1, ProjectMemoryFactCurationReviewRefV1,
+    ProjectMemoryFactCurationUpdateV1, ProjectMemoryFactFeedbackCommandV1,
+    ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactInspectionV1, ProjectMemoryFactLinkV1, ProjectMemoryFactMergeCommandV1,
+    ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactMergeTargetV1,
     ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
     ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactRetrievalOutcomeV1,
@@ -47,6 +54,7 @@ pub use project_memory::{
     ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchScoresV1,
     ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdateCommandV1,
     ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryFactUpdatePatchV1, ProjectMemoryFactV1,
+    derive_project_memory_fact_curation_child_operation_id,
 };
 pub use queries::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactContradictionStateV1,

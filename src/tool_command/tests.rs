@@ -36,7 +36,6 @@ fn fact_store_tool_lookup_rejects_broad_and_accepts_exact_routes() {
         "fact_store_update",
         "fact_store_remove",
         "fact_store_list",
-        "fact_store_curate",
     ] {
         let canonical = canonical_tool_name(name);
         assert!(
@@ -172,7 +171,7 @@ fn args_escape_hatch_reads_stdin_at_dash() {
 #[test]
 fn args_escape_hatch_reads_bare_path() {
     // `--args` is a whole-payload arg, so a bare file path works without the
-    // `@` sigil — matching `memory curate --llm-ops <file>`.
+    // `@` sigil used by per-key file values.
     let d = def("search");
     let dir = std::env::temp_dir().join(format!("ts-args-bare-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

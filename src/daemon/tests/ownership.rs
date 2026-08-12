@@ -148,50 +148,6 @@ async fn unborn_git_project_open_retains_lsp_and_starts_hook_replay() {
 }
 
 #[cfg(unix)]
-async fn maintenance_owner_fixture(
-    label: &str,
-) -> (
-    TempDir,
-    crate::db::DaemonDatabaseScope,
-    DaemonEngine,
-    ProjectServerKey,
-    DaemonHandshake,
-) {
-    let temp = TempDir::new().expect("maintenance fixture");
-    let project = temp.path().join("project");
-    let profile_root = temp.path().join("profile");
-    std::fs::create_dir_all(project.join("src")).expect("maintenance fixture project");
-    std::fs::write(project.join("src/main.rs"), "fn main() {}\n")
-        .expect("maintenance fixture source");
-    let client_identity = test_client_identity_for(profile_root.clone());
-    initialize_test_project(&project, &client_identity).await;
-    let handshake = DaemonHandshake {
-        project_path: Some(project.clone()),
-        client_identity,
-        ..test_handshake_defaults()
-    };
-    let engine = test_daemon_engine_for_profile(&profile_root);
-    let database_scope = enter_test_daemon_database_scope(&profile_root, label);
-    let cg = super::super::open_project_for_handshake(
-        &project,
-        &handshake,
-        &engine.store_administration,
-    )
-    .await
-    .expect("open maintenance fixture through daemon authority");
-    let key =
-        ProjectServerKey::from_open_project(&cg, &handshake).expect("maintenance fixture owner");
-    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
-    engine
-        .store_administration
-        .project_servers()
-        .lock()
-        .await
-        .insert(key.clone(), server);
-    (temp, database_scope, engine, key, handshake)
-}
-
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
@@ -252,17 +208,6 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     let direct_server = direct_server.expect("direct project server");
     let alias_server = alias_server.expect("aliased project server");
     assert!(std::sync::Arc::ptr_eq(&direct_server, &alias_server));
-    tokio::time::timeout(PHASE_TIMEOUT, async {
-        while engine
-            .memory_repair_start_attempts
-            .load(std::sync::atomic::Ordering::Relaxed)
-            == 0
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("initial maintenance activation timed out");
     assert_eq!(
         engine
             .project_open_attempts
@@ -270,36 +215,17 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         1,
         "canonical aliases must singleflight the first project open"
     );
-    assert_eq!(
-        engine
-            .memory_repair_start_attempts
-            .load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "concurrent insertion must acquire one repair owner"
-    );
     tokio::time::timeout(PHASE_TIMEOUT, async {
-        loop {
-            if engine
-                .store_administration
-                .memory_repair_schedulers()
-                .lock()
-                .await
-                .is_empty()
-                && engine
-                    .automation_config_probe_attempts
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                    == 1
-            {
-                break;
-            }
+        while engine
+            .automation_config_probe_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("initial memory-repair pass timed out");
-    engine
-        .memory_repair_start_attempts
-        .store(0, std::sync::atomic::Ordering::Relaxed);
+    .expect("initial automation configuration probe timed out");
     engine
         .automation_config_probe_attempts
         .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -317,13 +243,6 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
             .load(std::sync::atomic::Ordering::Relaxed),
         1,
         "cache hits must return before opening project databases"
-    );
-    assert_eq!(
-        engine
-            .memory_repair_start_attempts
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "cache hits must not restart completed maintenance"
     );
     assert_eq!(
         engine
@@ -420,23 +339,12 @@ async fn interrupted_post_insert_activation_retains_maintenance_ownership() {
             .automation_config_probe_attempts
             .load(std::sync::atomic::Ordering::Relaxed)
             == 0
-            || engine
-                .memory_repair_start_attempts
-                .load(std::sync::atomic::Ordering::Relaxed)
-                == 0
         {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("daemon-owned maintenance activation timed out");
-    assert_eq!(
-        engine
-            .memory_repair_start_attempts
-            .load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "cache publication must acquire repair ownership before activation can be interrupted"
-    );
     assert_eq!(
         engine
             .automation_config_probe_attempts
@@ -947,53 +855,6 @@ fn failed_optional_upgrade_restores_the_ready_core() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn project_rekey_cancels_stale_repair_owner_and_acquires_new_owner_once() {
-    let (_fixture, _database_scope, engine, new, handshake) =
-        maintenance_owner_fixture("project-rekey-test").await;
-    let mut old = new.clone();
-    old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
-    let task = tokio::spawn(std::future::pending::<()>());
-    let stale_task = task.abort_handle();
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(old.clone(), MemoryRepairSchedulerHandle::for_test(task));
-
-    engine
-        .rekey_project_maintenance(
-            &old,
-            new.clone(),
-            handshake.project_path.clone().expect("project path"),
-            handshake,
-            true,
-        )
-        .await;
-    assert!(
-        stale_task.is_finished(),
-        "rekey must await stale repair shutdown before returning"
-    );
-    let schedulers = engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await;
-    assert!(!schedulers.contains_key(&old));
-    assert!(schedulers.contains_key(&new));
-    assert_eq!(schedulers.len(), 1);
-    drop(schedulers);
-    assert_eq!(
-        engine
-            .memory_repair_start_attempts
-            .load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
-    engine.shutdown_all().await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn project_rekey_awaits_stale_automation_owner_before_replacement() {
     let engine = DaemonEngine::default();
     let old = ProjectServerKey {
@@ -1123,104 +984,6 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
 
 #[cfg(unix)]
 #[tokio::test]
-async fn shutdown_waits_for_blocked_repair_retirement_reaper_and_is_idempotent() {
-    let engine = DaemonEngine::default();
-    let key = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_id: Some("project".to_string()),
-            store_root: PathBuf::from("/store"),
-            graph_db_path: PathBuf::from("/store/repair.db"),
-        },
-        project_root: PathBuf::from("/project"),
-        scope_prefix: None,
-    };
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
-    started_rx
-        .await
-        .expect("noncooperative repair owner started");
-    let stale_task = task.abort_handle();
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(
-            key.clone(),
-            super::super::memory_repair_scheduler::MemoryRepairSchedulerHandle::for_test(task),
-        );
-
-    let retirement = engine
-        .retire_memory_repair_scheduler_locked(&key)
-        .await
-        .expect("repair owner retirement");
-    let shutdown_engine = engine.clone();
-    let shutdown = tokio::spawn(async move {
-        shutdown_engine.shutdown_all().await;
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if engine
-                .store_administration
-                .memory_repair_schedulers()
-                .lock()
-                .await
-                .is_empty()
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("shutdown did not drain repair ownership");
-
-    assert!(
-        !shutdown.is_finished(),
-        "shutdown must wait for the blocked repair retirement reaper"
-    );
-    assert!(
-        !stale_task.is_finished(),
-        "blocked repair owner must still be live before release"
-    );
-
-    release.release();
-    tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx)
-        .await
-        .expect("repair owner completion timed out")
-        .expect("repair owner completion sender dropped");
-    tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
-        .await
-        .expect("shutdown did not reap repair retirement")
-        .expect("shutdown task panicked");
-    retirement.wait().await;
-
-    assert_eq!(
-        engine.store_administration.retirement_reaper_count().await,
-        0,
-        "shutdown must leave no repair reaper ownership record"
-    );
-    assert!(
-        stale_task.is_finished(),
-        "shutdown must not leave the retired repair owner orphaned"
-    );
-    assert!(
-        engine
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await
-            .is_empty(),
-        "shutdown must clear the retired repair tombstone"
-    );
-    tokio::time::timeout(std::time::Duration::from_secs(1), engine.shutdown_all())
-        .await
-        .expect("repeated shutdown must be idempotent");
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finishes() {
     let engine = DaemonEngine::default();
     let old = ProjectServerKey {
@@ -1336,237 +1099,6 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
     assert_eq!(
         reapers_after_join, 0,
         "normal automation reaper completion must release daemon ownership"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn repair_retirement_timeout_retains_owner_tombstone_until_join_finishes() {
-    use super::super::memory_repair_scheduler::{
-        MemoryRepairSchedulerLifecycle, MemoryRepairSchedulerReconcileOutcome,
-    };
-
-    let engine = DaemonEngine::default();
-    let old = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_id: Some("project".to_string()),
-            store_root: PathBuf::from("/store"),
-            graph_db_path: PathBuf::from("/store/old.db"),
-        },
-        project_root: PathBuf::from("/project"),
-        scope_prefix: None,
-    };
-    let mut new = old.clone();
-    new.owner.graph_db_path = PathBuf::from("/store/new.db");
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
-    started_rx
-        .await
-        .expect("noncooperative repair owner started");
-    let stale_task = task.abort_handle();
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(old.clone(), MemoryRepairSchedulerHandle::for_test(task));
-
-    let rekey = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        engine.rekey_project_maintenance(
-            &old,
-            new.clone(),
-            PathBuf::from("/moved-project"),
-            test_handshake_defaults(),
-            false,
-        ),
-    )
-    .await;
-    let retained = engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .get(&old)
-        .is_some_and(|owner| owner.lifecycle == MemoryRepairSchedulerLifecycle::Retiring);
-    let reconcile = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        engine.ensure_memory_repair_scheduler(
-            new.clone(),
-            PathBuf::from("/moved-project"),
-            test_handshake_defaults(),
-        ),
-    )
-    .await
-    .ok();
-    let owner_count = engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .len();
-
-    release.release();
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx).await;
-    let joined = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        engine.rekey_project_maintenance(
-            &old,
-            new,
-            PathBuf::from("/moved-project"),
-            test_handshake_defaults(),
-            false,
-        ),
-    )
-    .await;
-    let owners_after_join = engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .len();
-    let reapers_after_join = engine.store_administration.retirement_reaper_count().await;
-    engine.shutdown_all().await;
-
-    assert_eq!(rekey, Ok(super::super::MaintenanceRekeyOutcome::Retiring));
-    assert!(retained, "repair timeout must retain a retiring owner");
-    assert_eq!(
-        reconcile,
-        Some(MemoryRepairSchedulerReconcileOutcome::Retiring),
-        "repair replacement must remain blocked by the live tombstone"
-    );
-    assert_eq!(owner_count, 1, "repair retirement must keep one owner");
-    assert!(
-        completed.is_ok(),
-        "noncooperative repair owner was not released"
-    );
-    assert_eq!(joined, Ok(super::super::MaintenanceRekeyOutcome::Completed));
-    assert!(stale_task.is_finished(), "stale repair task must terminate");
-    assert_eq!(
-        owners_after_join, 0,
-        "repair reaper must clear its tombstone"
-    );
-    assert_eq!(
-        reapers_after_join, 0,
-        "normal repair reaper completion must release daemon ownership"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn released_repair_tombstone_allows_one_eventual_replacement() {
-    use super::super::memory_repair_scheduler::{
-        MemoryRepairSchedulerLifecycle, MemoryRepairSchedulerReconcileOutcome,
-    };
-
-    let (_fixture, _database_scope, engine, new, handshake) =
-        maintenance_owner_fixture("repair-tombstone-test").await;
-    let project_path = handshake.project_path.clone().expect("project path");
-    let mut old = new.clone();
-    old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
-    started_rx
-        .await
-        .expect("noncooperative repair owner started");
-    engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .insert(old.clone(), MemoryRepairSchedulerHandle::for_test(task));
-
-    let timed_out = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        engine.rekey_project_maintenance(
-            &old,
-            new.clone(),
-            project_path.clone(),
-            handshake.clone(),
-            true,
-        ),
-    )
-    .await;
-    let retained = engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await
-        .get(&old)
-        .is_some_and(|owner| owner.lifecycle == MemoryRepairSchedulerLifecycle::Retiring);
-    let reconcile = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        engine.ensure_memory_repair_scheduler(new.clone(), project_path.clone(), handshake.clone()),
-    )
-    .await
-    .ok();
-    let no_overlap = {
-        let schedulers = engine
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await;
-        schedulers.len() == 1 && schedulers.contains_key(&old) && !schedulers.contains_key(&new)
-    };
-
-    release.release();
-    let completed = tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx).await;
-    let replaced = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        engine.rekey_project_maintenance(&old, new.clone(), project_path, handshake, true),
-    )
-    .await;
-    let (owner_count, owns_new, live_replacement) = {
-        let schedulers = engine
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await;
-        (
-            schedulers.len(),
-            schedulers.contains_key(&new),
-            schedulers
-                .get(&new)
-                .and_then(|owner| owner.task.as_ref())
-                .is_some_and(|task| !task.is_finished()),
-        )
-    };
-    let start_attempts = engine
-        .memory_repair_start_attempts
-        .load(std::sync::atomic::Ordering::Relaxed);
-    engine.shutdown_all().await;
-
-    assert_eq!(
-        timed_out,
-        Ok(super::super::MaintenanceRekeyOutcome::Retiring)
-    );
-    assert!(
-        retained,
-        "retirement timeout must retain one Retiring repair tombstone"
-    );
-    assert_eq!(
-        reconcile,
-        Some(MemoryRepairSchedulerReconcileOutcome::Retiring),
-        "ensure of the logical new key must stay blocked while the tombstone is live"
-    );
-    assert!(no_overlap, "a retiring repair owner must block replacement");
-    assert!(
-        completed.is_ok(),
-        "noncooperative repair owner was not released"
-    );
-    assert_eq!(
-        replaced,
-        Ok(super::super::MaintenanceRekeyOutcome::Completed)
-    );
-    assert_eq!(owner_count, 1, "exactly one repair owner must remain");
-    assert!(owns_new, "the released tombstone must permit replacement");
-    assert!(
-        live_replacement,
-        "the replacement repair owner must be live"
-    );
-    assert_eq!(
-        start_attempts, 1,
-        "repair replacement must start exactly once"
     );
 }
 
@@ -1754,107 +1286,4 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
         live_replacement,
         "exactly one live replacement must own the scheduler"
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn concurrent_project_rekeys_are_bounded_and_keep_one_repair_owner() {
-    let (_fixture, _database_scope, engine, new, handshake) =
-        maintenance_owner_fixture("concurrent-project-rekey-test").await;
-    let project_path = handshake.project_path.clone().expect("project path");
-    let mut old = new.clone();
-    old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
-    let first = engine.rekey_project_maintenance(
-        &old,
-        new.clone(),
-        project_path.clone(),
-        handshake.clone(),
-        true,
-    );
-    let second = engine.rekey_project_maintenance(&old, new.clone(), project_path, handshake, true);
-
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        tokio::join!(first, second);
-    })
-    .await
-    .expect("concurrent rekey must not deadlock");
-
-    let schedulers = engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await;
-    assert_eq!(schedulers.len(), 1);
-    assert!(schedulers.contains_key(&new));
-    drop(schedulers);
-    engine.shutdown_all().await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn stale_cache_retirement_does_not_duplicate_canonical_repair_owner() {
-    let engine = DaemonEngine::default();
-    let old = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_id: Some("project".to_string()),
-            store_root: PathBuf::from("/store"),
-            graph_db_path: PathBuf::from("/store/old.db"),
-        },
-        project_root: PathBuf::from("/project"),
-        scope_prefix: None,
-    };
-    let mut canonical = old.clone();
-    canonical.owner.graph_db_path = PathBuf::from("/store/canonical.db");
-    let stale_task = tokio::spawn(std::future::pending::<()>());
-    let stale_abort = stale_task.abort_handle();
-    let canonical_task = tokio::spawn(std::future::pending::<()>());
-    let canonical_abort = canonical_task.abort_handle();
-    {
-        let mut schedulers = engine
-            .store_administration
-            .memory_repair_schedulers()
-            .lock()
-            .await;
-        schedulers.insert(
-            old.clone(),
-            MemoryRepairSchedulerHandle::for_test(stale_task),
-        );
-        schedulers.insert(
-            canonical.clone(),
-            MemoryRepairSchedulerHandle::for_test(canonical_task),
-        );
-    }
-
-    engine
-        .rekey_project_maintenance(
-            &old,
-            canonical.clone(),
-            PathBuf::from("/moved-project"),
-            test_handshake_defaults(),
-            false,
-        )
-        .await;
-    tokio::task::yield_now().await;
-
-    assert!(stale_abort.is_finished());
-    assert!(!canonical_abort.is_finished());
-    let schedulers = engine
-        .store_administration
-        .memory_repair_schedulers()
-        .lock()
-        .await;
-    assert!(!schedulers.contains_key(&old));
-    assert!(schedulers.contains_key(&canonical));
-    assert_eq!(schedulers.len(), 1);
-    drop(schedulers);
-    assert_eq!(
-        engine
-            .memory_repair_start_attempts
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "retirement must preserve an existing canonical owner"
-    );
-    engine.shutdown_all().await;
 }

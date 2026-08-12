@@ -476,7 +476,7 @@ pub(super) async fn handle_dashboard(
             let automation_authority = match (
                 daemon_profile_root,
                 daemon_user_profile_id.clone(),
-                dashboard_project_graph_resolver.clone(),
+                retained_project_server_resolver.clone(),
                 daemon_invocation_service,
             ) {
                 (

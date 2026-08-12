@@ -275,6 +275,17 @@ fn removed_host_cli_aliases_are_invalid_subcommands() {
 }
 
 #[test]
+fn removed_manual_memory_curation_command_is_invalid() {
+    let error = match Cli::try_parse_from(["tracedecay", "memory", "curate"]) {
+        Ok(_) => panic!("manual memory curation must stay removed from final-V2"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    assert!(Cli::try_parse_from(["tracedecay", "memory", "status", "--json"]).is_ok());
+}
+
+#[test]
 fn removed_hermes_install_selectors_are_unknown_arguments() {
     for args in [
         vec![
@@ -1140,7 +1151,7 @@ fn automation_run_memory_curation_parses_manual_flags() {
         "automation",
         "run",
         "memory-curation",
-        "--max-clusters",
+        "--fact-review-limit",
         "8",
         "--min-confidence",
         "0.7",
@@ -1156,12 +1167,12 @@ fn automation_run_memory_curation_parses_manual_flags() {
                 AutomationAction::Run {
                     action:
                         AutomationRunAction::MemoryCuration {
-                            max_clusters,
+                            fact_review_limit,
                             min_confidence,
                             path,
                         }
                 }
-        }) if max_clusters == 8
+        }) if fact_review_limit == 8
             && (min_confidence - 0.7).abs() < f64::EPSILON
             && path.as_deref() == Some("/tmp/project")
     ));

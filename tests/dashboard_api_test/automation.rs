@@ -213,25 +213,19 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
             assert_eq!(record.model.as_deref(), None);
         }
 
-        let (status, runs) = get_json(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/runs?limit=5"),
-        );
+        let (status, runs) = get_json(&agent, &format!("{base_url}/api/automation/runs?limit=5"));
         assert_eq!(status, 200);
         assert_eq!(runs["count"], 3);
         assert_eq!(runs["limit"], 5);
-        assert_eq!(runs["records"][0]["trigger"], "dashboard");
-        assert_eq!(runs["records"][0]["status"], "skipped");
-        assert_eq!(runs["records"][0]["error"], "automation_disabled");
+        assert_eq!(runs["runs"][0]["trigger"], "dashboard");
+        assert_eq!(runs["runs"][0]["status"], "skipped");
+        assert_eq!(runs["runs"][0]["error"], "automation_disabled");
 
-        let (status, runs) = get_json(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/runs"),
-        );
+        let (status, runs) = get_json(&agent, &format!("{base_url}/api/automation/runs"));
         assert_eq!(status, 200);
         assert_eq!(runs["count"], 3);
         assert!(
-            runs["records"].as_array().is_some_and(|records| records
+            runs["runs"].as_array().is_some_and(|records| records
                 .iter()
                 .any(|record| record["run_id"] == memory_payload["run"]["run_id"]
                     && record["status"] == "skipped")),
@@ -360,7 +354,11 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
 
         let (cg, host_runtime) = setup_project(&project_root).await;
         let fixture = seed_memory_fixture(&cg).await;
-        let fake_codex = FakeCodexAppServer::new_memory_curator(fixture.near_duplicate_fact_id);
+        let curated_fact_id = fixture.near_duplicate_fact_id.clone();
+        let fake_codex = FakeCodexAppServer::new_memory_curator(
+            fixture.near_duplicate_fact_id.clone(),
+            fixture.near_duplicate_last_event_id.clone(),
+        );
         let _codex_bin_guard = EnvVarGuard::set("TRACEDECAY_CODEX_BIN", &fake_codex.bin);
         let dashboard_root = cg.store_layout().dashboard_root.clone();
         let agent = http_agent();
@@ -392,7 +390,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
             &agent,
             &format!("{base_url}/api/automation/run/memory-curator"),
             &serde_json::json!({
-                "max_clusters": 4,
+                "fact_review_limit": 4,
                 "min_confidence": 0.5
             }),
         );
@@ -415,6 +413,45 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         assert_eq!(record.accepted_count, 1);
         assert_eq!(record.rejected_count, 0);
         assert_eq!(record.artifacts.len(), 6);
+        let proposed = record
+            .proposed_ops
+            .as_ref()
+            .and_then(|value| value["ops"].as_array())
+            .unwrap_or_else(|| panic!("memory curator must retain proposed operations: {record:#?}"));
+        assert_eq!(proposed.len(), 1);
+        assert_eq!(proposed[0]["op"], "normalize_tags");
+        assert_eq!(
+            proposed[0]["fact_id"].as_str(),
+            Some(curated_fact_id.as_str())
+        );
+        assert!(proposed[0]["fact_id"]
+            .as_str()
+            .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok()));
+        let applied = record
+            .applied_ops
+            .as_ref()
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("accepted curation needs an applied receipt: {record:#?}"));
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0]["op"], "curation_batch");
+        assert_eq!(applied[0]["status"], "applied");
+        assert_eq!(applied[0]["operation_count"], 1);
+        assert_eq!(applied[0]["receipt"]["normalized_tags"], 1);
+        assert_eq!(applied[0]["receipt"]["facts_linked"], 0);
+        assert_eq!(
+            applied[0]["receipt"]["changed_fact_ids"],
+            serde_json::json!([curated_fact_id.as_str()])
+        );
+        assert_eq!(
+            applied[0]["receipt"]["operation_effects"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert!(applied[0]["receipt"]["replay_event_id"].is_string());
+        assert!(applied[0]["receipt"]["replay_fact_id"]
+            .as_str()
+            .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok()));
         let records = tracedecay_agent_hosts::automation::run_ledger::load_run_records(
             &dashboard_root,
             10,
@@ -424,6 +461,21 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         assert!(
             records.iter().any(|stored| stored == &record),
             "returned terminal ledger must be durably visible: {records:#?}"
+        );
+
+        let (status, curated_fact) = get_json(
+            &agent,
+            &format!(
+                "{base_url}/api/plugins/holographic/fact/{}",
+                curated_fact_id.as_str()
+            ),
+        );
+        assert_eq!(status, 200, "curated fact read failed: {curated_fact}");
+        assert_eq!(curated_fact["domain_state"], "ready");
+        assert_eq!(
+            curated_fact["payload"]["fact"]["tags"],
+            serde_json::json!(["cache", "curated", "policy"]),
+            "automation must apply the reviewed canonical tag normalization"
         );
 
         let artifact_url = format!("{base_url}/api/automation/runs/{run_id}/artifacts");
@@ -527,16 +579,16 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
 
         let (status, runs) = get_json(
             &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/runs?limit=5"),
+            &format!("{base_url}/api/automation/runs?limit=5"),
         );
         assert_eq!(status, 200);
         assert!(
-            runs["records"]
+            runs["runs"]
                 .as_array()
                 .is_some_and(
                     |records| records.iter().any(|record| record["run_id"] == run_id
                         && record["status"] == "succeeded"
-                        && record["artifacts"]
+                        && record["artifact_kinds"]
                             .as_array()
                             .is_some_and(|artifacts| artifacts.len() == 6))
                 ),
@@ -799,7 +851,7 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         assert_eq!(alive["helpful_count"], 0);
         assert_eq!(
             alive["canonical_fact_id"],
-            serde_json::json!(alive_receipt.canonical_fact_id)
+            serde_json::json!(alive_receipt.fact_id)
         );
         assert_eq!(alive["run_id"], "run_outcomes_alive");
         let gone = by_id(&gone_receipt.apply_id);
@@ -807,7 +859,7 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         assert_eq!(gone["still_exists"], false);
         assert_eq!(
             gone["canonical_fact_id"],
-            serde_json::json!(gone_receipt.canonical_fact_id)
+            serde_json::json!(gone_receipt.fact_id)
         );
         assert_eq!(gone["run_id"], "run_outcomes_deleted");
 

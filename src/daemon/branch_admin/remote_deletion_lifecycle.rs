@@ -733,6 +733,26 @@ impl StoreAdministration {
                     error,
                 )
             })?;
+        #[cfg(unix)]
+        if !self
+            .settle_retirement_reapers_for_project(
+                profile_root,
+                project_id,
+                super::super::DAEMON_TASK_ABORT_DEADLINE,
+            )
+            .await
+        {
+            return Err(cleanup_error(
+                RemoteDeletionFailureCode::RuntimeOwnersSettling,
+                RemoteDeletionPhase::CancelRuntimeOwners,
+                true,
+                TraceDecayError::Config {
+                    message: format!(
+                        "remote-deleted project '{project_id}' runtime owners are still settling"
+                    ),
+                },
+            ));
+        }
         crate::daemon::hook_v2_replay::shutdown_hook_v2_replay_consumer(&data_root).await;
         self.project_routes
             .forget_project(identity.profile_id(), project_id)

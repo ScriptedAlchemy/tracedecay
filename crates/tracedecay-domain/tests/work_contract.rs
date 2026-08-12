@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use serde_json::json;
 use tracedecay_domain::{
     ActorId, MAX_WORK_DEPENDENCIES, MAX_WORK_TITLE_BYTES, ManifestDigest, ProjectId, ProposalId,
-    RepositoryId, TaskId, UtcMicros, WorkAuthority, WorkEvent, WorkEventKind, WorkProjection,
-    WorkVersion, WorktreeId,
+    RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority, WorkEvent, WorkEventKind,
+    WorkProjection, WorkVersion, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T

@@ -72,6 +72,16 @@ impl DaemonInvocationService {
             .await
     }
 
+    pub(crate) fn observability_producer_for_project_root(
+        &self,
+        project_root: &Path,
+    ) -> Option<Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>> {
+        self.project_runtimes
+            .read_now::<RegisteredObservabilityProducerV1, _, _>(project_root, |registered| {
+                registered.producer()
+            })
+    }
+
     pub(crate) fn observability_producer_for_project_id(
         &self,
         project_id: &ProjectId,

@@ -9,8 +9,12 @@ use super::backend::{
 use super::config_error;
 use crate::errors::{Result, TraceDecayError};
 
+mod cursor;
+mod exact_lookup;
 mod publication;
 
+pub(crate) use cursor::load_latest_task_validation_pointer;
+pub use exact_lookup::find_run_record_exact_bounded;
 pub(crate) use publication::publish_run_artifact_chain;
 pub use publication::read_published_artifact_chain;
 
@@ -28,9 +32,19 @@ const RUN_LEDGER_TAIL_CHUNK_BYTES: u64 = 256 * 1024;
 pub enum AutomationTrigger {
     #[default]
     ManualCli,
+    ManualMcp,
     Dashboard,
     Scheduler,
     HostReceipt,
+}
+
+impl AutomationTrigger {
+    /// Explicit operator-triggered runs are admitted independently of whether
+    /// recurring scheduling is enabled. Backend availability, host mode,
+    /// policy, cancellation, and deadline checks still apply.
+    pub const fn is_on_demand(self) -> bool {
+        matches!(self, Self::ManualCli | Self::ManualMcp | Self::Dashboard)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +421,36 @@ pub async fn load_run_records(
         .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutomationRunLedgerPageV1 {
+    pub records: Vec<AutomationRunLedgerRecord>,
+    pub malformed_row_count: usize,
+    pub has_more: bool,
+}
+
+impl AutomationRunLedgerPageV1 {
+    pub fn is_complete(&self) -> bool {
+        !self.has_more && self.malformed_row_count == 0
+    }
+}
+
+pub async fn load_run_records_page(
+    dashboard_root: &Path,
+    limit: usize,
+) -> Result<AutomationRunLedgerPageV1> {
+    if limit == 0 {
+        return Ok(AutomationRunLedgerPageV1 {
+            records: Vec::new(),
+            malformed_row_count: 0,
+            has_more: false,
+        });
+    }
+    let path = run_ledger_path(dashboard_root);
+    tokio::task::spawn_blocking(move || read_run_records_tail_page(&path, limit))
+        .await
+        .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
+}
+
 pub async fn load_run_records_for_task_key(
     dashboard_root: &Path,
     requested_task_key: &str,
@@ -457,12 +501,24 @@ fn read_run_records_tail(path: &Path, limit: usize) -> Result<Vec<AutomationRunL
     read_run_records_tail_with_window(path, limit, RUN_LEDGER_TAIL_CHUNK_BYTES)
 }
 
+fn read_run_records_tail_page(path: &Path, limit: usize) -> Result<AutomationRunLedgerPageV1> {
+    read_run_records_tail_page_with_window(path, limit, RUN_LEDGER_TAIL_CHUNK_BYTES)
+}
+
 fn read_run_records_tail_with_window(
     path: &Path,
     limit: usize,
     initial_window: u64,
 ) -> Result<Vec<AutomationRunLedgerRecord>> {
-    read_run_records_tail_with_filter(path, limit, initial_window, &RunRecordFilter::Any)
+    read_run_records_tail_page_with_window(path, limit, initial_window).map(|page| page.records)
+}
+
+fn read_run_records_tail_page_with_window(
+    path: &Path,
+    limit: usize,
+    initial_window: u64,
+) -> Result<AutomationRunLedgerPageV1> {
+    read_run_records_tail_page_with_filter(path, limit, initial_window, &RunRecordFilter::Any)
 }
 
 fn read_run_records_tail_with_filter(
@@ -471,11 +527,27 @@ fn read_run_records_tail_with_filter(
     initial_window: u64,
     filter: &RunRecordFilter,
 ) -> Result<Vec<AutomationRunLedgerRecord>> {
+    read_run_records_tail_page_with_filter(path, limit, initial_window, filter)
+        .map(|page| page.records)
+}
+
+fn read_run_records_tail_page_with_filter(
+    path: &Path,
+    limit: usize,
+    initial_window: u64,
+    filter: &RunRecordFilter,
+) -> Result<AutomationRunLedgerPageV1> {
     use std::io::{Read, Seek, SeekFrom};
 
     let mut file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AutomationRunLedgerPageV1 {
+                records: Vec::new(),
+                malformed_row_count: 0,
+                has_more: false,
+            });
+        }
         Err(e) => {
             return Err(config_error(format!(
                 "failed to read automation run ledger '{}': {e}",
@@ -493,7 +565,11 @@ fn read_run_records_tail_with_filter(
         })?
         .len();
     if file_len == 0 {
-        return Ok(Vec::new());
+        return Ok(AutomationRunLedgerPageV1 {
+            records: Vec::new(),
+            malformed_row_count: 0,
+            has_more: false,
+        });
     }
 
     let mut requested = initial_window.max(1);
@@ -527,9 +603,13 @@ fn read_run_records_tail_with_filter(
             }
         };
         let text = String::from_utf8_lossy(slice);
-        let records = parse_run_records_newest_first(&text, limit, path, filter);
-        if records.len() >= limit || reached_start {
-            return Ok(records);
+        let parsed = parse_run_records_newest_first(&text, limit, path, filter);
+        if parsed.records.len() >= limit || reached_start {
+            return Ok(AutomationRunLedgerPageV1 {
+                records: parsed.records,
+                malformed_row_count: parsed.malformed_row_count,
+                has_more: parsed.stopped_at_limit || !reached_start,
+            });
         }
         requested = requested.saturating_mul(2);
     }
@@ -542,11 +622,14 @@ fn parse_run_records_newest_first(
     limit: usize,
     path: &Path,
     filter: &RunRecordFilter,
-) -> Vec<AutomationRunLedgerRecord> {
+) -> ParsedRunRecords {
     let mut records = Vec::new();
     let mut seen_run_ids = std::collections::BTreeSet::new();
+    let mut malformed_row_count = 0;
+    let mut stopped_at_limit = false;
     for line in text.lines().rev() {
         if records.len() >= limit {
+            stopped_at_limit = true;
             break;
         }
         let trimmed = line.trim();
@@ -564,6 +647,7 @@ fn parse_run_records_newest_first(
                 records.push(record);
             }
             Err(err) => {
+                malformed_row_count += 1;
                 tracing::warn!(
                     automation_run_ledger = %path.display(),
                     error = %err,
@@ -572,7 +656,17 @@ fn parse_run_records_newest_first(
             }
         }
     }
-    records
+    ParsedRunRecords {
+        records,
+        malformed_row_count,
+        stopped_at_limit,
+    }
+}
+
+struct ParsedRunRecords {
+    records: Vec<AutomationRunLedgerRecord>,
+    malformed_row_count: usize,
+    stopped_at_limit: bool,
 }
 
 fn artifact_relative_path(run_id: &str, kind: AutomationRunArtifactKind) -> String {
@@ -744,6 +838,12 @@ mod tests {
         let records = read_run_records_tail_with_window(&path, 1, 8).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].run_id, "newest");
+
+        let page = read_run_records_tail_page_with_window(&path, 5, 8).unwrap();
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(page.malformed_row_count, 1);
+        assert!(!page.has_more);
+        assert!(!page.is_complete());
     }
 
     #[test]

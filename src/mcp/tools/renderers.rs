@@ -105,6 +105,133 @@ pub(super) fn automation_artifact_md(value: &Value) -> String {
     md.render()
 }
 
+pub(super) fn automation_run_list_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Automation Runs");
+    md.field("status", render::field_str(value, "status"));
+    md.field("scope", render::field_str(value, "scope"));
+    md.field("count", &render::field_i64(value, "count").to_string());
+    md.field("completeness", render::field_str(value, "completeness"));
+    md.field(
+        "malformed_row_count",
+        &render::field_i64(value, "malformed_row_count").to_string(),
+    );
+    if value
+        .get("has_more")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        md.field("has_more", "true");
+    }
+    md.blank().heading(3, "Run History");
+    let Some(runs) = value.get("runs").and_then(Value::as_array) else {
+        md.empty_note("No run history field returned.");
+        return md.render();
+    };
+    if runs.is_empty() {
+        md.empty_note("No automation runs.");
+    } else {
+        for run in runs {
+            append_automation_run_summary(&mut md, run);
+        }
+    }
+    md.render()
+}
+
+pub(super) fn automation_run_view_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Automation Run");
+    md.field("status", render::field_str(value, "status"));
+    md.field("scope", render::field_str(value, "scope"));
+    let Some(run) = value.get("run") else {
+        md.empty_note("No automation run field returned.");
+        return md.render();
+    };
+    append_automation_run_fields(&mut md, run);
+    if let Some(artifacts) = run.get("artifacts").and_then(Value::as_array) {
+        md.blank().heading(3, "Artifacts");
+        if artifacts.is_empty() {
+            md.empty_note("No artifacts.");
+        } else {
+            for artifact in artifacts {
+                let kind = render::field_str(artifact, "kind");
+                let path = render::field_str(artifact, "path");
+                let sha256 = render::field_str(artifact, "sha256");
+                md.bullet(&format!("**{kind}** - `{path}` - `{sha256}`"));
+                let summary = render::field_str(artifact, "summary");
+                if !summary.is_empty() {
+                    md.line(&format!("  summary: {summary}"));
+                }
+            }
+        }
+    }
+    for (heading, key) in [
+        ("Applied Operations", "applied_ops"),
+        ("Rejected Operations", "rejected_ops"),
+        ("Validation Report", "validation_report"),
+    ] {
+        if let Some(detail) = run.get(key) {
+            md.blank().heading(3, heading);
+            md.line(render::generic_md(detail).trim());
+        }
+    }
+    md.render()
+}
+
+fn append_automation_run_summary(md: &mut Md, run: &Value) {
+    let run_id = render::field_str(run, "run_id");
+    let status = render::field_str(run, "status");
+    let task = render::field_str(run, "task_key");
+    let task = if task.is_empty() {
+        render::field_str(run, "task")
+    } else {
+        task
+    };
+    md.bullet(&format!("**{run_id}** - {status} - {task}"));
+    md.line(&format!(
+        "  reviewed: {}; accepted: {}; rejected: {}; skipped: {}",
+        render::field_i64(run, "reviewed_count"),
+        render::field_i64(run, "accepted_count"),
+        render::field_i64(run, "rejected_count"),
+        render::field_i64(run, "skipped_count"),
+    ));
+    let completed_at = render::field_str(run, "completed_at");
+    if !completed_at.is_empty() {
+        md.line(&format!("  completed_at: {completed_at}"));
+    }
+}
+
+fn append_automation_run_fields(md: &mut Md, run: &Value) {
+    for key in [
+        "run_id",
+        "status",
+        "task_key",
+        "task",
+        "trigger",
+        "backend",
+        "model",
+        "started_at",
+        "completed_at",
+    ] {
+        let text = render::field_str(run, key);
+        if !text.is_empty() {
+            md.field(key, text);
+        }
+    }
+    for key in [
+        "reviewed_count",
+        "accepted_count",
+        "rejected_count",
+        "skipped_count",
+    ] {
+        md.field(key, &render::field_i64(run, key).to_string());
+    }
+    let error = render::field_str(run, "error");
+    if !error.is_empty() {
+        md.blank().heading(3, "Error").line(error);
+    }
+}
+
 fn value_str<'a>(value: &'a Value, pointer: &str) -> &'a str {
     value.pointer(pointer).and_then(Value::as_str).unwrap_or("")
 }

@@ -1,9 +1,28 @@
 //! Closed result authority for retained memory and temporal operations.
 
+mod automation;
 mod lcm;
 mod memory;
 mod session;
 
+pub use automation::{
+    MemoryAutomationCommittedReceiptV1, MemoryAutomationCurationAddDispositionV1,
+    MemoryAutomationCurationLinkDispositionV1, MemoryAutomationCurationMergeV1,
+    MemoryAutomationCurationOperationEffectV1, MemoryAutomationCurationReceiptV1,
+    MemoryAutomationCurationRelationKindV1, MemoryAutomationCurationRelationProvenanceV1,
+    MemoryAutomationCurationRelationV1, MemoryAutomationCurationRemoveDispositionV1,
+    MemoryAutomationCurationResultV1, MemoryAutomationFactConflictSourceV1,
+    MemoryAutomationFactConflictValidationV1, MemoryAutomationFactDedupeValidationV1,
+    MemoryAutomationFactDispositionV1, MemoryAutomationFactEffectV1,
+    MemoryAutomationFactEvidenceItemV1, MemoryAutomationFactEvidenceSourceSpanV1,
+    MemoryAutomationFactEvidenceTrustBucketV1, MemoryAutomationFactEvidenceTrustV1,
+    MemoryAutomationFactEvidenceV1, MemoryAutomationFactInputDigestError,
+    MemoryAutomationFactInputDigestV1, MemoryAutomationFactNearestMatchV1,
+    MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
+    MemoryAutomationFactTargetV1, MemoryAutomationFactValidationStatusV1,
+    MemoryAutomationFactValidationV1, MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1,
+    MemoryAutomationRunSummaryV1, MemoryAutomationRunTerminalV1, MemoryAutomationSkipReasonV1,
+};
 pub use lcm::{
     CompactLineageEdgeV1, LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmContentRangeV1,
     LcmDagDepthStatusV1, LcmDagStatusV1, LcmDescribeExternalPayloadV1, LcmDescribeResultV1,
@@ -20,12 +39,14 @@ pub use lcm::{
     LcmTemporalFieldsV1,
 };
 pub use memory::{
-    FactCollectionEntryV1, FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1,
-    FactContradictionV1, FactDiffKindV1, FactFeedbackResultV1, FactFeedbackV1,
-    FactMutationReceiptV1, FactSearchHitV1, FactStoreAddResultV1, FactStoreContradictResultV1,
+    FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1, FactContradictionV1,
+    FactFeedbackDetailsAvailabilityV1, FactFeedbackResultV1, FactFeedbackV1,
+    FactIdentitySourceResultV1, FactPayloadAccessV1, FactProjectionV1, FactSearchCursorV1,
+    FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1, FactSearchScoresV1,
+    FactStatusV1, FactStoreAddCommitV1, FactStoreAddResultV1, FactStoreContradictResultV1,
     FactStoreGetResultV1, FactStoreListResultV1, FactStoreProbeResultV1, FactStoreReasonResultV1,
-    FactStoreRelatedResultV1, FactStoreRemoveResultV1, FactStoreResultV1, FactStoreSearchResultV1,
-    FactStoreUpdateResultV1, FactV1, MemoryFeedbackFunnelV1, MemoryRepairStatsV1,
+    FactStoreRelatedResultV1, FactStoreRemoveResultV1, FactStoreSearchResultV1,
+    FactStoreUpdateResultV1, FactTelemetryV1, FactV1, MemoryAlgebraV1, MemoryFeedbackFunnelV1,
     MemoryStatusResultV1, MemoryStatusV1, TrustHistoryEntryV1,
 };
 pub use session::{
@@ -96,6 +117,7 @@ pub struct RetainedErrorV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(untagged)]
 pub enum RetainedSurfaceResultV1 {
+    MemoryAutomationRun(MemoryAutomationRunResultV1),
     FactStoreAdd(FactStoreAddResultV1),
     FactStoreSearch(FactStoreSearchResultV1),
     FactStoreProbe(FactStoreProbeResultV1),
@@ -121,4 +143,35 @@ pub enum RetainedSurfaceResultV1 {
     LcmDescribe(LcmDescribeResultV1),
     LcmExpand(LcmExpandResultV1),
     LcmExpandQuery(LcmExpandQueryResultV1),
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::RetainedSurfaceResultV1;
+
+    #[test]
+    fn automatic_memory_terminal_selects_only_its_exact_result_variant() {
+        let result = serde_json::from_value::<RetainedSurfaceResultV1>(json!({
+            "run_id": "run.memory.zero",
+            "task": "memory_curator",
+            "terminal": {
+                "status": "completed",
+                "summary": {
+                    "reviewed_count": 0,
+                    "accepted_count": 0,
+                    "rejected_count": 0,
+                    "skipped_count": 0
+                }
+            },
+            "committed_receipts": []
+        }))
+        .expect("canonical automatic memory terminal");
+
+        assert!(matches!(
+            result,
+            RetainedSurfaceResultV1::MemoryAutomationRun(_)
+        ));
+    }
 }

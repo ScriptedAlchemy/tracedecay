@@ -39,13 +39,13 @@ export const AdjudicateWorkLeakCommandV1Schema = z.object({
   adjudication_id: z.string(),
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   command_id: z.lazy(() => WorkCommandIdSchema),
-  detection_horizon_micros: z.number().int(),
-  expected_revision: z.number().int().nullable(),
+  detection_horizon_micros: z.number().int().safe().min(0),
+  expected_revision: z.number().int().safe().min(0).nullable(),
 }).strict();
 export type AdjudicateWorkLeakCommandV1 = z.infer<typeof AdjudicateWorkLeakCommandV1Schema>;
 
 export const AdmitWorkExecutionRequestV1Schema = z.object({
-  based_on_version: z.number().int(),
+  based_on_version: z.number().int().safe().min(0),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
@@ -78,7 +78,7 @@ export type AnalyticsAgentsPayloadV1 = z.infer<typeof AnalyticsAgentsPayloadV1Sc
 
 export const AnalyticsAgentUsageV1Schema = z.object({
   agent: z.string(),
-  sessions: z.number().int(),
+  sessions: z.number().int().safe(),
 });
 export type AnalyticsAgentUsageV1 = z.infer<typeof AnalyticsAgentUsageV1Schema>;
 
@@ -91,21 +91,21 @@ export const AnalyticsDiagnosticsPayloadV1Schema = z.object({
   by_prompt_category: z.array(z.lazy(() => AnalyticsPromptCategoryCountV1Schema)),
   by_tool: z.array(z.lazy(() => AnalyticsToolCountV1Schema)),
   by_tool_category: z.array(z.lazy(() => AnalyticsToolCategoryCountV1Schema)),
-  event_count: z.number().int(),
+  event_count: z.number().int().safe(),
   events_per_hour: z.number().nullable(),
   hint_efficacy: z.lazy(() => AnalyticsHintEfficacyV1Schema),
-  hook_call_count: z.number().int(),
+  hook_call_count: z.number().int().safe(),
   hook_readiness: z.unknown(),
   hook_sources: z.array(z.unknown()),
   hook_window: z.lazy(() => AnalyticsHookWindowV1Schema),
-  mcp_tool_call_count: z.number().int(),
-  message_count: z.number().int(),
+  mcp_tool_call_count: z.number().int().safe(),
+  message_count: z.number().int().safe(),
   ratios: z.lazy(() => AnalyticsDiagnosticsRatiosV1Schema),
   recent_events: z.array(z.lazy(() => AnalyticsRecentEventV1Schema)),
   recent_hooks: z.array(z.lazy(() => AnalyticsRecentHookV1Schema)),
   source: z.string(),
-  tool_call_count: z.number().int(),
-  tracedecay_call_count: z.number().int(),
+  tool_call_count: z.number().int().safe(),
+  tracedecay_call_count: z.number().int().safe(),
 });
 export type AnalyticsDiagnosticsPayloadV1 = z.infer<typeof AnalyticsDiagnosticsPayloadV1Schema>;
 
@@ -118,34 +118,34 @@ export const AnalyticsDiagnosticsRatiosV1Schema = z.object({
 export type AnalyticsDiagnosticsRatiosV1 = z.infer<typeof AnalyticsDiagnosticsRatiosV1Schema>;
 
 export const AnalyticsEventKindCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   event_kind: z.string(),
 });
 export type AnalyticsEventKindCountV1 = z.infer<typeof AnalyticsEventKindCountV1Schema>;
 
 export const AnalyticsHintCategoryV1Schema = z.object({
   category: z.string(),
-  emitted: z.number().int(),
-  followed: z.number().int(),
-  ignored: z.number().int(),
-  suppressed: z.number().int(),
+  emitted: z.number().int().safe(),
+  followed: z.number().int().safe(),
+  ignored: z.number().int().safe(),
+  suppressed: z.number().int().safe(),
 });
 export type AnalyticsHintCategoryV1 = z.infer<typeof AnalyticsHintCategoryV1Schema>;
 
 export const AnalyticsHintEfficacyCategoryV1Schema = z.object({
-  acted: z.number().int(),
+  acted: z.number().int().safe(),
   category: z.string(),
-  emitted: z.number().int(),
-  ignored: z.number().int(),
-  unresolved: z.number().int(),
+  emitted: z.number().int().safe(),
+  ignored: z.number().int().safe(),
+  unresolved: z.number().int().safe(),
 });
 export type AnalyticsHintEfficacyCategoryV1 = z.infer<typeof AnalyticsHintEfficacyCategoryV1Schema>;
 
 export const AnalyticsHintEfficacyTotalsV1Schema = z.object({
-  acted: z.number().int(),
-  emitted: z.number().int(),
-  ignored: z.number().int(),
-  unresolved: z.number().int(),
+  acted: z.number().int().safe(),
+  emitted: z.number().int().safe(),
+  ignored: z.number().int().safe(),
+  unresolved: z.number().int().safe(),
 });
 export type AnalyticsHintEfficacyTotalsV1 = z.infer<typeof AnalyticsHintEfficacyTotalsV1Schema>;
 
@@ -166,19 +166,19 @@ export const AnalyticsHintsPayloadV1Schema = z.object({
 export type AnalyticsHintsPayloadV1 = z.infer<typeof AnalyticsHintsPayloadV1Schema>;
 
 export const AnalyticsHookNameCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   hook_name: z.string(),
 });
 export type AnalyticsHookNameCountV1 = z.infer<typeof AnalyticsHookNameCountV1Schema>;
 
 export const AnalyticsHookWindowV1Schema = z.object({
-  newest_ts_unix_ms: z.number().int().nullable(),
-  oldest_ts_unix_ms: z.number().int().nullable(),
-  rows_included: z.number().int(),
-  rows_scanned: z.number().int(),
+  newest_ts_unix_ms: z.number().int().safe().nullable(),
+  oldest_ts_unix_ms: z.number().int().safe().nullable(),
+  rows_included: z.number().int().safe(),
+  rows_scanned: z.number().int().safe(),
   total_rows_known: z.boolean(),
   truncated: z.boolean(),
-  window_rows: z.number().int(),
+  window_rows: z.number().int().safe(),
 });
 export type AnalyticsHookWindowV1 = z.infer<typeof AnalyticsHookWindowV1Schema>;
 
@@ -194,7 +194,7 @@ export const AnalyticsModeV1Schema = z.enum(["aggregate_share", "local_only", "o
 export type AnalyticsModeV1 = z.infer<typeof AnalyticsModeV1Schema>;
 
 export const AnalyticsOutcomeCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   outcome: z.string(),
 });
 export type AnalyticsOutcomeCountV1 = z.infer<typeof AnalyticsOutcomeCountV1Schema>;
@@ -213,7 +213,7 @@ export const AnalyticsOverviewPayloadV1Schema = z.object({
 export type AnalyticsOverviewPayloadV1 = z.infer<typeof AnalyticsOverviewPayloadV1Schema>;
 
 export const AnalyticsPromptCategoryCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   prompt_category: z.string(),
 });
 export type AnalyticsPromptCategoryCountV1 = z.infer<typeof AnalyticsPromptCategoryCountV1Schema>;
@@ -222,7 +222,7 @@ export const AnalyticsRecentEventV1Schema = z.object({
   event_kind: z.string(),
   hook_name: z.string(),
   outcome: z.string(),
-  timestamp: z.number().int().nullable(),
+  timestamp: z.number().int().safe().nullable(),
   tool_name: z.string(),
 });
 export type AnalyticsRecentEventV1 = z.infer<typeof AnalyticsRecentEventV1Schema>;
@@ -233,28 +233,28 @@ export const AnalyticsRecentHookV1Schema = z.object({
   prompt_category: z.string(),
   session_id: z.string(),
   tool_name: z.string(),
-  ts_unix_ms: z.number().int().nullable(),
+  ts_unix_ms: z.number().int().safe().nullable(),
 });
 export type AnalyticsRecentHookV1 = z.infer<typeof AnalyticsRecentHookV1Schema>;
 
 export const AnalyticsToolCategoryCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   tool_category: z.string(),
 });
 export type AnalyticsToolCategoryCountV1 = z.infer<typeof AnalyticsToolCategoryCountV1Schema>;
 
 export const AnalyticsToolCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   tool_name: z.string(),
 });
 export type AnalyticsToolCountV1 = z.infer<typeof AnalyticsToolCountV1Schema>;
 
 export const AnalyticsUnderusedFamilyV1Schema = z.object({
   family: z.string(),
-  missed_events: z.number().int(),
-  relevant_events: z.number().int(),
+  missed_events: z.number().int().safe(),
+  relevant_events: z.number().int().safe(),
   underused: z.boolean(),
-  usage_events: z.number().int(),
+  usage_events: z.number().int().safe(),
 });
 export type AnalyticsUnderusedFamilyV1 = z.infer<typeof AnalyticsUnderusedFamilyV1Schema>;
 
@@ -267,7 +267,7 @@ export type AnalyticsUnderusedPayloadV1 = z.infer<typeof AnalyticsUnderusedPaylo
 
 export const AnalyticsUsageCategoryV1Schema = z.object({
   category: z.string(),
-  events: z.number().int(),
+  events: z.number().int().safe(),
   kind: z.string(),
 });
 export type AnalyticsUsageCategoryV1 = z.infer<typeof AnalyticsUsageCategoryV1Schema>;
@@ -275,11 +275,58 @@ export type AnalyticsUsageCategoryV1 = z.infer<typeof AnalyticsUsageCategoryV1Sc
 export const AnalyticsUsageSummaryV1Schema = z.object({
   available: z.boolean(),
   by_category: z.array(z.lazy(() => AnalyticsUsageCategoryV1Schema)),
-  event_count: z.number().int().nullable(),
-  message_count: z.number().int(),
+  event_count: z.number().int().safe().nullable(),
+  message_count: z.number().int().safe(),
   source: z.string().nullable(),
 });
 export type AnalyticsUsageSummaryV1 = z.infer<typeof AnalyticsUsageSummaryV1Schema>;
+
+/** Stable non-retryable class for an admitted execution failure. */
+export const ApplicationExecutionFailureClassV1Schema = z.enum(["denied", "malformed_output", "permanent"]);
+export type ApplicationExecutionFailureClassV1 = z.infer<typeof ApplicationExecutionFailureClassV1Schema>;
+
+/** Stable application failure envelope. Partial effects and reset-required
+states are admitted terminals; partial effects carry their committed
+receipt directly while reset-required states carry an explicit action. */
+export const ApplicationProblemEnvelopeSchema = z.object({
+  contract: z.lazy(() => ResultContractRefSchema),
+  problem: z.lazy(() => ApplicationProblemRecordSchema),
+  request_id: z.string(),
+}).strict();
+export type ApplicationProblemEnvelope = z.infer<typeof ApplicationProblemEnvelopeSchema>;
+
+/** Stable problem-code taxonomy for request failures and admitted terminals. */
+export const ApplicationProblemKindSchema = z.enum(["cancelled", "conflict", "execution_failed", "invalid_request", "not_found_or_not_authorized", "partial_effect", "reset_required", "saturated", "stale", "timed_out", "unavailable", "unsupported"]);
+export type ApplicationProblemKind = z.infer<typeof ApplicationProblemKindSchema>;
+
+/** Stable application problem record shared verbatim by every adapter. */
+export const ApplicationProblemRecordSchema = z.object({
+  cancellation_stage: z.lazy(() => RequiredNullable2Schema),
+  code: z.string(),
+  committed_receipt: z.lazy(() => RequiredNullableSchema),
+  coverage: z.union([z.lazy(() => EvidenceCoverageSchema), z.null()]),
+  details: z.array(z.lazy(() => SafeDiagnosticSchema)),
+  diagnostic: z.union([z.lazy(() => SafeDiagnosticSchema), z.null()]),
+  execution_failure_classification: z.lazy(() => RequiredNullable4Schema),
+  kind: z.lazy(() => ApplicationProblemKindSchema),
+  legal_actions: z.array(z.lazy(() => LegalActionSchema)),
+  message: z.string(),
+  owning_layer: z.lazy(() => ProblemOwningLayerSchema),
+  request_id: z.string(),
+  retry: z.lazy(() => RetryDirectiveSchema),
+  retry_after_millis: z.number().int().safe().min(0).nullable(),
+  retry_scope: z.union([z.lazy(() => RetryScopeSchema), z.null()]),
+  retryable: z.boolean(),
+  revision: z.number().int().min(0),
+  terminality: z.lazy(() => ProblemTerminalitySchema),
+  trace_id: z.string(),
+  unavailable_classification: z.lazy(() => RequiredNullable3Schema),
+}).strict();
+export type ApplicationProblemRecord = z.infer<typeof ApplicationProblemRecordSchema>;
+
+/** Stable reason an application authority is unavailable. */
+export const ApplicationUnavailableClassV1Schema = z.enum(["authority", "backend_disconnected", "backend_retryable", "backend_unavailable"]);
+export type ApplicationUnavailableClassV1 = z.infer<typeof ApplicationUnavailableClassV1Schema>;
 
 export const ApplyWorkRelationReplanRequestV1Schema = z.object({
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
@@ -328,8 +375,8 @@ export const AutomaticWorktreeGcV1Schema = z.discriminatedUnion("kind", [z.objec
   kind: z.literal("disabled"),
 }), z.object({
   kind: z.literal("eligible_only"),
-  maximum_per_run: z.number().int(),
-  minimum_idle_seconds: z.number().int(),
+  maximum_per_run: z.number().int().min(1).max(65535),
+  minimum_idle_seconds: z.number().int().safe().min(1),
 })]);
 export type AutomaticWorktreeGcV1 = z.infer<typeof AutomaticWorktreeGcV1Schema>;
 
@@ -342,10 +389,10 @@ export const AutomationSchedulerStatusV1Schema = z.object({
   configuration_revision_id: z.string(),
   control_path: z.string(),
   enabled: z.boolean(),
-  last_session_activity: z.number().int().nullable(),
-  now: z.number().int(),
+  last_session_activity: z.number().int().safe().nullable(),
+  now: z.number().int().safe(),
   paused: z.boolean(),
-  scheduler_tick_secs: z.number().int(),
+  scheduler_tick_secs: z.number().int().safe().min(0),
   status: z.string(),
   tasks: z.array(z.lazy(() => AutomationTaskStatusV1Schema)),
 }).strict();
@@ -375,7 +422,7 @@ export type BrainId = z.infer<typeof BrainIdSchema>;
 
 export const BranchCollisionPolicyV1Schema = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("append_monotonic_ordinal"),
-  maximum_attempts: z.number().int(),
+  maximum_attempts: z.number().int().min(1).max(65535),
 }), z.object({
   kind: z.literal("reject"),
 })]);
@@ -386,7 +433,7 @@ export const BranchNameComponentV1Schema = z.discriminatedUnion("kind", [z.objec
 }), z.object({
   kind: z.literal("repository_slug"),
 }), z.object({
-  bytes: z.number().int(),
+  bytes: z.number().int().min(1).max(255),
   kind: z.literal("task_id_digest_prefix"),
 }), z.object({
   kind: z.literal("work_class"),
@@ -399,7 +446,7 @@ export type BranchNameSeparatorV1 = z.infer<typeof BranchNameSeparatorV1Schema>;
 export const BranchNamingPolicyV1Schema = z.object({
   collision: z.lazy(() => BranchCollisionPolicyV1Schema),
   components: z.array(z.lazy(() => BranchNameComponentV1Schema)),
-  maximum_bytes: z.number().int(),
+  maximum_bytes: z.number().int().min(1).max(65535),
   prefix: z.lazy(() => CanonicalGitRefPrefixSchema),
   separator: z.lazy(() => BranchNameSeparatorV1Schema),
 }).strict();
@@ -419,8 +466,8 @@ export const CallChainMeasurementV1Schema = z.object({
   edge_kind: z.string(),
   found: z.boolean(),
   from_node_id: z.string(),
-  hop_count: z.number().int().nullable(),
-  max_depth: z.number().int(),
+  hop_count: z.number().int().safe().min(0).nullable(),
+  max_depth: z.number().int().safe().min(0),
   selection: z.string(),
   steps: z.array(z.lazy(() => CallChainStepV1Schema)),
   to_node_id: z.string(),
@@ -432,6 +479,10 @@ export const CallChainStepV1Schema = z.object({
   node: z.lazy(() => NodeRefV1Schema),
 });
 export type CallChainStepV1 = z.infer<typeof CallChainStepV1Schema>;
+
+/** Exact stage at which cancellation or deadline state was observed. */
+export const CancellationStageSchema = z.enum(["after_commit", "before_admission", "before_effect", "before_read", "during_read", "effect_in_flight", "reconciling"]);
+export type CancellationStage = z.infer<typeof CancellationStageSchema>;
 
 export const CancelWorkAttemptCommandSchema = z.object({
   attempt_id: z.lazy(() => AttemptIdSchema),
@@ -469,11 +520,11 @@ export type CodeIndexFreshnessPayloadV1 = z.infer<typeof CodeIndexFreshnessPaylo
 /** Freshness/generation state for one mounted worktree. */
 export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   coverage: z.string(),
-  hook_hint_count: z.number().int().nullable(),
-  last_reconcile_micros: z.number().int().nullable(),
+  hook_hint_count: z.number().int().safe().min(0).nullable(),
+  last_reconcile_micros: z.number().int().safe().nullable(),
   latest_generation_id: z.string().nullable(),
   repository_id: z.string().nullable(),
-  sealed_at_micros: z.number().int().nullable(),
+  sealed_at_micros: z.number().int().safe().nullable(),
   snapshot_content_identity: z.string().nullable(),
   source_reference: z.string().nullable(),
   source_revision: z.string().nullable(),
@@ -490,6 +541,10 @@ export type CommitId = z.infer<typeof CommitIdSchema>;
 export const ComparisonDispositionV1Schema = z.enum(["insufficient_evidence", "promote", "reject"]);
 export type ComparisonDispositionV1 = z.infer<typeof ComparisonDispositionV1Schema>;
 
+/** Strongly typed canonical identity: `ComponentVersion`. */
+export const ComponentVersionSchema = z.string();
+export type ComponentVersion = z.infer<typeof ComponentVersionSchema>;
+
 /** Strongly typed canonical identity: `ConfigurationRevisionId`. */
 export const ConfigurationRevisionIdSchema = z.string();
 export type ConfigurationRevisionId = z.infer<typeof ConfigurationRevisionIdSchema>;
@@ -504,12 +559,22 @@ export const CostsReadModelV1Schema = z.object({
   estimated_cost: z.array(z.lazy(() => MetricValueV1Schema)),
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
   latency: z.array(z.lazy(() => ProviderLatencyReadModelV1Schema)),
-  observed_at_micros: z.number().int(),
+  observed_at_micros: z.number().int().safe(),
   pricing_revision: z.string().nullable(),
   usage: z.array(z.lazy(() => MetricValueV1Schema)),
   watermark: z.string(),
 });
 export type CostsReadModelV1 = z.infer<typeof CostsReadModelV1Schema>;
+
+/** Completeness is explicit; unknown never renders as clean. */
+export const CoverageCompletenessSchema = z.enum(["complete", "partial", "unknown"]);
+export type CoverageCompleteness = z.infer<typeof CoverageCompletenessSchema>;
+
+export const CoverageDomainStateSchema = z.object({
+  completeness: z.lazy(() => CoverageCompletenessSchema),
+  domain: z.lazy(() => EvidenceDomainSchema),
+}).strict();
+export type CoverageDomainState = z.infer<typeof CoverageDomainStateSchema>;
 
 export const CoverageStateV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 export type CoverageStateV1 = z.infer<typeof CoverageStateV1Schema>;
@@ -519,7 +584,7 @@ export const CoveringTestV1Schema = z.object({
   id: z.string(),
   name: z.string(),
   qualification: z.string(),
-  start_line: z.number().int(),
+  start_line: z.number().int().min(0),
 });
 export type CoveringTestV1 = z.infer<typeof CoveringTestV1Schema>;
 
@@ -581,15 +646,15 @@ never a fabricated `0`/`100%`. The completeness axis is authoritative — the
 frontend never derives `complete` from a `matched == eligible` coincidence. */
 export const DashboardCoverageV1Schema = z.object({
   completeness: z.lazy(() => DashboardCoverageCompletenessV1Schema),
-  denominator: z.number().int().nullable(),
-  eligible: z.number().int().nullable(),
-  examined: z.number().int().nullable(),
-  excluded: z.number().int().nullable(),
-  matched: z.number().int().nullable(),
+  denominator: z.number().int().safe().min(0).nullable(),
+  eligible: z.number().int().safe().min(0).nullable(),
+  examined: z.number().int().safe().min(0).nullable(),
+  excluded: z.number().int().safe().min(0).nullable(),
+  matched: z.number().int().safe().min(0).nullable(),
   omission_reasons: z.array(z.string()),
-  omitted: z.number().int().nullable(),
+  omitted: z.number().int().safe().min(0).nullable(),
   unit: z.string().nullable(),
-  unknown: z.number().int().nullable(),
+  unknown: z.number().int().safe().min(0).nullable(),
 });
 export type DashboardCoverageV1 = z.infer<typeof DashboardCoverageV1Schema>;
 
@@ -647,7 +712,7 @@ export type DashboardFreshnessStateV1 = z.infer<typeof DashboardFreshnessStateV1
 /** Freshness statement plus the optional observation stamp/watermark it was
 judged against. */
 export const DashboardFreshnessV1Schema = z.object({
-  observed_at_micros: z.number().int().nullable(),
+  observed_at_micros: z.number().int().safe().nullable(),
   state: z.lazy(() => DashboardFreshnessStateV1Schema),
   watermark: z.string().nullable(),
 });
@@ -682,8 +747,8 @@ export type DashboardScopeV1 = z.infer<typeof DashboardScopeV1Schema>;
 the daemon observed the state; `valid_time` is when the state was true in the
 modelled domain (absent when a read model has no distinct valid time). */
 export const DashboardTimeV1Schema = z.object({
-  observation_time_micros: z.number().int(),
-  valid_time_micros: z.number().int().nullable(),
+  observation_time_micros: z.number().int().safe(),
+  valid_time_micros: z.number().int().safe().nullable(),
 });
 export type DashboardTimeV1 = z.infer<typeof DashboardTimeV1Schema>;
 
@@ -733,11 +798,11 @@ export const DeliveryCommitTimelineV1Schema = z.object({
 export type DeliveryCommitTimelineV1 = z.infer<typeof DeliveryCommitTimelineV1Schema>;
 
 export const DeliveryCommitV1Schema = z.object({
-  author_at_micros: z.number().int(),
+  author_at_micros: z.number().int().safe(),
   author_email: z.string(),
   author_name: z.string(),
   commit: z.string(),
-  committer_at_micros: z.number().int(),
+  committer_at_micros: z.number().int().safe(),
   subject: z.string(),
 });
 export type DeliveryCommitV1 = z.infer<typeof DeliveryCommitV1Schema>;
@@ -773,15 +838,15 @@ export type DeliveryGitHeadV1 = z.infer<typeof DeliveryGitHeadV1Schema>;
 
 export const DeliveryGitStatusV1Schema = z.object({
   changed_paths: z.array(z.string()),
-  conflicted: z.number().int(),
+  conflicted: z.number().int().min(0),
   head: z.lazy(() => DeliveryGitHeadV1Schema),
-  ignored: z.number().int(),
+  ignored: z.number().int().min(0),
   operation: z.string(),
   repository: z.string(),
   schema_version: z.string(),
-  staged: z.number().int(),
-  unstaged: z.number().int(),
-  untracked: z.number().int(),
+  staged: z.number().int().min(0),
+  unstaged: z.number().int().min(0),
+  untracked: z.number().int().min(0),
 });
 export type DeliveryGitStatusV1 = z.infer<typeof DeliveryGitStatusV1Schema>;
 
@@ -1061,6 +1126,38 @@ export type DuplicateEffectOutcomeV1 = z.infer<typeof DuplicateEffectOutcomeV1Sc
 export const DuplicateEffortKindV1Schema = z.enum(["censored", "duplicate_effect", "exact_duplicate", "not_duplicate", "repeated_investigation", "superseded_overlap", "unknown"]);
 export type DuplicateEffortKindV1 = z.infer<typeof DuplicateEffortKindV1Schema>;
 
+/** The stable effect classification of one application operation.
+
+Git index writes remain separate classes so policy cannot accidentally
+substitute one index mutation for another. */
+export const EffectClassSchema = z.enum(["administrative", "configuration_write", "git_index_commit", "git_index_stage", "git_index_unstage", "preview", "read", "source_edit"]);
+export type EffectClass = z.infer<typeof EffectClassSchema>;
+
+/** Durable effect proof. It records identities and receipts, never credentials
+or arbitrary command text. */
+export const EffectReceiptSchema = z.object({
+  actor: z.lazy(() => ActorIdSchema),
+  catalog_digest: z.lazy(() => ManifestDigestSchema),
+  committed_state: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
+  configuration_digest: z.lazy(() => ManifestDigestSchema),
+  effect_class: z.lazy(() => EffectClassSchema),
+  expected_state: z.lazy(() => ManifestDigestSchema),
+  external_proof: z.union([z.lazy(() => RetrievalAnchorIdSchema), z.null()]),
+  idempotency_key: z.string(),
+  input_digest: z.lazy(() => ManifestDigestSchema),
+  operation: z.lazy(() => UseCaseIdSchema),
+  outcome: z.lazy(() => EffectTerminationSchema),
+  policy_digest: z.lazy(() => ManifestDigestSchema),
+  privacy_digest: z.lazy(() => ManifestDigestSchema),
+  request_id: z.string(),
+  scope: z.lazy(() => ResolvedScopeSchema),
+}).strict();
+export type EffectReceipt = z.infer<typeof EffectReceiptSchema>;
+
+/** Durable effect receipt terminal state. */
+export const EffectTerminationSchema = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
+export type EffectTermination = z.infer<typeof EffectTerminationSchema>;
+
 export const EnvironmentSettingsPayloadV1Schema = z.object({
   global_accounting_enabled: z.boolean(),
   global_accounting_mode: z.string(),
@@ -1076,6 +1173,21 @@ export const EnvironmentVariableV1Schema = z.object({
   value: z.string().nullable(),
 });
 export type EnvironmentVariableV1 = z.infer<typeof EnvironmentVariableV1Schema>;
+
+/** Deterministic coverage fold input for an evidence packet. */
+export const EvidenceCoverageSchema = z.object({
+  completeness: z.lazy(() => CoverageCompletenessSchema),
+  domains: z.array(z.lazy(() => CoverageDomainStateSchema)),
+  eligible: z.number().int().safe().min(0).nullable(),
+  requested_domains: z.array(z.lazy(() => EvidenceDomainSchema)),
+  returned: z.number().int().safe().min(0),
+  visited: z.number().int().safe().min(0).nullable(),
+}).strict();
+export type EvidenceCoverage = z.infer<typeof EvidenceCoverageSchema>;
+
+/** Requested evidence domain for bounded coverage and omissions. */
+export const EvidenceDomainSchema = z.enum(["anchor", "diagnostic", "graph", "operational", "source", "symbol", "temporal", "test"]);
+export type EvidenceDomain = z.infer<typeof EvidenceDomainSchema>;
 
 /** Cause a work item was blocked for. */
 export const ExecutionBlockedCauseV1Schema = z.enum(["backpressure", "capability", "ci", "conflict", "dependency", "effect_unknown", "lease", "needs_input", "other", "policy", "review", "scope", "test", "unknown"]);
@@ -1272,10 +1384,10 @@ and their next-envelope carriers; it is not attributed to a topology
 family. Sampling stays a count of sampled topology envelopes and is never
 expanded into a fabricated population estimate. */
 export const ExecutionTopologyEmissionCoverageV1Schema = z.object({
-  delayed: z.number().int().nullable(),
-  dropped: z.number().int().nullable(),
-  emitted: z.number().int().nullable(),
-  sampled_events: z.number().int().nullable(),
+  delayed: z.number().int().safe().min(0).nullable(),
+  dropped: z.number().int().safe().min(0).nullable(),
+  emitted: z.number().int().safe().min(0).nullable(),
+  sampled_events: z.number().int().safe().min(0).nullable(),
 }).strict();
 export type ExecutionTopologyEmissionCoverageV1 = z.infer<typeof ExecutionTopologyEmissionCoverageV1Schema>;
 
@@ -1294,7 +1406,7 @@ is taken from the request context, not from the request, so a caller can
 never widen the population it reads. */
 export const ExecutionTopologyMetricsRequestV1Schema = z.object({
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
-  max_events: z.number().int(),
+  max_events: z.number().int().min(0),
 }).strict();
 export type ExecutionTopologyMetricsRequestV1 = z.infer<typeof ExecutionTopologyMetricsRequestV1Schema>;
 
@@ -1309,7 +1421,7 @@ export const ExecutionTopologyMetricsV1Schema = z.object({
   github_stack_capability: z.lazy(() => ExecutionGitHubStackCapabilityReadingV1Schema),
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
   measurements: z.array(z.lazy(() => ExecutionTopologyMeasurementV1Schema)),
-  observed_at_micros: z.number().int(),
+  observed_at_micros: z.number().int().safe(),
   watermark: z.string(),
 }).strict();
 export type ExecutionTopologyMetricsV1 = z.infer<typeof ExecutionTopologyMetricsV1Schema>;
@@ -1334,19 +1446,19 @@ bucket counts leave the projection. */
 export const ExecutionWidthBucketV1Schema = z.enum(["from17_to32", "from33_to64", "from3_to4", "from5_to8", "from9_to16", "one", "over64", "two", "zero"]);
 export type ExecutionWidthBucketV1 = z.infer<typeof ExecutionWidthBucketV1Schema>;
 
-export const ExplorerFinalityV1Schema = z.enum(["cancelled", "complete", "error", "partial", "pending"]);
+export const ExplorerFinalityV1Schema = z.enum(["cancelled", "complete", "error", "partial", "pending", "timed_out"]);
 export type ExplorerFinalityV1 = z.infer<typeof ExplorerFinalityV1Schema>;
 
 export const ExplorerQueryRequestV1Schema = z.object({
-  limit: z.number().int(),
-  offset: z.number().int(),
+  limit: z.number().int().safe(),
+  offset: z.number().int().safe(),
   query: z.string(),
 }).strict();
 export type ExplorerQueryRequestV1 = z.infer<typeof ExplorerQueryRequestV1Schema>;
 
 export const ExplorerQueryRunV1Schema = z.object({
-  completed_at_micros: z.number().int().nullable(),
-  elapsed_micros: z.number().int(),
+  completed_at_micros: z.number().int().safe().nullable(),
+  elapsed_micros: z.number().int().safe(),
   explanation: z.string(),
   finality: z.lazy(() => ExplorerFinalityV1Schema),
   merge_revision: z.string(),
@@ -1358,7 +1470,7 @@ export const ExplorerQueryRunV1Schema = z.object({
   run_id: z.string(),
   sources: z.array(z.lazy(() => ExplorerSourceProgressV1Schema)),
   state: z.lazy(() => ExplorerRunStateV1Schema),
-  submitted_at_micros: z.number().int(),
+  submitted_at_micros: z.number().int().safe(),
 });
 export type ExplorerQueryRunV1 = z.infer<typeof ExplorerQueryRunV1Schema>;
 
@@ -1367,9 +1479,9 @@ export const ExplorerReadContextV1Schema = z.object({
   has_more: z.boolean(),
   has_more_messages: z.boolean(),
   has_more_summary_nodes: z.boolean(),
-  limit: z.number().int(),
+  limit: z.number().int().safe(),
   messages: z.array(z.lazy(() => LcmMessageV1Schema)),
-  offset: z.number().int(),
+  offset: z.number().int().safe(),
   order: z.string(),
   session_id: z.string(),
   storage_scope: z.string(),
@@ -1378,24 +1490,24 @@ export const ExplorerReadContextV1Schema = z.object({
 export type ExplorerReadContextV1 = z.infer<typeof ExplorerReadContextV1Schema>;
 
 export const ExplorerResultPageV1Schema = z.object({
-  limit: z.number().int(),
+  limit: z.number().int().safe(),
   metadata: z.unknown(),
-  next_offset: z.number().int().nullable(),
-  offset: z.number().int(),
+  next_offset: z.number().int().safe().nullable(),
+  offset: z.number().int().safe(),
   rows: z.array(z.unknown()),
-  total: z.number().int().nullable(),
+  total: z.number().int().safe().min(0).nullable(),
 });
 export type ExplorerResultPageV1 = z.infer<typeof ExplorerResultPageV1Schema>;
 
-export const ExplorerRunStateV1Schema = z.enum(["cancelled", "completed", "error", "partial", "pending"]);
+export const ExplorerRunStateV1Schema = z.enum(["cancelled", "completed", "error", "partial", "pending", "timed_out"]);
 export type ExplorerRunStateV1 = z.infer<typeof ExplorerRunStateV1Schema>;
 
 export const ExplorerSessionCountsV1Schema = z.object({
-  message_count: z.number().int(),
-  source_token_count: z.number().int().nullable(),
-  summary_node_count: z.number().int(),
-  summary_token_count: z.number().int().nullable(),
-  token_estimate_total: z.number().int().nullable(),
+  message_count: z.number().int().safe(),
+  source_token_count: z.number().int().safe().nullable(),
+  summary_node_count: z.number().int().safe(),
+  summary_token_count: z.number().int().safe().nullable(),
+  token_estimate_total: z.number().int().safe().nullable(),
 });
 export type ExplorerSessionCountsV1 = z.infer<typeof ExplorerSessionCountsV1Schema>;
 
@@ -1416,7 +1528,7 @@ export const ExplorerSourcePhaseV1Schema = z.enum(["cancelled", "completed", "qu
 export type ExplorerSourcePhaseV1 = z.infer<typeof ExplorerSourcePhaseV1Schema>;
 
 export const ExplorerSourceProgressV1Schema = z.object({
-  completed_units: z.number().int().nullable(),
+  completed_units: z.number().int().safe().min(0).nullable(),
   coverage: z.lazy(() => DashboardCoverageV1Schema),
   error_code: z.string().nullable(),
   freshness: z.string(),
@@ -1426,18 +1538,54 @@ export const ExplorerSourceProgressV1Schema = z.object({
   phase: z.lazy(() => ExplorerSourcePhaseV1Schema),
   source_id: z.lazy(() => ExplorerSourceIdV1Schema),
   source_label: z.string(),
-  total_units: z.number().int().nullable(),
+  total_units: z.number().int().safe().min(0).nullable(),
   watermark: z.string().nullable(),
 });
 export type ExplorerSourceProgressV1 = z.infer<typeof ExplorerSourceProgressV1Schema>;
 
 export const FactArmCoverageV1Schema = z.object({
   completeness: z.string(),
-  limit: z.number().int(),
-  returned: z.number().int(),
+  limit: z.number().int().safe().min(0),
+  returned: z.number().int().safe().min(0),
   truncated: z.boolean(),
 });
 export type FactArmCoverageV1 = z.infer<typeof FactArmCoverageV1Schema>;
+
+/** Strongly typed canonical identity: `FactAssertionId`. */
+export const FactAssertionIdSchema = z.string();
+export type FactAssertionId = z.infer<typeof FactAssertionIdSchema>;
+
+export const FactCategoryV1Schema = z.enum(["code_area", "decision", "general", "project", "tool", "user_pref"]);
+export type FactCategoryV1 = z.infer<typeof FactCategoryV1Schema>;
+
+export const FactCommitDispositionV1Schema = z.enum(["committed", "idempotent_replay"]);
+export type FactCommitDispositionV1 = z.infer<typeof FactCommitDispositionV1Schema>;
+
+export const FactCommitOwnerV1Schema = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("profile"),
+}).strict(), z.object({
+  kind: z.literal("project"),
+  project_id: z.lazy(() => ProjectIdSchema),
+}).strict()]);
+export type FactCommitOwnerV1 = z.infer<typeof FactCommitOwnerV1Schema>;
+
+export const FactCommitReceiptV1Schema = z.object({
+  active_assertion_id: z.union([z.lazy(() => FactAssertionIdSchema), z.null()]),
+  committed_event_ids: z.array(z.lazy(() => FactEventIdSchema)),
+  disposition: z.lazy(() => FactCommitDispositionV1Schema),
+  fact_id: z.lazy(() => FactIdSchema),
+  last_event_id: z.lazy(() => FactEventIdSchema),
+  owner: z.lazy(() => FactCommitOwnerV1Schema),
+}).strict();
+export type FactCommitReceiptV1 = z.infer<typeof FactCommitReceiptV1Schema>;
+
+/** Strongly typed canonical identity: `FactEventId`. */
+export const FactEventIdSchema = z.string();
+export type FactEventId = z.infer<typeof FactEventIdSchema>;
+
+/** Strongly typed canonical identity: `FactId`. */
+export const FactIdSchema = z.string();
+export type FactId = z.infer<typeof FactIdSchema>;
 
 export const FactMatchArmV1Schema = z.object({
   collision_warning: z.string(),
@@ -1462,29 +1610,47 @@ export const FactMatchesMeasurementV1Schema = z.object({
 });
 export type FactMatchesMeasurementV1 = z.infer<typeof FactMatchesMeasurementV1Schema>;
 
+export const FactSearchGraphCoverageV1Schema = z.discriminatedUnion("kind", [z.object({
+  expanded_fact_count: z.number().int().safe().min(0),
+  kind: z.literal("complete"),
+  relation_count: z.number().int().safe().min(0),
+  root_count: z.number().int().safe().min(0),
+}).strict(), z.object({
+  kind: z.literal("degraded"),
+  reason: z.lazy(() => FactSearchGraphDegradationV1Schema),
+}).strict(), z.object({
+  kind: z.literal("not_applicable"),
+}).strict(), z.object({
+  kind: z.literal("not_mounted"),
+}).strict()]);
+export type FactSearchGraphCoverageV1 = z.infer<typeof FactSearchGraphCoverageV1Schema>;
+
+export const FactSearchGraphDegradationV1Schema = z.enum(["budget_exhausted", "conflict", "deadline_exceeded", "unavailable"]);
+export type FactSearchGraphDegradationV1 = z.infer<typeof FactSearchGraphDegradationV1Schema>;
+
 export const FeedbackCoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 export type FeedbackCoverageV1 = z.infer<typeof FeedbackCoverageV1Schema>;
 
 export const FeedbackObservationDenominatorsV1Schema = z.object({
-  delayed: z.number().int(),
-  dropped: z.number().int(),
-  eligible: z.number().int(),
-  emitted: z.number().int(),
-  incomplete_boots: z.number().int(),
-  persisted: z.number().int(),
-  retention_dropped: z.number().int(),
+  delayed: z.number().int().safe().min(0),
+  dropped: z.number().int().safe().min(0),
+  eligible: z.number().int().safe().min(0),
+  emitted: z.number().int().safe().min(0),
+  incomplete_boots: z.number().int().safe().min(0),
+  persisted: z.number().int().safe().min(0),
+  retention_dropped: z.number().int().safe().min(0),
 }).strict();
 export type FeedbackObservationDenominatorsV1 = z.infer<typeof FeedbackObservationDenominatorsV1Schema>;
 
 export const FeedbackObservationReadModelV1Schema = z.object({
   coverage: z.lazy(() => FeedbackCoverageV1Schema),
   denominators: z.lazy(() => FeedbackObservationDenominatorsV1Schema),
-  event_counts: z.record(z.number().int()),
+  event_counts: z.record(z.number().int().safe().min(0)),
   first_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   last_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
-  schema_version: z.number().int(),
+  schema_version: z.number().int().min(0).max(65535),
   system_quality: z.lazy(() => FeedbackSystemQualityReadModelV1Schema),
-  total_count: z.number().int(),
+  total_count: z.number().int().safe().min(0),
   watermark: z.lazy(() => FeedbackObservationWatermarkV1Schema),
 }).strict();
 export type FeedbackObservationReadModelV1 = z.infer<typeof FeedbackObservationReadModelV1Schema>;
@@ -1492,7 +1658,7 @@ export type FeedbackObservationReadModelV1 = z.infer<typeof FeedbackObservationR
 export const FeedbackObservationWatermarkV1Schema = z.object({
   observed_through: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   producer_boot_id: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
-  producer_sequence: z.number().int().nullable(),
+  producer_sequence: z.number().int().safe().min(0).nullable(),
 }).strict();
 export type FeedbackObservationWatermarkV1 = z.infer<typeof FeedbackObservationWatermarkV1Schema>;
 
@@ -1510,10 +1676,10 @@ export type FeedbackSystemMetricUnitV1 = z.infer<typeof FeedbackSystemMetricUnit
 
 export const FeedbackSystemMetricV1Schema = z.object({
   coverage: z.lazy(() => FeedbackCoverageV1Schema),
-  denominator: z.number().int().nullable(),
+  denominator: z.number().int().safe().min(0).nullable(),
   denominator_population: z.lazy(() => FeedbackSystemMetricDenominatorV1Schema),
   metric: z.lazy(() => FeedbackSystemMetricKindV1Schema),
-  numerator: z.number().int().nullable(),
+  numerator: z.number().int().safe().min(0).nullable(),
   unavailable_reason: z.union([z.lazy(() => FeedbackSystemMetricUnavailableReasonV1Schema), z.null()]),
   unit: z.lazy(() => FeedbackSystemMetricUnitV1Schema),
   value: z.number().nullable(),
@@ -1522,7 +1688,7 @@ export type FeedbackSystemMetricV1 = z.infer<typeof FeedbackSystemMetricV1Schema
 
 export const FeedbackSystemQualityReadModelV1Schema = z.object({
   metrics: z.array(z.lazy(() => FeedbackSystemMetricV1Schema)),
-  schema_version: z.number().int(),
+  schema_version: z.number().int().min(0).max(65535),
 }).strict();
 export type FeedbackSystemQualityReadModelV1 = z.infer<typeof FeedbackSystemQualityReadModelV1Schema>;
 
@@ -1559,7 +1725,7 @@ export type GraphCappedV1 = z.infer<typeof GraphCappedV1Schema>;
 
 export const GraphEdgeV1Schema = z.object({
   kind: z.string(),
-  line: z.number().int().nullable(),
+  line: z.number().int().safe().nullable(),
   source: z.string(),
   source_name: z.string().nullable(),
   target: z.string(),
@@ -1568,36 +1734,36 @@ export const GraphEdgeV1Schema = z.object({
 export type GraphEdgeV1 = z.infer<typeof GraphEdgeV1Schema>;
 
 export const GraphKindCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   kind: z.string(),
 });
 export type GraphKindCountV1 = z.infer<typeof GraphKindCountV1Schema>;
 
 export const GraphLanguageCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   language: z.string(),
 });
 export type GraphLanguageCountV1 = z.infer<typeof GraphLanguageCountV1Schema>;
 
 export const GraphLargestFileV1Schema = z.object({
-  node_count: z.number().int(),
+  node_count: z.number().int().safe(),
   path: z.string(),
 });
 export type GraphLargestFileV1 = z.infer<typeof GraphLargestFileV1Schema>;
 
 export const GraphLimitsV1Schema = z.object({
-  edges: z.number().int(),
-  nodes: z.number().int(),
+  edges: z.number().int().safe(),
+  nodes: z.number().int().safe(),
 });
 export type GraphLimitsV1 = z.infer<typeof GraphLimitsV1Schema>;
 
 export const GraphNeighborsPayloadV1Schema = z.object({
   callees: z.array(z.lazy(() => GraphNodeV1Schema)),
   callers: z.array(z.lazy(() => GraphNodeV1Schema)),
-  depth: z.number().int(),
+  depth: z.number().int().safe(),
   edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
   edges_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
-  limit: z.number().int(),
+  limit: z.number().int().safe(),
   node_id: z.string(),
 });
 export type GraphNeighborsPayloadV1 = z.infer<typeof GraphNeighborsPayloadV1Schema>;
@@ -1608,32 +1774,32 @@ export const GraphNodePayloadV1Schema = z.object({
 export type GraphNodePayloadV1 = z.infer<typeof GraphNodePayloadV1Schema>;
 
 export const GraphNodeV1Schema = z.object({
-  assertions: z.number().int().nullable(),
-  attrs_start_line: z.number().int().nullable(),
-  branches: z.number().int().nullable(),
-  degree: z.number().int().nullable(),
+  assertions: z.number().int().safe().nullable(),
+  attrs_start_line: z.number().int().safe().nullable(),
+  branches: z.number().int().safe().nullable(),
+  degree: z.number().int().safe().nullable(),
   doc: z.string().nullable(),
   edge_kind: z.string().nullable(),
-  edge_line: z.number().int().nullable(),
-  end_column: z.number().int().nullable(),
-  end_line: z.number().int().nullable(),
+  edge_line: z.number().int().safe().nullable(),
+  end_column: z.number().int().safe().nullable(),
+  end_line: z.number().int().safe().nullable(),
   file_path: z.string().nullable(),
   id: z.string(),
-  is_async: z.number().int().nullable(),
+  is_async: z.number().int().safe().nullable(),
   kind: z.string(),
-  loops: z.number().int().nullable(),
-  max_nesting: z.number().int().nullable(),
+  loops: z.number().int().safe().nullable(),
+  max_nesting: z.number().int().safe().nullable(),
   name: z.string().nullable(),
   parent_id: z.string().nullable(),
   qualified_name: z.string().nullable(),
-  returns: z.number().int().nullable(),
+  returns: z.number().int().safe().nullable(),
   signature: z.string().nullable(),
   span: z.union([z.lazy(() => GraphSpanV1Schema), z.null()]),
-  start_column: z.number().int().nullable(),
-  start_line: z.number().int().nullable(),
-  unchecked_calls: z.number().int().nullable(),
-  unsafe_blocks: z.number().int().nullable(),
-  updated_at: z.number().int().nullable(),
+  start_column: z.number().int().safe().nullable(),
+  start_line: z.number().int().safe().nullable(),
+  unchecked_calls: z.number().int().safe().nullable(),
+  unsafe_blocks: z.number().int().safe().nullable(),
+  updated_at: z.number().int().safe().nullable(),
   visibility: z.string().nullable(),
 });
 export type GraphNodeV1 = z.infer<typeof GraphNodeV1Schema>;
@@ -1653,7 +1819,7 @@ export const GraphPathPayloadV1Schema = z.object({
   edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
   found: z.boolean(),
   from: z.string(),
-  max_depth: z.number().int(),
+  max_depth: z.number().int().safe(),
   nodes: z.array(z.lazy(() => GraphNodeV1Schema)),
   path: z.array(z.string()),
   to: z.string(),
@@ -1661,21 +1827,21 @@ export const GraphPathPayloadV1Schema = z.object({
 export type GraphPathPayloadV1 = z.infer<typeof GraphPathPayloadV1Schema>;
 
 export const GraphSearchPayloadV1Schema = z.object({
-  count: z.number().int(),
-  limit: z.number().int(),
-  offset: z.number().int(),
+  count: z.number().int().safe().min(0),
+  limit: z.number().int().safe(),
+  offset: z.number().int().safe(),
   query: z.string(),
   results: z.array(z.lazy(() => GraphNodeV1Schema)),
-  total: z.number().int(),
+  total: z.number().int().safe(),
 });
 export type GraphSearchPayloadV1 = z.infer<typeof GraphSearchPayloadV1Schema>;
 
 export const GraphSpanV1Schema = z.object({
-  attrs_start_line: z.number().int().nullable(),
-  end_column: z.number().int().nullable(),
-  end_line: z.number().int(),
-  start_column: z.number().int().nullable(),
-  start_line: z.number().int(),
+  attrs_start_line: z.number().int().safe().nullable(),
+  end_column: z.number().int().safe().nullable(),
+  end_line: z.number().int().safe(),
+  start_column: z.number().int().safe().nullable(),
+  start_line: z.number().int().safe(),
 });
 export type GraphSpanV1 = z.infer<typeof GraphSpanV1Schema>;
 
@@ -1690,9 +1856,9 @@ export const GraphSubgraphPayloadV1Schema = z.object({
 export type GraphSubgraphPayloadV1 = z.infer<typeof GraphSubgraphPayloadV1Schema>;
 
 export const GraphTotalsV1Schema = z.object({
-  edges: z.number().int(),
-  files: z.number().int(),
-  nodes: z.number().int(),
+  edges: z.number().int().safe().min(0),
+  files: z.number().int().safe().min(0),
+  nodes: z.number().int().safe().min(0),
 });
 export type GraphTotalsV1 = z.infer<typeof GraphTotalsV1Schema>;
 
@@ -1701,7 +1867,7 @@ export type HistoryRewritePolicyV1 = z.infer<typeof HistoryRewritePolicyV1Schema
 
 export const IncomingCallEdgeV1Schema = z.object({
   kind: z.string(),
-  line: z.number().int().nullable(),
+  line: z.number().int().min(0).nullable(),
   source: z.string(),
   target: z.string(),
 });
@@ -1716,23 +1882,23 @@ export const LatencyDistributionReadModelV1Schema = z.object({
 export type LatencyDistributionReadModelV1 = z.infer<typeof LatencyDistributionReadModelV1Schema>;
 
 export const LcmCompressionSummaryV1Schema = z.object({
-  node_count: z.number().int(),
+  node_count: z.number().int().safe(),
   ratio: z.number().nullable(),
-  source_token_count: z.number().int().nullable(),
-  token_count: z.number().int().nullable(),
+  source_token_count: z.number().int().safe().nullable(),
+  token_count: z.number().int().safe().nullable(),
 });
 export type LcmCompressionSummaryV1 = z.infer<typeof LcmCompressionSummaryV1Schema>;
 
 export const LcmDepthCountV1Schema = z.object({
-  count: z.number().int(),
-  depth: z.number().int(),
+  count: z.number().int().safe(),
+  depth: z.number().int().safe(),
 });
 export type LcmDepthCountV1 = z.infer<typeof LcmDepthCountV1Schema>;
 
 export const LcmLatestSessionV1Schema = z.object({
-  last_store_id: z.number().int().nullable(),
-  last_timestamp: z.number().int().nullable(),
-  message_count: z.number().int(),
+  last_store_id: z.number().int().safe().nullable(),
+  last_timestamp: z.number().int().safe().nullable(),
+  message_count: z.number().int().safe(),
   session_id: z.string(),
 });
 export type LcmLatestSessionV1 = z.infer<typeof LcmLatestSessionV1Schema>;
@@ -1747,17 +1913,17 @@ export const LcmMessageV1Schema = z.object({
   content: z.string().nullable(),
   message_id: z.string(),
   metadata_json: z.string().nullable(),
-  ordinal: z.number().int().nullable(),
-  pinned: z.number().int().nullable(),
+  ordinal: z.number().int().safe().nullable(),
+  pinned: z.number().int().safe().nullable(),
   role: z.string().nullable(),
   session_id: z.string(),
   snippet: z.string().nullable(),
   source: z.string().nullable(),
   storage_kind: z.string().nullable(),
-  store_id: z.number().int().nullable(),
+  store_id: z.number().int().safe().nullable(),
   summary_node_ids: z.array(z.string()),
-  timestamp: z.number().int().nullable(),
-  token_count: z.number().int().nullable(),
+  timestamp: z.number().int().safe().nullable(),
+  token_count: z.number().int().safe().nullable(),
   token_count_provenance: z.union([z.lazy(() => LcmTokenCountProvenanceV1Schema), z.null()]),
   tool_name: z.string().nullable(),
 });
@@ -1767,7 +1933,7 @@ export const LcmOverviewPayloadV1Schema = z.object({
   exists: z.boolean(),
   latest_sessions: z.array(z.lazy(() => LcmLatestSessionV1Schema)),
   latest_summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
-  limit: z.number().int(),
+  limit: z.number().int().safe(),
   matches: z.lazy(() => LcmMatchesV1Schema),
   overview: z.lazy(() => LcmOverviewStatsV1Schema),
   path: z.string(),
@@ -1779,18 +1945,18 @@ export type LcmOverviewPayloadV1 = z.infer<typeof LcmOverviewPayloadV1Schema>;
 export const LcmOverviewStatsV1Schema = z.object({
   compression: z.lazy(() => LcmCompressionSummaryV1Schema),
   depth_counts: z.array(z.lazy(() => LcmDepthCountV1Schema)),
-  max_summary_depth: z.number().int(),
-  messages_total: z.number().int(),
+  max_summary_depth: z.number().int().safe(),
+  messages_total: z.number().int().safe(),
   role_counts: z.array(z.lazy(() => LcmRoleCountV1Schema)),
-  sessions_total: z.number().int(),
+  sessions_total: z.number().int().safe(),
   source_counts: z.array(z.lazy(() => LcmSourceCountV1Schema)),
-  summary_node_sessions_total: z.number().int(),
-  summary_nodes_total: z.number().int(),
+  summary_node_sessions_total: z.number().int().safe(),
+  summary_nodes_total: z.number().int().safe(),
 });
 export type LcmOverviewStatsV1 = z.infer<typeof LcmOverviewStatsV1Schema>;
 
 export const LcmRoleCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   role: z.string().nullable(),
 });
 export type LcmRoleCountV1 = z.infer<typeof LcmRoleCountV1Schema>;
@@ -1815,7 +1981,7 @@ export const LcmSearchPayloadV1Schema = z.object({
   engine_detail: z.lazy(() => LcmSearchEngineDetailV1Schema),
   exists: z.boolean(),
   filters: z.lazy(() => LcmSearchFiltersV1Schema),
-  limit: z.number().int(),
+  limit: z.number().int().safe(),
   matches: z.lazy(() => LcmMatchesV1Schema),
   next_cursor: z.string().nullable(),
   path: z.string(),
@@ -1826,16 +1992,16 @@ export const LcmSearchPayloadV1Schema = z.object({
 export type LcmSearchPayloadV1 = z.infer<typeof LcmSearchPayloadV1Schema>;
 
 export const LcmSearchTotalsV1Schema = z.object({
-  messages: z.number().int(),
-  summary_nodes: z.number().int(),
+  messages: z.number().int().safe(),
+  summary_nodes: z.number().int().safe(),
 });
 export type LcmSearchTotalsV1 = z.infer<typeof LcmSearchTotalsV1Schema>;
 
 export const LcmSessionCountsV1Schema = z.object({
-  message_count: z.number().int(),
-  source_token_count: z.number().int().nullable(),
-  summary_node_count: z.number().int(),
-  summary_token_count: z.number().int().nullable(),
+  message_count: z.number().int().safe(),
+  source_token_count: z.number().int().safe().nullable(),
+  summary_node_count: z.number().int().safe(),
+  summary_token_count: z.number().int().safe().nullable(),
 });
 export type LcmSessionCountsV1 = z.infer<typeof LcmSessionCountsV1Schema>;
 
@@ -1845,7 +2011,7 @@ export const LcmSessionPayloadV1Schema = z.object({
   has_more: z.boolean(),
   has_more_messages: z.boolean(),
   has_more_summary_nodes: z.boolean(),
-  limit: z.number().int(),
+  limit: z.number().int().safe(),
   messages: z.array(z.lazy(() => LcmMessageV1Schema)),
   next_cursor: z.string().nullable(),
   path: z.string(),
@@ -1856,51 +2022,51 @@ export const LcmSessionPayloadV1Schema = z.object({
 export type LcmSessionPayloadV1 = z.infer<typeof LcmSessionPayloadV1Schema>;
 
 export const LcmSourceCountV1Schema = z.object({
-  count: z.number().int(),
+  count: z.number().int().safe(),
   source: z.string(),
 });
 export type LcmSourceCountV1 = z.infer<typeof LcmSourceCountV1Schema>;
 
 export const LcmSummaryNodeV1Schema = z.object({
   category: z.string(),
-  created_at: z.number().int(),
-  depth: z.number().int(),
+  created_at: z.number().int().safe(),
+  depth: z.number().int().safe(),
   expand_hint: z.string(),
-  latest_at: z.number().int().nullable(),
+  latest_at: z.number().int().safe().nullable(),
   node_id: z.string(),
-  recency: z.number().int().nullable(),
+  recency: z.number().int().safe().nullable(),
   session_id: z.string(),
   snippet: z.string().nullable(),
-  source_token_count: z.number().int().nullable(),
+  source_token_count: z.number().int().safe().nullable(),
   source_type: z.string(),
   summary: z.string(),
-  token_count: z.number().int().nullable(),
+  token_count: z.number().int().safe().nullable(),
 });
 export type LcmSummaryNodeV1 = z.infer<typeof LcmSummaryNodeV1Schema>;
 
 export const LcmTimelineBucketV1Schema = z.object({
   bucket: z.string(),
-  count: z.number().int(),
-  known_message_count: z.number().int(),
-  token_count: z.number().int().nullable(),
+  count: z.number().int().safe(),
+  known_message_count: z.number().int().safe(),
+  token_count: z.number().int().safe().nullable(),
   token_count_provenance: z.lazy(() => LcmTokenCountProvenanceV1Schema),
-  unknown_message_count: z.number().int(),
+  unknown_message_count: z.number().int().safe(),
 });
 export type LcmTimelineBucketV1 = z.infer<typeof LcmTimelineBucketV1Schema>;
 
 export const LcmTimelineCoverageV1Schema = z.object({
-  limit: z.number().int(),
+  limit: z.number().int().safe(),
   next_before_bucket: z.string().nullable(),
   ordering: z.string(),
-  returned_buckets: z.number().int(),
-  total_dated_buckets: z.number().int(),
+  returned_buckets: z.number().int().safe(),
+  total_dated_buckets: z.number().int().safe(),
   truncated: z.boolean(),
 });
 export type LcmTimelineCoverageV1 = z.infer<typeof LcmTimelineCoverageV1Schema>;
 
 export const LcmTimelineNodeBucketV1Schema = z.object({
   bucket: z.string().nullable(),
-  count: z.number().int(),
+  count: z.number().int().safe(),
 });
 export type LcmTimelineNodeBucketV1 = z.infer<typeof LcmTimelineNodeBucketV1Schema>;
 
@@ -1918,11 +2084,11 @@ export const LcmTimelinePayloadV1Schema = z.object({
 export type LcmTimelinePayloadV1 = z.infer<typeof LcmTimelinePayloadV1Schema>;
 
 export const LcmTimelineUndatedV1Schema = z.object({
-  count: z.number().int(),
-  known_message_count: z.number().int(),
-  token_count: z.number().int().nullable(),
+  count: z.number().int().safe(),
+  known_message_count: z.number().int().safe(),
+  token_count: z.number().int().safe().nullable(),
   token_count_provenance: z.lazy(() => LcmTokenCountProvenanceV1Schema),
-  unknown_message_count: z.number().int(),
+  unknown_message_count: z.number().int().safe(),
 });
 export type LcmTimelineUndatedV1 = z.infer<typeof LcmTimelineUndatedV1Schema>;
 
@@ -1932,8 +2098,12 @@ export type LcmTokenCountProvenanceV1 = z.infer<typeof LcmTokenCountProvenanceV1
 export const LeakOwnerClassV1Schema = z.enum(["delivery", "git", "unknown", "work", "workflow"]);
 export type LeakOwnerClassV1 = z.infer<typeof LeakOwnerClassV1Schema>;
 
+/** Bounded action an adapter may offer without inferring executable authority. */
+export const LegalActionSchema = z.enum(["contact_administrator", "correct_request", "reauthorize", "reconcile", "refresh", "reset", "retry"]);
+export type LegalAction = z.infer<typeof LegalActionSchema>;
+
 export const LinkAcceptedWorkAttemptRequestV1Schema = z.object({
-  based_on_version: z.number().int(),
+  based_on_version: z.number().int().safe().min(0),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
@@ -1947,9 +2117,9 @@ export type LocatorDigest = z.infer<typeof LocatorDigestSchema>;
 
 export const LoomBranchSpanV1Schema = z.object({
   branch: z.string().nullable(),
-  event_count: z.number().int(),
-  first_at: z.number().int(),
-  last_at: z.number().int(),
+  event_count: z.number().int().safe(),
+  first_at: z.number().int().safe(),
+  last_at: z.number().int().safe(),
   provider: z.string(),
   session_id: z.string(),
   source: z.string(),
@@ -1960,7 +2130,7 @@ export type LoomBranchSpanV1 = z.infer<typeof LoomBranchSpanV1Schema>;
 export const LoomCommitV1Schema = z.object({
   branch: z.string().nullable(),
   commit_sha: z.string(),
-  committed_at: z.number().int(),
+  committed_at: z.number().int().safe(),
   confidence: z.number(),
   evidence: z.string(),
   provider: z.string(),
@@ -1973,7 +2143,7 @@ export type LoomCommitV1 = z.infer<typeof LoomCommitV1Schema>;
 
 export const LoomEditedFileV1Schema = z.object({
   change_type: z.string().nullable(),
-  hunks: z.number().int().nullable(),
+  hunks: z.number().int().safe().nullable(),
   path: z.string(),
   provider: z.string(),
   session_id: z.string(),
@@ -1982,9 +2152,9 @@ export type LoomEditedFileV1 = z.infer<typeof LoomEditedFileV1Schema>;
 
 export const LoomFileSessionProjectionV1Schema = z.object({
   authority: z.string(),
-  eligible_sessions: z.number().int(),
+  eligible_sessions: z.number().int().safe().min(0),
   granularity: z.string(),
-  matched_sessions: z.number().int(),
+  matched_sessions: z.number().int().safe().min(0),
   providers: z.array(z.string()),
   sessions: z.array(z.unknown()),
 });
@@ -1997,24 +2167,24 @@ export type LoomSessionModelV1 = z.infer<typeof LoomSessionModelV1Schema>;
 
 export const LoomSessionRowV1Schema = z.object({
   edited_files_recorded: z.boolean(),
-  ended_at: z.number().int().nullable(),
+  ended_at: z.number().int().safe().nullable(),
   is_subagent: z.boolean(),
-  last_message_at: z.number().int().nullable(),
-  messages: z.number().int(),
+  last_message_at: z.number().int().safe().nullable(),
+  messages: z.number().int().safe(),
   models: z.array(z.lazy(() => LoomSessionModelV1Schema)),
   provider: z.string(),
   session_id: z.string(),
-  started_at: z.number().int().nullable(),
+  started_at: z.number().int().safe().nullable(),
   title: z.string().nullable(),
 });
 export type LoomSessionRowV1 = z.infer<typeof LoomSessionRowV1Schema>;
 
 export const LoomSourceCoverageV1Schema = z.object({
   completeness: z.string(),
-  eligible: z.number().int().nullable(),
-  examined: z.number().int().nullable(),
-  matched: z.number().int().nullable(),
-  omitted: z.number().int().nullable(),
+  eligible: z.number().int().safe().min(0).nullable(),
+  examined: z.number().int().safe().min(0).nullable(),
+  matched: z.number().int().safe().min(0).nullable(),
+  omitted: z.number().int().safe().min(0).nullable(),
   reason: z.string(),
   unit: z.string().nullable(),
 });
@@ -2025,7 +2195,7 @@ export const LoomSourceStatusV1Schema = z.object({
   coverage: z.lazy(() => LoomSourceCoverageV1Schema),
   granularity: z.string(),
   id: z.string(),
-  item_count: z.number().int().nullable(),
+  item_count: z.number().int().safe().min(0).nullable(),
   label: z.string(),
   providers: z.array(z.string()),
   reason: z.string().nullable(),
@@ -2042,14 +2212,14 @@ export const LoomTemporalPayloadV1Schema = z.object({
   sessions: z.array(z.lazy(() => LoomSessionRowV1Schema)),
   source_statuses: z.array(z.lazy(() => LoomSourceStatusV1Schema)),
   temporal_refresh: z.lazy(() => LoomTemporalRefreshV1Schema),
-  total: z.number().int(),
+  total: z.number().int().safe().min(0),
 });
 export type LoomTemporalPayloadV1 = z.infer<typeof LoomTemporalPayloadV1Schema>;
 
 export const LoomTemporalRefreshV1Schema = z.object({
-  active_generations: z.number().int(),
+  active_generations: z.number().int().safe().min(0),
   authority: z.string(),
-  latest_activated_at_micros: z.number().int().nullable(),
+  latest_activated_at_micros: z.number().int().safe().nullable(),
   state: z.lazy(() => DashboardDomainStateV1Schema),
 });
 export type LoomTemporalRefreshV1 = z.infer<typeof LoomTemporalRefreshV1Schema>;
@@ -2058,94 +2228,408 @@ export type LoomTemporalRefreshV1 = z.infer<typeof LoomTemporalRefreshV1Schema>;
 export const ManifestDigestSchema = z.string();
 export type ManifestDigest = z.infer<typeof ManifestDigestSchema>;
 
-export const MemoryBankV1Schema = z.object({
-  bank_name: z.string(),
-  bundled_fact_count: z.number().int(),
-  dim: z.number().int(),
-  fact_count: z.number().int(),
-  updated_at: z.number().int().nullable(),
-});
-export type MemoryBankV1 = z.infer<typeof MemoryBankV1Schema>;
+export const MemoryAlgebraStatusV1Schema = z.object({
+  estimated_capacity: z.number().int().safe().min(0),
+  hrr_dim: z.number().int().safe().min(0),
+  name: z.string(),
+}).strict();
+export type MemoryAlgebraStatusV1 = z.infer<typeof MemoryAlgebraStatusV1Schema>;
+
+export const MemoryAutomationCommittedReceiptV1Schema = z.discriminatedUnion("kind", [z.object({
+  kind: z.literal("automatic_fact"),
+  receipt: z.lazy(() => MemoryAutomationFactReceiptV1Schema),
+}).strict(), z.object({
+  kind: z.literal("curation"),
+  receipt: z.lazy(() => MemoryAutomationCurationReceiptV1Schema),
+}).strict()]);
+export type MemoryAutomationCommittedReceiptV1 = z.infer<typeof MemoryAutomationCommittedReceiptV1Schema>;
+
+export const MemoryAutomationCurationAddDispositionV1Schema = z.enum(["added", "near_duplicate", "possible_conflict"]);
+export type MemoryAutomationCurationAddDispositionV1 = z.infer<typeof MemoryAutomationCurationAddDispositionV1Schema>;
+
+export const MemoryAutomationCurationMergeV1Schema = z.object({
+  commit_receipts: z.array(z.lazy(() => FactCommitReceiptV1Schema)),
+  content_updated: z.boolean(),
+  deleted_loser_fact_ids: z.array(z.lazy(() => FactIdSchema)),
+  input_digest: z.string(),
+  operation_id: z.lazy(() => ProvenanceIdSchema),
+  winner_fact_id: z.lazy(() => FactIdSchema),
+}).strict();
+export type MemoryAutomationCurationMergeV1 = z.infer<typeof MemoryAutomationCurationMergeV1Schema>;
+
+export const MemoryAutomationCurationOperationEffectV1Schema = z.discriminatedUnion("kind", [z.object({
+  closest_fact_id: z.union([z.lazy(() => FactIdSchema), z.null()]),
+  commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
+  disposition: z.lazy(() => MemoryAutomationCurationAddDispositionV1Schema),
+  fact_id: z.lazy(() => FactIdSchema),
+  kind: z.literal("add"),
+  similarity_millionths: z.number().int().min(0).nullable(),
+}).strict(), z.object({
+  commit: z.lazy(() => FactCommitReceiptV1Schema),
+  kind: z.literal("link_facts"),
+  relation: z.lazy(() => MemoryAutomationCurationRelationV1Schema),
+  source_fact_id: z.lazy(() => FactIdSchema),
+  target_fact_id: z.lazy(() => FactIdSchema),
+}).strict(), z.object({
+  kind: z.literal("merge"),
+  outcome: z.lazy(() => MemoryAutomationCurationMergeV1Schema),
+}).strict(), z.object({
+  commit: z.lazy(() => FactCommitReceiptV1Schema),
+  fact_id: z.lazy(() => FactIdSchema),
+  kind: z.literal("normalize_tags"),
+}).strict(), z.object({
+  commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
+  disposition: z.lazy(() => MemoryAutomationCurationRemoveDispositionV1Schema),
+  kind: z.literal("remove"),
+  remaining_fact_count: z.number().int().safe().min(0),
+  target_fact_id: z.lazy(() => FactIdSchema),
+}).strict(), z.object({
+  commit: z.lazy(() => FactCommitReceiptV1Schema),
+  fact_id: z.lazy(() => FactIdSchema),
+  kind: z.literal("update"),
+  trust_delta_millionths: z.number().int(),
+}).strict()]);
+export type MemoryAutomationCurationOperationEffectV1 = z.infer<typeof MemoryAutomationCurationOperationEffectV1Schema>;
+
+export const MemoryAutomationCurationReceiptV1Schema = z.object({
+  canonical_digest: z.lazy(() => ManifestDigestSchema),
+  receipt: z.lazy(() => MemoryAutomationCurationResultV1Schema),
+}).strict();
+export type MemoryAutomationCurationReceiptV1 = z.infer<typeof MemoryAutomationCurationReceiptV1Schema>;
+
+export const MemoryAutomationCurationRelationKindV1Schema = z.enum(["contradicts", "derived_from", "supersedes", "supports"]);
+export type MemoryAutomationCurationRelationKindV1 = z.infer<typeof MemoryAutomationCurationRelationKindV1Schema>;
+
+export const MemoryAutomationCurationRelationProvenanceV1Schema = z.object({
+  sanitization_receipt: z.lazy(() => SanitizationReceiptV1Schema),
+  source_label: z.string(),
+}).strict();
+export type MemoryAutomationCurationRelationProvenanceV1 = z.infer<typeof MemoryAutomationCurationRelationProvenanceV1Schema>;
+
+export const MemoryAutomationCurationRelationV1Schema = z.object({
+  confidence_millionths: z.number().int().min(0),
+  evidence_fact_ids: z.array(z.lazy(() => FactIdSchema)),
+  kind: z.lazy(() => MemoryAutomationCurationRelationKindV1Schema),
+  provenance: z.lazy(() => MemoryAutomationCurationRelationProvenanceV1Schema),
+}).strict();
+export type MemoryAutomationCurationRelationV1 = z.infer<typeof MemoryAutomationCurationRelationV1Schema>;
+
+export const MemoryAutomationCurationRemoveDispositionV1Schema = z.enum(["already_removed", "not_found", "removed"]);
+export type MemoryAutomationCurationRemoveDispositionV1 = z.infer<typeof MemoryAutomationCurationRemoveDispositionV1Schema>;
+
+export const MemoryAutomationCurationResultV1Schema = z.object({
+  accepted_operations: z.number().int().safe().min(0),
+  automation_run_id: z.lazy(() => RunIdSchema),
+  changed_fact_ids: z.array(z.lazy(() => FactIdSchema)),
+  facts_added: z.number().int().safe().min(0),
+  facts_linked: z.number().int().safe().min(0),
+  facts_merged: z.number().int().safe().min(0),
+  facts_removed: z.number().int().safe().min(0),
+  facts_updated: z.number().int().safe().min(0),
+  input_digest: z.string(),
+  normalized_tags: z.number().int().safe().min(0),
+  operation_effects: z.array(z.lazy(() => MemoryAutomationCurationOperationEffectV1Schema)),
+  operation_id: z.lazy(() => ProvenanceIdSchema),
+  owner: z.lazy(() => FactCommitOwnerV1Schema),
+  replay_event_id: z.union([z.lazy(() => FactEventIdSchema), z.null()]),
+  replay_fact_id: z.union([z.lazy(() => FactIdSchema), z.null()]),
+}).strict();
+export type MemoryAutomationCurationResultV1 = z.infer<typeof MemoryAutomationCurationResultV1Schema>;
+
+export const MemoryAutomationFactConflictSourceV1Schema = z.literal("apply_time_add_fact_diff");
+export type MemoryAutomationFactConflictSourceV1 = z.infer<typeof MemoryAutomationFactConflictSourceV1Schema>;
+
+export const MemoryAutomationFactConflictValidationV1Schema = z.object({
+  note: z.string(),
+  source: z.lazy(() => MemoryAutomationFactConflictSourceV1Schema),
+}).strict();
+export type MemoryAutomationFactConflictValidationV1 = z.infer<typeof MemoryAutomationFactConflictValidationV1Schema>;
+
+export const MemoryAutomationFactDedupeValidationV1Schema = z.object({
+  near_duplicate_threshold: z.number(),
+  nearest: z.union([z.lazy(() => MemoryAutomationFactNearestMatchV1Schema), z.null()]),
+}).strict();
+export type MemoryAutomationFactDedupeValidationV1 = z.infer<typeof MemoryAutomationFactDedupeValidationV1Schema>;
+
+export const MemoryAutomationFactDispositionV1Schema = z.enum(["already_applied", "applied", "quarantined"]);
+export type MemoryAutomationFactDispositionV1 = z.infer<typeof MemoryAutomationFactDispositionV1Schema>;
+
+export const MemoryAutomationFactEffectV1Schema = z.discriminatedUnion("state", [z.object({
+  assertion_id: z.lazy(() => FactAssertionIdSchema),
+  event_id: z.lazy(() => FactEventIdSchema),
+  fact_id: z.lazy(() => FactIdSchema),
+  state: z.literal("applied"),
+  target: z.lazy(() => MemoryAutomationFactTargetV1Schema),
+}).strict(), z.object({
+  reason: z.string(),
+  state: z.literal("quarantined"),
+}).strict()]);
+export type MemoryAutomationFactEffectV1 = z.infer<typeof MemoryAutomationFactEffectV1Schema>;
+
+export const MemoryAutomationFactEvidenceItemV1Schema = z.object({
+  category: z.lazy(() => FactCategoryV1Schema),
+  content: z.string(),
+  entities: z.array(z.string()).nullable().optional(),
+  reason: z.string(),
+  source_span: z.lazy(() => MemoryAutomationFactEvidenceSourceSpanV1Schema),
+  tags: z.array(z.string()).nullable().optional(),
+  trust: z.lazy(() => MemoryAutomationFactEvidenceTrustV1Schema),
+}).strict();
+export type MemoryAutomationFactEvidenceItemV1 = z.infer<typeof MemoryAutomationFactEvidenceItemV1Schema>;
+
+export const MemoryAutomationFactEvidenceSourceSpanV1Schema = z.object({
+  message_id: z.string().nullable().optional(),
+  node_id: z.string().nullable().optional(),
+  session_id: z.string().nullable().optional(),
+  store_id: z.number().int().safe().nullable().optional(),
+}).strict();
+export type MemoryAutomationFactEvidenceSourceSpanV1 = z.infer<typeof MemoryAutomationFactEvidenceSourceSpanV1Schema>;
+
+export const MemoryAutomationFactEvidenceTrustBucketV1Schema = z.enum(["high", "low", "medium"]);
+export type MemoryAutomationFactEvidenceTrustBucketV1 = z.infer<typeof MemoryAutomationFactEvidenceTrustBucketV1Schema>;
+
+export const MemoryAutomationFactEvidenceTrustV1Schema = z.union([z.number(), z.lazy(() => MemoryAutomationFactEvidenceTrustBucketV1Schema)]);
+export type MemoryAutomationFactEvidenceTrustV1 = z.infer<typeof MemoryAutomationFactEvidenceTrustV1Schema>;
+
+export const MemoryAutomationFactEvidenceV1Schema = z.object({
+  evidence_hash: z.string().nullable().optional(),
+  item: z.union([z.lazy(() => MemoryAutomationFactEvidenceItemV1Schema), z.null()]).optional(),
+  validation: z.union([z.lazy(() => MemoryAutomationFactValidationV1Schema), z.null()]).optional(),
+}).strict();
+export type MemoryAutomationFactEvidenceV1 = z.infer<typeof MemoryAutomationFactEvidenceV1Schema>;
+
+/** Store-owned raw SHA-256 input digest. This intentionally has no algorithm
+prefix because the canonical fact command does not expose one. */
+export const MemoryAutomationFactInputDigestV1Schema = z.string();
+export type MemoryAutomationFactInputDigestV1 = z.infer<typeof MemoryAutomationFactInputDigestV1Schema>;
+
+export const MemoryAutomationFactNearestMatchV1Schema = z.object({
+  canonical_fact_id: z.lazy(() => FactIdSchema),
+  category: z.lazy(() => FactCategoryV1Schema),
+  score: z.number(),
+}).strict();
+export type MemoryAutomationFactNearestMatchV1 = z.infer<typeof MemoryAutomationFactNearestMatchV1Schema>;
+
+/** Exact public projection of one canonical automatic-fact authority result. */
+export const MemoryAutomationFactReceiptV1Schema = z.object({
+  apply_id: z.lazy(() => ProvenanceIdSchema),
+  automation_run_id: z.lazy(() => RunIdSchema),
+  canonical_digest: z.lazy(() => ManifestDigestSchema),
+  disposition: z.lazy(() => MemoryAutomationFactDispositionV1Schema),
+  effect: z.lazy(() => MemoryAutomationFactEffectV1Schema),
+  evidence: z.lazy(() => MemoryAutomationFactEvidenceV1Schema),
+  owner: z.lazy(() => FactCommitOwnerV1Schema),
+  recorded_at_micros: z.lazy(() => UtcMicrosSchema),
+  request: z.lazy(() => MemoryAutomationFactRequestV1Schema),
+  state: z.lazy(() => MemoryAutomationFactStateV1Schema),
+}).strict();
+export type MemoryAutomationFactReceiptV1 = z.infer<typeof MemoryAutomationFactReceiptV1Schema>;
+
+export const MemoryAutomationFactRequestV1Schema = z.object({
+  actor: z.union([z.lazy(() => ActorIdSchema), z.null()]),
+  category: z.lazy(() => FactCategoryV1Schema),
+  content: z.string(),
+  default_trust_millionths: z.number().int().min(0),
+  entities: z.array(z.string()),
+  input_digest: z.lazy(() => MemoryAutomationFactInputDigestV1Schema),
+  metadata: z.record(z.unknown()),
+  operation_id: z.lazy(() => ProvenanceIdSchema),
+  sanitization_receipt: z.lazy(() => SanitizationReceiptV1Schema),
+  source_label: z.string().nullable(),
+  tags: z.array(z.string()),
+}).strict();
+export type MemoryAutomationFactRequestV1 = z.infer<typeof MemoryAutomationFactRequestV1Schema>;
+
+export const MemoryAutomationFactStateV1Schema = z.enum(["applied", "quarantined"]);
+export type MemoryAutomationFactStateV1 = z.infer<typeof MemoryAutomationFactStateV1Schema>;
+
+export const MemoryAutomationFactTargetV1Schema = z.object({
+  fact_id: z.lazy(() => FactIdSchema),
+  owner: z.lazy(() => FactCommitOwnerV1Schema),
+}).strict();
+export type MemoryAutomationFactTargetV1 = z.infer<typeof MemoryAutomationFactTargetV1Schema>;
+
+export const MemoryAutomationFactValidationStatusV1Schema = z.literal("accepted");
+export type MemoryAutomationFactValidationStatusV1 = z.infer<typeof MemoryAutomationFactValidationStatusV1Schema>;
+
+export const MemoryAutomationFactValidationV1Schema = z.object({
+  conflict: z.lazy(() => MemoryAutomationFactConflictValidationV1Schema),
+  dedupe: z.lazy(() => MemoryAutomationFactDedupeValidationV1Schema),
+  status: z.lazy(() => MemoryAutomationFactValidationStatusV1Schema),
+}).strict();
+export type MemoryAutomationFactValidationV1 = z.infer<typeof MemoryAutomationFactValidationV1Schema>;
+
+/** Canonical admitted problem for one automatic-memory run.
+
+The generic application receipt binds the outer operation. The ordered
+receipts retain the exact canonical memory effects needed to reconcile a
+partial terminal without inventing an endpoint-specific payload. */
+export const MemoryAutomationRunProblemV1Schema = z.object({
+  committed_receipts: z.array(z.lazy(() => MemoryAutomationCommittedReceiptV1Schema)),
+  problem: z.lazy(() => ApplicationProblemEnvelopeSchema),
+  run_id: z.lazy(() => RunIdSchema),
+  scope: z.lazy(() => ResolvedScopeSchema),
+  task: z.lazy(() => MemoryAutomationTaskV1Schema),
+}).strict();
+export type MemoryAutomationRunProblemV1 = z.infer<typeof MemoryAutomationRunProblemV1Schema>;
+
+/** Durable terminal payload for one admitted automatic-memory run.
+
+An empty receipt list is valid for completed or skipped zero-effect runs.
+Partial effects are represented only by an application problem carrying a
+non-empty committed effect receipt. */
+export const MemoryAutomationRunResultV1Schema = z.object({
+  committed_receipts: z.array(z.lazy(() => MemoryAutomationCommittedReceiptV1Schema)),
+  run_id: z.lazy(() => RunIdSchema),
+  task: z.lazy(() => MemoryAutomationTaskV1Schema),
+  terminal: z.lazy(() => MemoryAutomationRunTerminalV1Schema),
+}).strict();
+export type MemoryAutomationRunResultV1 = z.infer<typeof MemoryAutomationRunResultV1Schema>;
+
+export const MemoryAutomationRunSummaryV1Schema = z.object({
+  accepted_count: z.number().int().safe().min(0),
+  rejected_count: z.number().int().safe().min(0),
+  reviewed_count: z.number().int().safe().min(0),
+  skipped_count: z.number().int().safe().min(0),
+}).strict();
+export type MemoryAutomationRunSummaryV1 = z.infer<typeof MemoryAutomationRunSummaryV1Schema>;
+
+export const MemoryAutomationRunTerminalV1Schema = z.discriminatedUnion("status", [z.object({
+  status: z.literal("completed"),
+  summary: z.lazy(() => MemoryAutomationRunSummaryV1Schema),
+}).strict(), z.object({
+  reason: z.lazy(() => MemoryAutomationSkipReasonV1Schema),
+  status: z.literal("skipped"),
+  summary: z.lazy(() => MemoryAutomationRunSummaryV1Schema),
+}).strict()]);
+export type MemoryAutomationRunTerminalV1 = z.infer<typeof MemoryAutomationRunTerminalV1Schema>;
+
+export const MemoryAutomationSkipReasonV1Schema = z.enum(["automation_disabled", "backend_disabled", "delegated_host_mode", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_unavailable", "session_reflector_disabled", "shipped_fact_proposal_history_retired", "similarity_authority_unavailable", "task_not_schedulable"]);
+export type MemoryAutomationSkipReasonV1 = z.infer<typeof MemoryAutomationSkipReasonV1Schema>;
+
+/** Automatic memory capability selected after one registered application
+admission. Skill-only automation remains outside this effect family. */
+export const MemoryAutomationTaskV1Schema = z.enum(["memory_curator", "session_reflector"]);
+export type MemoryAutomationTaskV1 = z.infer<typeof MemoryAutomationTaskV1Schema>;
 
 export const MemoryCategoryCountV1Schema = z.object({
   category: z.string(),
-  count: z.number().int(),
-});
+  count: z.number().int().safe().min(0),
+}).strict();
 export type MemoryCategoryCountV1 = z.infer<typeof MemoryCategoryCountV1Schema>;
 
 export const MemoryEntityRowV1Schema = z.object({
-  aliases: z.array(z.string()),
-  created_at: z.number().int(),
-  entity_id: z.number().int().nullable(),
-  entity_type: z.string().nullable(),
-  fact_count: z.number().int(),
+  entity_id: z.string(),
+  fact_count: z.number().int().safe().min(0),
   name: z.string(),
-});
+}).strict();
 export type MemoryEntityRowV1 = z.infer<typeof MemoryEntityRowV1Schema>;
-
-export const MemoryEntityTypeCountV1Schema = z.object({
-  count: z.number().int(),
-  entity_type: z.string(),
-});
-export type MemoryEntityTypeCountV1 = z.infer<typeof MemoryEntityTypeCountV1Schema>;
 
 export const MemoryFactDetailPayloadV1Schema = z.object({
   error: z.string(),
   fact: z.union([z.lazy(() => MemoryFactRowV1Schema), z.null()]),
-});
+}).strict();
 export type MemoryFactDetailPayloadV1 = z.infer<typeof MemoryFactDetailPayloadV1Schema>;
 
 export const MemoryFactRowV1Schema = z.object({
-  access_count: z.number().int(),
+  access_count: z.number().int().safe().min(0).nullable(),
   category: z.string().nullable(),
   content: z.string().nullable(),
-  created_at: z.number().int(),
-  entities: z.array(z.lazy(() => MemoryEntityRowV1Schema)).nullable(),
-  fact_id: z.number().int(),
-  has_hrr: z.number().int().nullable(),
-  helpful_count: z.number().int(),
-  last_recalled_at: z.number().int().nullable(),
+  created_at: z.number().int().safe().nullable(),
+  entities: z.array(z.string()).nullable(),
+  fact_id: z.lazy(() => FactIdSchema),
+  helpful_count: z.number().int().safe().min(0).nullable(),
+  last_recalled_at: z.number().int().safe().nullable(),
+  linked_entities: z.array(z.lazy(() => MemoryEntityRowV1Schema)).nullable(),
   metadata: z.unknown(),
-  retrieval_count: z.number().int(),
+  payload_access: z.lazy(() => PayloadAccessStateSchema),
+  projected_as_of: z.number().int().safe(),
+  retrieval_count: z.number().int().safe().min(0).nullable(),
+  score_millionths: z.number().int().min(0).nullable().optional(),
+  source_label: z.string().nullable(),
   tags: z.array(z.string()).nullable(),
-  trust_score: z.number(),
-  unhelpful_count: z.number().int(),
-  updated_at: z.number().int(),
-});
+  trust_score: z.number().nullable(),
+  unhelpful_count: z.number().int().safe().min(0).nullable(),
+  updated_at: z.number().int().safe().nullable(),
+  why: z.string().nullable().optional(),
+}).strict();
 export type MemoryFactRowV1 = z.infer<typeof MemoryFactRowV1Schema>;
 
 export const MemoryFactsCoverageV1Schema = z.object({
-  completeness: z.string(),
-  limit: z.number().int(),
-  query_applied_after_limit: z.boolean(),
-});
+  completeness: z.lazy(() => DashboardCoverageCompletenessV1Schema),
+  eligible: z.number().int().safe().min(0).nullable().optional(),
+  examined: z.number().int().safe().min(0).nullable().optional(),
+  graph: z.union([z.lazy(() => FactSearchGraphCoverageV1Schema), z.null()]).optional(),
+  limit: z.number().int().safe().min(1).max(100),
+}).strict();
 export type MemoryFactsCoverageV1 = z.infer<typeof MemoryFactsCoverageV1Schema>;
 
-/** Fact-store adoption funnel: seen (retrieved/accessed) vs. rated
-(helpful/unhelpful). A dead funnel — facts seen many times but never
-rated — means trust scores stay entirely seed-time values, never earned. */
-export const MemoryFeedbackFunnelSchema = z.object({
-  access_count_total: z.number().int(),
-  feedback_total: z.number().int(),
-  rated_fact_count: z.number().int(),
-  retrieval_count_total: z.number().int(),
-  retrieved_fact_count: z.number().int(),
-  seen_to_feedback_ratio: z.number().int().nullable(),
-});
-export type MemoryFeedbackFunnel = z.infer<typeof MemoryFeedbackFunnelSchema>;
+export const MemoryFeedbackFunnelV1Schema = z.object({
+  access_count_total: z.number().int().safe().min(0),
+  feedback_total: z.number().int().safe().min(0),
+  rated_fact_count: z.number().int().safe().min(0),
+  retrieval_count_total: z.number().int().safe().min(0),
+  retrieved_fact_count: z.number().int().safe().min(0),
+  seen_to_feedback_ratio: z.number().int().safe().min(0).nullable(),
+}).strict();
+export type MemoryFeedbackFunnelV1 = z.infer<typeof MemoryFeedbackFunnelV1Schema>;
 
-export const MemoryFeedbackHistoryRepairV1Schema = z.object({
-  processed: z.number().int(),
-  remaining: z.number().int().nullable(),
-  state: z.string(),
-});
-export type MemoryFeedbackHistoryRepairV1 = z.infer<typeof MemoryFeedbackHistoryRepairV1Schema>;
+export const MemoryGraphEdgeV1Schema = z.object({
+  kind: z.lazy(() => ProjectMemoryGraphRelationKindV1Schema),
+  source: z.string(),
+  target: z.string(),
+}).strict();
+export type MemoryGraphEdgeV1 = z.infer<typeof MemoryGraphEdgeV1Schema>;
+
+export const MemoryGraphNodeV1Schema = z.discriminatedUnion("kind", [z.object({
+  assertion_id: z.lazy(() => FactAssertionIdSchema),
+  fact_id: z.lazy(() => FactIdSchema),
+  id: z.string(),
+  kind: z.literal("assertion"),
+  label: z.string(),
+}).strict(), z.object({
+  entity_id: z.string(),
+  id: z.string(),
+  kind: z.literal("entity"),
+  label: z.string(),
+}).strict(), z.object({
+  category: z.string().nullable(),
+  content: z.string().nullable(),
+  fact_id: z.lazy(() => FactIdSchema),
+  helpful_count: z.number().int().safe().min(0).nullable(),
+  id: z.string(),
+  kind: z.literal("fact"),
+  label: z.string(),
+  payload_access: z.lazy(() => PayloadAccessStateSchema),
+  projected_as_of: z.number().int().safe(),
+  retrieval_count: z.number().int().safe().min(0).nullable(),
+  trust_score: z.number().nullable(),
+}).strict(), z.object({
+  anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
+  id: z.string(),
+  kind: z.literal("retrieval_anchor"),
+  label: z.string(),
+}).strict()]);
+export type MemoryGraphNodeV1 = z.infer<typeof MemoryGraphNodeV1Schema>;
+
+export const MemoryGraphPayloadV1Schema = z.object({
+  coverage: z.lazy(() => DashboardCoverageV1Schema),
+  edges: z.array(z.lazy(() => MemoryGraphEdgeV1Schema)),
+  fact_candidates_examined: z.number().int().safe().min(0),
+  fact_universe_count: z.number().int().safe().min(0),
+  nodes: z.array(z.lazy(() => MemoryGraphNodeV1Schema)),
+  relation_count: z.number().int().safe().min(0),
+  relation_limit: z.number().int().safe().min(0),
+  root_count: z.number().int().safe().min(0),
+  unavailable_fact_candidates: z.number().int().safe().min(0),
+}).strict();
+export type MemoryGraphPayloadV1 = z.infer<typeof MemoryGraphPayloadV1Schema>;
 
 export const MemoryGrowthPointV1Schema = z.object({
-  cumulative_facts: z.number().int(),
+  cumulative_facts: z.number().int().safe().min(0),
   date: z.string(),
-  facts: z.number().int(),
-});
+  facts: z.number().int().safe().min(0),
+}).strict();
 export type MemoryGrowthPointV1 = z.infer<typeof MemoryGrowthPointV1Schema>;
 
 export const MemoryHolographicPayloadV1Schema = z.object({
@@ -2154,95 +2638,65 @@ export const MemoryHolographicPayloadV1Schema = z.object({
   exists: z.boolean(),
   facts: z.array(z.lazy(() => MemoryFactRowV1Schema)),
   facts_coverage: z.lazy(() => MemoryFactsCoverageV1Schema),
-  graph: z.record(z.unknown()),
+  graph: z.lazy(() => MemoryGraphPayloadV1Schema),
   overview: z.union([z.lazy(() => MemoryOverviewSummaryV1Schema), z.null()]),
   path: z.string(),
   reads: z.record(z.lazy(() => MemoryReadStatusV1Schema)),
-});
+}).strict();
 export type MemoryHolographicPayloadV1 = z.infer<typeof MemoryHolographicPayloadV1Schema>;
-
-export const MemoryHrrCoverageV1Schema = z.object({
-  bank_fact_count: z.number().int().nullable(),
-  bank_name: z.string().nullable(),
-  category: z.string(),
-  coverage: z.number(),
-  dim: z.number().int().nullable(),
-  facts: z.number().int(),
-  hrr_vectors: z.number().int(),
-  status: z.string(),
-  updated_at: z.number().int().nullable(),
-});
-export type MemoryHrrCoverageV1 = z.infer<typeof MemoryHrrCoverageV1Schema>;
 
 export const MemoryOverviewPayloadV1Schema = z.object({
   holographic: z.lazy(() => MemoryHolographicPayloadV1Schema),
-  limit: z.number().int(),
+  limit: z.number().int().safe(),
   providers: z.record(z.unknown()),
   query: z.string(),
-});
+}).strict();
 export type MemoryOverviewPayloadV1 = z.infer<typeof MemoryOverviewPayloadV1Schema>;
 
 export const MemoryOverviewSummaryV1Schema = z.object({
-  banks: z.number().int(),
   categories: z.array(z.lazy(() => MemoryCategoryCountV1Schema)),
-  entities: z.number().int(),
-  entity_types: z.array(z.lazy(() => MemoryEntityTypeCountV1Schema)),
-  facts: z.number().int(),
+  entities: z.number().int().safe().min(0),
+  facts: z.number().int().safe().min(0),
   growth: z.array(z.lazy(() => MemoryGrowthPointV1Schema)),
-  hrr_coverage: z.array(z.lazy(() => MemoryHrrCoverageV1Schema)),
-  memory_banks: z.array(z.lazy(() => MemoryBankV1Schema)),
   trust_histogram: z.array(z.lazy(() => MemoryTrustBucketV1Schema)),
-});
+}).strict();
 export type MemoryOverviewSummaryV1 = z.infer<typeof MemoryOverviewSummaryV1Schema>;
 
 export const MemoryReadStatusV1Schema = z.object({
+  code: z.string().nullable().optional(),
   error: z.string().nullable().optional(),
-  state: z.string(),
-});
+  state: z.lazy(() => DashboardDomainStateV1Schema),
+}).strict();
 export type MemoryReadStatusV1 = z.infer<typeof MemoryReadStatusV1Schema>;
-
-export const MemoryRepairStatsSchema = z.object({
-  banks_rebuilt: z.number().int(),
-  missing_vectors_repaired: z.number().int(),
-});
-export type MemoryRepairStats = z.infer<typeof MemoryRepairStatsSchema>;
-
-export const MemoryStatusSchema = z.object({
-  algebra_name: z.string(),
-  bank_count: z.number().int(),
-  below_default_recall_threshold_count: z.number().int(),
-  entity_count: z.number().int(),
-  estimated_capacity: z.number().int(),
-  fact_count: z.number().int(),
-  feedback_funnel: z.lazy(() => MemoryFeedbackFunnelSchema),
-  helpful_count: z.number().int(),
-  hrr_dim: z.number().int(),
-  missing_vector_count: z.number().int(),
-  repair: z.lazy(() => MemoryRepairStatsSchema),
-  trust_025_050_count: z.number().int(),
-  trust_050_075_count: z.number().int(),
-  trust_075_100_count: z.number().int(),
-  trust_0_025_count: z.number().int(),
-  unhelpful_count: z.number().int(),
-});
-export type MemoryStatus = z.infer<typeof MemoryStatusSchema>;
 
 export const MemoryStatusPayloadV1Schema = z.object({
   error: z.string(),
   exists: z.boolean(),
-  feedback_history_repair: z.lazy(() => MemoryFeedbackHistoryRepairV1Schema),
-  largest_bank_fact_count: z.number().int(),
-  largest_bank_utilization_pct: z.number(),
-  memory: z.lazy(() => MemoryStatusSchema),
+  memory: z.lazy(() => MemoryStatusV1Schema),
   path: z.string(),
-});
+}).strict();
 export type MemoryStatusPayloadV1 = z.infer<typeof MemoryStatusPayloadV1Schema>;
 
+export const MemoryStatusV1Schema = z.object({
+  algebra: z.lazy(() => MemoryAlgebraStatusV1Schema),
+  below_default_recall_threshold_count: z.number().int().safe().min(0),
+  entity_count: z.number().int().safe().min(0),
+  fact_count: z.number().int().safe().min(0),
+  feedback_funnel: z.lazy(() => MemoryFeedbackFunnelV1Schema),
+  helpful_count: z.number().int().safe().min(0),
+  trust_025_050_count: z.number().int().safe().min(0),
+  trust_050_075_count: z.number().int().safe().min(0),
+  trust_075_100_count: z.number().int().safe().min(0),
+  trust_0_025_count: z.number().int().safe().min(0),
+  unhelpful_count: z.number().int().safe().min(0),
+}).strict();
+export type MemoryStatusV1 = z.infer<typeof MemoryStatusV1Schema>;
+
 export const MemoryTrustBucketV1Schema = z.object({
-  bucket: z.number().int(),
-  count: z.number().int(),
+  bucket: z.number().int().safe().min(0),
+  count: z.number().int().safe().min(0),
   label: z.string(),
-});
+}).strict();
 export type MemoryTrustBucketV1 = z.infer<typeof MemoryTrustBucketV1Schema>;
 
 export const MetricCalibrationV1Schema = z.object({
@@ -2250,7 +2704,7 @@ export const MetricCalibrationV1Schema = z.object({
   cohort_revision: z.string(),
   drift_valid: z.boolean(),
   estimator_revision: z.string(),
-  support: z.number().int(),
+  support: z.number().int().safe().min(0),
 });
 export type MetricCalibrationV1 = z.infer<typeof MetricCalibrationV1Schema>;
 
@@ -2261,13 +2715,13 @@ export const MetricCohortV1Schema = z.object({
 export type MetricCohortV1 = z.infer<typeof MetricCohortV1Schema>;
 
 export const MetricCoverageV1Schema = z.object({
-  censored: z.number().int(),
-  completed: z.number().int(),
-  eligible: z.number().int().nullable(),
-  excluded: z.number().int(),
-  observed: z.number().int(),
+  censored: z.number().int().safe().min(0),
+  completed: z.number().int().safe().min(0),
+  eligible: z.number().int().safe().min(0).nullable(),
+  excluded: z.number().int().safe().min(0),
+  observed: z.number().int().safe().min(0),
   state: z.lazy(() => CoverageStateV1Schema),
-  unknown: z.number().int(),
+  unknown: z.number().int().safe().min(0),
 });
 export type MetricCoverageV1 = z.infer<typeof MetricCoverageV1Schema>;
 
@@ -2304,7 +2758,7 @@ export const MetricValueV1Schema = z.object({
   cohort: z.lazy(() => MetricCohortV1Schema),
   coverage: z.lazy(() => MetricCoverageV1Schema),
   denominator: z.string(),
-  denominator_value: z.number().int().nullable(),
+  denominator_value: z.number().int().safe().min(0).nullable(),
   descriptor_revision: z.string(),
   evidence_class: z.lazy(() => MetricEvidenceClassV1Schema),
   metric: z.string(),
@@ -2320,7 +2774,7 @@ export type MetricValueV1 = z.infer<typeof MetricValueV1Schema>;
 /** Capability discovery never infers multi-root support from filesystem paths. */
 export const MultiRootCapabilityV1Schema = z.discriminatedUnion("status", [z.object({
   revision: z.lazy(() => ScopeSetRevisionSchema),
-  root_count: z.number().int(),
+  root_count: z.number().int().min(0),
   scope_set_digest: z.lazy(() => ManifestDigestSchema),
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
   status: z.literal("mounted"),
@@ -2333,7 +2787,7 @@ export type MultiRootCapabilityV1 = z.infer<typeof MultiRootCapabilityV1Schema>;
 /** Frozen continuation identity shared by all participating roots. */
 export const MultiRootContinuationV1Schema = z.object({
   digest: z.lazy(() => ManifestDigestSchema),
-  next_page: z.number().int(),
+  next_page: z.number().int().safe().min(1),
   order_digest: z.lazy(() => ManifestDigestSchema),
   query_digest: z.lazy(() => ManifestDigestSchema),
   root_generations: z.array(z.lazy(() => RootScopeOutcomeV1_for_RootGenerationV1Schema)),
@@ -2346,7 +2800,7 @@ digest. Query/order digests and root generations are server-derived. */
 export const MultiRootExecuteRequestV1Schema = z.object({
   continuation: z.union([z.lazy(() => MultiRootContinuationV1Schema), z.null()]),
   operation: z.lazy(() => MultiRootOperationV1Schema),
-  page: z.number().int(),
+  page: z.number().int().safe().min(0),
   scope_set_digest: z.lazy(() => ManifestDigestSchema),
   scope_set_id: z.lazy(() => ScopeSetIdSchema),
   scope_set_revision: z.lazy(() => ScopeSetRevisionSchema),
@@ -2421,7 +2875,7 @@ export const NodeRefV1Schema = z.object({
   kind: z.string(),
   name: z.string(),
   qualified_name: z.string(),
-  start_line: z.number().int(),
+  start_line: z.number().int().min(0),
 });
 export type NodeRefV1 = z.infer<typeof NodeRefV1Schema>;
 
@@ -2435,8 +2889,8 @@ export const NodeSessionsMeasurementV1Schema = z.object({
 export type NodeSessionsMeasurementV1 = z.infer<typeof NodeSessionsMeasurementV1Schema>;
 
 export const ObservabilityHorizonV1Schema = z.object({
-  since_micros: z.number().int(),
-  until_micros: z.number().int(),
+  since_micros: z.number().int().safe(),
+  until_micros: z.number().int().safe(),
 });
 export type ObservabilityHorizonV1 = z.infer<typeof ObservabilityHorizonV1Schema>;
 
@@ -2458,19 +2912,32 @@ export const ObservatoryReadModelV1Schema = z.object({
   current: z.boolean(),
   horizon: z.lazy(() => ObservabilityHorizonV1Schema),
   metrics: z.array(z.lazy(() => MetricValueV1Schema)),
-  observed_at_micros: z.number().int(),
+  observed_at_micros: z.number().int().safe(),
   watermark: z.string(),
 });
 export type ObservatoryReadModelV1 = z.infer<typeof ObservatoryReadModelV1Schema>;
 
 export const PauseWorkRunCommandSchema = z.object({
-  expected_authority_version: z.number().int().nullable(),
+  expected_authority_version: z.number().int().safe().min(0).nullable(),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   reason: z.lazy(() => WorkRunControlReasonV1Schema),
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 export type PauseWorkRunCommand = z.infer<typeof PauseWorkRunCommandSchema>;
+
+export const PayloadAccessStateSchema = z.enum(["ambiguous", "deleted", "eligible", "quarantined", "redacted", "retention_expired", "unavailable"]);
+export type PayloadAccessState = z.infer<typeof PayloadAccessStateSchema>;
+
+/** Strongly typed canonical identity: `PayloadDigestV1`. */
+export const PayloadDigestV1Schema = z.string();
+export type PayloadDigestV1 = z.infer<typeof PayloadDigestV1Schema>;
+
+export const PayloadReferenceV1Schema = z.object({
+  byte_len: z.number().int().safe().min(0),
+  digest: z.lazy(() => PayloadDigestV1Schema),
+}).strict();
+export type PayloadReferenceV1 = z.infer<typeof PayloadReferenceV1Schema>;
 
 export const PerformanceComparisonReadModelV1Schema = z.object({
   baseline_build: z.string().nullable(),
@@ -2479,10 +2946,10 @@ export const PerformanceComparisonReadModelV1Schema = z.object({
   corpus: z.string().nullable(),
   coverage: z.lazy(() => MetricCoverageV1Schema),
   disposition: z.lazy(() => ComparisonDispositionV1Schema),
-  eligible_outcomes: z.number().int().nullable(),
+  eligible_outcomes: z.number().int().safe().min(0).nullable(),
   environment: z.string().nullable(),
   oracle: z.string().nullable(),
-  paired_outcomes: z.number().int().nullable(),
+  paired_outcomes: z.number().int().safe().min(0).nullable(),
   platform: z.string().nullable(),
   regression_observed: z.boolean().nullable(),
   rollback_profile: z.string().nullable(),
@@ -2501,7 +2968,7 @@ export type PolicyIdentifierV1 = z.infer<typeof PolicyIdentifierV1Schema>;
 export const PrAutoTrackEntryV1Schema = z.object({
   branch: z.string(),
   head_branch: z.string(),
-  pr: z.number().int(),
+  pr: z.number().int().safe().min(0),
 });
 export type PrAutoTrackEntryV1 = z.infer<typeof PrAutoTrackEntryV1Schema>;
 
@@ -2531,9 +2998,17 @@ export const PrepareWorkProductMutationRequestV1Schema = z.object({
 }).strict();
 export type PrepareWorkProductMutationRequestV1 = z.infer<typeof PrepareWorkProductMutationRequestV1Schema>;
 
+/** Layer that owns resolving the problem rather than merely presenting it. */
+export const ProblemOwningLayerSchema = z.enum(["adapter", "application", "port", "runtime"]);
+export type ProblemOwningLayer = z.infer<typeof ProblemOwningLayerSchema>;
+
+/** Whether the problem occurred before admission or is an admitted terminal. */
+export const ProblemTerminalitySchema = z.enum(["admitted_terminal", "pre_admission"]);
+export type ProblemTerminality = z.infer<typeof ProblemTerminalitySchema>;
+
 export const ProjectAliasRecordSchema = z.object({
   alias_path: z.string(),
-  last_seen_at: z.number().int(),
+  last_seen_at: z.number().int().safe(),
   project_id: z.string(),
 });
 export type ProjectAliasRecord = z.infer<typeof ProjectAliasRecordSchema>;
@@ -2552,7 +3027,7 @@ export const ProjectEditableSettingsV1Schema = z.object({
   extract_docstrings: z.boolean(),
   git_ignore: z.boolean(),
   include: z.array(z.string()),
-  max_file_size: z.number().int(),
+  max_file_size: z.number().int().safe().min(0),
   sync: z.lazy(() => SyncSettingsV1Schema),
   telemetry: z.lazy(() => TelemetrySettingsV1Schema),
   track_call_sites: z.boolean(),
@@ -2567,25 +3042,29 @@ export type ProjectId = z.infer<typeof ProjectIdSchema>;
 export const ProjectionGenerationIdSchema = z.string();
 export type ProjectionGenerationId = z.infer<typeof ProjectionGenerationIdSchema>;
 
+/** The finite relationship vocabulary exposed by the verified project-memory graph. */
+export const ProjectMemoryGraphRelationKindV1Schema = z.enum(["active_assertion", "contradicts", "derived_from", "evidence_anchor", "mentions", "supersedes", "supports"]);
+export type ProjectMemoryGraphRelationKindV1 = z.infer<typeof ProjectMemoryGraphRelationKindV1Schema>;
+
 export const ProjectRegistryEntrySchema = z.object({
-  alias_count: z.number().int(),
-  artifact_count: z.number().int(),
+  alias_count: z.number().int().safe().min(0),
+  artifact_count: z.number().int().safe().min(0),
   branches: z.array(z.string()),
   canonical_root: z.string(),
   default_branch: z.string().nullable(),
   is_active: z.boolean().nullable().optional(),
   kind: z.string(),
   label: z.string(),
-  last_seen_at: z.number().int(),
+  last_seen_at: z.number().int().safe(),
   project_id: z.string(),
   project_root: z.string(),
-  store_count: z.number().int(),
+  store_count: z.number().int().safe().min(0),
 });
 export type ProjectRegistryEntry = z.infer<typeof ProjectRegistryEntrySchema>;
 
 export const ProjectRegistrySummarySchema = z.object({
-  project_count: z.number().int(),
-  repo_count: z.number().int(),
+  project_count: z.number().int().safe().min(0),
+  repo_count: z.number().int().safe().min(0),
   truncated: z.boolean(),
 });
 export type ProjectRegistrySummary = z.infer<typeof ProjectRegistrySummarySchema>;
@@ -2594,7 +3073,7 @@ export const ProjectRepoGroupSchema = z.object({
   branches: z.array(z.string()),
   git_common_dir: z.string().nullable(),
   label: z.string(),
-  project_count: z.number().int(),
+  project_count: z.number().int().safe().min(0),
   projects: z.array(z.lazy(() => ProjectRegistryEntrySchema)),
 });
 export type ProjectRepoGroup = z.infer<typeof ProjectRepoGroupSchema>;
@@ -2607,7 +3086,7 @@ export const ProjectSettingsPatchSchema = z.object({
   git_ignore: z.boolean().nullable().optional(),
   idempotency_key: z.string(),
   include: z.array(z.string()).nullable().optional(),
-  max_file_size: z.number().int().nullable().optional(),
+  max_file_size: z.number().int().safe().min(0).nullable().optional(),
   sync: z.union([z.lazy(() => SyncSettingsPatchSchema), z.null()]).optional(),
   telemetry: z.union([z.lazy(() => TelemetrySettingsPatchSchema), z.null()]).optional(),
   track_call_sites: z.boolean().nullable().optional(),
@@ -2630,7 +3109,7 @@ export const ProjectsPayloadV1Schema = z.object({
   active_project_id: z.string().nullable(),
   active_project_root: z.string(),
   error: z.string().nullable().optional(),
-  limit: z.number().int(),
+  limit: z.number().int().safe().min(0),
   project_tree: z.array(z.lazy(() => ProjectRepoGroupSchema)).nullable(),
   projects: z.array(z.lazy(() => PublicCodeProjectSchema)).nullable(),
   status: z.string(),
@@ -2663,6 +3142,10 @@ export const ProtectedRefSelectorV1Schema = z.discriminatedUnion("kind", [z.obje
 })]);
 export type ProtectedRefSelectorV1 = z.infer<typeof ProtectedRefSelectorV1Schema>;
 
+/** Strongly typed canonical identity: `ProvenanceId`. */
+export const ProvenanceIdSchema = z.string();
+export type ProvenanceId = z.infer<typeof ProvenanceIdSchema>;
+
 /** Strongly typed canonical identity: `ProviderId`. */
 export const ProviderIdSchema = z.string();
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
@@ -2693,20 +3176,20 @@ export const ProviderUsageSummaryV1Schema = z.object({
   error: z.string().nullable(),
   status: z.string().nullable(),
   total_cost_usd: z.number().nullable(),
-  total_tokens: z.number().int().nullable(),
-  usage_event_count: z.number().int().nullable(),
+  total_tokens: z.number().int().safe().nullable(),
+  usage_event_count: z.number().int().safe().nullable(),
 });
 export type ProviderUsageSummaryV1 = z.infer<typeof ProviderUsageSummaryV1Schema>;
 
 export const PublicCodeProjectSchema = z.object({
   canonical_root: z.string(),
-  created_at: z.number().int(),
+  created_at: z.number().int().safe(),
   default_branch: z.string().nullable(),
   display_root: z.string(),
   git_common_dir: z.string().nullable(),
   is_active: z.boolean().nullable().optional(),
   label: z.string(),
-  last_seen_at: z.number().int(),
+  last_seen_at: z.number().int().safe(),
   project_id: z.string(),
   project_root: z.string(),
 });
@@ -2745,7 +3228,7 @@ export const RegisteredRootSelectorV1Schema = z.object({
 export type RegisteredRootSelectorV1 = z.infer<typeof RegisteredRootSelectorV1Schema>;
 
 export const ReleaseWorkPlacementCommandSchema = z.object({
-  expected_authority_version: z.number().int(),
+  expected_authority_version: z.number().int().safe().min(0),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
@@ -2770,9 +3253,33 @@ export type RequiredCheckExpectationV1 = z.infer<typeof RequiredCheckExpectation
 export const RequiredCheckV1Schema = z.object({
   capability_id: z.lazy(() => CapabilityIdSchema),
   expectation: z.lazy(() => RequiredCheckExpectationV1Schema),
-  maximum_age_seconds: z.number().int(),
+  maximum_age_seconds: z.number().int().min(1),
 }).strict();
 export type RequiredCheckV1 = z.infer<typeof RequiredCheckV1Schema>;
+
+/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
+from an omitted field. New terminal-state fields must be present on every
+record so a missing committed receipt cannot be mistaken for `None`. */
+export const RequiredNullableSchema = z.union([z.lazy(() => EffectReceiptSchema), z.null()]);
+export type RequiredNullable = z.infer<typeof RequiredNullableSchema>;
+
+/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
+from an omitted field. New terminal-state fields must be present on every
+record so a missing committed receipt cannot be mistaken for `None`. */
+export const RequiredNullable2Schema = z.union([z.lazy(() => CancellationStageSchema), z.null()]);
+export type RequiredNullable2 = z.infer<typeof RequiredNullable2Schema>;
+
+/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
+from an omitted field. New terminal-state fields must be present on every
+record so a missing committed receipt cannot be mistaken for `None`. */
+export const RequiredNullable3Schema = z.union([z.lazy(() => ApplicationUnavailableClassV1Schema), z.null()]);
+export type RequiredNullable3 = z.infer<typeof RequiredNullable3Schema>;
+
+/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
+from an omitted field. New terminal-state fields must be present on every
+record so a missing committed receipt cannot be mistaken for `None`. */
+export const RequiredNullable4Schema = z.union([z.lazy(() => ApplicationExecutionFailureClassV1Schema), z.null()]);
+export type RequiredNullable4 = z.infer<typeof RequiredNullable4Schema>;
 
 /** The resolved configuration scope is one exact project/repository/worktree root.
 
@@ -2786,13 +3293,20 @@ export const ResolvedScopeSchema = z.object({
 }).strict();
 export type ResolvedScope = z.infer<typeof ResolvedScopeSchema>;
 
+/** Versioned schema identity for an application result contract. */
+export const ResultContractRefSchema = z.object({
+  schema_id: z.lazy(() => SchemaIdSchema),
+  schema_revision: z.number().int().min(0),
+}).strict();
+export type ResultContractRef = z.infer<typeof ResultContractRefSchema>;
+
 export const ResumeWorkAttemptsCommandSchema = z.object({
   occurred_at: z.lazy(() => UtcMicrosSchema),
 }).strict();
 export type ResumeWorkAttemptsCommand = z.infer<typeof ResumeWorkAttemptsCommandSchema>;
 
 export const ResumeWorkRunCommandSchema = z.object({
-  expected_authority_version: z.number().int(),
+  expected_authority_version: z.number().int().safe().min(0),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   reason: z.lazy(() => WorkRunControlReasonV1Schema),
   run_id: z.lazy(() => RunIdSchema),
@@ -2803,6 +3317,14 @@ export type ResumeWorkRunCommand = z.infer<typeof ResumeWorkRunCommandSchema>;
 /** Strongly typed canonical identity: `RetrievalAnchorId`. */
 export const RetrievalAnchorIdSchema = z.string();
 export type RetrievalAnchorId = z.infer<typeof RetrievalAnchorIdSchema>;
+
+/** Safe adapter-independent retry instruction. Adapters preserve it verbatim. */
+export const RetryDirectiveSchema = z.enum(["after_delay", "after_reconcile", "after_revalidate", "never", "same_request"]);
+export type RetryDirective = z.infer<typeof RetryDirectiveSchema>;
+
+/** Request identity boundary within which a retry remains valid. */
+export const RetryScopeSchema = z.enum(["fresh_request", "same_operation", "same_request"]);
+export type RetryScope = z.infer<typeof RetryScopeSchema>;
 
 export const RetryWorkAttemptCommandV1Schema = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
@@ -2815,7 +3337,7 @@ export type RetryWorkAttemptCommandV1 = z.infer<typeof RetryWorkAttemptCommandV1
 export const ReviewRequirementV1Schema = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("code_owner_and_independent_review"),
 }), z.object({
-  count: z.number().int(),
+  count: z.number().int().min(1).max(65535),
   kind: z.literal("independent_review_count"),
 }), z.object({
   kind: z.literal("none"),
@@ -2858,6 +3380,39 @@ export type RootScopeOutcomeV1_for_RootGenerationV1 = z.infer<typeof RootScopeOu
 export const RunIdSchema = z.string();
 export type RunId = z.infer<typeof RunIdSchema>;
 
+/** Sanitized detail that may cross the application boundary. */
+export const SafeDiagnosticSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+}).strict();
+export type SafeDiagnostic = z.infer<typeof SafeDiagnosticSchema>;
+
+/** Strongly typed canonical identity: `SanitizationReceiptId`. */
+export const SanitizationReceiptIdSchema = z.string();
+export type SanitizationReceiptId = z.infer<typeof SanitizationReceiptIdSchema>;
+
+/** Reference to a capture-owned sanitization receipt.
+
+Receipt references are the explicit boundary between untrusted wire data and
+the proof-carrying text types below. They do not claim that the domain crate
+ran a sanitizer; the capture layer owns issuance and persistence of receipts. */
+export const SanitizationReceiptRefV1Schema = z.object({
+  receipt_id: z.lazy(() => SanitizationReceiptIdSchema),
+  sanitizer_version: z.lazy(() => ComponentVersionSchema),
+}).strict();
+export type SanitizationReceiptRefV1 = z.infer<typeof SanitizationReceiptRefV1Schema>;
+
+export const SanitizationReceiptV1Schema = z.object({
+  disposition: z.lazy(() => SanitizerDispositionV1Schema),
+  payload: z.union([z.lazy(() => PayloadReferenceV1Schema), z.null()]),
+  receipt: z.lazy(() => SanitizationReceiptRefV1Schema),
+  sensitivity: z.lazy(() => SensitivityV1Schema),
+}).strict();
+export type SanitizationReceiptV1 = z.infer<typeof SanitizationReceiptV1Schema>;
+
+export const SanitizerDispositionV1Schema = z.enum(["accepted", "quarantined", "redacted", "rejected"]);
+export type SanitizerDispositionV1 = z.infer<typeof SanitizerDispositionV1Schema>;
+
 export const SavingsAccountingSummaryV1Schema = z.object({
   available: z.boolean(),
   db: z.string(),
@@ -2877,17 +3432,17 @@ export const SavingsLedgerSummaryV1Schema = z.object({
 export type SavingsLedgerSummaryV1 = z.infer<typeof SavingsLedgerSummaryV1Schema>;
 
 export const SavingsLifetimeCountersV1Schema = z.object({
-  project_total: z.number().int(),
+  project_total: z.number().int().safe(),
   projects: z.array(z.lazy(() => SavingsLifetimeProjectV1Schema)),
-  projects_limit: z.number().int(),
+  projects_limit: z.number().int().safe(),
   projects_truncated: z.boolean(),
-  total_tokens_saved: z.number().int(),
+  total_tokens_saved: z.number().int().safe(),
 });
 export type SavingsLifetimeCountersV1 = z.infer<typeof SavingsLifetimeCountersV1Schema>;
 
 export const SavingsLifetimeProjectV1Schema = z.object({
   path: z.string().nullable(),
-  tokens_saved: z.number().int().nullable(),
+  tokens_saved: z.number().int().safe().nullable(),
 });
 export type SavingsLifetimeProjectV1 = z.infer<typeof SavingsLifetimeProjectV1Schema>;
 
@@ -2912,30 +3467,30 @@ export type SavingsPricingSummaryV1 = z.infer<typeof SavingsPricingSummaryV1Sche
 export const SavingsSessionModelV1Schema = z.object({
   cost_basis: z.string(),
   estimated: z.lazy(() => TokenPairV1Schema),
-  estimated_messages: z.number().int(),
-  messages: z.number().int(),
+  estimated_messages: z.number().int().safe(),
+  messages: z.number().int().safe(),
   model: z.string().nullable(),
   provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
-  provider_usage_events: z.number().int(),
+  provider_usage_events: z.number().int().safe(),
   tokenized: z.lazy(() => TokenPairV1Schema),
-  tokenized_messages: z.number().int(),
+  tokenized_messages: z.number().int().safe(),
   tokenizer: z.unknown(),
 });
 export type SavingsSessionModelV1 = z.infer<typeof SavingsSessionModelV1Schema>;
 
 export const SavingsSessionRowV1Schema = z.object({
   cost_basis: z.string(),
-  estimated_messages: z.number().int(),
+  estimated_messages: z.number().int().safe(),
   is_subagent: z.boolean(),
-  last_message_at: z.number().int().nullable(),
-  messages: z.number().int(),
+  last_message_at: z.number().int().safe().nullable(),
+  messages: z.number().int().safe(),
   models: z.array(z.lazy(() => SavingsSessionModelV1Schema)),
   provider: z.string(),
-  provider_usage_events: z.number().int(),
+  provider_usage_events: z.number().int().safe(),
   session_id: z.string(),
-  started_at: z.number().int().nullable(),
+  started_at: z.number().int().safe().nullable(),
   title: z.string().nullable(),
-  tokenized_messages: z.number().int(),
+  tokenized_messages: z.number().int().safe(),
 });
 export type SavingsSessionRowV1 = z.infer<typeof SavingsSessionRowV1Schema>;
 
@@ -2945,8 +3500,8 @@ export const SavingsSessionsPayloadV1Schema = z.object({
   range: z.string(),
   scope: z.string().nullable(),
   sessions: z.array(z.lazy(() => SavingsSessionRowV1Schema)),
-  since: z.number().int().nullable(),
-  total: z.number().int(),
+  since: z.number().int().safe().nullable(),
+  total: z.number().int().safe(),
 });
 export type SavingsSessionsPayloadV1 = z.infer<typeof SavingsSessionsPayloadV1Schema>;
 
@@ -2956,26 +3511,30 @@ export const SavingsSessionSummaryV1Schema = z.object({
   db: z.string(),
   error: z.string().nullable(),
   estimated: z.union([z.lazy(() => TokenPairV1Schema), z.null()]),
-  estimated_messages: z.number().int().nullable(),
-  messages: z.number().int().nullable(),
-  model_count: z.number().int().nullable(),
+  estimated_messages: z.number().int().safe().nullable(),
+  messages: z.number().int().safe().nullable(),
+  model_count: z.number().int().safe().nullable(),
   provider_actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
-  provider_usage_events: z.number().int().nullable(),
+  provider_usage_events: z.number().int().safe().nullable(),
   scope: z.string().nullable(),
-  session_count: z.number().int().nullable(),
+  session_count: z.number().int().safe().nullable(),
   status: z.string().nullable(),
   token_counting: z.boolean().nullable(),
   tokenized: z.union([z.lazy(() => TokenPairV1Schema), z.null()]),
-  tokenized_messages: z.number().int().nullable(),
-  unknown_model_messages: z.number().int().nullable(),
+  tokenized_messages: z.number().int().safe().nullable(),
+  unknown_model_messages: z.number().int().safe().nullable(),
 });
 export type SavingsSessionSummaryV1 = z.infer<typeof SavingsSessionSummaryV1Schema>;
 
 export const SavingsSumV1Schema = z.object({
-  calls: z.number().int(),
-  saved_tokens: z.number().int(),
+  calls: z.number().int().safe(),
+  saved_tokens: z.number().int().safe(),
 });
 export type SavingsSumV1 = z.infer<typeof SavingsSumV1Schema>;
+
+/** Stable, canonical catalog identity for `SchemaId`. */
+export const SchemaIdSchema = z.string();
+export type SchemaId = z.infer<typeof SchemaIdSchema>;
 
 /** Truthful outcome for one authorized root or an aggregate over roots.
 
@@ -3032,7 +3591,7 @@ export const ScopeSetIdSchema = z.string();
 export type ScopeSetId = z.infer<typeof ScopeSetIdSchema>;
 
 /** Monotonic optimistic-concurrency revision of one scope set. */
-export const ScopeSetRevisionSchema = z.number().int();
+export const ScopeSetRevisionSchema = z.number().int().safe().min(1);
 export type ScopeSetRevision = z.infer<typeof ScopeSetRevisionSchema>;
 
 /** Typed explanation for a root that could not return usable data. */
@@ -3047,6 +3606,9 @@ export const SensitiveFilesystemLocatorV1Schema = z.object({
   sealed_value_digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 export type SensitiveFilesystemLocatorV1 = z.infer<typeof SensitiveFilesystemLocatorV1Schema>;
+
+export const SensitivityV1Schema = z.enum(["non_sensitive", "secret", "sensitive", "unclassified"]);
+export type SensitivityV1 = z.infer<typeof SensitivityV1Schema>;
 
 /** Strongly typed canonical identity: `SessionId`. */
 export const SessionIdSchema = z.string();
@@ -3083,11 +3645,11 @@ export type SharedProfileStoreLocatorV1 = z.infer<typeof SharedProfileStoreLocat
 
 /** One significant table-growth sample exposed to the dashboard. */
 export const SignificantTableGrowthSampleV1Schema = z.object({
-  current_bytes: z.number().int(),
-  current_observed_at: z.number().int(),
-  growth_bytes: z.number().int(),
-  previous_bytes: z.number().int(),
-  previous_observed_at: z.number().int(),
+  current_bytes: z.number().int().safe().min(0),
+  current_observed_at: z.number().int().safe(),
+  growth_bytes: z.number().int().safe().min(0),
+  previous_bytes: z.number().int().safe().min(0),
+  previous_observed_at: z.number().int().safe(),
   table: z.string(),
 });
 export type SignificantTableGrowthSampleV1 = z.infer<typeof SignificantTableGrowthSampleV1Schema>;
@@ -3117,13 +3679,13 @@ export type StartWorkAttemptCommand = z.infer<typeof StartWorkAttemptCommandSche
 
 /** A byte size measurement. A newtype keeps sizes from being confused with
 counts, ratios, or timestamps in the read models and producers. */
-export const StorageByteSizeV1Schema = z.number().int();
+export const StorageByteSizeV1Schema = z.number().int().safe().min(0);
 export type StorageByteSizeV1 = z.infer<typeof StorageByteSizeV1Schema>;
 
 /** Source-coverage status for one typed storage finding producer. */
 export const StorageFindingKindStatusV1Schema = z.object({
   kind: z.lazy(() => DoctorStorageFindingKindV1Schema),
-  observed_entries: z.number().int(),
+  observed_entries: z.number().int().safe().min(0),
   reason: z.string(),
   state: z.lazy(() => StorageFindingSourceStateV1Schema),
 });
@@ -3250,10 +3812,10 @@ export type StoreKeyV1 = z.infer<typeof StoreKeyV1Schema>;
 the reclaimable-bytes estimate (Plan 38 §6 compaction) can be computed
 without re-reading the store. */
 export const StoreSizeSampleV1Schema = z.object({
-  freelist_pages: z.number().int(),
+  freelist_pages: z.number().int().safe().min(0),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  page_count: z.number().int(),
-  page_size_bytes: z.number().int(),
+  page_count: z.number().int().safe().min(0),
+  page_size_bytes: z.number().int().min(0),
   store: z.lazy(() => StoreKeyV1Schema),
 }).strict();
 export type StoreSizeSampleV1 = z.infer<typeof StoreSizeSampleV1Schema>;
@@ -3262,7 +3824,7 @@ export type StoreSizeSampleV1 = z.infer<typeof StoreSizeSampleV1Schema>;
 dashboard role. */
 export const StoreTelemetryEntryV1Schema = z.object({
   budget: z.lazy(() => StoreBudgetDimensionV1Schema),
-  free_bytes: z.number().int().nullable(),
+  free_bytes: z.number().int().safe().min(0).nullable(),
   free_page_ratio: z.number().nullable(),
   growth: z.lazy(() => StoreGrowthDimensionV1Schema),
   path: z.string(),
@@ -3271,26 +3833,26 @@ export const StoreTelemetryEntryV1Schema = z.object({
   roles: z.array(z.string()),
   store: z.string(),
   table_growth: z.lazy(() => TableGrowthDimensionV1Schema),
-  total_bytes: z.number().int().nullable(),
+  total_bytes: z.number().int().safe().min(0).nullable(),
 });
 export type StoreTelemetryEntryV1 = z.infer<typeof StoreTelemetryEntryV1Schema>;
 
 export const StrataClusterV1Schema = z.object({
-  boundary_edges: z.number().int(),
+  boundary_edges: z.number().int().safe().min(0),
   directory: z.string(),
-  file_count: z.number().int(),
-  incoming_edges: z.number().int(),
-  internal_edges: z.number().int(),
-  order: z.number().int(),
-  outgoing_edges: z.number().int(),
+  file_count: z.number().int().safe().min(0),
+  incoming_edges: z.number().int().safe().min(0),
+  internal_edges: z.number().int().safe().min(0),
+  order: z.number().int().safe().min(0),
+  outgoing_edges: z.number().int().safe().min(0),
 });
 export type StrataClusterV1 = z.infer<typeof StrataClusterV1Schema>;
 
 export const StrataFileV1Schema = z.object({
   chain: z.array(z.string()),
-  depth: z.number().int(),
+  depth: z.number().int().safe().min(0),
   path: z.string(),
-  scc_size: z.number().int(),
+  scc_size: z.number().int().safe().min(0),
 });
 export type StrataFileV1 = z.infer<typeof StrataFileV1Schema>;
 
@@ -3302,20 +3864,20 @@ export const StrataMeasurementV1Schema = z.object({
   files: z.array(z.lazy(() => StrataFileV1Schema)),
   granularity: z.string(),
   graph_generation: z.string(),
-  ideal_depth: z.number().int(),
-  max_depth: z.number().int(),
+  ideal_depth: z.number().int().safe().min(0),
+  max_depth: z.number().int().safe().min(0),
   scan: z.lazy(() => StrataScanV1Schema),
 });
 export type StrataMeasurementV1 = z.infer<typeof StrataMeasurementV1Schema>;
 
 export const StrataScanV1Schema = z.object({
-  budget_ms: z.number().int(),
+  budget_ms: z.number().int().safe().min(0),
   cache_scope: z.string(),
   cache_state: z.string(),
-  dependency_edges_examined: z.number().int(),
-  files_examined: z.number().int(),
-  max_dependency_edges: z.number().int(),
-  max_files: z.number().int(),
+  dependency_edges_examined: z.number().int().safe().min(0),
+  files_examined: z.number().int().safe().min(0),
+  max_dependency_edges: z.number().int().safe().min(0),
+  max_files: z.number().int().safe().min(0),
 });
 export type StrataScanV1 = z.infer<typeof StrataScanV1Schema>;
 
@@ -3397,13 +3959,13 @@ export type StructureReadV15 = z.infer<typeof StructureReadV15Schema>;
 /** Nested synchronization settings patch. */
 export const SyncSettingsPatchSchema = z.object({
   auto_track_pr_branches: z.boolean().nullable().optional(),
-  auto_track_pr_poll_secs: z.number().int().nullable().optional(),
+  auto_track_pr_poll_secs: z.number().int().safe().min(0).nullable().optional(),
 }).strict();
 export type SyncSettingsPatch = z.infer<typeof SyncSettingsPatchSchema>;
 
 export const SyncSettingsV1Schema = z.object({
   auto_track_pr_branches: z.boolean(),
-  auto_track_pr_poll_secs: z.number().int(),
+  auto_track_pr_poll_secs: z.number().int().safe().min(0),
 });
 export type SyncSettingsV1 = z.infer<typeof SyncSettingsV1Schema>;
 
@@ -3411,10 +3973,10 @@ export type SyncSettingsV1 = z.infer<typeof SyncSettingsV1Schema>;
 each state includes source coverage and explicit omissions. */
 export const TableGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.object({
   coverage: z.lazy(() => DashboardCoverageV1Schema),
-  observed_at: z.number().int(),
+  observed_at: z.number().int().safe(),
   omission_reasons: z.array(z.string()),
   state: z.literal("baseline_established"),
-  tables_observed: z.number().int(),
+  tables_observed: z.number().int().safe().min(0),
 }), z.object({
   coverage: z.lazy(() => DashboardCoverageV1Schema),
   omission_reasons: z.array(z.string()),
@@ -3439,18 +4001,18 @@ export type TableGrowthDimensionV1 = z.infer<typeof TableGrowthDimensionV1Schema
 /** One current table omitted from the significant-sample list. Numeric evidence
 remains structured so clients can format units consistently. */
 export const TableGrowthOmissionV1Schema = z.discriminatedUnion("kind", [z.object({
-  current_bytes: z.number().int(),
+  current_bytes: z.number().int().safe().min(0),
   kind: z.literal("baseline_pending"),
-  observed_at: z.number().int(),
+  observed_at: z.number().int().safe(),
   reason: z.string(),
   table: z.string(),
 }), z.object({
-  current_bytes: z.number().int(),
-  current_observed_at: z.number().int(),
-  growth_bytes: z.number().int(),
+  current_bytes: z.number().int().safe().min(0),
+  current_observed_at: z.number().int().safe(),
+  growth_bytes: z.number().int().safe().min(0),
   kind: z.literal("below_threshold"),
-  previous_bytes: z.number().int(),
-  previous_observed_at: z.number().int(),
+  previous_bytes: z.number().int().safe().min(0),
+  previous_observed_at: z.number().int().safe(),
   reason: z.string(),
   table: z.string(),
 })]);
@@ -3458,9 +4020,9 @@ export type TableGrowthOmissionV1 = z.infer<typeof TableGrowthOmissionV1Schema>;
 
 /** Informational threshold applied to per-table payload growth samples. */
 export const TableGrowthThresholdV1Schema = z.object({
-  absolute_bytes: z.number().int(),
-  relative_floor_bytes: z.number().int(),
-  relative_percent: z.number().int(),
+  absolute_bytes: z.number().int().safe().min(0),
+  relative_floor_bytes: z.number().int().safe().min(0),
+  relative_percent: z.number().int().safe().min(0),
 });
 export type TableGrowthThresholdV1 = z.infer<typeof TableGrowthThresholdV1Schema>;
 
@@ -3469,7 +4031,7 @@ export const TaskEvidenceLinkV1Schema = z.object({
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   link_id: z.string(),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  revision: z.number().int(),
+  revision: z.number().int().safe().min(0),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict();
 export type TaskEvidenceLinkV1 = z.infer<typeof TaskEvidenceLinkV1Schema>;
@@ -3505,7 +4067,7 @@ export type TemporalModeV1 = z.infer<typeof TemporalModeV1Schema>;
 export const TestMapMeasurementV1Schema = z.object({
   algorithm: z.string(),
   applicable: z.boolean(),
-  caller_depth: z.number().int(),
+  caller_depth: z.number().int().safe().min(0),
   granularity: z.string(),
   node: z.lazy(() => NodeRefV1Schema),
   reason: z.string().nullable(),
@@ -3515,24 +4077,24 @@ export const TestMapMeasurementV1Schema = z.object({
 export type TestMapMeasurementV1 = z.infer<typeof TestMapMeasurementV1Schema>;
 
 export const TokenActualV1Schema = z.object({
-  cache_read_tokens: z.number().int().nullable(),
-  cache_write_tokens: z.number().int().nullable(),
-  input_tokens: z.number().int().nullable(),
-  output_tokens: z.number().int().nullable(),
+  cache_read_tokens: z.number().int().safe().nullable(),
+  cache_write_tokens: z.number().int().safe().nullable(),
+  input_tokens: z.number().int().safe().nullable(),
+  output_tokens: z.number().int().safe().nullable(),
 });
 export type TokenActualV1 = z.infer<typeof TokenActualV1Schema>;
 
 export const TokenPairV1Schema = z.object({
-  input_tokens: z.number().int(),
-  output_tokens: z.number().int(),
+  input_tokens: z.number().int().safe(),
+  output_tokens: z.number().int().safe(),
 });
 export type TokenPairV1 = z.infer<typeof TokenPairV1Schema>;
 
 export const TopologyConcurrencyPolicyV1Schema = z.object({
-  maximum_active_per_repository: z.number().int(),
-  maximum_global_active: z.number().int(),
-  maximum_parallel_per_task: z.number().int(),
-  maximum_stack_depth: z.number().int(),
+  maximum_active_per_repository: z.number().int().min(1).max(65535),
+  maximum_global_active: z.number().int().min(1).max(65535),
+  maximum_parallel_per_task: z.number().int().min(1).max(65535),
+  maximum_stack_depth: z.number().int().min(1).max(65535),
 }).strict();
 export type TopologyConcurrencyPolicyV1 = z.infer<typeof TopologyConcurrencyPolicyV1Schema>;
 
@@ -3541,7 +4103,7 @@ export type TopologyEscalationPolicyV1 = z.infer<typeof TopologyEscalationPolicy
 
 export const TopologyGatePolicyV1Schema = z.object({
   cleanliness: z.lazy(() => WorktreeCleanlinessRequirementV1Schema),
-  maximum_preflight_age_seconds: z.number().int(),
+  maximum_preflight_age_seconds: z.number().int().min(1),
   require_fresh_preflight: z.boolean(),
   review: z.lazy(() => ReviewRequirementV1Schema),
   tests: z.array(z.lazy(() => RequiredCheckV1Schema)),
@@ -3551,6 +4113,10 @@ export type TopologyGatePolicyV1 = z.infer<typeof TopologyGatePolicyV1Schema>;
 export const TopologyNotificationLevelV1Schema = z.enum(["critical_only", "lifecycle", "verbose"]);
 export type TopologyNotificationLevelV1 = z.infer<typeof TopologyNotificationLevelV1Schema>;
 
+/** Stable, canonical catalog identity for `UseCaseId`. */
+export const UseCaseIdSchema = z.string();
+export type UseCaseId = z.infer<typeof UseCaseIdSchema>;
+
 /** Strongly typed canonical identity: `UserProfileId`. */
 export const UserProfileIdSchema = z.string();
 export type UserProfileId = z.infer<typeof UserProfileIdSchema>;
@@ -3558,7 +4124,7 @@ export type UserProfileId = z.infer<typeof UserProfileIdSchema>;
 /** Profile-scoped settings patch accepted by `PATCH /api/settings/user`. */
 export const UserSettingsPatchSchema = z.object({
   expected_revision_id: z.string(),
-  extraction_timeout_secs: z.number().int().nullable().optional(),
+  extraction_timeout_secs: z.number().int().safe().min(0).nullable().optional(),
   idempotency_key: z.string(),
   upload_enabled: z.boolean().nullable().optional(),
   watcher_debounce: z.string().nullable().optional(),
@@ -3568,7 +4134,7 @@ export type UserSettingsPatch = z.infer<typeof UserSettingsPatchSchema>;
 export const UserSettingsPayloadV1Schema = z.object({
   configuration_revision_id: z.string(),
   configuration_snapshot_id: z.string(),
-  extraction_timeout_secs: z.number().int(),
+  extraction_timeout_secs: z.number().int().safe().min(0),
   installed_agents: z.array(z.string()),
   legacy_config_path: z.string(),
   legacy_config_read_only: z.boolean(),
@@ -3578,7 +4144,7 @@ export const UserSettingsPayloadV1Schema = z.object({
 export type UserSettingsPayloadV1 = z.infer<typeof UserSettingsPayloadV1Schema>;
 
 /** UTC timestamp represented as microseconds from the Unix epoch. */
-export const UtcMicrosSchema = z.number().int();
+export const UtcMicrosSchema = z.number().int().safe();
 export type UtcMicros = z.infer<typeof UtcMicrosSchema>;
 
 export const VerifiedWorkEvidenceRootV1Schema = z.object({
@@ -3593,10 +4159,10 @@ export type VerifiedWorkEvidenceRootV1 = z.infer<typeof VerifiedWorkEvidenceRoot
 
 /** One exact verified graph snapshot identity. */
 export const VerifiedWorkGraphVersionV1Schema = z.object({
-  event_sequence: z.number().int(),
-  graph_version: z.number().int(),
+  event_sequence: z.number().int().safe().min(0),
+  graph_version: z.number().int().safe().min(0),
   recovered_graph_digest: z.lazy(() => ManifestDigestSchema),
-  source_watermark: z.record(z.number().int()),
+  source_watermark: z.record(z.number().int().safe().min(0)),
 }).strict();
 export type VerifiedWorkGraphVersionV1 = z.infer<typeof VerifiedWorkGraphVersionV1Schema>;
 
@@ -3606,7 +4172,7 @@ their owning records remain behind normal authorization. */
 export const VerifiedWorkLeakEvidenceV1Schema = z.object({
   attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   coverage: z.lazy(() => CoverageStateV1Schema),
-  detection_horizon_micros: z.number().int(),
+  detection_horizon_micros: z.number().int().safe().min(0),
   evidence_refs: z.array(z.string()),
   kind: z.lazy(() => WorkExecutionLeakKindV1Schema),
   owner_class: z.lazy(() => LeakOwnerClassV1Schema),
@@ -3656,7 +4222,7 @@ export type WorkApprovalPolicy = z.infer<typeof WorkApprovalPolicySchema>;
 list and pinned to the same verified topology generation. */
 export const WorkArtifactHydrationRequestV1Schema = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
-  page_size: z.number().int(),
+  page_size: z.number().int().min(0),
 }).strict();
 export type WorkArtifactHydrationRequestV1 = z.infer<typeof WorkArtifactHydrationRequestV1Schema>;
 
@@ -3678,7 +4244,7 @@ export type WorkArtifactId = z.infer<typeof WorkArtifactIdSchema>;
 
 export const WorkArtifactRefV1Schema = z.object({
   artifact_id: z.lazy(() => WorkArtifactIdSchema),
-  byte_length: z.number().int(),
+  byte_length: z.number().int().safe().min(0),
   digest: z.lazy(() => ManifestDigestSchema),
 }).strict();
 export type WorkArtifactRefV1 = z.infer<typeof WorkArtifactRefV1Schema>;
@@ -3728,12 +4294,12 @@ export type WorkAttemptIdentityV1 = z.infer<typeof WorkAttemptIdentityV1Schema>;
 /** How much of the authorized attempt set one page covers. */
 export const WorkAttemptListCoverageV1Schema = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("capped"),
-  remaining: z.number().int(),
+  remaining: z.number().int().min(0),
   resume: z.lazy(() => WorkAttemptListCursorV1Schema),
-  returned: z.number().int(),
+  returned: z.number().int().min(0),
 }).strict(), z.object({
   coverage: z.literal("complete"),
-  returned: z.number().int(),
+  returned: z.number().int().min(0),
 }).strict()]);
 export type WorkAttemptListCoverageV1 = z.infer<typeof WorkAttemptListCoverageV1Schema>;
 
@@ -3747,7 +4313,7 @@ export type WorkAttemptListCursorV1 = z.infer<typeof WorkAttemptListCursorV1Sche
 
 export const WorkAttemptListRequestV1Schema = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
-  page_size: z.number().int(),
+  page_size: z.number().int().min(0),
 }).strict();
 export type WorkAttemptListRequestV1 = z.infer<typeof WorkAttemptListRequestV1Schema>;
 
@@ -3764,17 +4330,17 @@ export const WorkAttemptListV1Schema = z.discriminatedUnion("state", [z.object({
 export type WorkAttemptListV1 = z.infer<typeof WorkAttemptListV1Schema>;
 
 export const WorkAttemptProgressV1Schema = z.object({
-  completed: z.number().int(),
-  total: z.number().int(),
+  completed: z.number().int().safe().min(0),
+  total: z.number().int().safe().min(0),
 }).strict();
 export type WorkAttemptProgressV1 = z.infer<typeof WorkAttemptProgressV1Schema>;
 
 export const WorkAttemptProjectionBindingV1Schema = z.object({
   accepted_proposal: z.lazy(() => ProposalIdSchema),
-  event_sequence: z.number().int(),
-  graph_version: z.number().int(),
+  event_sequence: z.number().int().safe().min(0),
+  graph_version: z.number().int().safe().min(0),
   recovered_graph_digest: z.lazy(() => ManifestDigestSchema),
-  source_watermark: z.record(z.number().int()),
+  source_watermark: z.record(z.number().int().safe().min(0)),
 }).strict();
 export type WorkAttemptProjectionBindingV1 = z.infer<typeof WorkAttemptProjectionBindingV1Schema>;
 
@@ -3831,7 +4397,7 @@ export type WorkAttemptStreamChannelV1 = z.infer<typeof WorkAttemptStreamChannel
 
 /** Bounded summary of one captured provider stream. */
 export const WorkAttemptStreamSummaryV1Schema = z.object({
-  byte_length: z.number().int(),
+  byte_length: z.number().int().safe().min(0),
   digest: z.lazy(() => ManifestDigestSchema),
   truncated: z.boolean(),
 }).strict();
@@ -3840,7 +4406,7 @@ export type WorkAttemptStreamSummaryV1 = z.infer<typeof WorkAttemptStreamSummary
 /** The verified Work topology snapshot one attempt-list page was read under. */
 export const WorkAttemptTopologyBindingV1Schema = z.object({
   generation: z.string(),
-  task_count: z.number().int(),
+  task_count: z.number().int().min(0),
 }).strict();
 export type WorkAttemptTopologyBindingV1 = z.infer<typeof WorkAttemptTopologyBindingV1Schema>;
 
@@ -3868,8 +4434,8 @@ export const WorkCalibratedSizingV1Schema = z.object({
   drift_valid: z.boolean(),
   error: z.lazy(() => WorkOrdinalBandV1Schema),
   horizon: z.lazy(() => UtcMicrosSchema),
-  support: z.number().int(),
-  support_floor: z.number().int(),
+  support: z.number().int().min(0),
+  support_floor: z.number().int().min(0),
 }).strict();
 export type WorkCalibratedSizingV1 = z.infer<typeof WorkCalibratedSizingV1Schema>;
 
@@ -3880,12 +4446,12 @@ the authority-supplied outcome rows, categorical uncertainty, and exact
 denominator counts that produced the proposal's existing calibrated sizing. */
 export const WorkCalibrationEvidenceV1Schema = z.object({
   cohort_route: z.string().nullable(),
-  comparable_outcomes: z.number().int(),
-  eligible_route_count: z.number().int(),
-  incomparable_outcomes: z.number().int(),
+  comparable_outcomes: z.number().int().min(0),
+  eligible_route_count: z.number().int().min(0),
+  incomparable_outcomes: z.number().int().min(0),
   provenance: z.lazy(() => WorkCalibrationProvenanceV1Schema),
   raw_outcomes: z.array(z.lazy(() => WorkPriorOutcomeV1Schema)),
-  routes_with_outcomes: z.number().int(),
+  routes_with_outcomes: z.number().int().min(0),
   uncertainty: z.lazy(() => WorkCalibrationUncertaintyV1Schema),
 }).strict();
 export type WorkCalibrationEvidenceV1 = z.infer<typeof WorkCalibrationEvidenceV1Schema>;
@@ -3895,7 +4461,7 @@ export const WorkCalibrationProvenanceV1Schema = z.object({
   configuration_revision: z.union([z.lazy(() => ConfigurationRevisionIdSchema), z.null()]),
   evaluated_at: z.lazy(() => UtcMicrosSchema),
   evaluator_id: z.string(),
-  evaluator_revision: z.number().int(),
+  evaluator_revision: z.number().int().safe().min(0),
   input_digest: z.lazy(() => ManifestDigestSchema),
   local_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
 }).strict();
@@ -3942,7 +4508,7 @@ export type WorkCancellationStateV1 = z.infer<typeof WorkCancellationStateV1Sche
 
 export const WorkCausalProjectionV1Schema = z.object({
   candidate_edges: z.array(z.lazy(() => WorkDagEdgeV1Schema)),
-  graph_version: z.number().int(),
+  graph_version: z.number().int().safe().min(0),
 }).strict();
 export type WorkCausalProjectionV1 = z.infer<typeof WorkCausalProjectionV1Schema>;
 
@@ -3951,9 +4517,9 @@ export const WorkCommandIdSchema = z.string();
 export type WorkCommandId = z.infer<typeof WorkCommandIdSchema>;
 
 export const WorkCriticalPathProjectionV1Schema = z.object({
-  graph_version: z.number().int(),
+  graph_version: z.number().int().safe().min(0),
   task_ids: z.array(z.lazy(() => TaskIdSchema)),
-  total_effort: z.number().int(),
+  total_effort: z.number().int().min(0),
 }).strict();
 export type WorkCriticalPathProjectionV1 = z.infer<typeof WorkCriticalPathProjectionV1Schema>;
 
@@ -3965,7 +4531,7 @@ export type WorkDagEdgeV1 = z.infer<typeof WorkDagEdgeV1Schema>;
 
 export const WorkDagProjectionV1Schema = z.object({
   gating_edges: z.array(z.lazy(() => WorkDagEdgeV1Schema)),
-  graph_version: z.number().int(),
+  graph_version: z.number().int().safe().min(0),
   task_ids: z.array(z.lazy(() => TaskIdSchema)),
 }).strict();
 export type WorkDagProjectionV1 = z.infer<typeof WorkDagProjectionV1Schema>;
@@ -3990,7 +4556,7 @@ export type WorkDuplicateAdjudicationAppendOutcomeV1 = z.infer<typeof WorkDuplic
 export const WorkDuplicateAdjudicationCommandV1Schema = z.object({
   command_id: z.lazy(() => WorkCommandIdSchema),
   evidence: z.lazy(() => WorkDuplicateAdjudicationEvidenceV1Schema),
-  expected_revision: z.number().int().nullable(),
+  expected_revision: z.number().int().safe().min(0).nullable(),
   first_attempt: z.lazy(() => WorkAttemptIdentityV1Schema),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   quantities: z.lazy(() => WorkDuplicateAdjudicationQuantitiesV1Schema),
@@ -4007,14 +4573,14 @@ export const WorkDuplicateAdjudicationEvidenceV1Schema = z.object({
 export type WorkDuplicateAdjudicationEvidenceV1 = z.infer<typeof WorkDuplicateAdjudicationEvidenceV1Schema>;
 
 export const WorkDuplicateAdjudicationQuantitiesV1Schema = z.object({
-  cost_micros: z.number().int().nullable(),
+  cost_micros: z.number().int().safe().min(0).nullable(),
   coverage: z.lazy(() => CoverageStateV1Schema),
-  effect_count: z.number().int().nullable(),
+  effect_count: z.number().int().safe().min(0).nullable(),
   effect_outcome: z.lazy(() => DuplicateEffectOutcomeV1Schema),
   evidence: z.lazy(() => QuantityEvidenceClassV1Schema),
-  test_count: z.number().int().nullable(),
-  token_count: z.number().int().nullable(),
-  wall_micros: z.number().int().nullable(),
+  test_count: z.number().int().safe().min(0).nullable(),
+  token_count: z.number().int().safe().min(0).nullable(),
+  wall_micros: z.number().int().safe().min(0).nullable(),
 }).strict();
 export type WorkDuplicateAdjudicationQuantitiesV1 = z.infer<typeof WorkDuplicateAdjudicationQuantitiesV1Schema>;
 
@@ -4023,7 +4589,7 @@ export const WorkDuplicateAdjudicationReceiptV1Schema = z.object({
   adjudication_ref: z.lazy(() => ManifestDigestSchema),
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
   command: z.lazy(() => WorkDuplicateAdjudicationCommandV1Schema),
-  revision: z.number().int(),
+  revision: z.number().int().safe().min(0),
 }).strict();
 export type WorkDuplicateAdjudicationReceiptV1 = z.infer<typeof WorkDuplicateAdjudicationReceiptV1Schema>;
 
@@ -4048,9 +4614,9 @@ export const WorkEvidenceCoverageStateV1Schema = z.enum(["complete", "partial", 
 export type WorkEvidenceCoverageStateV1 = z.infer<typeof WorkEvidenceCoverageStateV1Schema>;
 
 export const WorkEvidenceCoverageV1Schema = z.object({
-  hydrated: z.number().int(),
-  omitted: z.number().int(),
-  selected: z.number().int(),
+  hydrated: z.number().int().min(0),
+  omitted: z.number().int().min(0),
+  selected: z.number().int().min(0),
   state: z.lazy(() => WorkEvidenceCoverageStateV1Schema),
 }).strict();
 export type WorkEvidenceCoverageV1 = z.infer<typeof WorkEvidenceCoverageV1Schema>;
@@ -4108,7 +4674,7 @@ export const WorkEvidenceRetrieveRequestV1Schema = z.object({
   continuation: z.union([z.lazy(() => WorkEvidenceContinuationV1Schema), z.null()]),
   expansion: z.union([z.lazy(() => WorkEvidenceExpansionSelectorV1Schema), z.null()]),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  page_size: z.number().int(),
+  page_size: z.number().int().min(0),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
   temporal: z.lazy(() => TemporalModeV1Schema),
@@ -4143,7 +4709,7 @@ or executable paths. The daemon resolves the registered executable only
 after this envelope has been persisted and admitted to the canonical queue. */
 export const WorkExecutionEnvelopeV1Schema = z.object({
   attempt_identity: z.lazy(() => WorkAttemptIdentityV1Schema),
-  cancellation_generation: z.number().int(),
+  cancellation_generation: z.number().int().safe().min(0),
   commit: z.lazy(() => CommitIdSchema),
   effect_state: z.lazy(() => WorkEffectStateV1Schema),
   execution_snapshot: z.lazy(() => WorkExecutionSnapshotSchema),
@@ -4177,12 +4743,12 @@ export const WorkExecutionLeakRecoveryV1Schema = z.enum(["failed", "not_required
 export type WorkExecutionLeakRecoveryV1 = z.infer<typeof WorkExecutionLeakRecoveryV1Schema>;
 
 export const WorkExecutionLimitsSchema = z.object({
-  max_concurrency: z.number().int(),
-  max_input_tokens: z.number().int(),
-  max_output_tokens: z.number().int(),
-  max_protocol_bytes: z.number().int(),
-  max_stderr_bytes: z.number().int(),
-  max_stdout_bytes: z.number().int(),
+  max_concurrency: z.number().int().min(0),
+  max_input_tokens: z.number().int().safe().min(0),
+  max_output_tokens: z.number().int().safe().min(0),
+  max_protocol_bytes: z.number().int().safe().min(0),
+  max_stderr_bytes: z.number().int().safe().min(0),
+  max_stdout_bytes: z.number().int().safe().min(0),
 }).strict();
 export type WorkExecutionLimits = z.infer<typeof WorkExecutionLimitsSchema>;
 
@@ -4214,14 +4780,14 @@ export const WorkExecutionSnapshotSchema = z.object({
 export type WorkExecutionSnapshot = z.infer<typeof WorkExecutionSnapshotSchema>;
 
 export const WorkExecutionSpanV1Schema = z.object({
-  admitted_projection_sequence: z.number().int(),
+  admitted_projection_sequence: z.number().int().safe().min(0),
   effect_state: z.lazy(() => WorkEffectStateV1Schema),
   ended_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   started_at: z.lazy(() => UtcMicrosSchema),
   state: z.lazy(() => WorkAttemptStateV1Schema),
   terminal_evidence_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
-  wall_micros: z.number().int().nullable(),
+  wall_micros: z.number().int().safe().min(0).nullable(),
 }).strict();
 export type WorkExecutionSpanV1 = z.infer<typeof WorkExecutionSpanV1Schema>;
 
@@ -4245,16 +4811,16 @@ export const WorkExperienceCandidateV1Schema = z.object({
 export type WorkExperienceCandidateV1 = z.infer<typeof WorkExperienceCandidateV1Schema>;
 
 export const WorkExperienceCoverageV1Schema = z.discriminatedUnion("coverage", [z.object({
-  applicable: z.number().int(),
+  applicable: z.number().int().min(0),
   coverage: z.literal("complete"),
-  returned: z.number().int(),
-  stale_excluded: z.number().int(),
+  returned: z.number().int().min(0),
+  stale_excluded: z.number().int().min(0),
 }).strict(), z.object({
-  applicable: z.number().int(),
+  applicable: z.number().int().min(0),
   coverage: z.literal("partial"),
-  omitted_by_limit: z.number().int(),
-  returned: z.number().int(),
-  stale_excluded: z.number().int(),
+  omitted_by_limit: z.number().int().min(0),
+  returned: z.number().int().min(0),
+  stale_excluded: z.number().int().min(0),
 }).strict(), z.object({
   coverage: z.literal("unavailable"),
 }).strict()]);
@@ -4263,7 +4829,7 @@ export type WorkExperienceCoverageV1 = z.infer<typeof WorkExperienceCoverageV1Sc
 export const WorkExperienceRequestV1Schema = z.object({
   evidence_not_before: z.lazy(() => UtcMicrosSchema),
   expertise_categories: z.array(z.lazy(() => WorkExpertiseCategoryV1Schema)),
-  limit: z.number().int(),
+  limit: z.number().int().min(0),
   observed_at: z.lazy(() => UtcMicrosSchema),
   selection: z.lazy(() => WorkProductSelectionScopeV1Schema),
   task_id: z.lazy(() => TaskIdSchema),
@@ -4325,7 +4891,7 @@ export const WorkFallbackTopologySchema = z.discriminatedUnion("kind", [z.object
 }).strict()]);
 export type WorkFallbackTopology = z.infer<typeof WorkFallbackTopologySchema>;
 
-export const WorkFenceEpochV1Schema = z.number().int();
+export const WorkFenceEpochV1Schema = z.number().int().safe().min(0);
 export type WorkFenceEpochV1 = z.infer<typeof WorkFenceEpochV1Schema>;
 
 export const WorkFilesystemPolicySchema = z.enum(["read_only", "workspace_write"]);
@@ -4354,7 +4920,7 @@ export const WorkFrontierComparisonV1Schema = z.enum(["agree", "disagree", "inco
 export type WorkFrontierComparisonV1 = z.infer<typeof WorkFrontierComparisonV1Schema>;
 
 export const WorkGraphChangeV1Schema = z.discriminatedUnion("kind", [z.object({
-  based_on_version: z.number().int(),
+  based_on_version: z.number().int().safe().min(0),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   kind: z.literal("accepted_attempt_linked"),
   linked_at: z.lazy(() => UtcMicrosSchema),
@@ -4365,7 +4931,7 @@ export const WorkGraphChangeV1Schema = z.discriminatedUnion("kind", [z.object({
   task_id: z.lazy(() => TaskIdSchema),
 }).strict(), z.object({
   admitted_at: z.lazy(() => UtcMicrosSchema),
-  based_on_version: z.number().int(),
+  based_on_version: z.number().int().safe().min(0),
   kind: z.literal("execution_admitted"),
   task_id: z.lazy(() => TaskIdSchema),
 }).strict(), z.object({
@@ -4451,11 +5017,11 @@ export type WorkGraphReadV1 = z.infer<typeof WorkGraphReadV1Schema>;
 
 export const WorkGraphTimelineCoverageV1Schema = z.discriminatedUnion("coverage", [z.object({
   coverage: z.literal("complete"),
-  returned: z.number().int(),
+  returned: z.number().int().min(0),
 }), z.object({
   continuation: z.string(),
   coverage: z.literal("partial"),
-  returned: z.number().int(),
+  returned: z.number().int().min(0),
 })]);
 export type WorkGraphTimelineCoverageV1 = z.infer<typeof WorkGraphTimelineCoverageV1Schema>;
 
@@ -4509,7 +5075,7 @@ export const WorkItemInputV1Schema = z.object({
   created_at: z.lazy(() => UtcMicrosSchema),
   deadline: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
-  effort: z.number().int(),
+  effort: z.number().int().min(0),
   hierarchy: z.lazy(() => WorkHierarchyV1Schema),
   informational_relations: z.array(z.lazy(() => TaskIdSchema)),
   scheduled_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -4534,7 +5100,7 @@ export const WorkItemV1Schema = z.object({
 export type WorkItemV1 = z.infer<typeof WorkItemV1Schema>;
 
 export const WorkKanbanCardV1Schema = z.object({
-  effort: z.number().int(),
+  effort: z.number().int().min(0),
   lane: z.lazy(() => WorkTimelineLaneV1Schema),
   legal_actions: z.array(z.lazy(() => WorkLegalActionV1Schema)),
   task_id: z.lazy(() => TaskIdSchema),
@@ -4543,7 +5109,7 @@ export type WorkKanbanCardV1 = z.infer<typeof WorkKanbanCardV1Schema>;
 
 export const WorkKanbanProjectionV1Schema = z.object({
   cards: z.array(z.lazy(() => WorkKanbanCardV1Schema)),
-  graph_version: z.number().int(),
+  graph_version: z.number().int().safe().min(0),
 }).strict();
 export type WorkKanbanProjectionV1 = z.infer<typeof WorkKanbanProjectionV1Schema>;
 
@@ -4560,7 +5126,7 @@ export const WorkLeakAdjudicationReceiptV1Schema = z.object({
   canonical_input_digest: z.lazy(() => ManifestDigestSchema),
   command: z.lazy(() => AdjudicateWorkLeakCommandV1Schema),
   evidence: z.lazy(() => VerifiedWorkLeakEvidenceV1Schema),
-  revision: z.number().int(),
+  revision: z.number().int().safe().min(0),
   scan_deadline: z.lazy(() => UtcMicrosSchema),
 }).strict();
 export type WorkLeakAdjudicationReceiptV1 = z.infer<typeof WorkLeakAdjudicationReceiptV1Schema>;
@@ -4590,11 +5156,11 @@ export const WorkObservedExecutionOrderBasisV1Schema = z.literal("terminal_obser
 export type WorkObservedExecutionOrderBasisV1 = z.infer<typeof WorkObservedExecutionOrderBasisV1Schema>;
 
 export const WorkObservedExecutionV1Schema = z.object({
-  admitted_projection_sequence: z.number().int(),
+  admitted_projection_sequence: z.number().int().safe().min(0),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   identity: z.lazy(() => WorkAttemptIdentityV1Schema),
   observed_at: z.lazy(() => UtcMicrosSchema),
-  ordinal: z.number().int(),
+  ordinal: z.number().int().min(0),
   state: z.lazy(() => WorkAttemptStateV1Schema),
 }).strict();
 export type WorkObservedExecutionV1 = z.infer<typeof WorkObservedExecutionV1Schema>;
@@ -4629,12 +5195,12 @@ Counts are measurements: a zero is "we looked and found none", and
 them would let an unreadable target read as a clean one. */
 export const WorkPlacementObservationV1Schema = z.object({
   active_holder: z.boolean(),
-  dirty_tracked_paths: z.number().int(),
+  dirty_tracked_paths: z.number().int().min(0),
   network_required: z.boolean(),
   observed_at: z.lazy(() => UtcMicrosSchema),
   readable: z.boolean(),
-  unique_commits: z.number().int().nullable(),
-  untracked_paths: z.number().int(),
+  unique_commits: z.number().int().min(0).nullable(),
+  untracked_paths: z.number().int().min(0),
 }).strict();
 export type WorkPlacementObservationV1 = z.infer<typeof WorkPlacementObservationV1Schema>;
 
@@ -4686,7 +5252,7 @@ export type WorkPlacementTargetV1 = z.infer<typeof WorkPlacementTargetV1Schema>;
 
 /** One run's durable placement relation. */
 export const WorkPlacementV1Schema = z.object({
-  authority_version: z.number().int(),
+  authority_version: z.number().int().safe().min(0),
   blockers: z.array(z.lazy(() => WorkPlacementBlockerV1Schema)),
   identity: z.lazy(() => WorkPlacementIdentityV1Schema),
   retention_eligible_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
@@ -4797,14 +5363,14 @@ export const WorkProductEventV1Schema = z.object({
   configuration_revision_id: z.lazy(() => ConfigurationRevisionIdSchema),
   event_id: z.string(),
   evidence: z.array(z.lazy(() => WorkProductEventEvidenceV1Schema)),
-  expected_graph_version: z.number().int().nullable(),
+  expected_graph_version: z.number().int().safe().min(0).nullable(),
   occurred_at: z.lazy(() => UtcMicrosSchema),
   owner_scope: z.lazy(() => WorkProductProfileScopeV1Schema),
   payload: z.lazy(() => WorkProductEventPayloadV1Schema),
   policy_revision_id: z.string(),
-  result_graph_version: z.number().int(),
-  sequence: z.number().int(),
-  source_watermark: z.record(z.number().int()),
+  result_graph_version: z.number().int().safe().min(0),
+  sequence: z.number().int().safe().min(0),
+  source_watermark: z.record(z.number().int().safe().min(0)),
 }).strict();
 export type WorkProductEventV1 = z.infer<typeof WorkProductEventV1Schema>;
 
@@ -4824,7 +5390,7 @@ export const WorkProductGraphV1Schema = z.object({
   plans: z.array(z.lazy(() => WorkPlanV1Schema)),
   proposal_decisions: z.array(z.lazy(() => WorkProposalDecisionV12Schema)),
   relation_replan_decisions: z.array(z.lazy(() => WorkRelationReplanDecisionV1Schema)),
-  version: z.number().int(),
+  version: z.number().int().safe().min(0),
 }).strict();
 export type WorkProductGraphV1 = z.infer<typeof WorkProductGraphV1Schema>;
 
@@ -4889,7 +5455,7 @@ export const WorkProductProjectionBundleV1Schema = z.object({
   causal: z.lazy(() => WorkCausalProjectionV1Schema),
   critical_path: z.lazy(() => WorkCriticalPathProjectionV1Schema),
   dag: z.lazy(() => WorkDagProjectionV1Schema),
-  graph_version: z.number().int(),
+  graph_version: z.number().int().safe().min(0),
   kanban: z.lazy(() => WorkKanbanProjectionV1Schema),
   runtime: z.lazy(() => WorkRuntimeProjectionV1Schema),
   timeline: z.lazy(() => WorkTimelineProjectionV1Schema),
@@ -4961,7 +5527,7 @@ export const WorkProductSelectionScopeV1Schema = z.discriminatedUnion("selection
 })]);
 export type WorkProductSelectionScopeV1 = z.infer<typeof WorkProductSelectionScopeV1Schema>;
 
-export const WorkProjectionSequenceV1Schema = z.number().int();
+export const WorkProjectionSequenceV1Schema = z.number().int().safe().min(0);
 export type WorkProjectionSequenceV1 = z.infer<typeof WorkProjectionSequenceV1Schema>;
 
 /** The explicit command the decision recommends next. A recommendation never
@@ -4996,21 +5562,21 @@ export type WorkProposalComparisonV1 = z.infer<typeof WorkProposalComparisonV1Sc
 
 /** One explained, replayable work-loop decision. */
 export const WorkProposalDecisionV1Schema = z.object({
-  based_on_version: z.number().int(),
+  based_on_version: z.number().int().safe().min(0),
   configuration_digest: z.lazy(() => ManifestDigestSchema),
   configuration_revision: z.union([z.lazy(() => ConfigurationRevisionIdSchema), z.null()]),
   decomposition: z.union([z.lazy(() => WorkDecompositionProposalV1Schema), z.null()]).optional(),
   deterministic_fallback: z.boolean(),
   disposition: z.lazy(() => WorkProposalDispositionV1Schema),
   evaluator_id: z.lazy(() => PolicyIdentifierV1Schema),
-  evaluator_revision: z.number().int(),
+  evaluator_revision: z.number().int().safe().min(0),
   frontier_comparison: z.lazy(() => WorkFrontierComparisonV1Schema),
   input_digest: z.lazy(() => ManifestDigestSchema),
   live_git_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
   local_evidence: z.union([z.lazy(() => WorkEvidenceFrontierV1Schema), z.null()]),
   ordered_reason_codes: z.array(z.lazy(() => WorkProposalReasonV1Schema)),
   policy_digest: z.lazy(() => ManifestDigestSchema),
-  policy_revision: z.number().int(),
+  policy_revision: z.number().int().safe().min(0),
   recommended_action: z.union([z.lazy(() => WorkProposalActionV1Schema), z.null()]),
   route_plan: z.union([z.lazy(() => WorkRoutePlanV1Schema), z.null()]).optional(),
   shape: z.union([z.lazy(() => WorkTaskShapeV1Schema), z.null()]).optional(),
@@ -5037,7 +5603,7 @@ export const WorkProposalReasonV1Schema = z.enum(["deadline_exceeded", "dependen
 export type WorkProposalReasonV1 = z.infer<typeof WorkProposalReasonV1Schema>;
 
 export const WorkProposalV1Schema = z.object({
-  based_on_version: z.number().int(),
+  based_on_version: z.number().int().safe().min(0),
   children: z.array(z.lazy(() => WorkProposedChildV1Schema)),
   evidence_digest: z.lazy(() => ManifestDigestSchema),
   explanation: z.string(),
@@ -5051,7 +5617,7 @@ export type WorkProposalV1 = z.infer<typeof WorkProposalV1Schema>;
 
 export const WorkProposedChildV1Schema = z.object({
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
-  effort: z.number().int(),
+  effort: z.number().int().min(0),
   task_id: z.lazy(() => TaskIdSchema),
   title: z.string(),
 }).strict();
@@ -5111,7 +5677,7 @@ export const WorkRankedRouteV1Schema = z.object({
   cost: z.lazy(() => WorkOrdinalBandV1Schema),
   evidence_quality: z.lazy(() => WorkOrdinalBandV1Schema),
   latency: z.lazy(() => WorkOrdinalBandV1Schema),
-  rank: z.number().int(),
+  rank: z.number().int().min(0),
   route_id: z.string(),
   sensitive_data_fitness: z.lazy(() => WorkOrdinalBandV1Schema),
 }).strict();
@@ -5142,7 +5708,7 @@ export const WorkRelationReplanDecisionV1Schema = z.object({
 export type WorkRelationReplanDecisionV1 = z.infer<typeof WorkRelationReplanDecisionV1Schema>;
 
 export const WorkRelationReplanProposalV1Schema = z.object({
-  based_on_version: z.number().int(),
+  based_on_version: z.number().int().safe().min(0),
   causal_candidates: z.array(z.lazy(() => TaskIdSchema)),
   dependencies: z.array(z.lazy(() => TaskIdSchema)),
   informational_relations: z.array(z.lazy(() => TaskIdSchema)),
@@ -5227,7 +5793,7 @@ export const WorkRoutePlanV1Schema = z.object({
 export type WorkRoutePlanV1 = z.infer<typeof WorkRoutePlanV1Schema>;
 
 /** A monotonically versioned control authority. */
-export const WorkRunControlAuthorityV1Schema = z.number().int();
+export const WorkRunControlAuthorityV1Schema = z.number().int().safe().min(0);
 export type WorkRunControlAuthorityV1 = z.infer<typeof WorkRunControlAuthorityV1Schema>;
 
 /** One run's control reading.
@@ -5240,12 +5806,12 @@ export const WorkRunControlReadingV1Schema = z.discriminatedUnion("state", [z.ob
   control: z.lazy(() => WorkRunControlV1Schema),
   live_attempts: z.array(z.lazy(() => AttemptIdSchema)),
   state: z.literal("controlled"),
-  total_attempts: z.number().int(),
+  total_attempts: z.number().int().min(0),
 }).strict(), z.object({
   deadline: z.lazy(() => UtcMicrosSchema),
   live_attempts: z.array(z.lazy(() => AttemptIdSchema)),
   state: z.literal("uncontrolled"),
-  total_attempts: z.number().int(),
+  total_attempts: z.number().int().min(0),
 }).strict()]);
 export type WorkRunControlReadingV1 = z.infer<typeof WorkRunControlReadingV1Schema>;
 
@@ -5289,7 +5855,7 @@ reader never has to recompute one from a clock it does not trust. */
 export const WorkRunDeadlineCheckpointV1Schema = z.object({
   checkpoint_at: z.lazy(() => UtcMicrosSchema),
   deadline: z.lazy(() => UtcMicrosSchema),
-  remaining_micros: z.number().int(),
+  remaining_micros: z.number().int().safe(),
 }).strict();
 export type WorkRunDeadlineCheckpointV1 = z.infer<typeof WorkRunDeadlineCheckpointV1Schema>;
 
@@ -5313,7 +5879,7 @@ export const WorkRuntimeProjectionV1Schema = z.object({
   attempts: z.array(z.lazy(() => WorkRuntimeAttemptProjectionV1Schema)),
   coverage: z.lazy(() => WorkRuntimeProjectionCoverageV1Schema),
   generation_id: z.lazy(() => ProjectionGenerationIdSchema),
-  graph_version: z.number().int(),
+  graph_version: z.number().int().safe().min(0),
   observed_at: z.lazy(() => UtcMicrosSchema),
   sequence: z.lazy(() => WorkProjectionSequenceV1Schema),
 }).strict();
@@ -5326,26 +5892,26 @@ export const WorkScoreKindV1Schema = z.enum(["calibrated_range", "heuristic", "o
 export type WorkScoreKindV1 = z.infer<typeof WorkScoreKindV1Schema>;
 
 export const WorkShapeAssessmentV1Schema = z.object({
-  ambiguity: z.number().int(),
-  blast_radius: z.number().int(),
-  complexity: z.number().int(),
-  integration_overhead: z.number().int(),
+  ambiguity: z.number().int().min(0).max(255),
+  blast_radius: z.number().int().min(0).max(255),
+  complexity: z.number().int().min(0).max(255),
+  integration_overhead: z.number().int().min(0).max(255),
   score_kind: z.lazy(() => WorkScoreKindV1Schema),
 }).strict();
 export type WorkShapeAssessmentV1 = z.infer<typeof WorkShapeAssessmentV1Schema>;
 
 export const WorkSizingV1Schema = z.object({
   coverage: z.string(),
-  high: z.number().int(),
-  likely: z.number().int(),
-  low: z.number().int(),
+  high: z.number().int().min(0),
+  likely: z.number().int().min(0),
+  low: z.number().int().min(0),
   score_kind: z.lazy(() => WorkScoreKindV1Schema),
 }).strict();
 export type WorkSizingV1 = z.infer<typeof WorkSizingV1Schema>;
 
 /** One level only (Q3). Read-only sketch; accepting it stays a separate version-checked command. */
 export const WorkSubtaskSketchV1Schema = z.object({
-  ordinal: z.number().int(),
+  ordinal: z.number().int().min(0),
   shape: z.lazy(() => WorkTaskShapeKindV1Schema),
   summary: z.string(),
 }).strict();
@@ -5430,10 +5996,10 @@ export const WorkTaskSessionContinuationV1Schema = z.object({
 export type WorkTaskSessionContinuationV1 = z.infer<typeof WorkTaskSessionContinuationV1Schema>;
 
 export const WorkTaskSessionCoverageV1Schema = z.object({
-  hidden: z.number().int(),
-  redacted: z.number().int(),
-  unknown: z.number().int(),
-  visible: z.number().int(),
+  hidden: z.number().int().safe().min(0),
+  redacted: z.number().int().safe().min(0),
+  unknown: z.number().int().safe().min(0),
+  visible: z.number().int().safe().min(0),
 }).strict();
 export type WorkTaskSessionCoverageV1 = z.infer<typeof WorkTaskSessionCoverageV1Schema>;
 
@@ -5458,31 +6024,31 @@ export type WorkTaskSessionHydrationStateV1 = z.infer<typeof WorkTaskSessionHydr
 
 export const WorkTaskSessionHydrationV1Schema = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
-  content: z.array(z.number().int()).nullable(),
-  rank: z.number().int(),
+  content: z.array(z.number().int().min(0).max(255)).nullable(),
+  rank: z.number().int().min(0),
   state: z.lazy(() => WorkTaskSessionHydrationStateV1Schema),
 }).strict();
 export type WorkTaskSessionHydrationV1 = z.infer<typeof WorkTaskSessionHydrationV1Schema>;
 
 export const WorkTaskSessionRankContributionV1Schema = z.object({
-  calibrated_feature_micros: z.number().int(),
+  calibrated_feature_micros: z.number().int().min(0),
   calibration_profile: z.string(),
-  ordinal_rank: z.number().int(),
-  raw_score_micros: z.number().int(),
+  ordinal_rank: z.number().int().min(0),
+  raw_score_micros: z.number().int().safe(),
   retriever: z.string(),
   retriever_revision: z.string(),
   score_domain: z.string(),
   source_occurrence: z.string(),
-  weight_micros: z.number().int(),
-  weighted_contribution_micros: z.number().int(),
+  weight_micros: z.number().int().min(0),
+  weighted_contribution_micros: z.number().int().safe().min(0),
 }).strict();
 export type WorkTaskSessionRankContributionV1 = z.infer<typeof WorkTaskSessionRankContributionV1Schema>;
 
 export const WorkTaskSessionRankedAnchorV1Schema = z.object({
   anchor_id: z.lazy(() => RetrievalAnchorIdSchema),
   contributions: z.array(z.lazy(() => WorkTaskSessionRankContributionV1Schema)),
-  final_ordinal: z.number().int(),
-  utility_micros: z.number().int(),
+  final_ordinal: z.number().int().min(0),
+  utility_micros: z.number().int().safe().min(0),
 }).strict();
 export type WorkTaskSessionRankedAnchorV1 = z.infer<typeof WorkTaskSessionRankedAnchorV1Schema>;
 
@@ -5532,7 +6098,7 @@ export type WorkTimelineLaneV1 = z.infer<typeof WorkTimelineLaneV1Schema>;
 
 export const WorkTimelineProjectionV1Schema = z.object({
   entries: z.array(z.lazy(() => WorkTimelineEntryV1Schema)),
-  graph_version: z.number().int(),
+  graph_version: z.number().int().safe().min(0),
 }).strict();
 export type WorkTimelineProjectionV1 = z.infer<typeof WorkTimelineProjectionV1Schema>;
 
@@ -5561,7 +6127,7 @@ export type WorkTopologyIntegrationStrategyV1 = z.infer<typeof WorkTopologyInteg
 attempt page joined to its durable placement reading. Placement absence is
 a state on the lane, not a dropped lane. */
 export const WorkTopologyPlacementLaneV1Schema = z.object({
-  attempt_count: z.number().int(),
+  attempt_count: z.number().int().min(0),
   placement: z.lazy(() => WorkPlacementReadingV1Schema),
   run_id: z.lazy(() => RunIdSchema),
   task_id: z.lazy(() => TaskIdSchema),
@@ -5584,7 +6150,7 @@ export const WorkTopologyPolicyV1Schema = z.object({
   retention: z.lazy(() => WorktreeRetentionPolicyV1Schema),
   review_topology: z.lazy(() => ReviewTopologyPolicyV1Schema),
   roots: z.array(z.lazy(() => WorktreeRootPolicyV1Schema)),
-  schema_version: z.number().int(),
+  schema_version: z.number().int().min(0).max(65535),
 }).strict();
 export type WorkTopologyPolicyV1 = z.infer<typeof WorkTopologyPolicyV1Schema>;
 
@@ -5593,7 +6159,7 @@ list's: a cursor minted under a superseded topology generation is a typed
 staleness refusal, never a silently different page. */
 export const WorkTopologyViewRequestV1Schema = z.object({
   cursor: z.union([z.lazy(() => WorkAttemptListCursorV1Schema), z.null()]),
-  page_size: z.number().int(),
+  page_size: z.number().int().min(0),
 }).strict();
 export type WorkTopologyViewRequestV1 = z.infer<typeof WorkTopologyViewRequestV1Schema>;
 
@@ -5617,28 +6183,28 @@ export const WorktreePlacementModeV1Schema = z.discriminatedUnion("kind", [z.obj
 export type WorktreePlacementModeV1 = z.infer<typeof WorktreePlacementModeV1Schema>;
 
 export const WorktreeRetentionPolicyV1Schema = z.object({
-  abandoned_retention_seconds: z.number().int().nullable(),
+  abandoned_retention_seconds: z.number().int().safe().min(1).nullable(),
   automatic_gc: z.lazy(() => AutomaticWorktreeGcV1Schema),
-  maximum_retained_per_repository: z.number().int().nullable(),
-  terminal_retention_seconds: z.number().int().nullable(),
+  maximum_retained_per_repository: z.number().int().min(1).max(65535).nullable(),
+  terminal_retention_seconds: z.number().int().safe().min(1).nullable(),
 }).strict();
 export type WorktreeRetentionPolicyV1 = z.infer<typeof WorktreeRetentionPolicyV1Schema>;
 
 export const WorktreeRootPolicyV1Schema = z.object({
   locator: z.lazy(() => SensitiveFilesystemLocatorV1Schema),
-  maximum_active_worktrees: z.number().int(),
+  maximum_active_worktrees: z.number().int().min(1).max(65535),
   repository_scope: z.lazy(() => RepositoryPlacementScopeV1Schema),
   root_id: z.string(),
 }).strict();
 export type WorktreeRootPolicyV1 = z.infer<typeof WorktreeRootPolicyV1Schema>;
 
 export const WorkWorkloadProjectionV1Schema = z.object({
-  actual_concurrency: z.number().int().nullable(),
-  blocked_effort: z.number().int().nullable(),
-  graph_version: z.number().int(),
-  ready_effort: z.number().int().nullable(),
-  requested_concurrency: z.number().int().nullable(),
-  running_effort: z.number().int().nullable(),
-  total_effort: z.number().int(),
+  actual_concurrency: z.number().int().min(0).nullable(),
+  blocked_effort: z.number().int().min(0).nullable(),
+  graph_version: z.number().int().safe().min(0),
+  ready_effort: z.number().int().min(0).nullable(),
+  requested_concurrency: z.number().int().min(0).nullable(),
+  running_effort: z.number().int().min(0).nullable(),
+  total_effort: z.number().int().min(0),
 }).strict();
 export type WorkWorkloadProjectionV1 = z.infer<typeof WorkWorkloadProjectionV1Schema>;

@@ -457,18 +457,16 @@ impl ObservationIdentityMaterialV1 {
     }
 }
 
-/// Compatibility name for Claude observation identity material.
 pub type ClaudeObservationIdentityMaterialV1 = ObservationIdentityMaterialV1;
 
 crate::canonical_text::validated_string_newtype!(
-    plain,
+    schema,
     ObservationContractError,
     validate_sha256;
     CanonicalObservationIdV1 => "observation identity",
     PayloadDigestV1 => "payload digest",
 );
 
-/// Wire-compatible name for the canonical observation identity.
 pub type IdempotencyKeyV1 = CanonicalObservationIdV1;
 
 impl CanonicalObservationIdV1 {
@@ -1573,8 +1571,9 @@ fn validate_canonical_label(value: &str) -> Result<(), ObservationContractError>
     Ok(())
 }
 
-/// Canonical content-addressed reference to a sanitized JSON payload.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(deny_unknown_fields)]
 pub struct PayloadReferenceV1 {
     digest: PayloadDigestV1,
@@ -1600,8 +1599,9 @@ impl PayloadReferenceV1 {
     }
 }
 
-/// Result of mandatory capture sanitization.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SanitizerDispositionV1 {
     Accepted,
@@ -1625,8 +1625,9 @@ impl SanitizerDispositionV1 {
     }
 }
 
-/// Classification applied before content crosses a durable sink.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    JsonSchema, Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SensitivityV1 {
     Unclassified,
@@ -1676,7 +1677,6 @@ impl ReceiptDomainV1 {
     }
 }
 
-/// Canonical inputs used to derive one sanitization receipt reference.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalClaudeSanitizationReceiptMaterialV1 {
     receipt_domain: ReceiptDomainV1,
@@ -1820,8 +1820,8 @@ fn update_hash_frame(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
-/// Receipt binding sanitizer version, disposition, classification, and payload.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SanitizationReceiptV1 {
     receipt: SanitizationReceiptRefV1,
     disposition: SanitizerDispositionV1,

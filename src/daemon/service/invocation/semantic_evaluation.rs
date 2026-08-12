@@ -42,6 +42,7 @@ impl SemanticInvocationControlV1 {
     pub(in crate::daemon) fn interruption(&self, now: UtcMicros) -> Option<ApplicationProblem> {
         if self.cancellation.is_cancelled() {
             return Some(ApplicationProblem::Cancelled {
+                stage: tracedecay_application::CancellationStage::BeforeAdmission,
                 retry: RetryDirective::Never,
                 legal_actions: Vec::new(),
             });
@@ -187,6 +188,7 @@ fn semantic_evaluation_response(
         Err(DaemonSemanticEvaluationExecutionErrorV1::Cancelled) => application_problem(
             request_id,
             ApplicationProblem::Cancelled {
+                stage: tracedecay_application::CancellationStage::DuringRead,
                 retry: RetryDirective::Never,
                 legal_actions: Vec::new(),
             },
@@ -194,6 +196,7 @@ fn semantic_evaluation_response(
         Err(DaemonSemanticEvaluationExecutionErrorV1::TimedOut) => application_problem(
             request_id,
             ApplicationProblem::TimedOut {
+                stage: tracedecay_application::CancellationStage::DuringRead,
                 retry: RetryDirective::Never,
                 legal_actions: Vec::new(),
             },

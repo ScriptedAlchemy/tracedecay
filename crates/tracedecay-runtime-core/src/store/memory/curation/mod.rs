@@ -2,7 +2,10 @@
 
 mod apply;
 mod relations;
+mod review;
 
+#[cfg(test)]
+mod destructive_tests;
 #[cfg(test)]
 mod merge_tests;
 #[cfg(test)]

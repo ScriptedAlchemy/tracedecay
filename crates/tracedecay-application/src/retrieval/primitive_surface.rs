@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
+use crate::memory::FactSearchHitV1;
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -198,40 +199,6 @@ pub struct PrimitiveSearchCoverageV1 {
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ContextMemoryFactV1 {
-    pub fact_id: i64,
-    pub content: String,
-    pub category: String,
-    pub tags: Vec<String>,
-    pub entities: Vec<String>,
-    pub trust_score: f64,
-    pub source: Option<String>,
-    pub retrieval_count: i64,
-    pub access_count: i64,
-    pub helpful_count: i64,
-    pub unhelpful_count: i64,
-    pub created_at: i64,
-    pub updated_at: i64,
-    pub last_retrieved_at: Option<i64>,
-    pub last_recalled_at: Option<i64>,
-    pub last_feedback_at: Option<i64>,
-    pub metadata: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextMemoryMatchV1 {
-    pub fact: ContextMemoryFactV1,
-    pub score: f64,
-    pub fts_score: f64,
-    pub jaccard_score: f64,
-    pub holographic_score: f64,
-    pub trust_score: f64,
-    pub why: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct ContextResultV1 {
     pub task: String,
     pub mode: ContextModeV1,
@@ -240,7 +207,7 @@ pub struct ContextResultV1 {
     pub related_symbols: Vec<PrimitiveSymbolLocationV1>,
     pub code: Vec<ContextCodeBlockV1>,
     pub coverage: PrimitiveSearchCoverageV1,
-    pub memory_matches: Vec<ContextMemoryMatchV1>,
+    pub memory_matches: Vec<FactSearchHitV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_matches_error: Option<String>,
 }

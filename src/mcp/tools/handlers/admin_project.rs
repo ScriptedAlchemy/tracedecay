@@ -1,8 +1,14 @@
 //! Unadvertised daemon-owned project operations used by one-shot CLI commands.
 
-use serde::Deserialize;
-use serde_json::{Map, Value, json};
 use std::path::Path;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use tracedecay_agent_hosts::automation::{
+    lifecycle::AutomationRunControl, run_ledger::AutomationTrigger,
+};
+use tracedecay_application::{CancellationSignal, Deadline, RequestId, now_micros};
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
 
@@ -15,24 +21,21 @@ use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 use super::super::ToolResult;
 use super::json_result;
 
+mod automation_terminal;
+mod public_memory_automation;
+use automation_terminal::{
+    pre_admission_problem_value, settle_run as automation_run_value,
+    terminal_response_value as automation_terminal_response,
+};
+pub(super) use public_memory_automation::admin_project_args as public_memory_automation_args;
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum AdminProjectAction {
     CounterGet,
     CounterReset,
     StatusAccounting,
-    MemoryStatus,
-    RuntimeStatus {
-        json: bool,
-    },
     GitignoreStatus,
-    MemoryCurate {
-        apply: bool,
-        llm: bool,
-        llm_ops: Option<Value>,
-        max_clusters: usize,
-        min_confidence: f64,
-    },
     Bench {
         queries_toml: Option<String>,
         json: bool,
@@ -48,6 +51,8 @@ enum AdminProjectAction {
     AutomationRun {
         task: AutomationRunTask,
         options: Value,
+        #[serde(default)]
+        trigger: AutomationTrigger,
     },
     AutomationReconcile {
         scope: crate::dashboard::AutomationReconcileScope,
@@ -65,11 +70,11 @@ enum AutomationRunTask {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MemoryCurationOptions {
-    max_clusters: usize,
+    fact_review_limit: usize,
     min_confidence: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SessionReflectionOptions {
     provider: String,
@@ -105,6 +110,15 @@ fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("project memory application failed: {error}"),
     }
+}
+
+fn admin_project_run_control(
+    deadline: Deadline,
+    cancellation: CancellationSignal,
+) -> AutomationRunControl {
+    AutomationRunControl::from_interrupted(Arc::new(move || {
+        cancellation.is_cancelled() || deadline.is_elapsed_at(now_micros())
+    }))
 }
 
 fn parse_automatic_fact_apply_id(value: String) -> Result<ProvenanceId> {
@@ -153,7 +167,7 @@ fn automatic_fact_receipt_json(receipt: &ProjectMemoryAutomaticFactReceiptV1) ->
             json!({
                 "content": request.content(),
                 "category": request.category(),
-                "source": request.source(),
+                "source_label": request.source_label(),
                 "tags": request.tags(),
                 "entities": request.entities(),
                 "trust": request.default_trust(),
@@ -162,21 +176,15 @@ fn automatic_fact_receipt_json(receipt: &ProjectMemoryAutomaticFactReceiptV1) ->
         ),
         ("evidence".to_owned(), json!(receipt.evidence())),
         (
-            "recorded_at".to_owned(),
-            json!(receipt.recorded_at().0.div_euclid(1_000_000)),
+            "recorded_at_micros".to_owned(),
+            json!(receipt.recorded_at().0),
         ),
     ]);
     if let Some(fact_id) = receipt.applied_fact_id() {
         value.insert(
-            "applied_canonical_fact_id".to_owned(),
+            "applied_fact_id".to_owned(),
             Value::String(fact_id.as_str().to_owned()),
         );
-    }
-    if let Some(legacy_fact_id) = receipt
-        .applied_mapping()
-        .and_then(|mapping| mapping.legacy_fact_id())
-    {
-        value.insert("applied_fact_id".to_owned(), json!(legacy_fact_id));
     }
     if let Some(reason) = receipt.quarantine_reason() {
         value.insert(
@@ -194,7 +202,14 @@ pub(super) async fn handle_admin_project(
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     profile_root: Option<&Path>,
     daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
+    application_request_id: Option<RequestId>,
+    application_deadline: Deadline,
+    application_cancellation: CancellationSignal,
 ) -> Result<ToolResult> {
+    let run_control = admin_project_run_control(
+        application_deadline.clone(),
+        application_cancellation.clone(),
+    );
     let action: AdminProjectAction =
         serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
             message: format!("invalid tracedecay_admin_project arguments: {error}"),
@@ -235,31 +250,6 @@ pub(super) async fn handle_admin_project(
                 "global_tokens_saved": global_tokens_saved,
             })
         }
-        AdminProjectAction::MemoryStatus => {
-            let status = cg.memory_status().await?;
-            let db = cg.open_project_store_db().await?;
-            let overview = project_memory_application(cg, &db)?
-                .dashboard_overview(1, 1)
-                .await
-                .map_err(memory_application_error)?;
-            let largest_bank_fact_count = overview
-                .memory_banks
-                .first()
-                .map_or(0, |bank| bank.fact_count);
-            json!({
-                "status": status,
-                "largest_bank_fact_count": largest_bank_fact_count,
-            })
-        }
-        AdminProjectAction::RuntimeStatus { json } => {
-            let snapshot = crate::runtime_telemetry::collect(cg).await?;
-            let output = if json {
-                crate::runtime_telemetry::to_pretty_json(&snapshot)
-            } else {
-                crate::runtime_telemetry::to_text_report(&snapshot)
-            };
-            json!({ "output": output })
-        }
         AdminProjectAction::GitignoreStatus => {
             let configuration = cg
                 .configuration_runtime()
@@ -273,22 +263,6 @@ pub(super) async fn handle_admin_project(
                 "git_ignore": configuration.config.git_ignore,
                 "revision_id": configuration.revision_id.as_str(),
             })
-        }
-        AdminProjectAction::MemoryCurate {
-            apply,
-            llm,
-            llm_ops,
-            max_clusters,
-            min_confidence,
-        } => {
-            let options = crate::dashboard::memory_curate::MemoryCurateOptions {
-                apply,
-                llm,
-                llm_ops,
-                max_clusters: max_clusters.clamp(1, 50),
-                min_confidence: min_confidence.clamp(0.0, 1.0),
-            };
-            crate::dashboard::memory_curate::run_memory_curate(cg, &options).await?
         }
         AdminProjectAction::Bench {
             queries_toml,
@@ -321,7 +295,12 @@ pub(super) async fn handle_admin_project(
                 .map(parse_automatic_fact_state)
                 .transpose()?;
             let page = memory
-                .list_project_memory_automatic_fact_receipts(state, None, limit)
+                .list_project_memory_automatic_fact_receipts(
+                    state,
+                    None,
+                    limit,
+                    run_control.read_control(),
+                )
                 .await
                 .map_err(memory_application_error)?;
             let receipts = page
@@ -343,7 +322,7 @@ pub(super) async fn handle_admin_project(
             let db = cg.open_project_store_db().await?;
             let memory = project_memory_application(cg, &db)?;
             let receipt = memory
-                .get_project_memory_automatic_fact_receipt(apply_id)
+                .get_project_memory_automatic_fact_receipt(apply_id, run_control.read_control())
                 .await
                 .map_err(memory_application_error)?
                 .ok_or_else(|| TraceDecayError::Config {
@@ -351,11 +330,28 @@ pub(super) async fn handle_admin_project(
                 })?;
             json!({ "receipt": automatic_fact_receipt_json(&receipt) })
         }
-        AdminProjectAction::AutomationRun { task, options } => {
-            run_automation(cg, profile_root, task, options, daemon_invocation_service).await?
+        AdminProjectAction::AutomationRun {
+            task,
+            options,
+            trigger,
+        } => {
+            run_automation(
+                cg,
+                profile_root,
+                task,
+                options,
+                trigger,
+                daemon_invocation_service,
+                application_request_id,
+                application_deadline,
+                application_cancellation,
+                &run_control,
+            )
+            .await?
         }
     };
-    Ok(json_result(&value))
+    let semantic_error = value.get("kind").and_then(Value::as_str) == Some("problem");
+    Ok(json_result(&value).with_semantic_error(semantic_error))
 }
 
 async fn run_automation(
@@ -363,11 +359,15 @@ async fn run_automation(
     profile_root: Option<&Path>,
     task: AutomationRunTask,
     options: Value,
+    trigger: AutomationTrigger,
     daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
+    application_request_id: Option<RequestId>,
+    application_deadline: Deadline,
+    application_cancellation: CancellationSignal,
+    run_control: &AutomationRunControl,
 ) -> Result<Value> {
     use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
     use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
     use tracedecay_agent_hosts::automation::runner::{
         MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
         SkillWriterAutomationOptions, run_memory_curator_with_backend,
@@ -393,64 +393,162 @@ async fn run_automation(
             message: format!("automation configuration authority is unavailable: {error}"),
         })?;
     let config = from_configuration_snapshot(&pinned.snapshot)?;
+    let configuration_digest =
+        crate::daemon::automation_effect::pinned_automation_configuration_digest(
+            &pinned.revision_id,
+            &pinned.snapshot.effective_behavior_digest,
+            &pinned.snapshot.resolution_provenance_digest,
+        )?;
     let backend = CodexAppServerBackend::from_automation_config(&config);
+    let request_id = application_request_id.ok_or_else(|| TraceDecayError::Config {
+        message: "manual automation application request identity is unavailable".to_owned(),
+    })?;
 
     let run = match task {
         AutomationRunTask::MemoryCuration => {
             let options = decode_options::<MemoryCurationOptions>(options)?;
-            let run = run_memory_curator_with_backend(
+            let run_id = request_id.as_str().to_owned();
+            let run_options = MemoryCuratorAutomationOptions {
+                trigger,
+                run_id: Some(run_id.clone()),
+                fact_review_limit: options.fact_review_limit,
+                min_confidence: options.min_confidence,
+            };
+            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+                invocation_service,
                 cg,
-                &config,
-                &pinned.revision_id,
-                &backend,
-                MemoryCuratorAutomationOptions {
-                    trigger: AutomationTrigger::ManualCli,
-                    run_id: None,
-                    max_clusters: options.max_clusters,
-                    min_confidence: options.min_confidence,
-                },
+                cg.project_root(),
+                &cg.store_layout().dashboard_root,
+                request_id.clone(),
+                application_deadline.clone(),
+                &application_cancellation,
+                now_micros(),
+                configuration_digest.clone(),
+                crate::daemon::automation_effect::memory_curator_run_request(
+                    &run_id,
+                    options.fact_review_limit,
+                    options.min_confidence,
+                )?,
             )
             .await?;
-            crate::daemon::record_project_automation_run(
-                producer.as_ref(),
-                cg.project_root(),
-                &run.ledger_record,
-                "manual_mcp",
-            );
-            serde_json::to_value(run)?
+            let effect = match admission {
+                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => {
+                    effect
+                }
+                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
+                    return automation_terminal_response(&terminal);
+                }
+                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
+                    problem,
+                ) => return pre_admission_problem_value(problem),
+            };
+            let (run, ledger_record) = automation_run_value(
+                run_memory_curator_with_backend(
+                    cg,
+                    &config,
+                    &pinned.revision_id,
+                    &backend,
+                    run_options,
+                    run_control,
+                )
+                .await,
+                effect,
+            )
+            .await?;
+            if let Some(ledger_record) = ledger_record.as_ref() {
+                crate::daemon::record_project_automation_run(
+                    producer.as_ref(),
+                    cg.project_root(),
+                    ledger_record,
+                    "manual_mcp",
+                );
+            }
+            if run.get("kind").and_then(Value::as_str) == Some("problem") {
+                return Ok(run);
+            }
+            if ledger_record.is_none() {
+                return Err(TraceDecayError::Config {
+                    message: "settled memory curator run lost its observation ledger".to_owned(),
+                });
+            }
+            run
         }
         AutomationRunTask::SessionReflection => {
             let options = decode_options::<SessionReflectionOptions>(options)?;
-            let run = run_session_reflector_with_backend(
+            let run_id = request_id.as_str().to_owned();
+            let run_options = SessionReflectorAutomationOptions {
+                trigger,
+                run_id: Some(run_id.clone()),
+                provider: options.provider,
+                query: options.query,
+                scope: options.scope,
+                session_id: options.session_id,
+                include_summaries: options.include_summaries,
+                evidence_limit: options.evidence_limit,
+                sort: options.sort,
+                source: options.source,
+                role: options.role,
+                start_time: options.start_time,
+                end_time: options.end_time,
+                ..SessionReflectorAutomationOptions::default()
+            };
+            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+                invocation_service,
                 cg,
-                &config,
-                &pinned.revision_id,
-                &backend,
-                SessionReflectorAutomationOptions {
-                    trigger: AutomationTrigger::ManualCli,
-                    run_id: None,
-                    provider: options.provider,
-                    query: options.query,
-                    scope: options.scope,
-                    session_id: options.session_id,
-                    include_summaries: options.include_summaries,
-                    evidence_limit: options.evidence_limit,
-                    sort: options.sort,
-                    source: options.source,
-                    role: options.role,
-                    start_time: options.start_time,
-                    end_time: options.end_time,
-                    ..SessionReflectorAutomationOptions::default()
-                },
+                cg.project_root(),
+                &cg.store_layout().dashboard_root,
+                request_id,
+                application_deadline,
+                &application_cancellation,
+                now_micros(),
+                configuration_digest,
+                crate::daemon::automation_effect::session_reflector_run_request(
+                    &run_id,
+                    &run_options,
+                )?,
             )
             .await?;
-            crate::daemon::record_project_automation_run(
-                producer.as_ref(),
-                cg.project_root(),
-                &run.ledger_record,
-                "manual_mcp",
-            );
-            serde_json::to_value(run)?
+            let effect = match admission {
+                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => {
+                    effect
+                }
+                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
+                    return automation_terminal_response(&terminal);
+                }
+                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
+                    problem,
+                ) => return pre_admission_problem_value(problem),
+            };
+            let (run, ledger_record) = automation_run_value(
+                run_session_reflector_with_backend(
+                    cg,
+                    &config,
+                    run_control,
+                    &pinned.revision_id,
+                    &backend,
+                    run_options,
+                )
+                .await,
+                effect,
+            )
+            .await?;
+            if let Some(ledger_record) = ledger_record.as_ref() {
+                crate::daemon::record_project_automation_run(
+                    producer.as_ref(),
+                    cg.project_root(),
+                    ledger_record,
+                    "manual_mcp",
+                );
+            }
+            if run.get("kind").and_then(Value::as_str) == Some("problem") {
+                return Ok(run);
+            }
+            if ledger_record.is_none() {
+                return Err(TraceDecayError::Config {
+                    message: "settled session reflector run lost its observation ledger".to_owned(),
+                });
+            }
+            run
         }
         AutomationRunTask::SkillWriting => {
             let options = decode_options::<SkillWritingOptions>(options)?;
@@ -504,6 +602,13 @@ fn decode_options<T: serde::de::DeserializeOwned>(options: Value) -> Result<T> {
 mod tests {
     use super::*;
 
+    fn test_application_control() -> (Deadline, CancellationSignal) {
+        (
+            Deadline::new(tracedecay_domain::UtcMicros(i64::MAX)).unwrap(),
+            CancellationSignal::active("cancel.admin-project-test").unwrap(),
+        )
+    }
+
     fn tool_json(result: &ToolResult) -> Value {
         let text = result.value["content"][0]["text"]
             .as_str()
@@ -516,8 +621,8 @@ mod tests {
         apply_id: &str,
         content: &str,
     ) -> ProjectMemoryAutomaticFactReceiptV1 {
-        use crate::memory::types::{AddFactRequest, MemoryCategory};
-        use tracedecay_domain::ActorId;
+        use tracedecay_domain::{ActorId, Confidence, FactCategoryV1};
+        use tracedecay_usecases::memory::ProjectMemoryFactAddRequest;
 
         let owner = cg.project_memory_owner().unwrap();
         let db = cg.open_project_store_db().await.unwrap();
@@ -525,13 +630,13 @@ mod tests {
         let actor = ActorId::new("automation.session-reflector".to_owned()).unwrap();
         let request = tracedecay_usecases::memory::automatic_fact_add_command(
             owner,
-            AddFactRequest {
+            ProjectMemoryFactAddRequest {
                 content: content.to_owned(),
-                category: MemoryCategory::Decision,
-                source: Some("admin-project-test".to_owned()),
+                category: FactCategoryV1::Decision,
+                source_label: Some("admin-project-test".to_owned()),
                 tags: Vec::new(),
                 entities: Vec::new(),
-                trust: Some(0.9),
+                trust: Some(Confidence::new(0.9).unwrap()),
                 metadata: json!({}),
             },
             "run.admin-project-test",
@@ -539,11 +644,14 @@ mod tests {
             Some(actor),
         )
         .unwrap();
+        let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
+        let write_control = run_control.write_control();
         memory
             .apply_project_memory_automatic_fact(
                 ProvenanceId::new(apply_id.to_owned()).unwrap(),
                 request,
                 tracedecay_store::ProjectMemoryAutomaticFactEvidenceV1::default(),
+                &write_control,
             )
             .await
             .unwrap()
@@ -579,6 +687,7 @@ mod tests {
         )
         .await;
 
+        let (deadline, cancellation) = test_application_control();
         let applied = tool_json(
             &handle_admin_project(
                 &cg,
@@ -591,6 +700,9 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                deadline,
+                cancellation,
             )
             .await
             .unwrap(),
@@ -605,6 +717,7 @@ mod tests {
                 .all(|receipt| receipt["state"] == "applied")
         );
 
+        let (deadline, cancellation) = test_application_control();
         let viewed = tool_json(
             &handle_admin_project(
                 &cg,
@@ -613,6 +726,9 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                deadline,
+                cancellation,
             )
             .await
             .unwrap(),
@@ -629,10 +745,10 @@ mod tests {
         );
         assert_eq!(viewed["receipt"]["add_fact_request"]["trust"], json!(0.9));
         assert_eq!(
-            viewed["receipt"]["add_fact_request"]["source"],
+            viewed["receipt"]["add_fact_request"]["source_label"],
             "admin-project-test"
         );
-        assert!(viewed["receipt"]["applied_canonical_fact_id"].is_string());
+        assert!(viewed["receipt"]["applied_fact_id"].is_string());
 
         for action in [
             json!({ "action": "fact_apply", "id": apply_id }),
@@ -642,10 +758,21 @@ mod tests {
                 "reason": "not durable",
             }),
         ] {
+            let (deadline, cancellation) = test_application_control();
             assert!(
-                handle_admin_project(&cg, action, None, None, None, None)
-                    .await
-                    .is_err(),
+                handle_admin_project(
+                    &cg,
+                    action,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    deadline,
+                    cancellation,
+                )
+                .await
+                .is_err(),
                 "manual fact mutations must not be accepted"
             );
         }
@@ -665,6 +792,14 @@ mod tests {
         ));
 
         for retired_action in [
+            json!({
+                "action": "memory_curate",
+                "apply": true,
+                "llm": false,
+                "llm_ops": null,
+                "fact_review_limit": 12,
+                "min_confidence": 0.75,
+            }),
             json!({ "action": "fact_apply", "id": "fact_1" }),
             json!({
                 "action": "fact_reject",
@@ -701,16 +836,34 @@ mod tests {
         let run_request = json!({
             "action": "automation_run",
             "task": "memory_curation",
-            "options": { "max_clusters": 12, "min_confidence": 0.75 }
+            "options": { "fact_review_limit": 12, "min_confidence": 0.75 }
         });
         let action = serde_json::from_value::<AdminProjectAction>(run_request).unwrap();
-        let AdminProjectAction::AutomationRun { task, options } = action else {
+        let AdminProjectAction::AutomationRun {
+            task,
+            options,
+            trigger,
+        } = action
+        else {
             panic!("manual automation request did not reach automation_run");
         };
         assert!(matches!(task, AutomationRunTask::MemoryCuration));
+        assert_eq!(trigger, AutomationTrigger::ManualCli);
         let options = decode_options::<MemoryCurationOptions>(options).unwrap();
-        assert_eq!(options.max_clusters, 12);
+        assert_eq!(options.fact_review_limit, 12);
         assert!((options.min_confidence - 0.75).abs() < f64::EPSILON);
+        let public = public_memory_automation_args(json!({})).unwrap();
+        let AdminProjectAction::AutomationRun {
+            task,
+            trigger,
+            options,
+        } = serde_json::from_value(public).unwrap()
+        else {
+            panic!("public memory automation did not reach automation_run");
+        };
+        assert!(matches!(task, AutomationRunTask::MemoryCuration));
+        assert_eq!(trigger, AutomationTrigger::ManualMcp);
+        assert!(decode_options::<MemoryCurationOptions>(options).is_ok());
         assert!(matches!(
             serde_json::from_value::<AdminProjectAction>(json!({
                 "action": "automation_reconcile",
@@ -735,7 +888,8 @@ mod tests {
                 "accepted_count": 1,
                 "rejected_count": 0,
                 "started_at": "2026-01-01T00:00:00Z",
-                "completed_at": "2026-01-01T00:00:01Z"
+                "completed_at": "2026-01-01T00:00:01Z",
+                "completed_at_micros": 1_767_225_601_000_000_i64
             }
         }))
         .unwrap();
@@ -770,7 +924,7 @@ mod tests {
         let run = serde_json::from_value::<AdminProjectAction>(json!({
             "action": "automation_run",
             "task": "memory_curation",
-            "options": { "max_clusters": 12, "min_confidence": 0.75 }
+            "options": { "fact_review_limit": 12, "min_confidence": 0.75 }
         }))
         .unwrap();
         assert!(matches!(
@@ -782,7 +936,7 @@ mod tests {
         ));
         assert!(
             decode_options::<MemoryCurationOptions>(json!({
-                "max_clusters": 12,
+                "fact_review_limit": 12,
                 "min_confidence": 0.75,
                 "unknown": true
             }))

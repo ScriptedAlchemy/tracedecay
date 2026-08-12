@@ -1,25 +1,16 @@
 //! `tracedecay dashboard` — local HTTP server for the dashboard UIs.
 //!
-//! Serves two dashboard plugin bundles ported from Hermes (the
-//! holographic-memory explorer and the LCM explorer) behind a small
-//! standalone shell, plus the JSON API both UIs expect — re-implemented on
-//! top of tracedecay's own data:
+//! Serves TraceDecay's embedded dashboard and its project-scoped JSON APIs:
 //!
-//! - `/api/plugins/holographic/*`  → project memory store
-//!   (`memory_facts` / `memory_entities` / `memory_banks` in the project DB)
+//! - `/api/plugins/holographic/*`  → canonical project facts, verified Grafeo
+//!   topology, and deterministic FHRR projections derived on read
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
 //!   (`lcm_raw_messages` / `lcm_summary_nodes` in the resolved active project
 //!   store where transcript ingest writes; see [`resolve_lcm_store`] for the
 //!   fail-closed authority selection)
 //!
-//! The endpoint paths and JSON payload shapes intentionally mirror the
-//! original Hermes plugin APIs (`plugins/memory/holographic_plus/dashboard/
-//! plugin_api.py` and the hermes-lcm `dashboard/plugin_api.py`) so the plugin
-//! bundles run unmodified under both hosts. The Hermes-side wrapper plugin
-//! reverse-proxies to this server, making this the canonical implementation.
-//!
-//! `/api/capabilities` advertises which features are live so hosts (or a
-//! richer Hermes wrapper) can extend the surface without forking the UI.
+//! `/api/capabilities` advertises which current TraceDecay authorities are
+//! mounted for the selected project.
 
 pub use tracedecay_agent_hosts::analytics;
 pub use tracedecay_usecases as application;
@@ -61,7 +52,7 @@ mod automation_authority;
 pub use automation_authority::{
     DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
     DashboardAutomationRunFutureV1, DashboardAutomationRunInvocationV1,
-    DashboardAutomationRunPortV1, DashboardAutomationRunRequestV1,
+    DashboardAutomationRunOutcomeV1, DashboardAutomationRunPortV1, DashboardAutomationRunRequestV1,
     DashboardManagedSkillCommandFutureV1, DashboardManagedSkillCommandInvocationV1,
     DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandPortV1,
     DashboardManagedSkillCommandV1,
@@ -110,7 +101,6 @@ pub use loom_api::{
 };
 mod memory_analysis;
 mod memory_api;
-pub mod memory_curate;
 mod memory_service;
 pub mod project_graph;
 pub mod project_registry;
@@ -153,7 +143,6 @@ use tower::ServiceExt;
 use tracedecay_api::WorkOperation;
 
 use crate::tracedecay::TraceDecay;
-use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_agent_hosts::automation::backend;
 use tracedecay_agent_hosts::automation::config::{AutomationBackend, AutomationHostMode};
 use tracedecay_domain::{FactOwnerV1, ProjectId};
@@ -1050,6 +1039,7 @@ struct DashboardHttpAdmission {
 }
 
 const DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS: i64 = 30_000_000;
+const DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS: i64 = 300_000_000;
 static DASHBOARD_HTTP_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Transport-owned controls attached to one admitted dashboard HTTP request.
@@ -1155,11 +1145,9 @@ async fn admit_dashboard_http_request(
             Ok(cancellation) => cancellation,
             Err(error) => return internal_error_response(error),
         };
-    let deadline_at = tracedecay_domain::UtcMicros(
-        observed_at
-            .0
-            .saturating_add(DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS),
-    );
+    let request_deadline_micros = dashboard_http_request_deadline_micros(request.uri().path());
+    let deadline_at =
+        tracedecay_domain::UtcMicros(observed_at.0.saturating_add(request_deadline_micros));
     let deadline = match tracedecay_application::Deadline::new(deadline_at) {
         Ok(deadline) => deadline,
         Err(error) => return internal_error_response(error),
@@ -1179,6 +1167,36 @@ async fn admit_dashboard_http_request(
     let response = next.run(request).await;
     cancellation_guard.completed = true;
     response
+}
+
+fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
+    if matches!(
+        path,
+        "/api/automation/run/memory-curator"
+            | "/api/automation/run/session-reflection"
+            | "/api/automation/run/skill-writing"
+    ) || is_project_scoped_automation_run_path(path)
+    {
+        DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS
+    } else {
+        DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS
+    }
+}
+
+fn is_project_scoped_automation_run_path(path: &str) -> bool {
+    let Some(project_and_tail) = path.strip_prefix("/api/projects/") else {
+        return false;
+    };
+    let Some((project_id, tail)) = project_and_tail.split_once('/') else {
+        return false;
+    };
+    !project_id.is_empty()
+        && matches!(
+            tail,
+            "automation/run/memory-curator"
+                | "automation/run/session-reflection"
+                | "automation/run/skill-writing"
+        )
 }
 
 fn internal_error_response(error: impl std::fmt::Display) -> Response {
@@ -1259,39 +1277,11 @@ pub async fn router(
     mut state: DashboardState,
     spa_routes: Router,
 ) -> Result<Router> {
-    // Fact writes defer derived memory rebuilds. Invoke the canonical bounded
-    // convergence policy exactly once for the active writable project before
-    // serving either startup path. Selected-project states are opened later
-    // through the read-only gateway and never pass through this function.
-    match memory_application_for_db(state.memory_owner.clone(), &state.mem_db) {
-        Ok(application) => {
-            match application
-                .converge_derived_memory("dashboard-startup-repair")
-                .await
-            {
-                Ok(report) if report.is_pending() => {
-                    tracing::warn!(
-                        "Derived memory startup convergence is pending; dashboard startup is \
-                         proceeding while remaining repair is deferred to the daemon scheduler"
-                    );
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!("Derived memory startup repair skipped: {error}");
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!("Derived memory startup repair skipped: {error}");
-        }
-    }
-
     // application primitive routes are bound to the active-project daemon. When the
     // daemon authority record is unavailable (standalone `tracedecay dashboard`
     // or the in-process test server), mounting them would otherwise fail the
     // whole server before it binds. Degrade gracefully instead — serve the core
-    // dashboard and skip the `/api/application` surface, mirroring the
-    // best-effort derived-memory repair above.
+    // dashboard and skip the `/api/application` surface.
     let application = match ActiveProjectApplicationRoutes::for_active_project(
         cg,
         state.application_invocation_executor.clone(),
@@ -1390,14 +1380,6 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/plugins/holographic/similarity",
             get(memory_api::similarity),
-        )
-        .route(
-            "/api/plugins/holographic/curation/plan",
-            get(memory_api::curation_plan),
-        )
-        .route(
-            "/api/plugins/holographic/curation/runs",
-            get(memory_api::curation_runs),
         )
         .route(
             "/api/plugins/holographic/curation/config",
@@ -1604,6 +1586,17 @@ async fn project_scoped_api_gateway(
     AxumPath((project_id, tail)): AxumPath<(String, String)>,
     mut req: Request<Body>,
 ) -> Response {
+    if is_profile_owned_automation_skills_route(&tail) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "status": "not_project_scoped",
+                "detail": "managed automation skills are profile-owned and are not available through project-qualified routes",
+                "project_id": project_id,
+            })),
+        )
+            .into_response();
+    }
     let application_read = selected_project_application_read(req.method(), &tail);
     if runtime.active_project_id() != Some(project_id.as_str())
         && !matches!(req.method(), &Method::GET | &Method::HEAD)
@@ -1644,83 +1637,6 @@ async fn project_scoped_api_gateway(
         .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
-    if is_project_scoped_retained_curation(req.method(), &tail) {
-        let Some(project_graph) = selected.state.project_graph.as_deref() else {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "unavailable",
-                    "detail": "active project retained curation authority is unavailable",
-                    "project_id": project_id,
-                })),
-            )
-                .into_response();
-        };
-        let application = match ActiveProjectApplicationRoutes::for_active_project(
-            project_graph,
-            selected.state.application_invocation_executor.clone(),
-        ) {
-            Ok(application) => application,
-            Err(err) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({
-                        "status": "unavailable",
-                        "detail": format!(
-                            "active project retained curation authority is unavailable: {err}"
-                        ),
-                        "project_id": project_id,
-                    })),
-                )
-                    .into_response();
-            }
-        };
-        let rewritten = format!(
-            "{}{}",
-            tracedecay_api::retained_route_path(
-                tracedecay_application::RetainedSurfaceOperation::FactStoreCurate,
-            ),
-            query
-        );
-        return match rewritten.parse::<Uri>() {
-            Ok(uri) => {
-                *req.uri_mut() = uri;
-                let (mut parts, body) = req.into_parts();
-                let request_control = parts
-                    .extensions
-                    .get::<DashboardHttpRequestControlV1>()
-                    .cloned();
-                parts.extensions.clear();
-                if let Some(request_control) = request_control {
-                    parts.extensions.insert(request_control);
-                }
-                let req = Request::from_parts(parts, body);
-                match application.http_router.oneshot(req).await {
-                    Ok(response) => response,
-                    Err(err) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "status": "error",
-                            "detail": format!(
-                                "dashboard retained curation route failed: {err}"
-                            ),
-                        })),
-                    )
-                        .into_response(),
-                }
-            }
-            Err(err) => (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "status": "bad_request",
-                    "detail": format!(
-                        "invalid project-scoped retained curation path: {err}"
-                    ),
-                })),
-            )
-                .into_response(),
-        };
-    }
     if let Some(read) = application_read {
         let Some(project_graph) = selected.state.project_graph.as_deref() else {
             return (
@@ -1811,6 +1727,10 @@ async fn project_scoped_api_gateway(
     }
 }
 
+fn is_profile_owned_automation_skills_route(tail: &str) -> bool {
+    tail == "automation/skills" || tail.starts_with("automation/skills/")
+}
+
 /// A canonical application read a selected project answers for itself.
 ///
 /// These are POSTs, so the gateway's read-only rule for non-active projects
@@ -1849,15 +1769,6 @@ fn selected_project_application_read(
             .any(|operation| tail.strip_prefix("work/") == Some(operation.route_segment()))
             .then_some(SelectedProjectApplicationRead::Work),
     }
-}
-
-fn is_project_scoped_retained_curation(method: &Method, tail: &str) -> bool {
-    method == Method::POST
-        && tail
-            == tracedecay_api::retained_application_route_path(
-                tracedecay_application::RetainedSurfaceOperation::FactStoreCurate,
-            )
-            .trim_start_matches('/')
 }
 
 async fn forward_project_request(
@@ -1987,6 +1898,120 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod authority_tests {
     use super::*;
+
+    #[test]
+    fn automation_run_routes_receive_the_backend_sized_deadline_budget() {
+        assert_eq!(
+            dashboard_http_request_deadline_micros("/api/automation/run/memory-curator"),
+            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+        );
+        assert_eq!(
+            dashboard_http_request_deadline_micros("/api/automation/run/session-reflection"),
+            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+        );
+        assert_eq!(
+            dashboard_http_request_deadline_micros("/api/automation/run/skill-writing"),
+            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+        );
+        assert_eq!(
+            dashboard_http_request_deadline_micros(
+                "/api/projects/project-7/automation/run/memory-curator"
+            ),
+            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+        );
+        assert_eq!(
+            dashboard_http_request_deadline_micros(
+                "/api/projects/project-7/automation/run/session-reflection"
+            ),
+            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+        );
+        assert_eq!(
+            dashboard_http_request_deadline_micros(
+                "/api/projects/project-7/automation/run/skill-writing"
+            ),
+            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+        );
+        assert_eq!(
+            dashboard_http_request_deadline_micros("/api/automation/runs"),
+            DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS,
+        );
+        assert_eq!(
+            dashboard_http_request_deadline_micros("/api/plugins/holographic/status"),
+            DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS,
+        );
+        for near_match in [
+            "/api/projects//automation/run/memory-curator",
+            "/api/projects/project-7/automation/run/memory-curator/extra",
+            "/api/projects/project-7/automation/run/memory-curatorish",
+            "/api/projects/project-7/automation/run/skill-writer",
+            "/api/projects/project-7/automation/runs",
+        ] {
+            assert_eq!(
+                dashboard_http_request_deadline_micros(near_match),
+                DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS,
+                "near-match route must retain the ordinary deadline: {near_match}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admitted_automation_route_carries_the_backend_sized_deadline() {
+        async fn deadline_budget(
+            axum::Extension(control): axum::Extension<DashboardHttpRequestControlV1>,
+        ) -> Json<Value> {
+            Json(json!({
+                "budget_micros": control.deadline().expires_at.0 - control.observed_at().0,
+            }))
+        }
+
+        let port = 47_123;
+        let app = with_dashboard_http_admission(
+            Router::new()
+                .route("/api/automation/run/memory-curator", post(deadline_budget))
+                .route(
+                    "/api/projects/{project_id}/automation/run/memory-curator",
+                    post(deadline_budget),
+                )
+                .route("/api/automation/runs", get(deadline_budget)),
+            std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        );
+        for (method, path, expected) in [
+            (
+                Method::POST,
+                "/api/automation/run/memory-curator",
+                DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+            ),
+            (
+                Method::GET,
+                "/api/automation/runs",
+                DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS,
+            ),
+            (
+                Method::POST,
+                "/api/projects/project-7/automation/run/memory-curator",
+                DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header(header::HOST, format!("127.0.0.1:{port}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("admitted request");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .expect("response body");
+            let payload: Value = serde_json::from_slice(&body).expect("deadline response");
+            assert_eq!(payload["budget_micros"], json!(expected));
+        }
+    }
 
     mod automatic_fact_receipts_routes;
 

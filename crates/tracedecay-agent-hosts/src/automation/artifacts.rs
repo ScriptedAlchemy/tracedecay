@@ -233,6 +233,7 @@ mod tests {
             artifacts: Vec::new(),
             started_at: "0".to_string(),
             completed_at: "1".to_string(),
+            completed_at_micros: 1_000_000,
         }
     }
 

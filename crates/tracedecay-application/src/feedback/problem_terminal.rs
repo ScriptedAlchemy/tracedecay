@@ -35,6 +35,9 @@ fn terminal_for_problem_kind(
             vec![ProviderEvaluationStateV1::Partial],
         ),
         ApplicationProblemKind::ResetRequired => (FeedbackCycleTerminationV1::Blocked, Vec::new()),
+        ApplicationProblemKind::ExecutionFailed => {
+            (FeedbackCycleTerminationV1::Blocked, Vec::new())
+        }
         ApplicationProblemKind::InvalidRequest
         | ApplicationProblemKind::NotFoundOrNotAuthorized
         | ApplicationProblemKind::Conflict

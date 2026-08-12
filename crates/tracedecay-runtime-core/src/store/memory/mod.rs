@@ -2,7 +2,9 @@
 
 use crate::db::Database;
 
+use tracedecay_domain::RunId;
 use tracedecay_domain::{FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2};
+use tracedecay_store::ProjectMemoryAutomationRunReceiptsV1;
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactReadControl, FactStore,
@@ -32,6 +34,7 @@ use tracedecay_store::{
 use automatic_facts::{
     get_project_memory_automatic_fact_receipt_tx, list_project_memory_automatic_fact_receipts_tx,
 };
+use automation_run_receipts::project_memory_automation_run_receipts_tx;
 use crud::{
     add_project_memory_fact_tx, apply_project_memory_automatic_fact_tx, fact_response_metadata_tx,
     find_project_memory_fact_by_content_digest_controlled_tx,
@@ -59,6 +62,7 @@ use search::{
 use status::project_memory_status_tx;
 
 mod automatic_facts;
+mod automation_run_receipts;
 mod candidates;
 mod crud;
 mod curation;
@@ -674,6 +678,34 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         })
         .await
     }
+
+    async fn project_memory_automation_run_receipts(
+        &self,
+        owner: FactOwnerV1,
+        run_id: RunId,
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryAutomationRunReceiptsV1> {
+        if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
+            runtime::validate_owner_binding(
+                runtime.binding(),
+                &owner,
+                "recover memory automation receipts",
+            )?;
+        }
+        let read_control = read_control.clone();
+        self.project_memory_read(move |transaction| {
+            Box::pin(async move {
+                project_memory_automation_run_receipts_tx(
+                    transaction,
+                    &owner,
+                    &run_id,
+                    &read_control,
+                )
+                .await
+            })
+        })
+        .await
+    }
 }
 
 impl ProjectMemoryGraphStore for DatabaseFactStore<'_> {
@@ -896,6 +928,11 @@ impl ProjectMemoryFactStore for ProjectFactStore<'_> {
             limit: usize,
             read_control: &FactReadControl,
         ) -> FactStoreResult<ProjectMemoryAutomaticFactReceiptPageV1>;
+        fn project_memory_automation_run_receipts(
+            owner: FactOwnerV1,
+            run_id: RunId,
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryAutomationRunReceiptsV1>;
     }
 }
 

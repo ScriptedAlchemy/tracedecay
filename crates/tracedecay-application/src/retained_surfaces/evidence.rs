@@ -5,7 +5,9 @@
 //! use it to build the common application envelope without upgrading a
 //! bounded result into fabricated complete evidence.
 
-use crate::{CoverageCompleteness, EvidenceDomain, FreshnessState, OmissionReason};
+use crate::{
+    CoverageCompleteness, EvidenceDomain, FreshnessState, OmissionReason, OpaqueCursor, PageCursor,
+};
 
 use super::{
     HydrationStateResultV1, LcmRetrievalOutcomeV1, LcmTemporalFieldsV1, RetainedOutcomeStatusV1,
@@ -59,7 +61,7 @@ pub struct RetainedSurfaceEvidenceFactsV1 {
     pub visited: Option<u64>,
     pub eligible: Option<u64>,
     pub total: Option<u64>,
-    pub next_cursor: Option<String>,
+    pub next_cursor: Option<PageCursor>,
     pub completeness: CoverageCompleteness,
     pub freshness: FreshnessState,
     pub omissions: Vec<RetainedSurfaceEvidenceOmissionV1>,
@@ -168,7 +170,7 @@ impl RetainedSurfaceEvidenceFactsV1 {
         &mut self,
         temporal: &TemporalMetadataV1,
     ) -> Result<(), RetainedSurfaceEvidenceTerminalV1> {
-        self.next_cursor.clone_from(&temporal.next_cursor);
+        self.next_cursor = opaque_page_cursor(temporal.next_cursor.as_deref())?;
         self.visited = Some(temporal_visited(&temporal.coverage)?);
         self.temporal = Some(temporal_facts(
             &temporal.watermarks,
@@ -200,7 +202,7 @@ impl RetainedSurfaceEvidenceFactsV1 {
         &mut self,
         temporal: &LcmTemporalFieldsV1,
     ) -> Result<(), RetainedSurfaceEvidenceTerminalV1> {
-        self.next_cursor.clone_from(&temporal.next_cursor);
+        self.next_cursor = opaque_page_cursor(temporal.next_cursor.as_deref())?;
         self.visited = Some(temporal_visited(&temporal.coverage)?);
         self.temporal = Some(temporal_facts(
             &temporal.watermarks,
@@ -274,22 +276,27 @@ impl RetainedSurfaceResultV1 {
         &self,
     ) -> Result<RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1> {
         match self {
-            Self::FactStoreSearch(value) => fact_collection(value.count),
-            Self::FactStoreProbe(value) => fact_collection(value.count),
-            Self::FactStoreRelated(value) => fact_collection(value.count),
-            Self::FactStoreReason(value) => fact_collection(value.count),
-            Self::FactStoreContradict(value) => fact_collection(value.count),
-            Self::FactStoreGet(value) => {
-                RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Operational, value.count)
+            Self::FactStoreSearch(value) => {
+                fact_search_collection(value.hits.len(), value.next_after.as_ref())
             }
-            Self::FactStoreList(value) => fact_collection(value.count),
-            Self::MemoryStatus(value) => {
-                let mut facts = RetainedSurfaceEvidenceFactsV1::unknown_singleton(
-                    EvidenceDomain::Operational,
-                    true,
-                )?;
-                facts.apply_status(value.status)?;
-                Ok(facts)
+            Self::FactStoreProbe(value) => {
+                fact_search_collection(value.hits.len(), value.next_after.as_ref())
+            }
+            Self::FactStoreRelated(value) => {
+                fact_search_collection(value.hits.len(), value.next_after.as_ref())
+            }
+            Self::FactStoreReason(value) => {
+                fact_search_collection(value.hits.len(), value.next_after.as_ref())
+            }
+            Self::FactStoreContradict(value) => fact_collection(value.contradictions.len()),
+            Self::FactStoreGet(_) => {
+                RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Operational, 1)
+            }
+            Self::FactStoreList(value) => {
+                fact_list_collection(value.facts.len(), value.next_after_fact_id.as_ref())
+            }
+            Self::MemoryStatus(_) => {
+                RetainedSurfaceEvidenceFactsV1::unknown_singleton(EvidenceDomain::Operational, true)
             }
             Self::SessionRefreshStatus(value) => {
                 let mut facts = RetainedSurfaceEvidenceFactsV1::unknown_singleton(
@@ -377,7 +384,8 @@ impl RetainedSurfaceResultV1 {
                 value.temporal.as_ref(),
                 None,
             ),
-            Self::FactStoreAdd(_)
+            Self::MemoryAutomationRun(_)
+            | Self::FactStoreAdd(_)
             | Self::FactStoreUpdate(_)
             | Self::FactStoreRemove(_)
             | Self::FactFeedback(_)
@@ -391,6 +399,40 @@ fn fact_collection(
     returned: usize,
 ) -> Result<RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1> {
     RetainedSurfaceEvidenceFactsV1::unknown(EvidenceDomain::Operational, returned)
+}
+
+fn fact_search_collection(
+    returned: usize,
+    next_after: Option<&crate::memory::FactSearchCursorV1>,
+) -> Result<RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1> {
+    let mut facts = fact_collection(returned)?;
+    facts.next_cursor = next_after
+        .cloned()
+        .map(|cursor| PageCursor::FactSearch { cursor });
+    Ok(facts)
+}
+
+fn fact_list_collection(
+    returned: usize,
+    next_after_fact_id: Option<&tracedecay_domain::FactId>,
+) -> Result<RetainedSurfaceEvidenceFactsV1, RetainedSurfaceEvidenceTerminalV1> {
+    let mut facts = fact_collection(returned)?;
+    facts.next_cursor = next_after_fact_id
+        .cloned()
+        .map(|fact_id| PageCursor::FactListAfter { fact_id });
+    Ok(facts)
+}
+
+fn opaque_page_cursor(
+    cursor: Option<&str>,
+) -> Result<Option<PageCursor>, RetainedSurfaceEvidenceTerminalV1> {
+    cursor
+        .map(|cursor| {
+            OpaqueCursor::new(cursor.to_owned())
+                .map(PageCursor::from)
+                .map_err(|_| RetainedSurfaceEvidenceTerminalV1::InvalidOutput)
+        })
+        .transpose()
 }
 
 fn lcm_facts(
@@ -484,9 +526,32 @@ const fn omission_reason(value: HydrationStateResultV1) -> Option<OmissionReason
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::{FactSearchCursorV1, FactSearchGraphCoverageV1};
+    use crate::result::PageCursor;
     use crate::retained_surfaces::{
-        MessageSearchHitV1, MessageSearchResultV1, RetainedNextActionV1, RetrievalWorkerStatusV1,
+        FactCommitOwnerV1, FactStoreContradictResultV1, FactStoreListResultV1,
+        FactStoreSearchResultV1, MessageSearchHitV1, MessageSearchResultV1, RetainedNextActionV1,
+        RetrievalWorkerStatusV1,
     };
+    use tracedecay_domain::{FactId, UtcMicros};
+
+    fn fact_id(identity_byte: char) -> FactId {
+        FactId::new(format!(
+            "fact.v1.{}.{}",
+            "0".repeat(64),
+            identity_byte.to_string().repeat(64)
+        ))
+        .expect("canonical fact id")
+    }
+
+    fn search_result(next_after: Option<FactSearchCursorV1>) -> FactStoreSearchResultV1 {
+        FactStoreSearchResultV1 {
+            owner: FactCommitOwnerV1::Profile,
+            hits: Vec::new(),
+            next_after,
+            graph_coverage: FactSearchGraphCoverageV1::NotMounted,
+        }
+    }
 
     fn message_search_result(
         status: RetainedOutcomeStatusV1,
@@ -545,6 +610,74 @@ mod tests {
         assert_eq!(facts.eligible, None);
         assert_eq!(facts.total, None);
         assert_eq!(facts.completeness, CoverageCompleteness::Unknown);
+    }
+
+    #[test]
+    fn fact_search_evidence_preserves_structural_cursor() {
+        let cursor = FactSearchCursorV1 {
+            score_millionths: 750_000,
+            updated_at: UtcMicros(42),
+            fact_id: fact_id('1'),
+        };
+        let facts = RetainedSurfaceResultV1::FactStoreSearch(search_result(Some(cursor.clone())))
+            .evidence_facts()
+            .expect("search evidence");
+
+        assert_eq!(facts.next_cursor, Some(PageCursor::FactSearch { cursor }));
+    }
+
+    #[test]
+    fn fact_search_evidence_omits_absent_cursor() {
+        let facts = RetainedSurfaceResultV1::FactStoreSearch(search_result(None))
+            .evidence_facts()
+            .expect("final search page evidence");
+
+        assert_eq!(facts.next_cursor, None);
+    }
+
+    #[test]
+    fn fact_list_evidence_preserves_structural_cursor() {
+        let fact_id = fact_id('2');
+        let result = FactStoreListResultV1 {
+            owner: FactCommitOwnerV1::Profile,
+            facts: Vec::new(),
+            next_after_fact_id: Some(fact_id.clone()),
+        };
+        let facts = RetainedSurfaceResultV1::FactStoreList(result)
+            .evidence_facts()
+            .expect("list evidence");
+
+        assert_eq!(
+            facts.next_cursor,
+            Some(PageCursor::FactListAfter { fact_id })
+        );
+    }
+
+    #[test]
+    fn fact_list_evidence_omits_absent_cursor() {
+        let result = FactStoreListResultV1 {
+            owner: FactCommitOwnerV1::Profile,
+            facts: Vec::new(),
+            next_after_fact_id: None,
+        };
+        let facts = RetainedSurfaceResultV1::FactStoreList(result)
+            .evidence_facts()
+            .expect("final list page evidence");
+
+        assert_eq!(facts.next_cursor, None);
+    }
+
+    #[test]
+    fn fact_contradiction_evidence_is_intentionally_nonpaginated() {
+        let result = FactStoreContradictResultV1 {
+            owner: FactCommitOwnerV1::Profile,
+            contradictions: Vec::new(),
+        };
+        let facts = RetainedSurfaceResultV1::FactStoreContradict(result)
+            .evidence_facts()
+            .expect("contradiction evidence");
+
+        assert_eq!(facts.next_cursor, None);
     }
 
     #[test]

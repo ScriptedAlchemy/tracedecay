@@ -71,7 +71,7 @@ const SUMMARY_ROW = {
 };
 
 const FACT_ROW = {
-  fact_id: 11,
+  fact_id: `fact.${'a'.repeat(64)}.${'b'.repeat(64)}`,
   content: 'Graph search is bounded',
   category: 'project',
   trust_score: 0.8,

@@ -6,8 +6,7 @@ use serde_json::{Map, Value};
 use tracedecay::errors::{Result, TraceDecayError};
 use tracedecay::mcp::tools::{ToolDefinition, short_tool_name};
 
-/// Old CLI command names that don't match the MCP tool name. Keeps muscle
-/// memory working for the seven removed top-level commands. The right-hand
+/// Legacy CLI command names that do not match the MCP tool name. The right-hand
 /// side is the canonical MCP suffix (without the `tracedecay_` prefix).
 const NAME_ALIASES: &[(&str, &str)] = &[("query", "search")];
 /// Result of CLI argument parsing: the JSON value to hand to the MCP handler,
@@ -205,8 +204,6 @@ pub(super) fn parse_invocation_with_stdin(
 /// by the dispatch layer (or the generated client itself) rather than being
 /// declared per-tool in the schemas:
 ///
-/// - `project_root` — registered-project selector alias accepted by dispatch
-///   ([`crate::mcp::tools`] `rejected_tool_project_selector_present`).
 /// - `response_handle_project_root` — LCM response-handle storage root when
 ///   the live project differs from the profile store.
 /// - `cwd` — read client-side by the generated Hermes plugin for project
@@ -214,7 +211,7 @@ pub(super) fn parse_invocation_with_stdin(
 ///
 /// The validation gate skips these so schema-exact integrations keep working;
 /// everything else unknown is a hard error.
-const DISPATCH_ROUTING_KEYS: &[&str] = &["project_root", "response_handle_project_root", "cwd"];
+const DISPATCH_ROUTING_KEYS: &[&str] = &["response_handle_project_root", "cwd"];
 
 /// One schema-driven validation pass over the *final* arguments object,
 /// shared by the `--args` and per-key paths. Turns the silent divergences —
@@ -531,11 +528,9 @@ fn bind_positionals(
 }
 
 /// Resolve a `--args` value to its JSON text. `--args` is a *whole-payload*
-/// argument (the value IS the object), so it follows the same convention as
-/// `memory curate --llm-ops`: `-` reads stdin and any non-inline value is a
-/// file path — a plain path "just works" without the `@` sigil that per-key
-/// values need. Inline JSON (starting `{`/`[`) is returned verbatim; `@file`
-/// and `@-` stay valid as back-compat aliases so existing scripts keep working.
+/// argument (the value IS the object): `-` reads stdin and any non-inline value
+/// is a file path, without the `@` sigil that per-key values need. Inline JSON
+/// (starting `{`/`[`) is returned verbatim; `@file` and `@-` are also accepted.
 fn resolve_args_payload(
     raw: &str,
     read_stdin: &mut impl FnMut() -> Result<String>,

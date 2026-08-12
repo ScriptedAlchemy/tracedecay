@@ -311,10 +311,6 @@ impl ProjectServerResponseLifecycle {
     pub(crate) fn response_revoked(&self) -> &tracedecay_usecases::context::CancellationToken {
         &self.response_revoked
     }
-
-    pub(crate) fn request_abort(&self) -> &tracedecay_usecases::context::CancellationToken {
-        &self.request_abort
-    }
 }
 
 /// Shared compare-and-swap cooldown gate for the lazy staleness check and

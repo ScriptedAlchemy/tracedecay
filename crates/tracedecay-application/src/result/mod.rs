@@ -13,12 +13,13 @@ pub use evidence::{
     AuthorityReceipt, BudgetClass, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
     EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket, EvidenceScore,
     EvidenceScoreKind, EvidenceScoreValue, FreshnessState, Omission, OmissionReason, OpaqueCursor,
-    PageState, PolicyDecisionRef, RetrievalEvidence, RetrieverContribution,
+    PageCursor, PageState, PolicyDecisionRef, RetrievalEvidence, RetrieverContribution,
     RetrieverContributionState, ScoreId, TemporalState,
 };
 pub use problem::{
-    ApplicationProblem, ApplicationProblemKind, LegalAction, ProblemOwningLayer,
-    ProblemTerminality, RetryDirective, RetryScope, SafeDiagnostic,
+    ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemKind,
+    ApplicationUnavailableClassV1, LegalAction, ProblemOwningLayer, ProblemTerminality,
+    RetryDirective, RetryScope, SafeDiagnostic,
 };
 pub use receipt::{
     CancellationObservation, CancellationStage, EffectId, EffectReceipt, EffectResult,

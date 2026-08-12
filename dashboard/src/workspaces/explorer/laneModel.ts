@@ -172,6 +172,7 @@ export function runIsTerminal(state: ExplorerRunStateV1): boolean {
     case 'completed':
     case 'partial':
     case 'cancelled':
+    case 'timed_out':
     case 'error':
       return true;
     default: {
@@ -402,6 +403,8 @@ export function runStateKind(state: ExplorerRunStateV1): DomainStateKind {
       return 'partial';
     case 'cancelled':
       return 'cancelled';
+    case 'timed_out':
+      return 'timed_out';
     case 'error':
       return 'error';
     default: {

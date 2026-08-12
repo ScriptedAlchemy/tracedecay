@@ -33,6 +33,27 @@ fn semantic_evaluation_candidate()
     }
 }
 
+#[test]
+fn retained_pre_reservation_admission_preserves_cancellation_and_timeout() {
+    assert!(retained_request_admission_problem(RequestAdmission::Admitted).is_none());
+    for (admission, expected) in [
+        (
+            RequestAdmission::Cancelled,
+            ApplicationProblemKind::Cancelled,
+        ),
+        (RequestAdmission::TimedOut, ApplicationProblemKind::TimedOut),
+    ] {
+        let problem = retained_request_admission_problem(admission)
+            .expect("refused admission must remain a typed application problem");
+        assert_eq!(problem.kind(), expected);
+        assert_eq!(problem.terminality(), ProblemTerminality::PreAdmission);
+        assert_eq!(
+            problem.cancellation_stage(),
+            Some(CancellationStage::BeforeAdmission)
+        );
+    }
+}
+
 #[tokio::test]
 async fn project_quiescence_denies_semantic_and_git_cached_routes() {
     let service = DaemonInvocationService::default();

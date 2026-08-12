@@ -820,6 +820,14 @@ impl ProjectRuntimeRegistryV1 {
         C: ProjectRuntimeComponent,
         F: FnOnce(&C) -> T,
     {
+        self.read_now::<C, T, F>(project_root, read)
+    }
+
+    pub(crate) fn read_now<C, T, F>(&self, project_root: &Path, read: F) -> Option<T>
+    where
+        C: ProjectRuntimeComponent,
+        F: FnOnce(&C) -> T,
+    {
         let runtimes = self.lock_runtimes();
         runtimes.get(project_root).and_then(C::peek).map(read)
     }

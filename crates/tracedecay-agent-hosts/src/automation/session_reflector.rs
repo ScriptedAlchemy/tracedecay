@@ -1,20 +1,21 @@
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
-use tracedecay_domain::{FactCategoryV1, PayloadAccessState};
+use tracedecay_domain::{Confidence, FactCategoryV1, PayloadAccessState};
 use tracedecay_store::{
-    ProjectMemoryFactAvailabilityV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchQuery,
-    ProjectMemoryFactStore,
+    ProjectMemoryFactProjectionV1, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
 };
+use tracedecay_usecases::memory::ProjectMemoryFactAddRequest;
 
 use crate::application::memory::MemoryApplication;
+use crate::automation::lifecycle::AutomationRunControl;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::trust::{DEFAULT_TRUST, HIGH_TRUST_REPRESENTATIVE, LOW_TRUST_REPRESENTATIVE};
-use crate::memory::types::{AddFactRequest, MemoryCategory};
 
 pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
+    run_control: &AutomationRunControl,
     proposals: &[Value],
     evidence: &Value,
 ) -> Result<(Vec<Value>, Vec<Value>)> {
@@ -22,7 +23,7 @@ pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     let mut accepted = Vec::new();
     let mut quarantined = Vec::new();
     for proposal in proposals {
-        match validate_fact_candidate(memory, proposal, &citations).await? {
+        match validate_fact_candidate(memory, run_control, proposal, &citations).await? {
             FactCandidateValidation::Accepted(value) => accepted.push(value),
             FactCandidateValidation::Quarantined(value) => quarantined.push(value),
         }
@@ -123,31 +124,60 @@ impl EvidenceCitationSet {
         let Some(span) = source_span.as_object() else {
             return false;
         };
-        if let Some(store_id) = span.get("store_id").and_then(value_as_i64) {
-            return self.raw_store_ids.contains(&store_id);
-        }
-        if let (Some(session_id), Some(message_id)) = (
+        let raw_store = span.get("store_id").and_then(value_as_i64);
+        let raw_message = (
             span.get("session_id").and_then(Value::as_str),
             span.get("message_id").and_then(Value::as_str),
-        ) {
-            return self
-                .raw_messages
-                .contains(&(session_id.to_string(), message_id.to_string()));
+        );
+        let summary_node = span.get("node_id").and_then(Value::as_str);
+        let complete_raw_message = raw_message.0.is_some() == raw_message.1.is_some();
+        if !complete_raw_message
+            || usize::from(raw_store.is_some())
+                + usize::from(raw_message.0.is_some())
+                + usize::from(summary_node.is_some())
+                != 1
+        {
+            return false;
         }
-        span.get("node_id")
-            .and_then(Value::as_str)
-            .is_some_and(|node_id| self.summary_nodes.contains(node_id))
+        raw_store.is_some_and(|store_id| self.raw_store_ids.contains(&store_id))
+            || raw_message
+                .0
+                .zip(raw_message.1)
+                .is_some_and(|(session_id, message_id)| {
+                    self.raw_messages
+                        .contains(&(session_id.to_string(), message_id.to_string()))
+                })
+            || summary_node.is_some_and(|node_id| self.summary_nodes.contains(node_id))
     }
 }
 
 async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
     memory: &MemoryApplication<A>,
+    run_control: &AutomationRunControl,
     proposal: &Value,
     citations: &EvidenceCitationSet,
 ) -> Result<FactCandidateValidation> {
     let Some(object) = proposal.as_object() else {
         return Ok(quarantined_fact(proposal, "item must be a JSON object"));
     };
+    const ALLOWED_FACT_FIELDS: &[&str] = &[
+        "content",
+        "category",
+        "tags",
+        "entities",
+        "trust",
+        "reason",
+        "source_span",
+    ];
+    if object
+        .keys()
+        .any(|field| !ALLOWED_FACT_FIELDS.contains(&field.as_str()))
+    {
+        return Ok(quarantined_fact(
+            proposal,
+            "fact proposal contains an unsupported field",
+        ));
+    }
     let Some(content) = object
         .get("content")
         .and_then(Value::as_str)
@@ -161,10 +191,16 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             "content exceeds 1000 characters",
         ));
     }
+    if content.chars().any(char::is_control) {
+        return Ok(quarantined_fact(
+            proposal,
+            "content contains a control character",
+        ));
+    }
     let Some(category) = object
         .get("category")
         .and_then(Value::as_str)
-        .and_then(|value| MemoryCategory::from_proposal_label(value).ok())
+        .and_then(session_fact_category)
     else {
         return Ok(quarantined_fact(proposal, "valid category is required"));
     };
@@ -189,12 +225,6 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             "trust must be a number between 0 and 1, or one of low, medium, high",
         ));
     };
-    if object.contains_key("confidence") {
-        return Ok(quarantined_fact(
-            proposal,
-            "confidence is not supported; use trust",
-        ));
-    }
     let Some(reason) = object
         .get("reason")
         .and_then(Value::as_str)
@@ -202,37 +232,72 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
     else {
         return Ok(quarantined_fact(proposal, "reason is required"));
     };
+    if reason.len() > 4_096 || reason.chars().any(char::is_control) {
+        return Ok(quarantined_fact(
+            proposal,
+            "reason exceeds the public evidence contract",
+        ));
+    }
     let Some(source_span) = object.get("source_span") else {
         return Ok(quarantined_fact(proposal, "source_span is required"));
     };
+    let Some(source_span_object) = source_span.as_object() else {
+        return Ok(quarantined_fact(proposal, "source_span must be an object"));
+    };
+    const ALLOWED_SOURCE_SPAN_FIELDS: &[&str] =
+        &["session_id", "message_id", "store_id", "node_id"];
+    if source_span_object
+        .keys()
+        .any(|field| !ALLOWED_SOURCE_SPAN_FIELDS.contains(&field.as_str()))
+    {
+        return Ok(quarantined_fact(
+            proposal,
+            "source_span contains an unsupported field",
+        ));
+    }
+    if source_span_object.values().any(Value::is_null) {
+        return Ok(quarantined_fact(
+            proposal,
+            "source_span optional identities must be omitted instead of null",
+        ));
+    }
+    if source_span_object.values().any(|value| {
+        value
+            .as_str()
+            .is_some_and(|text| !public_evidence_text(text, 4_096))
+    }) {
+        return Ok(quarantined_fact(
+            proposal,
+            "source_span contains an invalid public evidence identity",
+        ));
+    }
     if !citations.contains(source_span) {
         return Ok(quarantined_fact(
             proposal,
             "source_span must cite a bounded session reflection evidence hit",
         ));
     }
-    let exact_duplicate_id =
-        match memory
-            .find_exact_fact_by_content(&content)
-            .await
-            .map_err(|error| {
-                TraceDecayError::database_operation(
-                    "validate session reflector exact duplicate through memory authority",
-                    error,
-                )
-            })? {
-            None => None,
-            Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
-                Some(fact.fact_id().as_str().to_owned())
-            }
-            Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
-                return Ok(quarantined_unavailable_exact_duplicate(
-                    proposal,
-                    compatibility_availability_label(unavailable.availability()),
-                    payload_access_label(unavailable.status().payload_access()),
-                ));
-            }
-        };
+    let exact_duplicate_id = match memory
+        .find_exact_fact_by_content(&content, run_control.read_control())
+        .await
+        .map_err(|error| {
+            TraceDecayError::database_operation(
+                "validate session reflector exact duplicate through memory authority",
+                error,
+            )
+        })? {
+        None => None,
+        Some(ProjectMemoryFactProjectionV1::Available(fact)) => {
+            Some(fact.fact_id().as_str().to_owned())
+        }
+        Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
+            return Ok(quarantined_unavailable_exact_duplicate(
+                proposal,
+                unavailable.fact_id().as_str(),
+                unavailable.payload_access(),
+            ));
+        }
+    };
     if let Some(fact_id) = exact_duplicate_id {
         let reason = format!("exact duplicate of canonical fact {fact_id}");
         return Ok(quarantined_fact_with_validation(
@@ -248,13 +313,12 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
         ));
     }
     let filter =
-        ProjectMemoryFactSearchFilterV1::new(Some(session_fact_category(category)), None, None)
-            .map_err(|error| {
-                TraceDecayError::database_operation(
-                    "construct session reflector canonical dedupe filter",
-                    error,
-                )
-            })?;
+        ProjectMemoryFactSearchFilterV1::new(Some(category), None, None).map_err(|error| {
+            TraceDecayError::database_operation(
+                "construct session reflector canonical dedupe filter",
+                error,
+            )
+        })?;
     let query = ProjectMemoryFactSearchQuery::with_filter(
         memory.owner().clone(),
         ProjectMemoryFactSearchKindV1::Search,
@@ -270,7 +334,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
         )
     })?;
     let matches = memory
-        .search_project_memory_facts(query)
+        .search_project_memory_facts(query, run_control.read_control())
         .await
         .map_err(|error| {
             TraceDecayError::database_operation(
@@ -308,10 +372,25 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
             }),
         ));
     }
-    let request = AddFactRequest {
+    let trust = Confidence::new(trust).map_err(|error| {
+        TraceDecayError::database_operation(
+            "construct session reflector canonical fact confidence",
+            error,
+        )
+    })?;
+    let evidence_item = json!({
+        "content": content.clone(),
+        "category": category,
+        "tags": tags.clone(),
+        "entities": entities.clone(),
+        "trust": canonical_evidence_trust(object.get("trust"), trust.as_f64()),
+        "source_span": source_span,
+        "reason": reason.clone(),
+    });
+    let request = ProjectMemoryFactAddRequest {
         content,
         category,
-        source: Some("session_reflector".to_string()),
+        source_label: Some("session_reflector".to_string()),
         tags,
         entities,
         trust: Some(trust),
@@ -324,7 +403,7 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
     };
     Ok(FactCandidateValidation::Accepted(json!({
         "add_fact_request": request,
-        "item": proposal,
+        "item": evidence_item,
         "validation": {
             "status": "accepted",
             "dedupe": {
@@ -339,14 +418,15 @@ async fn validate_fact_candidate<A: ProjectMemoryFactStore>(
     })))
 }
 
-const fn session_fact_category(category: MemoryCategory) -> FactCategoryV1 {
+fn session_fact_category(category: &str) -> Option<FactCategoryV1> {
     match category {
-        MemoryCategory::General => FactCategoryV1::General,
-        MemoryCategory::UserPref => FactCategoryV1::UserPref,
-        MemoryCategory::Project => FactCategoryV1::Project,
-        MemoryCategory::Tool => FactCategoryV1::Tool,
-        MemoryCategory::Decision => FactCategoryV1::Decision,
-        MemoryCategory::CodeArea => FactCategoryV1::CodeArea,
+        "general" => Some(FactCategoryV1::General),
+        "user_pref" => Some(FactCategoryV1::UserPref),
+        "project" => Some(FactCategoryV1::Project),
+        "tool" => Some(FactCategoryV1::Tool),
+        "decision" => Some(FactCategoryV1::Decision),
+        "code_area" => Some(FactCategoryV1::CodeArea),
+        _ => None,
     }
 }
 
@@ -372,6 +452,18 @@ fn candidate_trust_value(value: &Value) -> Option<f64> {
     }
 }
 
+fn canonical_evidence_trust(value: Option<&Value>, trust: f64) -> Value {
+    match value.and_then(Value::as_str) {
+        Some(bucket) => Value::String(bucket.trim().to_ascii_lowercase()),
+        None => json!(trust),
+    }
+}
+
+fn public_evidence_text(value: &str, max_bytes: usize) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
 fn value_as_i64(value: &Value) -> Option<i64> {
     value
         .as_i64()
@@ -388,7 +480,11 @@ fn string_array_field(value: Option<&Value>) -> Option<Vec<String>> {
     }
     let mut values = Vec::new();
     for item in array {
-        values.push(item.as_str().and_then(normalized_non_empty)?);
+        let value = item.as_str().and_then(normalized_non_empty)?;
+        if value.len() > 4_096 || value.chars().any(char::is_control) {
+            return None;
+        }
+        values.push(value);
     }
     Some(values)
 }
@@ -406,8 +502,8 @@ fn quarantined_fact(proposal: &Value, reason: &str) -> FactCandidateValidation {
 
 fn quarantined_unavailable_exact_duplicate(
     proposal: &Value,
-    availability: &str,
-    payload_access: &str,
+    fact_id: &str,
+    payload_access: PayloadAccessState,
 ) -> FactCandidateValidation {
     let reason = "exact duplicate is unavailable for safe validation";
     quarantined_fact_with_validation(
@@ -418,32 +514,23 @@ fn quarantined_unavailable_exact_duplicate(
             "reason": reason,
             "dedupe": {
                 "exact_match": {
-                    "availability": availability,
-                    "payload_access": payload_access,
+                    "canonical_fact_id": fact_id,
+                    "payload_access": payload_access_label(payload_access),
                 },
             },
         }),
     )
 }
 
-fn compatibility_availability_label(value: ProjectMemoryFactAvailabilityV1) -> &'static str {
+fn payload_access_label(value: PayloadAccessState) -> &'static str {
     match value {
-        ProjectMemoryFactAvailabilityV1::Deleted => "deleted",
-        ProjectMemoryFactAvailabilityV1::Quarantined => "quarantined",
-        ProjectMemoryFactAvailabilityV1::Unavailable => "unavailable",
-    }
-}
-
-fn payload_access_label(value: Option<PayloadAccessState>) -> &'static str {
-    match value {
-        Some(PayloadAccessState::Eligible) => "eligible",
-        Some(PayloadAccessState::Redacted) => "redacted",
-        Some(PayloadAccessState::Quarantined) => "quarantined",
-        Some(PayloadAccessState::RetentionExpired) => "retention_expired",
-        Some(PayloadAccessState::Deleted) => "deleted",
-        Some(PayloadAccessState::Unavailable) => "unavailable",
-        Some(PayloadAccessState::Ambiguous) => "ambiguous",
-        None => "unknown",
+        PayloadAccessState::Eligible => "eligible",
+        PayloadAccessState::Redacted => "redacted",
+        PayloadAccessState::Quarantined => "quarantined",
+        PayloadAccessState::RetentionExpired => "retention_expired",
+        PayloadAccessState::Deleted => "deleted",
+        PayloadAccessState::Unavailable => "unavailable",
+        PayloadAccessState::Ambiguous => "ambiguous",
     }
 }
 

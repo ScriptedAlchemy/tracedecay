@@ -19,6 +19,10 @@ describe("AutomationsPage automatic outcomes", () => {
     ).toHaveLength(2);
     expect(within(outcomes).getByText("applied")).toBeTruthy();
     expect(within(outcomes).getByText("quarantined")).toBeTruthy();
+    expect(within(outcomes).getByText(/apply apply-1 · run session-reflector-0/)).toBeTruthy();
+    expect(within(outcomes).getByText(/fact fact\.apply-1/)).toBeTruthy();
+    expect(within(outcomes).getAllByText(/validation/).length).toBeGreaterThan(0);
+    expect(within(outcomes).getByText(/quarantine: validation failed/)).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: /approve|apply|review|plan/i }),
     ).toBeNull();
@@ -148,15 +152,19 @@ function receipt(id: string, state: "applied" | "quarantined" = "applied") {
     apply_id: id,
     run_id: "session-reflector-0",
     state,
+    evidence_hash: `evidence.${id}`,
     add_fact_request: {
       content: "A recorded project fact.",
       category: "preference",
     },
     quarantine_reason:
       state === "quarantined" ? "validation failed" : undefined,
-    applied_canonical_fact_id: state === "applied" ? `fact.${id}` : undefined,
-    applied_fact_id: state === "applied" ? 42 : null,
-    recorded_at: Math.floor(Date.now() / 1000),
+    validation: {
+      disposition: state === "applied" ? "accepted" : "rejected",
+      policy: "automatic-memory-v1",
+    },
+    applied_fact_id: state === "applied" ? `fact.${id}` : undefined,
+    recorded_at_micros: Date.now() * 1_000,
   };
 }
 
@@ -194,7 +202,15 @@ function stubAutomation(overrides: Record<string, Reply> = {}) {
       receipt("apply-1"),
       receipt("apply-2", "quarantined"),
     ]),
-    runs: { runs: [], count: 0, limit: 50, error: "" },
+    runs: {
+      runs: [],
+      count: 0,
+      limit: 50,
+      has_more: false,
+      malformed_row_count: 0,
+      completeness: "known",
+      error: "",
+    },
   };
   const fetchMock = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {

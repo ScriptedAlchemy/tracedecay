@@ -9,7 +9,7 @@ import { cn } from "../../ui/cn.ts";
  * has always been — search, list, fact inspector. The other three read the
  * holographic-memory routes the daemon has been mounting unconsumed:
  * `geometry` is the phase projection and the pairwise similarity it implies,
- * `curation` is the daemon's automatic curation outcomes and enable/disable
+ * `curation` is the daemon's automatic curation outcomes and explicit run
  * control, and `oplog`
  * is the store's own append-only record of what changed.
  *
@@ -65,7 +65,7 @@ export function knowledgeViewNote(kind: KnowledgeViewKind): string {
     case "geometry":
       return "the phase projection and the pairwise similarity computed from it";
     case "curation":
-      return "automatic curation outcomes, run receipts, and the daemon enable/disable control";
+      return "automatic curation outcomes, run receipts, and the policy-owned run control";
     case "oplog":
       return "the store’s append-only record of memory operations";
     default: {

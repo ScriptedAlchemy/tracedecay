@@ -2,15 +2,16 @@
 //! activated managed skills and recall trajectory of automatically applied
 //! facts.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use serde_json::{Value, json};
 
-use super::DashboardAutomationAuthorityErrorV1;
-use super::DashboardState;
 use super::automation_authority_error_response;
 use super::exact_automation_authority;
+use super::{DashboardAutomationAuthorityErrorV1, DashboardHttpRequestControlV1, DashboardState};
+use crate::memory_api::control::{fact_read_control, request_terminal_state, terminal_read_code};
+use crate::read_model::DashboardDomainStateV1;
 use tracedecay_agent_hosts::automation::managed_skills::list_managed_skills;
 use tracedecay_agent_hosts::automation::outcomes::{
     AutomationOutcomesSnapshot, compute_fact_outcomes, compute_skill_outcomes,
@@ -19,9 +20,33 @@ use tracedecay_agent_hosts::automation::outcomes::{
 use tracedecay_agent_hosts::automation::skill_usage::summarize_skill_usage;
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
+use tracedecay_store::FactReadControl;
 
-pub async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
-    match outcomes_payload(&state).await {
+pub async fn outcomes(
+    State(state): State<DashboardState>,
+    control: Option<Extension<DashboardHttpRequestControlV1>>,
+) -> (StatusCode, Json<Value>) {
+    let Some(Extension(control)) = control else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "detail": "dashboard HTTP request admission is unavailable",
+            })),
+        );
+    };
+    let result = outcomes_payload(&state, &fact_read_control(&control)).await;
+    if let Some(state) = request_terminal_state(&control) {
+        let (code, detail) = terminal_read_code(state);
+        return (
+            if state == DashboardDomainStateV1::TimedOut {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::REQUEST_TIMEOUT
+            },
+            Json(json!({"detail": detail, "code": code})),
+        );
+    }
+    match result {
         Ok(payload) => (StatusCode::OK, Json(payload)),
         Err(error) => automation_authority_error_response(error),
     }
@@ -29,6 +54,7 @@ pub async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<
 
 async fn outcomes_payload(
     state: &DashboardState,
+    read_control: &FactReadControl,
 ) -> std::result::Result<Value, DashboardAutomationAuthorityErrorV1> {
     let now = current_timestamp();
     let authority = exact_automation_authority(state)?;
@@ -50,7 +76,7 @@ async fn outcomes_payload(
             "could not initialize dashboard memory authority: {error}"
         ))
     })?;
-    let fact_outcomes = compute_fact_outcomes(&memory, now)
+    let fact_outcomes = compute_fact_outcomes(&memory, now, read_control)
         .await
         .map_err(automation_failure)?;
 

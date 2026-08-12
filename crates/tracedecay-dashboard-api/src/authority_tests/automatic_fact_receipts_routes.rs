@@ -1,24 +1,39 @@
+use std::sync::Arc;
+
 use axum::body::to_bytes;
 use serde_json::{Map, Value, json};
 use tower::ServiceExt;
 use tracedecay_agent_hosts::automation::automatic_facts::{
     AutomaticFactState, record_session_automatic_facts,
 };
+use tracedecay_agent_hosts::automation::lifecycle::AutomationRunControl;
 use tracedecay_domain::{
     ComponentVersion, Confidence, FactCategoryV1, PayloadReferenceV1, ProvenanceId,
     SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
     SensitivityV1,
 };
-use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddCommandV1};
+use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1};
+
+use crate::tracedecay::facts::memory_application_for_db;
 
 use super::*;
+
+const TEST_DASHBOARD_AUTHORITY: &str = "127.0.0.1:43127";
+
+fn admitted_request(uri: impl AsRef<str>) -> Request<Body> {
+    Request::builder()
+        .uri(uri.as_ref())
+        .header(axum::http::header::HOST, TEST_DASHBOARD_AUTHORITY)
+        .body(Body::empty())
+        .expect("admitted automatic fact receipt request")
+}
 
 fn admitted_fact(content: &str, metadata: Value) -> Value {
     json!({
         "add_fact_request": {
             "content": content,
             "category": "project",
-            "source": "dashboard-route-test",
+            "source_label": "dashboard-route-test",
             "tags": ["automation"],
             "entities": ["TraceDecay"],
             "trust": 0.9,
@@ -58,8 +73,10 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
             fixture.state.mem_db.as_ref(),
         )
         .expect("automatic fact receipt memory authority");
+        let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
         let applied = record_session_automatic_facts(
             &memory,
+            &run_control,
             "run.dashboard-applied",
             Some("evidence.dashboard-applied"),
             &[admitted_fact(
@@ -80,6 +97,7 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
         let quarantined_material = json!({
             "content": quarantined_content,
             "category": "project",
+            "source_label": "dashboard-route-test",
             "tags": ["automation"],
             "entities": ["TraceDecay"],
             "metadata": &quarantined_metadata,
@@ -87,10 +105,8 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
         let quarantined_apply_id =
             ProvenanceId::new("automatic-fact.dashboard-quarantined".to_owned())
                 .expect("quarantined apply id");
-        let quarantined_command = ProjectMemoryFactAddCommandV1::new(
+        let quarantined_command = ProjectMemoryFactAddMaterialV1::new(
             memory.owner().clone(),
-            ProvenanceId::new("operation.dashboard-quarantined".to_owned())
-                .expect("quarantined operation id"),
             quarantined_content.to_owned(),
             FactCategoryV1::Project,
             Some("dashboard-route-test".to_owned()),
@@ -98,12 +114,17 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
             vec!["TraceDecay".to_owned()],
             quarantined_metadata,
             accepted_fixture_receipt(&quarantined_material),
+            Some("run.dashboard-quarantined".to_owned()),
             Confidence::new(0.9).expect("quarantined default trust"),
             None,
         )
-        .expect("quarantined automatic fact command")
-        .with_automation_run_id("run.dashboard-quarantined".to_owned())
-        .expect("quarantined automation run identity");
+        .expect("quarantined automatic fact material")
+        .into_command(
+            ProvenanceId::new("operation.dashboard-quarantined".to_owned())
+                .expect("quarantined operation id"),
+        )
+        .expect("quarantined automatic fact command");
+        let quarantined_write_control = run_control.write_control();
         let quarantined = memory
             .apply_project_memory_automatic_fact(
                 quarantined_apply_id,
@@ -114,6 +135,7 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
                     Some(json!({"status": "accepted"})),
                 )
                 .expect("quarantined receipt evidence"),
+                &quarantined_write_control,
             )
             .await
             .expect("quarantined automatic fact receipt");
@@ -146,16 +168,18 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
             quarantined.receipt().apply_id().as_str().to_owned(),
         )
     };
-    let app = router_with_active_application(fixture.state, None, Router::new());
+    let app = with_dashboard_http_admission(
+        router_with_active_application(fixture.state, None, Router::new()),
+        TEST_DASHBOARD_AUTHORITY
+            .parse()
+            .expect("loopback dashboard authority"),
+    );
 
     let list = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/automation/automatic-fact-receipts?limit=10")
-                .body(Body::empty())
-                .expect("automatic fact receipt list request"),
-        )
+        .oneshot(admitted_request(
+            "/api/automation/automatic-fact-receipts?limit=10",
+        ))
         .await
         .expect("automatic fact receipt list response");
     assert_eq!(list.status(), StatusCode::OK);
@@ -170,12 +194,9 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
 
     let quarantined = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/automation/automatic-fact-receipts?state=quarantined&limit=10")
-                .body(Body::empty())
-                .expect("quarantined receipt list request"),
-        )
+        .oneshot(admitted_request(
+            "/api/automation/automatic-fact-receipts?state=quarantined&limit=10",
+        ))
         .await
         .expect("quarantined receipt list response");
     assert_eq!(quarantined.status(), StatusCode::OK);
@@ -184,7 +205,6 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
     let receipt = &quarantined["receipts"][0];
     assert_eq!(receipt["apply_id"], quarantined_id);
     assert_eq!(receipt["state"], "quarantined");
-    assert!(receipt.get("applied_canonical_fact_id").is_none());
     assert!(receipt.get("applied_fact_id").is_none());
     assert_eq!(
         receipt["quarantine_reason"],
@@ -197,12 +217,9 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
     ] {
         let viewed = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/automation/automatic-fact-receipts/{id}"))
-                    .body(Body::empty())
-                    .expect("automatic fact receipt view request"),
-            )
+            .oneshot(admitted_request(format!(
+                "/api/automation/automatic-fact-receipts/{id}"
+            )))
             .await
             .expect("automatic fact receipt view response");
         assert_eq!(viewed.status(), StatusCode::OK);
@@ -213,23 +230,17 @@ async fn automatic_fact_receipt_routes_expose_only_terminal_authority_outcomes()
 
     let invalid_state = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/automation/automatic-fact-receipts?state=pending")
-                .body(Body::empty())
-                .expect("invalid automatic fact receipt state request"),
-        )
+        .oneshot(admitted_request(
+            "/api/automation/automatic-fact-receipts?state=pending",
+        ))
         .await
         .expect("invalid automatic fact receipt state response");
     assert_eq!(invalid_state.status(), StatusCode::BAD_REQUEST);
 
     let missing = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/automation/automatic-fact-receipts/automatic-fact.missing")
-                .body(Body::empty())
-                .expect("missing automatic fact receipt request"),
-        )
+        .oneshot(admitted_request(
+            "/api/automation/automatic-fact-receipts/automatic-fact.missing",
+        ))
         .await
         .expect("missing automatic fact receipt response");
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);

@@ -1,12 +1,12 @@
 //! Typed retained session-query mappers over mounted daemon authorities.
 
-use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_application::retained_surfaces::{
     CorrelationIndexV1, GitScopeV1, RetainedErrorV1, RetainedOutcomeStatusV1,
     SessionCorrelationHitV1, SessionGitRefV1, SessionGitRelationV1, SessionsForRequestV1,
     SessionsForResultV1, WorkflowAgentV1, WorkflowCoverageV1, WorkflowQueryModeV1, WorkflowRunV1,
     WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
 };
+use tracedecay_application::{CancellationStage, RetainedSurfaceExecutionErrorV1};
 use tracedecay_sessions::runtime::git_correlation::{
     CommitEvidence, CommitRelation, CommitRelationFilter, GitCorrelationError, GitRefFilter,
     GitScopeFilter, SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind,
@@ -262,8 +262,12 @@ fn map_git_error(error: GitCorrelationError) -> RetainedSurfaceExecutionErrorV1 
             RetainedSurfaceExecutionErrorV1::InvalidRequest
         }
         GitCorrelationError::Corrupt(_) => RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
-        GitCorrelationError::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled,
-        GitCorrelationError::BudgetExhausted => RetainedSurfaceExecutionErrorV1::TimedOut,
+        GitCorrelationError::Cancelled => {
+            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
+        }
+        GitCorrelationError::BudgetExhausted => {
+            RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::DuringRead)
+        }
         GitCorrelationError::Db(_) | GitCorrelationError::Unavailable(_) => {
             RetainedSurfaceExecutionErrorV1::Unavailable
         }

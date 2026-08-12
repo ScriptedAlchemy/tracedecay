@@ -8,18 +8,19 @@
 import { describe, expect, it } from 'vitest';
 
 import type {
-  CurationRunsPayload,
   OplogPayload,
   ProjectionPayload,
   SimilarityPayload,
   TrustHistoryPayload,
 } from '../../data/query/memory.ts';
 import {
-  curationRunsReading,
-  oplogDetailReading,
+  OplogPayloadSchema,
+  TrustHistoryPayloadSchema,
+} from '../../data/query/memory.ts';
+import {
+  formatUtcMicros,
   oplogReading,
   projectionReading,
-  runStatusState,
   similarityReading,
   trustDetailState,
   trustHistoryReading,
@@ -27,9 +28,16 @@ import {
 
 /* ---- trust history ------------------------------------------------------- */
 
+describe('formatUtcMicros', () => {
+  it('formats canonical microseconds for presentation without changing the wire value', () => {
+    expect(formatUtcMicros(1_754_006_400_000_000)).toBe('2025-08-01T00:00:00.000Z');
+  });
+});
+
 function trustEvent(overrides: Partial<TrustHistoryPayload['trust_history'][number]> = {}) {
   return {
-    timestamp: '2026-08-01T00:00:00Z',
+    event_id: 'event-project-1',
+    timestamp: 1_754_006_400_000_000,
     action: 'helpful' as const,
     old_trust: 0.5,
     new_trust: 0.6,
@@ -39,28 +47,67 @@ function trustEvent(overrides: Partial<TrustHistoryPayload['trust_history'][numb
   };
 }
 
-function trustPayload(
-  events: TrustHistoryPayload['trust_history'],
-  repair: TrustHistoryPayload['repair'],
-): TrustHistoryPayload {
-  return { fact_id: 7, trust_history: events, repair, error: '' };
+function trustPayload(events: TrustHistoryPayload['trust_history']): TrustHistoryPayload {
+  return {
+    fact_id: 'fact-project-7',
+    trust_history: events,
+    limit: 300,
+    completeness: 'complete',
+    next_after: null,
+    error: '',
+  };
 }
 
 describe('trustHistoryReading', () => {
+  it('accepts canonical microseconds and rejects display timestamps on the wire', () => {
+    const canonical = trustPayload([trustEvent()]);
+    expect(TrustHistoryPayloadSchema.safeParse(canonical).success).toBe(true);
+    expect(
+      TrustHistoryPayloadSchema.safeParse({
+        ...canonical,
+        trust_history: [{ ...canonical.trust_history[0], timestamp: '2026-08-01T00:00:00Z' }],
+      }).success,
+    ).toBe(false);
+    expect(
+      TrustHistoryPayloadSchema.safeParse({
+        ...canonical,
+        trust_history: [{ ...canonical.trust_history[0], timestamp: 1.5 }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('requires partial history to carry its exact continuation', () => {
+    const canonical = trustPayload([trustEvent()]);
+    expect(
+      TrustHistoryPayloadSchema.safeParse({
+        ...canonical,
+        completeness: 'partial',
+        next_after: {
+          occurred_at: canonical.trust_history[0]!.timestamp,
+          event_id: canonical.trust_history[0]!.event_id,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      TrustHistoryPayloadSchema.safeParse({
+        ...canonical,
+        completeness: 'partial',
+        next_after: null,
+      }).success,
+    ).toBe(false);
+  });
+
   it('nets the opening and closing trust across the appended events', () => {
     const reading = trustHistoryReading(
-      trustPayload(
-        [
-          trustEvent({ old_trust: 0.5, new_trust: 0.6, delta: 0.1 }),
-          trustEvent({
-            action: 'unhelpful',
-            old_trust: 0.6,
-            new_trust: 0.45,
-            delta: -0.15,
-          }),
-        ],
-        { state: 'not_required', processed: null, remaining: null },
-      ),
+      trustPayload([
+        trustEvent({ old_trust: 0.5, new_trust: 0.6, delta: 0.1 }),
+        trustEvent({
+          action: 'unhelpful',
+          old_trust: 0.6,
+          new_trust: 0.45,
+          delta: -0.15,
+        }),
+      ]),
     );
     expect(reading.count).toBe(2);
     expect(reading.helpful).toBe(1);
@@ -72,9 +119,9 @@ describe('trustHistoryReading', () => {
 
   it('reports no opening, closing or net for an audit with no events', () => {
     const reading = trustHistoryReading(
-      trustPayload([], { state: 'not_required', processed: null, remaining: null }),
+      trustPayload([]),
     );
-    // Not zero. A fact nothing has ever rated has no measured movement, and a
+    // Not zero. A returned window with no rows has no measured movement, and a
     // `0.000` net would claim feedback arrived and cancelled out.
     expect(reading.opening).toBeNull();
     expect(reading.closing).toBeNull();
@@ -83,50 +130,26 @@ describe('trustHistoryReading', () => {
 
   it('counts every detail-availability tier, zeroes included', () => {
     const reading = trustHistoryReading(
-      trustPayload(
-        [
-          trustEvent({ details_availability: 'legacy_redacted' }),
-          trustEvent({ details_availability: 'unknown' }),
-          trustEvent({ details_availability: 'unknown' }),
-        ],
-        { state: 'complete', processed: 12, remaining: 0 },
-      ),
+      trustPayload([
+        trustEvent({ details_availability: 'redacted' }),
+        trustEvent({ details_availability: 'unknown' }),
+        trustEvent({ details_availability: 'unknown' }),
+      ]),
     );
     // The zero is as load-bearing as the counts: "0 of 3 available" is what
     // lets the panel say how much of the audit it can actually show.
     expect(reading.availability).toEqual({
       available: 0,
-      legacy_redacted: 1,
+      redacted: 1,
       unknown: 2,
     });
-  });
-
-  it('never reports an unknown repair state as a complete audit', () => {
-    const unknown = trustHistoryReading(
-      trustPayload([], { state: 'unknown', processed: null, remaining: null }),
-    );
-    expect(unknown.repair).toMatch(/cannot say whether/);
-    expect(unknown.repair).toMatch(/may be incomplete/);
-  });
-
-  it('states an unfinished repair with its remaining count, and without one', () => {
-    expect(
-      trustHistoryReading(
-        trustPayload([], { state: 'incomplete', processed: 4, remaining: 96 }),
-      ).repair,
-    ).toMatch(/96 rows to go/);
-    expect(
-      trustHistoryReading(
-        trustPayload([], { state: 'incomplete', processed: null, remaining: null }),
-      ).repair,
-    ).toMatch(/did not report how much is left/);
   });
 });
 
 describe('trustDetailState', () => {
   it('keeps a withheld detail apart from an unrecorded one', () => {
     expect(trustDetailState('available')).toBeNull();
-    expect(trustDetailState('legacy_redacted')).toBe('redacted');
+    expect(trustDetailState('redacted')).toBe('redacted');
     expect(trustDetailState('unknown')).toBe('unknown');
   });
 });
@@ -135,18 +158,25 @@ describe('trustDetailState', () => {
 
 function point(overrides: Partial<ProjectionPayload['points'][number]> = {}) {
   return {
-    fact_id: 1,
+    fact_id: 'fact-project-1',
+    payload_access: 'eligible' as const,
     x: 0,
     y: 0,
     category: 'general',
     content: 'a fact',
     trust_score: 0.5,
     retrieval_count: 0,
-    created_at: 0,
-    updated_at: 0,
-    bank_name: null,
+    access_count: 0,
+    helpful_count: 0,
+    unhelpful_count: 0,
+    created_at: 1_754_006_400_000_000,
+    updated_at: 1_754_006_400_000_000,
+    projected_as_of: 1_754_006_400_000_000,
+    last_recalled_at: null,
+    tags: [],
+    entities: [],
+    metadata: {},
     entity_count: 0,
-    connection_count: 0,
     ...overrides,
   };
 }
@@ -158,6 +188,12 @@ function projectionPayload(overrides: Partial<ProjectionPayload> = {}): Projecti
     limit: 400,
     method: 'pca',
     points: [],
+    coverage: {
+      completeness: 'complete',
+      examined: 0,
+      limit: 400,
+      omission_reasons: [],
+    },
     error: '',
     ...overrides,
   };
@@ -168,9 +204,9 @@ describe('projectionReading', () => {
     const reading = projectionReading(
       projectionPayload({
         points: [
-          point({ fact_id: 1, x: -1.5, y: 0.25, category: 'decision' }),
-          point({ fact_id: 2, x: 2, y: -1, category: 'decision' }),
-          point({ fact_id: 3, x: 0.5, y: 3, category: 'code_area' }),
+          point({ fact_id: 'fact-project-1', x: -1.5, y: 0.25, category: 'decision' }),
+          point({ fact_id: 'fact-project-2', x: 2, y: -1, category: 'decision' }),
+          point({ fact_id: 'fact-project-3', x: 0.5, y: 3, category: 'code_area' }),
         ],
       }),
     );
@@ -182,7 +218,7 @@ describe('projectionReading', () => {
       { category: 'decision', count: 2 },
       { category: 'code_area', count: 1 },
     ]);
-    expect(reading.note).toMatch(/principal components of 3 phase vectors/);
+    expect(reading.note).toMatch(/principal components of 3 query-time-derived phase encodings returned by a request bounded to 400 facts/);
   });
 
   it('refuses to call a `none` method a projection even when it returned points', () => {
@@ -190,22 +226,34 @@ describe('projectionReading', () => {
       projectionPayload({ method: 'none', dim: 64, points: [point()] }),
     );
     // The handler emits a single point at the origin for a store with one
-    // vectored fact. Drawn as a scatter it is indistinguishable from a real
+    // query-time encoded fact. Drawn as a scatter it is indistinguishable from a real
     // projection with one tight cluster.
     expect(reading.projected).toBe(false);
     expect(reading.note).toMatch(/placeholders, not a projection/);
   });
 
   it('separates a store with no vectors from one that could not be decomposed', () => {
-    const empty = projectionReading(projectionPayload({ method: 'none', dim: 0, points: [] }));
+    const empty = projectionReading(projectionPayload({
+      method: 'none',
+      dim: 0,
+      points: [],
+      coverage: {
+        completeness: 'bounded',
+        examined: 400,
+        limit: 400,
+        omission_reasons: ['request_limit_reached'],
+      },
+    }));
     expect(empty.projected).toBe(false);
-    expect(empty.note).toMatch(/no fact in this store carries a phase vector/);
+    expect(empty.note).toMatch(/returned no phase encodings; whole-store coverage is unknown/);
     expect(empty.extent).toBeNull();
   });
 
   it('does not call a two-point pca result unprojected', () => {
     const reading = projectionReading(
-      projectionPayload({ points: [point({ fact_id: 1 }), point({ fact_id: 2, x: 1 })] }),
+      projectionPayload({
+        points: [point({ fact_id: 'fact-project-1' }), point({ fact_id: 'fact-project-2', x: 1 })],
+      }),
     );
     expect(reading.projected).toBe(true);
   });
@@ -235,7 +283,7 @@ function similarityPayload(overrides: Partial<SimilarityPayload> = {}): Similari
   };
 }
 
-function pair(a: number, b: number, similarity: number) {
+function pair(a: string, b: string, similarity: number) {
   return {
     a_id: a,
     b_id: b,
@@ -251,29 +299,59 @@ function pair(a: number, b: number, similarity: number) {
 describe('similarityReading', () => {
   it('keeps the three denominators apart in one sentence', () => {
     const reading = similarityReading(
-      similarityPayload({ pairs: [pair(1, 2, 0.97), pair(3, 4, 0.9)] }),
+      similarityPayload({
+        pairs: [
+          pair('fact-project-1', 'fact-project-2', 0.97),
+          pair('fact-project-3', 'fact-project-4', 0.9),
+        ],
+      }),
     );
-    expect(reading.vectored).toBe(40);
+    expect(reading.encoded).toBe(40);
     expect(reading.scored).toBe(300);
     expect(reading.returned).toBe(2);
     expect(reading.denominators).toBe(
-      '2 shown of 300 scored pairs over 40 vectored facts, at or above 0.85',
+      '2 pairs shown at or above 0.85; 300 finite pairs scored globally over 40 query-time encoded facts',
     );
   });
 
-  it('marks a return truncated by the cap rather than by the floor', () => {
-    const capped = similarityReading(
+  it('does not infer cap truncation from the pre-floor global pair count', () => {
+    const fullPageWithUnknownCoverage = similarityReading(
       similarityPayload({
         limit: 2,
         total_pairs: 9,
-        pairs: [pair(1, 2, 0.97), pair(3, 4, 0.96)],
+        score_distribution: {
+          min_score: 0.1,
+          max_score: 0.97,
+          average_score: 0.37,
+          bin_count: 2,
+          total_pairs: 9,
+          bins: [
+            { start: 0.1, end: 0.84, count: 7 },
+            { start: 0.85, end: 0.97, count: 2 },
+          ],
+        },
+        pairs: [
+          pair('fact-project-1', 'fact-project-2', 0.97),
+          pair('fact-project-3', 'fact-project-4', 0.96),
+        ],
       }),
     );
-    expect(capped.capped).toBe(true);
-    const complete = similarityReading(
-      similarityPayload({ limit: 25, total_pairs: 2, pairs: [pair(1, 2, 0.97), pair(3, 4, 0.9)] }),
+    // Exactly two pairs meet the threshold and seven more fall below it. The
+    // response fills its limit, but `total_pairs` counts all nine finite pairs
+    // before the threshold, so it cannot prove a third threshold match exists.
+    expect(fullPageWithUnknownCoverage.capped).toBeNull();
+
+    const underLimit = similarityReading(
+      similarityPayload({
+        limit: 25,
+        total_pairs: 2,
+        pairs: [
+          pair('fact-project-1', 'fact-project-2', 0.97),
+          pair('fact-project-3', 'fact-project-4', 0.9),
+        ],
+      }),
     );
-    expect(complete.capped).toBe(false);
+    expect(underLimit.capped).toBe(false);
   });
 
   it('says a pair needs two facts rather than reporting zero similarity', () => {
@@ -297,131 +375,54 @@ describe('similarityReading', () => {
     expect(reading.average).toBeNull();
     expect(reading.min).toBeNull();
     expect(reading.max).toBeNull();
-    expect(reading.denominators).toBe('1 vectored fact — a pair needs two, so nothing was scored');
-  });
-});
-
-/* ---- curation runs ------------------------------------------------------- */
-
-function run(overrides: Partial<CurationRunsPayload['records'][number]> = {}) {
-  return {
-    run_id: 'run-1',
-    trigger: 'scheduler',
-    task: 'memory_curator',
-    backend: 'codex_app_server',
-    status: 'completed',
-    reviewed_count: 3,
-    accepted_count: 2,
-    rejected_count: 1,
-    skipped_count: 0,
-    started_at: '2026-08-01T00:00:00Z',
-    completed_at: '2026-08-01T00:01:00Z',
-    ...overrides,
-  };
-}
-
-describe('curationRunsReading', () => {
-  it('groups runs by task and counts the ones the ledger did not record as completed', () => {
-    const reading = curationRunsReading({
-      records: [
-        run({ run_id: 'a' }),
-        run({ run_id: 'b', accepted_count: 4, rejected_count: 0, skipped_count: 2 }),
-        run({ run_id: 'c', task: 'skill_writer', status: 'failed', error: 'backend timeout' }),
-      ],
-      count: 3,
-      limit: 50,
-      error: '',
-    });
-    expect(reading.failed).toBe(1);
-    expect(reading.tasks).toEqual([
-      { task: 'memory_curator', runs: 2, accepted: 6, rejected: 1, skipped: 2, failed: 0 },
-      // The failed run's own counts still total: the ledger recorded what it
-      // reviewed before it failed, and dropping those would understate the
-      // work the task actually did.
-      { task: 'skill_writer', runs: 1, accepted: 2, rejected: 1, skipped: 0, failed: 1 },
-    ]);
-  });
-
-  it('separates an unreadable ledger from a project that has never run automation', () => {
-    // Both answer HTTP 200 with an empty array. Only `error` tells them apart,
-    // and a surface that read `records` first would call the first one empty.
-    const unreadable = curationRunsReading({
-      records: [],
-      count: 0,
-      limit: 50,
-      error: 'ledger is corrupt at line 12',
-    });
-    expect(unreadable.ledgerError).toBe('ledger is corrupt at line 12');
-    const never = curationRunsReading({ records: [], count: 0, limit: 50, error: '' });
-    expect(never.ledgerError).toBeNull();
-  });
-
-  it('counts a run failed on its recorded status, not on carrying an error string', () => {
-    const reading = curationRunsReading({
-      records: [run({ status: 'completed', error: 'one proposal was malformed' })],
-      count: 1,
-      limit: 50,
-      error: '',
-    });
-    expect(reading.failed).toBe(0);
-  });
-});
-
-describe('runStatusState', () => {
-  it('maps the ledger vocabulary onto the state taxonomy', () => {
-    expect(runStatusState('completed')).toBe('ready');
-    expect(runStatusState('failed')).toBe('error');
-    expect(runStatusState('cancelled')).toBe('cancelled');
-    expect(runStatusState('timed_out')).toBe('timed_out');
-  });
-
-  it('leaves a status this build has not seen as unknown rather than as an error', () => {
-    // Inventing a verdict for the daemon's vocabulary is the fabrication the
-    // taxonomy exists to prevent — an unrecognised word is not a failure.
-    expect(runStatusState('quiesced')).toBe('unknown');
+    expect(reading.denominators).toBe(
+      '1 query-time encoded fact — a pair needs two, so nothing was scored',
+    );
   });
 });
 
 /* ---- oplog --------------------------------------------------------------- */
-
-describe('oplogDetailReading', () => {
-  it('keeps the three detail variants apart', () => {
-    expect(oplogDetailReading({ summary: 'stored a fact' })).toEqual({
-      kind: 'summary',
-      summary: 'stored a fact',
-    });
-    const redacted = oplogDetailReading({ redacted: true });
-    expect(redacted).toMatchObject({ kind: 'state', state: 'redacted' });
-    const unknown = oplogDetailReading({ availability: 'unknown' });
-    expect(unknown).toMatchObject({ kind: 'state', state: 'unknown' });
-    // The whole point: a withheld detail and an unrecorded one are not the
-    // same reading, and neither is "no detail".
-    expect(redacted).not.toEqual(unknown);
-  });
-});
 
 function oplogPayload(overrides: Partial<OplogPayload> = {}): OplogPayload {
   return { events: [], count: 0, limit: 100, error: '', ...overrides };
 }
 
 describe('oplogReading', () => {
-  it('tallies operations and the two withheld-detail tiers', () => {
+  it('accepts canonical microseconds and rejects display timestamps on the wire', () => {
+    const canonical = oplogPayload({
+      events: [{ id: 1, ts: 1_754_006_400_000_000, op: 'created', fact_id: 'fact-project-7' }],
+      count: 1,
+    });
+    expect(OplogPayloadSchema.safeParse(canonical).success).toBe(true);
+    expect(
+      OplogPayloadSchema.safeParse({
+        ...canonical,
+        events: [{ ...canonical.events[0], ts: '2026-08-01T00:00:00Z' }],
+      }).success,
+    ).toBe(false);
+    expect(
+      OplogPayloadSchema.safeParse({
+        ...canonical,
+        events: [{ ...canonical.events[0], ts: 1.5 }],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('tallies canonical operations without inventing unavailable details', () => {
     const reading = oplogReading(
       oplogPayload({
         events: [
-          { id: 1, ts: 't1', op: 'add_fact', fact_id: 7, detail: { summary: 'added' } },
-          { id: 2, ts: 't2', op: 'add_fact', fact_id: 8, detail: { redacted: true } },
-          { id: 3, ts: 't3', op: 'remove_fact', fact_id: null, detail: { availability: 'unknown' } },
+          { id: 1, ts: 1_754_006_400_000_000, op: 'created', fact_id: 'fact-project-7' },
+          { id: 2, ts: 1_754_092_800_000_000, op: 'created', fact_id: 'fact-project-8' },
+          { id: 3, ts: 1_754_179_200_000_000, op: 'payload_access_changed', fact_id: null },
         ],
         count: 3,
       }),
     );
     expect(reading.operations).toEqual([
-      { op: 'add_fact', count: 2 },
-      { op: 'remove_fact', count: 1 },
+      { op: 'created', count: 2 },
+      { op: 'payload_access_changed', count: 1 },
     ]);
-    expect(reading.redacted).toBe(1);
-    expect(reading.unknownDetail).toBe(1);
   });
 
   it('separates an unreadable store from a store nothing has written to', () => {

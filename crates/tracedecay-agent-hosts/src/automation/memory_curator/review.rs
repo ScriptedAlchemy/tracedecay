@@ -1,141 +1,184 @@
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay_domain::{FactId, FactOwnerV1};
-use tracedecay_runtime_core::memory::encoding::HolographicEncoder;
-use tracedecay_runtime_core::memory::similarity::{lexical_overlap, similarity_classification};
-use tracedecay_store::{CurrentFactsQuery, ProjectMemoryFactStore, StoredFactV1};
+use tracedecay_domain::{FactEventId, FactId, FactOwnerV1};
+use tracedecay_store::{
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
+    ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
+};
 use tracedecay_usecases::memory::MemoryApplication;
 
 use crate::errors::Result;
 
+use super::super::lifecycle::AutomationRunControl;
+use super::super::run_ledger::load_latest_task_validation_pointer;
 use super::{memory_application_error, memory_contract_error};
+use crate::errors::TraceDecayError;
 
-const CURATION_FACT_SCAN_LIMIT: usize = 1_000;
-// The classifier admits `merge_candidate` at 0.90 and `likely_duplicate` at
-// 0.95, so the lower classification floor is the bounded review prefilter.
-const CURATION_SIMILARITY_THRESHOLD_MILLIONTHS: u32 = 900_000;
+const CURATION_FACT_REVIEW_LIMIT: usize = 1_000;
 
-pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore>(
+pub(super) struct MemoryCuratorReviewPage {
+    pub review: Value,
+    pub allowed_facts: BTreeMap<FactId, FactEventId>,
+    pub resume_after_fact_id: Option<FactId>,
+}
+
+pub(super) async fn memory_curator_resume_cursor(root: &Path) -> Result<Option<FactId>> {
+    match load_latest_task_validation_pointer(
+        root,
+        "memory_curator",
+        "/pagination/resume_after_fact_id",
+    )
+    .await?
+    {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => {
+            FactId::new(value)
+                .map(Some)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("invalid durable memory curator cursor: {error}"),
+                })
+        }
+        Some(_) => Err(TraceDecayError::Config {
+            message: "invalid durable memory curator cursor shape".to_owned(),
+        }),
+    }
+}
+
+pub(super) fn attach_pagination_summary(
+    summary: &mut Value,
+    started_after_fact_id: Option<&FactId>,
+    resume_after_fact_id: Option<&FactId>,
+) {
+    if let Some(object) = summary.as_object_mut() {
+        object.insert(
+            "pagination".to_owned(),
+            json!({
+                "started_after_fact_id": started_after_fact_id,
+                "resume_after_fact_id": resume_after_fact_id,
+            }),
+        );
+    }
+}
+
+pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore + ProjectMemoryGraphStore>(
     memory: &MemoryApplication<A>,
     owner: &FactOwnerV1,
-    max_pairs: usize,
-) -> Result<(Value, BTreeSet<FactId>)> {
-    let facts = memory
-        .query_current_facts(
-            CurrentFactsQuery::new(owner.clone(), None, CURATION_FACT_SCAN_LIMIT)
+    fact_review_limit: usize,
+    after_fact_id: Option<FactId>,
+    run_control: &AutomationRunControl,
+) -> Result<MemoryCuratorReviewPage> {
+    let limit = fact_review_limit.clamp(1, CURATION_FACT_REVIEW_LIMIT);
+    let page = memory
+        .list_project_memory_facts(
+            ProjectMemoryFactListQueryV1::new(owner.clone(), None, None, after_fact_id, limit)
                 .map_err(memory_contract_error)?,
+            run_control.read_control(),
         )
         .await
         .map_err(memory_application_error)?;
-    let page_truncated = if facts.len() == CURATION_FACT_SCAN_LIMIT {
-        let after = facts.last().map(|fact| fact.fact_id().clone());
-        !memory
-            .query_current_facts(
-                CurrentFactsQuery::new(owner.clone(), after, 1).map_err(memory_contract_error)?,
-            )
-            .await
-            .map_err(memory_application_error)?
-            .is_empty()
-    } else {
-        false
-    };
-    let encoder = HolographicEncoder::new();
-    let eligible = facts
+    let mut allowed_facts = BTreeMap::new();
+    let mut unavailable_count = 0usize;
+    let facts = page
+        .facts()
         .iter()
-        .filter_map(|fact| {
-            fact.payload().map(|payload| {
-                (
-                    fact,
-                    encoder.encode_fact(payload.content(), payload.entities()),
-                )
-            })
+        .filter_map(|projection| match projection {
+            ProjectMemoryFactProjectionV1::Available(fact) => {
+                allowed_facts.insert(fact.fact_id().clone(), fact.last_event_id().clone());
+                Some(json!({
+                    "fact_id": fact.fact_id(),
+                    "last_event_id": fact.last_event_id(),
+                    "content": fact.content(),
+                    "category": fact.category(),
+                    "tags": fact.tags(),
+                    "trust": fact.trust(),
+                    "metadata": fact.metadata(),
+                }))
+            }
+            ProjectMemoryFactProjectionV1::Unavailable(_) => {
+                unavailable_count = unavailable_count.saturating_add(1);
+                None
+            }
         })
         .collect::<Vec<_>>();
-    let mut candidates = Vec::new();
-    for (left_index, (left, left_vector)) in eligible.iter().enumerate() {
-        for (right, right_vector) in eligible.iter().skip(left_index + 1) {
-            let similarity = encoder.similarity(left_vector, right_vector);
-            let similarity_millionths = (similarity.clamp(0.0, 1.0) * 1_000_000.0).round() as u32;
-            if similarity_millionths < CURATION_SIMILARITY_THRESHOLD_MILLIONTHS {
-                continue;
-            }
-            let left_content = left
-                .payload()
-                .map(|payload| payload.content())
-                .unwrap_or("");
-            let right_content = right
-                .payload()
-                .map(|payload| payload.content())
-                .unwrap_or("");
-            let (_, token_overlap, overlap_coefficient) =
-                lexical_overlap(left_content, right_content);
-            let classification =
-                similarity_classification(similarity, token_overlap, overlap_coefficient);
-            if matches!(classification, "merge_candidate" | "likely_duplicate") {
-                candidates.push((similarity_millionths, *left, *right, classification));
-            }
-        }
-    }
-    candidates.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.fact_id().cmp(right.1.fact_id()))
-            .then_with(|| left.2.fact_id().cmp(right.2.fact_id()))
-    });
-    candidates.truncate(max_pairs);
-
-    let mut allowed_fact_ids = BTreeSet::new();
-    let pairs = candidates
-        .into_iter()
-        .map(|(similarity_millionths, left, right, classification)| {
-            allowed_fact_ids.insert(left.fact_id().clone());
-            allowed_fact_ids.insert(right.fact_id().clone());
-            json!({
-                "left": similarity_fact_json(left),
-                "right": similarity_fact_json(right),
-                "similarity_millionths": similarity_millionths,
-                "classification": classification,
-            })
+    let next_after_fact_id = page.next_after_fact_id().cloned();
+    let graph = memory
+        .project_memory_graph(
+            ProjectMemoryGraphQueryV1::new(
+                owner.clone(),
+                allowed_facts.keys().cloned().collect(),
+                4_096,
+            )
+            .map_err(memory_contract_error)?,
+            run_control.read_control(),
+        )
+        .await
+        .map_err(memory_application_error)?;
+    let relations = graph
+        .relations()
+        .iter()
+        .filter_map(|relation| match (relation.source(), relation.target()) {
+            (
+                ProjectMemoryGraphTargetV1::Fact(source),
+                ProjectMemoryGraphTargetV1::Fact(target),
+            ) => Some(json!({
+                "source_fact_id": source.fact_id(),
+                "target_fact_id": target.fact_id(),
+                "kind": relation.kind(),
+            })),
+            _ => None,
         })
-        .collect::<Vec<_>>();
-    let status = match (pairs.is_empty(), page_truncated) {
-        (true, true) => "partial_coverage_no_candidates",
-        (true, false) => "up_to_date",
-        (false, _) => "needs_llm_review",
-    };
-    let allowed_fact_id_values = allowed_fact_ids.iter().collect::<Vec<_>>();
-    Ok((
-        json!({
-            "status": status,
-            "clusters_reviewed": pairs.len(),
-            "coverage": {
-                "active_facts_scanned": facts.len(),
-                "active_facts_eligible": eligible.len(),
-                "active_facts_total": if page_truncated { Value::Null } else { json!(facts.len()) },
-                "state": if page_truncated { "partial" } else { "complete" },
-            },
-            "page_truncated": page_truncated,
-            "allowed_fact_ids": allowed_fact_id_values,
-            "pairs": pairs,
-            "messages": [{
-                "role": "system",
-                "content": "Return strict JSON {\"ops\":[]}. Supported operations are delete, merge, normalize_tags, merge_entities, add_alias, and link_facts. Every fact id and evidence fact id must be copied exactly from allowed_fact_ids. Every operation requires confidence in [min_confidence,1]. A batch may contain at most one destructive delete/merge and must not mix a destructive operation with grooming operations. Never use timestamps as truth or freshness evidence."
-            }],
-        }),
-        allowed_fact_ids,
-    ))
+        .collect();
+    let mut review =
+        memory_curator_review_value(facts, unavailable_count, next_after_fact_id.is_some());
+    review["relations"] = Value::Array(relations);
+    Ok(MemoryCuratorReviewPage {
+        review,
+        allowed_facts,
+        resume_after_fact_id: next_after_fact_id,
+    })
 }
 
-fn similarity_fact_json(fact: &StoredFactV1) -> Value {
-    let payload = fact.payload();
+pub(super) fn memory_curator_review_value(
+    facts: Vec<Value>,
+    unavailable_count: usize,
+    page_truncated: bool,
+) -> Value {
+    let status = if facts.is_empty() {
+        if unavailable_count > 0 || page_truncated {
+            "unavailable"
+        } else {
+            "up_to_date"
+        }
+    } else {
+        "needs_llm_review"
+    };
+    let allowed_fact_ids = facts
+        .iter()
+        .filter_map(|fact| fact.get("fact_id"))
+        .cloned()
+        .collect::<Vec<_>>();
     json!({
-        "fact_id": fact.fact_id(),
-        "content": payload.map(|payload| payload.content()),
-        "category": payload.map(|payload| payload.category()),
-        "tags": payload.map(|payload| payload.tags()).unwrap_or_default(),
-        "trust": fact.trust(),
-        "metadata": payload.map(|payload| payload.metadata()),
+        "status": status,
+        "facts_reviewed": facts.len(),
+        "coverage": {
+            "active_facts_scanned": facts.len().saturating_add(unavailable_count),
+            "active_facts_available": facts.len(),
+            "active_facts_unavailable": unavailable_count,
+            "active_facts_total": if page_truncated {
+                Value::Null
+            } else {
+                json!(facts.len().saturating_add(unavailable_count))
+            },
+            "state": if page_truncated || unavailable_count > 0 { "partial" } else { "complete" },
+        },
+        "page_truncated": page_truncated,
+        "allowed_fact_ids": allowed_fact_ids,
+        "facts": facts,
+        "messages": [{
+            "role": "system",
+            "content": "Return strict JSON {\"ops\":[]} with at most 256 operations. Review only the supplied canonical facts and current relations. Supported operations are add, update, merge, remove, normalize_tags, and link_facts. Every target, relation endpoint, and evidence item must copy the exact fact_id plus last_event_id pair from facts. Every operation requires nonempty evidence_facts, a bounded reason (except normalize_tags/link_facts), and confidence in [min_confidence,1]. Do not repeat a relation already listed. Link facts must use distinct source and target snapshots plus source_label and metadata. Never use timestamps as truth or freshness evidence."
+        }],
     })
 }

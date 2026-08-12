@@ -15,7 +15,7 @@ use tracedecay_domain::{
 use tracedecay_store::{
     FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
     FactLineageCursor, FactLineageResponseV1, FactQueryCoverageV1, FactStoreResult,
-    ProjectMemoryFactIdV1,
+    ProjectMemoryAutomationRunReceiptsV1, ProjectMemoryFactIdV1,
 };
 
 use super::*;
@@ -23,6 +23,9 @@ use super::*;
 mod project_memory_contracts;
 mod read_control;
 mod retrieval;
+
+#[path = "tests/curation_mutations.rs"]
+mod curation_mutations;
 
 #[derive(Default)]
 struct FakeAuthority {
@@ -42,6 +45,9 @@ struct FakeAuthority {
     retrieval_outcome: Mutex<Option<ProjectMemoryFactRetrievalOutcomeV1>>,
     automatic_fact_apply_result: Mutex<Option<ProjectMemoryAutomaticFactApplyResultV1>>,
     merge_outcome: Mutex<Option<ProjectMemoryFactMergeOutcomeV1>>,
+    curation_requests: Mutex<Vec<ProjectMemoryFactCurationBatchV1>>,
+    curation_receipt: Mutex<Option<ProjectMemoryFactCurationReceiptV1>>,
+    automation_run_receipts: Mutex<Option<ProjectMemoryAutomationRunReceiptsV1>>,
 }
 
 #[derive(Default)]
@@ -360,11 +366,16 @@ impl ProjectMemoryFactStore for FakeAuthority {
 
     async fn apply_project_memory_fact_curation(
         &self,
-        _request: ProjectMemoryFactCurationBatchV1,
+        request: ProjectMemoryFactCurationBatchV1,
         _write_control: &FactWriteControl,
     ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
         self.authority_calls.lock().unwrap().push("curation");
-        Err(authority_fixture_error())
+        self.curation_requests.lock().unwrap().push(request);
+        self.curation_receipt
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(authority_fixture_error)
     }
 
     async fn merge_project_memory_facts(
@@ -470,6 +481,22 @@ impl ProjectMemoryFactStore for FakeAuthority {
             .unwrap()
             .push("automatic-fact-list");
         ProjectMemoryAutomaticFactReceiptPageV1::new(owner, vec![], None)
+    }
+
+    async fn project_memory_automation_run_receipts(
+        &self,
+        owner: FactOwnerV1,
+        run_id: tracedecay_domain::RunId,
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryAutomationRunReceiptsV1> {
+        self.authority_calls
+            .lock()
+            .unwrap()
+            .push("automation-run-receipts");
+        match self.automation_run_receipts.lock().unwrap().take() {
+            Some(receipts) => Ok(receipts),
+            None => ProjectMemoryAutomationRunReceiptsV1::new(owner, run_id, None, vec![]),
+        }
     }
 }
 
@@ -882,6 +909,39 @@ async fn lineage_page_must_advance_cursor_and_stay_bounded() {
     assert!(matches!(
         error,
         MemoryApplicationError::InvalidAuthorityResult { .. }
+    ));
+}
+
+#[tokio::test]
+async fn automation_receipt_recovery_rejects_foreign_authority_identity() {
+    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
+    let requested_run = tracedecay_domain::RunId::new("run.requested-recovery").unwrap();
+    *application
+        .authority
+        .automation_run_receipts
+        .lock()
+        .unwrap() = Some(
+        ProjectMemoryAutomationRunReceiptsV1::new(
+            FactOwnerV1::Profile,
+            requested_run.clone(),
+            None,
+            vec![],
+        )
+        .unwrap(),
+    );
+
+    let result = application
+        .project_memory_automation_run_receipts(
+            requested_run,
+            &FactReadControl::new(Arc::new(|| false)),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "memory automation receipt recovery identity",
+        })
     ));
 }
 
