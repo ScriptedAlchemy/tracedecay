@@ -12,7 +12,7 @@ use tracedecay_application::diagnostics::{
 };
 use tracedecay_domain::{CodeGenerationId, GenerationDiagnosticV1, RetrievalAnchorId};
 use tracedecay_store::{
-    DiagnosticPublicationReceiptV1, DiagnosticStore, DiagnosticStoreResult,
+    DiagnosticPublicationReceiptV1, DiagnosticStore, DiagnosticStoreError, DiagnosticStoreResult,
     SanitizedCleanDiagnosticSnapshotV1,
 };
 
@@ -57,7 +57,15 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         &self,
         snapshot: SanitizedCleanDiagnosticSnapshotV1,
     ) -> DiagnosticStoreResult<DiagnosticPublicationReceiptV1> {
-        DiagnosticsStore::new(self.database.conn())
+        let writer = self
+            .database
+            .writer_connection("publish clean diagnostics")
+            .await
+            .map_err(|source| DiagnosticStoreError::Storage {
+                operation: "publish clean diagnostics",
+                source: Box::new(source),
+            })?;
+        DiagnosticsStore::new(writer.engine_connection())
             .publish_clean_diagnostics(snapshot)
             .await
     }
@@ -130,7 +138,15 @@ impl DiagnosticStore for DatabaseDiagnosticStore {
         prior_generation: &CodeGenerationId,
         successor_generation: &CodeGenerationId,
     ) -> DiagnosticStoreResult<u64> {
-        DiagnosticsStore::new(self.database.conn())
+        let writer = self
+            .database
+            .writer_connection("supersede diagnostic generation")
+            .await
+            .map_err(|source| DiagnosticStoreError::Storage {
+                operation: "supersede diagnostic generation",
+                source: Box::new(source),
+            })?;
+        DiagnosticsStore::new(writer.engine_connection())
             .supersede_diagnostic_generation(prior_generation, successor_generation)
             .await
     }

@@ -289,7 +289,7 @@ fn diagnostic_provider(
         configuration: RevisionDigest {
             revision: ComponentVersion::new("configuration.lsp-advisory-source.v1")
                 .expect("configuration"),
-            digest: digest('a'),
+            digest: input.request.configuration_digest.clone(),
         },
         policy: policy(),
     })
@@ -555,10 +555,22 @@ async fn database(root: &std::path::Path) -> Database {
     crate::register_test_schema_installer();
     let authority = DatabaseAuthority::acquire_test(&path, "LSP advisory source journey")
         .expect("database authority");
-    Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
-        .await
-        .expect("database")
-        .0
+    let database =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .expect("database")
+            .0;
+    {
+        let writer = database
+            .writer_connection("install LSP advisory diagnostics schema")
+            .await
+            .expect("diagnostics schema writer");
+        DiagnosticsStore::new(writer.engine_connection())
+            .ensure_schema()
+            .await
+            .expect("diagnostics schema");
+    }
+    database
 }
 
 async fn seed_github_diagnostic(database: &Database, observed_at: UtcMicros) {
@@ -599,8 +611,12 @@ async fn seed_github_diagnostic(database: &Database, observed_at: UtcMicros) {
             },
         )
         .expect("contribution");
+    let writer = database
+        .writer_connection("seed LSP advisory source diagnostic")
+        .await
+        .expect("diagnostic writer");
     snapshot
-        .publish(&DiagnosticsStore::new(database.conn()))
+        .publish(&DiagnosticsStore::new(writer.engine_connection()))
         .await
         .expect("published diagnostic");
 }
