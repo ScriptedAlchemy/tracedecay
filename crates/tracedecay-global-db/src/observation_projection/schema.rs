@@ -539,9 +539,6 @@ mod tests {
 
     use crate::ensure_registered_schema;
     use tracedecay_runtime_core::db::engine::TestConnection;
-    use tracedecay_rusqlite_runtime::workflow::{
-        WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_TABLE_CONTRACTS_V1,
-    };
 
     async fn open_registered_schema(
         path: &std::path::Path,
@@ -559,19 +556,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
         let conn = TestConnection::open(&path);
-        // Seed the exact workflow V1 schema and identity row so the
-        // workflow-schema admission gate passes and the projection-shape
-        // probe is the check that refuses this store.
-        let mut workflow_schema = String::new();
-        for table in WORKFLOW_TABLE_CONTRACTS_V1 {
-            workflow_schema.push_str(table.sql);
-            workflow_schema.push_str(";\n");
-        }
-        workflow_schema.push_str(WORKFLOW_SCHEMA_IDENTITY_V1);
-        workflow_schema.push(';');
-        conn.execute_batch(&workflow_schema).await.unwrap();
+        ensure_registered_schema(&conn).await.unwrap();
         conn.execute_batch(
-            "CREATE TABLE observation_projection_rebuilds (
+            "DROP TABLE observation_projection_rebuilds;
+             CREATE TABLE observation_projection_rebuilds (
                 projector_version TEXT PRIMARY KEY,
                 generation TEXT NOT NULL,
                 frontier_sequence INTEGER NOT NULL CHECK(frontier_sequence >= 0),
