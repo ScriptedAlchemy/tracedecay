@@ -12,11 +12,12 @@ use tracedecay_domain::{
     ProvenanceId, RunId, UtcMicros,
 };
 use tracedecay_store::{
-    FactCommitOutcome, FactCommitReceipt, FactReadControl, FactStore, FactStoreError,
-    FactWriteBatch, ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationEffectV1,
-    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactCurationReceiptV1,
-    ProjectMemoryFactCurationReviewRefV1, ProjectMemoryFactIdV1, ProjectMemoryFactLinkV1,
-    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactStore,
+    FactCommitConflict, FactCommitOutcome, FactCommitReceipt, FactReadControl, FactStore,
+    FactStoreError, FactWriteBatch, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationOperationEffectV1, ProjectMemoryFactCurationOperationV1,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactCurationReviewRefV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactLinkV1, ProjectMemoryFactNormalizeTagsV1,
+    ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactStore,
 };
 
 use crate::db::engine::params;
@@ -1164,7 +1165,7 @@ async fn exact_operation_replay_reports_replayed_with_stable_canonical_material(
         FactLineageEventKindV1::Curated {
             action: FactCurationActionV1::Linked { relation },
             ..
-        } if relation.relation() == FactRelationKindV1::Supports
+        } if relation.kind() == FactRelationKindV1::Supports
     ));
 }
 

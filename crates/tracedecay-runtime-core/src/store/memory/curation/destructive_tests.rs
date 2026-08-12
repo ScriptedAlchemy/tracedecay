@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::{TempDir, tempdir};
 use tracedecay_domain::{
     Confidence, FactCategoryV1, FactEventId, FactOwnerV1, ProvenanceId, RunId,
@@ -127,11 +127,15 @@ fn add_command(
 fn evidence(
     owner: &FactOwnerV1,
     fact: ProjectMemoryFactIdV1,
+    expected_last_event_id: FactEventId,
     reason: &str,
 ) -> ProjectMemoryFactCurationEvidenceV1 {
     ProjectMemoryFactCurationEvidenceV1::new(
         owner,
-        vec![fact],
+        vec![tracedecay_store::ProjectMemoryFactCurationReviewRefV1::new(
+            fact,
+            expected_last_event_id,
+        )],
         Confidence::new(0.9).expect("review confidence"),
         reason.to_owned(),
     )
@@ -225,7 +229,7 @@ async fn operation_receipt_count(fixture: &Fixture, operation_ids: &[&Provenance
 #[tokio::test]
 async fn no_op_batch_has_no_anchor_and_replays_without_fabricated_changes() {
     let fixture = Fixture::new("truthful-no-op").await;
-    let (duplicate, _) = fixture.seed("duplicate").await;
+    let (duplicate, duplicate_event) = fixture.seed("duplicate").await;
     let (removed, removed_seed_event) = fixture.seed("removed").await;
     let initial_remove = ProjectMemoryFactRemoveCommandV1::new(
         removed.clone(),
@@ -268,6 +272,7 @@ async fn no_op_batch_has_no_anchor_and_replays_without_fabricated_changes() {
         evidence(
             &fixture.owner,
             duplicate.clone(),
+            duplicate_event.clone(),
             "Exact duplicate evidence",
         ),
     )
@@ -281,7 +286,12 @@ async fn no_op_batch_has_no_anchor_and_replays_without_fabricated_changes() {
     .expect("curation already-removed command");
     let remove = ProjectMemoryFactCurationRemoveV1::new(
         remove_command,
-        evidence(&fixture.owner, duplicate, "Deleted target already settled"),
+        evidence(
+            &fixture.owner,
+            duplicate,
+            duplicate_event,
+            "Deleted target already settled",
+        ),
     )
     .expect("curation already-removed operation");
     let request = ProjectMemoryFactCurationBatchV1::new(
@@ -340,7 +350,7 @@ async fn mixed_destructive_batch_commits_once_and_exactly_replays_every_effect()
     let (merge_winner, merge_winner_event) = fixture.seed("mixed-winner").await;
     let (merge_loser, merge_loser_event) = fixture.seed("mixed-loser").await;
     let (remove_target, remove_event) = fixture.seed("mixed-remove").await;
-    let (evidence_fact, _) = fixture.seed("mixed-evidence").await;
+    let (evidence_fact, evidence_event) = fixture.seed("mixed-evidence").await;
     let run = run_id("automation.run.mixed-destructive");
     let outer_id = provenance_id("curation.outer.mixed-destructive");
     let child_id = |index, kind| {
@@ -354,7 +364,12 @@ async fn mixed_destructive_batch_commits_once_and_exactly_replays_every_effect()
             Some(&run),
             child_id(0, ProjectMemoryFactCurationMutationKindV1::Add).as_str(),
         ),
-        evidence(&fixture.owner, evidence_fact.clone(), "Mixed add evidence"),
+        evidence(
+            &fixture.owner,
+            evidence_fact.clone(),
+            evidence_event.clone(),
+            "Mixed add evidence",
+        ),
     )
     .expect("mixed curation add");
     let update = ProjectMemoryFactCurationUpdateV1::new(
@@ -367,6 +382,7 @@ async fn mixed_destructive_batch_commits_once_and_exactly_replays_every_effect()
         evidence(
             &fixture.owner,
             evidence_fact.clone(),
+            evidence_event.clone(),
             "Mixed update evidence",
         ),
     )
@@ -388,6 +404,7 @@ async fn mixed_destructive_batch_commits_once_and_exactly_replays_every_effect()
         evidence(
             &fixture.owner,
             evidence_fact.clone(),
+            evidence_event.clone(),
             "Mixed merge evidence",
         ),
     )
@@ -400,7 +417,12 @@ async fn mixed_destructive_batch_commits_once_and_exactly_replays_every_effect()
             None,
         )
         .expect("mixed remove command"),
-        evidence(&fixture.owner, evidence_fact, "Mixed remove evidence"),
+        evidence(
+            &fixture.owner,
+            evidence_fact,
+            evidence_event,
+            "Mixed remove evidence",
+        ),
     )
     .expect("mixed curation remove");
     let request = ProjectMemoryFactCurationBatchV1::new(
@@ -475,7 +497,7 @@ async fn stale_late_child_rolls_back_prior_child_and_all_operation_receipts() {
     let fixture = Fixture::new("atomic-rollback").await;
     let (update_target, update_event) = fixture.seed("update-target").await;
     let (remove_target, remove_event) = fixture.seed("remove-target").await;
-    let (evidence_fact, _) = fixture.seed("evidence").await;
+    let (evidence_fact, evidence_event) = fixture.seed("evidence").await;
     let outer_id = provenance_id("curation.outer.atomic-rollback");
     let update_id = derive_project_memory_fact_curation_child_operation_id(
         &outer_id,
@@ -493,6 +515,7 @@ async fn stale_late_child_rolls_back_prior_child_and_all_operation_receipts() {
         evidence(
             &fixture.owner,
             evidence_fact.clone(),
+            evidence_event.clone(),
             "Update review evidence",
         ),
     )
@@ -511,7 +534,12 @@ async fn stale_late_child_rolls_back_prior_child_and_all_operation_receipts() {
             None,
         )
         .expect("stale remove command"),
-        evidence(&fixture.owner, evidence_fact, "Remove review evidence"),
+        evidence(
+            &fixture.owner,
+            evidence_fact,
+            evidence_event,
+            "Remove review evidence",
+        ),
     )
     .expect("stale remove operation");
     fixture
@@ -569,11 +597,16 @@ async fn cancellation_before_admission_writes_no_child_or_outer_receipt() {
     let update = ProjectMemoryFactCurationUpdateV1::new(
         update_command(
             target.clone(),
-            target_event,
+            target_event.clone(),
             child_id.as_str(),
             "Cancellation must keep this content out of canonical storage.",
         ),
-        evidence(&fixture.owner, target, "Cancellation fixture evidence"),
+        evidence(
+            &fixture.owner,
+            target,
+            target_event,
+            "Cancellation fixture evidence",
+        ),
     )
     .expect("cancelled curation update");
     let request = ProjectMemoryFactCurationBatchV1::new(
@@ -615,11 +648,16 @@ async fn cancellation_at_outer_commit_rolls_back_child_and_outer_receipts() {
     let update = ProjectMemoryFactCurationUpdateV1::new(
         update_command(
             target.clone(),
-            target_event,
+            target_event.clone(),
             child_id.as_str(),
             "Commit cancellation must roll this child mutation back.",
         ),
-        evidence(&fixture.owner, target, "Commit cancellation evidence"),
+        evidence(
+            &fixture.owner,
+            target,
+            target_event,
+            "Commit cancellation evidence",
+        ),
     )
     .expect("commit-cancelled curation update");
     let request = ProjectMemoryFactCurationBatchV1::new(
@@ -675,7 +713,12 @@ fn child_identity_is_stable_and_noncanonical_ids_are_rejected_structurally() {
                     operation_id.as_str(),
                     "Stable child identity fixture.",
                 ),
-                evidence(&owner, target.clone(), "Stable identity evidence"),
+                evidence(
+                    &owner,
+                    target.clone(),
+                    event.clone(),
+                    "Stable identity evidence",
+                ),
             )
             .expect("identity update operation"),
         )
@@ -726,7 +769,7 @@ fn child_identity_is_stable_and_noncanonical_ids_are_rejected_structurally() {
     ));
     assert!(matches!(
         ProjectMemoryFactCurationBatchV1::new(
-            owner,
+            owner.clone(),
             outer_id,
             None,
             Confidence::new(0.8).expect("minimum confidence"),

@@ -6,6 +6,7 @@ async fn changed_actor_under_the_same_normalization_id_conflicts_without_mutatio
     let normalized = fixture.seed("actor-conflict-subject", 10).await;
     let operation_id = provenance_id("fixture.normalize.actor-conflict");
     let first_request = normalize_request(
+        &fixture.db,
         &fixture.owner,
         operation_id.as_str(),
         Some(ActorId::new("actor.normalize.first").expect("first actor")),
@@ -13,8 +14,10 @@ async fn changed_actor_under_the_same_normalization_id_conflicts_without_mutatio
         vec!["Cache Policy".to_owned(), "canonical-tag".to_owned()],
         vec![normalized.clone()],
         0.92,
-    );
+    )
+    .await;
     let changed_actor_request = normalize_request(
+        &fixture.db,
         &fixture.owner,
         operation_id.as_str(),
         Some(ActorId::new("actor.normalize.second").expect("second actor")),
@@ -22,7 +25,8 @@ async fn changed_actor_under_the_same_normalization_id_conflicts_without_mutatio
         vec!["Cache Policy".to_owned(), "canonical-tag".to_owned()],
         vec![normalized.clone()],
         0.92,
-    );
+    )
+    .await;
     let store = DatabaseFactStore::new(&fixture.db);
     store
         .apply_project_memory_fact_curation(first_request.clone(), &fixture.control)
