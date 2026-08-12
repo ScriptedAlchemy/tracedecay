@@ -11,7 +11,7 @@ use tracedecay::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_domain::{
     AnchorResolutionStateV2, ClaudeByteRangeV1, ClaudeFileGenerationV1,
     ClaudeObservationIdentityMaterialV1, ClaudeSourceCursorV1, ClaudeSourceIdentityV1,
-    ComponentVersion, DurableClaudeObservationV1, FactId, FactLineageEventV1, FactOwnerV1,
+    ComponentVersion, DurableClaudeObservationV1, FactLineageEventV1, FactOwnerV1,
     ObservationScopeV1, PayloadAccessState, PayloadReferenceV1, ProjectionGenerationId,
     RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
     RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
@@ -21,10 +21,11 @@ use tracedecay_domain::{
 use tracedecay_store::{
     AnchoredObservationWrite, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
-    FactLineageResponseV1, FactStore, FactStoreResult, FactWriteBatch, ObservationCommitReceipt,
-    ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    RetrievalAnchorQuery, SESSION_MESSAGE_PROJECTOR_VERSION, StoredFactV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
+    FactLineageResponseV1, FactStore, FactStoreResult, FactWriteBatch, FactWriteControl,
+    ObservationCommitReceipt, ObservationPersistOutcome, ObservationProjectionStore,
+    ObservationStore, ObservationWrite, RetrievalAnchorQuery, SESSION_MESSAGE_PROJECTOR_VERSION,
+    StoredFactV1, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor_v2,
 };
 use tracedecay_usecases::anchor_resolution::{
     EvidenceAnchorReportResolver, EvidenceAnchorResolutionReport,
@@ -546,7 +547,11 @@ async fn ambiguous_resolution_reports_typed_state_from_record_and_store_conflict
 struct UnavailableFactStore;
 
 impl FactStore for UnavailableFactStore {
-    async fn commit_fact(&self, _batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
+    async fn commit_fact(
+        &self,
+        _batch: FactWriteBatch,
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<FactCommitOutcome> {
         unreachable!("report resolution never commits facts")
     }
 

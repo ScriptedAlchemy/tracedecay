@@ -90,7 +90,7 @@ pub(super) async fn admit_verified_ignored_dependency(
     let source_generation = graph.generation();
     match admission
         .admit(CodeIndexIgnoredDependencyAdmissionRequestV1::new(
-            graph.request_context()?,
+            graph.request_context(),
             source_generation,
             std::slice::from_ref(import),
         ))

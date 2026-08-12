@@ -21,7 +21,7 @@ use tracedecay_application::{
     retained_surface_outcome_matches_terminal, retained_surface_problem_matches_terminal,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
-use tracedecay_domain::{ManifestDigest, RunId, UtcMicros};
+use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_store::FactReadControl;
 
 use crate::daemon::retained_owner::receipts::{PreparedRetainedEffect, prepare_retained_effect};
@@ -187,12 +187,10 @@ pub(crate) enum AutomationEffectAdmission {
 }
 
 pub(crate) use input::{
-    combined_review_run_request, memory_curator_run_request, session_reflector_run_request,
-    skill_writer_run_request, user_job_run_request,
+    memory_curator_run_request, session_reflector_run_request, skill_writer_run_request,
+    user_job_run_request,
 };
-pub(crate) use recovery_index::{
-    AutomationEffectRecoveryReport, reconcile_reserved_automation_effects_for_project,
-};
+pub(crate) use recovery_index::reconcile_reserved_automation_effects_for_project;
 
 pub(crate) fn pinned_automation_configuration_digest(
     revision: &ConfigurationRevisionId,

@@ -1077,7 +1077,7 @@ impl StoreAdministration {
             .await
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
     pub(super) async fn settle_retirement_reapers_for_project(
         &self,
         profile_root: &Path,

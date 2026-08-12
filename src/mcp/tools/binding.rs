@@ -29,7 +29,6 @@ use tracedecay_tool_catalog::{
     McpIdempotencyContract, McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 
-#[cfg(test)]
 mod work;
 mod workflow;
 

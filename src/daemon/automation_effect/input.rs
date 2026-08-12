@@ -1,13 +1,11 @@
 //! Canonical automation request projection.
 
 use tracedecay_agent_hosts::automation::runner::{
-    CombinedReviewAutomationOptions, SessionReflectorAutomationOptions,
-    SkillWriterAutomationOptions,
+    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
 };
 use tracedecay_application::retained_surfaces::{
-    AutomationRunRequestV1, AutomationTaskRequestV1, CombinedReviewRunInputV1, LcmGrepSortV1,
-    LcmRoleV1, LcmSearchScopeV1, MemoryCuratorRunInputV1, SessionReflectorRunInputV1,
-    SkillWriterRunInputV1, UserJobRunInputV1,
+    AutomationRunRequestV1, AutomationTaskRequestV1, LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1,
+    MemoryCuratorRunInputV1, SessionReflectorRunInputV1, SkillWriterRunInputV1, UserJobRunInputV1,
 };
 use tracedecay_domain::{RunId, UtcMicros};
 
@@ -50,19 +48,6 @@ pub(crate) fn skill_writer_run_request(
     automation_run_request(
         run_id,
         AutomationTaskRequestV1::SkillWriter(project_skill_writer_input(options)?),
-    )
-}
-
-pub(crate) fn combined_review_run_request(
-    run_id: &str,
-    options: &CombinedReviewAutomationOptions,
-) -> Result<AutomationRunRequestV1> {
-    automation_run_request(
-        run_id,
-        AutomationTaskRequestV1::CombinedReview(CombinedReviewRunInputV1 {
-            session_reflector: project_reflector_input(&options.session_reflector)?,
-            skill_writer: project_skill_writer_input(&options.skill_writer)?,
-        }),
     )
 }
 

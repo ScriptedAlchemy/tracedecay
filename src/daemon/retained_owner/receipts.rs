@@ -223,46 +223,6 @@ pub(crate) fn prepare_retained_effect<T: Serialize>(
 }
 
 impl PreparedRetainedEffect {
-    pub(crate) fn authority_receipt(&self) -> &AuthorityReceipt {
-        &self.authority
-    }
-
-    pub(crate) fn recover(
-        operation: RetainedSurfaceOperation,
-        durable_operation_id: &str,
-        authority: AuthorityReceipt,
-        receipt_template: EffectReceipt,
-    ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
-        if operation != RetainedSurfaceOperation::FactStoreCurate
-            || durable_operation_id.trim().is_empty()
-            || receipt_template.outcome != EffectTermination::Partial
-            || receipt_template.committed_state.is_some()
-        {
-            return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
-        }
-        receipt_template
-            .validate()
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-        authority
-            .validate_for(&receipt_template.scope)
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-        let effect_id = EffectId::new(format!(
-            "effect.retained.{}.{}",
-            operation.as_str(),
-            durable_operation_id
-        ))
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-        Ok(Self {
-            operation,
-            durable_operation_id: durable_operation_id.to_owned(),
-            effect_id,
-            idempotency_key: receipt_template.idempotency_key.clone(),
-            authority,
-            expected_state: receipt_template.expected_state.clone(),
-            receipt_template,
-        })
-    }
-
     pub(crate) fn material_committed_state_digest<C: Serialize + ?Sized>(
         &self,
         committed_state_material: &C,
@@ -352,26 +312,6 @@ impl PreparedRetainedEffect {
             reconciliation,
             result,
             partial,
-        )
-    }
-
-    pub(crate) fn complete_recovered_with_digest(
-        &self,
-        observed_at: tracedecay_domain::UtcMicros,
-        finished_at: tracedecay_domain::UtcMicros,
-        effective_deadline: Deadline,
-        committed_state: &ManifestDigest,
-        reconciliation: ReconciliationState,
-        result: RetainedSurfaceResultV1,
-    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        self.complete_at(
-            observed_at,
-            finished_at,
-            effective_deadline,
-            committed_state,
-            reconciliation,
-            result,
-            None,
         )
     }
 

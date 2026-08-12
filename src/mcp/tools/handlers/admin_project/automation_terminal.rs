@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::automation::{
-    lifecycle::{AutomationCommittedReceipt, AutomationRunError, AutomationRunResult},
+    AutomationCommittedReceipt, AutomationRunError, AutomationRunResult,
     run_ledger::AutomationRunLedgerRecord,
 };
 
@@ -90,18 +90,6 @@ pub(super) trait AutomationRunTerminal: serde::Serialize {
     fn ledger_record(&self) -> &AutomationRunLedgerRecord;
 
     fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt>;
-}
-
-impl AutomationRunTerminal
-    for tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun
-{
-    fn ledger_record(&self) -> &AutomationRunLedgerRecord {
-        &self.ledger_record
-    }
-
-    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt> {
-        self.committed_receipt.as_ref()
-    }
 }
 
 impl AutomationRunTerminal

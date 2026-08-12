@@ -1,6 +1,5 @@
 use tracedecay_application::{ApplicationProblem, RequestId, SafeDiagnostic};
 
-use super::RegisteredHttpOperation;
 use crate::daemon_client::DaemonInvocationError;
 
 pub(crate) trait RegisteredHttpOperation: Copy {

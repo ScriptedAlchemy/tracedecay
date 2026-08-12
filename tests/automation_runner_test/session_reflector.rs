@@ -675,12 +675,11 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
         .await
         .unwrap();
     assert!(
-        after_apply
-            .hits()
-            .iter()
-            .any(|hit| hit.fact().content().is_some_and(|content| {
-                content.contains("manage durable session reflection facts directly")
-            })),
+        after_apply.hits().iter().any(|hit| {
+            hit.fact()
+                .content()
+                .contains("manage durable session reflection facts directly")
+        }),
         "session reflector should persist terminal automatic effects"
     );
 
@@ -801,12 +800,11 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
         .await
         .unwrap();
     assert!(
-        facts
-            .hits()
-            .iter()
-            .any(|hit| hit.fact().content().is_some_and(|content| {
-                content.contains("accepted session memories automatically")
-            })),
+        facts.hits().iter().any(|hit| {
+            hit.fact()
+                .content()
+                .contains("accepted session memories automatically")
+        }),
         "the terminal receipt must correspond to a searchable canonical fact"
     );
 }

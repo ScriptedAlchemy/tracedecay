@@ -47,8 +47,7 @@ fn run_record(run_id: &str, completed_at: &str) -> AutomationRunLedgerRecord {
 
 #[test]
 fn automation_run_read_definitions_are_bounded_and_read_only() {
-    let tools =
-        tracedecay::mcp::tools::definitions::get_tool_definitions().expect("tool definitions");
+    let tools = tracedecay::mcp::get_tool_definitions().expect("tool definitions");
     let list = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_automation_run_list")

@@ -11,13 +11,14 @@ use tracedecay_domain::{
     ProjectMemoryGraphRelationKindV1,
 };
 use tracedecay_store::{
-    FactReadControl, FactStoreError, FactWriteControl, ProjectMemoryFactProjectionV1,
-    ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1, ProjectMemoryGraphTargetV1,
+    FactReadControl, FactStoreError, FactWriteControl, ProjectMemoryFactIdV1,
+    ProjectMemoryFactProjectionV1, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
+    ProjectMemoryGraphTargetV1,
 };
 use tracedecay_usecases::memory::{
     MemoryApplication, MemoryApplicationError, MemoryOperationContext,
-    ProjectMemoryCurationOperation, ProjectMemoryFactAddRequest,
-    ProjectMemoryFactAddRequestOutcome,
+    ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
+    ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 
 use super::DaemonSessionRuntimeRegistryV1;
@@ -143,24 +144,23 @@ async fn link_facts(
 ) {
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(database))
         .expect("owner-bound memory application");
-    let operations = relations
-        .into_iter()
-        .enumerate()
-        .map(|(index, (source_fact_id, target_fact_id, relation))| {
-            ProjectMemoryCurationOperation::LinkFacts {
-                evidence_fact_ids: vec![source_fact_id.clone()],
-                source_fact_id,
-                target_fact_id,
-                relation,
-                confidence: Confidence::new(0.9).expect("relation confidence"),
-                source_label: "memory-graph-contract".to_owned(),
-                metadata: serde_json::json!({
-                    "fixture": operation,
-                    "relation_index": index,
-                }),
-            }
-        })
-        .collect();
+    let mut operations = Vec::with_capacity(relations.len());
+    for (index, (source_fact_id, target_fact_id, relation)) in relations.into_iter().enumerate() {
+        let source = reviewed_fact(database, lifecycle, owner, &source_fact_id).await;
+        let target = reviewed_fact(database, lifecycle, owner, &target_fact_id).await;
+        operations.push(ProjectMemoryCurationOperation::LinkFacts {
+            evidence_facts: vec![source.clone()],
+            source,
+            target,
+            relation,
+            confidence: Confidence::new(0.9).expect("relation confidence"),
+            source_label: "memory-graph-contract".to_owned(),
+            metadata: serde_json::json!({
+                "fixture": operation,
+                "relation_index": index,
+            }),
+        });
+    }
     memory
         .apply_project_memory_curation(
             operations,
@@ -172,6 +172,29 @@ async fn link_facts(
         )
         .await
         .expect("commit canonical graph relations");
+}
+
+async fn reviewed_fact(
+    database: &crate::db::Database,
+    lifecycle: &TestFactLifecycle,
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+) -> ProjectMemoryCurationMutationTarget {
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(database))
+        .expect("owner-bound memory application");
+    let projection = memory
+        .get_project_memory_fact(
+            ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())
+                .expect("owner-bound reviewed graph fact"),
+            &lifecycle.read_control(),
+        )
+        .await
+        .expect("read reviewed graph fact")
+        .expect("reviewed graph fact exists");
+    let ProjectMemoryFactProjectionV1::Available(fact) = projection else {
+        panic!("reviewed graph fact payload remains available");
+    };
+    ProjectMemoryCurationMutationTarget::new(fact.fact_id().clone(), fact.last_event_id().clone())
 }
 
 async fn wait_for_reconciliation(database: &crate::db::Database) {
@@ -522,7 +545,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
     let long_path = graph(
         &first_database,
         &lifecycle,
-        first_owner,
+        first_owner.clone(),
         vec![chain[0].clone()],
         LONG_PATH_RELATIONS,
     )

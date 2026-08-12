@@ -418,22 +418,12 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
                 .map_err(contract_error)?;
             record
                 .admission
-                .grant_id
-                .validate()
-                .map_err(contract_error)?;
-            record
-                .admission
                 .grant_digest
                 .validate()
                 .map_err(contract_error)?;
             record
                 .admission
                 .effect_receipt_template
-                .validate()
-                .map_err(contract_error)?;
-            record
-                .admission
-                .request_id
                 .validate()
                 .map_err(contract_error)?;
             if !record

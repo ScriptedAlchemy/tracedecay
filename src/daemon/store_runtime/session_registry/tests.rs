@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
 use tracedecay_domain::{
-    BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactId, FactLineageEventKindV1,
+    BrainNodeId, Confidence, FactCategoryV1, FactCurationActionV1, FactLineageEventKindV1,
     FactOwnerV1, FactRelationKindV1,
 };
 use tracedecay_rusqlite_runtime::remote::{
@@ -24,8 +24,8 @@ use tracedecay_store::{
     ProjectMemoryFactProjectionV1, RetainedGraphStoreLeaseV1,
 };
 use tracedecay_usecases::memory::{
-    MemoryOperationContext, ProjectMemoryCurationOperation, ProjectMemoryFactAddRequest,
-    ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
+    MemoryOperationContext, ProjectMemoryCurationMutationTarget, ProjectMemoryCurationOperation,
+    ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, memory_application_for_db,
 };
 
 struct TestRemoteKeyring(Arc<RemoteSpoolKeyV1>);
@@ -110,7 +110,10 @@ fn accepting_memory_write_control() -> FactWriteControl {
     FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }
 
-async fn add_profile_schema_fact(database: &crate::db::Database, label: &str) -> FactId {
+async fn add_profile_schema_fact(
+    database: &crate::db::Database,
+    label: &str,
+) -> ProjectMemoryCurationMutationTarget {
     let memory = memory_application_for_db(FactOwnerV1::Profile, database)
         .expect("profile memory application");
     let preflight = memory
@@ -137,7 +140,7 @@ async fn add_profile_schema_fact(database: &crate::db::Database, label: &str) ->
     let ProjectMemoryFactProjectionV1::Available(fact) = outcome.fact() else {
         panic!("profile schema fixture payload must remain available");
     };
-    fact.fact_id().clone()
+    ProjectMemoryCurationMutationTarget::new(fact.fact_id().clone(), fact.last_event_id().clone())
 }
 
 #[test]
@@ -240,10 +243,10 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     memory
         .apply_project_memory_curation(
             vec![ProjectMemoryCurationOperation::LinkFacts {
-                source_fact_id: source.clone(),
-                target_fact_id: target.clone(),
+                source: source.clone(),
+                target,
                 relation: FactRelationKindV1::Supports,
-                evidence_fact_ids: vec![evidence],
+                evidence_facts: vec![evidence],
                 confidence: Confidence::new(0.9).expect("profile relation confidence"),
                 source_label: "profile-schema-verification".to_owned(),
                 metadata: serde_json::json!({"fixture": "canonical-linked-lineage"}),
@@ -263,7 +266,8 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     let history = memory
         .get_project_memory_history(
             ProjectMemoryFactHistoryQueryV1::new(
-                ProjectMemoryFactIdV1::new(owner, source).expect("owner-bound profile source fact"),
+                ProjectMemoryFactIdV1::new(owner, source.fact_id().clone())
+                    .expect("owner-bound profile source fact"),
                 None,
                 16,
             )
@@ -277,7 +281,7 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
         FactLineageEventKindV1::Curated {
             action: FactCurationActionV1::Linked { relation },
             ..
-        } if relation.relation() == FactRelationKindV1::Supports
+        } if relation.kind() == FactRelationKindV1::Supports
     )));
 
     let mut rows = database

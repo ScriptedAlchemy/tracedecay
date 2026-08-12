@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ResultContractRef,
-    RetryDirective, SafeDiagnostic,
+    ApplicationProblem, ApplicationProblemEnvelope, ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_tool_catalog::BindingSurface;
 

@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
+use tracedecay_agent_hosts::automation::AutomationRunControl;
 use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
-use tracedecay_agent_hosts::automation::{AutomationRunControl, AutomationRunError};
 
 use crate::daemon::automation_effect::AutomationEffectAdmission;
 use crate::errors::{Result, TraceDecayError};
@@ -108,6 +108,31 @@ fn log_scheduler_automation_replay(
     );
 }
 
+pub(super) fn scheduler_application_problem_log_fields(
+    project_path: &Path,
+    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+    problem: &crate::daemon::automation_effect::AutomationSettledProblem,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("project", project_path.display().to_string()),
+        (
+            "task",
+            tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+        ),
+        ("request_id", problem.problem.request_id.as_str().to_owned()),
+        ("run_id", problem.run_id.as_str().to_owned()),
+        (
+            "problem_kind",
+            problem.problem.problem.source().canonical_code().to_owned(),
+        ),
+        ("problem_code", problem.problem.problem.code.clone()),
+        (
+            "committed_receipt_count",
+            problem.committed_receipts.len().to_string(),
+        ),
+    ]
+}
+
 async fn settle_scheduler_automation_error(
     engine: &DaemonEngine,
     project_id: &tracedecay_domain::ProjectId,
@@ -127,26 +152,9 @@ async fn settle_scheduler_automation_error(
     }
     match effect.settle_problem(&error).await {
         Ok(problem) => {
-            let problem = match serde_json::to_string(&problem) {
-                Ok(problem) => problem,
-                Err(error) => {
-                    return Some(TraceDecayError::Config {
-                        message: format!(
-                            "automation application problem serialization failed: {error}"
-                        ),
-                    });
-                }
-            };
             log_daemon_event(
                 "scheduler_task_application_problem",
-                &[
-                    ("project", project_path.display().to_string()),
-                    (
-                        "task",
-                        tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
-                    ),
-                    ("problem", problem),
-                ],
+                &scheduler_application_problem_log_fields(project_path, task, &problem),
             );
             None
         }

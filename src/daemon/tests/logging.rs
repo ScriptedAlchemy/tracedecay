@@ -17,13 +17,13 @@ fn daemon_log_line_formats_stable_key_value_fields() {
 
 #[test]
 fn scheduler_application_problem_log_excludes_hostile_payload() {
-    use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationTaskV1};
+    use tracedecay_application::retained_surfaces::AutomationRunProblemV1;
     use tracedecay_application::{
         ApplicationProblem, ApplicationProblemEnvelope, LegalAction, RequestId, ResolvedScope,
         RetainedSurfaceOperation, RetryDirective, SafeDiagnostic,
         retained_surface_application_operation,
     };
-    use tracedecay_domain::{ProjectId, RepositoryId, RunId, WorktreeId};
+    use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
     const SECRET: &str = "sk-scheduler-log-canary-1234567890";
     let request_id = RequestId::new("request.scheduler.log-privacy").unwrap();
@@ -50,15 +50,14 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
         None,
     )
     .unwrap();
-    let problem = AutomationRunProblemV1::new(
-        RunId::new("run.scheduler-log-privacy").unwrap(),
-        AutomationTaskV1::MemoryCurator,
-        scope,
-        envelope,
-        Vec::new(),
-        &request_id,
+    let request = super::super::automation_effect::memory_curator_run_request(
+        "run.scheduler-log-privacy",
+        24,
+        0.72,
     )
     .unwrap();
+    let problem =
+        AutomationRunProblemV1::new(&request, scope, envelope, Vec::new(), &request_id).unwrap();
     let fields = super::super::scheduler::scheduler_application_problem_log_fields(
         std::path::Path::new("/projects/log-privacy"),
         tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
