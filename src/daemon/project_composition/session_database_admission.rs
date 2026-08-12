@@ -41,7 +41,6 @@ pub(super) fn log_session_database_admission(
 mod tests {
     use std::sync::Arc;
     use std::time::Duration;
-
     use tokio::sync::{Barrier, oneshot};
     use tracedecay_domain::{BrainId, LocatorDigest, UserProfileId};
     use tracedecay_store::{ProjectId, StoreIncarnationV1, StoreShardIdV1, VerifiedStoreLocatorV1};

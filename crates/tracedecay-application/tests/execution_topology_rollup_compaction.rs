@@ -270,23 +270,41 @@ fn post_retention_corrections_join_retained_bounded_evidence_exactly() {
 fn duplicate_receipt_corrections_choose_the_latest_revision_across_anchors_and_fragment_order() {
     let day0 = horizon(0, DAY_MICROS);
     let day1 = horizon(DAY_MICROS, DAY_MICROS.saturating_mul(2));
-    let receipt_ref = "duplicate.rollup-compaction-revision";
+    let mut original_events = Vec::new();
+    let mut corrected_events = Vec::new();
+    for index in 0..5_u64 {
+        let receipt_ref = format!("duplicate.rollup-compaction-revision.{index}");
+        original_events.push(duplicate_event_for(
+            40 + index,
+            1_000_000 + index as i64,
+            &receipt_ref,
+            1,
+            &format!("receipt.duplicate.origin.{index}"),
+            10,
+        ));
+        corrected_events.push(duplicate_event_for(
+            50 + index * 2,
+            DAY_MICROS + 1_000_000 + index as i64,
+            &receipt_ref,
+            2,
+            &format!("receipt.duplicate.corrected.{index}"),
+            20,
+        ));
+        corrected_events.push(duplicate_event_for(
+            51 + index * 2,
+            DAY_MICROS + 2_000_000 + index as i64,
+            &receipt_ref,
+            1,
+            &format!("receipt.duplicate.stale.{index}"),
+            10,
+        ));
+    }
     let compacted = decode(&compact_json(
         &build_execution_topology_rollup_fragment(
             SCOPE,
             &day0,
             40,
-            page(
-                vec![duplicate_event_for(
-                    40,
-                    1_000_000,
-                    receipt_ref,
-                    1,
-                    "receipt.duplicate.origin",
-                    10,
-                )],
-                "duplicate-origin",
-            ),
+            page(original_events, "duplicate-origin"),
         )
         .unwrap(),
         31 * DAY_MICROS,
@@ -294,38 +312,18 @@ fn duplicate_receipt_corrections_choose_the_latest_revision_across_anchors_and_f
     let late = build_execution_topology_rollup_fragment(
         SCOPE,
         &day1,
-        41,
-        page(
-            vec![
-                duplicate_event_for(
-                    41,
-                    DAY_MICROS + 1_000_000,
-                    receipt_ref,
-                    2,
-                    "receipt.duplicate.corrected",
-                    20,
-                ),
-                duplicate_event_for(
-                    42,
-                    DAY_MICROS + 2_000_000,
-                    receipt_ref,
-                    1,
-                    "receipt.duplicate.stale",
-                    10,
-                ),
-            ],
-            "duplicate-correction-and-stale",
-        ),
+        59,
+        page(corrected_events, "duplicate-correction-and-stale"),
     )
     .unwrap();
     let requested = horizon(0, DAY_MICROS.saturating_mul(2));
     let forward = project_execution_topology_fragments(
         SCOPE,
         &requested,
-        42,
+        59,
         &[compacted.clone(), late.clone()],
     );
-    let reverse = project_execution_topology_fragments(SCOPE, &requested, 42, &[late, compacted]);
+    let reverse = project_execution_topology_fragments(SCOPE, &requested, 59, &[late, compacted]);
     assert_eq!(forward, reverse);
     let duplicate = forward
         .measurements
@@ -341,7 +339,7 @@ fn duplicate_receipt_corrections_choose_the_latest_revision_across_anchors_and_f
                     ]
         })
         .unwrap();
-    assert_eq!(duplicate.value.coverage.eligible, Some(1));
-    assert_eq!(duplicate.value.coverage.observed, 1);
+    assert_eq!(duplicate.value.coverage.eligible, Some(5));
+    assert_eq!(duplicate.value.coverage.observed, 5);
     assert_eq!(duplicate.value.coverage.unknown, 0);
 }

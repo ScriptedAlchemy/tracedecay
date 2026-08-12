@@ -21,7 +21,7 @@ pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
 }
 
 pub(in crate::mcp::tools) fn json_result(value: &Value) -> ToolResult {
-    text_tool_result(&serde_json::to_string(value).unwrap_or_default())
+    text_tool_result(&value.to_string())
 }
 
 pub(super) fn boxed_send<'a, T, F>(

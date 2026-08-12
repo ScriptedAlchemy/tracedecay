@@ -4,11 +4,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_application::{
-    AuthorityReceipt, CancellationSignal, CapabilityGrantId, Deadline, DirectorySyncPolicy,
-    DisclosureClass, EffectReceipt, RequestId, ResolvedScope,
-    retained_surfaces::MemoryAutomationRunRequestV1,
+    CancellationSignal, CapabilityGrantId, DirectorySyncPolicy, DisclosureClass, EffectReceipt,
+    RequestId, ResolvedScope, retained_surfaces::MemoryAutomationRunRequestV1,
 };
-use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest, UtcMicros};
+use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
 
 use super::retirement::RetirementBinding;
 use super::{AutomationSettledProblem, AutomationSettledTerminal, contract_error};
@@ -33,11 +32,6 @@ pub(super) struct DurableAutomationAdmission {
     pub(super) disclosure: DisclosureClass,
     /// Exact owner selected by the registered project-memory authority.
     pub(super) owner: FactOwnerV1,
-    /// Exact prepared authority retained before the run executes. Recovery
-    /// reuses these bytes and never constructs authority from a later grant.
-    pub(super) prepared_authority: AuthorityReceipt,
-    pub(super) observed_at: UtcMicros,
-    pub(super) effective_deadline: Deadline,
     /// Exact prepared outer-effect receipt material. Recovery changes only
     /// its committed-state digest; it never mints a new grant or request.
     pub(super) effect_receipt_template: EffectReceipt,
@@ -95,7 +89,6 @@ pub(super) enum ReservationResult {
     /// canonical memory receipt authority before this reservation can close.
     Recover {
         retirement: Option<RetirementBinding>,
-        admission: DurableAutomationAdmission,
     },
 }
 
@@ -148,7 +141,6 @@ pub(super) fn reserve_or_replay_blocking(
                     }
                     DurableAutomationState::Reserved => Ok(ReservationResult::Recover {
                         retirement: record.admission.retirement.clone(),
-                        admission: record.admission,
                     }),
                 }
             }
@@ -355,7 +347,11 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
                 .effect_authority_digest
                 .validate()
                 .map_err(contract_error)?;
-            CapabilityGrantId::new(record.admission.grant_id.as_str()).map_err(contract_error)?;
+            record
+                .admission
+                .grant_id
+                .validate()
+                .map_err(contract_error)?;
             record
                 .admission
                 .grant_digest
@@ -368,10 +364,9 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
                 .map_err(contract_error)?;
             record
                 .admission
-                .prepared_authority
-                .validate_for(&record.admission.scope)
+                .request_id
+                .validate()
                 .map_err(contract_error)?;
-            RequestId::new(record.admission.request_id.as_str()).map_err(contract_error)?;
             if !record
                 .admission
                 .recovery_problem
@@ -391,15 +386,6 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
                 || template.scope != record.admission.scope
                 || template.configuration_digest != record.admission.configuration_digest
                 || template.policy_digest != record.admission.grant_digest
-                || record.admission.prepared_authority.grant_id != record.admission.grant_id
-                || record.admission.prepared_authority.grant_revision
-                    != record.admission.grant_revision
-                || record.admission.prepared_authority.grant_digest != record.admission.grant_digest
-                || record.admission.prepared_authority.disclosure != record.admission.disclosure
-                || record.admission.prepared_authority.policy.digest
-                    != record.admission.grant_digest
-                || record.admission.prepared_authority.authorized_scope_digest
-                    != record.admission.scope.scope_digest
                 || record.admission.grant_revision == 0
                 || template.outcome != tracedecay_application::EffectTermination::Partial
                 || template.committed_state.is_some()
@@ -443,6 +429,7 @@ fn validate_stable_admission(
         || stored.request != requested.request
         || stored.input_digest != requested.input_digest
         || stored.configuration_digest != requested.configuration_digest
+        || stored.effect_authority_digest != requested.effect_authority_digest
         || stored.grant_id != requested.grant_id
         || stored.grant_revision != requested.grant_revision
         || stored.grant_digest != requested.grant_digest

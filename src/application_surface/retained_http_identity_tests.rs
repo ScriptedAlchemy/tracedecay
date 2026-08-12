@@ -463,7 +463,7 @@ async fn registered_http_rejects_successes_with_the_wrong_payload_receipt_or_sco
         wrong_effect_class,
     ] {
         let response = crate::daemon_contract::DaemonInvocationResponse::with_outcome(
-            request_id.as_str().to_owned(),
+            request_id.as_str(),
             crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication {
                 scope: scope.clone(),
                 outcome,
@@ -494,7 +494,7 @@ async fn registered_http_serializes_an_exactly_bound_effect() {
         }),
     );
     let response = crate::daemon_contract::DaemonInvocationResponse::with_outcome(
-        request_id.as_str().to_owned(),
+        request_id.as_str(),
         crate::daemon_contract::DaemonInvocationOutcome::RetainedApplication { scope, outcome },
     );
 

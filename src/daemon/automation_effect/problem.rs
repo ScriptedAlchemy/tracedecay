@@ -67,7 +67,7 @@ pub(super) fn failed_ledger_problem(
     failure_class_problem(ledger.error_classification)
 }
 
-pub(super) fn failure_class_problem(
+fn failure_class_problem(
     classification: Option<AgentTaskFailureClass>,
 ) -> Result<ApplicationProblem> {
     let diagnostic = SafeDiagnostic::new(
@@ -223,8 +223,7 @@ mod tests {
             "error": "backend failed",
             "error_classification": "permanent",
             "started_at": "2026-08-12T00:00:00Z",
-            "completed_at": "2026-08-12T00:00:01Z",
-            "completed_at_micros": 1786492801000000_i64
+            "completed_at": "2026-08-12T00:00:01Z"
         }))
         .expect("failed ledger")
     }

@@ -164,7 +164,12 @@ pub(super) async fn run_skill_writer_for_store(
             reason,
             evidence_hash,
         } => {
-            return rejected_skill_writer_run(&run, config, reason, evidence_hash);
+            return Ok(rejected_skill_writer_run(
+                &run,
+                config,
+                reason,
+                evidence_hash,
+            ));
         }
     };
     let SkillWriterEvidenceBundle {
@@ -478,7 +483,7 @@ pub(super) async fn finalize_skill_writer_success(
         })),
         accepted_count,
         rejected_count,
-    )?;
+    );
     record.applied_ops = (accepted_count > 0).then(|| {
         json!({
             "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
@@ -603,7 +608,7 @@ pub(super) fn rejected_skill_writer_run(
     config: &AutomationConfig,
     reason: &str,
     evidence_hash: Option<String>,
-) -> Result<SkillWriterAutomationRun> {
+) -> SkillWriterAutomationRun {
     let (report, record) = unpersisted_rejected_parts(
         run,
         config,
@@ -611,11 +616,11 @@ pub(super) fn rejected_skill_writer_run(
         reason,
         evidence_hash,
         "skill_writer",
-    )?;
-    Ok(SkillWriterAutomationRun {
+    );
+    SkillWriterAutomationRun {
         run_id: run.run_id.clone(),
         report,
         ledger_record: record,
         backend_response: None,
-    })
+    }
 }

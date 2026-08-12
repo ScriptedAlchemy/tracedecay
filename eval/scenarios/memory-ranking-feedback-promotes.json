@@ -10,13 +10,13 @@
       {
         "content": "Checkout service validates coupons against the promo ledger tango",
         "category": "project",
-        "source": "praised",
+        "source_label": "praised",
         "trust": 0.7
       },
       {
         "content": "Checkout service validates coupons against the promo ledger foxtrot",
         "category": "project",
-        "source": "panned",
+        "source_label": "panned",
         "trust": 0.7
       }
     ],

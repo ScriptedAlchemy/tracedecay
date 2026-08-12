@@ -216,7 +216,6 @@ mod tests {
             artifacts: Vec::new(),
             started_at: "1700000000".to_owned(),
             completed_at: "1700000001".to_owned(),
-            completed_at_micros: 1_700_000_001_000_000,
         }
     }
 

@@ -14,12 +14,11 @@ its terminal state; they do not select its operations or settle its effects.
 
 ## Current Curation Surfaces
 
-Memory curation is automation-owned. Subagents may inspect and classify
-evidence within their assigned scope, while the curator validates and commits
-the six supported policy-valid operations through the configured curation
-contract: add, update, merge, remove, normalize tags, and link facts. Each run
-produces a ledger record, activity events, post-action telemetry, and, when
-present, advertised artifacts.
+Memory curation is automation-owned and non-destructive. Subagents may inspect
+and classify evidence within their assigned scope, but the curator validates
+and commits only supported policy-valid operations through the configured
+curation contract. Each run produces a ledger record, activity events,
+post-action telemetry, and, when present, advertised artifacts.
 
 Use existing TraceDecay surfaces before inventing a new plan format:
 
@@ -79,9 +78,8 @@ The backend sees a bounded canonical-fact context and returns strict JSON:
 
 Operator notes:
 
-- Supported automatic operations are canonical add, update, merge, remove,
-  tag normalization, and fact linking. Unsupported operation shapes are
-  rejected.
+- Supported automatic operations are canonical, non-destructive normalization
+  and linking operations. Unsupported operation shapes are rejected.
 - Every fact id must come from the bounded canonical context, every confidence
   must meet the configured floor, and timestamps are not truth evidence.
 - The runner owns validation repair and commits accepted operations within the
@@ -121,9 +119,9 @@ daemon restart boundaries unchanged.
    and must not be retried as if nothing happened.
 7. **Use direct fact operations only for exact administration.** Fact-store
    add, update, and remove remain independent retained operations and never
-   continue a curator run. An ad hoc direct removal requires exact target
-   identity; automatic curator removal instead requires bounded evidence,
-   validation, policy admission, CAS, and its durable operation receipt.
+   continue a curator run. Removal requires an exact user instruction because
+   it is permanent; if the target is ambiguous, resolve and confirm only that
+   exact target.
 8. **Verify read-only.** Re-run targeted get/search/list/contradict checks and
    inspect the oplog or receipt projection. Report changed, skipped, rejected,
    and still ambiguous facts.
@@ -144,17 +142,15 @@ For each completed run, produce this compact report:
 | Tier | Operations | Default |
 | --- | --- | --- |
 | Read-mostly | MCP context/search and canonical fact reads | allowed |
-| Automatic curation | add, update, merge, remove, normalize tags, and link facts | the runner validates, commits, and records durable per-operation effects and terminal receipts |
+| Automatic curation | canonical tag normalization and fact linking | the runner validates, commits, and records a durable receipt |
 | Exact administration | direct fact add, update, or remove | requires an exact caller instruction and its own retained-operation receipt |
 
-Removal remains high risk because it permanently changes canonical memory.
-The automatic curator may remove only an exact bounded fact under validated
-evidence, policy admission, current-event CAS, and durable receipt settlement;
-there is no human approval stage between acceptance and application.
+Direct deletion remains high risk because it permanently removes canonical
+memory. It is not an automatic curator operation.
 
 ## Subagent Roles
 
-When subagents participate, give each one an explicit project selector and a non-overlapping ownership boundary such as a path set, memory namespace, report section, or review category. Subagents should return evidence-backed recommendations and exact target identifiers; the automation runner retains sole authority to validate and settle every curation effect, including removal.
+When subagents participate, give each one an explicit project selector and a non-overlapping ownership boundary such as a path set, memory namespace, report section, or review category. Subagents should return evidence-backed recommendations and exact target identifiers, leaving cross-scope reconciliation and destructive curation to the parent agent.
 
 
 - **Session Scout**: mines bounded recent sessions and summaries for durable
@@ -188,11 +184,9 @@ commits automatic curation output.
 ## Permanent-Delete Guardrails
 
 - Never promise archive, restore, undo, recycle-bin, or soft-delete behavior.
-- Automatic removal requires an exact fact identity from the bounded review,
-  evidence from that same review, current-event CAS, policy admission, and a
-  canonical curation receipt. It is never a proposal awaiting approval.
-- Direct deletion requires an exact target and a canonical retained-operation
-  receipt; avoid copying secret content into reports.
+- Automatic curation never hard-deletes a fact.
+- Direct deletion requires an exact user instruction and a canonical retained
+  operation receipt; avoid copying secret content into reports.
 - Record partial effects and do not retry in a way that hides uncertainty.
 - After any mutation, verify the resulting fact set and report failed or
   skipped operations.
@@ -204,8 +198,8 @@ Telemetry should measure usefulness without overstating savings:
 - Hint emitted/followed/ignored, category match, latency, and dedupe status.
 - Candidate lifecycle: mined, rejected, validated, committed, failed, or
   reconciled.
-- Operation kind: add, update, merge, remove, normalize tags, link facts, or
-  independent direct administration.
+- Operation kind: normalize tags, link facts, or independent direct
+  administration.
 - Outcome quality: later recall helpful/unhelpful feedback, duplicate
   recurrence, manual corrections, and rejected-candidate reasons.
 - Token accounting: audited net token delta using real transcript and usage

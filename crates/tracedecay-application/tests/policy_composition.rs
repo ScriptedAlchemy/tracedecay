@@ -116,14 +116,12 @@ fn production_composition_preserves_static_unavailability_for_policy() {
             "{capability_id} has a registered callable handler"
         );
     }
-    // symbol-search is a callable production retrieval capability: its catalog
-    // contribution is `AvailabilityContract::Available` and it carries a
-    // registered typed handler descriptor (activated by "feat(search): complete
-    // production retrieval activation"). It is therefore projected into a
-    // callable policy route, exactly like the feedback capabilities above.
+    // Symbol search is an available application capability with a registered
+    // typed handler descriptor, so it is projected into a callable policy
+    // route exactly like the feedback capabilities above.
     assert!(
         composition
-            .registered_capability("capability.retrieval.symbol-search")
+            .registered_capability("capability.application.symbol-search")
             .is_some()
     );
     // An inert handler remains non-invocable at its transport surfaces, but

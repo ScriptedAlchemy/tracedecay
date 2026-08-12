@@ -2,8 +2,7 @@
 
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::automation::{
-    lifecycle::{AutomationCommittedReceipt, AutomationRunError, AutomationRunResult},
-    run_ledger::AutomationRunLedgerRecord,
+    AutomationRunError, AutomationRunResult, run_ledger::AutomationRunLedgerRecord,
 };
 
 use crate::daemon::automation_effect::{AutomationEffectAuthority, AutomationSettledTerminal};
@@ -15,10 +14,12 @@ fn problem_value(
     Ok(serde_json::to_value(problem)?)
 }
 
-pub(super) trait MemoryAutomationRunTerminal: serde::Serialize {
+trait MemoryAutomationRunTerminal: serde::Serialize {
     fn ledger_record(&self) -> &AutomationRunLedgerRecord;
 
-    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt>;
+    fn committed_receipt(
+        &self,
+    ) -> Option<&tracedecay_agent_hosts::automation::AutomationCommittedReceipt>;
 }
 
 impl MemoryAutomationRunTerminal
@@ -28,7 +29,9 @@ impl MemoryAutomationRunTerminal
         &self.ledger_record
     }
 
-    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt> {
+    fn committed_receipt(
+        &self,
+    ) -> Option<&tracedecay_agent_hosts::automation::AutomationCommittedReceipt> {
         self.committed_receipt.as_ref()
     }
 }
@@ -40,7 +43,9 @@ impl MemoryAutomationRunTerminal
         &self.ledger_record
     }
 
-    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt> {
+    fn committed_receipt(
+        &self,
+    ) -> Option<&tracedecay_agent_hosts::automation::AutomationCommittedReceipt> {
         self.committed_receipt.as_ref()
     }
 }

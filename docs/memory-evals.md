@@ -16,15 +16,15 @@ Every scenario follows the same shape:
 
 1. **Fixture** — a throwaway project directory is created, `tracedecay init`
    builds a real `.tracedecay/` store, and the scenario's setup block seeds
-   facts (through the real `fact_store` write path, so HRR vectors and FTS
-   stay consistent) plus optional workspace files. Trust scores,
+   facts (through the real `fact_store` write path, so canonical rows, lineage,
+   and FTS stay consistent) plus optional workspace files. Trust scores,
    retrieval counts, and source labels are then pinned with SQL.
 2. **Drive** — either a scripted tool-call sequence (deterministic layer) or a
    real agent prompted over the generated tracedecay integration (real-model
    layer) exercises the memory write/recall/curation paths.
-3. **Assert** — end-state is checked through canonical fact-store reads, plus
-   the typed committed curation receipts in the terminal `tracedecay
-   automation run memory-curation` result for curation scenarios.
+3. **Assert** — end-state is checked with plain SQL against the fixture's
+   `.tracedecay/tracedecay.db` plus terminal automation receipts for curation
+   scenarios.
 4. **Cleanup** — the fixture directory is deleted; nothing touches the host
    project's stores.
 
@@ -32,7 +32,7 @@ Scenario declarations live in [`eval/scenarios/*.json`](../eval/scenarios/)
 and are shared by both layers, so prompts, setup, and assertions can never
 drift apart.
 
-### Hermetic deterministic layer (no LLM, runs in CI)
+### Deterministic layer (no LLM, runs in CI)
 
 `tests/memory_suite/memory_eval_test.rs` replays scripted tool-call sequences through the
 real `tracedecay` binary — the same code path MCP tool calls hit — and runs in
@@ -52,16 +52,6 @@ Each scenario runs up to two phases:
     refuses/neutralizes the bad state (all assertions pass ⇒ defended), or the
     assertion set catches the violation. Stable-contract scenarios fail on
     "accepted + bad end-state" regressions.
-
-Scenarios containing a `memory-curation` step are backend-required semantic
-journeys. Their curation phases are exposed through explicitly ignored tests;
-run those with libtest's ignored-test selection only after configuring the
-agent-managed backend. The supersession scenario's direct-update phase remains
-in the no-model default. A missing or disabled backend produces its normal
-typed fallback terminal, and the semantic assertions fail because no
-committed removal receipt exists; the harness never fabricates a provider.
-Canonical policy, CAS, rollback, and cancellation remain covered by direct
-deterministic tests in the automation and memory crates.
 
 ### Real-model layer (cost-gated, never in CI)
 
@@ -101,9 +91,8 @@ usage claims can be audited.
 | `memory-no-pollution` | stable | Single-turn throwaway tokens never become facts; durable decisions still can. |
 | `memory-secret-rejection` | stable | Credential-like values are rejected by the write path before they reach durable memory. |
 | `memory-skip-local` | stable | Content already visible in workspace files is neither stored nor recall-churned. |
-| `memory-supersede-without-dup` | stable, backend-required | Preference pivots update the existing fact; if a naive add duplicates it, the agent-managed curator removes the superseded fact automatically. |
+| `memory-supersede-without-dup` | stable | Preference pivots update the existing canonical fact without creating a pending proposal. |
 | `memory-multiturn-continuity` | stable | Facts stored in one session are recalled (with a real retrieval hit) in the next. |
-| `memory-curation-conservatism` | stable, backend-required | `tracedecay automation run memory-curation` preserves dissimilar high-trust, high-access facts while automatically settling a justified near-duplicate removal. |
 | `memory-feedback-trust` | stable | `fact_feedback` (helpful) raises `trust_score` above the seed and appends a `memory_feedback_events` audit row. |
 | `memory-ranking-retrieval-reinforcement` | stable | A frequently-retrieved fact out-ranks an equal-trust, never-retrieved rival — the `combined_score` usage boost, through the real search tool. |
 | `memory-ranking-feedback-promotes` | stable | Rating one fact `helpful` and an equally-relevant rival `unhelpful` flips their order in real search results (the full feedback → trust → rank loop). |

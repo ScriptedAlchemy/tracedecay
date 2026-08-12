@@ -465,8 +465,14 @@ async fn apply_configuration_or_semantic_transition(
     expected_revision: ConfigurationRevisionId,
     now: UtcMicros,
 ) -> Result<tracedecay_usecases::configuration::ConfigurationMutationReceipt, ConfigurationError> {
-    let semantic_profile = semantic_profile_transition(&mutation)?;
+    let requested_semantic_profile = semantic_profile_transition(&mutation)?;
     let current = registered.runtime.client().current().await?;
+    let semantic_profile = requested_semantic_profile.filter(|requested| {
+        requires_coordinated_semantic_profile_transition(
+            current.config.semantic.active_profile.is_some(),
+            requested.is_some(),
+        )
+    });
     let receipt = if current.revision_id != expected_revision {
         registered
             .runtime
@@ -510,6 +516,13 @@ async fn apply_configuration_or_semantic_transition(
     };
     reconcile_configuration_runtime(registered, &receipt, now).await;
     Ok(receipt)
+}
+
+pub(super) fn requires_coordinated_semantic_profile_transition(
+    current_active: bool,
+    requested_active: bool,
+) -> bool {
+    current_active || requested_active
 }
 
 fn semantic_profile_transition(

@@ -19,6 +19,7 @@ use tracedecay_sessions::runtime::lcm::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
+#[cfg(feature = "test-transport")]
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 #[test]

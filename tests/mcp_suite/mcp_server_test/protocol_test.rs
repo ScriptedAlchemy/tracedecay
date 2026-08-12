@@ -1,54 +1,14 @@
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 use tempfile::TempDir;
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-use tracedecay::mcp::handle_tool_call;
 use tracedecay::mcp::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, cleanup_expired_response_handles, store_response_handle,
 };
 use tracedecay::storage::resolve_response_handle_root;
 use tracedecay::tracedecay::{TraceDecay, current_timestamp};
 
-fn initialize_protocol_fixture(project: &Path, module: &str) {
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
-    )
-    .unwrap();
-    fs::write(project.join("src/lib.rs"), format!("pub mod {module};\n")).unwrap();
-    fs::write(
-        project.join(format!("src/{module}.rs")),
-        format!("pub fn {module}_marker() {{}}\n"),
-    )
-    .unwrap();
-    for args in [
-        &["init", "--quiet"][..],
-        &["add", "."][..],
-        &[
-            "-c",
-            "user.name=TraceDecay Tests",
-            "-c",
-            "user.email=tests@tracedecay.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "fixture",
-        ][..],
-    ] {
-        assert!(
-            Command::new("git")
-                .args(args)
-                .current_dir(project)
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
-}
+mod initialize_routing;
 
 // ---------------------------------------------------------------------------
 // 1. test_initialize
@@ -78,57 +38,12 @@ async fn test_initialize() {
 
 #[tokio::test]
 async fn initialize_roots_route_registered_reader_tools_without_explicit_selector() {
-    let isolation = TempDir::new().unwrap();
-    let active_project = isolation.path().join("active-project");
-    let target_project = isolation.path().join("target-project");
-    initialize_protocol_fixture(&active_project, "active");
-    initialize_protocol_fixture(&target_project, "target");
-    let harness = ProductionProjectCompositionHarnessV1::open(
-        isolation.path(),
-        [active_project.clone(), target_project.clone()],
-    )
-    .await
-    .unwrap();
-    let server = harness.server(&active_project).unwrap();
-    let target_root_uri = url::Url::from_file_path(&target_project)
-        .expect("target project has a portable file URI")
-        .to_string();
+    initialize_routing::assert_registered_reader_uses_initialize_root().await;
+}
 
-    let responses = run_server_with_messages(
-        server,
-        vec![
-            jsonrpc_request(
-                json!(1),
-                "initialize",
-                json!({
-                    "clientInfo": {"name": "codex", "version": "test"},
-                    "roots": [{"uri": target_root_uri, "name": "target-project"}]
-                }),
-            ),
-            jsonrpc_request(
-                json!(2),
-                "tools/call",
-                json!({
-                    "name": "tracedecay_files",
-                    "arguments": {"layout": "flat"}
-                }),
-            ),
-        ],
-    )
-    .await;
-
-    let files_response = response_with_id(&responses, json!(2));
-    let text = files_response["result"]["content"][0]["text"]
-        .as_str()
-        .expect("files response text");
-    assert!(
-        text.contains("src/target.rs"),
-        "initialize root should route reader tools to target project, got {text}"
-    );
-    assert!(
-        !text.contains("src/active.rs"),
-        "implicit initialize-root routing should not read the active project: {text}"
-    );
+#[tokio::test]
+async fn initialize_root_route_rejects_caller_project_path_spoof() {
+    initialize_routing::assert_legacy_selectors_cannot_spoof_initialize_root().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1211,10 +1126,6 @@ async fn test_multiple_tool_calls() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// 14. test_server_stats_initial
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_server_stats_initial() {
     let (server, _dir) = setup_server().await;
@@ -1231,19 +1142,23 @@ async fn test_server_stats_initial() {
     assert_eq!(stats["ratios"]["tool_calls_per_jsonrpc_message"], 0.0);
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_server_stats_include_response_handle_metrics() {
-    let (_env, _active_project) = crate::common::IsolatedEnv::acquire().await;
-    let (server, _dir) = setup_server().await;
+    let fixture = crate::support::production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production response-handle metrics server");
     let baseline = server.server_stats_json().await;
     let baseline_handles = &baseline["response_handles"];
     let baseline_counter = |key: &str| baseline_handles[key].as_u64().unwrap_or(0);
 
     let cg = server.cg().await;
-    let mut last_fact_id = None;
+    let mut last_fact = None;
     for i in 0..35 {
-        let added = handle_tool_call(
-            &cg,
+        let added = crate::support::handle_real_server_tool_call(
+            &server,
             "tracedecay_fact_store_add",
             json!({
                 "content": format!(
@@ -1251,66 +1166,66 @@ async fn test_server_stats_include_response_handle_metrics() {
                     "response handle telemetry should survive truncation ".repeat(80)
                 ),
                 "category": "project",
-                "trust": 0.9,
-                "format": "json"
+                "trust": 0.9
             }),
-            None,
-            None,
         )
-        .await
-        .unwrap();
+        .await;
         if i == 34 {
-            let added: Value = serde_json::from_str(extract_tool_text(&added.value)).unwrap();
-            last_fact_id = added["fact"]["fact_id"].as_i64();
+            let added: Value =
+                serde_json::from_str(crate::support::extract_real_server_text(&added)).unwrap();
+            let payload = added
+                .pointer("/outcome/value/payload")
+                .expect("canonical fact-store add payload");
+            assert_eq!(payload["outcome"], "committed");
+            assert_eq!(payload["result"]["disposition"], "added");
+            assert_eq!(payload["result"]["fact"]["kind"], "available");
+            let fact_id = payload["result"]["fact"]["fact"]["fact_id"]
+                .as_str()
+                .expect("canonical string fact id")
+                .to_owned();
+            assert!(fact_id.starts_with("fact.v1."));
+            let last_event_id = payload["result"]["commit"]["last_event_id"]
+                .as_str()
+                .expect("canonical fact commit generation")
+                .to_owned();
+            last_fact = Some((fact_id, last_event_id));
         }
     }
 
-    let listed = handle_tool_call(
-        &cg,
+    let listed = crate::support::handle_real_server_tool_call(
+        &server,
         "tracedecay_fact_store_list",
         json!({
             "category": "project",
             "min_trust": 0.0,
-            "limit": 200,
-            "format": "json"
+            "limit": 200
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let envelope: Value = serde_json::from_str(extract_tool_text(&listed.value)).unwrap();
+    .await;
+    let envelope: Value =
+        serde_json::from_str(crate::support::extract_real_server_text(&listed)).unwrap();
     let handle = envelope["handle"]
         .as_str()
         .expect("retrieve handle")
         .to_string();
-
-    let retrieved = handle_tool_call(
-        &cg,
+    let retrieved = crate::support::handle_real_server_tool_call(
+        &server,
         "tracedecay_retrieve",
         json!({ "handle": handle, "format": "json" }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let retrieved_payload: Value =
-        serde_json::from_str(extract_tool_text(&retrieved.value)).unwrap();
+        serde_json::from_str(crate::support::extract_real_server_text(&retrieved)).unwrap();
     assert_eq!(retrieved_payload["expired"], false);
 
-    let missing = handle_tool_call(
-        &cg,
+    let missing = crate::support::handle_real_server_tool_call(
+        &server,
         "tracedecay_retrieve",
-        json!({
-            "handle": "rh_0123456789abcdef01234567",
-            "format": "json"
-        }),
-        None,
-        None,
+        json!({"handle": "rh_0123456789abcdef01234567"}),
     )
-    .await
-    .unwrap();
-    let missing_payload: Value = serde_json::from_str(extract_tool_text(&missing.value)).unwrap();
+    .await;
+    let missing_payload: Value =
+        serde_json::from_str(crate::support::extract_real_server_text(&missing)).unwrap();
     assert_eq!(missing_payload["reason_code"], "handle_not_found");
 
     let expired = store_response_handle(
@@ -1319,17 +1234,14 @@ async fn test_server_stats_include_response_handle_metrics() {
         current_timestamp() - RESPONSE_HANDLE_TTL_SECS - 5,
     )
     .unwrap();
-    let expired_result = handle_tool_call(
-        &cg,
+    let expired_result = crate::support::handle_real_server_tool_call(
+        &server,
         "tracedecay_retrieve",
         json!({ "handle": expired.handle, "format": "json" }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
+    .await;
     let expired_payload: Value =
-        serde_json::from_str(extract_tool_text(&expired_result.value)).unwrap();
+        serde_json::from_str(crate::support::extract_real_server_text(&expired_result)).unwrap();
     assert_eq!(expired_payload["reason_code"], "handle_expired");
 
     let broken =
@@ -1337,16 +1249,14 @@ async fn test_server_stats_include_response_handle_metrics() {
     let broken_path = response_handle_dir(&cg).join(format!("{}.json", broken.handle));
     fs::remove_file(&broken_path).unwrap();
     fs::create_dir(&broken_path).unwrap();
+    let broken_result = crate::support::handle_real_server_tool_call_raw(
+        &server,
+        "tracedecay_retrieve",
+        json!({ "handle": broken.handle }),
+    )
+    .await;
     assert!(
-        handle_tool_call(
-            &cg,
-            "tracedecay_retrieve",
-            json!({ "handle": broken.handle }),
-            None,
-            None,
-        )
-        .await
-        .is_err(),
+        !broken_result["error"].is_null(),
         "broken handle fixture should increment retrieve failure telemetry"
     );
 
@@ -1411,23 +1321,29 @@ async fn test_server_stats_include_response_handle_metrics() {
         "response handle cache stats should expose on-disk file counts"
     );
 
-    if let Some(fact_id) = last_fact_id {
-        let _ = handle_tool_call(
-            &cg,
+    if let Some((fact_id, expected_last_event_id)) = last_fact {
+        let removed = crate::support::handle_real_server_tool_call(
+            &server,
             "tracedecay_fact_store_remove",
-            json!({ "fact_id": fact_id }),
-            None,
-            None,
+            json!({
+                "fact_id": fact_id.clone(),
+                "expected_last_event_id": expected_last_event_id
+            }),
         )
-        .await
-        .unwrap();
+        .await;
+        let removed: Value =
+            serde_json::from_str(crate::support::extract_real_server_text(&removed)).unwrap();
+        let payload = removed
+            .pointer("/outcome/value/payload")
+            .expect("canonical fact-store remove payload");
+        assert_eq!(payload["outcome"], "removed");
+        assert_eq!(payload["fact"]["kind"], "unavailable");
+        assert_eq!(payload["fact"]["status"]["fact_id"], fact_id);
+        assert_eq!(payload["fact"]["status"]["payload_access"], "deleted");
+        assert_eq!(payload["commit"]["fact_id"], fact_id);
     }
+    fixture.harness.shutdown().await;
 }
-
-// ---------------------------------------------------------------------------
-// 15. test_server_stats_after_run (indirect via tracedecay_status response)
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn test_server_stats_after_run() {
     let (server, _dir) = setup_server().await;

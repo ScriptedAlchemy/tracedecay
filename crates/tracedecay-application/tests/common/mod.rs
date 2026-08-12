@@ -84,8 +84,8 @@ pub fn result_contract() -> ResultContractRef {
 
 pub fn operation() -> ApplicationOperation {
     ApplicationOperation::new(
-        CapabilityId::new("capability.retrieval.symbol-search").unwrap(),
-        UseCaseId::new("use-case.retrieval.symbol-search").unwrap(),
+        CapabilityId::new("capability.application.symbol-search").unwrap(),
+        UseCaseId::new("use-case.application.symbol-search").unwrap(),
         result_contract(),
         true,
     )

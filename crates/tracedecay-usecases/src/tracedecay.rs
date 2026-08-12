@@ -19,7 +19,6 @@ use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
     RenameSymbolBindingV1,
 };
-use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
@@ -61,12 +60,6 @@ impl SourceEditGraphReadV1 {
     pub fn cancellation(&self) -> Arc<dyn GraphCancellation> {
         Arc::clone(&self.cancellation)
     }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct GraphRequestControl<'a> {
-    pub deadline: Option<&'a Deadline>,
-    pub cancellation: Option<&'a CancellationSignal>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,11 +176,6 @@ pub trait GraphRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, Option<Node>>;
     fn last_synced_commit(&self) -> GraphValueFuture<'_, Option<String>>;
     fn storage_page_counts(&self) -> GraphFuture<'_, (u64, u64, u64)>;
-    fn lazy_index_ignored_dependency_files<'a>(
-        &'a self,
-        file_paths: &'a [String],
-        control: GraphRequestControl<'a>,
-    ) -> GraphFuture<'a, Vec<String>>;
     fn get_complexity_ranked<'a>(
         &'a self,
         node_kind: Option<&'a NodeKind>,

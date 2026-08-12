@@ -12,22 +12,28 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tracedecay_application::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
-use tracedecay_domain::FactOwnerV1;
-use tracedecay_domain::ObservationScopeV1;
+use tracedecay_application::{
+    CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
+};
+use tracedecay_domain::{FactOwnerV1, ObservationScopeV1, ProjectId};
 use tracedecay_store::{FactReadControl, StoreShardScopeV1};
+use tracedecay_usecases::memory::MemoryApplication;
 
+use crate::daemon::retained_owner::{MemoryTargetAccessV1, open_project_retained_memory_target};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{AnalyticsToolCounts, RegisteredGlobalDb};
+use crate::store::DatabaseFactStore;
 use crate::timeutil::parse_rfc3339_timestamp;
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 use tracedecay_agent_hosts::automation::run_ledger::load_run_records;
 
 use super::super::{ToolResult, renderers};
-use super::support::{registered_project_context, tool_json_with_md};
+use super::support::tool_json_with_md;
 
 /// Bound on how many automation run-ledger rows a single call will scan.
 const AUTOMATION_RECORD_LIMIT: usize = 200;
@@ -258,29 +264,16 @@ struct ResolvedScope {
     /// facts/automation sections regardless of `scope`).
     root: PathBuf,
     display_root: String,
+    project_id: ProjectId,
 }
 
-async fn resolve_scope(
-    cg: &TraceDecay,
-    args: &Value,
-    global_db: Option<&RegisteredGlobalDb>,
-    all_projects: bool,
-) -> Result<ResolvedScope> {
-    let context = registered_project_context(args, &["project_path"], global_db).await?;
-    let (project_root, project_display) = match &context {
-        // Resolving the selector through the registry's project_aliases join
-        // (rather than trusting the raw selector path verbatim) keeps
-        // per-project matching correct across worktrees/aliases of the same
-        // logical project.
-        Some(ctx) => (
-            PathBuf::from(&ctx.project.canonical_root),
-            ctx.project.display_root.clone(),
-        ),
-        None => (
-            cg.project_root().to_path_buf(),
-            cg.project_root().to_string_lossy().to_string(),
-        ),
+async fn resolve_scope(cg: &TraceDecay, all_projects: bool) -> Result<ResolvedScope> {
+    let FactOwnerV1::Project { project_id } = cg.project_memory_owner().map_err(config_error)?
+    else {
+        return Err(config_error("active analytics target is not a project"));
     };
+    let project_root = cg.project_root().to_path_buf();
+    let project_display = cg.project_root().to_string_lossy().to_string();
     let filter = if all_projects {
         None
     } else {
@@ -290,6 +283,7 @@ async fn resolve_scope(
         filter,
         root: project_root,
         display_root: project_display,
+        project_id,
     })
 }
 
@@ -297,11 +291,14 @@ async fn resolve_scope(
 pub(super) async fn handle_analytics(
     cg: &TraceDecay,
     args: Value,
-    global_db: Option<&RegisteredGlobalDb>,
     analytics_db: Option<&RegisteredGlobalDb>,
     project_sessions: Option<&RegisteredGlobalDb>,
-    fact_read_control: &FactReadControl,
+    application_deadline: Deadline,
+    application_cancellation: CancellationSignal,
 ) -> Result<ToolResult> {
+    let read_control = FactReadControl::new(Arc::new(move || {
+        application_cancellation.is_cancelled() || application_deadline.is_elapsed_at(now_micros())
+    }));
     let all_projects = parse_scope(&args)?;
     let window_days = parse_window_days(&args);
     let section = parse_section(&args)?;
@@ -310,7 +307,7 @@ pub(super) async fn handle_analytics(
         config_error("registered global analytics store is unavailable for tracedecay_analytics")
     })?;
 
-    let scope = resolve_scope(cg, &args, global_db, all_projects).await?;
+    let scope = resolve_scope(cg, all_projects).await?;
 
     let since = current_timestamp().saturating_sub(window_days.saturating_mul(86_400));
     let event_count = gdb
@@ -386,7 +383,7 @@ pub(super) async fn handle_analytics(
         }
     }
     if wants_section(section, "facts") {
-        let facts = facts_section(cg, &args, global_db, fact_read_control).await;
+        let facts = facts_section(cg, &scope, &read_control).await;
         if let Some(object) = value.as_object_mut() {
             object.insert("facts".to_string(), facts);
         }
@@ -473,89 +470,50 @@ fn tools_section(rows: &[AnalyticsToolCounts]) -> Result<Value> {
 
 async fn facts_section(
     cg: &TraceDecay,
-    args: &Value,
-    global_db: Option<&RegisteredGlobalDb>,
+    scope: &ResolvedScope,
     read_control: &FactReadControl,
 ) -> Value {
-    let memory_scope = match args.get("memory_scope").and_then(Value::as_str) {
-        None | Some("project") => Some(MemoryScopeV1::Project),
-        Some("user") => Some(MemoryScopeV1::User),
-        Some(other) => {
-            return json!({
-                "available": false,
-                "reason": format!("unknown memory_scope for analytics facts: {other}"),
-            });
-        }
-    };
-    let selected = match registered_project_context(args, &["project_path"], global_db).await {
-        Ok(selected) => selected,
-        Err(err) => {
-            return json!({
-                "available": false,
-                "reason": err.to_string(),
-            });
-        }
-    };
-    let selector = match selected.as_ref() {
-        Some(context) => {
-            match tracedecay_domain::ProjectId::new(context.project.project_id.clone()) {
-                Ok(project_id) => Some(RetainedProjectSelectorV1 { project_id }),
-                Err(err) => {
-                    return json!({
-                        "available": false,
-                        "reason": format!("registered project has invalid memory identity: {err}"),
-                    });
-                }
-            }
-        }
-        None => None,
-    };
-    let admitted_project_id = match cg.project_memory_owner() {
+    let admitted_owner = match cg.project_memory_owner() {
         Ok(FactOwnerV1::Project { project_id }) => project_id,
-        Ok(FactOwnerV1::Profile) => {
+        Ok(FactOwnerV1::Profile) | Err(_) => {
             return json!({
                 "available": false,
-                "reason": "active project resolved a profile memory owner",
-            });
-        }
-        Err(err) => {
-            return json!({
-                "available": false,
-                "reason": err.to_string(),
+                "reason": "active analytics target has no project memory owner",
             });
         }
     };
-    let target = match crate::daemon::retained_owner::open_project_retained_memory_target(
+    let selector = (scope.project_id != admitted_owner).then(|| RetainedProjectSelectorV1 {
+        project_id: scope.project_id.clone(),
+    });
+    let target = match open_project_retained_memory_target(
         cg,
         cg.project_root(),
-        &admitted_project_id,
-        memory_scope,
+        &admitted_owner,
+        Some(MemoryScopeV1::Project),
         selector.as_ref(),
-        crate::daemon::retained_owner::MemoryTargetAccessV1::Read,
+        MemoryTargetAccessV1::Read,
     )
     .await
     {
         Ok(target) => target,
         Err(err) => {
+            let problem = retained_surface_execution_problem(err);
             return json!({
                 "available": false,
-                "reason": format!("fact-store target unavailable: {err:?}"),
+                "reason": problem.canonical_code(),
             });
         }
     };
-    let memory = match tracedecay_usecases::memory::memory_application_for_db(
+    let memory = match MemoryApplication::new(
         target.owner().clone(),
-        target.database(),
+        DatabaseFactStore::new(target.database()),
     ) {
         Ok(memory) => memory,
         Err(err) => {
             return json!({
                 "available": false,
                 "reason": format!("fact-store funnel unavailable: {err}"),
-                "project_root": selected.as_ref().map_or_else(
-                    || cg.project_root().display().to_string(),
-                    |context| context.project.display_root.clone(),
-                ),
+                "project_root": scope.root.display().to_string(),
             });
         }
     };
@@ -565,20 +523,14 @@ async fn facts_section(
             return json!({
                 "available": false,
                 "reason": format!("fact-store funnel unavailable: {err}"),
-                "project_root": selected.as_ref().map_or_else(
-                    || cg.project_root().display().to_string(),
-                    |context| context.project.display_root.clone(),
-                ),
+                "project_root": scope.root.display().to_string(),
             });
         }
     };
     let funnel = status.feedback_funnel();
     json!({
         "available": true,
-        "project_root": selected.as_ref().map_or_else(
-            || cg.project_root().display().to_string(),
-            |context| context.project.display_root.clone(),
-        ),
+        "project_root": scope.root.display().to_string(),
         "facts": status.fact_count(),
         "retrievals": funnel.retrieval_count_total(),
         "facts_retrieved": funnel.retrieved_fact_count(),

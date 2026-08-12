@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
-use tracedecay_agent_hosts::automation::backend::{AgentTaskKind, task_key};
+use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
 use tracedecay_agent_hosts::automation::{AutomationRunControl, AutomationRunError};
 
 use crate::daemon::automation_effect::AutomationEffectAdmission;
@@ -41,7 +41,10 @@ pub(super) fn scheduler_task_log_fields(
     ]
 }
 
-fn log_scheduler_task_start(project_path: &Path, task: AgentTaskKind) {
+fn log_scheduler_task_start(
+    project_path: &Path,
+    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+) {
     log_daemon_event(
         "scheduler_task",
         &scheduler_task_log_fields(project_path, task, "start"),
@@ -109,10 +112,10 @@ async fn settle_scheduler_automation_error(
     task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
     run_control: &AutomationRunControl,
     effect: crate::daemon::automation_effect::AutomationEffectAuthority,
-    error: AutomationRunError,
+    error: tracedecay_agent_hosts::automation::AutomationRunError,
 ) -> Option<TraceDecayError> {
     synchronize_scheduler_effect_control(run_control);
-    if let AutomationRunError::PartialEffect {
+    if let tracedecay_agent_hosts::automation::AutomationRunError::PartialEffect {
         ledger_record: Some(record),
         ..
     } = &error
@@ -121,42 +124,43 @@ async fn settle_scheduler_automation_error(
     }
     match effect.settle_problem(&error).await {
         Ok(Some(problem)) => {
+            let problem = match serde_json::to_string(&problem) {
+                Ok(problem) => problem,
+                Err(error) => {
+                    return Some(TraceDecayError::Config {
+                        message: format!(
+                            "automation application problem serialization failed: {error}"
+                        ),
+                    });
+                }
+            };
             log_daemon_event(
                 "scheduler_task_application_problem",
-                &scheduler_application_problem_log_fields(project_path, task, &problem),
+                &[
+                    ("project", project_path.display().to_string()),
+                    (
+                        "task",
+                        tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+                    ),
+                    ("problem", problem),
+                ],
             );
             None
         }
         Ok(None) => match error {
-            AutomationRunError::Runtime(error) => {
+            tracedecay_agent_hosts::automation::AutomationRunError::Runtime(error) => {
                 log_scheduler_task_error(project_path, task, &error);
                 Some(error)
             }
-            AutomationRunError::PartialEffect { .. } => Some(TraceDecayError::Config {
-                message: "automation partial effect did not produce an application terminal"
-                    .to_owned(),
-            }),
+            tracedecay_agent_hosts::automation::AutomationRunError::PartialEffect { .. } => {
+                Some(TraceDecayError::Config {
+                    message: "automation partial effect did not produce an application terminal"
+                        .to_owned(),
+                })
+            }
         },
         Err(error) => Some(error),
     }
-}
-
-pub(super) fn scheduler_application_problem_log_fields(
-    project_path: &Path,
-    task: AgentTaskKind,
-    problem: &crate::daemon::automation_effect::AutomationSettledProblem,
-) -> Vec<(&'static str, String)> {
-    let record = &problem.problem.problem;
-    let receipt_count = problem.committed_receipts.len().to_string();
-    vec![
-        ("project", project_path.display().to_string()),
-        ("task", task_key(task).to_owned()),
-        ("run_id", problem.run_id.to_string()),
-        ("request_id", problem.problem.request_id.to_string()),
-        ("problem_kind", record.source().canonical_code().to_owned()),
-        ("problem_code", record.code.clone()),
-        ("committed_receipt_count", receipt_count),
-    ]
 }
 
 fn scheduler_record_log_fields(

@@ -7,11 +7,16 @@ use serde::{Deserialize, Serialize};
 use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus,
 };
+use tracedecay_agent_hosts::automation::runner::{
+    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
+};
 use tracedecay_agent_hosts::automation::{AutomationCommittedReceipt, AutomationRunError};
 use tracedecay_application::retained_surfaces::{
-    MemoryAutomationCommittedReceiptV1, MemoryAutomationRunProblemV1, MemoryAutomationRunRequestV1,
-    MemoryAutomationRunResultV1, MemoryAutomationRunSummaryV1, MemoryAutomationRunTerminalV1,
-    MemoryAutomationSkipReasonV1, RetainedSurfaceResultV1,
+    LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1, MemoryAutomationCommittedReceiptV1,
+    MemoryAutomationRunProblemV1, MemoryAutomationRunRequestV1, MemoryAutomationRunResultV1,
+    MemoryAutomationRunSummaryV1, MemoryAutomationRunTerminalV1, MemoryAutomationSkipReasonV1,
+    MemoryAutomationTaskRequestV1, MemoryCuratorRunInputV1, RetainedSurfaceResultV1,
+    SessionReflectorRunInputV1,
 };
 use tracedecay_application::{
     ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal,
@@ -21,16 +26,15 @@ use tracedecay_application::{
     retained_surface_outcome_matches_terminal, retained_surface_problem_matches_terminal,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
-use tracedecay_domain::{ManifestDigest, RunId, UtcMicros, canonical_sha256};
+use tracedecay_domain::{ActorId, ManifestDigest, RunId, UtcMicros, canonical_sha256};
 use tracedecay_store::FactReadControl;
 
-use crate::daemon::retained_owner::{PreparedRetainedEffect, prepare_retained_effect};
+use crate::daemon::retained_owner::receipts::{PreparedRetainedEffect, prepare_retained_effect};
 use crate::daemon::service::invocation::{
     DaemonInvocationService, RegisteredRetainedRequestContextError,
 };
 use crate::errors::{Result, TraceDecayError};
 
-mod input;
 mod journal;
 mod problem;
 mod projection;
@@ -182,8 +186,9 @@ pub(crate) enum AutomationEffectAdmission {
     PreAdmissionProblem(ApplicationProblemEnvelope),
 }
 
-pub(crate) use input::{memory_curator_run_request, session_reflector_run_request};
-pub(crate) use recovery_index::reconcile_reserved_automation_effects_for_project;
+pub(crate) use recovery_index::{
+    AutomationEffectRecoveryReport, reconcile_reserved_automation_effects_for_project,
+};
 
 pub(crate) fn pinned_automation_configuration_digest(
     revision: &ConfigurationRevisionId,
@@ -196,6 +201,93 @@ pub(crate) fn pinned_automation_configuration_digest(
         behavior,
         provenance,
     ))
+}
+
+pub(crate) fn memory_curator_run_request(
+    run_id: &str,
+    fact_review_limit: usize,
+    min_confidence: f64,
+) -> Result<MemoryAutomationRunRequestV1> {
+    if !min_confidence.is_finite() || !(0.0..=1.0).contains(&min_confidence) {
+        return Err(contract_error(
+            "memory curator minimum confidence is outside the closed unit interval",
+        ));
+    }
+    let task = MemoryAutomationTaskRequestV1::MemoryCurator(MemoryCuratorRunInputV1 {
+        fact_review_limit: u32::try_from(fact_review_limit).map_err(contract_error)?,
+        min_confidence_millionths: (min_confidence * 1_000_000.0).round() as u32,
+    });
+    automation_run_request(run_id, task)
+}
+
+pub(crate) fn session_reflector_run_request(
+    run_id: &str,
+    options: &SessionReflectorAutomationOptions,
+) -> Result<MemoryAutomationRunRequestV1> {
+    automation_run_request(
+        run_id,
+        MemoryAutomationTaskRequestV1::SessionReflector(project_reflector_input(options)?),
+    )
+}
+
+fn project_reflector_input(
+    options: &SessionReflectorAutomationOptions,
+) -> Result<SessionReflectorRunInputV1> {
+    use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
+
+    Ok(SessionReflectorRunInputV1 {
+        provider: options.provider.clone(),
+        query: options.query.clone(),
+        scope: match options.scope {
+            LcmScope::Current => LcmSearchScopeV1::Current,
+            LcmScope::Session => LcmSearchScopeV1::Session,
+            LcmScope::All => LcmSearchScopeV1::All,
+        },
+        session_id: options.session_id.clone(),
+        include_summaries: options.include_summaries,
+        evidence_limit: u32::try_from(options.evidence_limit).map_err(contract_error)?,
+        include_recent_sessions: options.include_recent_sessions,
+        recent_sessions_limit: u32::try_from(options.recent_sessions_limit)
+            .map_err(contract_error)?,
+        sort: match options.sort {
+            LcmGrepSort::Recency => LcmGrepSortV1::Recency,
+            LcmGrepSort::Relevance => LcmGrepSortV1::Relevance,
+            LcmGrepSort::Hybrid => LcmGrepSortV1::Hybrid,
+        },
+        source: options.source.clone(),
+        role: options.role.as_deref().map(project_role).transpose()?,
+        start_time: options.start_time.map(UtcMicros),
+        end_time: options.end_time.map(UtcMicros),
+    })
+}
+
+fn project_role(role: &str) -> Result<LcmRoleV1> {
+    match role {
+        "system" => Ok(LcmRoleV1::System),
+        "user" => Ok(LcmRoleV1::User),
+        "assistant" => Ok(LcmRoleV1::Assistant),
+        "tool" => Ok(LcmRoleV1::Tool),
+        "unknown" => Ok(LcmRoleV1::Unknown),
+        _ => Err(contract_error(format!(
+            "session reflector role is not registered: {role}"
+        ))),
+    }
+}
+
+fn automation_run_request(
+    run_id: &str,
+    task: MemoryAutomationTaskRequestV1,
+) -> Result<MemoryAutomationRunRequestV1> {
+    let request = MemoryAutomationRunRequestV1 {
+        run_id: RunId::new(run_id.to_owned()).map_err(contract_error)?,
+        task,
+    };
+    if !request.validate() {
+        return Err(contract_error(
+            "automatic memory run input is outside its registered bounds",
+        ));
+    }
+    Ok(request)
 }
 
 impl AutomationEffectAuthority {
@@ -310,7 +402,7 @@ impl AutomationEffectAuthority {
             retained_operation,
             &configuration_digest,
             &(&request, &retirement_binding, &reset_source_digest),
-            request.run_id.as_str(),
+            &request.run_id,
         )
         .map_err(|_| contract_error("canonical memory automation effect preparation failed"))?;
         let placeholder = digest(&"tracedecay.memory-automation-run.uncommitted.v1")?;
@@ -328,13 +420,6 @@ impl AutomationEffectAuthority {
             ));
         };
         committed_receipt.committed_state = None;
-        let prepared_authority = prepared.authority_receipt().clone();
-        let effective_deadline = Deadline {
-            expires_at: context
-                .deadline()
-                .expires_at
-                .min(context.grant().expires_at),
-        };
         let effect_authority_digest = digest(&(
             "tracedecay.memory-automation-run.effect-authority.v1",
             context.actor(),
@@ -350,9 +435,6 @@ impl AutomationEffectAuthority {
             &input_digest,
             &request,
             &committed_receipt,
-            &prepared_authority,
-            observed_at,
-            &effective_deadline,
         ))?;
         let recovery_problem = reset_required_problem(&operation, &context, &request)?;
         let admission = DurableAutomationAdmission {
@@ -366,9 +448,6 @@ impl AutomationEffectAuthority {
             grant_digest: context.grant().digest.clone(),
             disclosure: context.grant().disclosure,
             owner: memory.project_memory_owner()?,
-            prepared_authority,
-            observed_at,
-            effective_deadline,
             effect_receipt_template: committed_receipt,
             actor: context.actor().clone(),
             scope: context.scope().clone(),
@@ -436,27 +515,16 @@ impl AutomationEffectAuthority {
                     Ok(AutomationEffectAdmission::Execute(authority))
                 }
             }
-            ReservationResult::Recover {
-                retirement,
-                admission: stored_admission,
-            } => {
+            ReservationResult::Recover { retirement } => {
                 let authority = Self {
                     context,
                     cancellation: cancellation.clone(),
                     operation,
                     prepared,
-                    admission: stored_admission,
+                    admission,
                     journal_path,
                     dashboard_root: dashboard_root.to_path_buf(),
                 };
-                if !recovery_index::admission_has_exact_authority(
-                    &authority.admission,
-                    &authority.operation,
-                )? {
-                    return Err(contract_error(
-                        "persisted automation authority digest does not match its admission",
-                    ));
-                }
                 let recovery_cancellation = cancellation.clone();
                 let read_control =
                     FactReadControl::new(Arc::new(move || recovery_cancellation.is_cancelled()));
@@ -486,11 +554,9 @@ impl AutomationEffectAuthority {
                     authority.settle_recovered_retirement().await?
                 } else if !committed_receipts.is_empty() {
                     authority
-                        .persist_recovered_terminal(recovery_index::recovered_partial_terminal(
-                            &authority.admission,
-                            committed_receipts,
-                            &authority.operation,
-                        )?)
+                        .persist_recovered_terminal(AutomationSettledTerminal::Problem(
+                            authority.recovered_partial_problem(committed_receipts)?,
+                        ))
                         .await?
                 } else if authority.admission.reset_source_digest.is_some() {
                     let problem = shipped_proposal_reset_required_problem(
@@ -502,18 +568,11 @@ impl AutomationEffectAuthority {
                         .persist_recovered_terminal(AutomationSettledTerminal::Problem(problem))
                         .await?
                 } else {
-                    let terminal = recovery_index::zero_receipt_ledger_terminal(
-                        dashboard_root,
-                        &authority.admission,
-                        &authority.operation,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        contract_error(
-                            "nonterminal automation ledger cannot close a recovered reservation",
-                        )
-                    })?;
-                    authority.persist_recovered_terminal(terminal).await?
+                    authority
+                        .persist_recovered_terminal(AutomationSettledTerminal::Problem(
+                            authority.admission.recovery_problem.clone(),
+                        ))
+                        .await?
                 };
                 if let Some(binding) = retirement {
                     if !terminal.is_retirement_terminal() {
@@ -603,6 +662,24 @@ impl AutomationEffectAuthority {
         self.persist_success_result(result).await
     }
 
+    pub(crate) async fn settle_skipped(&self, reason: &str) -> Result<AutomationSettledTerminal> {
+        let result = MemoryAutomationRunResultV1 {
+            run_id: self.admission.request.run_id.clone(),
+            task: self.admission.request.task_kind(),
+            terminal: MemoryAutomationRunTerminalV1::Skipped {
+                reason: project_skip_reason(reason)?,
+                summary: MemoryAutomationRunSummaryV1 {
+                    reviewed_count: 0,
+                    accepted_count: 0,
+                    rejected_count: 0,
+                    skipped_count: 1,
+                },
+            },
+            committed_receipts: Vec::new(),
+        };
+        self.persist_success_result(result).await
+    }
+
     async fn settle_retirement(&self) -> Result<AutomationSettledTerminal> {
         self.persist_success_result(self.retirement_result()?).await
     }
@@ -660,41 +737,16 @@ impl AutomationEffectAuthority {
             operation: &self.operation,
             observed_at: tracedecay_application::now_micros(),
         };
-        let committed_outer_result = result.clone();
-        let outcome = self.prepared.complete_with_digest(
-            &execution,
-            &committed_state,
-            tracedecay_application::ReconciliationState::Reconciled,
-            RetainedSurfaceResultV1::MemoryAutomationRun(result),
-            None,
-        );
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
-                reason_code,
-                committed_receipt,
-                detail,
-            }) => {
-                let terminal = self.outer_result_partial_problem(
-                    reason_code,
-                    committed_receipt,
-                    detail,
-                    committed_outer_result,
-                )?;
-                return if recovered {
-                    self.persist_recovered_terminal(AutomationSettledTerminal::Problem(terminal))
-                        .await
-                } else {
-                    self.persist_terminal(AutomationSettledTerminal::Problem(terminal))
-                        .await
-                };
-            }
-            Err(_) => {
-                return Err(contract_error(
-                    "canonical memory automation effect completion failed before a typed post-commit terminal",
-                ));
-            }
-        };
+        let outcome = self
+            .prepared
+            .complete_with_digest(
+                &execution,
+                &committed_state,
+                tracedecay_application::ReconciliationState::Reconciled,
+                RetainedSurfaceResultV1::MemoryAutomationRun(result),
+                None,
+            )
+            .map_err(|_| contract_error("canonical memory automation effect completion failed"))?;
         if !retained_surface_outcome_matches_terminal(
             RetainedSurfaceOperation::MemoryAutomationRun,
             self.context.request_id(),
@@ -714,38 +766,6 @@ impl AutomationEffectAuthority {
         } else {
             self.persist_terminal(terminal).await
         }
-    }
-
-    fn outer_result_partial_problem(
-        &self,
-        reason_code: String,
-        committed_receipt: tracedecay_application::EffectReceipt,
-        detail: String,
-        committed_outer_result: MemoryAutomationRunResultV1,
-    ) -> Result<AutomationSettledProblem> {
-        let problem =
-            retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
-                reason_code,
-                committed_receipt,
-                detail,
-            });
-        problem.validate().map_err(contract_error)?;
-        let envelope = ApplicationProblemEnvelope::new(
-            self.operation.result_contract().clone(),
-            self.context.request_id().clone(),
-            problem,
-        )
-        .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Application))
-        .map_err(contract_error)?;
-        MemoryAutomationRunProblemV1::new_outer_effect_partial(
-            self.admission.request.run_id.clone(),
-            self.admission.request.task_kind(),
-            self.context.scope().clone(),
-            envelope,
-            committed_outer_result,
-            self.context.request_id(),
-        )
-        .map_err(contract_error)
     }
 
     /// Projects an admitted automation failure into the canonical application
@@ -859,6 +879,28 @@ impl AutomationEffectAuthority {
             self.context.request_id(),
         )
         .map_err(contract_error)
+    }
+
+    fn recovered_partial_problem(
+        &self,
+        committed_receipts: Vec<MemoryAutomationCommittedReceiptV1>,
+    ) -> Result<AutomationSettledProblem> {
+        if committed_receipts.is_empty() {
+            return Err(contract_error(
+                "zero recovered memory effects cannot produce a partial terminal",
+            ));
+        }
+        let committed_state = digest(&(
+            "tracedecay.memory-automation-run.partial-state.v1",
+            self.admission.request.run_id.as_str(),
+            &committed_receipts,
+        ))?;
+        let problem = retained_surface_execution_problem(self.prepared.partial_error_with_digest(
+            &committed_state,
+            "application.memory-automation-run.recovered-partial-effect",
+            "Canonical memory effects committed before the outer run terminal was published.",
+        ));
+        self.problem_envelope(problem, committed_receipts)
     }
 
     async fn persist_terminal(

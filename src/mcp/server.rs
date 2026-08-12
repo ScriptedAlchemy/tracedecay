@@ -77,8 +77,8 @@ pub(crate) use live_transcript_refresh::{
 pub(crate) use protocol::*;
 use read_coalescing::*;
 pub(crate) use rmcp::{
-    RmcpConnectionAdapter, RmcpInitializeResponseDecorator,
-    RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement,
+    RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpSelectedProjectResponseAuthority,
+    RmcpWorkDeliverySettlement,
 };
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
@@ -134,13 +134,6 @@ pub(crate) type CodeIndexReconcileSink =
 /// identity.
 pub(crate) type CodeIndexPublicationIdentityResolver =
     Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1 + 'static>;
-
-pub(crate) type CodeGraphProjectionReadPort =
-    Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort + 'static>;
-pub(crate) type CodeGraphReadAdmissionPort =
-    Arc<dyn tracedecay_usecases::graph::CodeGraphReadAdmissionPort + 'static>;
-pub(crate) type CodeIndexIgnoredDependencyAdmissionPort =
-    Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1 + 'static>;
 
 /// Code-index search boundary contracts, owned by the query kernel.
 ///
@@ -526,6 +519,15 @@ impl McpServer {
     /// cache growth.
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) async fn new_with_global_db(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        global_db: Option<Arc<RegisteredGlobalDb>>,
+    ) -> Arc<Self> {
+        Self::new_with_dbs(cg, scope_prefix, global_db.clone(), global_db, true).await
     }
 
     #[cfg(test)]

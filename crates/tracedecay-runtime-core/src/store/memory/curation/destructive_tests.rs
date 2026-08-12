@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::{TempDir, tempdir};
 use tracedecay_domain::{
     Confidence, FactCategoryV1, FactEventId, FactOwnerV1, ProvenanceId, RunId,
@@ -726,7 +726,7 @@ fn child_identity_is_stable_and_noncanonical_ids_are_rejected_structurally() {
     ));
     assert!(matches!(
         ProjectMemoryFactCurationBatchV1::new(
-            owner.clone(),
+            owner,
             outer_id,
             None,
             Confidence::new(0.8).expect("minimum confidence"),

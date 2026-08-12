@@ -6,9 +6,7 @@ export type RetryDirective = "never" | "same_request" | "after_delay" | "after_r
 export type LegalAction = "correct_request" | "reauthorize" | "refresh" | "retry" | "reconcile" | "reset" | "contact_administrator" | UnknownValue;
 export type OperationTermination = "completed" | "cancelled" | "timed_out" | "failed" | "unavailable" | "partial" | "effect_unknown" | UnknownValue;
 export type EffectTermination = "completed" | "cancelled" | "timed_out" | "failed" | "partial" | "effect_unknown" | UnknownValue;
-export type ApplicationProblemKind = "invalid_request" | "not_found_or_not_authorized" | "conflict" | "partial_effect" | "stale" | "unsupported" | "unavailable" | "execution_failed" | "reset_required" | "saturated" | "cancelled" | "timed_out" | UnknownValue;
-export type ApplicationUnavailableClassV1 = "authority" | "backend_unavailable" | "backend_disconnected" | "backend_retryable" | UnknownValue;
-export type ApplicationExecutionFailureClassV1 = "denied" | "malformed_output" | "permanent" | UnknownValue;
+export type ApplicationProblemKind = "invalid_request" | "not_found_or_not_authorized" | "conflict" | "partial_effect" | "stale" | "unsupported" | "unavailable" | "reset_required" | "saturated" | "cancelled" | "timed_out" | UnknownValue;
 export type StreamEventName = "open" | "item" | "progress" | "resume_gap" | OperationTermination;
 export type Decoder<T> = (value: unknown) => T;
 export type CanonicalJsonSchema = Readonly<Record<string, unknown>>;
@@ -23,7 +21,7 @@ export interface PreviewResult<T> { preview_id: string; preview_digest: string; 
 export interface EffectResult<T> { effect_id: string; effect_class: string; idempotency_key: string; authority: Record<string, unknown>; expected_state: string; execution: OperationReceipt; reconciliation: string; receipt: Record<string, unknown>; payload: T | null; [key: string]: unknown }
 export type ApplicationOutcome<T> = { outcome: "evidence"; value: EvidencePacket<T>; [key: string]: unknown } | { outcome: "preview"; value: PreviewResult<T>; [key: string]: unknown } | { outcome: "effect"; value: EffectResult<T>; [key: string]: unknown };
 export interface ApplicationEnvelope<T> { contract: ContractRef; request_id: string; scope: Record<string, unknown>; outcome: ApplicationOutcome<T>; [key: string]: unknown }
-export interface ApplicationProblemRecord { revision: number; kind: ApplicationProblemKind; code: string; message: string; diagnostic: SafeDiagnostic | null; committed_receipt: EffectReceipt | null; owning_layer: string; terminality: string; retryable: boolean; retry: RetryDirective; retry_scope: string | null; retry_after_millis: number | null; cancellation_stage: string | null; unavailable_classification: ApplicationUnavailableClassV1 | null; execution_failure_classification: ApplicationExecutionFailureClassV1 | null; request_id: string; trace_id: string; details: SafeDiagnostic[]; legal_actions: LegalAction[]; coverage: unknown | null; [key: string]: unknown }
+export interface ApplicationProblemRecord { revision: number; kind: ApplicationProblemKind; code: string; message: string; diagnostic: SafeDiagnostic | null; committed_receipt: EffectReceipt | null; owning_layer: string; terminality: string; retryable: boolean; retry: RetryDirective; retry_scope: string | null; retry_after_millis: number | null; cancellation_stage: string | null; request_id: string; trace_id: string; details: SafeDiagnostic[]; legal_actions: LegalAction[]; coverage: unknown | null; [key: string]: unknown }
 export interface ApplicationProblemEnvelope { contract: ContractRef; request_id: string; problem: ApplicationProblemRecord; [key: string]: unknown }
 export type HttpSuccessEnvelope<T> = ApplicationEnvelope<T> & { binding_id: string };
 export type HttpProblemEnvelope = ApplicationProblemEnvelope & { binding_id?: string };

@@ -16,14 +16,14 @@ use tracedecay_application::{
     CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest,
     CodeImplementationsRequest, CodeQueryPage, CodeQueryScope, CodeRelationRequest,
     CodeSignatureRequest, CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRecord,
-    ExactOccurrenceRequest, LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageRequest,
-    PhraseSearchRequest, QualifiedNameRequest, RequestContext, ResultProjection, RetrievalOrder,
-    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRecord,
-    SourceMetadataRequest, callable_code_catalog_contribution, callable_code_handler_descriptors,
-    callable_code_operations,
+    ExactOccurrenceRequest, LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageCursor,
+    PageRequest, PhraseSearchRequest, QualifiedNameRequest, RequestContext, ResultProjection,
+    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
+    SourceMetadataRecord, SourceMetadataRequest, callable_code_catalog_contribution,
+    callable_code_handler_descriptors, callable_code_operations,
 };
 use tracedecay_domain::{
-    CodeGenerationId, EphemeralSanitizedQueryViewV1, PublicRetrieverStatus,
+    CodeGenerationId, EphemeralSanitizedQueryViewV1, FactId, PublicRetrieverStatus,
     QueryFallbackSubpayload, QueryNormalizationRevision, RetrieverKind, SanitizerRevision,
     TemporalModeV1, UtcMicros,
 };
@@ -95,6 +95,7 @@ enum ExactPortScenario {
     Valid,
     ValidCursor,
     UnexpectedCursor,
+    WrongCursorKind,
     ResolvedGeneration,
     MissingGeneration,
     UnavailableWithoutGeneration,
@@ -159,7 +160,12 @@ impl ExactOnlyPort {
             self.scenario,
             ExactPortScenario::MismatchedPageCounts
         ));
-        evidence.page.cursor = next_cursor.map(Into::into);
+        evidence.page.cursor = next_cursor.map(PageCursor::from);
+        if matches!(self.scenario, ExactPortScenario::WrongCursorKind) {
+            evidence.page.cursor = Some(PageCursor::FactListAfter {
+                fact_id: FactId::new("fact.fixture.wrong-cursor-kind".to_owned()).unwrap(),
+            });
+        }
         if matches!(self.scenario, ExactPortScenario::ValidCursor) {
             evidence.page.expires_at = Some(UtcMicros(10));
         }
@@ -527,6 +533,16 @@ fn callable_code_service_rejects_an_unresumable_port_cursor() {
 }
 
 #[test]
+fn callable_code_service_rejects_a_nonopaque_page_cursor() {
+    let problem = execute_exact(ExactPortScenario::WrongCursorKind).unwrap_err();
+    assert_eq!(problem.problem.kind(), ApplicationProblemKind::Unavailable);
+    assert_eq!(
+        problem.problem.diagnostic.as_ref().unwrap().code,
+        "application.code-query.invalid-port-evidence"
+    );
+}
+
+#[test]
 fn callable_code_service_accepts_a_bounded_unexpired_port_cursor() {
     let result = execute_exact(ExactPortScenario::ValidCursor).unwrap();
     let ApplicationOutcome::Evidence(packet) = result.outcome else {
@@ -538,7 +554,8 @@ fn callable_code_service_accepts_a_bounded_unexpired_port_cursor() {
             .page
             .cursor
             .as_ref()
-            .and_then(|cursor| cursor.as_opaque().map(OpaqueCursor::as_str)),
+            .and_then(PageCursor::as_opaque)
+            .map(OpaqueCursor::as_str),
         Some("cursor.generation.fixture.page-2")
     );
 }

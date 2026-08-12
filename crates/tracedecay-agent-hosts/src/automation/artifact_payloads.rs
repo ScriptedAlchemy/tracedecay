@@ -20,7 +20,6 @@ use super::outcomes::{
     AutomationOutcomesSnapshot, outcome_eval_definitions, outcome_feedback_section,
 };
 use super::run_ledger::{AutomationRunArtifactKind, AutomationRunLedgerRecord};
-use super::runner::SessionFactCurationReceipt;
 use super::text::truncate_chars_for_prompt;
 
 pub(super) struct ArtifactPayloadContext<'a> {
@@ -110,11 +109,6 @@ fn context_evidence_mode(context: &Value) -> Value {
 }
 
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {
-    let model = if ctx.task == AgentTaskKind::SessionReflector {
-        Vec::new()
-    } else {
-        validation_feedback_entries(ctx.record)
-    };
     json!({
         "schema_version": 1,
         "run_id": ctx.run_id,
@@ -131,9 +125,7 @@ pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Val
             "skipped_count": ctx.record.skipped_count,
         },
         "human": [],
-        "model": model,
-        "session_reflection_result": (ctx.task == AgentTaskKind::SessionReflector)
-            .then(|| session_reflection_summary(ctx.record)),
+        "model": validation_feedback_entries(ctx.record),
         "applied_change_outcomes": outcome_feedback_section(ctx.task, ctx.outcomes),
     })
 }
@@ -229,11 +221,11 @@ pub(super) fn validation_gate_payload(
     gate: &ImprovementGatePayload,
 ) -> Value {
     let (trace_ref, feedback_ref, generated_evals_ref) = refs;
-    let automatic_application = task_automatic_application_effect(ctx.task, ctx.record);
-    let report = match ctx.task {
-        AgentTaskKind::MemoryCurator => curation::memory_curation_trace_summary(ctx.record),
-        AgentTaskKind::SessionReflector => session_reflection_summary(ctx.record),
-        _ => ctx.record.validation_report.clone().unwrap_or(Value::Null),
+    let automatic_application = automatic_application_effect(ctx.record);
+    let report = if ctx.task == AgentTaskKind::MemoryCurator {
+        curation::memory_curation_trace_summary(ctx.record)
+    } else {
+        ctx.record.validation_report.clone().unwrap_or(Value::Null)
     };
     json!({
         "schema_version": 1,
@@ -338,7 +330,7 @@ pub(super) fn codex_handoff_payload(
     evals: &GeneratedEvalPayloads,
     gate: &ImprovementGatePayload,
 ) -> Value {
-    let automatic_application = task_automatic_application_effect(ctx.task, ctx.record);
+    let automatic_application = automatic_application_effect(ctx.record);
     let response = if ctx.task == AgentTaskKind::MemoryCurator {
         json!({
             "model": ctx.response.model,
@@ -346,14 +338,6 @@ pub(super) fn codex_handoff_payload(
             "output_tokens": ctx.response.output_tokens,
             "output_hash": ctx.record.output_hash,
             "curation_result": curation::memory_curation_trace_summary(ctx.record),
-        })
-    } else if ctx.task == AgentTaskKind::SessionReflector {
-        json!({
-            "model": ctx.response.model,
-            "input_tokens": ctx.response.input_tokens,
-            "output_tokens": ctx.response.output_tokens,
-            "output_hash": ctx.record.output_hash,
-            "session_reflection_result": session_reflection_summary(ctx.record),
         })
     } else {
         json!({
@@ -377,17 +361,10 @@ pub(super) fn codex_handoff_payload(
         "evidence_hash": ctx.record.evidence_hash,
         "input_hash": ctx.record.input_hash,
         "output_hash": ctx.record.output_hash,
-        "request": if matches!(ctx.task, AgentTaskKind::MemoryCurator | AgentTaskKind::SessionReflector) {
-            json!({
-                "evidence_hash": ctx.request.evidence_hash,
-                "context_hash": ctx.record.input_hash,
-            })
-        } else {
-            json!({
-                "evidence_hash": ctx.request.evidence_hash,
-                "prompt_preview": truncate_chars_for_prompt(&ctx.request.prompt, 4000),
-                "context_hash": ctx.record.input_hash,
-            })
+        "request": {
+            "evidence_hash": ctx.request.evidence_hash,
+            "prompt_preview": truncate_chars_for_prompt(&ctx.request.prompt, 4000),
+            "context_hash": ctx.record.input_hash,
         },
         "response": response,
         "readiness": {
@@ -453,45 +430,6 @@ pub(super) fn codex_handoff_payload(
         "next_actions": ctx.policy.next_actions(ctx.record),
         "tests_to_run": ctx.policy.handoff_tests(),
     })
-}
-
-fn session_reflection_summary(record: &AutomationRunLedgerRecord) -> Value {
-    json!({
-        "status": record.status,
-        "reviewed_count": record.reviewed_count,
-        "accepted_count": record.accepted_count,
-        "rejected_count": record.rejected_count,
-        "proposed_ops_hash": validation_report_hash(record.proposed_ops.as_ref()),
-        "applied_ops_hash": validation_report_hash(record.applied_ops.as_ref()),
-        "rejected_ops_hash": validation_report_hash(record.rejected_ops.as_ref()),
-        "validation_report_hash": validation_report_hash(record.validation_report.as_ref()),
-        "curation_receipt": session_reflection_curation_receipt(record),
-    })
-}
-
-fn session_reflection_curation_receipt(record: &AutomationRunLedgerRecord) -> Option<Value> {
-    let receipt = serde_json::from_value::<SessionFactCurationReceipt>(
-        record.validation_report.as_ref()?.get("receipt")?.clone(),
-    )
-    .ok()?;
-    serde_json::to_value(receipt).ok()
-}
-
-fn task_automatic_application_effect(
-    task: AgentTaskKind,
-    record: &AutomationRunLedgerRecord,
-) -> Value {
-    if task == AgentTaskKind::SessionReflector {
-        let application = automatic_application_effect(record);
-        json!({
-            "status": application.get("status"),
-            "accepted_count": record.accepted_count,
-            "rejected_count": record.rejected_count,
-            "retry_required": application.get("retry_required"),
-        })
-    } else {
-        automatic_application_effect(record)
-    }
 }
 
 fn automatic_application_effect(record: &AutomationRunLedgerRecord) -> Value {
@@ -630,7 +568,6 @@ mod tests {
             artifacts: Vec::new(),
             started_at: "0".to_string(),
             completed_at: "0".to_string(),
-            completed_at_micros: 0,
         };
         (request, response, record)
     }
@@ -659,10 +596,10 @@ mod tests {
         let outcomes = outcomes_snapshot();
         let ctx = ArtifactPayloadContext {
             run_id: "run-outcomes",
-            task: AgentTaskKind::SessionReflector,
-            task_key: "session_reflector",
-            prompt_version: "session_reflector:v1",
-            policy: artifact_policy(AgentTaskKind::SessionReflector),
+            task: AgentTaskKind::SkillWriter,
+            task_key: "skill_writer",
+            prompt_version: "skill_writer:v1",
+            policy: artifact_policy(AgentTaskKind::SkillWriter),
             request: &request,
             response: &response,
             record: &record,
@@ -901,88 +838,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn session_reflector_feedback_validation_and_handoff_are_payload_free() {
-        let (mut request, mut response, mut record) = payload_fixture();
-        let hostile_secret = "sk-live-session-reflector-do-not-publish";
-        request.prompt = format!("private session evidence: {hostile_secret}");
-        response.output_text = format!("proposed fact: {hostile_secret}");
-        response.output_json = Some(json!({"facts": [{"content": hostile_secret}]}));
-        record.task = AgentTaskKind::SessionReflector;
-        record.task_key = Some("session_reflector".to_owned());
-        record.reviewed_count = 2;
-        record.accepted_count = 1;
-        record.rejected_count = 1;
-        record.proposed_ops = Some(json!({"facts": [{"content": hostile_secret}]}));
-        record.applied_ops = Some(json!([{"apply_id": "apply-one", "secret": hostile_secret}]));
-        record.rejected_ops = Some(json!({"count": 1, "secret": hostile_secret}));
-        record.validation_report = Some(json!({
-            "status": "partial",
-            "receipt": {
-                "schema_version": 1,
-                "outcome": "partial",
-                "repair_attempted": true,
-                "admitted_count": 1,
-                "applied_count": 1,
-                "quarantined_count": 1,
-                "retry_required": false,
-                "automatic_fact_receipt_ids": ["apply-one"],
-                "applied_fact_ids": ["fact-one"],
-            },
-            "validation_repairs": [{"content": hostile_secret}],
-        }));
-        let outcomes = AutomationOutcomesSnapshot::default();
-        let ctx = ArtifactPayloadContext {
-            run_id: "run-outcomes",
-            task: AgentTaskKind::SessionReflector,
-            task_key: "session_reflector",
-            prompt_version: "session_reflector:v1",
-            policy: artifact_policy(AgentTaskKind::SessionReflector),
-            request: &request,
-            response: &response,
-            record: &record,
-            outcomes: &outcomes,
-        };
-        let refs = ArtifactRefs {
-            trace: json!({"kind": "traces"}),
-            feedback: json!({"kind": "feedback"}),
-            generated_evals: json!({"kind": "generated_evals"}),
-            validation_gate: json!({"kind": "validation_gate"}),
-            optimizer_diagnosis: json!({"kind": "optimizer_diagnosis"}),
-        };
-        let evals = generated_eval_payloads(&ctx);
-        let gate = improvement_gate_payload(&ctx, &evals);
-        let feedback = feedback_payload(&ctx, &refs.trace);
-        let validation = validation_gate_payload(
-            &ctx,
-            (&refs.trace, &refs.feedback, &refs.generated_evals),
-            &evals,
-            &gate,
-        );
-        let handoff = codex_handoff_payload(&ctx, &refs, &evals, &gate);
-
-        for payload in [&feedback, &validation, &handoff] {
-            assert!(
-                !serde_json::to_string(payload)
-                    .unwrap()
-                    .contains(hostile_secret)
-            );
-        }
-        assert_eq!(feedback.pointer("/model"), Some(&json!([])));
-        assert_eq!(
-            validation.pointer("/task_validation/report/curation_receipt/applied_count"),
-            Some(&json!(1))
-        );
-        assert!(handoff.pointer("/request/prompt_preview").is_none());
-        assert!(handoff.pointer("/response/output_text_preview").is_none());
-        assert!(handoff.pointer("/response/output_json").is_none());
-        assert!(
-            handoff
-                .pointer("/response/session_reflection_result/validation_report_hash")
-                .is_some()
-        );
-    }
-
     fn domain_id<T>(value: &str) -> T
     where
         T: TryFrom<String, Error = DomainError>,
@@ -1036,10 +891,10 @@ mod tests {
         let outcomes = AutomationOutcomesSnapshot::default();
         let ctx = ArtifactPayloadContext {
             run_id: "run-outcomes",
-            task: AgentTaskKind::SkillWriter,
-            task_key: "skill_writer",
-            prompt_version: "skill_writer:v1",
-            policy: artifact_policy(AgentTaskKind::SkillWriter),
+            task: AgentTaskKind::SessionReflector,
+            task_key: "session_reflector",
+            prompt_version: "session_reflector:v1",
+            policy: artifact_policy(AgentTaskKind::SessionReflector),
             request: &request,
             response: &response,
             record: &record,

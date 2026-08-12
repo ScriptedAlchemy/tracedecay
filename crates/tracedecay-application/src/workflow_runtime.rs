@@ -312,6 +312,7 @@ pub fn prepare_workflow_fan_out(
         let child_digest = canonical_sha256(&(
             "tracedecay.application.workflow-child.v3",
             &identity,
+            &plan_digest,
             ordinal,
             &input,
         ))

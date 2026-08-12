@@ -277,7 +277,7 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
         FactLineageEventKindV1::Curated {
             action: FactCurationActionV1::Linked { relation },
             ..
-        } if relation.kind() == FactRelationKindV1::Supports
+        } if relation.relation() == FactRelationKindV1::Supports
     )));
 
     let mut rows = database

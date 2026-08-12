@@ -2,16 +2,16 @@
   "schema_version": 1,
   "id": "memory-supersede-without-dup",
   "title": "Preference pivots update the existing fact instead of duplicating it",
-  "description": "When a stored preference is superseded (npm -> pnpm), a well-behaved agent updates the existing fact. If a naive add leaves both facts, the agent-managed curator must remove the older superseded preference.",
+  "description": "When a stored preference is superseded (npm -> pnpm), the canonical update operation changes the existing fact instead of creating a duplicate.",
   "adapted_from": "mnemon `memory-merge-supersede` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
   "contract": "stable",
-  "contract_notes": "The violation phase requires a configured automation backend. Accepted curator operations settle automatically without a separate approval or apply step.",
+  "contract_notes": "The deterministic journey captures the seeded canonical FactId and updates that exact fact through the retained surface.",
   "setup": {
     "facts": [
       {
         "content": "User prefers npm as the package manager for this project.",
         "category": "user_pref",
-        "source": "eval-seed",
+        "source_label": "eval-seed",
         "trust": 0.7
       }
     ],
@@ -28,23 +28,7 @@
         }
       }
     ],
-    "violation": {
-      "expectation": "defend-or-detect",
-      "steps": [
-        {
-          "kind": "tool",
-          "tool": "tracedecay_fact_store_add",
-          "args": {
-            "content": "User prefers pnpm as the package manager for this project (supersedes earlier npm preference).",
-            "category": "user_pref",
-            "source_label": "eval-agent"
-          }
-        },
-        {
-          "kind": "memory-curation"
-        }
-      ]
-    }
+    "violation": null
   },
   "real_model": {
     "prompts": [
@@ -76,13 +60,6 @@
       "op": "eq",
       "value": 0,
       "phase": "well-behaved-only"
-    },
-    {
-      "kind": "curation-removes-source",
-      "name": "curator_removes_seeded_npm_preference",
-      "source": "eval-seed",
-      "expected": true,
-      "phase": "violation-only"
     }
   ]
 }

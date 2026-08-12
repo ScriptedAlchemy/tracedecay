@@ -705,6 +705,12 @@ pub(super) fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::
     if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent)?;
     }
+
+    #[cfg(windows)]
+    if private {
+        return crate::windows_security::open_or_create_private_lock_file(lock_path);
+    }
+
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).truncate(false);
     let file = if private {

@@ -687,7 +687,9 @@ async fn active_project_tool_reports_resolved_store_metadata() {
             .as_str()
             .is_some_and(|path| path.contains(".tracedecay") && path.contains("projects"))
     );
-    assert_eq!(payload["branch"]["serving_db_exists"].as_bool(), Some(true));
+    assert_eq!(payload["storage"]["graph_db_exists"].as_bool(), Some(true));
+    assert!(payload["branch"].get("serving_db_path").is_none());
+    assert!(payload["branch"].get("serving_db_exists").is_none());
 }
 
 #[cfg(feature = "test-transport")]

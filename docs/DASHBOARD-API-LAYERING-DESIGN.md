@@ -31,8 +31,8 @@ logic + inline SQL + caches" toward a three-layer split, *without changing any
 observable behavior*.
 
 **In scope.** `src/dashboard/memory_api.rs`, `lcm_api.rs`, `graph_api.rs`, plus
-the shared `util.rs` data-access contract and the curation seam into
-`memory_curate.rs`.
+the shared `util.rs` data-access contract. The manual `memory_curate.rs` seam
+is removed by the final-V2 hard cut.
 
 **Out of scope** (see §13 Non-goals): `savings_api.rs`, `savings_pricing.rs`,
 `token_count.rs`, `assets.rs`, the router/server lifecycle in `mod.rs`, and the
@@ -46,7 +46,7 @@ canonical `src/db/` layer.
 | C2 | Every route path and JSON key stays byte-identical (standalone UIs + the Hermes reverse-proxy depend on them). | P18, P19, §2 |
 | C3 | The fail-soft error contract is preserved: `query_rows → Err(String)` surfaced in the payload `error` field (never a raw 500); `query_i64 → 0` on any error/empty; `JsonPath`/`JsonQuery` rejections stay `{detail}` JSON. | P2, P3 |
 | C4 | Memory mutations stay permanent and go through `MemoryApplication<DatabaseFactStore>` (no dashboard-local `DELETE`, no archive/soft-delete). | P4, P5 |
-| C5 | The 5 `pub(crate)` curation functions stay a reusable seam for `memory_curate.rs` (the CLI curation path + LLM-review tier). | P20, §5 |
+| C5 | Automatic curation uses canonical controlled reads and retained store operations; no parallel CLI/dashboard curation seam remains. | P20, §5 |
 | C6 | Cache keying/invalidation semantics are untouched (per-DB keys, content fingerprints, negative-cache exemption). | P14–P17 |
 | C7 | Standalone behavior and Hermes-wrapper compatibility are both preserved — no new auth, no off-loopback exposure. | P1, §11 |
 
@@ -95,7 +95,6 @@ src/dashboard/
 ├── memory_api.rs           # ROUTE  (11 handlers) — bodies become thin calls
 ├── memory_service.rs       # domain logic + memory-application boundary + curation seam
 ├── memory_analysis.rs      # unchanged — similarity/PCA math (SimilarityComputation)
-├── memory_curate.rs        # one-line import update only (§5)
 │
 ├── lcm_api.rs              # ROUTE  (6 handlers) — thin calls
 ├── lcm_service.rs          # NEW — overview/search/session/node/timeline/compression logic
@@ -169,33 +168,12 @@ Each table shows where current code lands. Line numbers are from the audited
 
 ---
 
-## 5. The curation seam (C5) — the one cross-file behavioral coupling
+## 5. Removed manual curation seam (C5)
 
-`memory_api.rs` is not just routes: `memory_curate.rs` (the dashboard-free CLI
-curation core, including the `--llm`/`--llm-ops` review tier) imports 5
-`pub(crate)` functions from it:
-
-```rust
-// memory_curate.rs:22 — current
-use super::memory_api::{
-    apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
-};
-```
-
-**Migration rule:** these 5 move to `memory_service.rs` as **one atomic
-change**, and `memory_curate.rs`'s import becomes:
-
-```rust
-use super::memory_service::{
-    apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
-};
-```
-
-Do **not** rename, merge, or inline these functions — they are a versioned seam
-(P20). Keep their signatures, `pub(crate)` visibility, and the fact that
-`similarity_computation` delegates to `memory_analysis::SimilarityComputation`.
-This is the single change most likely to break the CLI curation path if botched,
-so it is gated to its own commit (§12, phase 3a).
+Final-V2 deletes the dashboard-free `memory_curate.rs` CLI core and its
+plan/apply coupling to `memory_api.rs`. Automatic curation reads canonical fact
+projections and commits only controlled NormalizeTags/LinkFacts operations with
+terminal receipts.
 
 ---
 
@@ -337,7 +315,7 @@ and keeps existing tests green, code moves behind re-export shims.**
 ### Pre-flight (once, before any domain)
 - **Add characterization tests.** There is **no integration test coverage** for
   the dashboard in `tests/` today; the only safety net is in-module unit tests
-  in `util.rs`, `memory_analysis.rs`, `memory_curate.rs`, `token_count.rs`,
+  in `util.rs`, `memory_analysis.rs`, `token_count.rs`,
   `savings_*.rs`. Before moving any handler, add golden-payload snapshot tests
   (seed a tiny in-memory engine test database, hit the service/route fn, assert the exact
   JSON) for at least: one memory overview + `curate` dry_run, one lcm overview +
@@ -372,10 +350,8 @@ shared between `overview` and `default_subgraph` (both move to
    do not add a dashboard-local memory query layer. Move
    `overview_payload`/`fetch_facts`/`fetch_entities`/`graph_payload`/
    `providers_stub`, `vector_facts`/`ProjectionComputation`/`PROJECTION_CACHE`,
-   **and the 5 curation fns** (§5). In the **same commit**, update
-   `memory_curate.rs:22` import to `super::memory_service::{…}`. This commit
-   must compile and pass `memory_curate`'s unit tests + the curate
-   characterization test. Green.
+   The manual curation functions and route are deleted; automatic curation
+   stays behind the canonical agent-host/store authority.
 
 ### Phase 4 — closeout
 - Confirm `mod.rs` route table byte-identical to pre-migration (diff).
@@ -384,20 +360,8 @@ shared between `overview` and `default_subgraph` (both move to
   project DB for a manual eyeball of all four tabs.
 - Optional: remove now-dead `use` imports flagged by `cargo`/clippy.
 
-### Re-export shim technique (keeps each step independently green)
-When a function moves from `*_api.rs` to `*_service.rs`, but some other code still
-imports it from the old spot, leave a one-line re-export in the old module until
-all call sites are updated, then delete it:
-
-```rust
-// in memory_api.rs, transiently
-pub(crate) use super::memory_service::{build_delete_plan, delete_fact, /* … */};
-```
-
-This lets phase 3b move the 5 fns and fix `memory_curate.rs` in one commit while
-keeping `memory_api.rs`'s own internal references compiling during the move.
-Delete the shim in the same commit once `memory_curate` points at
-`memory_service` directly.
+No curation re-export shim is retained: the superseded parallel authority is
+deleted in the same breaking cutover.
 
 ---
 

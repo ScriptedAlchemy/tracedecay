@@ -19,7 +19,8 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use crate::daemon::automation_effect::{AutomationSettledTerminal, recovery_index};
+use super::*;
+use crate::daemon::automation_effect::AutomationSettledTerminal;
 
 fn digest(seed: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
@@ -93,9 +94,6 @@ fn admission(run_id: &str, request_id: &str) -> DurableAutomationAdmission {
         owner: FactOwnerV1::Project {
             project_id: scope.project_id.clone(),
         },
-        prepared_authority: authority(&scope),
-        observed_at: UtcMicros(1),
-        effective_deadline: Deadline::new(UtcMicros(10)).expect("deadline"),
         effect_receipt_template: partial_receipt_template(&request_id, &scope),
         actor: ActorId::new("actor.memory-journal").expect("actor"),
         scope: scope.clone(),
@@ -135,13 +133,13 @@ fn authority(scope: &ResolvedScope) -> AuthorityReceipt {
         grant_id: tracedecay_application::CapabilityGrantId::new("grant.memory-journal")
             .expect("grant"),
         grant_revision: 1,
-        grant_digest: digest('6'),
+        grant_digest: digest('3'),
         authorized_scope_digest: scope.scope_digest.clone(),
         disclosure: DisclosureClass::Evidence,
         policy: PolicyDecisionRef::new(
             "policy.memory-journal",
             1,
-            digest('6'),
+            digest('4'),
             ComponentVersion::new("policy.memory-journal.v1").expect("component"),
         )
         .expect("policy"),
@@ -361,23 +359,14 @@ fn durable_journal_rejects_changed_scope_identity() {
 }
 
 #[test]
-fn foreign_process_recovery_reuses_the_original_frozen_effect_authority() {
+fn durable_journal_rejects_changed_effect_authority() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let original = admission("run.memory-journal", "request.memory-journal");
-    reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
+    reserve_or_replay_blocking(&path, original).expect("reserve");
     let mut changed = admission("run.memory-journal", "request.memory-journal");
-    changed.process_run_id = "process.memory-journal.reopened".to_owned();
     changed.effect_authority_digest = digest('b');
-    changed.prepared_authority.revalidated_at = UtcMicros(500);
-    changed.observed_at = UtcMicros(501);
-    changed.effective_deadline = Deadline::new(UtcMicros(900)).expect("changed deadline");
-    let ReservationResult::Recover { admission, .. } =
-        reserve_or_replay_blocking(&path, changed).expect("recover foreign reservation")
-    else {
-        panic!("foreign reservation must recover")
-    };
-    assert_eq!(admission, original);
+    assert!(reserve_or_replay_blocking(&path, changed).is_err());
 }
 
 #[test]
@@ -424,15 +413,12 @@ fn project_open_crash_recovery_defers_retirement_until_exact_finalization() {
     reserve_or_replay_blocking(&path, original.clone()).expect("reserve retirement");
     let mut reopened = original.clone();
     reopened.process_run_id = "process.memory-journal.reopened".to_owned();
-    let ReservationResult::Recover {
-        retirement,
-        admission: recovered_admission,
-    } = reserve_or_replay_blocking(&path, reopened.clone()).expect("recover crashed reservation")
+    let ReservationResult::Recover { retirement } =
+        reserve_or_replay_blocking(&path, reopened.clone()).expect("recover crashed reservation")
     else {
         panic!("crashed retirement must require canonical receipt recovery")
     };
     assert_eq!(retirement, original.retirement);
-    assert_eq!(recovered_admission, original);
     let reopened_record = read_indexed_record_blocking(&path)
         .expect("physical reopen")
         .expect("reserved retirement");
@@ -630,10 +616,10 @@ fn scheduler_stable_request_identity_reopens_the_same_terminal() {
         ))
         .expect("reopened scheduler identity");
     assert_eq!(first_request, reopened_request);
-    let durable_admission = admission("host_receipt_17", first_request.as_str());
-    reserve_or_replay_blocking(&path, durable_admission.clone()).expect("reserve");
-    let terminal = success_terminal(&durable_admission, "host_receipt_17");
-    persist_terminal_blocking(&path, &durable_admission, terminal.clone()).expect("persist");
+    let admission = admission("host_receipt_17", first_request.as_str());
+    reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
+    let terminal = success_terminal(&admission, "host_receipt_17");
+    persist_terminal_blocking(&path, &admission, terminal.clone()).expect("persist");
     let reopened = admission("host_receipt_17", reopened_request.as_str());
     let ReservationResult::Replay {
         terminal: replay, ..
@@ -652,12 +638,13 @@ fn pending_index_survives_physical_reopen_and_closes_after_terminal() {
         .join("automation_effects")
         .join(format!("{}.json", "a".repeat(64)));
     let admission = admission("indexed_physical_reopen", "request.indexed-reopen");
-    recovery_index::add_pending_blocking(dashboard_root, &path, &admission)
+    super::recovery_index::add_pending_blocking(dashboard_root, &path, &admission)
         .expect("durable pending index");
     reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
 
-    let reopened = recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
-        .expect("physical index reopen");
+    let reopened =
+        super::recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
+            .expect("physical index reopen");
     assert_eq!(reopened.len(), 1);
     assert_eq!(reopened[0].path, path);
     let record = read_indexed_record_blocking(&path)
@@ -671,166 +658,12 @@ fn pending_index_survives_physical_reopen_and_closes_after_terminal() {
     reopened_admission.process_run_id = "process.reopened".to_owned();
     persist_recovered_terminal_blocking(&path, &reopened_admission, terminal, None)
         .expect("recovered terminal");
-    recovery_index::remove_pending_blocking(dashboard_root, &path).expect("pending cleanup");
+    super::recovery_index::remove_pending_blocking(dashboard_root, &path).expect("pending cleanup");
     assert!(
-        recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope,)
+        super::recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope,)
             .expect("closed index reopen")
             .is_empty()
     );
-}
-
-#[test]
-fn linked_worktree_reopen_discovers_project_shared_reservation_without_rebinding_authority() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let dashboard_root = temp.path();
-    let path = dashboard_root
-        .join("automation_effects")
-        .join(format!("{}.json", "c".repeat(64)));
-    let original = admission("linked_worktree_recovery", "request.linked-recovery");
-    recovery_index::add_pending_blocking(dashboard_root, &path, &original)
-        .expect("pending reservation");
-    reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
-
-    let sibling_scope = ResolvedScope::new(
-        original.scope.project_id.clone(),
-        original.scope.repository_id.clone(),
-        WorktreeId::new("worktree.memory-journal.sibling").expect("sibling worktree"),
-        None,
-    )
-    .expect("sibling scope");
-    let indexed = recovery_index::indexed_journals_blocking(dashboard_root, &sibling_scope)
-        .expect("project-shared discovery");
-    assert_eq!(indexed.len(), 1);
-    assert!(
-        super::super::recovery_index::admission_matches_registered_project(
-            &original,
-            &sibling_scope,
-            &indexed[0],
-        )
-    );
-
-    let foreign_repository = ResolvedScope::new(
-        original.scope.project_id.clone(),
-        RepositoryId::new("repository.memory-journal.foreign").expect("foreign repository"),
-        WorktreeId::new("worktree.memory-journal.foreign").expect("foreign worktree"),
-        None,
-    )
-    .expect("foreign scope");
-    assert!(
-        !super::super::recovery_index::admission_matches_registered_project(
-            &original,
-            &foreign_repository,
-            &indexed[0],
-        )
-    );
-    let record = read_indexed_record_blocking(&path)
-        .expect("reopen")
-        .expect("reserved record");
-    assert_eq!(record.admission().scope, original.scope);
-    assert!(record.terminal().is_none());
-}
-
-fn terminal_ledger(
-    admission: &DurableAutomationAdmission,
-    status: &str,
-    error: Option<&str>,
-    completed_at_micros: i64,
-) -> tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord {
-    serde_json::from_value(json!({
-        "schema_version": 2,
-        "run_id": admission.request.run_id.as_str(),
-        "trigger": "scheduler",
-        "task": "memory_curator",
-        "backend": "codex_app_server",
-        "status": status,
-        "accepted_count": 0,
-        "rejected_count": 0,
-        "skipped_count": usize::from(status == "skipped"),
-        "error": error,
-        "fallback_status": error,
-        "error_classification": (status == "failed").then_some("permanent"),
-        "started_at": "1",
-        "completed_at": "2",
-        "completed_at_micros": completed_at_micros,
-    }))
-    .expect("terminal ledger")
-}
-
-#[test]
-fn zero_receipt_recovery_uses_exact_success_skip_and_failed_ledger_terminals() {
-    let admission = admission("ledger_recovery", "request.ledger-recovery");
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("operation");
-
-    let completed = super::super::recovery_index::zero_receipt_terminal_from_ledger(
-        &admission,
-        &operation,
-        &terminal_ledger(&admission, "succeeded", None, 2),
-    )
-    .expect("completed recovery")
-    .expect("terminal");
-    assert!(completed.is_completed());
-
-    let mut review_only = terminal_ledger(&admission, "succeeded", None, 2);
-    review_only.reviewed_count = 4;
-    review_only.accepted_count = 3;
-    review_only.rejected_count = 1;
-    let review_only = super::super::recovery_index::zero_receipt_terminal_from_ledger(
-        &admission,
-        &operation,
-        &review_only,
-    )
-    .expect("review-only recovery")
-    .expect("terminal");
-    assert!(review_only.is_completed());
-
-    let skipped = super::super::recovery_index::zero_receipt_terminal_from_ledger(
-        &admission,
-        &operation,
-        &terminal_ledger(&admission, "skipped", Some("nothing_to_review"), 2),
-    )
-    .expect("skipped recovery")
-    .expect("terminal");
-    assert!(matches!(
-        skipped.run_result().map(|result| &result.terminal),
-        Some(MemoryAutomationRunTerminalV1::Skipped { .. })
-    ));
-
-    let failed = super::super::recovery_index::zero_receipt_terminal_from_ledger(
-        &admission,
-        &operation,
-        &terminal_ledger(&admission, "failed", Some("backend failed"), 2),
-    )
-    .expect("failed recovery")
-    .expect("terminal");
-    assert_eq!(
-        failed.problem().expect("problem").problem.problem.kind(),
-        tracedecay_application::ApplicationProblemKind::ExecutionFailed
-    );
-}
-
-#[test]
-fn zero_receipt_recovery_preserves_postcommit_deadline_as_outer_partial() {
-    let mut admission = admission("ledger_deadline", "request.ledger-deadline");
-    admission.effective_deadline = Deadline::new(UtcMicros(2)).expect("expired deadline");
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("operation");
-    let terminal = super::super::recovery_index::zero_receipt_terminal_from_ledger(
-        &admission,
-        &operation,
-        &terminal_ledger(&admission, "succeeded", None, 2),
-    )
-    .expect("deadline recovery")
-    .expect("terminal");
-    let problem = terminal.problem().expect("partial problem");
-    assert_eq!(
-        problem.problem.problem.kind(),
-        tracedecay_application::ApplicationProblemKind::PartialEffect
-    );
-    assert!(problem.committed_receipts.is_empty());
-    assert!(problem.committed_outer_result.is_some());
 }
 
 #[test]

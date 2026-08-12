@@ -21,6 +21,13 @@ pub(crate) type DatabaseOwnerReconciler = Arc<
     dyn Fn(Arc<TraceDecay>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
 >;
 
+pub(crate) type CodeGraphProjectionReadPort =
+    Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort + 'static>;
+pub(crate) type CodeGraphReadAdmissionPort =
+    Arc<dyn tracedecay_usecases::graph::CodeGraphReadAdmissionPort + 'static>;
+pub(crate) type CodeIndexIgnoredDependencyAdmissionPort =
+    Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1 + 'static>;
+
 /// Concrete route bridge to a project server already mounted by the daemon.
 /// Routed handlers retain the whole server so its graph, query ports, session
 /// stores, application executor, and lifecycle remain one authority.
@@ -32,7 +39,7 @@ pub(crate) type RetainedProjectServerResolver =
     Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static>;
 
 /// Dashboard admission erases the concrete graph only at its consumer
-/// boundary after the selected server's profile identity is validated.
+/// boundary.
 pub(crate) fn dashboard_retained_project_graph_resolver(
     resolver: RetainedProjectServerResolver,
     expected_profile_id: tracedecay_domain::UserProfileId,
@@ -107,10 +114,10 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_branch_diff_executor: Option<super::CodeIndexBranchDiffExecutor>,
-    pub(crate) code_graph_projection_read_port: Option<super::CodeGraphProjectionReadPort>,
-    pub(crate) code_graph_read_admission_port: Option<super::CodeGraphReadAdmissionPort>,
+    pub(crate) code_graph_projection_read_port: Option<CodeGraphProjectionReadPort>,
+    pub(crate) code_graph_read_admission_port: Option<CodeGraphReadAdmissionPort>,
     pub(crate) code_index_ignored_dependency_admission:
-        Option<super::CodeIndexIgnoredDependencyAdmissionPort>,
+        Option<CodeIndexIgnoredDependencyAdmissionPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_server_resolver: Option<super::RetainedProjectServerResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
@@ -418,7 +425,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_graph_projection_read_port(
         mut self,
-        port: super::CodeGraphProjectionReadPort,
+        port: CodeGraphProjectionReadPort,
     ) -> Self {
         self.code_graph_projection_read_port = Some(port);
         self
@@ -426,7 +433,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_graph_read_admission_port(
         mut self,
-        port: super::CodeGraphReadAdmissionPort,
+        port: CodeGraphReadAdmissionPort,
     ) -> Self {
         self.code_graph_read_admission_port = Some(port);
         self
@@ -434,7 +441,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_code_index_ignored_dependency_admission(
         mut self,
-        admission: super::CodeIndexIgnoredDependencyAdmissionPort,
+        admission: CodeIndexIgnoredDependencyAdmissionPort,
     ) -> Self {
         self.code_index_ignored_dependency_admission = Some(admission);
         self

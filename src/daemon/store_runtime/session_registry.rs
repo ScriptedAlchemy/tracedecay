@@ -227,7 +227,6 @@ impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {
     fn open_user_memory_db(&self) -> RuntimeFuture<'_, Database> {
         Box::pin(open_user_memory_db(self))
     }
-
 }
 
 fn runtime_incarnation(identity: &LocalProfileIdentityAuthorityV1) -> Result<StoreIncarnationV1> {

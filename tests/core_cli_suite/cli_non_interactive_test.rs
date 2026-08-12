@@ -951,7 +951,7 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
 }
 
 #[test]
-fn automation_run_memory_curation_succeeds_with_skipped_ledger_when_disabled() {
+fn automation_run_memory_curation_records_backend_disabled_skip() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(project.path().join("src")).unwrap();
@@ -964,7 +964,7 @@ fn automation_run_memory_curation_succeeds_with_skipped_ledger_when_disabled() {
     let run_output = run_with_timeout(run, cli_timeout());
     assert!(
         run_output.status.success(),
-        "manual automation run should remain supported and skip cleanly when disabled\nstdout:\n{}\nstderr:\n{}",
+        "manual automation run should skip cleanly when its backend is disabled\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&run_output.stdout),
         String::from_utf8_lossy(&run_output.stderr)
     );
@@ -972,8 +972,8 @@ fn automation_run_memory_curation_succeeds_with_skipped_ledger_when_disabled() {
         serde_json::from_slice(&run_output.stdout).expect("automation run should print JSON");
     assert_eq!(payload["ledger_record"]["status"], "skipped");
     assert_eq!(payload["ledger_record"]["trigger"], "manual_cli");
-    assert_eq!(payload["ledger_record"]["error"], "automation_disabled");
-    assert_eq!(payload["report"]["reason"], "automation_disabled");
+    assert_eq!(payload["ledger_record"]["error"], "backend_disabled");
+    assert_eq!(payload["report"]["reason"], "backend_disabled");
     assert!(payload.get("backend_response").is_none());
 
     let ledger_paths = std::fs::read_dir(profile_root(home.path()).join("projects"))
@@ -996,7 +996,7 @@ fn automation_run_memory_curation_succeeds_with_skipped_ledger_when_disabled() {
         serde_json::from_str(ledger.trim()).expect("ledger should contain one JSON record");
     assert_eq!(record["run_id"], payload["run_id"]);
     assert_eq!(record["status"], "skipped");
-    assert_eq!(record["error"], "automation_disabled");
+    assert_eq!(record["error"], "backend_disabled");
 
     let run_id = payload["run_id"]
         .as_str()
@@ -1028,7 +1028,7 @@ fn automation_run_memory_curation_succeeds_with_skipped_ledger_when_disabled() {
     let view_payload: serde_json::Value =
         serde_json::from_slice(&view_output.stdout).expect("runs view should print JSON");
     assert_eq!(view_payload["record"]["run_id"], run_id);
-    assert_eq!(view_payload["record"]["error"], "automation_disabled");
+    assert_eq!(view_payload["record"]["error"], "backend_disabled");
 
     let dashboard_root = ledger_paths[0]
         .parent()
@@ -1106,8 +1106,8 @@ fn automation_run_session_reflection_skips_without_backend_when_disabled() {
     assert_eq!(payload["ledger_record"]["task"], "session_reflector");
     assert_eq!(payload["ledger_record"]["status"], "skipped");
     assert_eq!(payload["ledger_record"]["trigger"], "manual_cli");
-    assert_eq!(payload["ledger_record"]["error"], "automation_disabled");
-    assert_eq!(payload["report"]["reason"], "automation_disabled");
+    assert_eq!(payload["ledger_record"]["error"], "backend_disabled");
+    assert_eq!(payload["report"]["reason"], "backend_disabled");
     assert!(payload.get("backend_response").is_none());
 }
 
@@ -1134,8 +1134,8 @@ fn automation_run_skill_writing_skips_without_backend_when_disabled() {
     assert_eq!(payload["ledger_record"]["task"], "skill_writer");
     assert_eq!(payload["ledger_record"]["status"], "skipped");
     assert_eq!(payload["ledger_record"]["trigger"], "manual_cli");
-    assert_eq!(payload["ledger_record"]["error"], "automation_disabled");
-    assert_eq!(payload["report"]["reason"], "automation_disabled");
+    assert_eq!(payload["ledger_record"]["error"], "backend_disabled");
+    assert_eq!(payload["report"]["reason"], "backend_disabled");
     assert!(payload.get("backend_response").is_none());
 }
 

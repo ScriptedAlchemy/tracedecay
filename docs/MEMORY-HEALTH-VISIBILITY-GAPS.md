@@ -73,7 +73,7 @@ dedicated diagnosis bundle.**
 |---|---|---|
 | Diagnose (schema/FTS/integrity/orphan/retention) | ✅ `tracedecay_lcm_doctor` MCP + `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` (read-only) | ❌ none |
 | Status/telemetry | ✅ `tracedecay_lcm_status` | ⚠️ `tracedecay_memory_status` (counts only — no integrity/health) |
-| Owner maintenance | ✅ daemon/explicitly authorized retention and payload-GC paths | ⚠️ `memory curate` is the explicit curation path; no unified memory maintenance owner |
+| Owner maintenance | ✅ daemon/explicitly authorized retention and payload-GC paths | ⚠️ automatic curation owns bounded tag/link maintenance; no unified memory maintenance owner |
 
 `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` gathers schema version, FTS rebuild-needed flags,
 payload orphan/missing-file diagnostics, summary-source integrity, lifecycle
@@ -121,7 +121,7 @@ Already renders, from `GET /api/plugins/holographic` (`overview_payload`):
 | D | **Trust-decay status** | ❌ | Trust histogram + mean shown (static `trust_score`). Decay is **ranking-only, recomputed at query time, never written to disk** (`retrieval.rs::temporal_decay_factor`, 365-day half-life, floored at 0.10). The per-result `why` field exposes the dynamic factor per result. | No "effective decayed trust" aggregate view / projection (G7, still open). `below_default_recall_threshold_count` is now surfaced via **Q3** (`memory status` / `/status`). The trust *change history* is now readable via **Q6** (`fact_trust_history` / `/trust-history`). |
 | E | **Stale memories** | ❌ | Nothing. `last_recalled_at` is stored per fact but unused for any UI/CLI signal. | No "not recalled in N days" list/count. **In this checkout, 129/129 facts have `last_recalled_at IS NULL` (never recalled)** — a strong staleness signal that is entirely invisible. |
 | F | **Index health** | ⚠️/❌ | HRR bank freshness status (`stale_bank`) per category is the only index-health signal. `MemoryStatus.repair` (`missing_vectors_repaired`, `banks_rebuilt`) exists, unsurfaced. | No FTS integrity check; no `memory_facts_fts` row-count sync vs `memory_facts`; no bank-capacity utilization; no dirty-bank queue display (`memory_bank_dirty` = 3 here); no auto_vacuum/VACUUM-status indicator; no "rebuild needed" planner like LCM's. |
-| G | **Suggested maintenance actions** | ⚠️ partial | Curation tab proposes delete/merge (similarity dedup) + entity prune/classify. `tracedecay memory curate` (CLI) does the same headless. | No unified read-only evidence bundle for **reap orphan entities, prune oplog, rebuild FTS, rebuild banks, reclaim, or retention**. Any write must remain on a separate daemon/authorized owner path; Doctor does not offer actions. |
+| G | **Suggested maintenance actions** | ⚠️ partial | Automatic curation performs bounded canonical tag normalization and fact linking with receipts. | No unified read-only evidence bundle for **reap orphan entities, prune oplog, rebuild FTS, rebuild banks, reclaim, or retention**. Any write must remain on a separate daemon/authorized owner path; Doctor does not offer actions. |
 
 ### 3.3 The status surface — now surfaced (was "hidden" at audit time)
 

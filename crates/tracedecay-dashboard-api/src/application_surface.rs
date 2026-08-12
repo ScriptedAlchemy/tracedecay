@@ -89,3 +89,34 @@ pub trait DashboardApplicationRuntime: Send + Sync {
         idempotency_key: ConfigurationIdempotencyKey,
     ) -> DashboardConfigurationApplyFuture<'a>;
 }
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_application::{Deadline, RequestId};
+    use tracedecay_domain::UtcMicros;
+
+    #[test]
+    fn admitted_dashboard_control_clones_share_the_live_cancellation_signal() {
+        let control = crate::DashboardHttpRequestControlV1 {
+            request_id: RequestId::new("request.dashboard-memory-control").expect("request id"),
+            deadline: Deadline::new(UtcMicros(500)).expect("deadline"),
+            cancellation: tracedecay_application::CancellationSignal::active(
+                "cancellation.dashboard-memory-control",
+            )
+            .expect("cancellation"),
+            observed_at: UtcMicros(100),
+        };
+
+        let owned_control = control.clone();
+        assert_eq!(owned_control.request_id(), control.request_id());
+        assert_eq!(owned_control.deadline(), control.deadline());
+        assert_eq!(owned_control.observed_at(), control.observed_at());
+
+        assert!(control.cancellation().cancel(UtcMicros(200)));
+        assert!(owned_control.cancellation().is_cancelled());
+        assert_eq!(
+            owned_control.cancellation().cancelled_at(),
+            Some(UtcMicros(200))
+        );
+    }
+}

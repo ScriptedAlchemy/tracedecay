@@ -517,13 +517,6 @@ fn transport_context(
 /// Concrete project-open factory for the complete owned application primitive
 /// runtime.
 ///
-/// Exact constructor signature:
-///
-/// `open_primitive_project_runtime(database, source_runtime, code_graph, symbol_graph_cursors,
-/// tests, lexical_grep, redundancy, temporal, source_lines, health, extended,
-/// scope, access, admitted_root_uri, operation_events, test_run_scope) ->
-/// Result<PrimitiveProjectRuntime,
-/// ApplicationContractError>`
 #[allow(clippy::too_many_arguments)]
 pub fn open_primitive_project_runtime(
     database: Database,

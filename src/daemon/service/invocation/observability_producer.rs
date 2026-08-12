@@ -1,8 +1,57 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::*;
 
 const DAEMON_OBSERVABILITY_PRODUCER_REVISION: &str = "tracedecay-daemon-observability.v1";
 const DAEMON_OBSERVABILITY_QUEUE_CAPACITY: usize = 1_024;
 const DAEMON_DELIVERY_SETTLEMENT_QUEUE_CAPACITY: usize = 1_024;
+static NEXT_DAEMON_OBSERVABILITY_PRODUCER_REGISTRATION: AtomicU64 = AtomicU64::new(1);
+
+fn daemon_observability_producer_identity(
+    project_id: &ProjectId,
+    configuration_revision: &ManifestDigest,
+    policy_revision: &ManifestDigest,
+) -> Result<tracedecay_usecases::observability::ObservabilityProducerIdentityV1, TraceDecayError> {
+    let registration = NEXT_DAEMON_OBSERVABILITY_PRODUCER_REGISTRATION
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| TraceDecayError::Config {
+            message: "daemon observability producer registrations are exhausted".to_owned(),
+        })?;
+    Ok(
+        tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            process_boot_id: format!(
+                "daemon:{}:{registration}",
+                crate::runtime_identity::process_run_id()
+            ),
+            producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION.to_owned(),
+            configuration_revision: configuration_revision.as_str().to_owned(),
+            policy_revision: policy_revision.as_str().to_owned(),
+        },
+    )
+}
+
+fn registered_observability_producer_matches_mount(
+    registered: &RegisteredObservabilityProducerV1,
+    database: &Arc<crate::global_db::RegisteredGlobalDb>,
+    project_id: &ProjectId,
+    configuration_revision: &ManifestDigest,
+    policy_revision: &ManifestDigest,
+) -> bool {
+    let incumbent = registered.producer();
+    registered.matches(
+        database,
+        &tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            process_boot_id: incumbent.identity().process_boot_id.clone(),
+            producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION.to_owned(),
+            configuration_revision: configuration_revision.as_str().to_owned(),
+            policy_revision: policy_revision.as_str().to_owned(),
+        },
+    )
+}
 
 impl DaemonInvocationService {
     pub(crate) async fn mount_observability_producer(
@@ -16,33 +65,41 @@ impl DaemonInvocationService {
         Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
         TraceDecayError,
     > {
-        let identity = tracedecay_usecases::observability::ObservabilityProducerIdentityV1 {
-            authorized_scope_ref: project_id.as_str().to_owned(),
-            process_boot_id: format!("daemon:{}", crate::runtime_identity::process_run_id()),
-            producer_revision: DAEMON_OBSERVABILITY_PRODUCER_REVISION.to_owned(),
-            configuration_revision: configuration_revision.as_str().to_owned(),
-            policy_revision: policy_revision.as_str().to_owned(),
-        };
         self.project_runtimes
             .register_or_reconcile(
                 project_root.clone(),
                 |registered: &mut RegisteredObservabilityProducerV1| {
-                    registered.matches(&database, &identity).then_some(()).ok_or_else(|| {
-                        TraceDecayError::Config {
-                            message: "a different observability producer is already mounted for this project"
+                    registered_observability_producer_matches_mount(
+                        registered,
+                        &database,
+                        &project_id,
+                        &configuration_revision,
+                        &policy_revision,
+                    )
+                    .then_some(())
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message:
+                            "a different observability producer is already mounted for this project"
                                 .to_owned(),
-                        }
                     })
                 },
                 || {
-                    let producer = tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
-                        Arc::clone(&database),
-                        identity.clone(),
-                        DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
-                    )
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("project observability producer mount failed: {error}"),
-                    })?;
+                    let identity = daemon_observability_producer_identity(
+                        &project_id,
+                        &configuration_revision,
+                        &policy_revision,
+                    )?;
+                    let producer =
+                        tracedecay_usecases::observability::BoundedObservabilityProducerV1::start(
+                            Arc::clone(&database),
+                            identity,
+                            DAEMON_OBSERVABILITY_QUEUE_CAPACITY,
+                        )
+                        .map_err(|error| TraceDecayError::Config {
+                            message: format!(
+                                "project observability producer mount failed: {error}"
+                            ),
+                        })?;
                     RegisteredObservabilityProducerV1::new(
                         Arc::clone(&database),
                         producer,
@@ -82,15 +139,38 @@ impl DaemonInvocationService {
             })
     }
 
-    pub(crate) fn observability_producer_for_project_id(
+    pub(crate) fn observability_producer_for_brain_profile_project(
         &self,
+        brain_id: &tracedecay_domain::BrainId,
+        profile_id: &tracedecay_domain::UserProfileId,
         project_id: &ProjectId,
     ) -> Option<Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>> {
         self.project_runtimes
-            .find_current::<RegisteredObservabilityProducerV1, _, _>(|registered| {
+            .find_equivalent::<RegisteredObservabilityProducerV1, _, _, _>(|registered| {
+                let database = registered.database();
+                let binding = database.binding();
+                let tracedecay_store::StoreShardScopeV1::ProjectSessions {
+                    project_id: registered_project,
+                } = &binding.shard_id.scope
+                else {
+                    return None;
+                };
+                if &binding.shard_id.brain_id != brain_id
+                    || &binding.shard_id.profile_id != profile_id
+                    || registered_project != project_id
+                {
+                    return None;
+                }
                 let producer = registered.producer();
-                (producer.identity().authorized_scope_ref == project_id.as_str())
-                    .then_some(producer)
+                (producer.identity().authorized_scope_ref == project_id.as_str()).then(|| {
+                    (
+                        (
+                            binding.clone(),
+                            database.runtime().locator().verified().clone(),
+                        ),
+                        producer,
+                    )
+                })
             })
     }
 

@@ -7,10 +7,6 @@ use std::process::Command;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::{Result as TraceDecayResult, TraceDecayError};
 use tracedecay::mcp::ToolResult;
-use tracedecay_application::retained_surfaces::{
-    FactProjectionV1, FactStoreAddCommitV1, FactStoreAddResultV1, FactStoreGetResultV1,
-    FactTelemetryV1,
-};
 
 struct ScopedProductionContextFixture {
     harness: ProductionProjectCompositionHarnessV1,
@@ -101,51 +97,46 @@ async fn call_production_tool(
     Ok(ToolResult::new(value, Vec::new()))
 }
 
-fn retained_payload(result: &ToolResult) -> Value {
-    let envelope: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    envelope
+async fn call_production_fact_tool(
+    fixture: &ProductionCompositionFixture,
+    tool_name: &str,
+    mut arguments: Value,
+) -> Value {
+    arguments
+        .as_object_mut()
+        .expect("canonical fact-store request object")
+        .insert("format".to_owned(), json!("json"));
+    let result = call_production_tool(fixture, tool_name, arguments)
+        .await
+        .unwrap_or_else(|error| panic!("{tool_name} failed: {error}"));
+    assert_ne!(
+        result.value["isError"], true,
+        "{tool_name}: {:?}",
+        result.value
+    );
+    let response: Value = serde_json::from_str(extract_text(&result.value))
+        .unwrap_or_else(|error| panic!("{tool_name} returned invalid JSON: {error}"));
+    response
         .pointer("/outcome/value/payload")
         .cloned()
-        .unwrap_or_else(|| panic!("retained tool returned no canonical payload: {envelope}"))
+        .unwrap_or_else(|| {
+            panic!("{tool_name} omitted the retained application payload: {response}")
+        })
 }
 
-fn added_fact_id(result: &ToolResult) -> String {
-    let result: FactStoreAddResultV1 = serde_json::from_value(retained_payload(result)).unwrap();
-    let projection = match result {
-        FactStoreAddResultV1::Committed { result } => match result {
-            FactStoreAddCommitV1::Added { fact, .. }
-            | FactStoreAddCommitV1::NearDuplicate { fact, .. }
-            | FactStoreAddCommitV1::PossibleConflict { fact, .. } => fact,
-        },
-        FactStoreAddResultV1::NormalizedDuplicate { fact, .. } => fact,
-        FactStoreAddResultV1::SecretRejected => panic!("canonical test fact was rejected"),
-    };
-    match projection {
-        FactProjectionV1::Available { fact } => fact.fact_id.as_str().to_owned(),
-        FactProjectionV1::Unavailable { status } => {
-            panic!(
-                "new canonical fact is unavailable: {}",
-                status.fact_id.as_str()
-            )
-        }
-    }
+fn available_fact(projection: &Value) -> &Value {
+    assert_eq!(projection["kind"], "available");
+    projection
+        .get("fact")
+        .expect("available projection must contain a fact")
 }
 
-async fn fact_telemetry(fixture: &ProductionCompositionFixture, fact_id: &str) -> FactTelemetryV1 {
-    let result = call_production_tool(
-        fixture,
-        "tracedecay_fact_store_get",
-        json!({"format": "json", "fact_id": fact_id}),
-    )
-    .await
-    .unwrap();
-    let result: FactStoreGetResultV1 = serde_json::from_value(retained_payload(&result)).unwrap();
-    match result.fact {
-        FactProjectionV1::Available { fact } => fact.telemetry,
-        FactProjectionV1::Unavailable { status } => {
-            panic!("canonical fact is unavailable: {}", status.fact_id.as_str())
-        }
-    }
+fn committed_fact_id(payload: &Value) -> &str {
+    assert_eq!(payload["outcome"], "committed");
+    assert_eq!(payload["result"]["disposition"], "added");
+    available_fact(&payload["result"]["fact"])["fact_id"]
+        .as_str()
+        .expect("committed add must return a canonical fact id")
 }
 
 #[tokio::test]
@@ -193,28 +184,45 @@ async fn test_context() {
 #[tokio::test]
 async fn context_includes_matching_memory_facts() {
     let fixture = setup_production_project().await;
-    let added = call_production_tool(
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production context MCP server");
+    let cg = server.cg().await;
+    let added = call_production_fact_tool(
         &fixture,
         "tracedecay_fact_store_add",
         json!({
-            "format": "json",
             "content": "Helper function reviews should check durable memory before broad file search.",
             "category": "decision",
-            "entity": "helper function",
+            "entities": ["helper function"],
             "tags": ["context", "memory"],
             "trust": 0.91,
-            "source": "mcp-context-test"
+            "source_label": "mcp-context-test"
         }),
     )
-    .await
-    .unwrap();
-    let fact_id = added_fact_id(&added);
-    let before_context = fact_telemetry(&fixture, &fact_id).await;
-
-    let markdown_result = call_production_tool(
+    .await;
+    let fact_id = committed_fact_id(&added).to_owned();
+    let before_context = call_production_fact_tool(
         &fixture,
+        "tracedecay_fact_store_get",
+        json!({"fact_id": fact_id.clone()}),
+    )
+    .await;
+    let before_context = available_fact(&before_context["fact"]);
+    let before_retrieval_count = before_context["telemetry"]["retrieval_count"]
+        .as_u64()
+        .expect("canonical get must project retrieval telemetry");
+    let before_access_count = before_context["telemetry"]["access_count"]
+        .as_u64()
+        .expect("canonical get must project access telemetry");
+
+    let markdown_result = handle_tool_call(
+        &cg,
         "tracedecay_context",
         json!({"task": "helper function durable memory review"}),
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -223,10 +231,12 @@ async fn context_includes_matching_memory_facts() {
     assert!(markdown.contains(&format!("fact_id={fact_id}")));
     assert!(markdown.contains("Helper function reviews should check durable memory"));
 
-    let json_result = call_production_tool(
-        &fixture,
+    let json_result = handle_tool_call(
+        &cg,
         "tracedecay_context",
         json!({"task": "helper function durable memory review", "format": "json"}),
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -244,14 +254,28 @@ async fn context_includes_matching_memory_facts() {
             .iter()
             .any(|hit| hit["fact"]["fact_id"].as_str() == Some(fact_id.as_str()))
     }));
+    assert_eq!(payload["memory_graph_coverage"]["kind"], "complete");
+    assert!(payload.get("memory_matches_error").is_none());
 
-    let after_context = fact_telemetry(&fixture, &fact_id).await;
+    let after_context = call_production_fact_tool(
+        &fixture,
+        "tracedecay_fact_store_get",
+        json!({"fact_id": fact_id}),
+    )
+    .await;
+    let after_context = available_fact(&after_context["fact"]);
+    let after_retrieval_count = after_context["telemetry"]["retrieval_count"]
+        .as_u64()
+        .expect("canonical get must project retrieval telemetry");
+    let after_access_count = after_context["telemetry"]["access_count"]
+        .as_u64()
+        .expect("canonical get must project access telemetry");
     assert_eq!(
-        after_context.retrieval_count, before_context.retrieval_count,
+        after_retrieval_count, before_retrieval_count,
         "context memory enrichment should not count as an explicit memory retrieval"
     );
     assert_eq!(
-        after_context.access_count, before_context.access_count,
+        after_access_count, before_access_count,
         "context memory enrichment should not count as an explicit memory recall"
     );
     fixture.harness.shutdown().await;
@@ -261,34 +285,34 @@ async fn context_includes_matching_memory_facts() {
 async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     let fixture = setup_production_project().await;
     let long_content = format!("Long memory control fact {}", "x".repeat(320));
-    call_production_tool(
+    let long_added = call_production_fact_tool(
         &fixture,
         "tracedecay_fact_store_add",
         json!({
             "content": long_content,
             "category": "decision",
-            "entity": "long memory control",
+            "entities": ["long memory control"],
             "tags": ["context-memory-controls"],
             "trust": 0.92,
-            "source": "mcp-context-test"
+            "source_label": "mcp-context-test"
         }),
     )
-    .await
-    .unwrap();
-    call_production_tool(
+    .await;
+    let _long_fact_id = committed_fact_id(&long_added);
+    let low_trust_added = call_production_fact_tool(
         &fixture,
         "tracedecay_fact_store_add",
         json!({
             "content": "Low trust memory control fact should stay filtered.",
             "category": "decision",
-            "entity": "low trust memory control",
+            "entities": ["low trust memory control"],
             "tags": ["context-memory-controls"],
-            "trust": 0.2,
-            "source": "mcp-context-test"
+            "trust": 0.8,
+            "source_label": "mcp-context-test"
         }),
     )
-    .await
-    .unwrap();
+    .await;
+    let low_trust_fact_id = committed_fact_id(&low_trust_added).to_owned();
 
     let disabled = call_production_tool(
         &fixture,
@@ -305,6 +329,26 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
     assert_eq!(
         disabled_payload["memory_matches"].as_array().map(Vec::len),
         Some(0)
+    );
+
+    let admitted = call_production_tool(
+        &fixture,
+        "tracedecay_context",
+        json!({
+            "task": "low trust memory control fact",
+            "format": "json",
+            "memory_min_trust": 0.5
+        }),
+    )
+    .await
+    .unwrap();
+    let admitted_payload: Value = serde_json::from_str(extract_text(&admitted.value)).unwrap();
+    assert!(
+        admitted_payload["memory_matches"]
+            .as_array()
+            .is_some_and(|matches| matches
+                .iter()
+                .any(|hit| hit["fact"]["fact_id"].as_str() == Some(low_trust_fact_id.as_str())))
     );
 
     let filtered = call_production_tool(
@@ -324,9 +368,7 @@ async fn context_memory_controls_filter_disable_and_preserve_markdown() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|hit| hit["fact"]["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("Low trust memory control")))
+            .any(|hit| hit["fact"]["fact_id"].as_str() == Some(low_trust_fact_id.as_str()))
     );
 
     let markdown = call_production_tool(

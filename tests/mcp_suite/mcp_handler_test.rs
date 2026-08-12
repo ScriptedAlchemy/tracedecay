@@ -4,6 +4,7 @@
 //! fixtures and helpers live in the suite-level `support` module.
 
 mod admin_test;
+mod automation_runs_test;
 mod bounded_analysis_test;
 mod context_test;
 mod dependency_hint_test;
@@ -13,7 +14,11 @@ mod graph_analysis_test;
 mod graph_query_test;
 mod lcm_test;
 #[cfg(feature = "test-transport")]
+mod memory_contradiction_contract_test;
+#[cfg(feature = "test-transport")]
+mod memory_fact_assertions;
 mod memory_facts_test;
+mod memory_feedback_test;
 #[cfg(feature = "test-transport")]
 mod move_symbol_test;
 #[cfg(feature = "test-transport")]

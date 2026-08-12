@@ -144,10 +144,7 @@ Hermes `~/.hermes/memory_store.db` (`facts`/`entities`/`memory_banks`).
 | `GET /projection` | numpy PCA over `hrr_vector` blobs (float64) | Rust dual-PCA (Gram matrix power iteration) over bincode-encoded `Vec<f64>` phase vectors | working |
 | `GET /similarity` | pure-python `mean(cos(p_i−p_j))` + lexical overlap + classification | same math in Rust (`SIMILARITY_FACT_CAP` 500, identical thresholds) | working |
 | `GET /archive` / `POST /archive/{id}/restore` | `facts.state='archived'` / provider restore | **removed by design** — tracedecay curation hard-DELETEs losing facts; there is no archive state and no restore. The UI's Archive tab was removed accordingly. | n/a |
-| `GET /curation/status` | hermes curator state files | Returns autonomous curation status and last applied run metadata | **working** |
-| `GET /curation/activity` | curator activity events | Structured TraceDecay curation activity events from automation/apply paths (`queued`, `evidence`, `backend`, `validation`, `apply`, `report`, `finish`, `failure`, or `rejection` as applicable) | working |
 | `POST /api/automation/run/memory-curator` | automation runner | Queues autonomous memory curation; accepted operations apply through policy and emit ledger/activity/artifact telemetry | **working** |
-| `POST /curate/apply` | (new, no Hermes equivalent) | Generic curation-ops apply API: `{"ops": [{"op":"delete",...} \| {"op":"merge",...}]}` with per-op results; the contract for external (LLM) planners | **working** |
 | `providers` block in `GET /` | hermes provider discovery | static tracedecay stub | stubbed |
 
 Mapping notes: bank names are the category itself in tracedecay (old store
@@ -292,23 +289,16 @@ The tracedecay backend does not have an LLM integration, so built-in curation is
 3. Autonomous dashboard runs queue through `POST /api/automation/run/memory-curator`.
    Accepted operations are validated and applied by automation policy, with
    ledger, artifact, telemetry, and activity events.
-4. The CLI dry-run response shape remains a valid `MemoryCurateResponse` (`ran`, `dry_run`,
-   `actions`, `counts: {delete: n}`, `applied_counts`, `llm_calls: 0`,
-   `coverage`, `provider: tracedecay`, `mode: similarity_dedup`).
+4. Terminal automation results expose durable committed receipts and typed
+   reconciliation requirements; there is no dry-run or apply-later response.
 
-### Generic curation-ops apply API (contract for external planners)
+### Removed manual curation API
 
-`POST /api/plugins/holographic/curate/apply` accepts `{"ops": [...]}` where
-each op is one of:
-
-- `{"op": "delete", "fact_id": <id>, "reason": <string?>}`
-- `{"op": "merge", "winner_id": <id>, "loser_ids": [<id>...], "merged_content": <string?>}`
-
-Response: `{"results": [per-op result], "counts": {"deleted", "merged",
-"errors"}}`. Ids are validated per-op; partial failures are reported per-op
-(status stays 200), never as a whole-request 500. A 400 is returned only for a
-malformed body. Standalone automation backends and delegated host planners use
-this contract.
+The former `POST /api/plugins/holographic/curate/apply` manual operations route
+is removed in final-V2. Automatic curation uses the canonical retained store
+operation and terminal receipts; direct add/update/remove remain separate
+administrative application operations. No external planner submits delete or
+merge operations to a curation endpoint.
 
 ### Capabilities
 
@@ -316,7 +306,7 @@ this contract.
 TraceDecay reports `automation.mode` as `"disabled"`, `"standalone_backend"`,
 or `"delegated_host"`. In standalone mode, a configured backend can set
 `features.llm_curation` true. In delegated-host mode, planning remains
-host-owned and the host submits proposed ops via `/curate/apply`; Hermes is one
+host-owned and TraceDecay automation commits validated canonical operations;
 compatibility bridge for this provider-neutral contract. The UI's
 CurationPanel consumes the same ops shape either way (its Archive tab was
 removed; `delete` ops render as high-risk actions with a permanent-deletion
@@ -454,10 +444,9 @@ synced verbatim to the deployed copy
 (`hermes-agent/plugins/hermes_intelligence/dashboard/plugin_api.py`), along
 with freshly rebuilt dist bundles + manifest (includes the new graph.js).
 
-**LLM curation.** The Hermes wrapper no longer hosts a separate LLM plan/apply
-route. LLM-backed curation is owned by TraceDecay automation or by the CLI
-`tracedecay memory curate --llm` / `--llm-ops` path, with mutations submitted
-through `POST /api/plugins/holographic/curate/apply`.
+**LLM curation.** The Hermes wrapper hosts no separate plan/apply route.
+Final-V2 curation is automatic and agent-managed; there is no manual CLI or
+dashboard approval/apply protocol.
 - Contract verified live against the rebuilt tracedecay binary (no
   mismatches): dry-run plan over real similarity clusters, then real apply
   against a **copy** of the project DB — `counts: {merged: 1}`, 63 losers
@@ -507,16 +496,13 @@ conservatism backstop, and callers can pass a higher `threshold` /
 
 ## What's stubbed / known gaps
 
-1. **Curation activity stream**: RESOLVED — `GET /curation/activity` returns the
-   in-memory structured activity log for automation and explicit apply paths.
-   Events use phases such as `queued`, `evidence`,
-   `backend`, `validation`, `apply`, `report`, `finish`, `failure`, and
-   `rejection` as applicable.
-2. **Rich curation ops**: the built-in planner only proposes `delete`. The apply
-   API additionally executes `merge` (content rewrite + loser deletion), but
+1. **Curation activity stream**: superseded by canonical automation run and
+   outcome receipts; the old `GET /curation/activity` route is removed.
+2. **Automatic curation operations**: final-V2 permits only canonical
+   NormalizeTags/LinkFacts mutations through the controlled store authority;
    `supersede`, `retag`, and `entity_*` ops from holographic_plus are not
-   implemented; automation planners can supply richer plans via `/curate/apply`.
-4. **Similarity floor**: RESOLVED — the cached pair set keeps every finite
+   implemented; automation runs consume canonical evidence directly.
+3. **Similarity floor**: RESOLVED — the cached pair set keeps every finite
    phase-cosine pair (`SIMILARITY_PAIR_FLOOR = -1.0`), and the API accepts a
    `min_similarity` parameter clamped to [-1, 1], so callers can brush below
    the UI's default duplicate-review floor without recomputation.
@@ -580,8 +566,7 @@ conservatism backstop, and callers can pass a higher `threshold` /
       `features.curation` capability flag; then enable the CurationPanel.
       - Implemented as similarity-based dedup with hard-delete semantics:
         `POST /curate` proposes/applies `delete` actions for `likely_duplicate`
-        pairs, and `POST /curate/apply` exposes a generic delete/merge ops
-        contract for external planners. No schema change shipped (v13 only
+        pairs. The former generic delete/merge planner route is removed. No schema change shipped (v13 only
         cleans up a never-committed archive-column experiment). See the
         Phase 3 section above for full details.
 - [x] Add `--open` (launch browser). Done: `tracedecay dashboard --open` opens

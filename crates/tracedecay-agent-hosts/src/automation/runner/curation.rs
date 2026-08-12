@@ -13,6 +13,7 @@ use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::AgentTaskRunContext;
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus};
 use crate::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub(super) fn evaluate_session_curation(
     config: &AutomationConfig,
@@ -115,9 +116,8 @@ pub(super) fn unpersisted_rejected_parts(
     reason: &str,
     evidence_hash: Option<String>,
     report_task: &'static str,
-) -> Result<(Value, AutomationRunLedgerRecord)> {
-    let completed_at_micros = crate::automation::run_ledger::current_timestamp_micros()?;
-    let completed_at = (completed_at_micros / 1_000_000).to_string();
+) -> (Value, AutomationRunLedgerRecord) {
+    let completed_at = current_timestamp().to_string();
     let contract = agent_task_contract(task);
     let report = json!({
         "status": "skipped",
@@ -162,7 +162,6 @@ pub(super) fn unpersisted_rejected_parts(
         artifacts: Vec::new(),
         started_at: run.started_at().to_string(),
         completed_at,
-        completed_at_micros,
     };
-    Ok((report, record))
+    (report, record)
 }

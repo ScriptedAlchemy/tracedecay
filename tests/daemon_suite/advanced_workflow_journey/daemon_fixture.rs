@@ -35,7 +35,11 @@ pub(super) fn wait_for_application_mount(client: &Client) -> Vec<ComponentConfig
         .execute::<ApplicationConfigurationObservedState>(&ConfigurationObservedStateRequestV1 {})
     {
         Ok(response) => Some(response.result),
-        Err(ClientError::Problem(problem)) if problem.kind == "not_found_or_not_authorized" => None,
+        Err(ClientError::Problem(problem))
+            if problem.kind == "not_found_or_not_authorized" || problem.kind == "unavailable" =>
+        {
+            None
+        }
         Err(error) => panic!("project application mount failed: {error}"),
     })
 }

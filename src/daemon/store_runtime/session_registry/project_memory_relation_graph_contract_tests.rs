@@ -522,7 +522,7 @@ async fn registered_memory_relation_graph_survives_restart_and_isolates_topologi
     let long_path = graph(
         &first_database,
         &lifecycle,
-        first_owner.clone(),
+        first_owner,
         vec![chain[0].clone()],
         LONG_PATH_RELATIONS,
     )

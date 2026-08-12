@@ -69,35 +69,6 @@ describe("curation console", () => {
     expect((dispatch?.[1] as RequestInit).body).toBe("{}");
   });
 
-  it("renders all six committed effect variants with exact durable identities", async () => {
-    stubRoutes({ runResponse: { run: mixedAutomaticRun("run-dashboard") } });
-    renderConsole();
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Run automatic curator now" }),
-    );
-
-    expect(await screen.findByText(/add fact · fact fact\.v1\..* · added · committed · events event\.add/)).toBeTruthy();
-    expect(await screen.findByText(/update fact · fact fact\.v1\..* · trust delta 25000 · committed · events event\.update/)).toBeTruthy();
-    expect(await screen.findByText(/merge facts · winner fact\.v1\..* · deleted losers fact\.v1\..* · content unchanged · events event\.merge\.loser, event\.merge\.tombstone/)).toBeTruthy();
-    expect(await screen.findByText(/remove fact · target fact\.v1\..* · removed · remaining 4 · committed · events event\.remove/)).toBeTruthy();
-    expect(await screen.findByText(/normalize tags · fact fact\.v1\..* · committed · events event\.normalize\.fact, event\.normalize\.assertion/)).toBeTruthy();
-    expect(await screen.findByText(/link facts · fact\.v1\..* → fact\.v1\..* · supports · committed · events event\.link/)).toBeTruthy();
-  });
-
-  it("renders accepted no-op effects without inventing commits", async () => {
-    stubRoutes({ runResponse: { run: allNoopAutomaticRun("run-dashboard") } });
-    renderConsole();
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Run automatic curator now" }),
-    );
-
-    expect(await screen.findByText(/add fact · fact fact\.v1\..* · near duplicate · closest fact\.v1\..* · similarity 1000000 · no commit/)).toBeTruthy();
-    expect(await screen.findByText(/remove fact · target fact\.v1\..* · not found · remaining 9 · no commit/)).toBeTruthy();
-    expect(await screen.findByText("reviewed 2 · accepted 2 · rejected 0")).toBeTruthy();
-  });
-
   it("preserves a committed partial-effect receipt and reconcile action", async () => {
     stubRoutes({ status: 409, runResponse: partialEffectProblem() });
     renderConsole();
@@ -107,14 +78,13 @@ describe("curation console", () => {
     );
 
     expect(await screen.findByText(/curation committed before projection failed/)).toBeTruthy();
-    expect(await screen.findByText("committed before failure · 1 accepted effect")).toBeTruthy();
     expect(
       await screen.findByText(
         /reconciliation required · 1 canonical receipt · admitted effect use-case\.application\.retained\.memory-automation-run · request request\.dashboard\.partial/,
       ),
     ).toBeTruthy();
     expect(await screen.findByText(/normalize tags · fact fact\.v1\./)).toBeTruthy();
-    expect(await screen.findByText(/events event\.dashboard\.fact, event\.dashboard\.assertion/)).toBeTruthy();
+    expect(await screen.findByText(/event event\.dashboard\.assertion/)).toBeTruthy();
   });
 
   it("keeps reset-required separate from availability failure", async () => {
@@ -245,190 +215,6 @@ function automaticRun(runId: string) {
   };
 }
 
-function domFactId(seed: string): string {
-  const ownerHash = createHash("sha256")
-    .update(canonicalJson([
-      "fact-owner.v1",
-      { kind: "project", project_id: "project.dashboard" },
-    ]))
-    .digest("hex");
-  return `fact.v1.${ownerHash}.${seed.padStart(64, "0")}`;
-}
-
-function domCommit(
-  factId: string,
-  events: string[],
-  assertion: string | null,
-) {
-  return {
-    disposition: "committed",
-    fact_id: factId,
-    owner: { kind: "project", project_id: "project.dashboard" },
-    committed_event_ids: events,
-    last_event_id: events.at(-1)!,
-    active_assertion_id: assertion,
-  };
-}
-
-function automaticRunWithCuration(
-  runId: string,
-  receipt: Record<string, unknown>,
-  accepted: number,
-) {
-  return {
-    run_id: runId,
-    task: "memory_curator",
-    terminal: {
-      status: "completed",
-      summary: {
-        reviewed_count: accepted,
-        accepted_count: accepted,
-        rejected_count: 0,
-        skipped_count: 0,
-      },
-    },
-    committed_receipts: [{
-      kind: "curation",
-      receipt: {
-        canonical_digest: canonicalSha([
-          "tracedecay.memory-automation-run.curation-receipt.v1",
-          receipt,
-        ]),
-        receipt,
-      },
-    }],
-  };
-}
-
-function mixedAutomaticRun(runId: string) {
-  const ids = Array.from({ length: 9 }, (_, index) => domFactId(String(index + 1)));
-  const receipt = {
-    owner: { kind: "project", project_id: "project.dashboard" },
-    operation_id: "operation.dashboard.mixed",
-    input_digest: "a".repeat(64),
-    automation_run_id: runId,
-    operation_effects: [
-      {
-        kind: "add",
-        fact_id: ids[0],
-        disposition: "added",
-        closest_fact_id: null,
-        similarity_millionths: null,
-        commit: domCommit(ids[0]!, ["event.add"], "assertion.add"),
-      },
-      {
-        kind: "update",
-        fact_id: ids[1],
-        trust_delta_millionths: 25_000,
-        commit: domCommit(ids[1]!, ["event.update"], "assertion.update"),
-      },
-      {
-        kind: "merge",
-        outcome: {
-          operation_id: "operation.dashboard.merge",
-          input_digest: "b".repeat(64),
-          winner_fact_id: ids[2],
-          content_updated: false,
-          deleted_loser_fact_ids: [ids[3]],
-          commit_receipts: [domCommit(
-            ids[3]!,
-            ["event.merge.loser", "event.merge.tombstone"],
-            null,
-          )],
-        },
-      },
-      {
-        kind: "remove",
-        target_fact_id: ids[4],
-        disposition: "removed",
-        remaining_fact_count: 4,
-        commit: domCommit(ids[4]!, ["event.remove"], null),
-      },
-      {
-        kind: "normalize_tags",
-        fact_id: ids[5],
-        commit: domCommit(
-          ids[5]!,
-          ["event.normalize.fact", "event.normalize.assertion"],
-          "assertion.normalize",
-        ),
-      },
-      {
-        kind: "link_facts",
-        source_fact_id: ids[6],
-        target_fact_id: ids[7],
-        relation: {
-          kind: "supports",
-          evidence_fact_ids: [ids[8]],
-          confidence_millionths: 800_000,
-          provenance: {
-            source_label: "automation:memory-curator",
-            sanitization_receipt: {
-              receipt: {
-                receipt_id: "receipt.dashboard.mixed",
-                sanitizer_version: "sanitizer.dashboard.v1",
-              },
-              disposition: "accepted",
-              sensitivity: "non_sensitive",
-              payload: { digest: sha("9"), byte_len: 128 },
-            },
-          },
-        },
-        commit: domCommit(ids[6]!, ["event.link"], "assertion.link"),
-      },
-    ],
-    replay_fact_id: ids[0],
-    replay_event_id: "event.add",
-    changed_fact_ids: [ids[0], ids[1], ids[3], ids[4], ids[5], ids[6], ids[7]],
-    accepted_operations: 6,
-    facts_added: 1,
-    facts_updated: 1,
-    facts_merged: 1,
-    facts_removed: 1,
-    normalized_tags: 1,
-    facts_linked: 1,
-  };
-  return automaticRunWithCuration(runId, receipt, 6);
-}
-
-function allNoopAutomaticRun(runId: string) {
-  const duplicate = domFactId("a");
-  const receipt = {
-    owner: { kind: "project", project_id: "project.dashboard" },
-    operation_id: "operation.dashboard.noop",
-    input_digest: "e".repeat(64),
-    automation_run_id: runId,
-    operation_effects: [
-      {
-        kind: "add",
-        fact_id: duplicate,
-        disposition: "near_duplicate",
-        closest_fact_id: duplicate,
-        similarity_millionths: 1_000_000,
-        commit: null,
-      },
-      {
-        kind: "remove",
-        target_fact_id: domFactId("b"),
-        disposition: "not_found",
-        remaining_fact_count: 9,
-        commit: null,
-      },
-    ],
-    replay_fact_id: null,
-    replay_event_id: null,
-    changed_fact_ids: [],
-    accepted_operations: 2,
-    facts_added: 0,
-    facts_updated: 0,
-    facts_merged: 0,
-    facts_removed: 0,
-    normalized_tags: 0,
-    facts_linked: 0,
-  };
-  return automaticRunWithCuration(runId, receipt, 2);
-}
-
 const sha = (seed: string) => `sha256:${seed.repeat(64)}`;
 
 function canonicalJson(value: unknown): string {
@@ -505,11 +291,6 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
           replay_fact_id: factId,
           replay_event_id: "event.dashboard.assertion",
           changed_fact_ids: [factId],
-          accepted_operations: 1,
-          facts_added: 0,
-          facts_updated: 0,
-          facts_merged: 0,
-          facts_removed: 0,
           normalized_tags: 1,
           facts_linked: 0,
         };
@@ -576,8 +357,6 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
           retry_scope: null,
           retry_after_millis: null,
           cancellation_stage: null,
-          unavailable_classification: null,
-          execution_failure_classification: null,
           request_id: requestId,
           trace_id: requestId,
           details: [],

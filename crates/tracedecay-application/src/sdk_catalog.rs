@@ -322,13 +322,17 @@ mod tests {
                 "{} must keep its mounted route {route_path} in the SDK",
                 operation_id.as_str()
             );
+            let operation = operation_id
+                .as_str()
+                .strip_prefix("operation.")
+                .expect("canonical operation ID");
+            let expected_method = operation
+                .strip_prefix("application.code_")
+                .map(|suffix| format!("code_{suffix}"))
+                .unwrap_or_else(|| operation.replace('.', "_"));
             assert_eq!(
                 projected_binding.sdk_method().as_str(),
-                operation_id
-                    .as_str()
-                    .strip_prefix("operation.")
-                    .expect("canonical operation ID")
-                    .replace('.', "_"),
+                expected_method,
                 "{} must keep its canonical SDK method spelling",
                 operation_id.as_str()
             );

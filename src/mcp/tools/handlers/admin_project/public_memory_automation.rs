@@ -19,7 +19,7 @@ struct PublicMemoryAutomationRun {
     min_confidence: f64,
 }
 
-pub(in crate::mcp::tools::handlers) fn admin_project_args(mut args: Value) -> Result<Value> {
+pub(super) fn admin_project_args(mut args: Value) -> Result<Value> {
     if let Some(arguments) = args.as_object_mut() {
         arguments.remove("__mcp_request_id");
     }

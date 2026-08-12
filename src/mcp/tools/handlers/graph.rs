@@ -38,8 +38,9 @@ mod verified;
 #[cfg(test)]
 use context_support::context_memory_section;
 use context_support::{
-    context_markdown_lane_preview, context_memory_analytics_value, context_memory_enabled,
-    context_memory_matches, context_memory_options, insert_context_memory_section,
+    ContextMemoryOutcome, context_markdown_lane_preview, context_memory_analytics_value,
+    context_memory_options, context_memory_outcome, context_memory_read_control,
+    insert_context_memory_section,
 };
 use primitive_surface::{
     node_not_found as node_not_found_result, search_coverage as primitive_search_coverage,
@@ -516,6 +517,9 @@ pub(super) async fn handle_context(
         .max_code_blocks
         .map_or(5, |value| value.clamp(1, 20) as usize);
     let semantic_mode = primitive_semantic_search_mode(request.semantic_mode);
+    let memory_options = context_memory_options(&args);
+    let memory_read_control =
+        context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
     let outcome = execute_code_index_search(
         search_executor,
         crate::mcp::server::CodeIndexSearchRequestV1 {
@@ -528,8 +532,8 @@ pub(super) async fn handle_context(
             cursor: None,
             mode: semantic_mode,
             authority: search_authority.cloned(),
-            deadline: deadline.clone(),
-            cancellation: cancellation.clone(),
+            deadline,
+            cancellation,
         },
     )
     .await;
@@ -592,15 +596,11 @@ pub(super) async fn handle_context(
         }
     }
     related.truncate(max_nodes);
-    let memory_options = context_memory_options(&args);
-    let (memory_matches, memory_matches_error) = if context_memory_enabled(&memory_options) {
-        match context_memory_matches(cg, task, &memory_options, deadline, cancellation).await {
-            Ok(matches) => (matches, None),
-            Err(err) => (Vec::new(), Some(err.to_string())),
-        }
-    } else {
-        (Vec::new(), None)
-    };
+    let ContextMemoryOutcome {
+        hits: memory_matches,
+        graph_coverage: memory_graph_coverage,
+        error: memory_matches_error,
+    } = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref()).await;
     let mut all_symbols = selected.clone();
     all_symbols.extend(related.iter().cloned());
     let touched_files = graph_symbol_paths(&all_symbols)?;
@@ -677,6 +677,7 @@ pub(super) async fn handle_context(
         code: code_blocks,
         coverage: primitive_search_coverage(&complete.coverage),
         memory_matches: memory_matches.clone(),
+        memory_graph_coverage,
         memory_matches_error: memory_matches_error.clone(),
     };
     let mut value = serde_json::to_value(result)?;
@@ -1739,16 +1740,16 @@ mod tests {
         serde_json::from_value(json!({
             "fact": {
                 "owner": {"kind": "profile"},
-                "fact_id": "fact.test",
+                "fact_id": "fact.0000000000000000000000000000000000000000000000000000000000000000.1111111111111111111111111111111111111111111111111111111111111111",
                 "content": content,
                 "category": "project",
                 "tags": [],
                 "entities": [],
                 "trust_score_millionths": 900_000,
-                "source": {"kind": "application", "operation_id": "operation.test"},
-                "source_label": "test",
-                "active_assertion_id": "assertion.active",
-                "last_event_id": "event.created",
+                "source": {"kind": "application", "operation_id": "operation.context-memory"},
+                "source_label": "context-test",
+                "active_assertion_id": "assertion.context-memory",
+                "last_event_id": "event.context-memory",
                 "projected_as_of": 1,
                 "telemetry": {
                     "retrieval_count": 0,
@@ -1772,7 +1773,7 @@ mod tests {
             },
             "why": null
         }))
-        .expect("canonical context-memory hit")
+        .expect("canonical context memory hit")
     }
 
     /// A warm response must render exactly as it did before coverage existed:

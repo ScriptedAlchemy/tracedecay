@@ -13,7 +13,7 @@ pub mod hermes_skill_bridge;
 pub mod host_receipts;
 mod job_webhook;
 pub mod jobs;
-pub mod lifecycle;
+mod lifecycle;
 mod managed_skill_model;
 mod managed_skill_validation;
 pub mod managed_skills;

@@ -10,11 +10,9 @@ use super::config_error;
 use crate::errors::{Result, TraceDecayError};
 
 mod cursor;
-mod exact_lookup;
 mod publication;
 
 pub(crate) use cursor::load_latest_task_validation_pointer;
-pub use exact_lookup::find_run_record_exact_bounded;
 pub(crate) use publication::publish_run_artifact_chain;
 pub use publication::read_published_artifact_chain;
 

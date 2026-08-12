@@ -13,8 +13,8 @@ use tracedecay_application::retained_surfaces::{
     TemporalOmissionV1, TemporalWatermarksV1, ValidCoverageIntervalV1, WorkflowsRequestV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, CancellationStage, RequestAdmission, RetainedSessionExecutionPortV1,
-    RetainedSessionRequestV1, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
+    RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1, now_micros,
 };
 use tracedecay_domain::{
@@ -126,7 +126,7 @@ impl DirectRetainedSessionPortV1 {
         // transaction and misreport an unknown effect as a pre-admission error.
         if !context.cancellation_signal.try_begin_commit() {
             return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                CancellationStage::BeforeEffect,
+                tracedecay_application::CancellationStage::BeforeEffect,
             ));
         }
         let handled = self.authorities.refresh.execute(command).await;
@@ -205,9 +205,7 @@ impl DirectRetainedSessionPortV1 {
         F: std::future::Future<Output = Result<T, TraceDecayError>>,
     {
         tokio::select! {
-            () = context.cancellation_signal.cancelled() => Err(
-                RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
-            ),
+            () = context.cancellation_signal.cancelled() => Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::DuringRead)),
             result = super::bounded_execution(context, future) => result,
         }
     }
@@ -454,7 +452,7 @@ impl MessageSearchInput {
             }
             SessionRetrievalServiceOutcome::Cancelled => {
                 return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                    CancellationStage::DuringRead,
+                    tracedecay_application::CancellationStage::DuringRead,
                 ));
             }
         }
@@ -532,7 +530,7 @@ fn ensure_project_message_scope(
         || request
             .project_selector
             .as_ref()
-            .is_some_and(|selector| selector.project_id.as_str() != authorities.project_id.as_str())
+            .is_some_and(|selector| selector.project_id != authorities.project_id)
     {
         return Err(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized);
     }
@@ -624,12 +622,12 @@ async fn retrieve_bounded(
         RequestAdmission::Admitted => {}
         RequestAdmission::Cancelled => {
             return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                CancellationStage::BeforeRead,
+                tracedecay_application::CancellationStage::BeforeRead,
             ));
         }
         RequestAdmission::TimedOut => {
             return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                CancellationStage::BeforeRead,
+                tracedecay_application::CancellationStage::BeforeRead,
             ));
         }
     }
@@ -643,7 +641,7 @@ async fn retrieve_bounded(
         .ok()
         .map(Duration::from_micros)
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
-            CancellationStage::BeforeRead,
+            tracedecay_application::CancellationStage::BeforeRead,
         ))?;
     let retrieval = service.retrieve_admitted_with_cancellation(
         context.request_context,
@@ -652,14 +650,10 @@ async fn retrieve_bounded(
     );
     tokio::select! {
         _ = context.cancellation_signal.cancelled() => {
-            Err(RetainedSurfaceExecutionErrorV1::Cancelled(
-                CancellationStage::DuringRead,
-            ))
+            Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::DuringRead))
         }
         outcome = tokio::time::timeout(remaining, retrieval) => {
-            outcome.map_err(|_| {
-                RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::DuringRead)
-            })
+            outcome.map_err(|_| RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_application::CancellationStage::DuringRead))
         }
     }
 }

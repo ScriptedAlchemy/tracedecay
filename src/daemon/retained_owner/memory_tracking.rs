@@ -8,10 +8,9 @@ use tracedecay_store::{
 };
 use tracedecay_usecases::memory::MemoryApplication;
 
-use super::memory::fact_write_control;
+use super::memory::{bounded_memory_operation, fact_write_control};
 use super::memory_mapping;
 use super::memory_mutation::{MemoryMutationSettlement, memory_mutation_settlement};
-use super::memory_stage::bounded_memory_operation;
 use crate::store::DatabaseFactStore;
 
 #[derive(Default)]
@@ -50,13 +49,12 @@ pub(super) async fn track_explicit_search(
         ProjectMemoryFactRetrievalCommandV1::new(owner.clone(), operation_id, targets, true)
             .map_err(memory_mapping::map_store_error)?;
     let write_control = fact_write_control(context);
-    let (outcome, settled_after_expiry) =
-        bounded_memory_operation(context, memory_mapping::EFFECT_CANCELLATION_STAGES, async {
-            Ok(memory
-                .record_project_memory_fact_retrieval(command, &write_control)
-                .await)
-        })
-        .await?;
+    let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
+        Ok(memory
+            .record_project_memory_fact_retrieval(command, &write_control)
+            .await)
+    })
+    .await?;
     let (outcome, authority_result_invalid) = match memory_mutation_settlement(outcome)? {
         MemoryMutationSettlement::Validated(outcome) => (outcome, false),
         MemoryMutationSettlement::InvalidAuthority(outcome) => (outcome, true),

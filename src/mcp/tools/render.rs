@@ -813,7 +813,7 @@ fn scalar_str(v: &Value) -> String {
         }
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
-        _ => serde_json::to_string(v).unwrap_or_default(),
+        _ => v.to_string(),
     }
 }
 
@@ -1086,10 +1086,7 @@ fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
         }
         md.blank().heading(depth.min(6), k);
         if depth >= GENERIC_MAX_DEPTH {
-            md.line(&format!(
-                "`{}`",
-                serde_json::to_string(v).unwrap_or_default()
-            ));
+            md.line(&format!("`{}`", v));
         } else {
             render_value(md, v, depth + 1);
         }

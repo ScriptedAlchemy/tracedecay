@@ -5,6 +5,7 @@ use crate::errors::Result;
 use crate::graph::GraphQueryManager;
 use crate::tracedecay::TraceDecay;
 use crate::types::NodeKind;
+use tracedecay_application::RequestContext;
 use tracedecay_code_index::chunks::CodeIndexImportEvidenceV1;
 use tracedecay_code_index::graph_projection::{
     CodeGraphImpactBatchV1, CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1,
@@ -21,38 +22,24 @@ use tracedecay_usecases::graph::{
 pub(crate) struct VerifiedGraphQuery {
     reader: CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
-    request_context: Option<tracedecay_application::RequestContext>,
+    request_context: RequestContext,
 }
 
 impl VerifiedGraphQuery {
-    #[cfg(test)]
     pub(crate) fn from_reader(
         reader: CodeGraphInteractiveReader,
         cancellation: Arc<dyn GraphCancellation>,
+        request_context: RequestContext,
     ) -> Self {
         Self {
             reader,
             cancellation,
-            request_context: None,
+            request_context,
         }
     }
 
-    fn from_admitted_reader(
-        reader: CodeGraphInteractiveReader,
-        cancellation: Arc<dyn GraphCancellation>,
-        request_context: tracedecay_application::RequestContext,
-    ) -> Self {
-        Self {
-            reader,
-            cancellation,
-            request_context: Some(request_context),
-        }
-    }
-
-    pub(crate) fn request_context(&self) -> Result<&tracedecay_application::RequestContext> {
-        self.request_context.as_ref().ok_or_else(|| {
-            graph_invalid_request("verified graph query is missing its admitted request context")
-        })
+    pub(crate) fn request_context(&self) -> &RequestContext {
+        &self.request_context
     }
 
     pub(crate) fn manager(&self) -> GraphQueryManager<'_> {
@@ -208,17 +195,6 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
-    pub(crate) fn resolve_qualified_name(
-        &self,
-        qualified_name: &str,
-        kind: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
-        self.reader
-            .resolve_qualified_name(qualified_name, kind, limit, Arc::clone(&self.cancellation))
-            .map_err(graph_projection_error)
-    }
-
     pub(crate) fn external_type_import_candidates(
         &self,
         query: &str,
@@ -232,6 +208,17 @@ impl VerifiedGraphQuery {
                 limit,
                 Arc::clone(&self.cancellation),
             )
+            .map_err(graph_projection_error)
+    }
+
+    pub(crate) fn resolve_qualified_name(
+        &self,
+        qualified_name: &str,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CodeGraphSymbolSummaryV1>> {
+        self.reader
+            .resolve_qualified_name(qualified_name, kind, limit, Arc::clone(&self.cancellation))
             .map_err(graph_projection_error)
     }
 
@@ -399,7 +386,7 @@ impl TraceDecay {
         let reader = verified
             .reader_with_cancellation(&context, observed_at, Arc::clone(&graph_cancellation))
             .map_err(map_code_graph_read_runtime_error)?;
-        Ok(VerifiedGraphQuery::from_admitted_reader(
+        Ok(VerifiedGraphQuery::from_reader(
             reader,
             graph_cancellation,
             context,

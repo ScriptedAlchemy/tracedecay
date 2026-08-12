@@ -7,8 +7,7 @@ use tracedecay_application::retained_surfaces::{
     RetainedOutcomeStatusV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, CancellationStage, RetainedSurfaceExecutionContextV1,
-    RetainedSurfaceExecutionErrorV1,
+    ApplicationOutcome, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
 };
 use tracedecay_domain::{HydrationStateV1, RetrievalGrainV1, SessionId, TemporalModeV1};
 use tracedecay_sessions::runtime::git_correlation::GitScopeFilter;
@@ -587,9 +586,9 @@ fn retrieval_error(outcome: SessionRetrievalServiceOutcome) -> RetainedSurfaceEx
         | SessionRetrievalServiceOutcome::BudgetExhausted => {
             RetainedSurfaceExecutionErrorV1::Saturated
         }
-        SessionRetrievalServiceOutcome::Cancelled => {
-            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
-        }
+        SessionRetrievalServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         SessionRetrievalServiceOutcome::Locked
         | SessionRetrievalServiceOutcome::Unavailable(_)
         | SessionRetrievalServiceOutcome::Complete { .. }
@@ -613,9 +612,9 @@ fn describe_error(outcome: LcmDescribeServiceOutcome) -> RetainedSurfaceExecutio
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
         LcmDescribeServiceOutcome::BudgetExhausted => RetainedSurfaceExecutionErrorV1::Saturated,
-        LcmDescribeServiceOutcome::Cancelled => {
-            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
-        }
+        LcmDescribeServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         LcmDescribeServiceOutcome::Locked
         | LcmDescribeServiceOutcome::Unavailable(_)
         | LcmDescribeServiceOutcome::Complete { .. }
@@ -634,9 +633,9 @@ fn expand_error(outcome: LcmExpandServiceOutcome) -> RetainedSurfaceExecutionErr
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
         LcmExpandServiceOutcome::BudgetExhausted => RetainedSurfaceExecutionErrorV1::Saturated,
-        LcmExpandServiceOutcome::Cancelled => {
-            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
-        }
+        LcmExpandServiceOutcome::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         LcmExpandServiceOutcome::Locked
         | LcmExpandServiceOutcome::Unavailable(_)
         | LcmExpandServiceOutcome::Complete { .. }

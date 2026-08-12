@@ -245,26 +245,25 @@ transcripts"), so Codex sessions also feed reflection.
   near-duplicate & conflict detection, secret rejection, trust calibration
   guidance; `tracedecay_fact_feedback` (helpful/unhelpful trust deltas);
   `tracedecay_memory_status`. Cross-project reads via
-  `project_id`/`project_path` selectors (read-only actions).
+  the closed `project_selector.project_id` selector (read-only actions).
 
-### 3.4 Storage loop: session_reflector (exists, automation disabled by default)
+### 3.4 Storage loop: session_reflector
 
-`crates/tracedecay-agent-hosts/src/automation/{runner,session_reflector,fact_proposals}.rs`:
+`crates/tracedecay-agent-hosts/src/automation/{runner,session_reflector,automatic_facts}.rs`:
 
 - Scheduler-driven task (`AgentTaskKind::SessionReflector`,
   `crates/tracedecay-agent-hosts/src/automation/scheduler.rs:301`) gathers LCM session evidence, prompts an
   automation backend (`build_session_reflector_prompt`), and validates
-  returned **fact proposals** against evidence citations
-  (`validate_fact_proposals` — each proposal must cite raw messages / store
-  ids / summary nodes; trust bounded by `proposal_trust_value`).
-- Accepted proposals flow through the automation apply policy
-  (`fact_proposals.rs::record_session_fact_proposals`): self-managed memory
-  apply is the normal model-managed path, while the dashboard exposes outcomes,
-  telemetry, and explicit apply/reject controls for configured review modes.
-- **Defaults are conservative:** automation starts disabled
-  (`enabled: false`, `backend: Disabled`; `crates/tracedecay-agent-hosts/src/automation/config.rs:101-113`).
-  The write path from transcripts → facts exists but is off unless the user
-  enables automation.
+  returned **fact candidates** against evidence citations. Each candidate must
+  cite raw messages, store ids, or summary nodes, and confidence remains
+  bounded by the canonical trust contract.
+- Valid candidates flow directly through the agent-managed automatic-fact
+  authority. The dashboard exposes outcomes, receipts, telemetry, and
+  pause/disable/quarantine controls; it has no per-fact approve, reject, or
+  apply authority.
+- Final-V2 production profiles enable the bounded automatic loop by default.
+  Explicit administration can pause or disable the loop without introducing a
+  pending-proposal state.
 
 ### 3.5 Host skill inventory and deployment
 
@@ -384,10 +383,10 @@ With `features.memories = true`, Codex builds a parallel memory in
    curated, trust-scored, per-project recall. Do **not** silently edit the
    user's `config.toml`; make it a doctor suggestion.
 3. **Harvest:** one-way import of `~/.codex/memories/raw_memories.md` +
-   `rollout_summaries/*.md` into fact proposals (they're clean markdown with
-   cwd/thread metadata — easy to parse into `AddFactRequest`s routed through
-   the same validation/apply path as D). Gives the fact store Codex's
-   already-consolidated knowledge on day one.
+   `rollout_summaries/*.md` as candidate evidence for the automatic fact
+   authority. Candidates still pass the same policy, privacy, and canonical
+   validation as live reflection before direct application or quarantine; no
+   pending proposal or per-fact approval state is created.
 
 For Cursor: native Memories can't be intercepted or exported; the only lever
 is the Settings toggle. If a daemon-owned memory workflow is adopted, recommend

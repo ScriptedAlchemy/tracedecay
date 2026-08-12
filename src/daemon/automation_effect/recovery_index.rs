@@ -4,14 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
-use tracedecay_agent_hosts::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus, find_run_record_exact_bounded,
-};
 use tracedecay_application::retained_surfaces::{
-    MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1, MemoryAutomationRunSummaryV1,
-    MemoryAutomationRunTerminalV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
-    RetainedSurfaceResultV1,
+    MemoryAutomationRunProblemV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
 };
 use tracedecay_application::{
     ApplicationProblemEnvelope, CancellationSignal, DirectorySyncPolicy, ProblemOwningLayer,
@@ -23,7 +17,6 @@ use tracedecay_store::FactReadControl;
 use super::{
     AutomationSettledTerminal, contract_error, digest,
     journal::{self, DurableAutomationAdmission},
-    problem::failure_class_problem,
     projection::project_recovered_committed_receipts,
 };
 use crate::errors::Result;
@@ -75,7 +68,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             break;
         }
         report.inspected += 1;
-        if indexed.project_id != *project_id {
+        if indexed.project_id != *project_id || indexed.scope_digest != scope.scope_digest {
             report.deferred += 1;
             continue;
         }
@@ -110,7 +103,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             || !admission.request.validate()
             || admission.process_run_id == crate::runtime_identity::process_run_id()
             || admission.owner != owner
-            || !admission_matches_registered_project(&admission, &scope, &indexed)
+            || admission.scope != scope
             || indexed.path.file_name().and_then(|name| name.to_str())
                 != Some(&automation_journal_filename(&admission.request.run_id)?)
             || !admission_has_exact_authority(&admission, &operation)?
@@ -158,29 +151,10 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             ));
         }
         let terminal = if committed.is_empty() {
-            match zero_receipt_ledger_terminal(dashboard_root, &admission, &operation).await {
-                Ok(Some(terminal)) => terminal,
-                Ok(None) => {
-                    report.deferred += 1;
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(event = "automation_effect_recovery_deferred", error = %error);
-                    report.deferred += 1;
-                    continue;
-                }
-            }
+            AutomationSettledTerminal::Problem(admission.recovery_problem.clone())
         } else {
             recovered_partial_terminal(&admission, committed, &operation)?
         };
-        let recovered_reset = terminal.problem().is_some_and(|problem| {
-            problem.problem.problem.kind()
-                == tracedecay_application::ApplicationProblemKind::ResetRequired
-        });
-        let recovered_partial = terminal.problem().is_some_and(|problem| {
-            problem.problem.problem.kind()
-                == tracedecay_application::ApplicationProblemKind::PartialEffect
-        });
         let path = indexed.path.clone();
         let requested = admission.clone();
         let root = dashboard_root.to_path_buf();
@@ -193,7 +167,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
                 Some(&write_cancellation),
             )?
             else {
-                return Ok::<bool, crate::errors::TraceDecayError>(false);
+                return Ok(false);
             };
             remove_pending_blocking(&root, &path)?;
             Ok(true)
@@ -203,221 +177,13 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
         if !committed {
             break;
         }
-        if recovered_reset {
+        if recovered.is_empty() {
             report.reset_required += 1;
-        } else if recovered_partial {
+        } else {
             report.partial_effects += 1;
         }
     }
     Ok(report)
-}
-
-pub(super) fn admission_matches_registered_project(
-    admission: &DurableAutomationAdmission,
-    registered_scope: &ResolvedScope,
-    indexed: &IndexedJournal,
-) -> bool {
-    admission.scope.validate().is_ok()
-        && admission.scope.project_id == registered_scope.project_id
-        && admission.scope.repository_id == registered_scope.repository_id
-        && indexed.project_id == admission.scope.project_id
-        && indexed.scope_digest == admission.scope.scope_digest
-}
-
-pub(super) async fn zero_receipt_ledger_terminal(
-    dashboard_root: &Path,
-    admission: &DurableAutomationAdmission,
-    operation: &tracedecay_application::ApplicationOperation,
-) -> Result<Option<AutomationSettledTerminal>> {
-    let Some(ledger) =
-        find_run_record_exact_bounded(dashboard_root, admission.request.run_id.as_str()).await?
-    else {
-        return Ok(Some(AutomationSettledTerminal::Problem(
-            admission.recovery_problem.clone(),
-        )));
-    };
-    zero_receipt_terminal_from_ledger(admission, operation, &ledger)
-}
-
-pub(super) fn zero_receipt_terminal_from_ledger(
-    admission: &DurableAutomationAdmission,
-    operation: &tracedecay_application::ApplicationOperation,
-    ledger: &AutomationRunLedgerRecord,
-) -> Result<Option<AutomationSettledTerminal>> {
-    if !ledger_matches_admission(ledger, admission) || !ledger.status.is_terminal() {
-        return Ok(None);
-    }
-    if ledger.status == AutomationRunStatus::Failed {
-        let problem = failure_class_problem(ledger.error_classification)?;
-        problem.validate().map_err(contract_error)?;
-        let envelope = ApplicationProblemEnvelope::new(
-            operation.result_contract().clone(),
-            admission.request_id.clone(),
-            problem,
-        )
-        .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Application))
-        .map_err(contract_error)?;
-        return MemoryAutomationRunProblemV1::new(
-            admission.request.run_id.clone(),
-            admission.request.task_kind(),
-            admission.scope.clone(),
-            envelope,
-            Vec::new(),
-            &admission.request_id,
-        )
-        .map(AutomationSettledTerminal::Problem)
-        .map(Some)
-        .map_err(contract_error);
-    }
-    let terminal = match ledger.status {
-        AutomationRunStatus::Succeeded => MemoryAutomationRunTerminalV1::Completed {
-            summary: MemoryAutomationRunSummaryV1 {
-                reviewed_count: 0,
-                accepted_count: 0,
-                rejected_count: 0,
-                skipped_count: 0,
-            },
-        },
-        AutomationRunStatus::Skipped => {
-            if ledger.error != ledger.fallback_status
-                || ledger.reviewed_count != 0
-                || ledger.accepted_count != 0
-                || ledger.rejected_count != 0
-                || ledger.skipped_count != 1
-            {
-                return Err(contract_error(
-                    "skipped automation ledger terminal is inconsistent",
-                ));
-            }
-            MemoryAutomationRunTerminalV1::Skipped {
-                reason: super::projection::project_skip_reason(
-                    ledger
-                        .error
-                        .as_deref()
-                        .ok_or_else(|| contract_error("skipped ledger has no exact reason"))?,
-                )?,
-                summary: MemoryAutomationRunSummaryV1 {
-                    reviewed_count: 0,
-                    accepted_count: 0,
-                    rejected_count: 0,
-                    skipped_count: 1,
-                },
-            }
-        }
-        _ => return Ok(None),
-    };
-    let result = MemoryAutomationRunResultV1 {
-        run_id: admission.request.run_id.clone(),
-        task: admission.request.task_kind(),
-        terminal,
-        committed_receipts: Vec::new(),
-    };
-    if !result.matches_terminal() {
-        return Err(contract_error(
-            "zero-receipt ledger terminal is inconsistent",
-        ));
-    }
-    recovered_result_terminal(
-        admission,
-        operation,
-        result,
-        tracedecay_domain::UtcMicros(ledger.completed_at_micros),
-    )
-    .map(Some)
-}
-
-fn ledger_matches_admission(
-    ledger: &AutomationRunLedgerRecord,
-    admission: &DurableAutomationAdmission,
-) -> bool {
-    ledger.run_id == admission.request.run_id.as_str()
-        && matches!(
-            (ledger.task, admission.request.task_kind()),
-            (
-                AgentTaskKind::MemoryCurator,
-                tracedecay_application::retained_surfaces::MemoryAutomationTaskV1::MemoryCurator
-            ) | (
-                AgentTaskKind::SessionReflector,
-                tracedecay_application::retained_surfaces::MemoryAutomationTaskV1::SessionReflector
-            )
-        )
-}
-
-fn recovered_result_terminal(
-    admission: &DurableAutomationAdmission,
-    operation: &tracedecay_application::ApplicationOperation,
-    result: MemoryAutomationRunResultV1,
-    finished_at: tracedecay_domain::UtcMicros,
-) -> Result<AutomationSettledTerminal> {
-    if finished_at < admission.observed_at {
-        return Err(contract_error(
-            "automation ledger terminal predates durable admission",
-        ));
-    }
-    let prepared = crate::daemon::retained_owner::PreparedRetainedEffect::recover(
-        RetainedSurfaceOperation::MemoryAutomationRun,
-        admission.request.run_id.as_str(),
-        admission.prepared_authority.clone(),
-        admission.effect_receipt_template.clone(),
-    )
-    .map_err(|error| {
-        contract_error(format!(
-            "durable automation authority could not be reconstructed: {error:?}"
-        ))
-    })?;
-    let committed_state = prepared
-        .material_committed_state_digest(&result)
-        .map_err(|error| {
-            contract_error(format!(
-                "recovered automation result could not be committed: {error:?}"
-            ))
-        })?;
-    match prepared.complete_recovered_with_digest(
-        admission.observed_at,
-        finished_at,
-        admission.effective_deadline.clone(),
-        &committed_state,
-        tracedecay_application::ReconciliationState::Reconciled,
-        RetainedSurfaceResultV1::MemoryAutomationRun(result.clone()),
-    ) {
-        Ok(outcome) => Ok(AutomationSettledTerminal::Outcome {
-            scope: admission.scope.clone(),
-            outcome,
-        }),
-        Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
-            reason_code,
-            committed_receipt,
-            detail,
-        }) => {
-            let problem = retained_surface_execution_problem(
-                RetainedSurfaceExecutionErrorV1::PartialEffect {
-                    reason_code,
-                    committed_receipt,
-                    detail,
-                },
-            );
-            let envelope = ApplicationProblemEnvelope::new(
-                operation.result_contract().clone(),
-                admission.request_id.clone(),
-                problem,
-            )
-            .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Application))
-            .map_err(contract_error)?;
-            MemoryAutomationRunProblemV1::new_outer_effect_partial(
-                admission.request.run_id.clone(),
-                admission.request.task_kind(),
-                admission.scope.clone(),
-                envelope,
-                result,
-                &admission.request_id,
-            )
-            .map(AutomationSettledTerminal::Problem)
-            .map_err(contract_error)
-        }
-        Err(error) => Err(contract_error(format!(
-            "recovered memory automation completion failed: {error:?}"
-        ))),
-    }
 }
 
 pub(super) fn special_recovery_defer_reason(
@@ -433,7 +199,7 @@ pub(super) fn special_recovery_defer_reason(
     }
 }
 
-pub(super) fn admission_has_exact_authority(
+fn admission_has_exact_authority(
     admission: &DurableAutomationAdmission,
     operation: &tracedecay_application::ApplicationOperation,
 ) -> Result<bool> {
@@ -452,13 +218,10 @@ pub(super) fn admission_has_exact_authority(
         &admission.input_digest,
         &admission.request,
         &admission.effect_receipt_template,
-        &admission.prepared_authority,
-        admission.observed_at,
-        &admission.effective_deadline,
     ))? == admission.effect_authority_digest)
 }
 
-pub(super) fn recovered_partial_terminal(
+fn recovered_partial_terminal(
     admission: &DurableAutomationAdmission,
     committed: Vec<tracedecay_application::retained_surfaces::MemoryAutomationCommittedReceiptV1>,
     operation: &tracedecay_application::ApplicationOperation,
@@ -588,11 +351,9 @@ pub(super) fn indexed_journals_blocking(
         Ok(index
             .entries
             .into_iter()
-            // Project memory is shared by linked worktrees. The pending index
-            // must therefore discover every reservation for this registered
-            // project; the journal authority check later proves the exact
-            // repository and the entry's original worktree-scoped digest.
-            .filter(|entry| entry.project_id == scope.project_id)
+            .filter(|entry| {
+                entry.project_id == scope.project_id && entry.scope_digest == scope.scope_digest
+            })
             .map(|entry| IndexedJournal {
                 path: automation_root.join(&entry.journal_file),
                 project_id: entry.project_id,

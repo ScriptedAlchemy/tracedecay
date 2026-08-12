@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ActorId, FactOwnerV1};
 
-use super::artifacts::sha256_json;
 use super::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
     BackendRetryPolicy, run_agent_task_with_retry_report,
@@ -695,6 +694,7 @@ async fn run_combined_review_for_retrieval(
                 retry_report: &retry_report,
                 evidence: &reflector_bundle.evidence,
                 evidence_hash: reflector_bundle.evidence_hash.clone(),
+                proposed_ops: &output,
                 proposals: &facts,
             },
             &validation_repairs,
@@ -889,12 +889,11 @@ async fn append_combined_failed_records(
     err: &TraceDecayError,
     retry_report: &AgentTaskRetryReport,
 ) -> Result<(AutomationRunLedgerRecord, AutomationRunLedgerRecord)> {
-    let reflector_projection = proposed_ops.map(combined_reflector_failure_projection);
     let reflector_record = reflector_finalizer
         .append_failed_record(
             response.model.clone(),
             evidence.reflector.evidence_hash.clone(),
-            reflector_projection,
+            proposed_ops.cloned(),
             err.to_string(),
             retry_report,
         )
@@ -909,21 +908,6 @@ async fn append_combined_failed_records(
         )
         .await?;
     Ok((reflector_record, skill_record))
-}
-
-fn combined_reflector_failure_projection(output: &Value) -> Value {
-    let facts = output
-        .get("facts")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    json!({
-        "schema_version": 1,
-        "proposed": {
-            "count": facts.len(),
-            "sha256": sha256_json(&json!(facts)),
-        },
-    })
 }
 
 fn build_combined_review_prompt(reflector_evidence: &Value, skill_evidence: &Value) -> String {

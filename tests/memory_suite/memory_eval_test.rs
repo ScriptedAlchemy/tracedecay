@@ -10,11 +10,9 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_application::retained_surfaces::{
-    FactProjectionV1, FactSearchHitV1, FactStoreAddCommitV1, FactStoreAddResultV1,
+    FactCategoryV1, FactProjectionV1, FactSearchHitV1, FactStoreAddCommitV1, FactStoreAddResultV1,
     FactStoreGetResultV1, FactStoreListResultV1, FactStoreSearchResultV1, FactV1,
-    MemoryAutomationCommittedReceiptV1, MemoryAutomationCurationOperationEffectV1,
-    MemoryAutomationCurationRemoveDispositionV1, MemoryAutomationRunResultV1,
-    MemoryAutomationTaskV1, MemoryStatusResultV1,
+    MemoryStatusResultV1,
 };
 use tracedecay_domain::FactId;
 
@@ -55,8 +53,8 @@ struct Setup {
 #[derive(Deserialize)]
 struct SeedFact {
     content: String,
-    category: String,
-    source: String,
+    category: FactCategoryV1,
+    source_label: String,
     trust: f64,
     #[serde(default)]
     preload_query: Option<String>,
@@ -88,13 +86,13 @@ enum Expectation {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum Step {
     Tool { tool: String, args: Value },
-    MemoryCuration,
 }
 
 type FactIndex = BTreeMap<String, Vec<FactId>>;
 
 struct Fixture {
-    /// Declared first so the daemon terminates before temporary directories are removed.
+    /// Declared first so the daemon is terminated before temporary directories
+    /// are removed on platforms that keep profile files open while it lives.
     _daemon: Option<common::DaemonProcess>,
     _home: TempDir,
     home_path: PathBuf,
@@ -213,7 +211,7 @@ fn run_exact_value(fixture: &Fixture, tool: &str, args: Value) -> Value {
     let args = exact_args(args);
     let output = run_ok(fixture, &["tool", tool, "--args", &args.to_string()]);
     serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| panic!("{tool} output was not FactRecordV1 JSON: {error}"))
+        .unwrap_or_else(|error| panic!("{tool} output was not retained-surface JSON: {error}"))
 }
 
 fn run_exact<T: serde::de::DeserializeOwned>(fixture: &Fixture, tool: &str, args: Value) -> T {
@@ -266,25 +264,23 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) -> FactIndex {
             json!({
                 "content": seed.content,
                 "category": seed.category,
-                "source_label": seed.source,
+                "source_label": seed.source_label,
                 "trust": seed.trust,
             }),
         );
-        let projection = match added {
-            FactStoreAddResultV1::SecretRejected => panic!("seed fact rejected: {}", seed.content),
-            FactStoreAddResultV1::NormalizedDuplicate { fact, .. }
-            | FactStoreAddResultV1::Committed {
-                result:
-                    FactStoreAddCommitV1::Added { fact, .. }
-                    | FactStoreAddCommitV1::NearDuplicate { fact, .. }
-                    | FactStoreAddCommitV1::PossibleConflict { fact, .. },
-            } => fact,
+        let result = match added {
+            FactStoreAddResultV1::Committed { result } => result,
+            other => panic!("seed fact was not committed: {} ({other:?})", seed.content),
         };
-        let FactProjectionV1::Available { fact } = projection else {
-            panic!("seed fact has no available payload: {}", seed.content)
+        let fact = match result {
+            FactStoreAddCommitV1::Added { fact, .. }
+            | FactStoreAddCommitV1::NearDuplicate { fact, .. }
+            | FactStoreAddCommitV1::PossibleConflict { fact, .. } => available_fact(fact),
         };
-        let ids = index.entry(seed.source.clone()).or_default();
-        ids.push(fact.fact_id.clone());
+        index
+            .entry(seed.source_label.clone())
+            .or_default()
+            .push(fact.fact_id.clone());
 
         if seed.preload_searches == 0 {
             continue;
@@ -292,7 +288,7 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) -> FactIndex {
         let query = seed.preload_query.as_deref().unwrap_or_else(|| {
             panic!(
                 "seed source `{}` sets preload_searches without a preload_query",
-                seed.source
+                seed.source_label
             )
         });
         for _ in 0..seed.preload_searches {
@@ -308,13 +304,15 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) -> FactIndex {
 }
 
 fn wait_for_memory_ready(fixture: &Fixture, expected_facts: usize) {
+    let expected_facts = u64::try_from(expected_facts)
+        .expect("fixture fact count must fit the canonical status count domain");
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last_count = 0;
     while Instant::now() < deadline {
         let status: MemoryStatusResultV1 =
             run_exact(fixture, "tracedecay_memory_status", json!({}));
         last_count = status.memory.fact_count;
-        if last_count >= expected_facts as u64 {
+        if last_count >= expected_facts {
             return;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -362,7 +360,7 @@ fn resolve_fact_references(value: &mut Value, facts: &FactIndex) {
             let [fact_id] = ids.as_slice() else {
                 panic!("FactId source reference `{source}` is ambiguous");
             };
-            *value = Value::from(fact_id.as_str());
+            *value = Value::String(fact_id.as_str().to_owned());
         }
         Value::Array(values) => {
             for entry in values {
@@ -382,12 +380,7 @@ struct StepResult {
     succeeded: bool,
 }
 
-fn execute_step(
-    fixture: &Fixture,
-    step: &Step,
-    facts: &FactIndex,
-    curation_run: &mut Option<MemoryAutomationRunResultV1>,
-) -> StepResult {
+fn execute_step(fixture: &Fixture, step: &Step, facts: &FactIndex) -> StepResult {
     match step {
         Step::Tool { tool, args } => {
             assert!(
@@ -400,30 +393,6 @@ fn execute_step(
             let mut command = fixture.command();
             command.args(["tool", tool, "--args", &args.to_string()]);
             let output = run_with_timeout(command, Duration::from_secs(120));
-            StepResult {
-                succeeded: output.status.success(),
-            }
-        }
-        Step::MemoryCuration => {
-            let mut command = fixture.command();
-            command.args(["automation", "run", "memory-curation"]);
-            let output = run_with_timeout(command, Duration::from_secs(120));
-            if output.status.success() {
-                let run: MemoryAutomationRunResultV1 = serde_json::from_slice(&output.stdout)
-                    .unwrap_or_else(|error| {
-                        panic!("memory-curation terminal was not canonical JSON: {error}")
-                    });
-                assert_eq!(
-                    run.task,
-                    MemoryAutomationTaskV1::MemoryCurator,
-                    "memory-curation command returned another automation task"
-                );
-                assert!(
-                    run.matches_terminal(),
-                    "memory-curation command returned an invalid terminal"
-                );
-                *curation_run = Some(run);
-            }
             StepResult {
                 succeeded: output.status.success(),
             }
@@ -454,7 +423,7 @@ fn compare_f64(op: CompareOp, actual: f64, expected: f64) -> bool {
 }
 
 fn millionths(value: u32) -> f64 {
-    value as f64 / 1_000_000.0
+    f64::from(value) / 1_000_000.0
 }
 
 fn op_symbol(op: CompareOp) -> &'static str {
@@ -471,14 +440,7 @@ fn op_symbol(op: CompareOp) -> &'static str {
 fn current_facts(fixture: &Fixture) -> Vec<FactV1> {
     let listed: FactStoreListResultV1 =
         run_exact(fixture, "tracedecay_fact_store_list", json!({"limit": 200}));
-    listed
-        .facts
-        .into_iter()
-        .map(|projection| match projection {
-            FactProjectionV1::Available { fact } => fact,
-            other => panic!("fact-store list returned unavailable fact: {other:?}"),
-        })
-        .collect()
+    listed.facts.into_iter().map(available_fact).collect()
 }
 
 fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<FactSearchHitV1> {
@@ -490,23 +452,13 @@ fn run_search(fixture: &Fixture, query: &str, limit: usize) -> Vec<FactSearchHit
     searched.hits
 }
 
-fn curation_removed_ids(run: &MemoryAutomationRunResultV1) -> HashSet<FactId> {
-    let mut ids = HashSet::new();
-    for receipt in &run.committed_receipts {
-        if let MemoryAutomationCommittedReceiptV1::Curation(receipt) = receipt {
-            for effect in &receipt.receipt.operation_effects {
-                if let MemoryAutomationCurationOperationEffectV1::Remove {
-                    target_fact_id,
-                    disposition: MemoryAutomationCurationRemoveDispositionV1::Removed,
-                    ..
-                } = effect
-                {
-                    ids.insert(target_fact_id.clone());
-                }
-            }
+fn available_fact(projection: FactProjectionV1) -> FactV1 {
+    match projection {
+        FactProjectionV1::Available { fact } => fact,
+        FactProjectionV1::Unavailable { status } => {
+            panic!("expected available fact projection, got {status:?}")
         }
     }
-    ids
 }
 
 fn source_fact_id(facts: &FactIndex, source: &str) -> FactId {
@@ -546,7 +498,6 @@ fn evaluate_assertions(
     fixture: &Fixture,
     phase: Phase,
     facts: &FactIndex,
-    curation_run: &Option<MemoryAutomationRunResultV1>,
 ) -> Vec<AssertionOutcome> {
     let mut outcomes = Vec::new();
     for assertion in &scenario.assertions {
@@ -565,7 +516,7 @@ fn evaluate_assertions(
                     name: name.clone(),
                     passed: compare_i64(*op, actual, *value),
                     detail: format!(
-                        "FactRecordV1 count {actual}; expected {actual} {} {value}",
+                        "available fact count {actual}; expected {actual} {} {value}",
                         op_symbol(*op)
                     ),
                 });
@@ -658,8 +609,10 @@ fn evaluate_assertions(
                 let actual = current_facts(fixture)
                     .iter()
                     .filter(|fact| fact.source_label.as_deref() == Some(source))
-                    .map(|fact| i64::try_from(fact.telemetry.retrieval_count).unwrap())
-                    .sum::<i64>();
+                    .map(|fact| fact.telemetry.retrieval_count)
+                    .sum::<u64>();
+                let actual = i64::try_from(actual)
+                    .expect("retrieval total must fit the eval assertion integer domain");
                 outcomes.push(AssertionOutcome {
                     name: name.clone(),
                     passed: compare_i64(*op, actual, *value),
@@ -695,32 +648,6 @@ fn evaluate_assertions(
                     name: name.clone(),
                     passed: compare_i64(*op, actual, *value),
                     detail: format!("source `{source}` has {actual} {action:?} feedback events; expected {actual} {} {value}", op_symbol(*op)),
-                });
-            }
-            Assertion::CurationRemovesSource {
-                name,
-                source,
-                expected,
-                phase: assertion_phase,
-            } => {
-                if should_skip_assertion(phase, *assertion_phase) {
-                    continue;
-                }
-                let Some(run) = curation_run else {
-                    panic!(
-                        "[{}] assertion `{name}` needs a completed memory-curation run",
-                        scenario.id
-                    );
-                };
-                let removed_ids = curation_removed_ids(run);
-                let source_ids = facts.get(source).cloned().unwrap_or_default();
-                let any_removed = source_ids
-                    .iter()
-                    .any(|fact_id| removed_ids.contains(fact_id));
-                outcomes.push(AssertionOutcome {
-                    name: name.clone(),
-                    passed: any_removed == *expected,
-                    detail: format!("curation remove operations touch source `{source}`: {any_removed} (expected {expected})"),
                 });
             }
             Assertion::SearchRank {
@@ -817,25 +744,18 @@ fn format_outcomes(outcomes: &[AssertionOutcome]) -> String {
         .join("\n")
 }
 
-fn run_scenario(id: &str, run_violation: bool) {
+fn run_scenario(id: &str) {
     let scenario = load_scenario(id);
 
     let (fixture, facts) = build_fixture(&scenario.setup);
-    let mut curation_run = None;
     for step in &scenario.deterministic.well_behaved {
-        let result = execute_step(&fixture, step, &facts, &mut curation_run);
+        let result = execute_step(&fixture, step, &facts);
         assert!(
             result.succeeded,
             "[{id}] well-behaved step was refused; compliant writes must be accepted"
         );
     }
-    let outcomes = evaluate_assertions(
-        &scenario,
-        &fixture,
-        Phase::WellBehaved,
-        &facts,
-        &curation_run,
-    );
+    let outcomes = evaluate_assertions(&scenario, &fixture, Phase::WellBehaved, &facts);
     assert!(
         outcomes.iter().all(|outcome| outcome.passed),
         "[{id}] well-behaved phase failed:\n{}",
@@ -845,18 +765,13 @@ fn run_scenario(id: &str, run_violation: bool) {
     let Some(violation) = &scenario.deterministic.violation else {
         return;
     };
-    if !run_violation {
-        return;
-    }
     let (fixture, facts) = build_fixture(&scenario.setup);
-    let mut curation_run = None;
     let mut any_step_succeeded = false;
     for step in &violation.steps {
-        let result = execute_step(&fixture, step, &facts, &mut curation_run);
+        let result = execute_step(&fixture, step, &facts);
         any_step_succeeded |= result.succeeded;
     }
-    let outcomes =
-        evaluate_assertions(&scenario, &fixture, Phase::Violation, &facts, &curation_run);
+    let outcomes = evaluate_assertions(&scenario, &fixture, Phase::Violation, &facts);
     let all_passed = outcomes.iter().all(|outcome| outcome.passed);
     match violation.expectation {
         Expectation::Detect => assert!(
@@ -879,72 +794,61 @@ fn run_scenario(id: &str, run_violation: bool) {
 
 #[test]
 fn eval_memory_no_pollution() {
-    run_scenario("memory-no-pollution", true);
+    run_scenario("memory-no-pollution");
 }
 
 #[test]
 fn eval_memory_secret_rejection() {
-    run_scenario("memory-secret-rejection", true);
+    run_scenario("memory-secret-rejection");
 }
 
 #[test]
 fn eval_memory_skip_local() {
-    run_scenario("memory-skip-local", true);
+    run_scenario("memory-skip-local");
 }
 
 #[test]
 fn eval_memory_supersede_without_dup() {
-    run_scenario("memory-supersede-without-dup", false);
-}
-
-#[test]
-#[ignore = "requires a configured automation backend"]
-fn eval_memory_supersede_without_dup_curation() {
-    run_scenario("memory-supersede-without-dup", true);
+    run_scenario("memory-supersede-without-dup");
 }
 
 #[test]
 fn eval_memory_multiturn_continuity() {
-    run_scenario("memory-multiturn-continuity", true);
-}
-
-#[test]
-#[ignore = "requires a configured automation backend"]
-fn eval_memory_curation_conservatism() {
-    run_scenario("memory-curation-conservatism", true);
+    run_scenario("memory-multiturn-continuity");
 }
 
 #[test]
 fn eval_memory_ranking_trust_bias() {
-    run_scenario("memory-ranking-trust-bias", true);
+    run_scenario("memory-ranking-trust-bias");
 }
 
 #[test]
 fn eval_memory_ranking_supersession() {
-    run_scenario("memory-ranking-supersession", true);
+    run_scenario("memory-ranking-supersession");
 }
 
 #[test]
 fn eval_memory_ranking_morphology() {
-    run_scenario("memory-ranking-morphology", true);
+    run_scenario("memory-ranking-morphology");
 }
 
 #[test]
 fn eval_memory_feedback_trust() {
-    run_scenario("memory-feedback-trust", true);
+    run_scenario("memory-feedback-trust");
 }
 
 #[test]
 fn eval_memory_ranking_retrieval_reinforcement() {
-    run_scenario("memory-ranking-retrieval-reinforcement", true);
+    run_scenario("memory-ranking-retrieval-reinforcement");
 }
 
 #[test]
 fn eval_memory_ranking_feedback_promotes() {
-    run_scenario("memory-ranking-feedback-promotes", true);
+    run_scenario("memory-ranking-feedback-promotes");
 }
 
-/// Every scenario must have a test so unwired JSON cannot silently escape production coverage.
+/// Every scenario file must have a matching test so an unwired JSON scenario
+/// cannot silently stop exercising the production retained-memory path.
 #[test]
 fn every_scenario_file_is_wired() {
     let wired: HashSet<&str> = [
@@ -953,7 +857,6 @@ fn every_scenario_file_is_wired() {
         "memory-skip-local",
         "memory-supersede-without-dup",
         "memory-multiturn-continuity",
-        "memory-curation-conservatism",
         "memory-ranking-trust-bias",
         "memory-ranking-supersession",
         "memory-ranking-morphology",

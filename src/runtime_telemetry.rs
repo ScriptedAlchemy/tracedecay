@@ -77,9 +77,9 @@ pub struct RuntimeSnapshot {
     /// Captured at (Unix epoch seconds).
     pub captured_at: u64,
     /// `tracedecay` build version (e.g. `6.0.0`).
-    pub tracedecay_version: &'static str,
+    pub tracedecay_version: String,
     /// Host OS short name (`macos`, `linux`, `windows`, …).
-    pub host_os: &'static str,
+    pub host_os: String,
     pub process: ProcessSnapshot,
     pub database: DatabaseSnapshot,
 }
@@ -103,7 +103,7 @@ pub struct ProcessSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseSnapshot {
     pub project_root: PathBuf,
-    /// `<root>/.tracedecay/<branch>.db` or whichever DB is being served.
+    /// Canonical durable database currently owned by this project runtime.
     pub db_path: PathBuf,
     /// Canonical identity of the file owned by this process, when resolvable.
     pub canonical_db_path: PathBuf,
@@ -248,20 +248,11 @@ pub(crate) async fn collect_with_integrity_and_generation_census(
         .as_secs();
     Ok(RuntimeSnapshot {
         captured_at,
-        tracedecay_version: crate::version::build_version(),
-        host_os: std::env::consts::OS,
+        tracedecay_version: crate::version::build_version().to_owned(),
+        host_os: std::env::consts::OS.to_owned(),
         process,
         database,
     })
-}
-
-/// Render a `RuntimeSnapshot` as the JSON wire shape used by both the
-/// CLI (`--json` flag) and the MCP tool result.
-pub fn to_pretty_json(snap: &RuntimeSnapshot) -> String {
-    match serde_json::to_string_pretty(snap) {
-        Ok(json) => json,
-        Err(error) => format!("runtime telemetry serialization failed: {error}"),
-    }
 }
 
 /// Render a `RuntimeSnapshot` as a human-readable status block for
@@ -701,6 +692,13 @@ fn bytes_human(n: u64) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_snapshot_deserializes_from_owned_transport_json() {
+        fn require_owned_transport_decode<T: serde::de::DeserializeOwned>() {}
+
+        require_owned_transport_decode::<RuntimeSnapshot>();
+    }
 
     #[test]
     fn bytes_human_formats_units() {

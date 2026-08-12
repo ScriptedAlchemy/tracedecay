@@ -446,8 +446,12 @@ pub(super) struct StoreAdministration {
 /// Retry ownership for a timed-out server, or a terminal failure receipt that
 /// must remain visible without retaining the server and its daemon callbacks.
 pub(super) enum RetainedProjectShutdownOwner {
-    TimedOut { server: Arc<crate::mcp::McpServer> },
-    Failed { error: String },
+    TimedOut {
+        server: Arc<crate::mcp::McpServer>,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 impl Default for StoreAdministration {
@@ -628,7 +632,7 @@ impl StoreAdministration {
         registry.mounted_session_databases().await
     }
 
-    pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::tracedecay::TraceDecay>> {
+    pub(super) async fn mounted_project_servers(&self) -> Vec<Arc<crate::mcp::McpServer>> {
         let Ok(profile_root) = self
             .profile_identity()
             .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
@@ -644,8 +648,13 @@ impl StoreAdministration {
                 .map(|(_, entry)| Arc::clone(&entry.server))
                 .collect::<Vec<_>>()
         };
+        servers
+    }
+
+    pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::tracedecay::TraceDecay>> {
+        let servers = self.mounted_project_servers().await;
         let mut graphs = Vec::with_capacity(servers.len());
-        for server in servers {
+        for server in &servers {
             graphs.push(server.cg().await);
         }
         graphs
@@ -1068,7 +1077,7 @@ impl StoreAdministration {
             .await
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, test))]
     pub(super) async fn settle_retirement_reapers_for_project(
         &self,
         profile_root: &Path,

@@ -281,10 +281,6 @@ export const AnalyticsUsageSummaryV1Schema = z.object({
 });
 export type AnalyticsUsageSummaryV1 = z.infer<typeof AnalyticsUsageSummaryV1Schema>;
 
-/** Stable non-retryable class for an admitted execution failure. */
-export const ApplicationExecutionFailureClassV1Schema = z.enum(["denied", "malformed_output", "permanent"]);
-export type ApplicationExecutionFailureClassV1 = z.infer<typeof ApplicationExecutionFailureClassV1Schema>;
-
 /** Stable application failure envelope. Partial effects and reset-required
 states are admitted terminals; partial effects carry their committed
 receipt directly while reset-required states carry an explicit action. */
@@ -296,18 +292,17 @@ export const ApplicationProblemEnvelopeSchema = z.object({
 export type ApplicationProblemEnvelope = z.infer<typeof ApplicationProblemEnvelopeSchema>;
 
 /** Stable problem-code taxonomy for request failures and admitted terminals. */
-export const ApplicationProblemKindSchema = z.enum(["cancelled", "conflict", "execution_failed", "invalid_request", "not_found_or_not_authorized", "partial_effect", "reset_required", "saturated", "stale", "timed_out", "unavailable", "unsupported"]);
+export const ApplicationProblemKindSchema = z.enum(["cancelled", "conflict", "invalid_request", "not_found_or_not_authorized", "partial_effect", "reset_required", "saturated", "stale", "timed_out", "unavailable", "unsupported"]);
 export type ApplicationProblemKind = z.infer<typeof ApplicationProblemKindSchema>;
 
 /** Stable application problem record shared verbatim by every adapter. */
 export const ApplicationProblemRecordSchema = z.object({
-  cancellation_stage: z.lazy(() => RequiredNullable2Schema),
+  cancellation_stage: z.union([z.lazy(() => CancellationStageSchema), z.null()]),
   code: z.string(),
   committed_receipt: z.lazy(() => RequiredNullableSchema),
   coverage: z.union([z.lazy(() => EvidenceCoverageSchema), z.null()]),
   details: z.array(z.lazy(() => SafeDiagnosticSchema)),
   diagnostic: z.union([z.lazy(() => SafeDiagnosticSchema), z.null()]),
-  execution_failure_classification: z.lazy(() => RequiredNullable4Schema),
   kind: z.lazy(() => ApplicationProblemKindSchema),
   legal_actions: z.array(z.lazy(() => LegalActionSchema)),
   message: z.string(),
@@ -320,13 +315,8 @@ export const ApplicationProblemRecordSchema = z.object({
   revision: z.number().int().min(0),
   terminality: z.lazy(() => ProblemTerminalitySchema),
   trace_id: z.string(),
-  unavailable_classification: z.lazy(() => RequiredNullable3Schema),
 }).strict();
 export type ApplicationProblemRecord = z.infer<typeof ApplicationProblemRecordSchema>;
-
-/** Stable reason an application authority is unavailable. */
-export const ApplicationUnavailableClassV1Schema = z.enum(["authority", "backend_disconnected", "backend_retryable", "backend_unavailable"]);
-export type ApplicationUnavailableClassV1 = z.infer<typeof ApplicationUnavailableClassV1Schema>;
 
 export const ApplyWorkRelationReplanRequestV1Schema = z.object({
   mutation: z.lazy(() => WorkProductMutationIdentityV1Schema),
@@ -2244,50 +2234,16 @@ export const MemoryAutomationCommittedReceiptV1Schema = z.discriminatedUnion("ki
 }).strict()]);
 export type MemoryAutomationCommittedReceiptV1 = z.infer<typeof MemoryAutomationCommittedReceiptV1Schema>;
 
-export const MemoryAutomationCurationAddDispositionV1Schema = z.enum(["added", "near_duplicate", "possible_conflict"]);
-export type MemoryAutomationCurationAddDispositionV1 = z.infer<typeof MemoryAutomationCurationAddDispositionV1Schema>;
-
-export const MemoryAutomationCurationMergeV1Schema = z.object({
-  commit_receipts: z.array(z.lazy(() => FactCommitReceiptV1Schema)),
-  content_updated: z.boolean(),
-  deleted_loser_fact_ids: z.array(z.lazy(() => FactIdSchema)),
-  input_digest: z.string(),
-  operation_id: z.lazy(() => ProvenanceIdSchema),
-  winner_fact_id: z.lazy(() => FactIdSchema),
-}).strict();
-export type MemoryAutomationCurationMergeV1 = z.infer<typeof MemoryAutomationCurationMergeV1Schema>;
-
 export const MemoryAutomationCurationOperationEffectV1Schema = z.discriminatedUnion("kind", [z.object({
-  closest_fact_id: z.union([z.lazy(() => FactIdSchema), z.null()]),
-  commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
-  disposition: z.lazy(() => MemoryAutomationCurationAddDispositionV1Schema),
-  fact_id: z.lazy(() => FactIdSchema),
-  kind: z.literal("add"),
-  similarity_millionths: z.number().int().min(0).nullable(),
-}).strict(), z.object({
   commit: z.lazy(() => FactCommitReceiptV1Schema),
   kind: z.literal("link_facts"),
   relation: z.lazy(() => MemoryAutomationCurationRelationV1Schema),
   source_fact_id: z.lazy(() => FactIdSchema),
   target_fact_id: z.lazy(() => FactIdSchema),
 }).strict(), z.object({
-  kind: z.literal("merge"),
-  outcome: z.lazy(() => MemoryAutomationCurationMergeV1Schema),
-}).strict(), z.object({
   commit: z.lazy(() => FactCommitReceiptV1Schema),
   fact_id: z.lazy(() => FactIdSchema),
   kind: z.literal("normalize_tags"),
-}).strict(), z.object({
-  commit: z.union([z.lazy(() => FactCommitReceiptV1Schema), z.null()]),
-  disposition: z.lazy(() => MemoryAutomationCurationRemoveDispositionV1Schema),
-  kind: z.literal("remove"),
-  remaining_fact_count: z.number().int().safe().min(0),
-  target_fact_id: z.lazy(() => FactIdSchema),
-}).strict(), z.object({
-  commit: z.lazy(() => FactCommitReceiptV1Schema),
-  fact_id: z.lazy(() => FactIdSchema),
-  kind: z.literal("update"),
-  trust_delta_millionths: z.number().int(),
 }).strict()]);
 export type MemoryAutomationCurationOperationEffectV1 = z.infer<typeof MemoryAutomationCurationOperationEffectV1Schema>;
 
@@ -2314,25 +2270,17 @@ export const MemoryAutomationCurationRelationV1Schema = z.object({
 }).strict();
 export type MemoryAutomationCurationRelationV1 = z.infer<typeof MemoryAutomationCurationRelationV1Schema>;
 
-export const MemoryAutomationCurationRemoveDispositionV1Schema = z.enum(["already_removed", "not_found", "removed"]);
-export type MemoryAutomationCurationRemoveDispositionV1 = z.infer<typeof MemoryAutomationCurationRemoveDispositionV1Schema>;
-
 export const MemoryAutomationCurationResultV1Schema = z.object({
-  accepted_operations: z.number().int().safe().min(0),
   automation_run_id: z.lazy(() => RunIdSchema),
   changed_fact_ids: z.array(z.lazy(() => FactIdSchema)),
-  facts_added: z.number().int().safe().min(0),
   facts_linked: z.number().int().safe().min(0),
-  facts_merged: z.number().int().safe().min(0),
-  facts_removed: z.number().int().safe().min(0),
-  facts_updated: z.number().int().safe().min(0),
   input_digest: z.string(),
   normalized_tags: z.number().int().safe().min(0),
   operation_effects: z.array(z.lazy(() => MemoryAutomationCurationOperationEffectV1Schema)),
   operation_id: z.lazy(() => ProvenanceIdSchema),
   owner: z.lazy(() => FactCommitOwnerV1Schema),
-  replay_event_id: z.union([z.lazy(() => FactEventIdSchema), z.null()]),
-  replay_fact_id: z.union([z.lazy(() => FactIdSchema), z.null()]),
+  replay_event_id: z.lazy(() => FactEventIdSchema),
+  replay_fact_id: z.lazy(() => FactIdSchema),
 }).strict();
 export type MemoryAutomationCurationResultV1 = z.infer<typeof MemoryAutomationCurationResultV1Schema>;
 
@@ -3262,24 +3210,6 @@ from an omitted field. New terminal-state fields must be present on every
 record so a missing committed receipt cannot be mistaken for `None`. */
 export const RequiredNullableSchema = z.union([z.lazy(() => EffectReceiptSchema), z.null()]);
 export type RequiredNullable = z.infer<typeof RequiredNullableSchema>;
-
-/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
-from an omitted field. New terminal-state fields must be present on every
-record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable2Schema = z.union([z.lazy(() => CancellationStageSchema), z.null()]);
-export type RequiredNullable2 = z.infer<typeof RequiredNullable2Schema>;
-
-/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
-from an omitted field. New terminal-state fields must be present on every
-record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable3Schema = z.union([z.lazy(() => ApplicationUnavailableClassV1Schema), z.null()]);
-export type RequiredNullable3 = z.infer<typeof RequiredNullable3Schema>;
-
-/** Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`
-from an omitted field. New terminal-state fields must be present on every
-record so a missing committed receipt cannot be mistaken for `None`. */
-export const RequiredNullable4Schema = z.union([z.lazy(() => ApplicationExecutionFailureClassV1Schema), z.null()]);
-export type RequiredNullable4 = z.infer<typeof RequiredNullable4Schema>;
 
 /** The resolved configuration scope is one exact project/repository/worktree root.
 

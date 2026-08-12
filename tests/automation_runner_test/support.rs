@@ -277,7 +277,7 @@ pub(crate) async fn run_session_reflector_with_backend(
     run_control: &AutomationRunControl,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
-) -> tracedecay_agent_hosts::automation::AutomationRunResult<
+) -> tracedecay::errors::Result<
     tracedecay_agent_hosts::automation::runner::SessionReflectorAutomationRun,
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
@@ -338,7 +338,7 @@ pub(crate) async fn run_memory_curator_with_backend(
     run_control: &AutomationRunControl,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
-) -> tracedecay_agent_hosts::automation::AutomationRunResult<
+) -> tracedecay::errors::Result<
     tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun,
 > {
     tracedecay_agent_hosts::automation::runner::run_memory_curator_with_backend(
@@ -1275,7 +1275,6 @@ pub(crate) fn scheduler_record_for(
         artifacts: Vec::new(),
         started_at: (completed_at - 1).to_string(),
         completed_at: completed_at.to_string(),
-        completed_at_micros: completed_at.saturating_mul(1_000_000),
     }
 }
 

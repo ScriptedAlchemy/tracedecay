@@ -1,7 +1,7 @@
 //! Canonical retained-memory request and result mapping.
 
-use serde::Serialize;
 use serde_json::Value;
+use tracedecay_application::RetainedSurfaceExecutionErrorV1;
 use tracedecay_application::retained_surfaces::{
     FactCategoryV1, FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1,
     FactContradictionV1, FactFeedbackActionV1, FactFeedbackDetailsAvailabilityV1,
@@ -16,9 +16,6 @@ use tracedecay_application::retained_surfaces::{
     FactV1, MemoryAlgebraV1, MemoryFeedbackFunnelV1, MemoryScopeV1, MemoryStatusResultV1,
     MemoryStatusV1, RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
     TrustHistoryEntryV1,
-};
-use tracedecay_application::{
-    CancellationStage, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
 };
 use tracedecay_domain::{
     ActorId, Confidence, FactCategoryV1 as DomainFactCategoryV1, FactIdentitySourceV1, FactOwnerV1,
@@ -39,8 +36,7 @@ use tracedecay_store::{
     ProjectMemoryMemoryStatusV1,
 };
 use tracedecay_usecases::memory::{
-    MemoryApplicationError, MemoryOperationContext, ProjectMemoryFactAddRequest,
-    ProjectMemoryFactAddRequestOutcome,
+    MemoryApplicationError, ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome,
 };
 
 pub(super) const MAX_RETAINED_FACT_LIMIT: usize = 200;
@@ -893,12 +889,14 @@ pub(super) fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecution
         | FactStoreError::RelationConflict { .. }
         | FactStoreError::GraphConflict => RetainedSurfaceExecutionErrorV1::Conflict,
         FactStoreError::GraphCancelled | FactStoreError::ReadCancelled => {
-            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
+            RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_application::CancellationStage::DuringRead,
+            )
         }
         FactStoreError::GraphBudgetExhausted => RetainedSurfaceExecutionErrorV1::Saturated,
-        FactStoreError::GraphDeadlineExceeded => {
-            RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::DuringRead)
-        }
+        FactStoreError::GraphDeadlineExceeded => RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         FactStoreError::GraphResetRequired { owner, .. } => match owner {
             FactOwnerV1::Profile => RetainedSurfaceExecutionErrorV1::ProfileResetRequired,
             FactOwnerV1::Project { .. } => RetainedSurfaceExecutionErrorV1::ProjectResetRequired,
@@ -907,41 +905,100 @@ pub(super) fn map_store_error(error: FactStoreError) -> RetainedSurfaceExecution
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct MemoryCancellationStages {
-    pub(super) before: CancellationStage,
-    pub(super) active: CancellationStage,
-}
-
-pub(super) const READ_CANCELLATION_STAGES: MemoryCancellationStages = MemoryCancellationStages {
-    before: CancellationStage::BeforeRead,
-    active: CancellationStage::DuringRead,
-};
-
-pub(super) const EFFECT_CANCELLATION_STAGES: MemoryCancellationStages = MemoryCancellationStages {
-    before: CancellationStage::BeforeEffect,
-    active: CancellationStage::EffectInFlight,
-};
-
-pub(super) fn memory_operation_context<T: Serialize>(
-    context: &RetainedSurfaceExecutionContextV1<'_>,
-    owner: &FactOwnerV1,
-    action: &str,
-    logical_effect: &T,
-) -> Result<MemoryOperationContext, RetainedSurfaceExecutionErrorV1> {
-    MemoryOperationContext::from_logical_effect(
-        owner,
-        action,
-        logical_effect,
-        Some(context.request_context.actor().clone()),
-    )
-    .map_err(map_memory_error)
-}
-
 fn confidence_millionths(value: Confidence) -> u32 {
     (value.as_f64() * 1_000_000.0).round() as u32
 }
 
 #[cfg(test)]
-#[path = "memory_mapping_tests.rs"]
-mod tests;
+mod tests {
+    use tracedecay_application::RetainedSurfaceExecutionErrorV1;
+    use tracedecay_application::retained_surfaces::{
+        FactReadOptionsV1, FactStoreSearchRequestV1, MemoryScopeV1, RetainedProjectSelectorV1,
+    };
+    use tracedecay_domain::{FactOwnerV1, ProjectId};
+    use tracedecay_store::FactStoreError;
+
+    use super::{MAX_RETAINED_FACT_LIMIT, fact_limit, map_store_error, search_logical_effect};
+
+    #[test]
+    fn retained_limits_reject_zero_and_oversized_pages() {
+        assert_eq!(fact_limit(None), Ok(20));
+        assert_eq!(fact_limit(Some(1)), Ok(1));
+        assert_eq!(fact_limit(Some(MAX_RETAINED_FACT_LIMIT as u64)), Ok(200));
+        assert_eq!(
+            fact_limit(Some(0)),
+            Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        );
+        assert_eq!(
+            fact_limit(Some((MAX_RETAINED_FACT_LIMIT + 1) as u64)),
+            Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn graph_failures_keep_distinct_retained_terminal_states() {
+        assert_eq!(
+            map_store_error(FactStoreError::GraphCancelled),
+            RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_application::CancellationStage::DuringRead
+            )
+        );
+        assert_eq!(
+            map_store_error(FactStoreError::ReadCancelled),
+            RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_application::CancellationStage::DuringRead
+            )
+        );
+        assert_eq!(
+            map_store_error(FactStoreError::GraphBudgetExhausted),
+            RetainedSurfaceExecutionErrorV1::Saturated
+        );
+        assert_eq!(
+            map_store_error(FactStoreError::GraphDeadlineExceeded),
+            RetainedSurfaceExecutionErrorV1::TimedOut(
+                tracedecay_application::CancellationStage::DuringRead
+            )
+        );
+        assert_eq!(
+            map_store_error(FactStoreError::OperationConflict),
+            RetainedSurfaceExecutionErrorV1::Conflict
+        );
+        assert_eq!(
+            map_store_error(FactStoreError::GraphResetRequired {
+                owner: FactOwnerV1::Profile,
+                reason: "profile graph reset".to_owned(),
+            }),
+            RetainedSurfaceExecutionErrorV1::ProfileResetRequired
+        );
+        assert_eq!(
+            map_store_error(FactStoreError::GraphResetRequired {
+                owner: FactOwnerV1::Project {
+                    project_id: ProjectId::new("project.graph-reset").expect("project id"),
+                },
+                reason: "project graph reset".to_owned(),
+            }),
+            RetainedSurfaceExecutionErrorV1::ProjectResetRequired
+        );
+    }
+
+    #[test]
+    fn logical_search_identity_excludes_equivalent_routing_fields() {
+        let project_id = ProjectId::new("project.retained-logical-search").expect("project id");
+        let owner = FactOwnerV1::Project {
+            project_id: project_id.clone(),
+        };
+        let direct = FactStoreSearchRequestV1 {
+            query: "canonical identity".to_owned(),
+            options: FactReadOptionsV1::default(),
+            after: None,
+        };
+        let mut explicitly_routed = direct.clone();
+        explicitly_routed.options.memory_scope = Some(MemoryScopeV1::Project);
+        explicitly_routed.options.project_selector = Some(RetainedProjectSelectorV1 { project_id });
+
+        assert_eq!(
+            search_logical_effect(&owner, &direct),
+            search_logical_effect(&owner, &explicitly_routed)
+        );
+    }
+}

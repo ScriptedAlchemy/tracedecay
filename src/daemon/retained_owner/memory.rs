@@ -1,6 +1,9 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use serde::Serialize;
 use tracedecay_application::retained_surfaces::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
     FactStoreGetRequestV1, FactStoreListRequestV1, FactStoreProbeRequestV1,
@@ -9,7 +12,7 @@ use tracedecay_application::retained_surfaces::{
     RetainedProjectSelectorV1, RetainedSurfaceOperation, RetainedSurfaceResultV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, CancellationStage, RetainedMemoryExecutionPortV1, RetainedMemoryRequestV1,
+    ApplicationOutcome, RequestAdmission, RetainedMemoryExecutionPortV1, RetainedMemoryRequestV1,
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
     RetainedSurfaceExecutionFutureV1, now_micros,
 };
@@ -26,7 +29,6 @@ use tracedecay_usecases::memory::{
 use super::map_execution_error;
 use super::memory_mapping;
 use super::memory_mutation::{fresh_one_shot_commit_gate, validate_memory_mutation};
-use super::memory_stage::bounded_memory_operation;
 use super::memory_tracking::{TrackedExplicitSearch, track_explicit_search};
 use super::receipts::{
     effective_memory_deadline, evidence_outcome, memory_expiry_partial, prepare_retained_effect,
@@ -35,22 +37,6 @@ use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistry
 use crate::db::Database;
 use crate::store::DatabaseFactStore;
 use crate::tracedecay::TraceDecay;
-
-macro_rules! bounded_memory_read {
-    ($context:expr, $future:expr) => {
-        bounded_memory_operation($context, memory_mapping::READ_CANCELLATION_STAGES, $future)
-    };
-}
-
-macro_rules! bounded_memory_effect {
-    ($context:expr, $future:expr) => {
-        bounded_memory_operation(
-            $context,
-            memory_mapping::EFFECT_CANCELLATION_STAGES,
-            $future,
-        )
-    };
-}
 
 macro_rules! execute_scoped_memory {
     (
@@ -63,11 +49,11 @@ macro_rules! execute_scoped_memory {
     ) => {{
         match &$port.authority {
             DirectRetainedMemoryAuthorityV1::Project { cg, project_root } => {
-                let (cg, _) = bounded_memory_read!($context, async {
+                let (cg, _) = bounded_memory_operation($context, async {
                     Ok::<_, RetainedSurfaceExecutionErrorV1>(Arc::clone(&*cg.read().await))
                 })
                 .await?;
-                let (target, _) = bounded_memory_read!($context, async {
+                let (target, _) = bounded_memory_operation($context, async {
                     super::memory_target::open_project_retained_memory_target(
                         &cg,
                         project_root,
@@ -90,7 +76,7 @@ macro_rules! execute_scoped_memory {
             }
             DirectRetainedMemoryAuthorityV1::Profile { registry } => {
                 memory_mapping::ensure_profile_request_scope($memory_scope, $selector)?;
-                let (database, _) = bounded_memory_read!($context, async {
+                let (database, _) = bounded_memory_operation($context, async {
                     crate::daemon::store_runtime::session_registry::open_user_memory_db(registry)
                         .await
                         .map_err(map_execution_error)
@@ -340,7 +326,7 @@ async fn execute_add_on_db(
         &operation_id,
     )?;
     let write_control = fact_write_control(context);
-    let (outcome, settled_after_expiry) = bounded_memory_effect!(context, async {
+    let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(memory
             .add_preflighted_project_memory_fact(preflight, &write_control)
             .await)
@@ -389,8 +375,7 @@ async fn execute_update_on_db(
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner.clone())?;
     let logical_effect = memory_mapping::update_logical_effect(&owner, request)?;
-    let operation_context =
-        memory_mapping::memory_operation_context(context, &owner, "update", &logical_effect)?;
+    let operation_context = memory_operation_context(context, &owner, "update", &logical_effect)?;
     let operation_id = operation_context.operation_id().as_str().to_owned();
     let prepared = prepare_retained_effect(
         context,
@@ -406,7 +391,7 @@ async fn execute_update_on_db(
         context.request_context.actor().clone(),
     )?;
     let write_control = fact_write_control(context);
-    let (outcome, settled_after_expiry) = bounded_memory_effect!(context, async {
+    let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(memory
             .update_project_memory_fact(command, &write_control)
             .await)
@@ -440,8 +425,7 @@ async fn execute_remove_on_db(
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner.clone())?;
     let logical_effect = memory_mapping::remove_logical_effect(&owner, request)?;
-    let operation_context =
-        memory_mapping::memory_operation_context(context, &owner, "remove", &logical_effect)?;
+    let operation_context = memory_operation_context(context, &owner, "remove", &logical_effect)?;
     let operation_id = operation_context.operation_id().as_str().to_owned();
     let prepared = prepare_retained_effect(
         context,
@@ -457,7 +441,7 @@ async fn execute_remove_on_db(
         context.request_context.actor().clone(),
     )?;
     let write_control = fact_write_control(context);
-    let (outcome, settled_after_expiry) = bounded_memory_effect!(context, async {
+    let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(memory
             .remove_project_memory_fact(command, &write_control)
             .await)
@@ -507,8 +491,7 @@ async fn execute_feedback_on_db(
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner.clone())?;
     let logical_effect = memory_mapping::feedback_logical_effect(&owner, request)?;
-    let operation_context =
-        memory_mapping::memory_operation_context(context, &owner, "feedback", &logical_effect)?;
+    let operation_context = memory_operation_context(context, &owner, "feedback", &logical_effect)?;
     let operation_id = operation_context.operation_id().as_str().to_owned();
     let prepared = prepare_retained_effect(
         context,
@@ -524,7 +507,7 @@ async fn execute_feedback_on_db(
         context.request_context.actor().clone(),
     )?;
     let write_control = fact_write_control(context);
-    let (outcome, settled_after_expiry) = bounded_memory_effect!(context, async {
+    let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(memory
             .record_project_memory_fact_feedback(command, &write_control)
             .await)
@@ -597,7 +580,7 @@ async fn search_on_db(
         MemoryOperationContext::from_request_id(&owner, "search", request_id, actor)
             .map_err(memory_mapping::map_memory_error)?;
     let read_control = fact_read_control(context);
-    let (page, _) = bounded_memory_read!(context, async {
+    let (page, _) = bounded_memory_operation(context, async {
         memory
             .search_project_memory_facts(query, &read_control)
             .await
@@ -674,7 +657,7 @@ async fn search_on_db(
     if tracked.settled_after_expiry {
         let Some(committed_state) = tracked.committed_state() else {
             return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-                CancellationStage::DuringRead,
+                tracedecay_application::CancellationStage::DuringRead,
             ));
         };
         let prepared = prepared
@@ -689,9 +672,13 @@ async fn search_on_db(
     let result = memory_mapping::exact_search_result(mapped);
     match evidence_outcome(context, RetainedSurfaceOperation::FactStoreSearch, result) {
         Ok(outcome) => Ok(outcome),
-        Err(RetainedSurfaceExecutionErrorV1::TimedOut(stage)) => {
+        Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_application::CancellationStage::DuringRead,
+        )) => {
             let Some(committed_state) = tracked.committed_state() else {
-                return Err(RetainedSurfaceExecutionErrorV1::TimedOut(stage));
+                return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                    tracedecay_application::CancellationStage::DuringRead,
+                ));
             };
             let prepared = prepared
                 .as_ref()
@@ -752,7 +739,7 @@ async fn semantic_search_on_db(
     let memory = memory_application(database, owner.clone())?;
     let query = memory_mapping::search_query(owner, kind, query_text, options, after)?;
     let read_control = fact_read_control(context);
-    let (page, _) = bounded_memory_read!(context, async {
+    let (page, _) = bounded_memory_operation(context, async {
         let page = match request {
             SemanticRead::Probe(_) => {
                 memory
@@ -793,7 +780,7 @@ async fn contradict_on_db(
     )
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
-    let (page, _) = bounded_memory_read!(context, async {
+    let (page, _) = bounded_memory_operation(context, async {
         memory
             .find_project_memory_contradictions(query, &read_control)
             .await
@@ -819,7 +806,7 @@ async fn get_on_db(
     let target = ProjectMemoryFactIdV1::new(owner, request.fact_id.clone())
         .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
-    let (projection, _) = bounded_memory_read!(context, async {
+    let (projection, _) = bounded_memory_operation(context, async {
         memory
             .get_project_memory_fact(target.clone(), &read_control)
             .await
@@ -833,7 +820,7 @@ async fn get_on_db(
         memory_mapping::MAX_RETAINED_FEEDBACK_HISTORY_LIMIT,
     )
     .map_err(memory_mapping::map_store_error)?;
-    let (history, _) = bounded_memory_read!(context, async {
+    let (history, _) = bounded_memory_operation(context, async {
         memory
             .get_project_memory_feedback_history(history_query, &read_control)
             .await
@@ -863,7 +850,7 @@ async fn list_on_db(
     )
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
-    let (page, _) = bounded_memory_read!(context, async {
+    let (page, _) = bounded_memory_operation(context, async {
         memory
             .list_project_memory_facts(query, &read_control)
             .await
@@ -883,7 +870,7 @@ async fn execute_status_on_db(
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner)?;
     let read_control = fact_read_control(context);
-    let (status, _) = bounded_memory_read!(context, async {
+    let (status, _) = bounded_memory_operation(context, async {
         memory
             .project_memory_status(&read_control)
             .await
@@ -904,7 +891,7 @@ fn memory_application(
 
 fn fact_read_control(context: &RetainedSurfaceExecutionContextV1<'_>) -> FactReadControl {
     let signal = context.cancellation_signal.clone();
-    let expires_at = effective_memory_deadline(context).expires_at;
+    let expires_at = effective_expiry(context);
     FactReadControl::new(Arc::new(move || {
         signal.is_cancelled() || expires_at <= now_micros()
     }))
@@ -915,7 +902,7 @@ pub(super) fn fact_write_control(
 ) -> FactWriteControl {
     let interrupted_signal = context.cancellation_signal.clone();
     let commit_signal = context.cancellation_signal.clone();
-    let expires_at = effective_memory_deadline(context).expires_at;
+    let expires_at = effective_expiry(context);
     let commit_expires_at = expires_at;
     FactWriteControl::new(
         Arc::new(move || interrupted_signal.is_cancelled() || expires_at <= now_micros()),
@@ -925,4 +912,102 @@ pub(super) fn fact_write_control(
                 || !commit_signal.try_begin_commit()
         })),
     )
+}
+
+fn effective_expiry(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+) -> tracedecay_domain::UtcMicros {
+    effective_memory_deadline(context).expires_at
+}
+
+pub(super) async fn bounded_memory_operation<T, F>(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    future: F,
+) -> Result<(T, bool), RetainedSurfaceExecutionErrorV1>
+where
+    F: Future<Output = Result<T, RetainedSurfaceExecutionErrorV1>>,
+{
+    let now = now_micros();
+    match context.request_context.admission_at(now) {
+        RequestAdmission::Admitted if !context.cancellation_signal.is_cancelled() => {}
+        RequestAdmission::Admitted | RequestAdmission::Cancelled => {
+            return Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_application::CancellationStage::BeforeEffect,
+            ));
+        }
+        RequestAdmission::TimedOut => {
+            return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                tracedecay_application::CancellationStage::BeforeEffect,
+            ));
+        }
+    }
+    let remaining = effective_expiry(context).0.saturating_sub(now.0);
+    let remaining = u64::try_from(remaining)
+        .ok()
+        .map(Duration::from_micros)
+        .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_application::CancellationStage::BeforeEffect,
+        ))?;
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        outcome = &mut future => classify_memory_settlement(context, outcome),
+        _ = context.cancellation_signal.cancelled() => {
+            if context.cancellation_signal.commit_started() {
+                classify_memory_settlement(context, future.await)
+            } else {
+                Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_application::CancellationStage::BeforeEffect))
+            }
+        }
+        _ = tokio::time::sleep(remaining) => {
+            if context.cancellation_signal.commit_started() {
+                classify_memory_settlement(context, future.await)
+            } else {
+                Err(RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_application::CancellationStage::BeforeEffect))
+            }
+        }
+    }
+}
+
+fn classify_memory_settlement<T>(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    outcome: Result<T, RetainedSurfaceExecutionErrorV1>,
+) -> Result<(T, bool), RetainedSurfaceExecutionErrorV1> {
+    let commit_started = context.cancellation_signal.commit_started();
+    let cancelled = context.cancellation_signal.is_cancelled();
+    let timed_out = effective_expiry(context) <= now_micros();
+    match outcome {
+        Ok(value) if commit_started => Ok((value, timed_out)),
+        Ok(_) if cancelled => Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_application::CancellationStage::BeforeEffect,
+        )),
+        Ok(_) if timed_out => Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_application::CancellationStage::BeforeEffect,
+        )),
+        Ok(value) => Ok((value, false)),
+        Err(_) if cancelled && !commit_started => Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_application::CancellationStage::BeforeEffect,
+        )),
+        Err(RetainedSurfaceExecutionErrorV1::Cancelled(_)) if timed_out => {
+            Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                tracedecay_application::CancellationStage::BeforeEffect,
+            ))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn memory_operation_context<T: Serialize>(
+    context: &RetainedSurfaceExecutionContextV1<'_>,
+    owner: &FactOwnerV1,
+    action: &str,
+    logical_effect: &T,
+) -> Result<MemoryOperationContext, RetainedSurfaceExecutionErrorV1> {
+    MemoryOperationContext::from_logical_effect(
+        owner,
+        action,
+        logical_effect,
+        Some(context.request_context.actor().clone()),
+    )
+    .map_err(memory_mapping::map_memory_error)
 }

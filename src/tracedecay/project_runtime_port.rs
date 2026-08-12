@@ -62,7 +62,6 @@ impl ProjectRuntime for TraceDecay {
     fn open_project_store_db(&self) -> RuntimeFuture<'_, Database> {
         Box::pin(TraceDecay::open_project_store_db(self))
     }
-
 }
 
 impl DashboardProjectRuntime for TraceDecay {

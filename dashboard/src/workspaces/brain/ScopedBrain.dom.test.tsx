@@ -349,7 +349,7 @@ describe('ScopedBrain', () => {
    * are the only fields that say those zeros are not measurements. Reading the
    * numbers without the flags turned "no session or event source is available"
    * and
-   * "this project has no memory bank" into "nothing has happened here", which
+   * "this project has no memory store" into "nothing has happened here", which
    * is the one reading the reader cannot tell apart from real quiet.
    */
   it('withholds counts a source flagged unavailable, and says why', async () => {
@@ -366,7 +366,7 @@ describe('ScopedBrain', () => {
           body: withEnvelopePayload({
             ...MEMORY_PAYLOAD,
             exists: false,
-            error: 'no memory bank at /store/proj_x/memory.db',
+            error: 'no memory store at /store/proj_x/memory.db',
             memory: { ...(MEMORY_PAYLOAD['memory'] as object), fact_count: 0, entity_count: 0 },
           }),
         },
@@ -393,7 +393,7 @@ describe('ScopedBrain', () => {
     expect(readout('events')).toBe('—');
     // And each dash is accounted for, in the source's own words where it sent
     // any — a withheld figure the reader cannot explain reads as a bug.
-    expect(screen.getByText(/no memory bank at \/store\/proj_x\/memory\.db/)).toBeTruthy();
+    expect(screen.getByText(/no memory store at \/store\/proj_x\/memory\.db/)).toBeTruthy();
     expect(screen.getByText(/no session or event source is available/i)).toBeTruthy();
   });
 
@@ -422,7 +422,7 @@ describe('ScopedBrain', () => {
     await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
     expect(readout('facts')).toBe('0');
     expect(readout('entities')).toBe('12');
-    expect(screen.queryByText(/no memory bank/i)).toBeNull();
+    expect(screen.queryByText(/no memory store/i)).toBeNull();
   });
 
   /**

@@ -1,20 +1,26 @@
 use super::*;
 
+use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::CancellationSignal;
+use tracedecay_application::{
+    CancellationSignal, CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass,
+    RequestContext, RequestId, ResolvedScope,
+};
 use tracedecay_code_index::graph_projection::HermeticCodeGraphProjectionStore;
 use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
 use tracedecay_domain::{
-    BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
+    ActorId, BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
     CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkV1, ContentDigest,
-    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, PolicyRevisionId,
-    RelationEdgeKindV1, SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision,
-    SensitivityLevelV1, SnapshotFileDispositionV1, SourceSpan, SymbolOccurrenceId,
+    EdgeAuthorityV1, FileOccurrenceId, LanguageDescriptorRevision, LanguageId, ManifestDigest,
+    PolicyRevisionId, ProjectId, RefId, RelationEdgeKindV1, RepositoryId, SanitizedCodeFileV1,
+    SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SnapshotFileDispositionV1,
+    SourceSpan, SymbolOccurrenceId, WorktreeId,
 };
 use tracedecay_graph_db::NeverCancelled;
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[allow(dead_code)]
 fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
@@ -47,6 +53,42 @@ where
     hasher.update([0]);
     hasher.update(value.as_bytes());
     fixture_id(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn verified_graph_context(cancellation: &CancellationSignal) -> RequestContext {
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.affected-tests.fixture").expect("fixture project"),
+        RepositoryId::new("repository.affected-tests.fixture").expect("fixture repository"),
+        WorktreeId::new("worktree.affected-tests.fixture").expect("fixture worktree"),
+        Some(RefId::new("refs/heads/affected-tests-fixture").expect("fixture reference")),
+    )
+    .expect("fixture resolved scope");
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.affected-tests.fixture").expect("fixture grant"),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("fixture grant digest"),
+        ActorId::new("actor.affected-tests-fixture.issuer").expect("fixture issuer"),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        BTreeSet::from([
+            CapabilityId::new("capability.affected-tests.fixture").expect("fixture capability")
+        ]),
+        BTreeSet::from([
+            UseCaseId::new("use-case.affected-tests.fixture").expect("fixture use case")
+        ]),
+        DisclosureClass::Evidence,
+    )
+    .expect("fixture capability grant");
+    RequestContext::new(
+        ActorId::new("actor.affected-tests-fixture.requester").expect("fixture requester"),
+        scope,
+        grant,
+        RequestId::new("request.affected-tests.fixture").expect("fixture request"),
+        Deadline::new(UtcMicros(i64::MAX)).expect("fixture deadline"),
+        cancellation.context(),
+    )
+    .expect("fixture request context")
 }
 
 fn verified_graph(
@@ -138,7 +180,12 @@ fn verified_graph(
     let reader = store
         .interactive_reader_with_cancellation(&generation, Arc::clone(&graph_cancellation))
         .expect("open generation-pinned fixture reader");
-    crate::tracedecay::queries::graph::VerifiedGraphQuery::from_reader(reader, graph_cancellation)
+    let context = verified_graph_context(&cancellation);
+    crate::tracedecay::queries::graph::VerifiedGraphQuery::from_reader(
+        reader,
+        graph_cancellation,
+        context,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -10,13 +10,13 @@
       {
         "content": "Database backup runbook uses pg_dump nightly",
         "category": "project",
-        "source": "on-topic-low",
+        "source_label": "on-topic-low",
         "trust": 0.3
       },
       {
         "content": "Acme primary database runs on Postgres",
         "category": "project",
-        "source": "off-topic-high",
+        "source_label": "off-topic-high",
         "trust": 0.9
       }
     ],

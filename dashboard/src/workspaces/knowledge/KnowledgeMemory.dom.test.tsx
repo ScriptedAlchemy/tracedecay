@@ -255,7 +255,7 @@ const RUNS = {
     },
     {
       run_id: "run-b",
-      trigger: "manual_cli",
+      trigger: "manual",
       task: "skill_writer",
       backend: "codex_app_server",
       model: null,
@@ -705,28 +705,13 @@ describe("Curation console", () => {
     stubRoutes();
     renderPage("/knowledge?view=curation");
     const list = await screen.findByRole("region", {
-      name: "Automatic run history",
+      name: "Automatic run records",
     });
-    expect(
-      await within(list).findByText("backend timed out after 60s"),
-    ).toBeTruthy();
-    // Each disclosure row prints the status and tallies from its own ledger
-    // record. Keep both records scoped to the read-only history panel so a
-    // curator-control settlement elsewhere on the page cannot satisfy this.
-    expect(
-      within(list).getByRole("button", {
-        name: /memory_curator.*succeeded.*3 accepted · 2 rejected/,
-      }),
-    ).toBeTruthy();
-    expect(
-      within(list).getByRole("button", {
-        name: /skill_writer.*failed.*0 accepted · 0 rejected/,
-      }),
-    ).toBeTruthy();
-    expect(
-      requested.some((url) =>
-        url.split("?")[0]?.endsWith("/api/automation/runs"),
-      ),
-    ).toBe(true);
+    expect(within(list).getByText("backend timed out after 60s")).toBeTruthy();
+    // The failed run keeps its own chip rather than being folded into a count,
+    // and the chip carries the state in `data-state` so the meaning does not
+    // depend on the label text or on colour.
+    expect(list.querySelector('[data-state="error"]')).toBeTruthy();
+    expect(list.querySelector('[data-state="ready"]')).toBeTruthy();
   });
 });

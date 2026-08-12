@@ -109,13 +109,13 @@ const SUMMARY_ROWS = [
 ];
 const FACT_ROWS = [
   {
-    fact_id: 11,
+    fact_id: `fact.${'a'.repeat(64)}.${'b'.repeat(64)}`,
     content: 'Graph search is bounded by ResolvedScope and never crosses project stores.',
     category: 'project',
     trust_score: 0.82,
   },
   {
-    fact_id: 12,
+    fact_id: `fact.${'a'.repeat(64)}.${'c'.repeat(64)}`,
     content: 'Explorer never merges source results into one ranked list.',
     category: 'design',
     trust_score: 0.64,

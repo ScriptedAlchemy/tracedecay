@@ -52,13 +52,6 @@ pub(super) enum Assertion {
         #[serde(default)]
         phase: AssertionPhase,
     },
-    CurationRemovesSource {
-        name: String,
-        source: String,
-        expected: bool,
-        #[serde(default)]
-        phase: AssertionPhase,
-    },
     SearchRank {
         name: String,
         query: String,

@@ -657,11 +657,12 @@ impl DaemonSessionRuntimeRegistryV1 {
                 session_registry_error("register project memory authority", format!("{error:?}"))
             })?;
         if let Some(database) = self.project_memory.lock().await.get(&project_id).cloned() {
-            return Database::publish_runtime(
+            let readonly = Database::publish_runtime(
                 database.retained_runtime().clone(),
                 DatabaseAccessMode::ReadOnly,
             )
-            .await;
+            .await?;
+            return Ok(readonly);
         }
         let shard_id = StoreShardIdV1::project(
             self.identity.brain_id().clone(),

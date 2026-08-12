@@ -389,9 +389,6 @@ impl ProjectMemoryFactUpdateCommandV1 {
     pub fn target(&self) -> &ProjectMemoryFactIdV1 {
         &self.target
     }
-    pub fn owner(&self) -> &FactOwnerV1 {
-        self.target.owner()
-    }
     pub fn operation_id(&self) -> &ProvenanceId {
         &self.operation_id
     }
@@ -438,9 +435,6 @@ impl ProjectMemoryFactRemoveCommandV1 {
 
     pub fn target(&self) -> &ProjectMemoryFactIdV1 {
         &self.target
-    }
-    pub fn owner(&self) -> &FactOwnerV1 {
-        self.target.owner()
     }
     pub fn operation_id(&self) -> &ProvenanceId {
         &self.operation_id

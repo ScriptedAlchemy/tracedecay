@@ -44,7 +44,7 @@ function envelopePayload<T>(result: EnvelopeResult<T> | undefined): T | null {
  *   provide exact revision and generation provenance.
  *
  *   The project-scoped gateway, `/api/projects/{id}/…`, supplies the code graph,
- *   memory bank and session analytics when those reads resolve. Their envelope
+ *   memory store and session analytics when those reads resolve. Their envelope
  *   client preserves typed transport and schema outcomes, so this surface never
  *   guesses that a generic failure means "not mounted".
  */
@@ -76,7 +76,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     '/api/plugins/graph/overview',
     GraphOverviewPayloadV1Schema,
   );
-  const memory = useEnvelope(
+  const memoryStatus = useEnvelope(
     ['brain', 'memory-status'],
     '/api/plugins/holographic/status',
     MemoryStatusPayloadV1Schema,
@@ -118,8 +118,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   // as well.
   const totals = envelopePayload(overview.data)?.totals ?? null;
 
-  const memoryRead = envelopePayload(memory.data);
-  const bank = memoryRead?.exists === true ? memoryRead.memory : null;
+  const memoryStatusRead = envelopePayload(memoryStatus.data);
+  const memory = memoryStatusRead?.exists === true ? memoryStatusRead.memory : null;
 
   const analyticsRead = envelopePayload(analytics.data);
   const usage =
@@ -141,10 +141,10 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
         : null;
   const unmeasured = [
     readAbsence('Graph totals', overview),
-    readAbsence('Memory', memory),
+    readAbsence('Memory', memoryStatus),
     readAbsence('Analytics', analytics),
-    memoryRead !== null && memoryRead.exists === false
-      ? `Memory: ${memoryRead.error || 'this project has no memory bank.'}`
+    memoryStatusRead !== null && memoryStatusRead.exists === false
+      ? `Memory: ${memoryStatusRead.error || 'this project has no memory store.'}`
       : null,
     analyticsRead !== null && analyticsRead.available !== true
       ? 'Analytics: no session or event source is available, so activity could not be counted.'
@@ -184,8 +184,8 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                 { label: 'nodes', ...splitCount(totals?.nodes ?? null) },
                 { label: 'edges', ...splitCount(totals?.edges ?? null) },
                 { label: 'files', ...splitCount(totals?.files ?? null) },
-                { label: 'facts', ...splitCount(bank?.fact_count ?? null) },
-                { label: 'entities', ...splitCount(bank?.entity_count ?? null) },
+                { label: 'facts', ...splitCount(memory?.fact_count ?? null) },
+                { label: 'entities', ...splitCount(memory?.entity_count ?? null) },
                 { label: 'events', ...splitCount(usage?.event_count ?? null) },
               ]}
             />

@@ -4,7 +4,9 @@ use std::sync::Arc;
 use axum::Router;
 use tokio::sync::Mutex;
 use tracedecay_application::{
-    ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef, SafeDiagnostic,
+    ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
+    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResponse, InvocationError,
+    RequestId, ResultContractRef, SafeDiagnostic,
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationRevisionId, UserProfileId,
@@ -14,7 +16,9 @@ use tracedecay_lsp::LspSessionRegistry;
 use tracedecay_usecases::configuration::DirectConfigurationMutation;
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
-use super::service::invocation::{DaemonConfigurationRuntimeRegistrar, DaemonInvocationService};
+use super::service::invocation::{
+    DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
+};
 use crate::application_surface::{
     ApplicationSurfaceOperation, ConfigurationBatchSurfaceRequest,
     ConfigurationDirectMutationSurfaceRequest, ConfigurationSurfaceRequest,
@@ -31,6 +35,7 @@ use crate::tracedecay::TraceDecay;
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
 const CONFIGURATION_AUTHORITY_LIFETIME_MICROS: i64 = 3_600_000_000;
 
+#[derive(Clone)]
 struct DashboardConfigurationRuntimeForTestV1 {
     service: DaemonInvocationService,
     lsp_registry: Arc<Mutex<LspSessionRegistry>>,
@@ -47,13 +52,16 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
 
     fn routers(
         &self,
-        _active_project_id: ProjectId,
+        active_project_id: ProjectId,
     ) -> std::result::Result<DashboardApplicationRouters, String> {
-        // This fixture mounts the configuration effect authority only. The
-        // dashboard routes under test remain the production HTTP adapters;
-        // unrelated application primitive routes stay absent.
+        let http = crate::application_surface::http_application_router_with_executor(
+            Arc::new(self.clone()),
+            tracedecay_usecases::operation_stream::OperationEventAuthority::default(),
+            active_project_id,
+        )
+        .map_err(|error| error.to_string())?;
         Ok(DashboardApplicationRouters {
-            http: Router::new(),
+            http,
             configuration: Router::new(),
             feedback: Router::new(),
             work: Router::new(),
@@ -120,6 +128,66 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
                 _ => Err(unavailable_error(&self.result_contract, request_id)),
             }
         })
+    }
+}
+
+impl ApplicationInvocationExecutor for DashboardConfigurationRuntimeForTestV1 {
+    fn invoke(
+        &self,
+        _invocation: ApplicationInvocation,
+    ) -> ApplicationInvocationFuture<'_, std::result::Result<ApplicationResponse, InvocationError>>
+    {
+        Box::pin(async { Err(InvocationError::Unavailable) })
+    }
+}
+
+impl crate::daemon_client::DaemonInvocationExecutor for DashboardConfigurationRuntimeForTestV1 {
+    fn invoke_controlled(
+        &self,
+        request: DaemonInvocationRequest,
+        deadline: tracedecay_application::Deadline,
+        cancellation: tracedecay_application::CancellationSignal,
+        _policy: crate::daemon_client::InvocationCancellationPolicy,
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        '_,
+        std::result::Result<
+            crate::daemon_contract::DaemonInvocationResponse,
+            crate::daemon_client::DaemonInvocationError,
+        >,
+    > {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(crate::daemon_client::DaemonInvocationError::Cancelled {
+                    stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                });
+            }
+            if crate::daemon_client::deadline_remaining(&deadline).is_none() {
+                return Err(crate::daemon_client::DaemonInvocationError::TimedOut {
+                    stage: tracedecay_application::CancellationStage::BeforeAdmission,
+                });
+            }
+            Ok(self
+                .service
+                .invoke_with_cancellation(
+                    &self.lsp_registry,
+                    Some(&self.project_root),
+                    None,
+                    None,
+                    None,
+                    request,
+                    None,
+                )
+                .await)
+        })
+    }
+
+    fn observe_feedback(
+        &self,
+        _subject_digest: ManifestDigest,
+        _observed_at: UtcMicros,
+        _event: tracedecay_usecases::feedback::observations::FeedbackSourceEventV1,
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -216,6 +284,53 @@ pub(crate) async fn dashboard_configuration_runtime_for_test(
             expires_at,
             None,
             policy_digest,
+        )
+        .await?;
+    let configuration = cg
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("dashboard test retained configuration is unavailable: {error}"),
+        })?;
+    let retained_access = super::project_open_owners::daemon_owned_project_source_access_at(
+        &scope,
+        &project_root,
+        &configuration,
+        observed_at,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("dashboard test retained access is invalid: {error}"),
+    })?;
+    let retained_grant =
+        super::project_open_owners::project_open_retained_grant(&retained_access, observed_at)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("dashboard test retained grant is invalid: {error}"),
+            })?;
+    let retained_ports = super::retained_owner::retained_surface_ports(
+        super::retained_owner::ProductionRetainedAuthoritiesV1 {
+            cg: Arc::new(tokio::sync::RwLock::new(Arc::clone(&cg))),
+            project_root: project_root.clone(),
+            project_id: project_id.clone(),
+            mounted_profile_id: None,
+            mounted_session_store_id: None,
+            mounted_session_root_id: None,
+            registered_session_db: None,
+            project_refresh: None,
+            project_retrieval: None,
+            project_workflow_index: None,
+            project_lcm: None,
+            configuration_digest: retained_access.configuration_digest.clone(),
+        },
+    );
+    DaemonRetainedRuntimeRegistrar::new(&service)
+        .register(
+            project_root.clone(),
+            scope.clone(),
+            retained_access.requester,
+            retained_grant,
+            retained_ports,
         )
         .await?;
     let operation = tracedecay_application::configuration_surface_operation(

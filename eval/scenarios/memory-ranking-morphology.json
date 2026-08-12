@@ -10,31 +10,31 @@
       {
         "content": "Use pnpm for installing dependencies in this monorepo",
         "category": "project",
-        "source": "on-topic-install-morph",
+        "source_label": "on-topic-install-morph",
         "trust": 0.5
       },
       {
         "content": "Use npm to install packages",
         "category": "project",
-        "source": "off-topic-install-exact",
+        "source_label": "off-topic-install-exact",
         "trust": 0.5
       },
       {
         "content": "Always back up the database nightly before deploy",
         "category": "project",
-        "source": "on-topic-backup-split",
+        "source_label": "on-topic-backup-split",
         "trust": 0.5
       },
       {
         "content": "Database backups run via pg_dump every night",
         "category": "project",
-        "source": "on-topic-backup-plural",
+        "source_label": "on-topic-backup-plural",
         "trust": 0.5
       },
       {
         "content": "Acme primary database runs on Postgres",
         "category": "project",
-        "source": "off-topic-backup-exact",
+        "source_label": "off-topic-backup-exact",
         "trust": 0.5
       }
     ],

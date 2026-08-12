@@ -56,7 +56,7 @@ project-scoped via `project_root` captured at server start. Security rests on:
    defaults `host` to loopback in practice),
 2. filesystem permissions on the SQLite DBs.
 
-The POST write endpoints (`/curate`, `/curate/apply`) are therefore open to any
+The removed POST write endpoints (`/curate`, `/curate/apply`) were open to any
 local process that can reach the port. **Any refactor must not expose these
 routes off-loopback without adding auth.** The Hermes wrapper is where auth
 actually lives (see §2).
@@ -94,11 +94,10 @@ bundles and the Hermes host working unmodified:**
    holographic/*`, `/lcm/* → …/hermes-lcm/*`, `/graph/*`, `/savings/*`, and
    exposes upstream `/api/capabilities` at `/capabilities`. It also adds the
    **Hermes session-token middleware** — the only auth in the stack.
-3. **Curation is automation-owned.** The Hermes wrapper is a thin proxy; it no
-   longer hosts a separate LLM plan/apply endpoint. Standalone automation and
-   the `tracedecay memory curate --llm` / `--llm-ops` CLI path share the
-   reusable curation core, while dashboard mutation goes through explicit
-   automation runs or `POST /curate/apply`.
+3. **Curation is automation-owned.** The Hermes wrapper is a thin proxy and
+   hosts no plan/apply endpoint. Final-V2 removes the manual memory-curation
+   CLI and dashboard apply route; the automatic curator validates and commits
+   canonical tag/link operations with durable receipts.
 
 ---
 
@@ -115,9 +114,6 @@ in several handlers and omitted from the table for brevity.
 | 2 | GET | `/api/plugins/holographic/fact/{fact_id}` | `fact_detail` | path `fact_id:i64` | `{fact, error}` | Fact row + linked entities. **404** `{detail}` if missing. |
 | 3 | GET | `/api/plugins/holographic/projection` | `projection` | `q`, `limit`(25/`PROJECTION_POINT_CAP`=2000) | `{exists, dim, limit, method, points, error}` | `vector_facts` decodes HRR blobs → PCA on `spawn_blocking`. **Cached** by `(query,limit,VectorStateFingerprint)`. |
 | 4 | GET | `/api/plugins/holographic/similarity` | `similarity` | `min_similarity`, `limit`(25/`SIMILARITY_PAIR_CAP`) | `{exists, dim, count, limit, threshold, min_similarity, total_pairs, score_distribution, pairs, error}` | O(n²·d) pairwise phase-cosine on `spawn_blocking`. **Cached** by fingerprint. Emits `threshold` AND `min_similarity` for shape compat. |
-| 5 | GET | `/api/plugins/holographic/curation/status` | `curation_status` | — | curator status | Reports autonomous curation status, last applied run metadata, and dashboard activity availability. |
-| 6 | GET | `/api/plugins/holographic/curation/activity` | `curation_activity` | `limit` | `{events, count, limit, error}` | Curation activity stream capped to the newest events. Automation paths emit phases such as `queued`, `evidence`, `backend`, `validation`, `apply`, `report`, `finish`, `failure`, and `rejection`. |
-| 7 | POST | `/api/plugins/holographic/curate/apply` | `curate_apply` | body `{ops:[{op:"delete"\|"merge", ...}]}` | `{results, counts:{deleted, merged, errors}}` | Generic ops endpoint. `delete`→`MemoryStore::remove_fact`; `merge`→`MemoryStore::merge_facts` (optional content rewrite + hard-delete losers). Per-op failures reported inline (HTTP 200). |
 | 10 | GET | `/api/plugins/holographic/oplog` | `oplog` | `limit`(50/300) | `{events, count, limit, error}` | `SELECT … FROM memory_oplog ORDER BY id DESC`. Parses `detail_json`. |
 
 ### 3b. `lcm_api.rs` — `/api/plugins/hermes-lcm/*` (4 routes)
@@ -270,16 +266,9 @@ pulled out of SQLite per request). All projection/similarity computation runs on
 **`memory_api.rs` is the coupling hotspot.** It is fan-in from *two* sides:
 
 1. `mod.rs` routes (the 11 HTTP handlers).
-2. **`memory_curate.rs` imports 5 `pub(crate)` functions** —
-   `build_delete_plan`, `delete_fact`, `apply_delete_op`, `apply_merge_op`,
-   `similarity_computation` (`memory_curate.rs:22`). `memory_curate` is the
-   dashboard-free curation core (`tracedecay memory curate`, including the
-   `--llm`/`--llm-ops` review tier used by automation and CLI workflows).
-
-   → **memory_api is not just a route module; it is a curation library.** Moving,
-   renaming, or inlining these 5 functions breaks the CLI curation path and the
-   LLM-review tier. Keep them as reusable seams (or update `memory_curate` in the
-   same change).
+2. Final-V2 has no `memory_curate.rs` parallel authority. Automatic curation
+   reads canonical fact projections and writes through the controlled store
+   curation operation; `memory_api.rs` remains a dashboard read adapter.
 
 `lcm_api.rs` and `graph_api.rs` are leaf route modules (only `mod.rs` calls
 them); each depends only on `util` + `DashboardState`. The one internal coupling
@@ -308,7 +297,7 @@ module, or a documented invariant.
   (FastAPI shape), not Axum's text/plain.
 
 **Data invariants**
-- P4. **Deletion is permanent** (`/curate`, `/curate/apply`,
+- P4. **Deletion was permanent on the removed routes** (`/curate`, `/curate/apply`,
   `MemoryStore::remove_fact`/`merge_facts`). No archive, no soft-delete. This is
   intentional (see project memory facts). Do not "add an archive" without
   explicit intent.

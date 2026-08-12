@@ -135,9 +135,9 @@ const SCHEMA_MARKDOWN: &str = r"# tracedecay SQLite schema
 
 The active project database lives in the user-level TraceDecay profile store
 (`~/.tracedecay/projects/<project_id>/tracedecay.db` by default), scoped to the
-current project. Per-branch variants live beside it under the same store. All
-tables are plain SQLite; safe to query with any client. WAL mode is used, so
-readers do not block writers.
+current project. Linked worktrees share this durable project store. All tables
+are plain SQLite; safe to query with any client. WAL mode is used, so readers
+do not block writers.
 
 ## Tables
 
@@ -193,27 +193,6 @@ Common keys: `tokens_saved`, schema-version markers.
 ### `read_cache` — rendered `tracedecay_read` responses
 - primary key: `(project_id, session_id, file_path, mode, args_hash)`
 - stores `mtime_ns`, `digest`, rendered `body` BLOB, token count, and `created_at`
-
-### v11: `memory_facts`, `memory_entities`, `memory_fact_entities`, `memory_banks`, `memory_feedback_events`
-The holographic fact store replaces narrow decision rows with durable facts
-linked to named entities:
-
-- `memory_facts` — numeric `fact_id`, unique fact content, category, source,
-  tags JSON, computed trust score, retrieval/feedback counts, timestamps, and
-  structured metadata.
-- `memory_entities` — normalized recall keys for symbols, files,
-  directories, branches, people, subsystems, and concepts. Facts can attach
-  multiple entities so recall can start from code or natural-language names.
-- `memory_fact_entities` — many-to-many join table linking facts to entities
-  with cascade deletes.
-- `memory_banks` — optional holographic memory-bank vectors by category or
-  bank name (`bank_name`, `vector`, `hrr_algebra`, `hrr_dim`, `fact_count`,
-  `updated_at`).
-- `memory_feedback_events` — append-only `helpful`/`unhelpful` audit events
-  keyed by numeric `fact_id`, with source, note, old/new trust, and trust delta.
-
-Older `memory_decisions` / `memory_code_areas` tables are migration-only inputs:
-v11 backfills them into `memory_facts` and then drops the legacy tables.
 
 ## Recipes
 
@@ -971,9 +950,7 @@ impl McpServer {
         // and notify make the write's completion observable to
         // [`Self::ledger_writes_settled`] without making it awaited
         // anywhere on the request path.
-        let registered = self.accounting_db.clone();
-        let legacy = self.global_db.clone();
-        if registered.is_some() || legacy.is_some() {
+        if let Some(registered) = self.accounting_db.clone() {
             let ToolTokenAccounting {
                 raw_file_tokens,
                 response_tokens,
@@ -1004,8 +981,8 @@ impl McpServer {
                 failure_reason: failure_reason.as_deref(),
             });
             self.spawn_observed_ledger_write(async move {
-                if let Some(gdb) = registered {
-                    gdb.record_savings(
+                registered
+                    .record_savings(
                         &project_path_str,
                         &tool_name_owned,
                         raw_file_tokens,
@@ -1013,23 +990,7 @@ impl McpServer {
                         ts,
                     )
                     .await;
-                    if let Err(e) = gdb.append_analytics_event(&analytics_event).await {
-                        tracing::warn!(error = %e, "MCP analytics event insert failed");
-                    }
-                    return;
-                }
-                let Some(gdb) = legacy else {
-                    return;
-                };
-                gdb.record_savings(
-                    &project_path_str,
-                    &tool_name_owned,
-                    raw_file_tokens,
-                    response_tokens,
-                    ts,
-                )
-                .await;
-                if let Err(e) = gdb.append_analytics_event(&analytics_event).await {
+                if let Err(e) = registered.append_analytics_event(&analytics_event).await {
                     tracing::warn!(error = %e, "MCP analytics event insert failed");
                 }
             });
@@ -1094,22 +1055,9 @@ impl McpServer {
 
     async fn prepend_index_warnings(
         &self,
-        cg: &TraceDecay,
         include_connection_worktree_warning: bool,
         result: &mut ToolResult,
     ) {
-        // Warn if serving from a fallback (ancestor) branch DB.
-        if let Some(warning) = cg.fallback_warning() {
-            let warning = format!("WARNING: {warning}");
-            if let Some(content) = result
-                .value
-                .get_mut("content")
-                .and_then(|c| c.as_array_mut())
-            {
-                content.insert(0, json!({"type": "text", "text": &warning}));
-            }
-        }
-
         // Borrowed-worktree heads-up (#312). Inserted LAST so it
         // appears FIRST in the response — the index serving the
         // wrong branch is the most serious of these warnings to
@@ -1196,7 +1144,7 @@ impl McpServer {
                 }
                 self.append_version_notice(&mut result, connection_notifications)
                     .await;
-                self.prepend_index_warnings(&cg, selected_owner.is_none(), &mut result)
+                self.prepend_index_warnings(selected_owner.is_none(), &mut result)
                     .await;
                 JsonRpcResponse::success(id, result.value)
             }

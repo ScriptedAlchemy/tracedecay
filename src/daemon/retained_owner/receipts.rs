@@ -6,11 +6,11 @@ use tracedecay_application::retained_surfaces::{
     SessionCoverageModeV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, AuthorityReceipt, CancellationStage, Deadline, EffectId, EffectReceipt,
-    EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceIdentity,
-    EvidencePacket, IdempotencyKey, Omission, OperationBudgetUsage, OperationReceipt, PageState,
-    PolicyDecisionRef, ReconciliationState, RetainedSurfaceExecutionContextV1,
-    RetainedSurfaceExecutionErrorV1, TemporalState, now_micros,
+    ApplicationOutcome, AuthorityReceipt, Deadline, EffectId, EffectReceipt, EffectResult,
+    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceIdentity, EvidencePacket,
+    IdempotencyKey, Omission, OperationBudgetUsage, OperationReceipt, PageState, PolicyDecisionRef,
+    ReconciliationState, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+    TemporalState, now_micros,
 };
 use tracedecay_domain::{ComponentVersion, ManifestDigest, TemporalModeV1, canonical_sha256};
 use tracedecay_tool_catalog::{EffectClass, SortContractId};
@@ -92,7 +92,7 @@ pub(super) fn evidence_outcome(
     });
     if effective_deadline.is_elapsed_at(now_micros()) {
         return Err(RetainedSurfaceExecutionErrorV1::TimedOut(
-            CancellationStage::DuringRead,
+            tracedecay_application::CancellationStage::DuringRead,
         ));
     }
     Ok(outcome)
@@ -223,46 +223,6 @@ pub(crate) fn prepare_retained_effect<T: Serialize>(
 }
 
 impl PreparedRetainedEffect {
-    pub(crate) fn authority_receipt(&self) -> &AuthorityReceipt {
-        &self.authority
-    }
-
-    pub(crate) fn recover(
-        operation: RetainedSurfaceOperation,
-        durable_operation_id: &str,
-        authority: AuthorityReceipt,
-        receipt_template: EffectReceipt,
-    ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
-        if operation != RetainedSurfaceOperation::MemoryAutomationRun
-            || durable_operation_id.trim().is_empty()
-            || receipt_template.outcome != EffectTermination::Partial
-            || receipt_template.committed_state.is_some()
-        {
-            return Err(RetainedSurfaceExecutionErrorV1::InvalidRequest);
-        }
-        receipt_template
-            .validate()
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-        authority
-            .validate_for(&receipt_template.scope)
-            .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-        let effect_id = EffectId::new(format!(
-            "effect.retained.{}.{}",
-            operation.as_str(),
-            durable_operation_id
-        ))
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-        Ok(Self {
-            operation,
-            durable_operation_id: durable_operation_id.to_owned(),
-            effect_id,
-            idempotency_key: receipt_template.idempotency_key.clone(),
-            authority,
-            expected_state: receipt_template.expected_state.clone(),
-            receipt_template,
-        })
-    }
-
     pub(crate) fn material_committed_state_digest<C: Serialize + ?Sized>(
         &self,
         committed_state_material: &C,
@@ -343,49 +303,6 @@ impl PreparedRetainedEffect {
         result: RetainedSurfaceResultV1,
         partial: Option<(&str, &str)>,
     ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        let finished_at = now_micros();
-        self.complete_at(
-            context.observed_at,
-            finished_at,
-            effective_memory_deadline(context),
-            committed_state,
-            reconciliation,
-            result,
-            partial,
-        )
-    }
-
-    pub(crate) fn complete_recovered_with_digest(
-        &self,
-        observed_at: tracedecay_domain::UtcMicros,
-        finished_at: tracedecay_domain::UtcMicros,
-        effective_deadline: Deadline,
-        committed_state: &ManifestDigest,
-        reconciliation: ReconciliationState,
-        result: RetainedSurfaceResultV1,
-    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        self.complete_at(
-            observed_at,
-            finished_at,
-            effective_deadline,
-            committed_state,
-            reconciliation,
-            result,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn complete_at(
-        &self,
-        observed_at: tracedecay_domain::UtcMicros,
-        finished_at: tracedecay_domain::UtcMicros,
-        effective_deadline: Deadline,
-        committed_state: &ManifestDigest,
-        reconciliation: ReconciliationState,
-        result: RetainedSurfaceResultV1,
-        partial: Option<(&str, &str)>,
-    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
         let partial_receipt = self.partial_receipt(committed_state);
         if let Some((reason_code, detail)) = partial {
             return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
@@ -400,11 +317,13 @@ impl PreparedRetainedEffect {
                 committed_receipt: partial_receipt.clone(),
                 detail: detail.to_owned(),
             };
+        let finished_at = now_micros();
+        let effective_deadline = effective_memory_deadline(context);
         let execution = OperationReceipt::completed(
-            observed_at,
+            context.observed_at,
             finished_at,
             effective_deadline.clone(),
-            measured_budget(observed_at, finished_at, &result).map_err(|_| {
+            measured_budget(context.observed_at, finished_at, &result).map_err(|_| {
                 post_commit_failure(
                     "The effect committed, but its delivery budget could not be measured.",
                 )
@@ -440,7 +359,7 @@ impl PreparedRetainedEffect {
                 "The effect committed, but its public result could not be assembled.",
             )
         })?;
-        if effective_deadline.is_elapsed_at(finished_at) {
+        if effective_deadline.is_elapsed_at(now_micros()) {
             let (reason_code, detail) = self.expiry_partial();
             return Err(RetainedSurfaceExecutionErrorV1::PartialEffect {
                 reason_code: reason_code.to_owned(),
@@ -549,17 +468,17 @@ fn map_evidence_terminal(
         | RetainedSurfaceEvidenceTerminalV1::CursorManifestLimitExceeded => {
             RetainedSurfaceExecutionErrorV1::Saturated
         }
-        RetainedSurfaceEvidenceTerminalV1::Cancelled => {
-            RetainedSurfaceExecutionErrorV1::Cancelled(CancellationStage::DuringRead)
-        }
+        RetainedSurfaceEvidenceTerminalV1::Cancelled => RetainedSurfaceExecutionErrorV1::Cancelled(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         RetainedSurfaceEvidenceTerminalV1::Conflict => RetainedSurfaceExecutionErrorV1::Conflict,
         RetainedSurfaceEvidenceTerminalV1::Denied
         | RetainedSurfaceEvidenceTerminalV1::NotFoundOrNotAuthorized => {
             RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized
         }
-        RetainedSurfaceEvidenceTerminalV1::TimedOut => {
-            RetainedSurfaceExecutionErrorV1::TimedOut(CancellationStage::DuringRead)
-        }
+        RetainedSurfaceEvidenceTerminalV1::TimedOut => RetainedSurfaceExecutionErrorV1::TimedOut(
+            tracedecay_application::CancellationStage::DuringRead,
+        ),
         RetainedSurfaceEvidenceTerminalV1::Unsupported => {
             RetainedSurfaceExecutionErrorV1::Unsupported
         }
@@ -664,9 +583,9 @@ mod tests {
         RetainedOutcomeStatusV1, SessionRefreshBeginResultV1,
     };
     use tracedecay_application::{
-        ApplicationOutcome, CancellationContext, CancellationSignal, CapabilityGrantId,
-        CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext, RequestId,
-        RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
+        ApplicationOperation, ApplicationOutcome, CancellationContext, CancellationSignal,
+        CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
+        RequestId, RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1,
         retained_surface_application_operation,
     };
     use tracedecay_domain::{
@@ -674,8 +593,8 @@ mod tests {
     };
 
     use super::{
-        EffectTermination, RetainedSurfaceOperation, RetainedSurfaceResultV1,
-        session_refresh_effect_outcome,
+        EffectTermination, RetainedSurfaceOperation, RetainedSurfaceResultV1, memory_expiry_detail,
+        prepare_retained_effect, session_refresh_effect_outcome,
     };
 
     fn digest(byte: char) -> ManifestDigest {

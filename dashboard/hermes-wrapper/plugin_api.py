@@ -469,7 +469,7 @@ def get_holographic(path: str, request: Request) -> JSONResponse:
 
     Maps ``/holographic/<path>`` to upstream
     ``GET /api/plugins/holographic/<path>`` (e.g. ``projection``,
-    ``similarity``, ``fact/{id}``, ``curation/plan``), preserving the query
+    ``similarity``, ``fact/{id}``, ``oplog``), preserving the query
     string.
     """
     return _proxy("GET", f"/api/plugins/holographic/{path}", request, None)

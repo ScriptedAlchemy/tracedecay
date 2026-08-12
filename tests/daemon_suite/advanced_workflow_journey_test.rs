@@ -312,6 +312,7 @@ fn write_provider_transcript(home: &Path, project: &Path, identity: &WorkAttempt
 fn initialize_project(home: &Path, project: &Path) -> (String, CommitId) {
     std::fs::create_dir_all(home).expect("home directory");
     std::fs::create_dir_all(project).expect("project directory");
+    task_session::seed_semantic_source(project);
     std::fs::write(project.join("README.md"), "advanced workflow journey\n")
         .expect("fixture source");
     run(
@@ -367,6 +368,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     let project = scratch.path().join("project");
     let (_commit_text, commit) = initialize_project(&home, &project);
     let project = project.canonicalize().expect("canonical project root");
+    let semantic_fixture = task_session::install_semantic_fixture(&home);
 
     let mut daemon = spawn_project_daemon(&home, &project);
     run(
@@ -872,7 +874,7 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
     restarted
         .kill_and_wait()
         .expect("physically restart daemon after accepted synthesis settlement");
-    let _restarted_evidence = spawn_project_daemon(&home, &project);
+    let mut restored_daemon = spawn_project_daemon(&home, &project);
     let client = sdk_client(&home, project_id.as_str());
     let _ = wait_for_application_mount(&client);
     wait_for_work_mount(&client);
@@ -899,16 +901,35 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
             .contains(completed_synthesis.identity()),
         "the accepted-attempt relation must survive physical daemon restart"
     );
-    let restored_receipt = task_session::assert_restored_provider_session_unavailable(
+    restored_daemon = task_session::configure_restart_and_activate_semantic_profile(
+        &home,
+        &project,
+        &client,
+        &project_id,
+        restored_daemon,
+        &product_selection,
+        &synthesis_task,
+        restored_entry.verified_version(),
+        completed_synthesis.identity(),
+        &sealed_receipt,
+        &semantic_fixture,
+    );
+    restored_daemon
+        .kill_and_wait()
+        .expect("physically restart daemon after evaluated semantic activation");
+    let _activated_daemon = spawn_project_daemon(&home, &project);
+    let client = sdk_client(&home, project_id.as_str());
+    let _ = wait_for_application_mount(&client);
+    wait_for_work_mount(&client);
+    task_session::wait_for_semantic_current(&home, &project);
+    let _task_session = task_session::assert_available_over_sdk_and_mcp(
+        &home,
+        &project,
         &client,
         &product_selection,
         &synthesis_task,
         restored_entry.verified_version(),
         completed_synthesis.identity(),
-    );
-    assert_eq!(
-        restored_receipt, sealed_receipt,
-        "the accepted-attempt receipt must survive restart exactly"
     );
 
     let handoff_scope = TaskHandoffScope::new(

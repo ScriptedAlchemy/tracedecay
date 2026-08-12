@@ -6,6 +6,16 @@ import {
   DashboardDomainStateV1Schema,
   DashboardEnvelopeV1Schema,
   DoctorFindingsPayloadV1Schema,
+  MemoryAlgebraStatusV1Schema,
+  MemoryCategoryCountV1Schema,
+  MemoryFactDetailPayloadV1Schema,
+  MemoryFactsCoverageV1Schema,
+  MemoryFeedbackFunnelV1Schema,
+  MemoryGrowthPointV1Schema,
+  MemoryOverviewSummaryV1Schema,
+  MemoryStatusPayloadV1Schema,
+  MemoryStatusV1Schema,
+  MemoryTrustBucketV1Schema,
   StorageFindingsPayloadV1Schema,
   StorageTelemetryPayloadV1Schema,
   WIRE_SCHEMA_REVISION,
@@ -123,6 +133,91 @@ describe("wire envelope decoder", () => {
     const bad = readyEnvelope();
     delete bad.authorization;
     expect(Envelope.safeParse(bad).success).toBe(false);
+  });
+});
+
+describe("wire memory decoder", () => {
+  it("enforces the admitted memory fact page range", () => {
+    const coverage = {
+      completeness: "complete",
+      limit: 1,
+    };
+
+    expect(MemoryFactsCoverageV1Schema.safeParse(coverage).success).toBe(true);
+    expect(MemoryFactsCoverageV1Schema.safeParse({ ...coverage, limit: 100 }).success).toBe(true);
+    expect(
+      MemoryFactsCoverageV1Schema.safeParse({ ...coverage, limit: 0 }).success,
+    ).toBe(false);
+    expect(MemoryFactsCoverageV1Schema.safeParse({ ...coverage, limit: 101 }).success).toBe(false);
+    expect(MemoryFactsCoverageV1Schema.safeParse({ ...coverage, limit: -1 }).success).toBe(false);
+
+    const widestSafeCoverage = {
+      ...coverage,
+      eligible: Number.MAX_SAFE_INTEGER,
+      examined: Number.MAX_SAFE_INTEGER,
+    };
+    expect(MemoryFactsCoverageV1Schema.safeParse(widestSafeCoverage).success).toBe(true);
+    expect(
+      MemoryFactsCoverageV1Schema.safeParse({
+        ...widestSafeCoverage,
+        eligible: Number.MAX_SAFE_INTEGER + 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      MemoryFactsCoverageV1Schema.safeParse({
+        ...widestSafeCoverage,
+        examined: Number.MAX_SAFE_INTEGER + 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      MemoryFactsCoverageV1Schema.safeParse({ ...widestSafeCoverage, eligible: -1 }).success,
+    ).toBe(false);
+    expect(
+      MemoryFactsCoverageV1Schema.safeParse({ ...widestSafeCoverage, examined: -1 }).success,
+    ).toBe(false);
+  });
+
+  it("rejects unknown fields across the canonical memory DTO boundary", () => {
+    const algebra = { name: "fhrr", hrr_dim: 1024, estimated_capacity: 4096 };
+    const feedback = {
+      access_count_total: 1,
+      feedback_total: 1,
+      rated_fact_count: 1,
+      retrieval_count_total: 1,
+      retrieved_fact_count: 1,
+      seen_to_feedback_ratio: 2,
+    };
+    const status = {
+      algebra,
+      below_default_recall_threshold_count: 0,
+      entity_count: 1,
+      fact_count: 1,
+      feedback_funnel: feedback,
+      helpful_count: 1,
+      trust_025_050_count: 0,
+      trust_050_075_count: 0,
+      trust_075_100_count: 1,
+      trust_0_025_count: 0,
+      unhelpful_count: 0,
+    };
+    const cases: Array<[z.ZodTypeAny, Record<string, unknown>]> = [
+      [MemoryAlgebraStatusV1Schema, algebra],
+      [MemoryFeedbackFunnelV1Schema, feedback],
+      [MemoryStatusV1Schema, status],
+      [MemoryStatusPayloadV1Schema, { path: "/fixture", exists: true, memory: status, error: "" }],
+      [MemoryFactDetailPayloadV1Schema, { fact: null, error: "" }],
+      [MemoryCategoryCountV1Schema, { category: "project", count: 1 }],
+      [MemoryTrustBucketV1Schema, { bucket: 0, label: "0.0–0.1", count: 1 }],
+      [MemoryGrowthPointV1Schema, { date: "2026-08-11", facts: 1, cumulative_facts: 1 }],
+      [
+        MemoryOverviewSummaryV1Schema,
+        { facts: 1, entities: 1, categories: [], trust_histogram: [], growth: [] },
+      ],
+    ];
+
+    for (const [schema, value] of cases) {
+      expect(schema.safeParse({ ...value, unexpected: true }).success).toBe(false);
+    }
   });
 });
 

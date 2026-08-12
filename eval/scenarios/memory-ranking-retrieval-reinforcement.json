@@ -10,7 +10,7 @@
       {
         "content": "Release pipeline caching uses sccache to speed Rust compilation zulu",
         "category": "project",
-        "source": "hot",
+        "source_label": "hot",
         "trust": 0.6,
         "preload_query": "zulu",
         "preload_searches": 12
@@ -18,7 +18,7 @@
       {
         "content": "Release pipeline caching uses sccache to speed Rust compilation yankee",
         "category": "project",
-        "source": "cold",
+        "source_label": "cold",
         "trust": 0.6
       }
     ],

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "memory-feedback-trust",
   "title": "helpful fact_feedback raises trust and records an audit event",
-  "description": "Proves the exact fact-feedback operation is wired end-to-end: a `helpful` action on a seeded FactId must raise its FactRecordV1 trust score and appear in that fact's typed history.",
+  "description": "Proves the exact fact-feedback operation is wired end-to-end: a `helpful` action on a seeded FactId must raise its canonical trust score and appear in that fact's typed history.",
   "contract": "stable",
   "contract_notes": "Deterministic write-path check with no LLM. The harness captures the exact FactId returned during setup and verifies the typed get/history response after feedback.",
   "setup": {
@@ -10,7 +10,7 @@
       {
         "content": "Payments service exposes an idempotency key on POST /charges",
         "category": "project",
-        "source": "feedback-target",
+        "source_label": "feedback-target",
         "trust": 0.3
       }
     ],

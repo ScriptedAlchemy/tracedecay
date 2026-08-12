@@ -160,6 +160,7 @@ trait AutomaticFactReceiptSummary {
     fn summary_apply_id(&self) -> &str;
     fn summary_state(&self) -> AutomaticFactState;
     fn summary_applied_fact_id(&self) -> Option<&str>;
+    fn summary_ledger_value(&self) -> Value;
 }
 
 impl AutomaticFactReceiptSummary for AutomaticFactReceipt {
@@ -173,6 +174,24 @@ impl AutomaticFactReceiptSummary for AutomaticFactReceipt {
 
     fn summary_applied_fact_id(&self) -> Option<&str> {
         self.applied_fact_id.as_deref()
+    }
+
+    fn summary_ledger_value(&self) -> Value {
+        json!({
+            "schema_version": self.schema_version,
+            "apply_id": self.apply_id,
+            "run_id": self.run_id,
+            "state": self.state,
+            "request": {
+                "add_fact_request": self.add_fact_request,
+            },
+            "evidence_hash": self.evidence_hash,
+            "item": self.item,
+            "validation": self.validation,
+            "quarantine_reason": self.quarantine_reason,
+            "applied_fact_id": self.applied_fact_id,
+            "recorded_at_micros": self.recorded_at_micros,
+        })
     }
 }
 
@@ -188,48 +207,10 @@ impl AutomaticFactReceiptSummary for SettledAutomaticFactReceipt {
     fn summary_applied_fact_id(&self) -> Option<&str> {
         self.applied_fact_id()
     }
-}
 
-fn values_digest(values: &[Value]) -> Result<String> {
-    let bytes = serde_json::to_vec(values).map_err(TraceDecayError::from)?;
-    Ok(crate::automation::artifact_refs::sha256_bytes(&bytes))
-}
-
-fn fact_collection_summary(values: &[Value]) -> Result<Value> {
-    Ok(json!({
-        "count": values.len(),
-        "sha256": values_digest(values)?,
-    }))
-}
-
-fn automatic_fact_receipt_summary<T: AutomaticFactReceiptSummary>(receipt: &T) -> Value {
-    json!({
-        "apply_id": receipt.summary_apply_id(),
-        "state": receipt.summary_state(),
-        "applied_fact_id": receipt.summary_applied_fact_id(),
-    })
-}
-
-fn session_fact_ledger_summary(
-    proposed: &[Value],
-    accepted: &[Value],
-    admitted: &[Value],
-    quarantined: &[Value],
-) -> Result<Value> {
-    Ok(json!({
-        "schema_version": 1,
-        "proposed": fact_collection_summary(proposed)?,
-        "accepted": fact_collection_summary(accepted)?,
-        "admitted": fact_collection_summary(admitted)?,
-        "quarantined": fact_collection_summary(quarantined)?,
-    }))
-}
-
-fn validation_repairs_summary(repairs: &[Value]) -> Result<Value> {
-    Ok(json!({
-        "count": repairs.len(),
-        "sha256": values_digest(repairs)?,
-    }))
+    fn summary_ledger_value(&self) -> Value {
+        self.ledger_value()
+    }
 }
 
 fn session_fact_curation_receipt<T: AutomaticFactReceiptSummary>(
@@ -364,7 +345,7 @@ fn rejected_session_reflector_run(
     config: &AutomationConfig,
     reason: &str,
     evidence_hash: Option<String>,
-) -> Result<SessionReflectorAutomationRun> {
+) -> SessionReflectorAutomationRun {
     let (report, record) = unpersisted_rejected_parts(
         run,
         config,
@@ -372,14 +353,14 @@ fn rejected_session_reflector_run(
         reason,
         evidence_hash,
         "session_reflector",
-    )?;
-    Ok(SessionReflectorAutomationRun {
+    );
+    SessionReflectorAutomationRun {
         run_id: run.run_id.clone(),
         report,
         ledger_record: record,
         backend_response: None,
         committed_receipt: None,
-    })
+    }
 }
 
 /// Validates and automatically applies the `facts` half of a reflector (or
@@ -389,6 +370,7 @@ pub(super) struct ProposedAgentOutput<'a> {
     pub(super) retry_report: &'a AgentTaskRetryReport,
     pub(super) evidence: &'a Value,
     pub(super) evidence_hash: Option<String>,
+    pub(super) proposed_ops: &'a Value,
     pub(super) proposals: &'a [Value],
 }
 
@@ -420,8 +402,8 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         retry_report,
         evidence,
         evidence_hash,
+        proposed_ops,
         proposals,
-        ..
     } = output;
     let run_id = finalizer.run_id();
     let (accepted_facts, rejected_facts) =
@@ -484,23 +466,15 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         }
         let settled_values = settled_receipts
             .iter()
-            .map(automatic_fact_receipt_summary)
+            .map(SettledAutomaticFactReceipt::ledger_value)
             .collect::<Vec<_>>();
         let authority_quarantines = settled_receipts
             .iter()
             .filter(|receipt| receipt.state() == AutomaticFactState::Quarantined)
-            .map(automatic_fact_receipt_summary)
+            .map(SettledAutomaticFactReceipt::ledger_value)
             .collect::<Vec<_>>();
         let mut all_rejections = terminal_rejections.clone();
-        all_rejections.extend(authority_quarantines.iter().cloned());
-        let proposed_summary = session_fact_ledger_summary(
-            proposals,
-            &accepted_facts,
-            admitted_facts,
-            &terminal_rejections,
-        )?;
-        let rejected_summary = fact_collection_summary(&all_rejections)?;
-        let repairs_summary = validation_repairs_summary(validation_repairs)?;
+        all_rejections.extend(authority_quarantines);
         let terminal_accepted_count = receipt.applied_count;
         let terminal_rejected_count = receipt.quarantined_count;
         let committed_receipt = NonEmptyAutomaticFactReceipts::from_vec(
@@ -517,18 +491,23 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
             .append_failed_record_with_effects(
                 response.model.clone(),
                 evidence_hash,
-                Some(proposed_summary),
+                Some(json!({
+                    "facts": proposed_ops.get("facts").cloned().unwrap_or_else(|| json!([])),
+                    "accepted_facts": accepted_facts,
+                    "admitted_facts": admitted_facts,
+                    "quarantined_facts": terminal_rejections,
+                })),
                 error.to_string(),
                 retry_report,
                 Some(json!({
                     "automatic_fact_receipts": settled_values,
                     "applied_receipt_ids": applied_receipt_ids,
                 })),
-                Some(rejected_summary),
+                Some(json!(all_rejections)),
                 Some(json!({
                     "status": receipt.outcome,
                     "receipt": receipt,
-                    "validation_repairs": repairs_summary,
+                    "validation_repairs": validation_repairs,
                 })),
                 terminal_accepted_count,
                 terminal_rejected_count,
@@ -549,7 +528,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         automatic_fact_receipts
             .iter()
             .filter(|receipt| receipt.state == AutomaticFactState::Quarantined)
-            .map(automatic_fact_receipt_summary),
+            .map(AutomaticFactReceiptSummary::summary_ledger_value),
     );
     let curation_policy = json!({
         "decision": curation_decision,
@@ -581,22 +560,23 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
             .get("evidence_hash")
             .and_then(Value::as_str)
             .map(str::to_string),
-        Some(session_fact_ledger_summary(
-            proposals,
-            &accepted_facts,
-            admitted_facts,
-            &terminal_rejections,
-        )?),
+        Some(json!({
+            "facts": proposed_ops.get("facts").cloned().unwrap_or_else(|| json!([])),
+            "accepted_facts": report.get("accepted_facts").cloned().unwrap_or_else(|| json!([])),
+            "admitted_facts": report.get("admitted_facts").cloned().unwrap_or_else(|| json!([])),
+            "quarantined_facts": report.get("quarantined_facts").cloned().unwrap_or_else(|| json!([])),
+            "automatic_fact_receipt_ids": report.pointer("/receipt/automatic_fact_receipt_ids").cloned().unwrap_or_else(|| json!([])),
+        })),
         receipt.applied_count,
         receipt.quarantined_count,
-    )?;
+    );
     record.backend_attempt_count = retry_report.attempt_count();
     record.backend_attempts = retry_report.attempts().to_vec();
     record.applied_ops = report
         .pointer("/curation_policy/effect/applied_receipt_ids")
         .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
         .cloned();
-    record.rejected_ops = Some(fact_collection_summary(&terminal_rejections)?);
+    record.rejected_ops = report.get("quarantined_facts").cloned();
     let applied_receipt_ids = report
         .pointer("/curation_policy/effect/applied_receipt_ids")
         .cloned()
@@ -607,7 +587,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         "admitted_count": admitted_count,
         "quarantined_count": receipt.quarantined_count,
         "receipt": report.get("receipt").cloned().unwrap_or_else(|| json!({})),
-        "validation_repairs": validation_repairs_summary(validation_repairs)?,
+        "validation_repairs": validation_repairs,
         "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
     });
     if let Some(object) = validation_report.as_object_mut() {
@@ -615,7 +595,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
             "applied_receipts".to_string(),
             json!({
             "receipt_ids": applied_receipt_ids,
-            "admitted_count": admitted_count,
+            "admitted_facts": report.get("admitted_facts").cloned().unwrap_or_else(|| json!([])),
             }),
         );
     }
@@ -672,8 +652,12 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             reason,
             evidence_hash,
         } => {
-            return rejected_session_reflector_run(&run, config, reason, evidence_hash)
-                .map_err(Into::into);
+            return Ok(rejected_session_reflector_run(
+                &run,
+                config,
+                reason,
+                evidence_hash,
+            ));
         }
     };
     crate::automation::outcomes::refresh_fact_outcomes(
@@ -779,20 +763,15 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                     .append_failed_record_with_effects(
                         None,
                         evidence_hash,
-                        Some(session_fact_ledger_summary(
-                            &proposals,
-                            &initial_accepted_facts,
-                            &[],
-                            &rejected_facts,
-                        )?),
+                        Some(proposed_ops),
                         error.to_string(),
                         &retry_report,
                         None,
-                        Some(fact_collection_summary(&rejected_facts)?),
+                        Some(json!(rejected_facts.clone())),
                         Some(json!({
                             "status": receipt.outcome,
                             "receipt": receipt,
-                            "validation_repairs": validation_repairs_summary(&validation_repairs)?,
+                            "validation_repairs": validation_repairs,
                         })),
                         initial_accepted_facts.len(),
                         rejected_facts.len(),
@@ -823,6 +802,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             retry_report: &retry_report,
             evidence: &evidence,
             evidence_hash: evidence_hash.clone(),
+            proposed_ops: &proposed_ops,
             proposals: &proposals,
         },
         &validation_repairs,

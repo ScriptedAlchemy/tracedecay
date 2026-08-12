@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
+use tracedecay_application::retained_surfaces::{FactCommitOwnerV1, MemoryStatusV1};
 
 use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
 
@@ -87,20 +88,14 @@ async fn daemon_tool_json_within(
     })?
 }
 
-pub(crate) fn format_memory_status_report(
-    status: &tracedecay_application::retained_surfaces::MemoryStatusV1,
-) -> String {
+pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
     let owner = match &status.owner {
-        tracedecay_application::retained_surfaces::FactCommitOwnerV1::Profile => {
-            "profile".to_owned()
-        }
-        tracedecay_application::retained_surfaces::FactCommitOwnerV1::Project { project_id } => {
-            format!("project:{}", project_id.as_str())
-        }
+        FactCommitOwnerV1::Profile => "profile".to_owned(),
+        FactCommitOwnerV1::Project { project_id } => format!("project:{}", project_id.as_str()),
     };
     format!(
         concat!(
-            "Canonical memory status\n",
+            "Holographic memory status\n",
             "owner: {}\n",
             "facts: {}\n",
             "entities: {}\n",
@@ -134,7 +129,7 @@ pub(crate) fn format_memory_status_report(
         status
             .feedback_funnel
             .seen_to_feedback_ratio
-            .map_or_else(|| "dead".to_string(), |ratio| format!("{ratio}:1")),
+            .map_or_else(|| "n/a".to_string(), |ratio| format!("{ratio}:1")),
     )
 }
 
@@ -183,17 +178,20 @@ async fn handle_status_command_within(
         let result = daemon_tool_json_within(
             deadline,
             &project_path,
-            "tracedecay_admin_project",
-            serde_json::json!({ "action": "runtime_status", "json": json }),
+            "tracedecay_runtime",
+            serde_json::json!({ "format": "json" }),
         )
         .await?;
-        let output = result
-            .get("output")
-            .and_then(Value::as_str)
-            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                message: "daemon runtime status response omitted output".to_string(),
-            })?;
-        print!("{output}");
+        if json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            let snapshot: tracedecay::runtime_telemetry::RuntimeSnapshot =
+                serde_json::from_value(result)?;
+            print!(
+                "{}",
+                tracedecay::runtime_telemetry::to_text_report(&snapshot)
+            );
+        }
         return Ok(());
     }
     let daemon_status = daemon_tool_json_within(
@@ -286,10 +284,7 @@ async fn handle_status_command_within(
                 .get("parent_branch")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            is_fallback: daemon_status
-                .get("branch_fallback")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            is_fallback: false,
         });
     let cost_info = None;
     if short {

@@ -68,7 +68,7 @@ fn reset_required_observation_is_distinct_from_unavailability() {
 }
 
 #[test]
-fn scoped_retained_problems_keep_problem_outcome_and_rejection_classification() {
+fn scoped_retained_invalid_request_preserves_rejection_classification() {
     let scope = ResolvedScope::new(
         ProjectId::new("project.retained.observability").expect("project"),
         RepositoryId::new("repository.retained.observability").expect("repository"),
@@ -101,4 +101,31 @@ fn scoped_retained_problems_keep_problem_outcome_and_rejection_classification() 
             FeedbackArgumentRejectionClassV1::InvalidShape,
         ))
     );
+}
+
+#[test]
+fn scoped_retained_reset_preserves_admitted_terminal_outcome() {
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.retained.reset").expect("project"),
+        RepositoryId::new("repository.retained.reset").expect("repository"),
+        WorktreeId::new("worktree.retained.reset").expect("worktree"),
+        None,
+    )
+    .expect("scope");
+    let reset = DaemonInvocationResponse::retained_application_problem(
+        "request.retained.reset",
+        scope,
+        ApplicationProblem::reset_required(
+            SafeDiagnostic::new(
+                "retained.observability.reset_required",
+                "The retained observability fixture requires reset",
+            )
+            .expect("diagnostic"),
+        ),
+    );
+    assert_eq!(
+        invocation_response_outcome(&reset),
+        FeedbackOutcomeV1::ResetRequired
+    );
+    assert_eq!(invocation_rejected_argument(&reset), None);
 }

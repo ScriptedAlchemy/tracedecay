@@ -85,7 +85,11 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
         if let Ok(envelope) = &response.result {
             let producer = self
                 .invocation
-                .observability_producer_for_project_id(&envelope.scope.project_id);
+                .observability_producer_for_brain_profile_project(
+                    &self.credentials.brain_id,
+                    &self.credentials.profile_id,
+                    &envelope.scope.project_id,
+                );
             record_remote_query_response(producer.as_deref(), expected_shards, &response);
         }
         Ok(response)

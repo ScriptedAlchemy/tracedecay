@@ -99,7 +99,7 @@ pub(super) fn def_fact_feedback(input_schema: Value) -> ToolDefinition {
     def_rw(
         "tracedecay_fact_feedback",
         "Fact Feedback",
-        "Record helpful/unhelpful feedback for an exact retained-memory fact and adjust its trust score. Call this on fact_id values surfaced in tracedecay_context's Memory Matches or tracedecay_fact_store_search whenever a recalled fact materially helped or misled you -- feedback is how trust is earned, and recalled facts are almost never rated.",
+        "Record helpful/unhelpful feedback for an active-project memory fact and adjust its trust score. Call this on fact_id values surfaced in tracedecay_context's Memory Matches or tracedecay_fact_store_search whenever a recalled fact materially helped or misled you -- feedback is how trust is earned, and recalled facts are almost never rated.",
         input_schema,
     )
 }
@@ -108,7 +108,7 @@ pub(super) fn def_memory_status(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_memory_status",
         "Memory Status",
-        "Inspect canonical retained-memory counts, trust distribution, algebra, and feedback funnel without mutating state. Defaults to the active project; use project_selector.project_id only when intentionally checking another registered project.",
+        "Inspect canonical memory state: return the owner, fact/entity counts, algebra identity and capacity, trust distribution, below-threshold facts, feedback totals, and retrieval funnel. Defaults to the active project; pass an exact project_selector only when intentionally checking another registered project. Human/operator equivalent: `tracedecay memory status`.",
         input_schema,
     )
 }

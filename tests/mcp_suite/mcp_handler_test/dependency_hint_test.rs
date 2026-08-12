@@ -1,7 +1,5 @@
 #![cfg(feature = "test-transport")]
 
-mod lazy_cutover;
-
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
@@ -10,6 +8,8 @@ use std::process::Command;
 use std::time::Duration;
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
+
+mod lazy_cutover;
 
 struct ScopedDependencyHintFixture {
     harness: ProductionProjectCompositionHarnessV1,
@@ -103,7 +103,7 @@ fn hint_candidates(payload: &Value) -> &[Value] {
 }
 
 #[tokio::test]
-async fn test_search_reports_parser_backed_external_import_hint_without_mutating_generation() {
+async fn test_search_reports_unresolved_external_import_hint_without_mutating_generation() {
     let fixture = production_composition_fixture_with_sources(|project| {
         fs::create_dir_all(project.join("src")).unwrap();
         write_dependency_declaration(project, "export interface SparseWidget { value: string }\n");
@@ -143,14 +143,6 @@ export function GenerationAnchor() { return 2; }
         })]
     );
     assert_eq!(
-        sparse["external_import_hint"]["resolution_status"],
-        "unverified"
-    );
-    assert_eq!(
-        sparse["external_import_hint"]["evidence"],
-        "parser_external_module_specifier"
-    );
-    assert_eq!(
         sparse["external_import_hint"]["suggested_action"],
         "verify_external_import_before_lazy_indexing"
     );
@@ -178,68 +170,6 @@ export function GenerationAnchor() { return 2; }
             "automatic hinting must not index the ignored dependency: {exact}"
         );
     }
-    fixture.harness.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_search_external_import_hint_does_not_claim_project_alias_resolution() {
-    let fixture = production_composition_fixture_with_sources(|project| {
-        fs::create_dir_all(project.join("src")).unwrap();
-        fs::write(
-            project.join("src/app.ts"),
-            r#"import type { AliasWidget } from "@/types";
-export function AliasWidgetHelper() { return 1; }
-"#,
-        )
-        .unwrap();
-    })
-    .await;
-    let server = fixture
-        .harness
-        .server(&fixture.project_root)
-        .expect("production project server");
-
-    let payload =
-        wait_for_search_payload(&server, json!({"query": "AliasWidget", "limit": 5})).await;
-    assert_eq!(
-        hint_candidates(&payload),
-        &[json!({
-            "module": "@/types",
-            "symbol": "AliasWidget",
-            "import_file": "src/app.ts",
-            "line": 1,
-        })]
-    );
-    assert_eq!(
-        payload["external_import_hint"]["evidence"],
-        "parser_external_module_specifier"
-    );
-    assert_eq!(
-        payload["external_import_hint"]["resolution_status"],
-        "unverified"
-    );
-    let message = payload["external_import_hint"]["message"]
-        .as_str()
-        .expect("truthful external import message");
-    assert!(message.contains("not verified"));
-    assert!(!message.contains("ignored dependency"));
-    assert!(!message.contains("node_modules"));
-
-    let markdown = handle_real_server_tool_call_raw(
-        &server,
-        "tracedecay_search",
-        json!({"query": "AliasWidget", "limit": 5, "format": "markdown"}),
-    )
-    .await;
-    assert!(
-        markdown["error"].is_null(),
-        "alias advisory markdown: {markdown}"
-    );
-    let markdown = extract_real_server_text(&markdown["result"]);
-    assert!(markdown.contains("is imported from external-module specifier"));
-    assert!(!markdown.contains("exports `AliasWidget`"));
-    assert!(!markdown.contains("ignored dependency"));
-    assert!(!markdown.contains("node_modules"));
     fixture.harness.shutdown().await;
 }
 
@@ -318,7 +248,7 @@ export function IndexedAnchor() { return 1; }
     assert_eq!(payload["results"][0]["display"]["name"], "IndexedAnchor");
     assert!(
         payload["external_import_hint"].is_null(),
-        "a full result page must skip the parser-backed advisory read: {payload}"
+        "a full result page must skip the verified advisory read: {payload}"
     );
     fixture.harness.shutdown().await;
 }

@@ -141,6 +141,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
 mod tests {
     use super::SPECS;
     use crate::retained_surfaces::RetainedSurfaceOperation;
+    use tracedecay_tool_catalog::{BindingSurface, EffectClass, ScopeDimension};
 
     #[test]
     fn contradiction_is_bounded_while_resumable_memory_reads_are_paginated() {

@@ -832,20 +832,24 @@ impl ProjectRuntimeRegistryV1 {
         runtimes.get(project_root).and_then(C::peek).map(read)
     }
 
-    /// Project a value from the one registered component that matches.
+    /// Project equivalent authorities from linked roots onto one result.
     ///
-    /// Project-id lookups have no root to disambiguate linked worktrees. An
-    /// ambiguous match therefore remains unavailable instead of attaching an
-    /// observation to whichever root happens to sort first.
-    pub(crate) fn find_current<C, T, F>(&self, mut find: F) -> Option<T>
+    /// A match is available only when every matching root resolves to the
+    /// same complete authority key. This permits linked worktrees that share
+    /// one durable project store without accepting a cross-profile or foreign
+    /// store match.
+    pub(crate) fn find_equivalent<C, K, T, F>(&self, mut find: F) -> Option<T>
     where
         C: ProjectRuntimeComponent,
-        F: FnMut(&C) -> Option<T>,
+        K: Eq,
+        F: FnMut(&C) -> Option<(K, T)>,
     {
         let runtimes = self.lock_runtimes();
         let mut matches = runtimes.values().filter_map(C::peek).filter_map(&mut find);
-        let only = matches.next()?;
-        matches.next().is_none().then_some(only)
+        let (authority, result) = matches.next()?;
+        matches
+            .all(|(candidate, _)| candidate == authority)
+            .then_some(result)
     }
 
     /// Register a component, or accept an incumbent the caller recognizes as

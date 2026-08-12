@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "memory-skip-local",
   "title": "Do not store or recall what is already in visible context",
-  "description": "When the answer is sitting in a visible workspace file, the agent must neither store it as a fact nor churn memory recall for it. Seeded unrelated FactRecordV1 values must keep their retrieval counts at zero in the deterministic layer.",
+  "description": "When the answer is sitting in a visible workspace file, the agent must neither store it as a fact nor churn memory recall for it. Seeded unrelated canonical fact projections must keep their retrieval counts at zero in the deterministic layer.",
   "adapted_from": "mnemon `memory-skip-local` (Apache-2.0, https://github.com/mnemon-dev/mnemon @ 41a9612)",
   "contract": "stable",
   "setup": {
@@ -10,13 +10,13 @@
       {
         "content": "The CI pipeline runs clippy with deny warnings on every push.",
         "category": "code_area",
-        "source": "eval-seed",
+        "source_label": "eval-seed",
         "trust": 0.8
       },
       {
         "content": "Release notes are drafted from the changelog tool output.",
         "category": "general",
-        "source": "eval-seed",
+        "source_label": "eval-seed",
         "trust": 0.7
       }
     ],

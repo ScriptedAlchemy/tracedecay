@@ -10,7 +10,7 @@
       {
         "content": "Use npm to install packages",
         "category": "user_pref",
-        "source": "old-npm",
+        "source_label": "old-npm",
         "trust": 0.7
       }
     ],

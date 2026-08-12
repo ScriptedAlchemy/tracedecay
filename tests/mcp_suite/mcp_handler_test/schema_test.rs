@@ -101,22 +101,6 @@ async fn schema_required_arguments_match_representative_handler_parsers() {
         expect_missing_argument_error(&cg, tool_name, json!({}), expected_message).await;
     }
 
-    // Alternative parser style: fact_feedback accepts action/helpful/unhelpful, but one is required.
-    assert_schema_requires(&tools, "tracedecay_fact_feedback", &["fact_id"]);
-    assert_schema_advertises_required_alternatives(
-        &tools,
-        "tracedecay_fact_feedback",
-        "action",
-        &["action", "helpful", "unhelpful"],
-    );
-    expect_missing_argument_error(
-        &cg,
-        "tracedecay_fact_feedback",
-        json!({ "fact_id": 1 }),
-        "missing feedback action",
-    )
-    .await;
-
     // Nested-object parser style.
     assert_schema_requires(
         &tools,
@@ -432,6 +416,8 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
         "fact_store_update",
         "fact_store_remove",
         "fact_store_list",
+        "fact_feedback",
+        "memory_status",
     ] {
         let operation_id =
             tracedecay_tool_catalog::OperationId::new(format!("operation.application.{operation}"))
@@ -449,9 +435,7 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
             let properties = schema["properties"]
                 .as_object_mut()
                 .unwrap_or_else(|| panic!("{tool_name} properties"));
-            for transport_field in ["format", "project_selector", "project_id", "project_path"] {
-                properties.remove(transport_field);
-            }
+            properties.remove("format");
         }
         assert_eq!(
             advertised, canonical,
@@ -461,7 +445,7 @@ fn exact_fact_store_definitions_project_canonical_request_schemas() {
 }
 
 #[test]
-fn exact_memory_tool_definitions_include_hermes_payload_fields() {
+fn exact_memory_tool_definitions_exclude_legacy_payload_aliases() {
     let tools = get_tool_definitions().expect("tool definitions");
     let tool_names: std::collections::HashSet<_> =
         tools.iter().map(|tool| tool.name.as_str()).collect();
@@ -473,10 +457,6 @@ fn exact_memory_tool_definitions_include_hermes_payload_fields() {
         .iter()
         .find(|tool| tool.name == "tracedecay_fact_store_search")
         .expect("tracedecay_fact_store_search definition");
-    let feedback = tools
-        .iter()
-        .find(|tool| tool.name == "tracedecay_fact_feedback")
-        .expect("tracedecay_fact_feedback definition");
     let status = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_memory_status")
@@ -490,19 +470,21 @@ fn exact_memory_tool_definitions_include_hermes_payload_fields() {
         fact_search.annotations.as_ref().unwrap()["readOnlyHint"],
         true
     );
-    assert_eq!(
-        feedback.annotations.as_ref().unwrap()["readOnlyHint"],
-        false
-    );
     assert_eq!(status.annotations.as_ref().unwrap()["readOnlyHint"], true);
 
     for field in [
-        "content", "entity", "entities", "category", "tags", "trust", "source", "metadata",
+        "content",
+        "entities",
+        "category",
+        "tags",
+        "trust",
+        "source_label",
+        "metadata",
     ] {
-        assert!(
-            fact_add.input_schema["properties"].get(field).is_some(),
-            "fact_store_add schema missing Hermes field {field}"
-        );
+        assert!(fact_add.input_schema["properties"].get(field).is_some());
+    }
+    for alias in ["entity", "source", "action"] {
+        assert!(fact_add.input_schema["properties"].get(alias).is_none());
     }
     assert!(fact_add.input_schema["properties"].get("action").is_none());
     assert!(
@@ -514,10 +496,6 @@ fn exact_memory_tool_definitions_include_hermes_payload_fields() {
         fact_search.input_schema["properties"]
             .get("content")
             .is_none()
-    );
-    assert_eq!(
-        feedback.input_schema["required"],
-        serde_json::json!(["fact_id"])
     );
     assert_eq!(
         fact_add.input_schema["properties"]["trust"]["type"],
@@ -676,31 +654,6 @@ pub(crate) fn assert_schema_requires(
         actual, expected,
         "{tool_name} schema required arguments drifted from handler parser expectations"
     );
-}
-
-pub(crate) fn assert_schema_advertises_required_alternatives(
-    tools: &[tracedecay::mcp::ToolDefinition],
-    tool_name: &str,
-    property: &str,
-    alternatives: &[&str],
-) {
-    // Root-level `anyOf` alternatives are rejected by some providers (e.g.
-    // Moonshot refuses `anyOf` alongside a parent `type`), so the requirement
-    // is advertised in the property description and enforced by the handler.
-    let schema = tool_schema(tools, tool_name);
-    assert!(
-        schema.get("anyOf").is_none(),
-        "{tool_name} schema must not use root-level anyOf; providers such as Moonshot reject it"
-    );
-    let description = schema["properties"][property]["description"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{tool_name} schema is missing a {property} description"));
-    for alternative in alternatives {
-        assert!(
-            description.contains(alternative),
-            "{tool_name} {property} description must advertise that one of {alternatives:?} is required by the handler parser; missing alternative {alternative}"
-        );
-    }
 }
 
 pub(crate) async fn expect_missing_argument_error(

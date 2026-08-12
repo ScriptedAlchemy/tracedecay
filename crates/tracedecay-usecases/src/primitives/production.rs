@@ -2489,20 +2489,16 @@ fn affected_tests_evidence(
 /// Owned authorities and admitted project state required to open the complete
 /// application primitive runtime.
 pub struct ProductionPrimitiveOpenRequestV1 {
-    database: Database,
     source_runtime: Arc<SourceReadRuntime>,
     code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     session_db: Arc<RegisteredGlobalDb>,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
-    project_root: PathBuf,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
-    scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
     operation_events: OperationEventAuthority,
-    configuration_digest: ManifestDigest,
 }
 
 impl ProductionPrimitiveOpenRequestV1 {
@@ -2518,25 +2514,17 @@ impl ProductionPrimitiveOpenRequestV1 {
         admitted_root_uri: String,
         operation_events: OperationEventAuthority,
     ) -> Self {
-        let database = source_runtime.db().clone();
-        let project_root = source_runtime.project_root().to_path_buf();
-        let scope = access.scope.clone();
-        let configuration_digest = access.configuration_digest.clone();
         Self {
-            database,
             source_runtime,
             code_graph,
             ignored_dependency_admission,
             session_db,
             temporal,
-            project_root,
             code_index,
             diagnostic_identity,
-            scope,
             access,
             admitted_root_uri,
             operation_events,
-            configuration_digest,
         }
     }
 }
@@ -2546,21 +2534,21 @@ pub async fn open_production_primitive_runtime(
     request: ProductionPrimitiveOpenRequestV1,
 ) -> Result<PrimitiveProjectRuntime, ApplicationContractError> {
     let ProductionPrimitiveOpenRequestV1 {
-        database,
         source_runtime,
         code_graph,
         ignored_dependency_admission,
         session_db,
         temporal,
-        project_root,
         code_index,
         diagnostic_identity,
-        scope,
         access,
         admitted_root_uri,
         operation_events,
-        configuration_digest,
     } = request;
+    let database = source_runtime.db().clone();
+    let project_root = source_runtime.project_root().to_path_buf();
+    let scope = access.scope.clone();
+    let configuration_digest = access.configuration_digest.clone();
     let key = session_db
         .as_ref()
         .ensure_active_session_cursor_key_result()
@@ -2580,11 +2568,6 @@ pub async fn open_production_primitive_runtime(
                 field: "application primitive session cursor authenticator",
             })?,
     );
-    // The published generation is part of every symbol-graph cursor's snapshot
-    // identity, and it is read per request rather than captured here: a value
-    // frozen at mount would let two different graph states share one cursor
-    // identity, which is precisely the silent page-set change cursors exist to
-    // rule out.
     let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
         key: key.clone(),
         configuration_digest: configuration_digest.clone(),

@@ -944,15 +944,6 @@
       ],
       "type": "object"
     },
-    "ApplicationExecutionFailureClassV1": {
-      "description": "Stable non-retryable class for an admitted execution failure.",
-      "enum": [
-        "denied",
-        "malformed_output",
-        "permanent"
-      ],
-      "type": "string"
-    },
     "ApplicationProblemEnvelope": {
       "additionalProperties": false,
       "description": "Stable application failure envelope. Partial effects and reset-required\nstates are admitted terminals; partial effects carry their committed\nreceipt directly while reset-required states carry an explicit action.",
@@ -984,7 +975,6 @@
         "stale",
         "unsupported",
         "unavailable",
-        "execution_failed",
         "reset_required",
         "saturated",
         "cancelled",
@@ -997,7 +987,14 @@
       "description": "Stable application problem record shared verbatim by every adapter.",
       "properties": {
         "cancellation_stage": {
-          "$ref": "#/$defs/RequiredNullable2"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CancellationStage"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "code": {
           "type": "string"
@@ -1031,9 +1028,6 @@
               "type": "null"
             }
           ]
-        },
-        "execution_failure_classification": {
-          "$ref": "#/$defs/RequiredNullable4"
         },
         "kind": {
           "$ref": "#/$defs/ApplicationProblemKind"
@@ -1087,9 +1081,6 @@
         },
         "trace_id": {
           "type": "string"
-        },
-        "unavailable_classification": {
-          "$ref": "#/$defs/RequiredNullable3"
         }
       },
       "required": [
@@ -1106,8 +1097,6 @@
         "retry_scope",
         "retry_after_millis",
         "cancellation_stage",
-        "unavailable_classification",
-        "execution_failure_classification",
         "request_id",
         "trace_id",
         "details",
@@ -1115,16 +1104,6 @@
         "coverage"
       ],
       "type": "object"
-    },
-    "ApplicationUnavailableClassV1": {
-      "description": "Stable reason an application authority is unavailable.",
-      "enum": [
-        "authority",
-        "backend_unavailable",
-        "backend_disconnected",
-        "backend_retryable"
-      ],
-      "type": "string"
     },
     "ApplyWorkRelationReplanRequestV1": {
       "additionalProperties": false,
@@ -9793,187 +9772,8 @@
         }
       ]
     },
-    "MemoryAutomationCurationAddDispositionV1": {
-      "enum": [
-        "added",
-        "near_duplicate",
-        "possible_conflict"
-      ],
-      "type": "string"
-    },
-    "MemoryAutomationCurationMergeV1": {
-      "additionalProperties": false,
-      "properties": {
-        "commit_receipts": {
-          "items": {
-            "$ref": "#/$defs/FactCommitReceiptV1"
-          },
-          "type": "array"
-        },
-        "content_updated": {
-          "type": "boolean"
-        },
-        "deleted_loser_fact_ids": {
-          "items": {
-            "$ref": "#/$defs/FactId"
-          },
-          "type": "array"
-        },
-        "input_digest": {
-          "type": "string"
-        },
-        "operation_id": {
-          "$ref": "#/$defs/ProvenanceId"
-        },
-        "winner_fact_id": {
-          "$ref": "#/$defs/FactId"
-        }
-      },
-      "required": [
-        "operation_id",
-        "input_digest",
-        "winner_fact_id",
-        "content_updated",
-        "deleted_loser_fact_ids",
-        "commit_receipts"
-      ],
-      "type": "object"
-    },
     "MemoryAutomationCurationOperationEffectV1": {
       "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "closest_fact_id": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/FactId"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "commit": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/FactCommitReceiptV1"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "disposition": {
-              "$ref": "#/$defs/MemoryAutomationCurationAddDispositionV1"
-            },
-            "fact_id": {
-              "$ref": "#/$defs/FactId"
-            },
-            "kind": {
-              "const": "add",
-              "type": "string"
-            },
-            "similarity_millionths": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "kind",
-            "fact_id",
-            "disposition",
-            "closest_fact_id",
-            "similarity_millionths",
-            "commit"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "commit": {
-              "$ref": "#/$defs/FactCommitReceiptV1"
-            },
-            "fact_id": {
-              "$ref": "#/$defs/FactId"
-            },
-            "kind": {
-              "const": "update",
-              "type": "string"
-            },
-            "trust_delta_millionths": {
-              "format": "int32",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "kind",
-            "fact_id",
-            "trust_delta_millionths",
-            "commit"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "merge",
-              "type": "string"
-            },
-            "outcome": {
-              "$ref": "#/$defs/MemoryAutomationCurationMergeV1"
-            }
-          },
-          "required": [
-            "kind",
-            "outcome"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "commit": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/FactCommitReceiptV1"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "disposition": {
-              "$ref": "#/$defs/MemoryAutomationCurationRemoveDispositionV1"
-            },
-            "kind": {
-              "const": "remove",
-              "type": "string"
-            },
-            "remaining_fact_count": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "target_fact_id": {
-              "$ref": "#/$defs/FactId"
-            }
-          },
-          "required": [
-            "kind",
-            "target_fact_id",
-            "disposition",
-            "remaining_fact_count",
-            "commit"
-          ],
-          "type": "object"
-        },
         {
           "additionalProperties": false,
           "properties": {
@@ -10096,22 +9896,9 @@
       ],
       "type": "object"
     },
-    "MemoryAutomationCurationRemoveDispositionV1": {
-      "enum": [
-        "removed",
-        "already_removed",
-        "not_found"
-      ],
-      "type": "string"
-    },
     "MemoryAutomationCurationResultV1": {
       "additionalProperties": false,
       "properties": {
-        "accepted_operations": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "automation_run_id": {
           "$ref": "#/$defs/RunId"
         },
@@ -10121,27 +9908,7 @@
           },
           "type": "array"
         },
-        "facts_added": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "facts_linked": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "facts_merged": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "facts_removed": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "facts_updated": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -10167,24 +9934,10 @@
           "$ref": "#/$defs/FactCommitOwnerV1"
         },
         "replay_event_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FactEventId"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/FactEventId"
         },
         "replay_fact_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/FactId"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/$defs/FactId"
         }
       },
       "required": [
@@ -10196,11 +9949,6 @@
         "replay_fact_id",
         "replay_event_id",
         "changed_fact_ids",
-        "accepted_operations",
-        "facts_added",
-        "facts_updated",
-        "facts_merged",
-        "facts_removed",
         "normalized_tags",
         "facts_linked"
       ],
@@ -13569,39 +13317,6 @@
       "anyOf": [
         {
           "$ref": "#/$defs/EffectReceipt"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
-    },
-    "RequiredNullable2": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/CancellationStage"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
-    },
-    "RequiredNullable3": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ApplicationUnavailableClassV1"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Unlike `Option<T>`, this wrapper distinguishes an explicit JSON `null`\nfrom an omitted field. New terminal-state fields must be present on every\nrecord so a missing committed receipt cannot be mistaken for `None`."
-    },
-    "RequiredNullable4": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/ApplicationExecutionFailureClassV1"
         },
         {
           "type": "null"

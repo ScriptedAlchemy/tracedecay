@@ -4,12 +4,18 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tracedecay_application::memory::{FactCategoryV1, FactSearchHitV1};
+use tracedecay_application::retained_surfaces::{
+    FactCategoryV1, FactSearchGraphCoverageV1, FactSearchGraphDegradationV1, FactSearchHitV1,
+};
+use tracedecay_application::{
+    CancellationSignal, Deadline, now_micros, retained_surface_execution_problem,
+};
 use tracedecay_domain::Confidence;
 use tracedecay_store::{
     FactReadControl, ProjectMemoryFactSearchFilterV1, ProjectMemoryFactSearchKindV1,
     ProjectMemoryFactSearchQuery,
 };
+use tracedecay_usecases::memory::memory_application_error;
 
 use crate::context::{
     CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING, CONTEXT_EXTENSION_POINTS_HEADING,
@@ -17,7 +23,7 @@ use crate::context::{
     CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL,
     CONTEXT_TEST_COVERAGE_HEADING,
 };
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::text::utf8_prefix_at_or_before;
 use crate::tracedecay::TraceDecay;
 
@@ -119,15 +125,14 @@ pub(super) fn context_memory_section(
         section.push_str(CONTEXT_MEMORY_MATCHES_HEADING);
         section.push('\n');
         for hit in memory_matches {
-            let fact = &hit.fact;
             let _ = writeln!(
                 section,
                 "- fact_id={} category={} trust={:.2} score={:.3}: {}",
-                fact.fact_id,
-                fact_category_name(fact.category),
-                f64::from(fact.trust_score_millionths) / 1_000_000.0,
+                hit.fact.fact_id,
+                context_fact_category(hit.fact.category),
+                f64::from(hit.fact.trust_score_millionths) / 1_000_000.0,
                 f64::from(hit.scores.score_millionths) / 1_000_000.0,
-                compact_memory_content(&fact.content)
+                compact_memory_content(&hit.fact.content)
             );
         }
         section.push('\n');
@@ -145,7 +150,11 @@ pub(super) fn context_memory_section(
     None
 }
 
-fn fact_category_name(category: FactCategoryV1) -> &'static str {
+fn compact_memory_content(content: &str) -> String {
+    content.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+const fn context_fact_category(category: FactCategoryV1) -> &'static str {
     match category {
         FactCategoryV1::General => "general",
         FactCategoryV1::UserPref => "user_pref",
@@ -154,10 +163,6 @@ fn fact_category_name(category: FactCategoryV1) -> &'static str {
         FactCategoryV1::Decision => "decision",
         FactCategoryV1::CodeArea => "code_area",
     }
-}
-
-fn compact_memory_content(content: &str) -> String {
-    content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub(super) struct ContextMemoryOptions {
@@ -192,6 +197,28 @@ pub(super) fn context_memory_enabled(options: &ContextMemoryOptions) -> bool {
     options.include_memory
 }
 
+pub(super) fn context_memory_read_control(
+    options: &ContextMemoryOptions,
+    deadline: Option<&Deadline>,
+    cancellation: Option<&CancellationSignal>,
+) -> Result<Option<FactReadControl>> {
+    if !context_memory_enabled(options) {
+        return Ok(None);
+    }
+    let deadline = deadline.ok_or_else(|| TraceDecayError::Config {
+        message: "context memory search requires the admitted request deadline".to_owned(),
+    })?;
+    let cancellation = cancellation
+        .cloned()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "context memory search requires the admitted cancellation signal".to_owned(),
+        })?;
+    let expires_at = deadline.expires_at;
+    Ok(Some(FactReadControl::new(Arc::new(move || {
+        cancellation.is_cancelled() || now_micros() >= expires_at
+    }))))
+}
+
 pub(super) fn context_memory_analytics_value(
     options: &ContextMemoryOptions,
     memory_matches: &[FactSearchHitV1],
@@ -199,7 +226,7 @@ pub(super) fn context_memory_analytics_value(
 ) -> Value {
     let fact_ids: Vec<Value> = memory_matches
         .iter()
-        .map(|hit| Value::from(hit.fact.fact_id.as_str()))
+        .map(|hit| Value::String(hit.fact.fact_id.as_str().to_owned()))
         .collect();
     json!({
         "include_memory": options.include_memory,
@@ -211,51 +238,85 @@ pub(super) fn context_memory_analytics_value(
     })
 }
 
-pub(super) async fn context_memory_matches(
+pub(super) struct ContextMemoryMatches {
+    pub(super) hits: Vec<FactSearchHitV1>,
+    pub(super) graph_coverage: FactSearchGraphCoverageV1,
+}
+
+pub(super) struct ContextMemoryOutcome {
+    pub(super) hits: Vec<FactSearchHitV1>,
+    pub(super) graph_coverage: Option<FactSearchGraphCoverageV1>,
+    pub(super) error: Option<String>,
+}
+
+pub(super) async fn context_memory_outcome(
     cg: &TraceDecay,
     task: &str,
     options: &ContextMemoryOptions,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-) -> Result<Vec<FactSearchHitV1>> {
-    let owner = cg.project_memory_owner()?;
-    let filter = ProjectMemoryFactSearchFilterV1::new(
-        None,
-        Some(Confidence::new(options.min_trust).map_err(memory_search_error)?),
-        None,
-    )
-    .map_err(memory_search_error)?;
+    read_control: Option<&FactReadControl>,
+) -> ContextMemoryOutcome {
+    let Some(read_control) = read_control else {
+        return ContextMemoryOutcome {
+            hits: Vec::new(),
+            graph_coverage: None,
+            error: None,
+        };
+    };
+    match context_memory_matches(cg, task, options, read_control).await {
+        Ok(matches) => ContextMemoryOutcome {
+            hits: matches.hits,
+            graph_coverage: Some(matches.graph_coverage),
+            error: None,
+        },
+        Err(error) => ContextMemoryOutcome {
+            hits: Vec::new(),
+            graph_coverage: Some(FactSearchGraphCoverageV1::Degraded {
+                reason: FactSearchGraphDegradationV1::Unavailable,
+            }),
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+async fn context_memory_matches(
+    cg: &TraceDecay,
+    task: &str,
+    options: &ContextMemoryOptions,
+    read_control: &FactReadControl,
+) -> Result<ContextMemoryMatches> {
+    let memory = cg.project_memory_application().await?;
+    let min_trust =
+        Confidence::new(options.min_trust).map_err(|error| TraceDecayError::Config {
+            message: format!("invalid context memory trust threshold: {error}"),
+        })?;
+    let filter =
+        ProjectMemoryFactSearchFilterV1::new(None, Some(min_trust), None).map_err(|error| {
+            TraceDecayError::database_operation("construct context memory filter", error)
+        })?;
     let query = ProjectMemoryFactSearchQuery::with_filter(
-        owner,
+        memory.owner().clone(),
         ProjectMemoryFactSearchKindV1::Search,
         Some(task.to_owned()),
         filter,
         None,
         options.limit,
     )
-    .map_err(memory_search_error)?;
-    let read_control = FactReadControl::new(Arc::new(move || {
-        cancellation
-            .as_ref()
-            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
-            || deadline.as_ref().is_some_and(|deadline| {
-                deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
-            })
-    }));
-    let memory = cg.project_memory_application().await?;
+    .map_err(|error| {
+        TraceDecayError::database_operation("construct context memory query", error)
+    })?;
     let page = memory
-        .search_project_memory_facts(query, &read_control)
+        .search_project_memory_facts(query, read_control)
         .await
-        .map_err(memory_search_error)?;
-    crate::daemon::retained_owner::public_search_page(&page)
-        .map(|page| page.hits)
-        .map_err(|error| crate::errors::TraceDecayError::Config {
-            message: format!("context memory projection failed: {error:?}"),
-        })
-}
-
-fn memory_search_error(
-    error: impl std::error::Error + Send + Sync + 'static,
-) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::database_operation("context memory search", error)
+        .map_err(memory_application_error)?;
+    let public = crate::daemon::retained_owner::public_search_page(&page).map_err(|error| {
+        let problem = retained_surface_execution_problem(error);
+        TraceDecayError::Database {
+            operation: "project canonical context memory".to_string(),
+            message: problem.canonical_code().to_string(),
+        }
+    })?;
+    Ok(ContextMemoryMatches {
+        hits: public.hits,
+        graph_coverage: public.graph_coverage,
+    })
 }

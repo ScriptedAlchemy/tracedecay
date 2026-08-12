@@ -33,31 +33,29 @@ use tracedecay_usecases::advisory::GitHubRepositoryTargetV1;
 
 use super::{
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
+    DaemonInvocationState,
 };
 use crate::request_identity::{PreviewIdentityDomain, derive_preview_identity};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
 use crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry;
-use crate::daemon::service::invocation::daemon_operation_event_authority;
-use crate::daemon::session_retrieval::DaemonSessionLookupPrimitiveV1;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::McpServer;
 use tracedecay_lsp::analyzer::broker::AdmittedLspProvider;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
-use tracedecay_usecases::primitives::{
-    ProductionPrimitiveOpenRequestV1, admitted_root_uri_for_project, locator_digest_for_project,
-    open_production_primitive_runtime,
-};
+use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
 mod automation_effect_recovery;
 mod code_index_reads;
 mod lsp_registration;
+mod primitive_runtime;
 mod query_authority_upgrade;
 mod source_edit_owner;
+#[cfg(test)]
+mod work_grant_tests;
 
 pub(crate) use automation_effect_recovery::reconcile_project_open_automation_effects;
 pub(crate) use code_index_reads::{
@@ -66,6 +64,7 @@ pub(crate) use code_index_reads::{
 };
 
 use lsp_registration::production_lsp_registration;
+use primitive_runtime::open_and_register_project_primitive_runtime;
 use source_edit_owner::{
     install_project_open_source_edit_rollback_owner, source_edit_authority_error,
     source_edit_contract_error, source_edit_request_context, source_edit_surface_result,
@@ -958,56 +957,16 @@ pub(super) async fn register_project_open_production_owners(
         admitted_root_uri_for_project(project_root).map_err(|error| TraceDecayError::Config {
             message: format!("project-open admitted root URI denied: {error}"),
         })?;
-    let code_graph = server
-        .code_graph_projection_read_port()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project-open primitive runtime requires the production code-graph projection authority"
-                .to_owned(),
-        })?;
-    let ignored_dependency_admission = server
-        .code_index_ignored_dependency_admission()
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "project-open primitive runtime requires ignored-dependency admission"
-                .to_owned(),
-        })?;
-    let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
-        server
-            .project_session_application_retrieval_service()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open primitive session lookup requires the mounted project session retrieval authority"
-                    .to_owned(),
-            })?,
-    ));
-    let primitive_runtime =
-        open_production_primitive_runtime(ProductionPrimitiveOpenRequestV1::new(
-            graph.clone(),
-            code_graph,
-            Some(ignored_dependency_admission),
-            Arc::clone(&session_db),
-            temporal,
-            Arc::new(invocation.code_index_schedulers.clone()),
-            Arc::new(invocation.code_index_schedulers.clone()),
-            access.clone(),
-            admitted_root_uri.clone(),
-            daemon_operation_event_authority(),
-        ))
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open primitive runtime open failed: {error}"),
-        })?;
-    match invocation
-        .primitive_runtime_registrar()
-        .register(project_root.to_path_buf(), primitive_runtime)
-        .await
-    {
-        Ok(_) | Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered) => {}
-        Err(DaemonPrimitiveRuntimeRegistrationError::RegistryClosed) => {
-            return Err(TraceDecayError::Config {
-                message: "project-open primitive runtime registration failed: the daemon project runtime registry is closed"
-                    .to_owned(),
-            });
-        }
-    }
+    open_and_register_project_primitive_runtime(
+        invocation,
+        project_root,
+        graph.clone(),
+        server,
+        Arc::clone(&session_db),
+        access.clone(),
+        &admitted_root_uri,
+    )
+    .await?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -1602,8 +1561,8 @@ fn project_open_work_grant(
         "tracedecay.project-open.work-grant.v1",
         &access.scope,
         &access.requester,
-        &access.configuration_digest,
-        &access.configuration_provenance_digest,
+        &access.binding,
+        &access.effective_capabilities,
         &capabilities,
         &use_cases,
     ))
@@ -1627,7 +1586,7 @@ fn project_open_work_grant(
     )
 }
 
-fn project_open_retained_grant(
+pub(super) fn project_open_retained_grant(
     access: &ProjectSourceAccessSnapshot,
     observed_at: UtcMicros,
 ) -> std::result::Result<tracedecay_application::CapabilityGrantSnapshot, ApplicationContractError>
@@ -1868,24 +1827,6 @@ mod tests {
                 capabilities.contains(descriptor.operation().capability_id()),
                 "{} must be granted to the daemon-owned project route",
                 descriptor.operation().capability_id().as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn production_project_owner_grants_every_work_operation() {
-        let capabilities = production_owner_capabilities().expect("production capabilities");
-
-        for (_, capability, _) in tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1
-            .into_iter()
-            .chain(tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS)
-            .chain(tracedecay_application::HANDOFF_APPLICATION_OPERATION_IDS_V1)
-        {
-            let capability = CapabilityId::new(capability).expect("Work attempt capability");
-            assert!(
-                capabilities.contains(&capability),
-                "{} must be granted to the daemon-owned Work route",
-                capability.as_str()
             );
         }
     }

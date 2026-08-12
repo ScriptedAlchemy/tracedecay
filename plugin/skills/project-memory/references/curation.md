@@ -115,7 +115,7 @@ area, branch, PR, or decision set.
    plus candidate, matching category, `limit: 10`, `min_trust: 0.5`; skip
    near-duplicates and ask before replacing contradictory facts.
 5. **Store accepted facts → `tracedecay_fact_store_add`** with
-   content, category, source_label, tags, entities, trust, and metadata containing
+   content, category, source, tags, entities, trust, and metadata containing
    subject/confidence/citations. Act on `near_duplicate`, `possible_conflict`,
    and `rejected_secret_like`; never rephrase a rejected secret to bypass
    filtering.

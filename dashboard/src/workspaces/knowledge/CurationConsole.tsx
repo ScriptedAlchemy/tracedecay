@@ -6,10 +6,6 @@ import {
   type AutomaticCuratorResult,
   type AutomationOutcomesPayload,
 } from "../../data/query/automation.ts";
-import type {
-  FactCommitReceiptV1,
-  MemoryAutomationCurationOperationEffectV1,
-} from "../../contracts/generated.ts";
 import { PayloadBoundary } from "../../ui/ReadSection.tsx";
 import { Panel, Readout } from "../../ui/instrument.tsx";
 import { RunHistory } from "../automations/RunHistory.tsx";
@@ -109,7 +105,6 @@ function AutomaticCuratorSettlement({
               ? ` · ${result.run.committed_receipts.length.toLocaleString()} committed receipt`
               : " · no committed effects"}
           </p>
-          <TerminalSummary summary={result.run.terminal.summary} />
           <CommittedCurationEffects run={result.run} />
         </div>
       );
@@ -128,10 +123,6 @@ function AutomaticCuratorSettlement({
           <p>
             reconciliation required · {result.problem.committed_receipts.length.toLocaleString()} canonical receipt
             {result.problem.committed_receipts.length === 1 ? "" : "s"} · admitted effect {receipt.operation} · request {receipt.request_id}
-          </p>
-          <p>
-            committed before failure · {acceptedEffectCount(result.problem).toLocaleString()} accepted effect
-            {acceptedEffectCount(result.problem) === 1 ? "" : "s"}
           </p>
           <CommittedCurationEffects run={result.problem} />
         </div>
@@ -158,30 +149,6 @@ function AutomaticCuratorSettlement({
   }
 }
 
-function TerminalSummary({
-  summary,
-}: {
-  summary: AutomaticCuratorRun["terminal"]["summary"];
-}) {
-  return (
-    <p>
-      reviewed {summary.reviewed_count.toLocaleString()} · accepted {summary.accepted_count.toLocaleString()} · rejected {summary.rejected_count.toLocaleString()}
-    </p>
-  );
-}
-
-function acceptedEffectCount({
-  committed_receipts: receipts,
-}: Pick<AutomaticCuratorRun, "committed_receipts">): number {
-  return receipts.reduce(
-    (count, receipt) => count +
-      (receipt.kind === "curation"
-        ? receipt.receipt.receipt.accepted_operations
-        : 0),
-    0,
-  );
-}
-
 function CommittedCurationEffects({
   run,
 }: {
@@ -195,80 +162,21 @@ function CommittedCurationEffects({
   if (effects.length === 0) return null;
   return (
     <ol aria-label="Committed curator effects" className="flex flex-col gap-1 border-l border-edge-subtle pl-2">
-      {effects.map((effect, index) => (
-        <li key={`${effect.kind}:${index}`} className="text-3xs text-text-secondary">
-          <CurationEffect effect={effect} />
+      {effects.map((effect) => (
+        <li key={`${effect.kind}:${effect.commit.last_event_id}`} className="text-3xs text-text-secondary">
+          {effect.kind === "normalize_tags" ? (
+            <>
+              normalize tags · fact {effect.fact_id} · {effect.commit.disposition} · event {effect.commit.last_event_id}
+            </>
+          ) : (
+            <>
+              link facts · {effect.source_fact_id} → {effect.target_fact_id} · {effect.relation.kind} · {effect.commit.disposition} · event {effect.commit.last_event_id}
+            </>
+          )}
         </li>
       ))}
     </ol>
   );
-}
-
-function CurationEffect({
-  effect,
-}: {
-  effect: MemoryAutomationCurationOperationEffectV1;
-}) {
-  switch (effect.kind) {
-    case "add":
-      return (
-        <>
-          add fact · fact {effect.fact_id} · {displayToken(effect.disposition)}
-          {effect.closest_fact_id === null
-            ? null
-            : ` · closest ${effect.closest_fact_id} · similarity ${effect.similarity_millionths}`}
-          <CommitSummary commit={effect.commit} />
-        </>
-      );
-    case "update":
-      return (
-        <>
-          update fact · fact {effect.fact_id} · trust delta {effect.trust_delta_millionths}
-          <CommitSummary commit={effect.commit} />
-        </>
-      );
-    case "merge":
-      return (
-        <>
-          merge facts · winner {effect.outcome.winner_fact_id} · deleted losers {effect.outcome.deleted_loser_fact_ids.join(", ")} · content {effect.outcome.content_updated ? "updated" : "unchanged"} · events {effect.outcome.commit_receipts.flatMap((commit) => commit.committed_event_ids).join(", ")}
-        </>
-      );
-    case "remove":
-      return (
-        <>
-          remove fact · target {effect.target_fact_id} · {displayToken(effect.disposition)} · remaining {effect.remaining_fact_count}
-          <CommitSummary commit={effect.commit} />
-        </>
-      );
-    case "normalize_tags":
-      return (
-        <>
-          normalize tags · fact {effect.fact_id}
-          <CommitSummary commit={effect.commit} />
-        </>
-      );
-    case "link_facts":
-      return (
-        <>
-          link facts · {effect.source_fact_id} → {effect.target_fact_id} · {displayToken(effect.relation.kind)}
-          <CommitSummary commit={effect.commit} />
-        </>
-      );
-  }
-}
-
-function CommitSummary({
-  commit,
-}: {
-  commit: FactCommitReceiptV1 | null;
-}) {
-  return commit === null
-    ? <> · no commit</>
-    : <> · {displayToken(commit.disposition)} · events {commit.committed_event_ids.join(", ")}</>;
-}
-
-function displayToken(value: string): string {
-  return value.replaceAll("_", " ");
 }
 
 function OutcomesBody({ data }: { data: AutomationOutcomesPayload }) {

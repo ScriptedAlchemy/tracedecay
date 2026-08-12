@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tracedecay_agent_hosts::automation::{
-    lifecycle::AutomationRunControl, run_ledger::AutomationTrigger,
-};
+use tracedecay_agent_hosts::automation::{AutomationRunControl, run_ledger::AutomationTrigger};
 use tracedecay_application::{CancellationSignal, Deadline, RequestId, now_micros};
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
@@ -888,8 +886,7 @@ mod tests {
                 "accepted_count": 1,
                 "rejected_count": 0,
                 "started_at": "2026-01-01T00:00:00Z",
-                "completed_at": "2026-01-01T00:00:01Z",
-                "completed_at_micros": 1_767_225_601_000_000_i64
+                "completed_at": "2026-01-01T00:00:01Z"
             }
         }))
         .unwrap();

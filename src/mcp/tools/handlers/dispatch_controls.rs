@@ -1,10 +1,7 @@
 //! Exact admitted controls for the analytics handler entrypoint.
 
-use std::sync::Arc;
-
 use serde_json::Value;
 use tracedecay_application::{CancellationSignal, Deadline};
-use tracedecay_store::FactReadControl;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
@@ -38,20 +35,16 @@ pub(super) async fn dispatch_analytics(
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
     let (deadline, cancellation) = admitted_control(&options, "analytics")?;
-    let fact_read_control = FactReadControl::new(Arc::new(move || {
-        cancellation.is_cancelled()
-            || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
-    }));
     analytics::handle_analytics(
         cg,
         args,
-        options.global_db.map(std::sync::Arc::as_ref),
         options.accounting_db,
         options
             .session_authorities
             .project_registered
             .map(std::sync::Arc::as_ref),
-        &fact_read_control,
+        deadline,
+        cancellation,
     )
     .await
 }

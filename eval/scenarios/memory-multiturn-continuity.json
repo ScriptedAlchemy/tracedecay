@@ -28,20 +28,7 @@
         }
       }
     ],
-    "violation": {
-      "expectation": "detect",
-      "steps": [
-        {
-          "kind": "tool",
-          "tool": "tracedecay_fact_store_add",
-          "args": {
-            "content": "Continuity note: eval-first memory regression stays in the long memory suite.",
-            "category": "decision",
-            "source_label": "eval-agent"
-          }
-        }
-      ]
-    }
+    "violation": null
   },
   "real_model": {
     "prompts": [

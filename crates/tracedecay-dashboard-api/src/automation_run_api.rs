@@ -512,8 +512,7 @@ mod run_list_tests {
                 "created_at": "1754000060"
             }],
             "started_at": "1754000000",
-            "completed_at": "1754000060",
-            "completed_at_micros": 1_754_000_060_000_000_i64
+            "completed_at": "1754000060"
         }))
         .expect("ledger record fixture parses");
 

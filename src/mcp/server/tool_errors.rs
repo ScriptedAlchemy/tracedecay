@@ -192,13 +192,14 @@ pub(crate) fn tool_error_response(
                     })),
                 );
             }
-            TraceDecayError::Json(err) => {
+            TraceDecayError::File { message, .. }
+                if message.starts_with("corrupt response-handle record") =>
+            {
                 return JsonRpcResponse::error_with_data(
                     id,
                     ErrorCode::InternalError,
-                    format!(
-                        "tool execution failed: cached response handle record is unreadable: {err}"
-                    ),
+                    "tool execution failed: cached response handle record is unreadable."
+                        .to_string(),
                     Some(json!({
                         "tool": RESPONSE_RETRIEVE_TOOL,
                         "reason_code": "corrupt_handle_record",
@@ -207,11 +208,11 @@ pub(crate) fn tool_error_response(
                     })),
                 );
             }
-            TraceDecayError::Io(err) => {
+            TraceDecayError::File { .. } => {
                 return JsonRpcResponse::error_with_data(
                     id,
                     ErrorCode::InternalError,
-                    format!("tool execution failed: failed to read cached response handle: {err}"),
+                    "tool execution failed: failed to read cached response handle.".to_string(),
                     Some(json!({
                         "tool": RESPONSE_RETRIEVE_TOOL,
                         "reason_code": "handle_read_failed",
@@ -222,6 +223,24 @@ pub(crate) fn tool_error_response(
             }
             _ => {}
         }
+    }
+    if let TraceDecayError::ProjectRoute {
+        reason_code,
+        retryable: false,
+        detail,
+    } = error
+    {
+        return JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InvalidParams,
+            detail.clone(),
+            Some(json!({
+                "tool": tool_name,
+                "reason_code": reason_code,
+                "retryable": false,
+                "detail": detail,
+            })),
+        );
     }
     if let TraceDecayError::Config { message } = error {
         // Handler-authored argument and lookup failures follow two message

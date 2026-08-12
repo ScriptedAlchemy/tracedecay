@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::memory::FactSearchHitV1;
+use crate::memory::{FactSearchGraphCoverageV1, FactSearchHitV1};
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -208,8 +208,24 @@ pub struct ContextResultV1 {
     pub code: Vec<ContextCodeBlockV1>,
     pub coverage: PrimitiveSearchCoverageV1,
     pub memory_matches: Vec<FactSearchHitV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_graph_coverage: Option<FactSearchGraphCoverageV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_matches_error: Option<String>,
+}
+
+impl ContextResultV1 {
+    pub fn with_memory_graph_coverage(
+        mut self,
+        memory_graph_coverage: Option<FactSearchGraphCoverageV1>,
+    ) -> Self {
+        self.memory_graph_coverage = memory_graph_coverage;
+        self
+    }
+
+    pub fn memory_graph_coverage(&self) -> Option<FactSearchGraphCoverageV1> {
+        self.memory_graph_coverage
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
@@ -486,4 +502,92 @@ pub struct TodosResultV1 {
     pub match_count: usize,
     pub by_kind: BTreeMap<String, u64>,
     pub markers: Vec<TodoMarkerV1>,
+}
+
+#[cfg(test)]
+mod tests {
+    use schemars::schema_for;
+    use serde_json::{Value, json};
+
+    use super::{
+        ContextModeV1, ContextResultV1, PrimitiveLaneCompleteV1, PrimitiveLaneStatusV1,
+        PrimitiveRecallV1, PrimitiveSearchCoverageV1,
+    };
+    use crate::memory::{FactSearchGraphCoverageV1, FactSearchGraphDegradationV1};
+
+    fn context_result() -> ContextResultV1 {
+        ContextResultV1 {
+            task: "explain memory".to_owned(),
+            mode: ContextModeV1::Explore,
+            code_generation: "generation.test".to_owned(),
+            symbols: vec![],
+            related_symbols: vec![],
+            code: vec![],
+            coverage: PrimitiveSearchCoverageV1 {
+                exact: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
+                lexical: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
+                graph: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
+                semantic: PrimitiveLaneStatusV1::Complete(PrimitiveLaneCompleteV1::Complete),
+                recall: PrimitiveRecallV1::Full,
+            },
+            memory_matches: vec![],
+            memory_graph_coverage: None,
+            memory_matches_error: None,
+        }
+    }
+
+    #[test]
+    fn context_result_preserves_optional_memory_graph_coverage() {
+        let absent = context_result().with_memory_graph_coverage(None);
+        assert_eq!(absent.memory_graph_coverage(), None);
+        assert!(
+            serde_json::to_value(&absent)
+                .expect("context result serializes")
+                .get("memory_graph_coverage")
+                .is_none()
+        );
+
+        for (coverage, expected) in [
+            (
+                FactSearchGraphCoverageV1::NotMounted,
+                json!({"kind": "not_mounted"}),
+            ),
+            (
+                FactSearchGraphCoverageV1::Complete {
+                    root_count: 2,
+                    relation_count: 3,
+                    expanded_fact_count: 4,
+                },
+                json!({
+                    "kind": "complete",
+                    "root_count": 2,
+                    "relation_count": 3,
+                    "expanded_fact_count": 4
+                }),
+            ),
+            (
+                FactSearchGraphCoverageV1::Degraded {
+                    reason: FactSearchGraphDegradationV1::BudgetExhausted,
+                },
+                json!({"kind": "degraded", "reason": "budget_exhausted"}),
+            ),
+        ] {
+            let result = context_result().with_memory_graph_coverage(Some(coverage));
+            assert_eq!(result.memory_graph_coverage(), Some(coverage));
+            assert_eq!(
+                serde_json::to_value(result).expect("context result serializes")["memory_graph_coverage"],
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn context_result_schema_exposes_optional_typed_memory_graph_coverage() {
+        let schema = serde_json::to_value(schema_for!(ContextResultV1))
+            .expect("context result schema serializes");
+        assert!(schema["properties"]["memory_graph_coverage"].is_object());
+        assert!(schema["required"].as_array().is_none_or(|required| {
+            !required.contains(&Value::String("memory_graph_coverage".to_owned()))
+        }));
+    }
 }

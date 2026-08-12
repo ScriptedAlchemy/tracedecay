@@ -55,6 +55,7 @@ use tracedecay_store::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_temporal_query::ports::ExecutionControl;
+#[cfg(feature = "test-transport")]
 use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 pub(crate) static GLOBAL_DB_ENV_LOCK: Mutex<()> = Mutex::const_new(());
@@ -952,20 +953,6 @@ pub(crate) fn extract_first_json_content(value: &Value) -> Value {
             })
         })
         .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
-}
-
-#[cfg(feature = "test-transport")]
-pub(crate) fn assert_fact_results(payload: &Value, included: &str, excluded: &str, context: &str) {
-    assert_eq!(payload["count"].as_u64(), Some(1), "{context}: {payload}");
-    let results = payload["results"].to_string();
-    assert!(
-        results.contains(included),
-        "{context} should include {included:?}: {payload}"
-    );
-    assert!(
-        !results.contains(excluded),
-        "{context} should not include {excluded:?}: {payload}"
-    );
 }
 
 pub(crate) fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> String {

@@ -165,15 +165,75 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
         9005,
         "tracedecay_fact_store_add",
         json!({
+            "format": "json",
             "content": fact_content,
             "category": "decision",
-            "entity": "context memory analytics",
+            "entities": ["context memory analytics"],
             "trust": 0.94,
-            "source": "mcp-server-memory-analytics-test"
+            "source_label": "mcp-server-memory-analytics-test"
         }),
     )
     .await;
-    assert!(added["error"].is_null(), "fact add should not error");
+    let added_text = successful_tool_text(&added, "canonical fact add");
+    assert_ne!(
+        added["result"]["isError"], true,
+        "fact add must not return an MCP semantic error: {added}"
+    );
+    let added_envelope: serde_json::Value =
+        serde_json::from_str(added_text).expect("fact add should return application JSON");
+    assert!(
+        added_envelope["request_id"]
+            .as_str()
+            .is_some_and(|request_id| !request_id.is_empty()),
+        "fact add must return an application request identity: {added_envelope}"
+    );
+    assert_eq!(added_envelope["outcome"]["outcome"], "effect");
+    assert_eq!(
+        added_envelope["outcome"]["value"]["effect_class"],
+        "administrative"
+    );
+    assert_eq!(
+        added_envelope["outcome"]["value"]["receipt"]["outcome"],
+        "completed"
+    );
+    let added_payload = &added_envelope["outcome"]["value"]["payload"];
+    assert_eq!(added_payload["outcome"], "committed");
+    let added_result = &added_payload["result"];
+    assert_eq!(added_result["disposition"], "added");
+    assert_eq!(added_result["fact"]["kind"], "available");
+    let fact = &added_result["fact"]["fact"];
+    assert_eq!(fact["content"], fact_content);
+    assert_eq!(fact["category"], "decision");
+    assert_eq!(fact["entities"], json!(["context memory analytics"]));
+    assert_eq!(fact["trust_score_millionths"], 940_000);
+    assert_eq!(fact["source_label"], "mcp-server-memory-analytics-test");
+    assert_eq!(fact["source"]["kind"], "application");
+    assert!(
+        fact["source"]["operation_id"]
+            .as_str()
+            .is_some_and(|operation_id| !operation_id.is_empty()),
+        "application identity must retain its canonical operation id: {fact}"
+    );
+    assert!(
+        fact["fact_id"]
+            .as_str()
+            .is_some_and(|fact_id| fact_id.starts_with("fact.v1.")),
+        "fact add must return a canonical fact identity: {fact}"
+    );
+    let commit = &added_result["commit"];
+    assert_eq!(commit["disposition"], "committed");
+    assert_eq!(commit["fact_id"], fact["fact_id"]);
+    assert_eq!(commit["owner"], fact["owner"]);
+    assert_eq!(commit["active_assertion_id"], fact["active_assertion_id"]);
+    assert_eq!(commit["last_event_id"], fact["last_event_id"]);
+    assert!(
+        commit["committed_event_ids"]
+            .as_array()
+            .is_some_and(|event_ids| {
+                !event_ids.is_empty() && event_ids.contains(&commit["last_event_id"])
+            }),
+        "commit must bind the created fact to its durable event: {commit}"
+    );
 
     let resp = call_tool(
         Arc::clone(&server),

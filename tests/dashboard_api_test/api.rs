@@ -1,20 +1,9 @@
 use crate::dashboard_api_support::*;
 
-fn nonexistent_project_fact_id(fixture: &DashboardFixture, operation_id: &str) -> String {
-    let identity = tracedecay_domain::FactIdentityMaterialV1::new(
-        tracedecay_domain::FactOwnerV1::Project {
-            project_id: fixture.host_runtime.project_id().clone(),
-        },
-        tracedecay_domain::FactIdentitySourceV1::Application {
-            operation_id: tracedecay_domain::ProvenanceId::new(operation_id.to_owned())
-                .unwrap_or_else(|error| panic!("build missing fact provenance: {error}")),
-        },
-    )
-    .unwrap_or_else(|error| panic!("build missing fact identity: {error}"));
-    tracedecay_domain::FactId::derive(&identity)
-        .unwrap_or_else(|error| panic!("derive missing fact id: {error}"))
-        .as_str()
-        .to_owned()
+fn absent_canonical_fact_id(existing: &FactId) -> String {
+    let raw = existing.as_str();
+    let replacement = if raw.ends_with('0') { '1' } else { '0' };
+    format!("{}{replacement}", &raw[..raw.len() - 1])
 }
 
 #[test]
@@ -49,188 +38,6 @@ fn retired_dashboard_routes_cannot_serve_placeholder_bundles() {
             assert!(body.contains("<title>TraceDecay</title>"));
             assert!(!body.contains("rewrite in progress"));
         }
-    });
-}
-
-#[test]
-fn automatic_fact_receipt_endpoints_expose_terminal_applied_and_quarantined_receipts() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        use tracedecay::store::memory::DatabaseFactStore;
-        use tracedecay_agent_hosts::automation::AutomationRunControl;
-        use tracedecay_domain::{
-            ActorId, ComponentVersion, Confidence, FactCategoryV1, FactOwnerV1, PayloadReferenceV1,
-            ProvenanceId, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-            SanitizerDispositionV1, SensitivityV1,
-        };
-        use tracedecay_store::{
-            ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAddMaterialV1,
-        };
-        use tracedecay_usecases::memory::{
-            MemoryApplication, ProjectMemoryFactAddRequest, automatic_fact_add_command,
-        };
-
-        let fixture = start_dashboard_fixture(false).await;
-        let cg = fixture
-            .host_runtime
-            .open_project_graph_for_test(
-                &fixture.project_root,
-                tracedecay::tracedecay::TraceDecayOpenOptions::default(),
-            )
-            .await
-            .unwrap_or_else(|error| panic!("open dashboard fixture project: {error}"));
-        let project_id = cg
-            .store_layout()
-            .identity
-            .project_id
-            .as_deref()
-            .and_then(|value| ProjectId::new(value.to_owned()).ok())
-            .unwrap_or_else(|| panic!("dashboard fixture needs an authoritative project id"));
-        let owner = FactOwnerV1::Project { project_id };
-        let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(cg.db()))
-            .unwrap_or_else(|error| panic!("initialize automatic fact authority: {error}"));
-        let apply_id = "automatic-fact-receipt-api-applied";
-        let command = automatic_fact_add_command(
-            owner.clone(),
-            ProjectMemoryFactAddRequest {
-                content: "Automatic receipt API preserves applied facts".to_owned(),
-                category: FactCategoryV1::Decision,
-                source_label: Some("dashboard-api-test".to_owned()),
-                tags: Vec::new(),
-                entities: Vec::new(),
-                trust: Some(
-                    Confidence::new(0.9)
-                        .unwrap_or_else(|error| panic!("build applied fact confidence: {error}")),
-                ),
-                metadata: serde_json::json!({}),
-            },
-            "run.dashboard-receipt-api",
-            apply_id,
-            Some(
-                ActorId::new("automation:dashboard-api-test".to_owned())
-                    .unwrap_or_else(|error| panic!("build automatic fact actor: {error}")),
-            ),
-        )
-        .unwrap_or_else(|error| panic!("build automatic fact command: {error}"));
-        let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
-        let applied_write_control = run_control.write_control();
-        memory
-            .apply_project_memory_automatic_fact(
-                ProvenanceId::new(apply_id.to_owned())
-                    .unwrap_or_else(|error| panic!("build automatic fact receipt id: {error}")),
-                command,
-                ProjectMemoryAutomaticFactEvidenceV1::default(),
-                &applied_write_control,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("record automatic applied receipt: {error}"));
-
-        let quarantined_apply_id = "automatic-fact-receipt-api-quarantined";
-        let quarantined_content = "api_key=0000000000000000";
-        let quarantined_material = serde_json::json!({
-            "content": quarantined_content,
-            "category": FactCategoryV1::Decision,
-            "source_label": "dashboard-api-test",
-            "tags": [],
-            "entities": [],
-            "metadata": {},
-        });
-        let quarantine_receipt = SanitizationReceiptV1::new(
-            SanitizationReceiptRefV1::new(
-                SanitizationReceiptId::new("receipt.dashboard-api-quarantined".to_owned())
-                    .unwrap_or_else(|error| panic!("build sanitization receipt id: {error}")),
-                ComponentVersion::new("sanitizer.dashboard-api-test.v1".to_owned())
-                    .unwrap_or_else(|error| panic!("build sanitizer version: {error}")),
-            )
-            .unwrap_or_else(|error| panic!("build sanitization receipt reference: {error}")),
-            SanitizerDispositionV1::Accepted,
-            SensitivityV1::NonSensitive,
-            Some(
-                PayloadReferenceV1::for_payload(&quarantined_material)
-                    .unwrap_or_else(|error| panic!("bind sanitization payload: {error}")),
-            ),
-        )
-        .unwrap_or_else(|error| panic!("build accepted sanitization receipt: {error}"));
-        let quarantined_command = ProjectMemoryFactAddMaterialV1::new(
-            owner,
-            quarantined_content.to_owned(),
-            FactCategoryV1::Decision,
-            Some("dashboard-api-test".to_owned()),
-            Vec::new(),
-            Vec::new(),
-            serde_json::json!({}),
-            quarantine_receipt,
-            Some("run.dashboard-receipt-api".to_owned()),
-            Confidence::new(0.9).unwrap_or_else(|error| panic!("build fact confidence: {error}")),
-            None,
-        )
-        .unwrap_or_else(|error| panic!("build quarantined automatic fact material: {error}"))
-        .into_command(
-            ProvenanceId::new("automatic-fact-receipt-api-quarantined-operation".to_owned())
-                .unwrap_or_else(|error| panic!("build automatic operation id: {error}")),
-        )
-        .unwrap_or_else(|error| panic!("build quarantined automatic fact command: {error}"));
-        let quarantined_write_control = run_control.write_control();
-        memory
-            .apply_project_memory_automatic_fact(
-                ProvenanceId::new(quarantined_apply_id.to_owned()).unwrap_or_else(|error| {
-                    panic!("build quarantined automatic fact receipt id: {error}")
-                }),
-                quarantined_command,
-                ProjectMemoryAutomaticFactEvidenceV1::default(),
-                &quarantined_write_control,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("record automatic quarantined receipt: {error}"));
-
-        let agent = http_agent();
-        let endpoint = format!(
-            "{}/api/automation/automatic-fact-receipts",
-            fixture.base_url
-        );
-        let (status, listed) = get_json(&agent, &format!("{endpoint}?state=applied"));
-        assert_eq!(status, 200, "automatic receipt list failed: {listed}");
-        assert_eq!(listed["count"], 1);
-        assert_eq!(listed["limit"], 50);
-        assert_eq!(listed["error"], "");
-        let receipts = listed["receipts"]
-            .as_array()
-            .unwrap_or_else(|| panic!("automatic receipt list must contain receipts: {listed}"));
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0]["apply_id"], apply_id);
-        assert_eq!(receipts[0]["run_id"], "run.dashboard-receipt-api");
-        assert_eq!(receipts[0]["state"], "applied");
-        assert!(receipts[0]["applied_fact_id"].is_string());
-
-        let (status, viewed) = get_json(&agent, &format!("{endpoint}/{apply_id}"));
-        assert_eq!(status, 200, "automatic receipt view failed: {viewed}");
-        assert_eq!(viewed["error"], "");
-        assert_eq!(viewed["receipt"]["apply_id"], apply_id);
-        assert_eq!(viewed["receipt"]["state"], "applied");
-
-        let (status, quarantined) = get_json(&agent, &format!("{endpoint}?state=quarantined"));
-        assert_eq!(
-            status, 200,
-            "quarantined receipt list failed: {quarantined}"
-        );
-        assert_eq!(quarantined["count"], 1);
-        assert_eq!(quarantined["receipts"][0]["apply_id"], quarantined_apply_id);
-        assert_eq!(quarantined["receipts"][0]["state"], "quarantined");
-        assert!(quarantined["receipts"][0]["quarantine_reason"].is_string());
-        assert!(quarantined["receipts"][0].get("applied_fact_id").is_none());
-
-        let (status, rejected_filter) = get_json(&agent, &format!("{endpoint}?state=staged"));
-        assert_eq!(status, 400);
-        assert!(
-            rejected_filter["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("expected applied or quarantined")),
-            "non-terminal filter must be rejected: {rejected_filter}"
-        );
-        cg.close();
     });
 }
 
@@ -313,7 +120,7 @@ fn automation_outcomes_endpoint_returns_live_read_only_outcomes() {
             .unwrap_or_else(|| panic!("expected applied fact outcome: {payload}"));
         assert_eq!(
             fact["canonical_fact_id"],
-            serde_json::json!(applied_receipt.canonical_fact_id)
+            serde_json::json!(applied_receipt.fact_id)
         );
         assert_eq!(fact["run_id"], "run_dashboard_outcomes");
         assert_eq!(fact["verdict"], "never_recalled");
@@ -350,51 +157,60 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         let overview = &overview["payload"];
         assert_eq!(overview["providers"]["memory_provider"], "tracedecay");
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
-        assert_eq!(overview["holographic"]["overview"]["banks"], 3);
         assert_eq!(overview["holographic"]["overview"]["entities"], 3);
         assert_eq!(overview["holographic"]["reads"]["facts"]["state"], "ready");
-        assert_eq!(overview["holographic"]["reads"]["entities"]["state"], "ready");
+        assert_eq!(
+            overview["holographic"]["reads"]["entities"]["state"],
+            "ready"
+        );
         assert_eq!(overview["holographic"]["reads"]["graph"]["state"], "ready");
         assert_eq!(
             overview["holographic"]["facts_coverage"]["completeness"],
-            "bounded"
+            "complete"
         );
         assert_eq!(overview["holographic"]["facts_coverage"]["limit"], 5);
         assert_eq!(
-            overview["holographic"]["facts_coverage"]["query_applied_after_limit"],
-            true
+            overview["holographic"]["facts_coverage"]["graph"]["state"], "complete",
+            "ranked fact search must report its mounted graph-assist coverage"
         );
-        // Bank list counts must be live (consistent with the header fact
-        // count). The stored bundle snapshot still stays exposed as
-        // bundled_fact_count, but startup backfill rebuilds now refresh the
-        // seeded project bank to the live membership count.
-        let memory_banks = overview["holographic"]["overview"]["memory_banks"]
-            .as_array()
-            .unwrap_or_else(|| panic!("expected memory_banks array"));
-        let project_bank = memory_banks
-            .iter()
-            .find(|bank| bank["bank_name"] == "project")
-            .unwrap_or_else(|| panic!("expected project bank in memory_banks"));
+
+        let (status, entity_bounded) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/?limit=1&graph_limit=10",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(entity_bounded["domain_state"], "partial");
         assert_eq!(
-            project_bank["fact_count"], 2,
-            "bank list must report live membership counts"
+            entity_bounded["payload"]["holographic"]["reads"]["entities"]["state"],
+            "bounded"
         );
         assert_eq!(
-            project_bank["bundled_fact_count"], 2,
-            "startup bank rebuild should refresh the bundled project snapshot to the live membership count"
+            entity_bounded["payload"]["holographic"]["reads"]["entities"]["code"],
+            "entity_limit_reached"
+        );
+        assert_eq!(
+            entity_bounded["payload"]["holographic"]["entities"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
         );
         let facts = overview["holographic"]["facts"]
             .as_array()
             .unwrap_or_else(|| panic!("expected facts array in overview payload"));
         assert_eq!(facts.len(), 2, "query should filter to cache facts only");
-        // Access tracking is part of every fact payload (seeded rows carry
-        // the column defaults).
         assert!(
-            facts
-                .iter()
-                .all(|fact| fact["access_count"].is_number()
-                    && fact.get("last_recalled_at").is_some()),
-            "fact list rows must surface access_count and last_recalled_at"
+            facts.iter().all(|fact| {
+                fact["fact_id"]
+                    .as_str()
+                    .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok())
+                    && fact["payload_access"] == "eligible"
+                    && fact["access_count"].is_number()
+                    && fact.get("last_recalled_at").is_some()
+            }),
+            "fact rows must expose canonical identities and exact payload availability: {facts:?}"
         );
         let graph_nodes = overview["holographic"]["graph"]["nodes"]
             .as_array()
@@ -402,6 +218,17 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert!(
             graph_nodes.iter().any(|node| node["kind"] == "entity"),
             "graph should include entity nodes"
+        );
+        let graph_fact_nodes = graph_nodes
+            .iter()
+            .filter(|node| node["kind"] == "fact")
+            .collect::<Vec<_>>();
+        assert!(
+            !graph_fact_nodes.is_empty()
+                && graph_fact_nodes.iter().all(|node| node["fact_id"]
+                    .as_str()
+                    .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok())),
+            "every Grafeo fact node must preserve canonical identity: {graph_nodes:?}"
         );
         let graph_edges = overview["holographic"]["graph"]["edges"]
             .as_array()
@@ -411,6 +238,14 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
                 .iter()
                 .any(|edge| edge["kind"] == "active_assertion"),
             "the mounted memory relation graph should expose canonical assertion topology"
+        );
+        assert_eq!(
+            overview["holographic"]["graph"]["coverage"]["state"],
+            "complete"
+        );
+        assert_eq!(
+            overview["holographic"]["graph"]["coverage"]["omission_reasons"],
+            Value::Array(Vec::new())
         );
         let growth = overview["holographic"]["overview"]["growth"]
             .as_array()
@@ -437,12 +272,10 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         );
         assert_eq!(status, 200);
         let memory_status = &memory_status["payload"];
-        assert!(
-            memory_status["feedback_history_repair"]["state"].is_string()
-                && memory_status["feedback_history_repair"]["processed"].is_number()
-                && memory_status["feedback_history_repair"]["remaining"].is_number(),
-            "status must expose authoritative feedback-history repair progress: {memory_status}"
-        );
+        assert_eq!(memory_status["memory"]["fact_count"], 3);
+        assert_eq!(memory_status["memory"]["entity_count"], 3);
+        assert_eq!(memory_status["memory"]["algebra"]["name"], "amari_fhrr");
+        assert_eq!(memory_status["memory"]["algebra"]["hrr_dim"], 2048);
 
         let (status, projection) = get_json(
             &agent,
@@ -455,6 +288,10 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(projection["limit"], 2000);
         assert_eq!(projection["method"], "pca");
         assert_eq!(projection["dim"], 2048);
+        assert_eq!(projection["coverage"]["completeness"], "complete");
+        assert_eq!(projection["coverage"]["limit"], 2000);
+        assert!(projection["coverage"]["examined"].is_number());
+        assert_eq!(projection["coverage"]["omission_reasons"], json!([]));
         let projection_points = projection["points"]
             .as_array()
             .unwrap_or_else(|| panic!("expected projection points array"));
@@ -468,21 +305,20 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         );
         let project_point = projection_points
             .iter()
-            .find(|point| point["fact_id"].as_str() == Some(project_fact_id.as_str()))
+            .find(|point| point["fact_id"] == project_fact_id.as_str())
             .unwrap_or_else(|| panic!("expected projection point for seeded project fact"));
-        assert_eq!(project_point["bank_name"], "project");
-        assert!(
-            project_point["bank_id"].is_null() || project_point["bank_id"].is_number(),
-            "projection point may omit an unavailable legacy bank identity"
-        );
         assert_eq!(project_point["entity_count"], 1);
-        assert_eq!(project_point["connection_count"], 1);
+        assert_eq!(project_point["payload_access"], "eligible");
         let tool_point = projection_points
             .iter()
-            .find(|point| point["fact_id"].as_str() == Some(tool_fact_id.as_str()))
+            .find(|point| point["fact_id"] == tool_fact_id.as_str())
             .unwrap_or_else(|| panic!("expected projection point for seeded tool fact"));
         assert_eq!(tool_point["entity_count"], 2);
-        assert_eq!(tool_point["connection_count"], 2);
+        assert!(projection_points.iter().all(|point| {
+            point["fact_id"]
+                .as_str()
+                .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok())
+        }));
 
         let (status, similarity) = get_json(
             &agent,
@@ -504,6 +340,16 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
             pairs.len(),
             3,
             "min_similarity=0 should return pairs below the previous 0.5 floor"
+        );
+        assert!(
+            pairs.iter().all(|pair| {
+                ["a_id", "b_id"].iter().all(|field| {
+                    pair[field]
+                        .as_str()
+                        .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok())
+                })
+            }),
+            "similarity must preserve canonical fact identities: {pairs:?}"
         );
         let duplicate_pair = pairs
             .iter()
@@ -552,8 +398,6 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
                 .any(|pair| pair["classification"] == "likely_duplicate"),
             "fixture vectors should produce a likely_duplicate pair"
         );
-
-
     });
 }
 
@@ -587,7 +431,7 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             .and_then(|points| {
                 points
                     .iter()
-                    .find(|point| point["fact_id"].as_str() == Some(tool_fact_id.as_str()))
+                    .find(|point| point["fact_id"] == tool_fact_id.as_str())
             })
             .unwrap_or_else(|| panic!("expected projection point for seeded tool fact"));
         assert_eq!(
@@ -612,10 +456,17 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
         assert_eq!(detail["domain_state"], "ready");
         let detail = &detail["payload"];
         assert_eq!(detail["error"], "");
-        assert_eq!(detail["fact"]["fact_id"], tool_fact_id);
+        assert_eq!(
+            detail["fact"]["fact_id"].as_str(),
+            Some(tool_fact_id.as_str())
+        );
         assert_eq!(detail["fact"]["category"], "tool");
         assert_eq!(detail["fact"]["content"], LONG_FACT_CONTENT);
-        assert_eq!(detail["fact"]["has_hrr"], 1);
+        assert_eq!(
+            detail["fact"]["entities"],
+            serde_json::json!(["LCMTab", "SimilarityView"]),
+            "canonical fact payload entities stay normalized strings"
+        );
         assert_eq!(detail["fact"]["trust_score"], 0.66);
         assert!(
             detail["fact"]["access_count"].is_number(),
@@ -625,9 +476,9 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             detail["fact"].get("last_recalled_at").is_some(),
             "fact detail must surface last_recalled_at"
         );
-        let entities = detail["fact"]["entities"]
+        let entities = detail["linked_entities"]
             .as_array()
-            .unwrap_or_else(|| panic!("expected entities array in fact detail"));
+            .unwrap_or_else(|| panic!("expected linked_entities array in fact detail"));
         let entity_names: Vec<&str> = entities
             .iter()
             .filter_map(|entity| entity["name"].as_str())
@@ -638,10 +489,9 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
             "fact detail must list linked entities sorted by name"
         );
 
-        // Unknown ids are a typed empty read: HTTP 200 with a
-        // complete-zero-findings envelope and no fabricated payload.
-        let missing_fact_id =
-            nonexistent_project_fact_id(&fixture, "operation.dashboard-api.missing-fact-detail");
+        let missing_fact_id = absent_canonical_fact_id(&tool_fact_id);
+        FactId::new(missing_fact_id.clone())
+            .unwrap_or_else(|error| panic!("missing fixture id must remain canonical: {error}"));
         let (status, missing) = get_json(
             &agent,
             &format!(
@@ -652,6 +502,21 @@ fn holographic_fact_detail_returns_full_content_and_entities() {
         assert_eq!(status, 200);
         assert_eq!(missing["domain_state"], "complete_zero_findings");
         assert_eq!(missing["payload"], Value::Null);
+
+        let (status, numeric) = get_json(
+            &agent,
+            &format!("{}/api/plugins/holographic/fact/99999", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(numeric["domain_state"], "error");
+        assert!(
+            numeric["coverage"]["omission_reasons"]
+                .as_array()
+                .is_some_and(|reasons| reasons.iter().any(|reason| reason
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("invalid canonical fact id")))),
+            "numeric legacy identity must fail closed: {numeric}"
+        );
     });
 }
 
@@ -679,11 +544,16 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
         );
         assert_eq!(status, 200);
         assert_eq!(history["error"], "");
-        assert_eq!(history["fact_id"], tool_fact_id);
+        assert_eq!(history["fact_id"].as_str(), Some(tool_fact_id.as_str()));
+        assert_eq!(history["limit"], 300);
+        assert_eq!(history["completeness"], "complete");
+        assert!(history["next_after"].is_null());
+        assert!(history.get("repair").is_none());
         let trail = history["trust_history"]
             .as_array()
             .unwrap_or_else(|| panic!("expected trust_history array: {history}"));
         assert_eq!(trail.len(), 2);
+        assert!(trail.iter().all(|entry| entry["event_id"].is_string()));
         assert!(trail[0]["timestamp"].is_number());
         assert_eq!(trail[0]["action"], "helpful");
         assert_eq!(trail[0]["old_trust"], 0.71);
@@ -698,6 +568,7 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
         );
         assert_eq!(trail[0]["source"], "dashboard-test");
         assert_eq!(trail[0]["note"], "confirmed durable");
+        assert_eq!(trail[0]["details_availability"], "available");
         assert_eq!(trail[1]["action"], "unhelpful");
         assert_eq!(trail[1]["old_trust"], 0.76);
         assert_eq!(trail[1]["new_trust"], 0.66);
@@ -711,23 +582,27 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
             ),
         );
         assert_eq!(status, 200);
-        assert_eq!(empty_history["fact_id"], project_fact_id);
+        assert_eq!(
+            empty_history["fact_id"].as_str(),
+            Some(project_fact_id.as_str())
+        );
         assert_eq!(
             empty_history["trust_history"]
                 .as_array()
                 .map(|rows| rows.len()),
             Some(0)
         );
+        assert_eq!(empty_history["completeness"], "complete");
+        assert!(empty_history["next_after"].is_null());
 
-        let missing_fact_id = nonexistent_project_fact_id(
-            &fixture,
-            "operation.dashboard-api.missing-fact-trust-history",
-        );
+        let missing_fact_id = absent_canonical_fact_id(&project_fact_id);
+        FactId::new(missing_fact_id.clone())
+            .unwrap_or_else(|error| panic!("missing fixture id must remain canonical: {error}"));
         let (status, missing) = get_json(
             &agent,
             &format!(
                 "{}/api/plugins/holographic/fact/{missing_fact_id}/trust-history",
-                fixture.base_url
+                fixture.base_url,
             ),
         );
         assert_eq!(status, 404);
@@ -737,6 +612,21 @@ fn holographic_fact_trust_history_returns_feedback_trail_and_empty_for_unreviewe
                 .unwrap_or_default()
                 .contains(&missing_fact_id),
             "404 body should carry the requested fact id"
+        );
+
+        let (status, numeric) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/holographic/fact/99999/trust-history",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 400);
+        assert!(
+            numeric["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("invalid canonical fact id")),
+            "numeric legacy identity must fail closed: {numeric}"
         );
     });
 }
