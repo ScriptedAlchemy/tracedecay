@@ -620,11 +620,13 @@ print(
 )
 PY
 cat >"$consumer/src/main.rs" <<'RS'
+use std::collections::BTreeSet;
+
 use tracedecay::agents::host_bundle_registry::{
-    default_components, verified_embedded_default_host_component_set,
+    RECEIPT_BACKED_HOST_KINDS, default_components, verified_embedded_default_host_component_set,
     verified_embedded_host_bundle,
 };
-use tracedecay::agents::host_bundle_v2::{HostKindV1, stock_host_kinds};
+use tracedecay::agents::host_bundle_v2::stock_host_kinds;
 use tracedecay::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_tool_catalog::{AvailabilityContract, CapabilityId};
 
@@ -639,18 +641,6 @@ const REQUIRED_CAPABILITIES: [&str; 10] = [
     "capability.application.feedback.github-review-ingest",
     "capability.application.feedback.ci-failure-localize",
     "capability.application.feedback.proximity",
-];
-
-const REQUIRED_HOSTS: [HostKindV1; 9] = [
-    HostKindV1::ClaudeCode,
-    HostKindV1::CursorDesktop,
-    HostKindV1::Codex,
-    HostKindV1::Hermes,
-    HostKindV1::Kiro,
-    HostKindV1::KimiCode,
-    HostKindV1::OpenCode,
-    HostKindV1::Gemini,
-    HostKindV1::Copilot,
 ];
 
 fn main() {
@@ -670,13 +660,16 @@ fn main() {
     let supported_hosts = stock_host_kinds()
         .into_iter()
         .filter(|host| !default_components(*host).is_empty())
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
+    let receipt_backed_hosts = RECEIPT_BACKED_HOST_KINDS
+        .into_iter()
+        .collect::<BTreeSet<_>>();
     assert_eq!(
         supported_hosts,
-        REQUIRED_HOSTS.to_vec(),
+        receipt_backed_hosts,
         "packaged default host bundle inventory changed"
     );
-    for host in REQUIRED_HOSTS {
+    for host in RECEIPT_BACKED_HOST_KINDS {
         let components = default_components(host);
         let component_set = verified_embedded_default_host_component_set(host, 0)
             .expect("default packaged host component set must verify");
