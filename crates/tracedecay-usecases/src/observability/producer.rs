@@ -387,32 +387,35 @@ impl BoundedObservabilityProducerV1 {
                 "observability_producer_closed".to_owned(),
             ));
         }
-        let mut worker = match self.worker.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(poisoned) => {
-                let mut guard = poisoned.into_inner();
-                let worker = guard.take();
-                drop(guard);
-                if let Some(worker) = worker {
-                    worker.abort();
-                    let _ = worker.await;
-                }
-                self.state.store(PRODUCER_STOPPED, Ordering::Release);
-                return Err(ApplicationContractError::Domain(
-                    "observability_producer_lock_poisoned".to_owned(),
-                ));
-            }
+        let (mut worker, worker_lock_poisoned) = match self.worker.lock() {
+            Ok(mut guard) => (guard.take(), false),
+            Err(poisoned) => (poisoned.into_inner().take(), true),
         };
+        if worker_lock_poisoned {
+            if let Some(worker) = worker.take() {
+                worker.abort();
+                let _ = worker.await;
+            }
+            self.state.store(PRODUCER_STOPPED, Ordering::Release);
+            return Err(ApplicationContractError::Domain(
+                "observability_producer_lock_poisoned".to_owned(),
+            ));
+        }
         // STOPPING rejects new synchronous admissions immediately. Polling the
         // lock under the same absolute deadline then fences any admission that
         // had already validated RUNNING without blocking the async executor.
         loop {
-            match self.emission_lock.try_lock() {
+            let admission_fenced = match self.emission_lock.try_lock() {
                 Ok(guard) => {
                     drop(guard);
-                    break;
+                    Ok(true)
                 }
-                Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(std::sync::TryLockError::Poisoned(_)) => Err(()),
+                Err(std::sync::TryLockError::WouldBlock) => Ok(false),
+            };
+            match admission_fenced {
+                Ok(true) => break,
+                Err(()) => {
                     if let Some(worker) = worker.take() {
                         worker.abort();
                         let _ = worker.await;
@@ -422,7 +425,7 @@ impl BoundedObservabilityProducerV1 {
                         "observability_producer_lock_poisoned".to_owned(),
                     ));
                 }
-                Err(std::sync::TryLockError::WouldBlock) => {
+                Ok(false) => {
                     let now = Instant::now();
                     if now >= shutdown_deadline {
                         if let Some(worker) = worker.take() {
