@@ -181,18 +181,18 @@ function committedCurationEffect(
     case "add":
       return effect.commit === null ? [] : [{
         key: `add:${effect.commit.last_event_id}`,
-        label: `add fact · fact ${effect.fact_id} · ${effect.disposition} · event ${effect.commit.last_event_id}`,
+        label: `add fact · fact ${effect.fact_id} · ${effect.disposition} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
       }];
     case "link_facts":
       return effect.commit === null ? [] : [{
         key: `link_facts:${effect.commit.last_event_id}`,
-        label: `link facts · ${effect.source_fact_id} → ${effect.target_fact_id} · ${effect.relation.kind} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
+        label: `link facts · ${effect.source_fact_id} → ${effect.target_fact_id} · ${effect.relation.kind} · ${effect.disposition} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
       }];
     case "merge": {
       const commit = effect.outcome.commit_receipts.at(-1);
       return commit === undefined ? [] : [{
         key: `merge:${effect.outcome.operation_id}:${commit.last_event_id}`,
-        label: `merge facts · winner ${effect.outcome.winner_fact_id} · ${effect.outcome.deleted_loser_fact_ids.length.toLocaleString()} removed · event ${commit.last_event_id}`,
+        label: `merge facts · winner ${effect.outcome.winner_fact_id} · ${effect.outcome.deleted_loser_fact_ids.length.toLocaleString()} removed · ${commit.disposition} · event ${commit.last_event_id}`,
       }];
     }
     case "normalize_tags":
@@ -203,7 +203,7 @@ function committedCurationEffect(
     case "remove":
       return effect.commit === null ? [] : [{
         key: `remove:${effect.commit.last_event_id}`,
-        label: `remove fact · fact ${effect.target_fact_id} · ${effect.disposition} · event ${effect.commit.last_event_id}`,
+        label: `remove fact · fact ${effect.target_fact_id} · ${effect.disposition} · ${effect.commit.disposition} · event ${effect.commit.last_event_id}`,
       }];
     case "update":
       return [{

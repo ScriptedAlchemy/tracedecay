@@ -704,14 +704,26 @@ describe("Curation console", () => {
   it("reports run history with the ledger status of each run", async () => {
     stubRoutes();
     renderPage("/knowledge?view=curation");
-    const list = await screen.findByRole("region", {
-      name: "Automatic run records",
+    const history = await screen.findByRole("region", {
+      name: "Automatic run history",
     });
-    expect(within(list).getByText("backend timed out after 60s")).toBeTruthy();
-    // The failed run keeps its own chip rather than being folded into a count,
-    // and the chip carries the state in `data-state` so the meaning does not
-    // depend on the label text or on colour.
-    expect(list.querySelector('[data-state="error"]')).toBeTruthy();
-    expect(list.querySelector('[data-state="ready"]')).toBeTruthy();
+    const succeededRun = (
+      await within(history).findByText("memory_curator")
+    ).closest("button");
+    expect(succeededRun).toBeTruthy();
+    expect(within(succeededRun!).getByText("succeeded")).toBeTruthy();
+    expect(
+      within(succeededRun!).getByText("3 accepted · 2 rejected"),
+    ).toBeTruthy();
+
+    const failedRun = within(history).getByText("skill_writer").closest("button");
+    expect(failedRun).toBeTruthy();
+    expect(within(failedRun!).getByText("failed")).toBeTruthy();
+    expect(
+      within(failedRun!).getByText("0 accepted · 0 rejected"),
+    ).toBeTruthy();
+    expect(
+      within(history).getByText("backend timed out after 60s"),
+    ).toBeTruthy();
   });
 });

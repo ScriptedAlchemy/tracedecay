@@ -4,8 +4,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { AutomationCommittedReceiptV1 } from "../../contracts/generated.ts";
 import { useScope } from "../../data/scope/store.ts";
 import { CurationConsole } from "./CurationConsole.tsx";
+
+type CurationReceipt = Extract<
+  AutomationCommittedReceiptV1,
+  { kind: "curation" }
+>;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -70,6 +76,59 @@ describe("curation console", () => {
       fact_review_limit: 24,
       min_confidence_millionths: 720_000,
     });
+  });
+
+  it("renders the canonical commit disposition for every committed effect", async () => {
+    stubRoutes({
+      runResponse: {
+        run: automaticRunWithReceipt(
+          "run-dashboard-effects",
+          committedEffectsReceipt("run-dashboard-effects"),
+        ),
+      },
+    });
+    renderConsole();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Run automatic curator now" }),
+    );
+
+    const effects = await screen.findByLabelText("Committed curator effects");
+    expect(effects.querySelectorAll("li")).toHaveLength(6);
+    for (const label of [
+      "add fact",
+      "link facts",
+      "merge facts",
+      "normalize tags",
+      "remove fact",
+      "update fact",
+    ]) {
+      expect(effects.textContent).toContain(label);
+    }
+    expect(effects.textContent?.match(/idempotent_replay/g)).toHaveLength(6);
+  });
+
+  it("suppresses effects whose canonical commit is absent", async () => {
+    stubRoutes({
+      runResponse: {
+        run: automaticRunWithReceipt(
+          "run-dashboard-nullable-effects",
+          nullableEffectsReceipt("run-dashboard-nullable-effects"),
+        ),
+      },
+    });
+    renderConsole();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Run automatic curator now" }),
+    );
+
+    expect(
+      await screen.findByText(
+        /run run-dashboard-nullable-effects settled completed/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Committed curator effects")).toBeNull();
   });
 
   it("preserves a committed partial-effect receipt and reconcile action", async () => {
@@ -215,8 +274,244 @@ function automaticRun(runId: string) {
         skipped_count: 0,
       },
     },
-    committed_receipts: [],
+    committed_receipts: [] as CurationReceipt[],
   };
+}
+
+function automaticRunWithReceipt(
+  runId: string,
+  receipt: CurationReceipt,
+) {
+  const run = automaticRun(runId);
+  run.terminal.summary.reviewed_count =
+    receipt.receipt.receipt.accepted_operations;
+  run.terminal.summary.accepted_count = run.terminal.summary.reviewed_count;
+  run.committed_receipts = [receipt];
+  return run;
+}
+
+function committedEffectsReceipt(runId: string): CurationReceipt {
+  const addFact = factId("1");
+  const linkSource = factId("2");
+  const linkTarget = factId("3");
+  const mergeWinner = factId("5");
+  const mergeLoser = factId("6");
+  const normalizedFact = factId("7");
+  const removedFact = factId("8");
+  const updatedFact = factId("9");
+  const receipt: CurationReceipt = {
+    kind: "curation",
+    receipt: {
+      canonical_digest: "",
+      receipt: {
+        owner: { kind: "project", project_id: "project.dashboard" },
+        operation_id: "operation.dashboard.effects",
+        input_digest: "c".repeat(64),
+        automation_run_id: runId,
+        operation_effects: [
+          {
+            kind: "add",
+            fact_id: addFact,
+            closest_fact_id: null,
+            similarity_millionths: null,
+            disposition: "added",
+            commit: factCommit(addFact, "add", 1, "assertion.dashboard.add"),
+          },
+          {
+            kind: "link_facts",
+            source_fact_id: linkSource,
+            target_fact_id: linkTarget,
+            relation: {
+              kind: "supports",
+              evidence_fact_ids: [factId("4")],
+              confidence_millionths: 800_000,
+              provenance: {
+                source_label: "automation:memory-curator",
+                sanitization_receipt: {
+                  receipt: {
+                    receipt_id: "receipt.dashboard.relation",
+                    sanitizer_version: "sanitizer.dashboard.v1",
+                  },
+                  disposition: "accepted",
+                  sensitivity: "non_sensitive",
+                  payload: { digest: sha("9"), byte_len: 128 },
+                },
+              },
+            },
+            disposition: "linked",
+            commit: factCommit(
+              linkSource,
+              "link",
+              1,
+              "assertion.dashboard.link",
+            ),
+          },
+          {
+            kind: "merge",
+            outcome: {
+              operation_id: "operation.dashboard.merge",
+              input_digest: "d".repeat(64),
+              winner_fact_id: mergeWinner,
+              deleted_loser_fact_ids: [mergeLoser],
+              content_updated: false,
+              commit_receipts: [factCommit(mergeLoser, "merge", 2, null)],
+            },
+          },
+          {
+            kind: "normalize_tags",
+            fact_id: normalizedFact,
+            commit: factCommit(
+              normalizedFact,
+              "normalize",
+              2,
+              "assertion.dashboard.normalize",
+            ),
+          },
+          {
+            kind: "remove",
+            target_fact_id: removedFact,
+            disposition: "removed",
+            remaining_fact_count: 8,
+            commit: factCommit(removedFact, "remove", 1, null),
+          },
+          {
+            kind: "update",
+            fact_id: updatedFact,
+            trust_delta_millionths: 100_000,
+            commit: factCommit(
+              updatedFact,
+              "update",
+              1,
+              "assertion.dashboard.update",
+            ),
+          },
+        ],
+        replay_fact_id: addFact,
+        replay_event_id: "event.dashboard.add.1",
+        changed_fact_ids: [
+          addFact,
+          linkSource,
+          linkTarget,
+          mergeLoser,
+          normalizedFact,
+          removedFact,
+          updatedFact,
+        ],
+        accepted_operations: 6,
+        facts_added: 1,
+        facts_updated: 1,
+        facts_merged: 1,
+        facts_removed: 1,
+        normalized_tags: 1,
+        facts_linked: 1,
+      },
+    },
+  };
+  return refreshCurationDigest(receipt);
+}
+
+function nullableEffectsReceipt(runId: string): CurationReceipt {
+  const existingFact = factId("a");
+  const receipt: CurationReceipt = {
+    kind: "curation",
+    receipt: {
+      canonical_digest: "",
+      receipt: {
+        owner: { kind: "project", project_id: "project.dashboard" },
+        operation_id: "operation.dashboard.nullable-effects",
+        input_digest: "e".repeat(64),
+        automation_run_id: runId,
+        operation_effects: [
+          {
+            kind: "add",
+            fact_id: existingFact,
+            closest_fact_id: existingFact,
+            similarity_millionths: 1_000_000,
+            disposition: "near_duplicate",
+            commit: null,
+          },
+          {
+            kind: "link_facts",
+            source_fact_id: factId("b"),
+            target_fact_id: factId("c"),
+            relation: {
+              kind: "supports",
+              evidence_fact_ids: [factId("d")],
+              confidence_millionths: 800_000,
+              provenance: {
+                source_label: "automation:memory-curator",
+                sanitization_receipt: {
+                  receipt: {
+                    receipt_id: "receipt.dashboard.nullable-relation",
+                    sanitizer_version: "sanitizer.dashboard.v1",
+                  },
+                  disposition: "accepted",
+                  sensitivity: "non_sensitive",
+                  payload: { digest: sha("8"), byte_len: 128 },
+                },
+              },
+            },
+            disposition: "already_linked",
+            commit: null,
+          },
+          {
+            kind: "remove",
+            target_fact_id: factId("e"),
+            disposition: "not_found",
+            remaining_fact_count: 9,
+            commit: null,
+          },
+        ],
+        replay_fact_id: null,
+        replay_event_id: null,
+        changed_fact_ids: [],
+        accepted_operations: 3,
+        facts_added: 0,
+        facts_updated: 0,
+        facts_merged: 0,
+        facts_removed: 0,
+        normalized_tags: 0,
+        facts_linked: 0,
+      },
+    },
+  };
+  return refreshCurationDigest(receipt);
+}
+
+function factCommit(
+  fact: string,
+  eventLabel: string,
+  eventCount: number,
+  activeAssertionId: string | null,
+) {
+  const committedEventIds = Array.from(
+    { length: eventCount },
+    (_, index) => `event.dashboard.${eventLabel}.${index + 1}`,
+  );
+  return {
+    disposition: "idempotent_replay" as const,
+    fact_id: fact,
+    owner: { kind: "project" as const, project_id: "project.dashboard" },
+    committed_event_ids: committedEventIds,
+    last_event_id: committedEventIds.at(-1)!,
+    active_assertion_id: activeAssertionId,
+  };
+}
+
+function refreshCurationDigest(receipt: CurationReceipt): CurationReceipt {
+  receipt.receipt.canonical_digest = canonicalSha([
+    "tracedecay.automation-run.curation-receipt.v1",
+    receipt.receipt.receipt,
+  ]);
+  return receipt;
+}
+
+function factId(seed: string): string {
+  const ownerBinding = canonicalSha([
+    "fact-owner.v1",
+    { kind: "project", project_id: "project.dashboard" },
+  ]).slice("sha256:".length);
+  return `fact.v1.${ownerBinding}.${seed.padStart(64, "0")}`;
 }
 
 function automaticRequestDigest(): string {
