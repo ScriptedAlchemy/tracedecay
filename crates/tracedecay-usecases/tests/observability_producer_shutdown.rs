@@ -655,7 +655,7 @@ async fn clean_shutdown_with_pending_drop_remains_partial() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_terminal_linearizes_after_concurrent_admission() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
     let (_project, runtime) = runtime().await;
@@ -665,31 +665,96 @@ async fn shutdown_terminal_linearizes_after_concurrent_admission() {
         BoundedObservabilityProducerV1::start(
             Arc::clone(&db),
             identity(scope, "boot:concurrent-stop"),
-            1_024,
+            4,
         )
         .expect("producer"),
     );
-    let start = Arc::new(Barrier::new(257));
-    let emitters = (0..256)
-        .map(|index| {
-            let producer = Arc::clone(&producer);
-            let start = Arc::clone(&start);
-            std::thread::spawn(move || {
-                let mut event = envelope(scope);
-                event.event_id = format!("event:concurrent:{index}");
-                event.idempotency_key = format!("idempotency:concurrent:{index}");
-                event.trace_id = format!("trace:concurrent:{index}");
-                start.wait();
-                producer.try_emit(event)
-            })
+    let mut admitted_before = envelope(scope);
+    admitted_before.event_id = "event:concurrent:before".to_owned();
+    admitted_before.idempotency_key = "idempotency:concurrent:before".to_owned();
+    admitted_before.trace_id = "trace:concurrent:before".to_owned();
+    assert_eq!(
+        producer
+            .try_emit(admitted_before)
+            .expect("pre-shutdown admission"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+
+    // Release one admission at the shutdown boundary. Either side may win,
+    // but a successful admission must be included before the terminal.
+    let boundary = Arc::new(Barrier::new(4));
+    let crossing = {
+        let producer = Arc::clone(&producer);
+        let boundary = Arc::clone(&boundary);
+        std::thread::spawn(move || {
+            let mut event = envelope(scope);
+            event.event_id = "event:concurrent:crossing".to_owned();
+            event.idempotency_key = "idempotency:concurrent:crossing".to_owned();
+            event.trace_id = "trace:concurrent:crossing".to_owned();
+            boundary.wait();
+            producer.try_emit(event)
         })
-        .collect::<Vec<_>>();
-    start.wait();
-    producer.shutdown().await.expect("concurrent shutdown");
-    let admitted = emitters
-        .into_iter()
-        .filter_map(|emitter| emitter.join().expect("emitter thread").ok())
-        .count() as u64;
+    };
+    let after_stopping = {
+        let producer = Arc::clone(&producer);
+        let boundary = Arc::clone(&boundary);
+        std::thread::spawn(move || {
+            let mut probe = envelope("project.observability.shutdown.probe");
+            probe.event_id = "event:concurrent:probe".to_owned();
+            probe.idempotency_key = "idempotency:concurrent:probe".to_owned();
+            probe.trace_id = "trace:concurrent:probe".to_owned();
+            boundary.wait();
+            loop {
+                match producer.try_emit(probe.clone()) {
+                    Err("observability_producer_binding") => std::thread::yield_now(),
+                    Err("observability_producer_closed") => break,
+                    other => panic!("unexpected lifecycle probe outcome: {other:?}"),
+                }
+            }
+
+            let mut event = envelope(scope);
+            event.event_id = "event:concurrent:late".to_owned();
+            event.idempotency_key = "idempotency:concurrent:late".to_owned();
+            event.trace_id = "trace:concurrent:late".to_owned();
+            producer.try_emit(event)
+        })
+    };
+    let shutdown = {
+        let producer = Arc::clone(&producer);
+        let boundary = Arc::clone(&boundary);
+        tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || boundary.wait())
+                .await
+                .expect("shutdown boundary waiter");
+            producer.shutdown().await
+        })
+    };
+    boundary.wait();
+
+    // Join native contenders off the async workers. The binding-only probe in
+    // `after_stopping` observes the lifecycle transition without touching the
+    // database, then immediately attempts the required post-boundary emit.
+    let (crossing, after_stopping) = tokio::task::spawn_blocking(move || {
+        (
+            crossing.join().expect("crossing emitter thread"),
+            after_stopping.join().expect("late emitter thread"),
+        )
+    })
+    .await
+    .expect("admission contenders");
+    assert_eq!(after_stopping, Err("observability_producer_closed"));
+    let crossing_admitted = match crossing {
+        Ok(ObservabilityEmissionOutcomeV1::Enqueued) => 1_u64,
+        Err("observability_producer_closed") => 0_u64,
+        other => panic!("unexpected crossing admission outcome: {other:?}"),
+    };
+    let summary = shutdown
+        .await
+        .expect("shutdown task")
+        .expect("concurrent shutdown");
+    let admitted = 1_u64.saturating_add(crossing_admitted);
+    assert_eq!(summary.persisted, admitted.saturating_add(1));
+    assert_eq!(summary.dropped, 0);
 
     let page = RegisteredObservabilityPortV1::new(&db)
         .query(ObservabilityQueryV1 {
