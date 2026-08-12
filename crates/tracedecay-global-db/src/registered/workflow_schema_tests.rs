@@ -1,25 +1,34 @@
+use std::fmt::Write as _;
 use std::fs;
 
 use tempfile::TempDir;
-use tracedecay_runtime_core::db::{
-    Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
-};
+use tracedecay_runtime_core::db::engine::TestConnection;
 use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_rusqlite_runtime::workflow::{
     WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_TABLE_CONTRACTS_V1,
 };
 
-async fn assert_workflow_schema_reset_without_mutation(
-    name: &str,
-    seed_schema: impl FnOnce(&rusqlite::Connection),
-) {
+async fn assert_workflow_schema_reset_without_mutation(malformed_schema: String) {
     crate::register_test_schema_installer();
     let directory = TempDir::new().unwrap();
     let database_path = directory.path().join("project/sessions.db");
     fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+    let database = TestConnection::open(&database_path);
+    let connection = (*database).clone();
+    crate::ensure_registered_schema(&connection).await.unwrap();
+    let mut drop_workflow_schema = String::new();
+    for table in WORKFLOW_TABLE_CONTRACTS_V1.iter().rev() {
+        writeln!(drop_workflow_schema, "DROP TABLE IF EXISTS {};", table.name).unwrap();
+    }
+    connection
+        .execute_batch(&drop_workflow_schema)
+        .await
+        .unwrap();
+    drop(connection);
+    drop(database);
     {
         let connection = rusqlite::Connection::open(&database_path).unwrap();
-        seed_schema(&connection);
+        connection.execute_batch(&malformed_schema).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE workflow_reset_canary (value TEXT NOT NULL);
@@ -27,25 +36,12 @@ async fn assert_workflow_schema_reset_without_mutation(
             )
             .unwrap();
     }
-    let authority = DatabaseAuthority::acquire_test(&database_path, name).unwrap();
-    let (database, _) = Database::publish_registered_test_runtime(
-        &database_path,
-        &authority,
-        TestDatabaseRuntimeMode::Existing,
-        TestDatabaseRuntimeScope::ProjectSessions {
-            project_id: tracedecay_domain::ProjectId::new(format!("project.{name}")).unwrap(),
-        },
-    )
-    .await
-    .unwrap();
-    let writer = database
-        .writer_connection("inspect rejected workflow shape")
-        .await
-        .unwrap();
+    let database = TestConnection::open(&database_path);
+    let connection = (*database).clone();
     let before_bytes = fs::read(&database_path).unwrap();
-    let before_schema = schema_snapshot(writer.engine_connection()).await;
+    let before_schema = schema_snapshot(&connection).await;
 
-    let error = match crate::ensure_registered_schema(writer.engine_connection()).await {
+    let error = match crate::ensure_registered_schema(&connection).await {
         Ok(()) => panic!("malformed workflow schema must not be completed"),
         Err(error) => error,
     };
@@ -63,12 +59,11 @@ async fn assert_workflow_schema_reset_without_mutation(
         "typed refusal must preserve the exact main database bytes"
     );
     assert_eq!(
-        schema_snapshot(writer.engine_connection()).await,
+        schema_snapshot(&connection).await,
         before_schema,
         "typed refusal must preserve every schema object byte-for-byte"
     );
-    let mut canary = writer
-        .engine_connection()
+    let mut canary = connection
         .query("SELECT value FROM workflow_reset_canary", ())
         .await
         .unwrap();
@@ -110,43 +105,35 @@ async fn schema_snapshot(
 
 #[tokio::test]
 async fn partial_workflow_store_requires_reset_without_mutation() {
-    assert_workflow_schema_reset_without_mutation("partial-workflow", |connection| {
-        connection
-            .execute_batch(
-                "CREATE TABLE workflow_schema (
+    assert_workflow_schema_reset_without_mutation(
+        "CREATE TABLE workflow_schema (
                          singleton INTEGER PRIMARY KEY,
                          schema_version INTEGER NOT NULL,
                          definition_digest TEXT NOT NULL
                      );
-                     INSERT INTO workflow_schema VALUES (1, 0, 'partial');",
-            )
-            .unwrap();
-    })
+         INSERT INTO workflow_schema VALUES (1, 0, 'partial');"
+            .to_owned(),
+    )
     .await;
 }
 
 #[tokio::test]
 async fn name_complete_workflow_store_with_missing_columns_requires_reset_without_mutation() {
-    assert_workflow_schema_reset_without_mutation("name-complete-workflow", |connection| {
-        connection
-            .execute_batch(
-                "CREATE TABLE workflow_definitions (definition_id TEXT);
+    assert_workflow_schema_reset_without_mutation(
+        "CREATE TABLE workflow_definitions (definition_id TEXT);
                      CREATE TABLE workflow_effect_journal (idempotency_key TEXT);
                      CREATE TABLE workflow_handoffs (token_digest TEXT);
                      CREATE TABLE workflow_schema (singleton INTEGER PRIMARY KEY);
-                     INSERT INTO workflow_schema VALUES (1);",
-            )
-            .unwrap();
-    })
+         INSERT INTO workflow_schema VALUES (1);"
+            .to_owned(),
+    )
     .await;
 }
 
 #[tokio::test]
 async fn constraintless_workflow_lookalike_requires_reset_without_mutation() {
-    assert_workflow_schema_reset_without_mutation("constraintless-workflow", |connection| {
-        connection
-            .execute_batch(
-                "CREATE TABLE workflow_definitions (
+    assert_workflow_schema_reset_without_mutation(
+        "CREATE TABLE workflow_definitions (
                          definition_id TEXT NOT NULL,
                          definition_version INTEGER NOT NULL,
                          payload TEXT NOT NULL,
@@ -183,32 +170,28 @@ async fn constraintless_workflow_lookalike_requires_reset_without_mutation() {
                          1,
                          1,
                          'sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da'
-                     );",
-            )
-            .unwrap();
-    })
+         );"
+        .to_owned(),
+    )
     .await;
 }
 
 #[tokio::test]
 async fn extra_workflow_schema_identity_requires_reset_without_mutation() {
-    assert_workflow_schema_reset_without_mutation("extra-workflow-identity", |connection| {
-        let mut schema = String::new();
-        for table in WORKFLOW_TABLE_CONTRACTS_V1 {
-            schema.push_str(table.sql);
-            schema.push_str(";\n");
-        }
-        schema.push_str(WORKFLOW_SCHEMA_IDENTITY_V1);
-        schema.push_str(
-            ";
+    let mut schema = String::new();
+    for table in WORKFLOW_TABLE_CONTRACTS_V1 {
+        schema.push_str(table.sql);
+        schema.push_str(";\n");
+    }
+    schema.push_str(WORKFLOW_SCHEMA_IDENTITY_V1);
+    schema.push_str(
+        ";
              PRAGMA ignore_check_constraints = ON;
              INSERT INTO workflow_schema VALUES (
                  2,
                  1,
                  'sha256:ef3f0fdc0760f91f64f8cc567cee1174dbd94fec69c9de2a39f9683fd8b780da'
-             );",
-        );
-        connection.execute_batch(&schema).unwrap();
-    })
-    .await;
+         );",
+    );
+    assert_workflow_schema_reset_without_mutation(schema).await;
 }
