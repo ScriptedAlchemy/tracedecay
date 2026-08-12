@@ -2,8 +2,10 @@
 //!
 //! Candidate discovery and validation belong to the automation run receipt.
 //! This module records and reads only terminal applied or quarantined effects.
-//! It also retires the independently shipped v1 proposal sidecar by committing
-//! pending items through that same terminal authority before exact archival.
+//! It also recognizes the independently shipped v1 proposal sidecar for a
+//! one-time retirement boundary. Terminal historical records are archived
+//! exactly; unresolved approval records require an explicit store reset and
+//! never enter the canonical automatic-fact authority.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -46,20 +48,6 @@ struct ShippedAddFactRequestV1 {
     entities: Vec<String>,
     trust: Option<f64>,
     metadata: Value,
-}
-
-impl From<ShippedAddFactRequestV1> for AddFactRequest {
-    fn from(request: ShippedAddFactRequestV1) -> Self {
-        Self {
-            content: request.content,
-            category: request.category,
-            source: request.source,
-            tags: request.tags,
-            entities: request.entities,
-            trust: request.trust,
-            metadata: request.metadata,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -105,17 +93,17 @@ struct ShippedFactProposalStoreV1 {
 
 /// One-time disposition of the independently shipped proposal sidecar.
 ///
-/// The live sidecar is never a second read authority. Pending records first
-/// receive terminal canonical automatic-fact receipts; only then are the
-/// source bytes moved into the content-addressed archive.
+/// The live sidecar is never a second read or mutation authority. A sidecar
+/// containing only terminal historical records moves to an exact-byte,
+/// content-addressed archive. Any unresolved approval record fails closed with
+/// `ResetRequired` before archive or canonical memory effects.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ShippedFactProposalDisposition {
     NotPresent,
     Archived {
         source_digest: String,
         archive_path: PathBuf,
-        pending_receipts: Vec<AutomaticFactReceipt>,
-        preserved_terminal_records: usize,
+        archived_terminal_records: usize,
     },
 }
 
@@ -235,8 +223,7 @@ pub async fn record_session_automatic_facts<A: ProjectMemoryFactStore>(
     })
 }
 
-pub(crate) async fn dispose_shipped_fact_proposals<A: ProjectMemoryFactStore>(
-    memory: &MemoryApplication<A>,
+pub(crate) async fn dispose_shipped_fact_proposals(
     dashboard_root: &Path,
 ) -> Result<ShippedFactProposalDisposition> {
     let source_path = dashboard_root.join(SHIPPED_FACT_PROPOSALS_FILENAME);
@@ -296,11 +283,9 @@ pub(crate) async fn dispose_shipped_fact_proposals<A: ProjectMemoryFactStore>(
     }
 
     let source_digest_hex = hex::encode(Sha256::digest(&bytes));
-    let source_actor_digest = source_digest_hex.chars().take(16).collect::<String>();
     let source_digest = format!("sha256:{source_digest_hex}");
     let mut proposal_ids = HashSet::new();
-    let mut pending = Vec::new();
-    let mut preserved_terminal_records = 0usize;
+    let mut archived_terminal_records = 0usize;
     for record in &store.proposals {
         if !proposal_ids.insert(record.proposal_id.as_str()) {
             return Err(shipped_fact_proposal_reset_required(
@@ -311,86 +296,16 @@ pub(crate) async fn dispose_shipped_fact_proposals<A: ProjectMemoryFactStore>(
                 ),
             ));
         }
-        if record.state != ShippedFactProposalStateV1::PendingApproval {
-            preserved_terminal_records += 1;
-            continue;
+        if record.state == ShippedFactProposalStateV1::PendingApproval {
+            return Err(shipped_fact_proposal_reset_required(
+                &source_path,
+                format!(
+                    "unresolved proposal '{}' cannot be imported because final-V2 has no fact approval authority",
+                    record.proposal_id
+                ),
+            ));
         }
-        let request = record
-            .add_fact_request
-            .clone()
-            .map(AddFactRequest::from)
-            .ok_or_else(|| {
-                shipped_fact_proposal_reset_required(
-                    &source_path,
-                    format!(
-                        "pending proposal '{}' has no add_fact_request",
-                        record.proposal_id
-                    ),
-                )
-            })?;
-        let apply_id = ProvenanceId::new(record.proposal_id.clone()).map_err(|error| {
-            shipped_fact_proposal_reset_required(
-                &source_path,
-                format!(
-                    "pending proposal '{}' has an invalid identity: {error}",
-                    record.proposal_id
-                ),
-            )
-        })?;
-        let proposal_actor_digest = hex::encode(Sha256::digest(record.proposal_id.as_bytes()));
-        let proposal_actor_digest = proposal_actor_digest.chars().take(16).collect::<String>();
-        let actor = automatic_fact_actor(&format!(
-            "automation:shipped-fact-proposal:{}:{}",
-            source_actor_digest.as_str(),
-            proposal_actor_digest.as_str()
-        ))?;
-        let command = automatic_fact_add_command(
-            memory.owner().clone(),
-            request,
-            &record.run_id,
-            &record.proposal_id,
-            Some(actor),
-        )
-        .map_err(|error| {
-            shipped_fact_proposal_reset_required(
-                &source_path,
-                format!(
-                    "pending proposal '{}' cannot enter the canonical automatic-fact authority: {error}",
-                    record.proposal_id
-                ),
-            )
-        })?;
-        let evidence = ProjectMemoryAutomaticFactEvidenceV1::new(
-            bounded_metadata_text(record.evidence_hash.as_deref(), 160),
-            Some(serde_json::json!({
-                "source_format": "fact_proposals.json/v1",
-                "source_digest": source_digest.as_str(),
-                "proposal_id": record.proposal_id.as_str(),
-                "legacy_state": "pending_approval",
-                "created_at": record.created_at,
-                "updated_at": record.updated_at,
-                "duplicate_count": record.duplicate_count,
-                "last_duplicate_run_id": record.last_duplicate_run_id.as_deref(),
-                "proposal": record.proposal.as_ref(),
-                "validation_reason": record.validation_reason.as_deref(),
-                "reviewer": record.reviewer.as_deref(),
-                "applied_fact_id": record.applied_fact_id,
-                "apply_outcome": record.apply_outcome.as_ref(),
-                "folded_contents": record.folded_contents.as_slice(),
-            })),
-            record.validation.clone(),
-        )
-        .map_err(store_error)?;
-        pending.push((apply_id, command, evidence));
-    }
-
-    let mut pending_receipts = Vec::with_capacity(pending.len());
-    for (apply_id, command, evidence) in pending {
-        let result = memory
-            .apply_project_memory_automatic_fact(apply_id, command, evidence)
-            .await
-            .map_err(memory_application_error)?;
-        pending_receipts.push(automatic_fact_receipt(result.receipt())?);
+        archived_terminal_records += 1;
     }
 
     let archive_path =
@@ -399,8 +314,7 @@ pub(crate) async fn dispose_shipped_fact_proposals<A: ProjectMemoryFactStore>(
     Ok(ShippedFactProposalDisposition::Archived {
         source_digest,
         archive_path,
-        pending_receipts,
-        preserved_terminal_records,
+        archived_terminal_records,
     })
 }
 

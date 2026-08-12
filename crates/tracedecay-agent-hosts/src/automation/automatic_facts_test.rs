@@ -86,8 +86,21 @@ fn shipped_sidecar(pending_request: Option<AddFactRequest>) -> serde_json::Value
     })
 }
 
+fn terminal_shipped_sidecar() -> serde_json::Value {
+    let mut sidecar = shipped_sidecar(None);
+    let proposals = sidecar["proposals"].as_array_mut().unwrap();
+    let record = proposals[0].as_object_mut().unwrap();
+    record.insert("state".to_string(), serde_json::json!("applied"));
+    record.insert("applied_fact_id".to_string(), serde_json::json!(42));
+    record.insert(
+        "apply_outcome".to_string(),
+        serde_json::json!({"state": "applied", "fact_id": 42}),
+    );
+    sidecar
+}
+
 #[tokio::test]
-async fn shipped_pending_proposals_receive_canonical_receipts_before_exact_archive() {
+async fn shipped_pending_proposals_require_reset_without_mutation_or_archive() {
     let temp = tempfile::tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
@@ -104,51 +117,28 @@ async fn shipped_pending_proposals_receive_canonical_receipts_before_exact_archi
     .await;
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
 
-    let disposition = dispose_shipped_fact_proposals(&memory, &dashboard_root)
+    let error = dispose_shipped_fact_proposals(&dashboard_root)
         .await
-        .unwrap();
-    let ShippedFactProposalDisposition::Archived {
-        source_digest,
-        archive_path,
-        pending_receipts,
-        preserved_terminal_records,
-    } = disposition
-    else {
-        panic!("shipped sidecar must be archived after disposition");
-    };
+        .unwrap_err();
 
-    assert!(source_digest.starts_with("sha256:"));
-    assert_eq!(pending_receipts.len(), 1);
-    assert_eq!(pending_receipts[0].apply_id, "fact_0123456789abcdef");
-    assert_eq!(pending_receipts[0].state, AutomaticFactState::Applied);
-    assert_eq!(pending_receipts[0].run_id, "run-shipped-sidecar");
-    assert_eq!(
-        pending_receipts[0]
-            .item
-            .as_ref()
-            .and_then(|item| item.get("last_duplicate_run_id")),
-        Some(&serde_json::json!("run-shipped-duplicate"))
-    );
-    assert_eq!(preserved_terminal_records, 1);
-    assert_eq!(tokio::fs::read(&archive_path).await.unwrap(), source_bytes);
-    assert!(!source_path.exists());
-    assert_eq!(canonical_fact_count(&memory).await, 1);
-    assert_eq!(
+    assert!(matches!(
+        error,
+        TraceDecayError::ResetRequired { ref authority, .. }
+            if authority == "shipped fact proposal sidecar"
+    ));
+    assert_eq!(tokio::fs::read(&source_path).await.unwrap(), source_bytes);
+    assert!(!dashboard_root.join("fact_proposals.archive").exists());
+    assert_eq!(canonical_fact_count(&memory).await, 0);
+    assert!(
         load_automatic_fact_receipt(&memory, "fact_0123456789abcdef")
             .await
-            .unwrap(),
-        Some(pending_receipts[0].clone())
-    );
-    assert_eq!(
-        dispose_shipped_fact_proposals(&memory, &dashboard_root)
-            .await
-            .unwrap(),
-        ShippedFactProposalDisposition::NotPresent
+            .unwrap()
+            .is_none()
     );
 }
 
 #[tokio::test]
-async fn unsupported_shipped_pending_record_requires_reset_without_partial_effects() {
+async fn shipped_pending_record_without_request_still_requires_reset_without_effects() {
     let temp = tempfile::tempdir().unwrap();
     let dashboard_root = temp.path().join("dashboard");
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
@@ -162,7 +152,7 @@ async fn unsupported_shipped_pending_record_requires_reset_without_partial_effec
     .await;
     let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
 
-    let error = dispose_shipped_fact_proposals(&memory, &dashboard_root)
+    let error = dispose_shipped_fact_proposals(&dashboard_root)
         .await
         .unwrap_err();
 
@@ -174,6 +164,83 @@ async fn unsupported_shipped_pending_record_requires_reset_without_partial_effec
     assert_eq!(tokio::fs::read(&source_path).await.unwrap(), source_bytes);
     assert_eq!(canonical_fact_count(&memory).await, 0);
     assert!(!dashboard_root.join("fact_proposals.archive").exists());
+}
+
+#[tokio::test]
+async fn terminal_shipped_records_archive_exact_bytes_without_canonical_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
+    let source_path = dashboard_root.join("fact_proposals.json");
+    let source_bytes = serde_json::to_vec_pretty(&terminal_shipped_sidecar()).unwrap();
+    tokio::fs::write(&source_path, &source_bytes).await.unwrap();
+    let db = database(
+        &temp.path().join("memory.db"),
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await;
+    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
+
+    let disposition = dispose_shipped_fact_proposals(&dashboard_root)
+        .await
+        .unwrap();
+    let ShippedFactProposalDisposition::Archived {
+        source_digest,
+        archive_path,
+        archived_terminal_records,
+    } = disposition
+    else {
+        panic!("terminal shipped records must move to the exact archive");
+    };
+
+    assert!(source_digest.starts_with("sha256:"));
+    assert_eq!(archived_terminal_records, 2);
+    assert_eq!(tokio::fs::read(&archive_path).await.unwrap(), source_bytes);
+    assert!(!source_path.exists());
+    assert_eq!(canonical_fact_count(&memory).await, 0);
+    assert_eq!(
+        dispose_shipped_fact_proposals(&dashboard_root)
+            .await
+            .unwrap(),
+        ShippedFactProposalDisposition::NotPresent
+    );
+}
+
+#[tokio::test]
+async fn terminal_archive_failure_retains_original_sidecar_without_canonical_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
+    let source_path = dashboard_root.join("fact_proposals.json");
+    let source_bytes = serde_json::to_vec(&terminal_shipped_sidecar()).unwrap();
+    tokio::fs::write(&source_path, &source_bytes).await.unwrap();
+    let archive_blocker = dashboard_root.join("fact_proposals.archive");
+    tokio::fs::write(&archive_blocker, b"not a directory")
+        .await
+        .unwrap();
+    let db = database(
+        &temp.path().join("memory.db"),
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await;
+    let memory = MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&db)).unwrap();
+
+    let error = dispose_shipped_fact_proposals(&dashboard_root)
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("failed to create shipped fact proposal archive")
+    );
+    assert_eq!(tokio::fs::read(&source_path).await.unwrap(), source_bytes);
+    assert!(
+        tokio::fs::metadata(&archive_blocker)
+            .await
+            .unwrap()
+            .is_file()
+    );
+    assert_eq!(canonical_fact_count(&memory).await, 0);
 }
 
 #[tokio::test]

@@ -485,7 +485,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
-    dispose_shipped_fact_proposals(memory, &dashboard_root).await?;
+    dispose_shipped_fact_proposals(&dashboard_root).await?;
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
         sessions_db,
