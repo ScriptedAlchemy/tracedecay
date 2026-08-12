@@ -19,37 +19,129 @@ async fn context_scout_registry_remounts_same_project_database_after_daemon_rest
     .await
     .unwrap()
     .0;
+    let profile_id = UserProfileId::new("profile.scout.daemon-restart").unwrap();
     let project_id = ProjectId::new("project.scout.daemon-restart").unwrap();
+    let project_root = temporary.path().join("project");
 
     let first_service = DaemonInvocationService::default();
     let first_registrar = DaemonContextScoutRuntimeRegistrar::new(&first_service);
     let first = first_registrar
-        .open_and_register(database.clone(), project_id.clone())
+        .open_and_register(
+            database.clone(),
+            profile_id.clone(),
+            project_id.clone(),
+            project_root.clone(),
+        )
         .await
         .unwrap();
     assert!(Arc::ptr_eq(
         &first,
-        &first_registrar.get(&project_id).await.unwrap()
+        &first_registrar
+            .get(&profile_id, &project_id, &project_root)
+            .await
+            .unwrap()
     ));
     first_service.expire_all().await;
-    assert!(first_registrar.get(&project_id).await.is_none());
+    assert!(
+        first_registrar
+            .get(&profile_id, &project_id, &project_root)
+            .await
+            .is_none()
+    );
 
     let restarted_service = DaemonInvocationService::default();
     let restarted_registrar = DaemonContextScoutRuntimeRegistrar::new(&restarted_service);
     let restarted = restarted_registrar
-        .open_and_register(database.clone(), project_id.clone())
+        .open_and_register(
+            database.clone(),
+            profile_id.clone(),
+            project_id.clone(),
+            project_root.clone(),
+        )
         .await
         .unwrap();
     assert!(!Arc::ptr_eq(&first, &restarted));
     assert!(Arc::ptr_eq(
         &restarted,
-        &restarted_registrar.get(&project_id).await.unwrap()
+        &restarted_registrar
+            .get(&profile_id, &project_id, &project_root)
+            .await
+            .unwrap()
     ));
     assert!(matches!(
         restarted_registrar
-            .open_and_register(database, project_id)
+            .open_and_register(database, profile_id, project_id, project_root)
             .await,
         Err(DaemonContextScoutRuntimeRegistrationError::AlreadyRegistered)
+    ));
+}
+
+#[tokio::test]
+async fn context_scout_retirement_preserves_same_project_in_another_profile() {
+    let temporary = tempfile::tempdir().unwrap();
+    let database_path = temporary.path().join("graph.db");
+    crate::daemon::store_runtime::register_registered_schema_installer();
+    let authority = crate::db::DatabaseAuthority::acquire_test(
+        &database_path,
+        "daemon Context Scout lifecycle",
+    )
+    .unwrap();
+    let database = Database::publish_test_runtime(
+        &database_path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .unwrap()
+    .0;
+    let service = DaemonInvocationService::default();
+    let registrar = DaemonContextScoutRuntimeRegistrar::new(&service);
+    let project_id = ProjectId::new("project.scout.shared").unwrap();
+    let profile_a = UserProfileId::new("profile.scout.a").unwrap();
+    let profile_b = UserProfileId::new("profile.scout.b").unwrap();
+    let root_a = temporary.path().join("project-a");
+    let root_b = temporary.path().join("project-b");
+    registrar
+        .open_and_register(
+            database.clone(),
+            profile_a.clone(),
+            project_id.clone(),
+            root_a.clone(),
+        )
+        .await
+        .unwrap();
+    let registry_b = registrar
+        .open_and_register(
+            database,
+            profile_b.clone(),
+            project_id.clone(),
+            root_b.clone(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        service
+            .expire_project(
+                &Arc::new(Mutex::new(LspSessionRegistry::default())),
+                &profile_a,
+                &project_id,
+                &[root_a.clone()].into_iter().collect(),
+            )
+            .await
+    );
+    assert!(
+        registrar
+            .get(&profile_a, &project_id, &root_a)
+            .await
+            .is_none()
+    );
+    assert!(Arc::ptr_eq(
+        &registry_b,
+        &registrar
+            .get(&profile_b, &project_id, &root_b)
+            .await
+            .unwrap()
     ));
 }
 

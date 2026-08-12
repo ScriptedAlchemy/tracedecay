@@ -237,8 +237,11 @@ pub(crate) struct DaemonInvocationService {
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
     lsp_lease_tasks: Arc<LspLeaseTaskRegistry>,
     authorized_lsp_workspaces: Arc<Mutex<BTreeMap<ManifestDigest, AuthorizedDaemonLspWorkspace>>>,
-    context_scout_registries:
-        Arc<Mutex<BTreeMap<ProjectId, Arc<ProjectContextScoutAddressRegistryV1>>>>,
+    context_scout_registries: Arc<
+        Mutex<
+            BTreeMap<InvocationProjectRuntimeIdentityV1, Arc<ProjectContextScoutAddressRegistryV1>>,
+        >,
+    >,
     /// Every per-project component, published together under one lock. See
     /// [`ProjectRuntimeRegistryV1`] for why these are not twelve maps.
     project_runtimes: ProjectRuntimeRegistryV1,

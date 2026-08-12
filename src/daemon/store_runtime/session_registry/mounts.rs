@@ -128,11 +128,15 @@ impl DaemonSessionRuntimeRegistryV1 {
             remote_credential_authority,
             remote_replay_transaction,
             remote_recovery_authorities: Mutex::new(BTreeMap::new()),
-            project_memory: Mutex::new(BTreeMap::new()),
+            project_memory: Arc::new(Mutex::new(BTreeMap::new())),
             project_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
             retained_hook_tasks: RetainedHookTasks::new(),
-            memory_graph_reconciliation_tasks: RetainedMemoryGraphReconciliationTasksV1::new(),
+            memory_graph_reconciliation_tasks: Arc::new(
+                RetainedMemoryGraphReconciliationTasksV1::new(),
+            ),
+            session_sync_service: Arc::new(std::sync::OnceLock::new()),
+            remote_recovery_project_lifecycle: Arc::new(std::sync::OnceLock::new()),
             #[cfg(test)]
             long_lived_session_maintenance_for_test: AtomicBool::new(false),
         };
@@ -220,9 +224,12 @@ impl DaemonSessionRuntimeRegistryV1 {
             .attach_registered(runtime, "mount profile session store")
             .await?;
         let relation_graph = self.retain_session_relation_graph_runtime(shard_id).await?;
+        let (relation_graph, graph_binding, graph_verified_locator) = relation_graph.into_parts();
         database.bind_session_relation_graph(
             SessionRelationScope::profile_sessions(self.identity.profile_id().clone()),
             relation_graph,
+            graph_binding,
+            graph_verified_locator,
         )?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
@@ -330,6 +337,8 @@ impl DaemonSessionRuntimeRegistryV1 {
                     Some(self.profile_pin.clone()),
                     None,
                     true,
+                    false,
+                    None,
                     "mount Remote Brain node store",
                 )
                 .await?;
@@ -384,9 +393,13 @@ impl DaemonSessionRuntimeRegistryV1 {
                 self.incarnation,
                 Arc::clone(&self.resolver),
                 self.registry.clone(),
+                self.graph_registry.clone(),
+                Arc::clone(&self.graph_lifecycle_cancelled),
                 self.profile_pin.clone(),
                 Arc::clone(&self.project_sessions),
                 Arc::clone(&self.remote_replay_transaction),
+                self.session_sync_service(),
+                self.remote_recovery_project_lifecycle(),
             );
             let backup_root = database
                 .database_path()
@@ -511,6 +524,13 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|error| {
                 session_registry_error("register project session authority", format!("{error:?}"))
             })?;
+        self.mount_registered_project_sessions(project_id).await
+    }
+
+    pub(crate) async fn mount_registered_project_sessions(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Arc<RegisteredGlobalDb>> {
         let mut mounted = self.project_sessions.lock().await;
         if let Some(database) = mounted.get(&project_id) {
             return Ok(Arc::clone(database));
@@ -539,9 +559,12 @@ impl DaemonSessionRuntimeRegistryV1 {
             .attach_registered(runtime, "mount project session store")
             .await?;
         let relation_graph = self.retain_session_relation_graph_runtime(shard_id).await?;
+        let (relation_graph, graph_binding, graph_verified_locator) = relation_graph.into_parts();
         database.bind_session_relation_graph(
             SessionRelationScope::project_sessions(project_id.clone()),
             relation_graph,
+            graph_binding,
+            graph_verified_locator,
         )?;
         self.remote_replay_transaction
             .register_target(project_id.clone(), replay_runtime, replay_authority)

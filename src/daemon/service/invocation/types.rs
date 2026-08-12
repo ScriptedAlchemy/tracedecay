@@ -1,6 +1,7 @@
 //! Shared retained-state shapes and small daemon-private types used across the invocation split.
 
 use super::*;
+use tracedecay_application::RegisteredRootLocatorV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -219,10 +220,53 @@ pub(in crate::daemon::service) struct RegisteredCallableCodeRuntime {
     pub(super) authorization: DaemonCallableCodeAuthorizationSource,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct InvocationProjectRuntimeIdentityV1 {
+    profile_id: UserProfileId,
+    project_id: ProjectId,
+    project_root: PathBuf,
+}
+
+impl InvocationProjectRuntimeIdentityV1 {
+    pub(super) fn new(
+        profile_id: UserProfileId,
+        project_id: ProjectId,
+        project_root: PathBuf,
+    ) -> Self {
+        Self {
+            profile_id,
+            project_id,
+            project_root,
+        }
+    }
+
+    pub(super) fn belongs_to(
+        &self,
+        profile_id: &UserProfileId,
+        project_id: &ProjectId,
+        project_roots: &std::collections::BTreeSet<PathBuf>,
+    ) -> bool {
+        &self.profile_id == profile_id
+            && &self.project_id == project_id
+            && project_roots.contains(&self.project_root)
+    }
+
+    pub(super) fn matches_locator(&self, locator: &RegisteredRootLocatorV1) -> bool {
+        self.profile_id == locator.profile.profile_id
+            && self.project_id == locator.project_id
+            && self.project_root == locator.canonical_root
+    }
+
+    pub(super) fn matches_project_root(&self, project_root: &Path) -> bool {
+        self.project_root == project_root
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::daemon::service) struct RegisteredConfigurationRuntime {
     pub(super) runtime: Arc<ProjectConfigurationRuntime>,
     pub(super) scope: ResolvedScope,
+    pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub(super) actor: ActorId,
     pub(super) grants: DaemonConfigurationGrantAuthority,
     pub(super) semantic_operation: Arc<OnceLock<Arc<ProductionSemanticConfigurationOperationV1>>>,
@@ -240,6 +284,7 @@ impl RegisteredConfigurationRuntime {
 
 pub(super) struct RuntimeLspSession {
     pub(super) expires_at_ms: u64,
+    pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub(super) actor: RuntimeLspActor,
     pub(super) delivery_settlements:
         Option<Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>>,
@@ -452,6 +497,7 @@ pub(super) type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
 pub(crate) struct DaemonLspInvocationOwner {
+    pub(super) project_identity: InvocationProjectRuntimeIdentityV1,
     pub(super) factory: Arc<DaemonLspSessionFactory>,
     pub(super) scope_grant: Option<CapabilityGrantSnapshot>,
     pub(super) scope_set_storage:
@@ -469,7 +515,27 @@ pub(super) struct AuthorizedDaemonLspWorkspace {
 impl DaemonLspInvocationOwner {
     #[cfg(test)]
     pub(crate) fn new(factory: Arc<DaemonLspSessionFactory>) -> Self {
+        Self::for_test_project(
+            factory,
+            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            ProjectId::new("project.test.lsp").expect("test LSP project"),
+            PathBuf::from("/test/lsp"),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_project(
+        factory: Arc<DaemonLspSessionFactory>,
+        profile_id: UserProfileId,
+        project_id: ProjectId,
+        project_root: PathBuf,
+    ) -> Self {
         Self {
+            project_identity: InvocationProjectRuntimeIdentityV1::new(
+                profile_id,
+                project_id,
+                project_root,
+            ),
             factory,
             scope_grant: None,
             scope_set_storage: None,
@@ -477,7 +543,8 @@ impl DaemonLspInvocationOwner {
         }
     }
 
-    pub(crate) fn authorized(
+    pub(super) fn authorized(
+        project_identity: InvocationProjectRuntimeIdentityV1,
         factory: Arc<DaemonLspSessionFactory>,
         scope_grant: CapabilityGrantSnapshot,
         scope_set_storage: tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
@@ -486,6 +553,7 @@ impl DaemonLspInvocationOwner {
         >,
     ) -> Self {
         Self {
+            project_identity,
             factory,
             scope_grant: Some(scope_grant),
             scope_set_storage: Some(scope_set_storage),

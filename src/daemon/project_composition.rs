@@ -274,6 +274,7 @@ pub(super) async fn production_project_server(
         let cancellation = cancellation.clone();
         let graph_runtime = Arc::clone(&graph_runtime);
         let graph_publication_database = Arc::new(cg.db().clone());
+        let profile_id = cg.store_runtime_registry().profile_id().clone();
         Arc::new(move || {
             let invocation = invocation.clone();
             let project_id = project_id.clone();
@@ -287,6 +288,7 @@ pub(super) async fn production_project_server(
             let cancellation = cancellation.clone();
             let graph_runtime = Arc::clone(&graph_runtime);
             let graph_publication_database = Arc::clone(&graph_publication_database);
+            let profile_id = profile_id.clone();
             Box::pin(async move {
                 if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
                     return Err("project route was revoked before code-index mount".to_owned());
@@ -321,6 +323,7 @@ pub(super) async fn production_project_server(
                 let authority_invocation = invocation.clone();
                 let authority_project = project_root.clone();
                 let authority_scope = scope.clone();
+                let authority_profile_id = profile_id.clone();
                 let authority_route_registered = Arc::clone(&route_registered);
                 let authority_cancellation = cancellation.clone();
                 tokio::spawn(async move {
@@ -380,6 +383,7 @@ pub(super) async fn production_project_server(
                         () = authority_cancellation.cancelled() => return,
                         outcome = authority_invocation.mount_query_authority_for_project(
                             &authority_project,
+                            &authority_profile_id,
                             &authority_scope,
                         ) => outcome,
                     };

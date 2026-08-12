@@ -22,6 +22,7 @@ type ProjectServerShutdown = Pin<Box<dyn Future<Output = ShutdownTaskReceipt> + 
 pub(super) struct DaemonShutdownPlan {
     clients: JoinSet<Result<()>>,
     owner_phases: Vec<Vec<ShutdownOwner>>,
+    terminal_owner_phases: Vec<Vec<ShutdownOwner>>,
     project_server_shutdown: ProjectServerShutdown,
 }
 
@@ -37,8 +38,17 @@ impl DaemonShutdownPlan {
         Self {
             clients,
             owner_phases,
+            terminal_owner_phases: Vec::new(),
             project_server_shutdown: Box::pin(project_server_shutdown),
         }
+    }
+
+    pub(super) fn with_terminal_owner_phases(
+        mut self,
+        terminal_owner_phases: Vec<Vec<ShutdownOwner>>,
+    ) -> Self {
+        self.terminal_owner_phases = terminal_owner_phases;
+        self
     }
 }
 
@@ -255,10 +265,14 @@ async fn run_daemon_shutdown(
     } else {
         clients
     };
-    let background = match background_receipt {
+    let mut background = match background_receipt {
         Some(receipt) => receipt,
         None => background_shutdown.await,
     };
+    let terminal = prepare_shutdown_owner_phases(plan.terminal_owner_phases)
+        .join(shutdown_deadline)
+        .await;
+    background.extend(terminal);
     let project_servers = tokio::select! {
         biased;
         receipt = &mut plan.project_server_shutdown => receipt,
@@ -300,10 +314,43 @@ async fn join_aborted_clients_until(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use super::*;
     use crate::errors::TraceDecayError;
+
+    #[tokio::test]
+    async fn terminal_owner_waits_for_admitted_commit_to_drain() {
+        let lifecycle = DaemonLifecycle::default();
+        let activity = lifecycle.try_enter().expect("admitted commit activity");
+        lifecycle.begin_draining();
+        let terminal_cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = Arc::clone(&terminal_cancelled);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let shutdown_lifecycle = lifecycle.clone();
+        let shutdown = tokio::spawn(async move {
+            coordinate_daemon_shutdown(&shutdown_lifecycle, deadline, async move {
+                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async {
+                    ShutdownTaskReceipt::default()
+                })
+                .with_terminal_owner_phases(vec![vec![ShutdownOwner::new(
+                    "memory_graph_reconciliation",
+                    move || {
+                        task_cancelled.store(true, Ordering::Release);
+                    },
+                    async {},
+                )]])
+            })
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!terminal_cancelled.load(Ordering::Acquire));
+        drop(activity);
+        let receipt = shutdown.await.expect("terminal shutdown receipt");
+        assert!(terminal_cancelled.load(Ordering::Acquire));
+        assert!(receipt.background.unfinished().is_empty());
+    }
 
     #[tokio::test]
     async fn cancelled_first_waiter_does_not_duplicate_shutdown_ownership() {

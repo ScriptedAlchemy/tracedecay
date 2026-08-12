@@ -2,6 +2,12 @@
 
 use super::*;
 
+mod context_scout_registry;
+
+pub(crate) use context_scout_registry::{
+    DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
+};
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_primitive(
     service: &DaemonInvocationService,
@@ -484,7 +490,7 @@ pub(super) async fn execute_context_scout(
         .context_scout_registries
         .lock()
         .await
-        .get(&registered.scope.project_id)
+        .get(&registered.project_identity)
         .cloned();
     let Some(registry) = registry else {
         return DaemonInvocationResponse::problem(
@@ -914,58 +920,6 @@ const fn context_scout_store_outcome(
         crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable => {
             "unavailable"
         }
-    }
-}
-
-#[derive(Debug, Error)]
-pub(crate) enum DaemonContextScoutRuntimeRegistrationError {
-    #[error("a Context Scout address registry is already mounted for this project")]
-    AlreadyRegistered,
-    #[error("the Context Scout address registry could not be opened")]
-    InvalidProjectIdentity,
-}
-
-#[derive(Clone)]
-pub(crate) struct DaemonContextScoutRuntimeRegistrar {
-    service: DaemonInvocationService,
-}
-
-impl DaemonContextScoutRuntimeRegistrar {
-    pub(crate) fn new(service: &DaemonInvocationService) -> Self {
-        Self {
-            service: service.clone(),
-        }
-    }
-
-    pub(crate) async fn open_and_register(
-        &self,
-        database: Database,
-        project_id: ProjectId,
-    ) -> Result<Arc<ProjectContextScoutAddressRegistryV1>, DaemonContextScoutRuntimeRegistrationError>
-    {
-        let Some(registry) =
-            ProjectContextScoutAddressRegistryV1::new(database, project_id.clone())
-        else {
-            return Err(DaemonContextScoutRuntimeRegistrationError::InvalidProjectIdentity);
-        };
-        let mut registries = self.service.context_scout_registries.lock().await;
-        if registries.contains_key(&project_id) {
-            return Err(DaemonContextScoutRuntimeRegistrationError::AlreadyRegistered);
-        }
-        registries.insert(project_id, Arc::clone(&registry));
-        Ok(registry)
-    }
-
-    pub(crate) async fn get(
-        &self,
-        project_id: &ProjectId,
-    ) -> Option<Arc<ProjectContextScoutAddressRegistryV1>> {
-        self.service
-            .context_scout_registries
-            .lock()
-            .await
-            .get(project_id)
-            .cloned()
     }
 }
 

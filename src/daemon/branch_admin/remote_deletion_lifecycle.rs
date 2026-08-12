@@ -675,6 +675,14 @@ impl StoreAdministration {
             })?;
         let data_root = crate::storage::profile_sharded_data_root(profile_root, project_id);
         let project_sessions_path = data_root.join(crate::storage::SESSIONS_DB_FILENAME);
+        let identity = self.profile_identity().map_err(|error| {
+            cleanup_error(
+                RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
+                RemoteDeletionPhase::CancelRuntimeOwners,
+                true,
+                error,
+            )
+        })?;
 
         let project_roots = self
             .remote_deleted_project_roots(database, profile_root, project_id)
@@ -705,7 +713,7 @@ impl StoreAdministration {
         }
         owners
             .invocation
-            .retire_remote_deleted_project(&typed_project_id, &project_roots)
+            .retire_remote_deleted_project(identity.profile_id(), &typed_project_id, &project_roots)
             .await
             .map_err(|error| {
                 cleanup_error(
@@ -727,7 +735,7 @@ impl StoreAdministration {
             })?;
         crate::daemon::hook_v2_replay::shutdown_hook_v2_replay_consumer(&data_root).await;
         self.project_routes
-            .forget_project(project_id)
+            .forget_project(identity.profile_id(), project_id)
             .map_err(|error| {
                 cleanup_error(
                     RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
@@ -766,6 +774,21 @@ impl StoreAdministration {
                     },
                 )
             })?;
+        self.session_sync_service
+            .retire_project(identity.profile_id(), &typed_project_id)
+            .await
+            .map_err(|error| {
+                cleanup_error(
+                    RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
+                    RemoteDeletionPhase::CancelRuntimeOwners,
+                    true,
+                    TraceDecayError::Config {
+                        message: format!(
+                            "could not retire remote-deleted project session sync: {error}"
+                        ),
+                    },
+                )
+            })?;
         let runtime_registry = self.session_runtime_registry().await.map_err(|error| {
             cleanup_error(
                 RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
@@ -774,6 +797,44 @@ impl StoreAdministration {
                 error,
             )
         })?;
+        let memory_shard = tracedecay_store::StoreShardIdV1::project(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            typed_project_id.clone(),
+        );
+        runtime_registry
+            .retire_memory_graph_reconciliation_task(&memory_shard)
+            .await
+            .map_err(|error| {
+                cleanup_error(
+                    RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
+                    RemoteDeletionPhase::CancelRuntimeOwners,
+                    true,
+                    error,
+                )
+            })?;
+        runtime_registry
+            .retire_project_session_relation_graph(&typed_project_id)
+            .await
+            .map_err(|error| {
+                cleanup_error(
+                    RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
+                    RemoteDeletionPhase::CancelRuntimeOwners,
+                    true,
+                    error,
+                )
+            })?;
+        runtime_registry
+            .retire_project_memory_graph(&typed_project_id)
+            .await
+            .map_err(|error| {
+                cleanup_error(
+                    RemoteDeletionFailureCode::RuntimeRetirementIncomplete,
+                    RemoteDeletionPhase::CancelRuntimeOwners,
+                    true,
+                    error,
+                )
+            })?;
         runtime_registry
             .drop_project_runtime_caches(&typed_project_id)
             .await;

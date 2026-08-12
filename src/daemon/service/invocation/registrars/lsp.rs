@@ -26,8 +26,33 @@ impl DaemonLspOwnerRegistrar {
         project_root: PathBuf,
         factory: Arc<DaemonLspSessionFactory>,
     ) -> Result<(), ProjectRuntimeRegistryError> {
-        self.register_lsp_owner(project_root, DaemonLspInvocationOwner::new(factory))
-            .await
+        self.register_factory_for_project(
+            project_root,
+            UserProfileId::new("profile.test.lsp").expect("test LSP profile"),
+            ProjectId::new("project.test.lsp").expect("test LSP project"),
+            factory,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn register_factory_for_project(
+        &self,
+        project_root: PathBuf,
+        profile_id: UserProfileId,
+        project_id: ProjectId,
+        factory: Arc<DaemonLspSessionFactory>,
+    ) -> Result<(), ProjectRuntimeRegistryError> {
+        self.register_lsp_owner(
+            project_root.clone(),
+            DaemonLspInvocationOwner::for_test_project(
+                factory,
+                profile_id,
+                project_id,
+                project_root,
+            ),
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -46,6 +71,11 @@ impl DaemonLspOwnerRegistrar {
         diagnostics_quiet_window: Duration,
         gateway_capabilities: GatewayCapabilities,
     ) -> Result<Arc<DaemonLspSessionFactory>, TraceDecayError> {
+        let project_identity = InvocationProjectRuntimeIdentityV1::new(
+            registered_database.binding().shard_id.profile_id.clone(),
+            scope_grant.scope.project_id.clone(),
+            project_root.clone(),
+        );
         let feedback_runtime = self
             .service
             .feedback_runtime(Some(&project_root))
@@ -114,6 +144,7 @@ impl DaemonLspOwnerRegistrar {
         self.register_lsp_owner(
             project_root,
             DaemonLspInvocationOwner::authorized(
+                project_identity,
                 factory.clone(),
                 scope_grant,
                 scope_set_storage,

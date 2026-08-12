@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, Weak, mpsc};
 use std::time::Duration;
 
 use tracedecay_application::RequestId;
@@ -11,21 +11,19 @@ use tracedecay_application::remote::recovery::{
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
 use tracedecay_domain::{ManifestDigest, ProjectId, RemoteWriterFenceV1, canonical_sha256};
+use tracedecay_graph_db::GraphDbRegistry;
 use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
     RemoteRecoveryPhysicalEffectsV1, RemoteSqliteStorageV1,
 };
-use tracedecay_store::{
-    RemoteWriterFenceInstallV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestProbeV1,
-    StoreRuntimeBindingV1, StoreShardIdV1,
-};
+use tracedecay_store::{RemoteWriterFenceInstallV1, StoreShardIdV1};
 
 use super::{
-    DatabaseAuthority, DestructiveMaintenanceTarget, LocalProfileIdentityAuthorityV1,
-    LocalStoreRuntimeResolverV1, ProfileAuthorityPin, RegisteredGlobalDb, Result,
-    StoreRuntimeRegistry, open_runtime, registry_open_error, session_registry_error,
+    DatabaseAuthority, DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
+    LocalProfileIdentityAuthorityV1, LocalStoreLocatorResolutionV1, LocalStoreRuntimeResolverV1,
+    ProfileAuthorityPin, RegisteredGlobalDb, Result, StoreRuntimeKey, StoreRuntimeRegistry,
+    registry_open_error, session_registry_error,
 };
 
 const BACKUP_MANIFEST_VERSION: &str = "tracedecay.remote-backup.v1";
@@ -35,11 +33,20 @@ const INTERRUPTION_CANCELLED: u8 = 1;
 const INTERRUPTION_DEADLINE: u8 = 2;
 
 mod artifacts;
+mod publication;
+mod support;
+
+use publication::RestorePublicationV1;
+pub(super) use publication::remote_restore_activated_open_identity;
 
 use artifacts::{
     BackupSnapshotV1, RemoteBackupManifestV1, classify_runtime_error, converge_interrupted_restore,
-    digest_bytes, digest_from_bytes, read_json_manifest, replay_current_authority_state,
-    safe_digest_suffix, sha256_bytes, sha256_file, validate_isolated_restore,
+    digest_bytes, digest_from_bytes, read_json_manifest, safe_digest_suffix, sha256_bytes,
+    sha256_file, sqlite_identity, validate_isolated_restore,
+};
+use support::{
+    RecoveryRuntimeProbeV1, authority_key, backup_id, committed_restore,
+    validate_recovery_artifact_file,
 };
 
 #[derive(Clone)]
@@ -48,9 +55,20 @@ pub(super) struct RemoteRecoveryPublicationContextV1 {
     incarnation: tracedecay_store::StoreIncarnationV1,
     resolver: Arc<LocalStoreRuntimeResolverV1>,
     registry: StoreRuntimeRegistry,
+    graph_registry: GraphDbRegistry,
+    graph_lifecycle_cancelled: Arc<AtomicBool>,
     profile_pin: ProfileAuthorityPin,
     project_sessions: Arc<tokio::sync::Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
     replay: Arc<crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
+    session_sync_service:
+        Arc<OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>>,
+    project_lifecycle: Arc<
+        OnceLock<
+            Weak<
+                crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1,
+            >,
+        >,
+    >,
 }
 
 impl RemoteRecoveryPublicationContextV1 {
@@ -60,10 +78,22 @@ impl RemoteRecoveryPublicationContextV1 {
         incarnation: tracedecay_store::StoreIncarnationV1,
         resolver: Arc<LocalStoreRuntimeResolverV1>,
         registry: StoreRuntimeRegistry,
+        graph_registry: GraphDbRegistry,
+        graph_lifecycle_cancelled: Arc<AtomicBool>,
         profile_pin: ProfileAuthorityPin,
         project_sessions: Arc<tokio::sync::Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
         replay: Arc<
             crate::daemon::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1,
+        >,
+        session_sync_service: Arc<
+            OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>,
+        >,
+        project_lifecycle: Arc<
+            OnceLock<
+                Weak<
+                    crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1,
+                >,
+            >,
         >,
     ) -> Self {
         Self {
@@ -71,162 +101,159 @@ impl RemoteRecoveryPublicationContextV1 {
             incarnation,
             resolver,
             registry,
+            graph_registry,
+            graph_lifecycle_cancelled,
             profile_pin,
             project_sessions,
             replay,
+            session_sync_service,
+            project_lifecycle,
         }
     }
 
-    async fn publish_restore(
+    fn session_sync_service(
         &self,
+        operation: &'static str,
+    ) -> Result<Arc<crate::daemon::session_sync::DaemonSessionSyncService>> {
+        self.session_sync_service
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                session_registry_error(
+                    operation,
+                    "session sync lifecycle authority is unavailable".to_owned(),
+                )
+            })
+    }
+
+    fn project_lifecycle(
+        &self,
+    ) -> Result<Arc<crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1>>
+    {
+        self.project_lifecycle
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                session_registry_error(
+                    "authorize remote project recovery",
+                    "remote recovery project lifecycle is unavailable".to_owned(),
+                )
+            })
+    }
+
+    async fn authorize_project_recovery(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<crate::daemon::store_writer_gate::WriterAdmissionGuard> {
+        self.project_lifecycle()?
+            .authorize_project_recovery(project_id)
+            .await
+    }
+
+    async fn abort_and_remount_restore(
+        &self,
+        mounted: &mut BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>,
         project_id: ProjectId,
-        staging: PathBuf,
-        rollback: PathBuf,
-        expected_binding: StoreRuntimeBindingV1,
-        expected_staging_identity: u64,
-        interruption: Arc<AtomicU8>,
+        expected_opened_file_identity: u64,
+        reservation: DestructiveMaintenanceReservation,
+        operation: &'static str,
+        failure: String,
     ) -> Result<RestorePublicationV1> {
-        let mut mounted = Arc::clone(&self.project_sessions).lock_owned().await;
-        let Some(database) = mounted.get(&project_id) else {
-            return Ok(RestorePublicationV1::RolledBack);
-        };
-        if database.binding() != &expected_binding {
-            return Ok(RestorePublicationV1::RolledBack);
-        }
-        if Arc::strong_count(database) != 1 {
-            return Ok(RestorePublicationV1::RolledBack);
-        }
-        let destination = database.db_path().to_path_buf();
-        let Some(root) = destination.parent() else {
-            return Ok(RestorePublicationV1::RolledBack);
-        };
-        let target = match DestructiveMaintenanceTarget::new(root, [destination.clone()]) {
-            Ok(target) => target,
-            Err(_) => return Ok(RestorePublicationV1::RolledBack),
-        };
-        if self
-            .replay
-            .unregister_target(&project_id, &expected_binding)
-            .is_err()
-        {
-            return Ok(RestorePublicationV1::RolledBack);
-        }
-        let database = mounted.remove(&project_id).ok_or_else(|| {
+        reservation.abort_preserved().map_err(|release_failure| {
             session_registry_error(
-                "publish remote restore",
-                "ProjectSessions target disappeared during recovery".to_owned(),
+                operation,
+                format!("{failure}; release failed: {release_failure:?}"),
             )
         })?;
-        drop(database);
-
-        let reservation = match self.registry.begin_destructive_maintenance(target).await {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                let restored = self
-                    .mount_project_sessions(project_id.clone())
-                    .await
-                    .map_err(|remount| {
-                        session_registry_error(
-                            "recover failed remote restore quiesce",
-                            format!("{error:?}; remount failed: {remount}"),
-                        )
-                    })?;
-                self.publish_mounted(&mut mounted, project_id, restored)?;
-                return Ok(RestorePublicationV1::RolledBack);
-            }
-        };
-        let Some(closed) = reservation
-            .closed()
-            .iter()
-            .find(|closed| closed.binding() == &expected_binding)
-            .cloned()
-        else {
-            reservation.abort_preserved().map_err(|error| {
-                session_registry_error(
-                    "release incomplete remote restore quiesce",
-                    format!("{error:?}"),
-                )
+        let restored = self
+            .mount_project_sessions(project_id.clone(), expected_opened_file_identity)
+            .await
+            .map_err(|remount| {
+                session_registry_error(operation, format!("{failure}; remount failed: {remount}"))
             })?;
-            let restored = self.mount_project_sessions(project_id.clone()).await?;
-            self.publish_mounted(&mut mounted, project_id, restored)?;
-            return Ok(RestorePublicationV1::RolledBack);
-        };
-        if let Err(error) = replay_current_authority_state(&destination, &staging) {
-            reservation.abort_preserved().map_err(|release| {
-                session_registry_error(
-                    "release rejected remote restore",
-                    format!("{error:?}; release failed: {release:?}"),
-                )
-            })?;
-            let restored = self.mount_project_sessions(project_id.clone()).await?;
-            self.publish_mounted(&mut mounted, project_id, restored)?;
-            return Ok(RestorePublicationV1::RolledBack);
-        }
-        if interruption_value(&interruption).is_some() {
-            reservation.abort_preserved().map_err(|error| {
-                session_registry_error("cancel remote restore publication", format!("{error:?}"))
-            })?;
-            let restored = self.mount_project_sessions(project_id.clone()).await?;
-            self.publish_mounted(&mut mounted, project_id, restored)?;
-            return Ok(RestorePublicationV1::RolledBack);
-        }
+        self.publish_mounted(mounted, project_id, restored).await?;
+        Ok(RestorePublicationV1::RolledBack)
+    }
 
-        let publication = DatabaseAuthority::replace_sqlite_with_rollback_atomically(
-            &staging,
-            &destination,
-            &rollback,
-            closed.opened_file_identity(),
-            expected_staging_identity,
-        );
-        match publication {
-            Ok(()) => {
-                PrivateStoreIo::sync_sqlite_family(&destination).map_err(|error| {
-                    session_registry_error("sync published remote restore", error.to_string())
-                })?;
-                PrivateStoreIo::sync_sqlite_family(&rollback).map_err(|error| {
-                    session_registry_error("sync remote restore rollback", error.to_string())
-                })?;
-                reservation.finish_deleted().map_err(|error| {
-                    session_registry_error("release published remote restore", format!("{error:?}"))
-                })?;
-            }
-            Err(error) => {
-                let destination_identity =
-                    tracedecay_runtime_core::db::sqlite_generation_identity(&destination).ok();
-                if destination_identity == Some(closed.opened_file_identity()) {
-                    reservation.abort_preserved().map_err(|release| {
-                        session_registry_error(
-                            "release rolled-back remote restore",
-                            format!("{release:?}"),
-                        )
-                    })?;
-                    let restored = self.mount_project_sessions(project_id.clone()).await?;
-                    self.publish_mounted(&mut mounted, project_id, restored)?;
-                    return Ok(RestorePublicationV1::RolledBack);
-                }
-                return Err(session_registry_error(
-                    "publish remote restore",
-                    format!("atomic publication requires forward recovery: {error}"),
-                ));
-            }
-        }
-
-        match self.mount_project_sessions(project_id.clone()).await {
+    async fn finish_published_restore(
+        &self,
+        mut mounted: tokio::sync::OwnedMutexGuard<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
+        project_id: ProjectId,
+        destination: &Path,
+        rollback: &Path,
+        reservation: DestructiveMaintenanceReservation,
+        expected_published_identity: u64,
+        expected_rollback_identity: u64,
+    ) -> Result<RestorePublicationV1> {
+        publication::quarantine_sqlite_sidecars(
+            destination,
+            &rollback.with_extension("unverified.sqlite3"),
+        )?;
+        PrivateStoreIo::sync_sqlite_family(destination).map_err(|error| {
+            session_registry_error("sync published remote restore", error.to_string())
+        })?;
+        PrivateStoreIo::sync_sqlite_family(rollback).map_err(|error| {
+            session_registry_error("sync remote restore rollback", error.to_string())
+        })?;
+        reservation.finish_deleted().map_err(|error| {
+            session_registry_error("release published remote restore", format!("{error:?}"))
+        })?;
+        match self
+            .mount_project_sessions(project_id.clone(), expected_published_identity)
+            .await
+        {
             Ok(restored) => {
-                self.publish_mounted(&mut mounted, project_id, restored)?;
+                self.publish_quarantined_mounted(
+                    &mut mounted,
+                    project_id,
+                    restored,
+                    destination,
+                    RestorePublicationV1::Published,
+                )
+                .await?;
                 Ok(RestorePublicationV1::Published)
             }
             Err(publication_error) => {
-                self.rollback_published_restore(
-                    &project_id,
-                    &destination,
-                    &rollback,
-                    expected_staging_identity,
-                    closed.opened_file_identity(),
+                publication::mark_remote_restore_rollback_required(
+                    destination,
+                    rollback,
+                    expected_rollback_identity,
+                    expected_published_identity,
+                )?;
+                drop(mounted);
+                let rollback = self
+                    .rollback_published_restore(
+                        &project_id,
+                        destination,
+                        rollback,
+                        expected_published_identity,
+                        expected_rollback_identity,
+                    )
+                    .await;
+                if let Err(rollback) = rollback {
+                    return Err(session_registry_error(
+                        "rollback rejected remote restore",
+                        format!("validation={publication_error}; rollback failed: {rollback}"),
+                    ));
+                }
+                mounted = Arc::clone(&self.project_sessions).lock_owned().await;
+                let restored = self
+                    .mount_project_sessions(project_id.clone(), expected_rollback_identity)
+                    .await
+                    .map_err(|remount| {
+                        session_registry_error(
+                            "restore project sessions after rejected publication",
+                            format!("validation={publication_error}; remount failed: {remount}"),
+                        )
+                    })?;
+                self.publish_quarantined_mounted(
+                    &mut mounted,
+                    project_id,
+                    restored,
+                    destination,
+                    RestorePublicationV1::RolledBack,
                 )
                 .await?;
-                let restored = self.mount_project_sessions(project_id.clone()).await?;
-                self.publish_mounted(&mut mounted, project_id, restored)?;
                 tracing::warn!(
                     error = %publication_error,
                     "restored database failed registered reattach and was rolled back"
@@ -235,119 +262,6 @@ impl RemoteRecoveryPublicationContextV1 {
             }
         }
     }
-
-    async fn rollback_published_restore(
-        &self,
-        project_id: &ProjectId,
-        destination: &Path,
-        rollback: &Path,
-        expected_published_identity: u64,
-        expected_rollback_identity: u64,
-    ) -> Result<()> {
-        let retained_new = destination.with_extension(format!(
-            "remote-restore-rejected-{expected_published_identity:016x}.sqlite3"
-        ));
-        let target = DestructiveMaintenanceTarget::new(
-            destination.parent().ok_or_else(|| {
-                session_registry_error(
-                    "rollback remote restore",
-                    "published target has no parent directory".to_owned(),
-                )
-            })?,
-            [destination.to_path_buf()],
-        )
-        .map_err(|error| {
-            session_registry_error("reserve remote restore rollback", format!("{error:?}"))
-        })?;
-        let reservation = self
-            .registry
-            .begin_destructive_maintenance(target)
-            .await
-            .map_err(|error| {
-                session_registry_error("quiesce remote restore rollback", format!("{error:?}"))
-            })?;
-        DatabaseAuthority::replace_sqlite_with_rollback_atomically(
-            rollback,
-            destination,
-            &retained_new,
-            expected_published_identity,
-            expected_rollback_identity,
-        )?;
-        PrivateStoreIo::sync_sqlite_family(destination).map_err(|error| {
-            session_registry_error("sync rolled-back remote restore", error.to_string())
-        })?;
-        reservation.finish_deleted().map_err(|error| {
-            session_registry_error("release remote restore rollback", format!("{error:?}"))
-        })?;
-        tracing::info!(
-            project_id = %project_id,
-            retained_rejected_store = %retained_new.display(),
-            "remote restore rolled back after registered validation failed"
-        );
-        Ok(())
-    }
-
-    async fn mount_project_sessions(
-        &self,
-        project_id: ProjectId,
-    ) -> Result<Arc<RegisteredGlobalDb>> {
-        let shard_id = StoreShardIdV1::project_sessions(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id,
-        );
-        let runtime = open_runtime(
-            &self.registry,
-            self.resolver.as_ref(),
-            shard_id,
-            self.incarnation,
-            Some(self.profile_pin.clone()),
-            None,
-            false,
-            "reattach restored project session store",
-        )
-        .await?;
-        let expected_binding = runtime.binding().clone();
-        let expected_locator = runtime.locator().verified().clone();
-        let authority = runtime
-            .database_authority("reattach restored project session store")
-            .map_err(|error| {
-                registry_open_error("reattach restored project session store", error)
-            })?;
-        let database = RegisteredGlobalDb::migrate_and_attach(
-            runtime,
-            expected_binding,
-            expected_locator,
-            authority,
-        )
-        .await?;
-        Ok(Arc::new(database))
-    }
-
-    fn publish_mounted(
-        &self,
-        mounted: &mut BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>,
-        project_id: ProjectId,
-        database: Arc<RegisteredGlobalDb>,
-    ) -> Result<()> {
-        let runtime = database.runtime().clone();
-        let authority = runtime
-            .database_authority("register restored remote replay target")
-            .map_err(|error| {
-                registry_open_error("register restored remote replay target", error)
-            })?;
-        self.replay
-            .register_target(project_id.clone(), runtime, authority)
-            .map_err(|error| session_registry_error("register restored replay target", error))?;
-        mounted.insert(project_id, database);
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RestorePublicationV1 {
-    Published,
-    RolledBack,
 }
 
 #[derive(Clone)]
@@ -417,6 +331,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             .target_project_id()
             .cloned()
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+        let _recovery_admission = self
+            .runtime
+            .block_on(self.publication.authorize_project_recovery(&project_id))
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let authority_key = authority_key(expected)?;
         match self
             .replay
@@ -454,6 +372,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         RemoteRecoveryPhysicalEffectErrorV1,
     > {
         let project_id = self.resolve_project(expected, caller)?;
+        let _recovery_admission = self
+            .runtime
+            .block_on(self.publication.authorize_project_recovery(&project_id))
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let policy_digest = self
             .storage
             .recovery_policy_digest(&caller.scope)
@@ -466,6 +388,8 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let database_path = self.backup_root.join(format!("{backup_id}.sqlite3"));
         let manifest_path = self.backup_root.join(format!("{backup_id}.manifest.json"));
         if manifest_path.exists() {
+            validate_recovery_artifact_file(&self.backup_root, &manifest_path)?;
+            validate_recovery_artifact_file(&self.backup_root, &database_path)?;
             return load_existing_backup(
                 &manifest_path,
                 &database_path,
@@ -480,8 +404,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let interruption = Arc::new(AtomicU8::new(INTERRUPTION_NONE));
         if database_path.exists() {
-            let identity = tracedecay_runtime_core::db::sqlite_generation_identity(&database_path)
-                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+            let identity = sqlite_identity(&database_path)?;
             let interrupted =
                 database_path.with_extension(format!("interrupted-{identity:016x}.sqlite3"));
             if interrupted.exists() {
@@ -566,6 +489,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         RemoteRecoveryPhysicalEffectErrorV1,
     > {
         let project_id = self.resolve_project(expected, caller)?;
+        let _recovery_admission = self
+            .runtime
+            .block_on(self.publication.authorize_project_recovery(&project_id))
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let policy_digest = self
             .storage
             .recovery_policy_digest(&caller.scope)
@@ -573,17 +500,28 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         if digest_bytes(&policy_digest)? != request.expected_policy_digest {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
         }
-        let manifest_path = self
-            .backup_root
-            .join(format!("{}.manifest.json", request.backup_id));
-        let backup_path = self
-            .backup_root
-            .join(format!("{}.sqlite3", request.backup_id));
-        let (binding, destination) = self
-            .replay
-            .target_descriptor(&project_id)
-            .map_err(classify_runtime_error)?;
+        let backup_id = safe_suffix(&request.backup_id)?;
+        let manifest_path = self.backup_root.join(format!("{backup_id}.manifest.json"));
+        let backup_path = self.backup_root.join(format!("{backup_id}.sqlite3"));
+        validate_recovery_artifact_file(&self.backup_root, &manifest_path)?;
+        validate_recovery_artifact_file(&self.backup_root, &backup_path)?;
         let manifest = read_json_manifest(&manifest_path)?;
+        let expected_shard = StoreShardIdV1::project_sessions(
+            self.publication.identity.brain_id().clone(),
+            self.publication.identity.profile_id().clone(),
+            project_id.clone(),
+        );
+        let destination = match self.publication.resolver.resolve_key(&StoreRuntimeKey::new(
+            expected_shard.clone(),
+            self.publication.incarnation,
+        )) {
+            LocalStoreLocatorResolutionV1::Resolved(locator) => {
+                locator.locator().path().to_path_buf()
+            }
+            LocalStoreLocatorResolutionV1::Unavailable(_) => {
+                return Err(RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired);
+            }
+        };
         validate_manifest(
             &manifest,
             &backup_path,
@@ -591,7 +529,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             expected,
             &policy_digest,
             &project_id,
-            &binding.shard_id,
+            &expected_shard,
         )?;
         if sha256_file(&manifest_path)? != request.manifest_digest {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
@@ -601,13 +539,99 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
         let suffix = safe_suffix(&request.preview_id)?;
         let staging = destination.with_extension(format!("remote-restore-{suffix}.staging"));
         let rollback = destination.with_extension(format!("remote-restore-{suffix}.rollback"));
+        if let Some(outcome) = self
+            .runtime
+            .block_on(self.publication.resume_quarantined_restore_while_admitted(
+                project_id.clone(),
+                &destination,
+                &rollback,
+            ))
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired)?
+        {
+            return match outcome {
+                RestorePublicationV1::Published => {
+                    committed_restore(request, policy_digest, manifest.destination_bytes, None)
+                }
+                RestorePublicationV1::RolledBack => {
+                    Err(RemoteRecoveryPhysicalEffectErrorV1::RolledBack)
+                }
+            };
+        }
+        let destination_matches_restore =
+            sha256_file(&destination).is_ok_and(|digest| digest == manifest.destination_sha256);
+        if self
+            .runtime
+            .block_on(self.publication.resume_retained_rollback(
+                project_id.clone(),
+                &destination,
+                &rollback,
+                destination_matches_restore,
+            ))
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired)?
+        {
+            return Err(RemoteRecoveryPhysicalEffectErrorV1::RolledBack);
+        }
         if converge_interrupted_restore(
             &destination,
             &staging,
             &rollback,
             manifest.destination_sha256,
         )? {
+            let converged_identity = sqlite_identity(&destination)?;
+            if self
+                .runtime
+                .block_on(
+                    self.publication
+                        .ensure_project_sessions_target_while_admitted(
+                            project_id.clone(),
+                            converged_identity,
+                            &destination,
+                        ),
+                )
+                .is_err()
+            {
+                let published_identity = sqlite_identity(&destination)?;
+                let rollback_identity = sqlite_identity(&rollback)?;
+                self.runtime
+                    .block_on(self.publication.rollback_published_restore(
+                        &project_id,
+                        &destination,
+                        &rollback,
+                        published_identity,
+                        rollback_identity,
+                    ))
+                    .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired)?;
+                self.runtime
+                    .block_on(
+                        self.publication
+                            .ensure_project_sessions_target_while_admitted(
+                                project_id.clone(),
+                                rollback_identity,
+                                &destination,
+                            ),
+                    )
+                    .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired)?;
+                return Err(RemoteRecoveryPhysicalEffectErrorV1::RolledBack);
+            }
             return committed_restore(request, policy_digest, manifest.destination_bytes, None);
+        }
+        let current_destination_identity = sqlite_identity(&destination)?;
+        self.runtime
+            .block_on(
+                self.publication
+                    .ensure_project_sessions_target_while_admitted(
+                        project_id.clone(),
+                        current_destination_identity,
+                        &destination,
+                    ),
+            )
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired)?;
+        let (binding, mounted_destination) = self
+            .replay
+            .target_descriptor(&project_id)
+            .map_err(classify_runtime_error)?;
+        if binding.shard_id != expected_shard || mounted_destination != destination {
+            return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
         }
         if rollback.exists() {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::ForwardRecoveryRequired);
@@ -619,8 +643,7 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
                 .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         }
         validate_isolated_restore(&staging)?;
-        let staging_identity = tracedecay_runtime_core::db::sqlite_generation_identity(&staging)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+        let staging_identity = sqlite_identity(&staging)?;
         let interruption = Arc::new(AtomicU8::new(INTERRUPTION_NONE));
         let publication = self.publication.clone();
         let runtime = self.runtime.clone();
@@ -677,6 +700,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             .target_project_id()
             .cloned()
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
+        let _recovery_admission = self
+            .runtime
+            .block_on(self.publication.authorize_project_recovery(&project_id))
+            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let expected_sinks = self.required_promotion_sink_ids(expected)?;
         if expected_sinks != required_sink_ids {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
@@ -808,29 +835,6 @@ fn validate_manifest(
     Ok(())
 }
 
-fn committed_restore(
-    request: &StagedRestoreConfirmationV1,
-    policy_digest: ManifestDigest,
-    bytes_consumed: u64,
-    interruption: Option<RemoteRecoveryInterruptionV1>,
-) -> std::result::Result<
-    RemoteRecoveryPhysicalCommitV1<StagedRestoreProgressV1>,
-    RemoteRecoveryPhysicalEffectErrorV1,
-> {
-    let receipt_id = format!("remote.restore.{}", safe_suffix(&request.preview_id)?);
-    let output = StagedRestoreProgressV1::Published { receipt_id };
-    Ok(RemoteRecoveryPhysicalCommitV1 {
-        committed_state_digest: canonical_sha256(&output)
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?,
-        output,
-        policy_digest,
-        committed_at: tracedecay_application::clock::now_micros(),
-        units_consumed: 1,
-        bytes_consumed,
-        interruption_observed_after_commit: interruption,
-    })
-}
-
 fn run_controlled<T: Send>(
     control: &dyn RemoteRecoveryControlPortV1,
     request_id: &RequestId,
@@ -890,89 +894,6 @@ fn interruption_value(interruption: &Arc<AtomicU8>) -> Option<RemoteRecoveryInte
         INTERRUPTION_DEADLINE => Some(RemoteRecoveryInterruptionV1::DeadlineExceeded),
         _ => None,
     }
-}
-
-struct RecoveryRuntimeProbeV1 {
-    cancellation: RuntimeCancellationIdentityV1,
-    deadline: RuntimeDeadlineV1,
-    interruption: Arc<AtomicU8>,
-    commit_started: AtomicBool,
-}
-
-impl RecoveryRuntimeProbeV1 {
-    fn new(
-        request_id: &RequestId,
-        interruption: Arc<AtomicU8>,
-    ) -> std::result::Result<Self, RemoteRecoveryPhysicalEffectErrorV1> {
-        let digest = canonical_sha256(&("tracedecay.remote-recovery-control.v1", request_id))
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let suffix = digest
-            .as_str()
-            .strip_prefix("sha256:")
-            .ok_or(RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        Ok(Self {
-            cancellation: RuntimeCancellationIdentityV1 {
-                cancellation_id: RuntimeCancellationIdV1::new(format!("cancellation.{suffix}"))
-                    .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?,
-                generation: 1,
-            },
-            deadline: RuntimeDeadlineV1 {
-                deadline_id: RuntimeDeadlineIdV1::new(format!("deadline.{suffix}"))
-                    .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?,
-            },
-            interruption,
-            commit_started: AtomicBool::new(false),
-        })
-    }
-}
-
-impl RuntimeRequestProbeV1 for RecoveryRuntimeProbeV1 {
-    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
-        &self.cancellation
-    }
-
-    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
-        &self.deadline
-    }
-
-    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-        match interruption_value(&self.interruption) {
-            Some(RemoteRecoveryInterruptionV1::Cancelled) => Some(RuntimeInterruptionV1::Cancelled),
-            Some(RemoteRecoveryInterruptionV1::DeadlineExceeded) => {
-                Some(RuntimeInterruptionV1::DeadlineExceeded)
-            }
-            None => None,
-        }
-    }
-
-    fn try_begin_commit(&self) -> bool {
-        self.interruption().is_none()
-            && self
-                .commit_started
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-    }
-}
-
-fn authority_key(
-    expected: &RecoveryAuthorityExpectationV1,
-) -> std::result::Result<ManifestDigest, RemoteRecoveryPhysicalEffectErrorV1> {
-    canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &expected.brain_id,
-        &expected.shard_id,
-        &expected.generation_id,
-    ))
-    .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
-}
-
-fn backup_id(
-    operation_id: &str,
-    expected: &RecoveryAuthorityExpectationV1,
-) -> std::result::Result<String, RemoteRecoveryPhysicalEffectErrorV1> {
-    let digest = canonical_sha256(&("tracedecay.remote-backup.v1", operation_id, expected))
-        .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-    Ok(format!("remote.backup.{}", safe_digest_suffix(&digest)?))
 }
 
 fn remote_fence(

@@ -176,6 +176,10 @@ impl ProductionProjectCompositionHarnessV1 {
         invocation.configure_github_read_only_credentials(&profile_identity);
         let http_application_registry = http_application::DaemonHttpApplicationRegistry::default();
         let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
+        store_administration.install_remote_recovery_project_lifecycle(
+            invocation.clone(),
+            Arc::clone(&project_open_gates),
+        )?;
         install_http_application_cold_resolver(
             &http_application_registry,
             store_administration.clone(),

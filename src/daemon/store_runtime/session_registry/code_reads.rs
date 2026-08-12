@@ -169,6 +169,71 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.project_sessions.lock().await.remove(project_id);
     }
 
+    pub(crate) async fn retire_project_session_relation_graph(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<()> {
+        let mut mounted = self.project_sessions.lock().await;
+        let Some(database) = mounted.get(project_id) else {
+            return Ok(());
+        };
+        let (graph_binding, graph_verified_locator) = database
+            .session_relation_graph_identity()
+            .map(|(binding, locator)| (binding.clone(), locator.clone()))?;
+        self.remote_replay_transaction
+            .unregister_target(project_id, database.binding())
+            .map_err(|error| {
+                session_registry_error("retire project session replay target", error)
+            })?;
+        let database = mounted.remove(project_id).ok_or_else(|| {
+            session_registry_error(
+                "retire project session relation graph",
+                "mounted ProjectSessions authority disappeared during retirement".to_owned(),
+            )
+        })?;
+        drop(database);
+        drop(mounted);
+        if let Err(close_error) = super::code_graph::graph_attachment::close_retained(
+            &self.graph_registry,
+            graph_binding,
+            graph_verified_locator,
+        )
+        .await
+        {
+            let restored = self
+                .mount_registered_project_sessions(project_id.clone())
+                .await
+                .map_err(|restore_error| {
+                    session_registry_error(
+                        "restore project session authority after relation graph close refusal",
+                        format!("{close_error}; remount failed: {restore_error}"),
+                    )
+                })?;
+            if let Some(session_sync) = self
+                .session_sync_service
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+            {
+                session_sync
+                    .rebind_project(self.identity.profile_id(), project_id, &restored)
+                    .await
+                    .map_err(|rebind_error| {
+                        session_registry_error(
+                            "restore project session sync after relation graph close refusal",
+                            format!("{close_error}; rebind failed: {rebind_error}"),
+                        )
+                    })?;
+            }
+            return Err(close_error);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn retire_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
+        self.project_memory.lock().await.remove(project_id);
+        Ok(())
+    }
+
     /// Mounts the project-wide mutable graph. The checkout path is exact route
     /// provenance; the canonical database locator is supplied by `StoreLayout`.
     pub(crate) async fn project_graph(

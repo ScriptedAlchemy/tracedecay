@@ -17,7 +17,7 @@ use tracedecay_usecases::primitives::PrimitiveProjectRuntime;
 use super::invocation::{
     DaemonLspInvocationOwner, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
     RegisteredFeedbackRuntime, RegisteredRetainedRuntime, RegisteredWorkRuntime,
-    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    SwitchableFeedbackCycleRuntimeV1,
 };
 
 mod observability;
@@ -25,10 +25,13 @@ mod request_snapshot;
 mod shutdown;
 
 pub(crate) use observability::RegisteredObservabilityProducerV1;
+pub(crate) use shutdown::ProjectRuntimeRootQuiescenceV1;
 use shutdown::ShutdownState;
 
 #[cfg(test)]
 mod observability_tests;
+#[cfg(test)]
+mod recovery_tests;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,13 +408,31 @@ impl From<ProjectRuntimeAlreadyRegistered> for ProjectRuntimeRegistryError {
     }
 }
 
+#[derive(Default)]
+struct ProjectRuntimeRootFencesV1 {
+    retired: BTreeSet<PathBuf>,
+    quiesced: BTreeSet<PathBuf>,
+    request_leases: BTreeMap<PathBuf, usize>,
+}
+
+impl ProjectRuntimeRootFencesV1 {
+    fn contains(&self, root: &Path) -> bool {
+        self.retired.contains(root) || self.quiesced.contains(root)
+    }
+
+    fn requests_drained(&self, roots: &BTreeSet<PathBuf>) -> bool {
+        roots
+            .iter()
+            .all(|root| !self.request_leases.contains_key(root))
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ProjectRuntimeRegistryV1 {
     runtimes: Arc<StdMutex<BTreeMap<PathBuf, ProjectRuntime>>>,
-    /// Roots retired by a deletion/replacement cleanup. Registration for a
-    /// retired root is refused until the root is explicitly readmitted, so a
-    /// late open cannot resurrect a runtime over a deleted store.
-    retired_roots: Arc<StdMutex<BTreeSet<PathBuf>>>,
+    /// Permanent deletion fences and temporary recovery fences share one lock,
+    /// so dropping a recovery guard cannot undo a concurrent deletion.
+    root_fences: Arc<StdMutex<ProjectRuntimeRootFencesV1>>,
     reservation_changed: watch::Sender<u64>,
     reservation_blocking_changed: Arc<(StdMutex<u64>, Condvar)>,
     /// The blocking drain is retained independently of whichever async
@@ -433,7 +454,7 @@ impl Default for ProjectRuntimeRegistryV1 {
         let (shutdown_complete, _) = watch::channel(ShutdownState::Pending);
         Self {
             runtimes: Arc::new(StdMutex::new(BTreeMap::new())),
-            retired_roots: Arc::new(StdMutex::new(BTreeSet::new())),
+            root_fences: Arc::new(StdMutex::new(ProjectRuntimeRootFencesV1::default())),
             reservation_changed,
             reservation_blocking_changed: Arc::new((StdMutex::new(0), Condvar::new())),
             shutdown_task: Arc::new(AsyncMutex::new(None)),
@@ -453,6 +474,59 @@ struct ProjectRuntimeReservationLease {
     project_root: PathBuf,
     reservation: ProjectRuntimeReservation,
     active: bool,
+}
+
+pub(in crate::daemon) struct ProjectRuntimeRequestLeaseV1 {
+    inner: Arc<ProjectRuntimeRequestLeaseInnerV1>,
+}
+
+struct ProjectRuntimeRequestLeaseInnerV1 {
+    registry: ProjectRuntimeRegistryV1,
+    roots: BTreeSet<PathBuf>,
+}
+
+impl Clone for ProjectRuntimeRequestLeaseV1 {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl ProjectRuntimeRequestLeaseV1 {
+    pub(in crate::daemon) fn covers(
+        &self,
+        registry: &ProjectRuntimeRegistryV1,
+        project_root: &Path,
+    ) -> bool {
+        Arc::ptr_eq(&self.inner.registry.root_fences, &registry.root_fences)
+            && (self.inner.roots.contains(project_root)
+                || project_root
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|canonical| self.inner.roots.contains(&canonical)))
+    }
+}
+
+impl Drop for ProjectRuntimeRequestLeaseInnerV1 {
+    fn drop(&mut self) {
+        let mut fences = self.registry.lock_root_fences();
+        for root in &self.roots {
+            let remove = match fences.request_leases.get_mut(root) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    false
+                }
+                Some(_) => true,
+                None => false,
+            };
+            if remove {
+                fences.request_leases.remove(root);
+            }
+        }
+        drop(fences);
+        self.registry.signal_reservation_changed();
+    }
 }
 
 impl ProjectRuntimeReservationLease {
@@ -475,11 +549,11 @@ impl ProjectRuntimeReservationLease {
         {
             commit_starting.send(()).expect("commit-starting receiver");
         }
-        let retired_roots = self.registry.lock_retired_roots();
+        let root_fences = self.registry.lock_root_fences();
         let mut runtimes = self.registry.lock_runtimes();
         let runtime = runtimes.entry(self.project_root.clone()).or_default();
         let result = if self.registry.closed.load(Ordering::Acquire)
-            || retired_roots.contains(&self.project_root)
+            || root_fences.contains(&self.project_root)
         {
             Err(ProjectRuntimeRegistryError::Closed)
         } else if self.reservation.has_same_slots(&publication.reservation) {
@@ -498,7 +572,7 @@ impl ProjectRuntimeReservationLease {
             runtimes.remove(&self.project_root);
         }
         drop(runtimes);
-        drop(retired_roots);
+        drop(root_fences);
         self.active = false;
         self.registry.signal_reservation_changed();
         result
@@ -545,9 +619,9 @@ impl Drop for ProjectRuntimeReservationLease {
 }
 
 impl ProjectRuntimeRegistryV1 {
-    fn lock_retired_roots(&self) -> MutexGuard<'_, BTreeSet<PathBuf>> {
-        match self.retired_roots.lock() {
-            Ok(retired) => retired,
+    fn lock_root_fences(&self) -> MutexGuard<'_, ProjectRuntimeRootFencesV1> {
+        match self.root_fences.lock() {
+            Ok(fences) => fences,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
@@ -575,9 +649,9 @@ impl ProjectRuntimeRegistryV1 {
         project_root: PathBuf,
         reservation: ProjectRuntimeReservation,
     ) -> Result<ProjectRuntimeReservationLease, ProjectRuntimeRegistryError> {
-        let retired_roots = self.lock_retired_roots();
+        let root_fences = self.lock_root_fences();
         let mut runtimes = self.lock_runtimes();
-        if self.closed.load(Ordering::Acquire) || retired_roots.contains(&project_root) {
+        if self.closed.load(Ordering::Acquire) || root_fences.contains(&project_root) {
             return Err(ProjectRuntimeRegistryError::Closed);
         }
         let runtime = runtimes.entry(project_root.clone()).or_default();
@@ -586,7 +660,7 @@ impl ProjectRuntimeRegistryV1 {
         }
         runtime.reservations.extend(reservation.type_ids());
         drop(runtimes);
-        drop(retired_roots);
+        drop(root_fences);
         Ok(ProjectRuntimeReservationLease {
             registry: self.clone(),
             project_root,
@@ -607,9 +681,9 @@ impl ProjectRuntimeRegistryV1 {
         loop {
             let mut reservation_changed = self.reservation_changed.subscribe();
             {
-                let retired_roots = self.lock_retired_roots();
+                let root_fences = self.lock_root_fences();
                 let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) || retired_roots.contains(&project_root) {
+                if self.closed.load(Ordering::Acquire) || root_fences.contains(&project_root) {
                     return Err(ProjectRuntimeRegistryError::Closed);
                 }
                 let runtime = runtimes.entry(project_root.clone()).or_default();
@@ -643,9 +717,9 @@ impl ProjectRuntimeRegistryV1 {
         loop {
             let mut reservation_changed = self.reservation_changed.subscribe();
             {
-                let retired_roots = self.lock_retired_roots();
+                let root_fences = self.lock_root_fences();
                 let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) || retired_roots.contains(&project_root) {
+                if self.closed.load(Ordering::Acquire) || root_fences.contains(&project_root) {
                     return Err(ProjectRuntimeRegistryError::Closed);
                 }
                 let runtime = runtimes.entry(project_root.clone()).or_default();
@@ -790,8 +864,9 @@ impl ProjectRuntimeRegistryV1 {
         loop {
             let mut reservation_changed = self.reservation_changed.subscribe();
             {
+                let root_fences = self.lock_root_fences();
                 let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) {
+                if self.closed.load(Ordering::Acquire) || root_fences.contains(&project_root) {
                     return Err(ProjectRuntimeRegistryError::Closed.into());
                 }
                 let runtime = runtimes.entry(project_root.clone()).or_default();
@@ -856,6 +931,11 @@ impl ProjectRuntimeRegistryV1 {
     #[cfg(test)]
     pub(crate) async fn is_empty(&self) -> bool {
         self.lock_runtimes().is_empty()
+    }
+
+    #[cfg(test)]
+    pub(in crate::daemon) fn is_root_fenced(&self, project_root: &Path) -> bool {
+        self.lock_root_fences().contains(project_root)
     }
 
     #[cfg(test)]

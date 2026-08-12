@@ -19,7 +19,9 @@ use crate::daemon::code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1
 /// Which project-open mount to retry once a generation exists.
 pub(super) enum DeferredQueryAuthorityMountV1 {
     /// The configured accepted authority (committed activation present).
-    Configured,
+    Configured {
+        profile_id: tracedecay_domain::configuration::UserProfileId,
+    },
     /// The checked-in core exact/lexical/graph fallback (no committed
     /// activation); cursor keys are reloaded at attempt time from the same
     /// durable session store the open-time mount used.
@@ -88,9 +90,9 @@ async fn try_deferred_mount(
     mount: &DeferredQueryAuthorityMountV1,
 ) -> DeferredMountAttemptV1 {
     let outcome = match mount {
-        DeferredQueryAuthorityMountV1::Configured => {
+        DeferredQueryAuthorityMountV1::Configured { profile_id } => {
             invocation
-                .mount_query_authority_for_project(project_root, scope)
+                .mount_query_authority_for_project(project_root, profile_id, scope)
                 .await
         }
         DeferredQueryAuthorityMountV1::CoreFallback { session_db } => {

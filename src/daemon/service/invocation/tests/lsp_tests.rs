@@ -302,6 +302,11 @@ async fn linked_workspace_owner_requires_its_exact_registered_scope() {
         .install_lsp_owner(
             root.clone(),
             DaemonLspInvocationOwner {
+                project_identity: InvocationProjectRuntimeIdentityV1::new(
+                    UserProfileId::new("profile.test.lsp-linked").unwrap(),
+                    expected.project_id.clone(),
+                    root.clone(),
+                ),
                 factory: unavailable_lsp_session_factory(),
                 scope_grant: Some(grant),
                 scope_set_storage: None,
@@ -474,6 +479,11 @@ async fn open_polled_lsp_delivery(
         .install_lsp_owner(
             project_root.clone(),
             DaemonLspInvocationOwner {
+                project_identity: InvocationProjectRuntimeIdentityV1::new(
+                    UserProfileId::new("profile.test.lsp-delivery").expect("profile"),
+                    ProjectId::new("project.test.lsp-delivery").expect("project"),
+                    project_root.clone(),
+                ),
                 factory: unavailable_lsp_session_factory(),
                 scope_grant: None,
                 scope_set_storage: None,

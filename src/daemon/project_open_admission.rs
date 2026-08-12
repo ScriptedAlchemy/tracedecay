@@ -9,7 +9,8 @@
 //! and ownership records.
 
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
+use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {
@@ -71,7 +72,7 @@ pub(super) enum MaintenanceRekeyOutcome {
 /// reconnecting MCP host cannot repeatedly reopen the same rejected store.
 #[derive(Clone, Default)]
 pub(super) struct ProjectOpenTasks {
-    registry: Arc<tokio::sync::Mutex<ProjectOpenTaskRegistry>>,
+    registry: Arc<StdMutex<ProjectOpenTaskRegistry>>,
 }
 
 #[derive(Default)]
@@ -79,6 +80,28 @@ struct ProjectOpenTaskRegistry {
     routes: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
     retiring: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
     closed_profiles: BTreeSet<PathBuf>,
+    quiesced_projects: BTreeSet<ProjectOpenIdentityV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ProjectOpenIdentityV1 {
+    profile_root: PathBuf,
+    project_id: String,
+    project_roots: BTreeSet<PathBuf>,
+}
+
+pub(super) struct ProjectOpenIdentityQuiescenceV1 {
+    tasks: ProjectOpenTasks,
+    identity: ProjectOpenIdentityV1,
+}
+
+impl Drop for ProjectOpenIdentityQuiescenceV1 {
+    fn drop(&mut self) {
+        self.tasks
+            .lock_registry()
+            .quiesced_projects
+            .remove(&self.identity);
+    }
 }
 
 struct ProjectOpenTaskEntry {
@@ -157,6 +180,48 @@ fn project_route_matches_identity(
                 .and_then(|layout| layout.identity.project_id)
                 .as_deref()
                 == Some(project_id))
+}
+
+fn project_routes_for_retirement(
+    registry: &mut ProjectOpenTaskRegistry,
+    identity: &ProjectOpenIdentityV1,
+) -> Vec<ProjectRouteKey> {
+    let mut routes = registry
+        .routes
+        .keys()
+        .filter(|route| {
+            project_route_matches_identity(
+                route,
+                &identity.profile_root,
+                &identity.project_id,
+                &identity.project_roots,
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for route in &routes {
+        if let Some(entry) = registry.routes.remove(route) {
+            entry.cancellation.cancel();
+            registry.retiring.insert(route.clone(), entry);
+        }
+    }
+    let already_selected = routes.iter().cloned().collect::<HashSet<_>>();
+    routes.extend(
+        registry
+            .retiring
+            .keys()
+            .filter(|route| {
+                !already_selected.contains(*route)
+                    && project_route_matches_identity(
+                        route,
+                        &identity.profile_root,
+                        &identity.project_id,
+                        &identity.project_roots,
+                    )
+            })
+            .cloned(),
+    );
+    routes
 }
 
 async fn wait_for_project_open_task(mut completion: tokio::sync::watch::Receiver<bool>) {
@@ -363,6 +428,12 @@ impl ProjectOpenTaskRegistry {
 }
 
 impl ProjectOpenTasks {
+    fn lock_registry(&self) -> StdMutexGuard<'_, ProjectOpenTaskRegistry> {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[cfg(test)]
     pub(super) async fn start<OpenFuture>(
         &self,
@@ -385,12 +456,26 @@ impl ProjectOpenTasks {
         OpenFuture: std::future::Future<Output = Result<()>> + Send + 'static,
     {
         let now = Instant::now();
-        let mut registry = self.registry.lock().await;
+        let mut registry = self.lock_registry();
         registry.prune(now);
         if registry.closed_profiles.contains(&route.profile_root) {
             return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
                 message: "project open denied: authenticated profile was remotely deleted"
                     .to_owned(),
+                retry_at: None,
+                typed: None,
+            });
+        }
+        if registry.quiesced_projects.iter().any(|identity| {
+            project_route_matches_identity(
+                &route,
+                &identity.profile_root,
+                &identity.project_id,
+                &identity.project_roots,
+            )
+        }) {
+            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure {
+                message: "project open temporarily unavailable during remote recovery".to_owned(),
                 retry_at: None,
                 typed: None,
             });
@@ -439,7 +524,7 @@ impl ProjectOpenTasks {
         route: &ProjectRouteKey,
     ) -> Option<ProjectOpenFailure> {
         let now = Instant::now();
-        let mut registry = self.registry.lock().await;
+        let mut registry = self.lock_registry();
         registry.prune(now);
         let entry = registry.routes.get(route)?;
         match entry.state.borrow().clone() {
@@ -461,7 +546,7 @@ impl ProjectOpenTasks {
         request_cancellation: &CancellationToken,
     ) -> ProjectOpenWaitOutcome {
         let mut state = {
-            let registry = self.registry.lock().await;
+            let registry = self.lock_registry();
             let Some(entry) = registry.routes.get(route) else {
                 return ProjectOpenWaitOutcome::NotTracked;
             };
@@ -547,6 +632,37 @@ impl ProjectOpenTasks {
         .await
     }
 
+    pub(super) async fn quiesce_project_identity(
+        &self,
+        profile_root: &Path,
+        project_id: &str,
+        project_roots: &BTreeSet<PathBuf>,
+    ) -> Option<ProjectOpenIdentityQuiescenceV1> {
+        let identity = ProjectOpenIdentityV1 {
+            profile_root: profile_root.to_path_buf(),
+            project_id: project_id.to_owned(),
+            project_roots: project_roots.clone(),
+        };
+        let routes = {
+            let mut registry = self.lock_registry();
+            if !registry.quiesced_projects.insert(identity.clone()) {
+                return None;
+            }
+            project_routes_for_retirement(&mut registry, &identity)
+        };
+        if !self
+            .drain_retiring_routes(routes, DAEMON_TASK_ABORT_DEADLINE)
+            .await
+        {
+            self.lock_registry().quiesced_projects.remove(&identity);
+            return None;
+        }
+        Some(ProjectOpenIdentityQuiescenceV1 {
+            tasks: self.clone(),
+            identity,
+        })
+    }
+
     pub(super) async fn shutdown_project_identity_with_deadline(
         &self,
         profile_root: &Path,
@@ -555,37 +671,15 @@ impl ProjectOpenTasks {
         timeout: Duration,
     ) -> bool {
         let routes = {
-            let mut registry = self.registry.lock().await;
-            let mut routes = registry
-                .routes
-                .keys()
-                .filter(|route| {
-                    project_route_matches_identity(route, profile_root, project_id, project_roots)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            for route in &routes {
-                if let Some(entry) = registry.routes.remove(route) {
-                    entry.cancellation.cancel();
-                    registry.retiring.insert(route.clone(), entry);
-                }
-            }
-            let retiring_routes = registry
-                .retiring
-                .keys()
-                .filter(|route| {
-                    !routes.contains(route)
-                        && project_route_matches_identity(
-                            route,
-                            profile_root,
-                            project_id,
-                            project_roots,
-                        )
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            routes.extend(retiring_routes);
-            routes
+            let mut registry = self.lock_registry();
+            project_routes_for_retirement(
+                &mut registry,
+                &ProjectOpenIdentityV1 {
+                    profile_root: profile_root.to_path_buf(),
+                    project_id: project_id.to_owned(),
+                    project_roots: project_roots.clone(),
+                },
+            )
         };
         self.drain_retiring_routes(routes, timeout).await
     }
@@ -596,7 +690,7 @@ impl ProjectOpenTasks {
         timeout: Duration,
     ) -> bool {
         let routes = {
-            let mut registry = self.registry.lock().await;
+            let mut registry = self.lock_registry();
             registry.closed_profiles.insert(profile_root.to_path_buf());
             let active = registry
                 .routes
@@ -626,16 +720,14 @@ impl ProjectOpenTasks {
         post_abort_deadline: Duration,
     ) -> bool {
         {
-            let mut registry = self.registry.lock().await;
+            let mut registry = self.lock_registry();
             for (route, entry) in std::mem::take(&mut registry.routes) {
                 entry.cancellation.cancel();
                 registry.retiring.insert(route, entry);
             }
         }
         let routes = self
-            .registry
-            .lock()
-            .await
+            .lock_registry()
             .retiring
             .keys()
             .cloned()
@@ -651,7 +743,7 @@ impl ProjectOpenTasks {
         // shutdown, so abort what is still running and give the aborts their
         // own bounded window; the task's completion finalizer fires on abort.
         {
-            let registry = self.registry.lock().await;
+            let registry = self.lock_registry();
             for route in &routes {
                 if let Some(entry) = registry.retiring.get(route) {
                     entry.task.abort();
@@ -665,7 +757,7 @@ impl ProjectOpenTasks {
     async fn drain_retiring_routes(&self, routes: Vec<ProjectRouteKey>, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         let completions = {
-            let mut registry = self.registry.lock().await;
+            let mut registry = self.lock_registry();
             routes
                 .into_iter()
                 .filter_map(|route| {
@@ -683,7 +775,7 @@ impl ProjectOpenTasks {
                 Err(_) => drained = false,
             }
         }
-        let mut registry = self.registry.lock().await;
+        let mut registry = self.lock_registry();
         for route in joined {
             registry.retiring.remove(&route);
         }
@@ -692,7 +784,7 @@ impl ProjectOpenTasks {
 
     #[cfg(test)]
     pub(super) async fn tracked_task_count(&self) -> usize {
-        let mut registry = self.registry.lock().await;
+        let mut registry = self.lock_registry();
         registry.prune(Instant::now());
         let active = registry
             .routes
@@ -709,7 +801,7 @@ impl ProjectOpenTasks {
 
     #[cfg(test)]
     pub(super) async fn tracked_route_count(&self) -> usize {
-        let mut registry = self.registry.lock().await;
+        let mut registry = self.lock_registry();
         registry.prune(Instant::now());
         registry.routes.len() + registry.retiring.len()
     }
@@ -830,152 +922,6 @@ mod typed_failure_tests {
 }
 
 #[cfg(test)]
-mod lsp_upgrade_tests {
-    use super::*;
-
-    fn route(project_path: &str, scope_prefix: Option<&str>) -> ProjectRouteKey {
-        ProjectRouteKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_path: PathBuf::from(project_path),
-            scope_prefix: scope_prefix.map(str::to_owned),
-        }
-    }
-
-    fn open_deadline() -> tracedecay_application::Deadline {
-        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-            tracedecay_application::clock::now_micros()
-                .0
-                .saturating_add(5_000_000),
-        ))
-        .expect("valid test deadline")
-    }
-
-    #[tokio::test]
-    async fn lsp_wait_stays_pending_after_core_publication_until_full_open_finishes() {
-        let tasks = ProjectOpenTasks::default();
-        let route = route("/workspace", None);
-        let full_open = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::clone(&full_open);
-        assert!(matches!(
-            tasks
-                .start(route.clone(), async move {
-                    release.notified().await;
-                    Ok(())
-                })
-                .await,
-            ProjectOpenTaskClaim::InFlight(_)
-        ));
-        let cancellation = CancellationToken::new();
-        let deadline = open_deadline();
-        let wait = tasks.wait_for_lsp_upgrade(&route, &deadline, &cancellation);
-        tokio::pin!(wait);
-        tokio::select! {
-            _outcome = &mut wait => panic!("full-open wait completed before the tracked task"),
-            _ = tokio::time::sleep(Duration::from_millis(10)) => {}
-        }
-        full_open.notify_one();
-        assert!(matches!(wait.await, ProjectOpenWaitOutcome::Completed));
-    }
-
-    #[tokio::test]
-    async fn lsp_wait_observes_cancellation_and_deadline_before_full_open() {
-        let tasks = ProjectOpenTasks::default();
-        let route = route("/workspace", None);
-        let release = Arc::new(tokio::sync::Notify::new());
-        let open_release = Arc::clone(&release);
-        assert!(matches!(
-            tasks
-                .start(route.clone(), async move {
-                    open_release.notified().await;
-                    Ok(())
-                })
-                .await,
-            ProjectOpenTaskClaim::InFlight(_)
-        ));
-
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-        let cancellation_deadline = open_deadline();
-        assert!(matches!(
-            tasks
-                .wait_for_lsp_upgrade(&route, &cancellation_deadline, &cancellation)
-                .await,
-            ProjectOpenWaitOutcome::Cancelled
-        ));
-
-        let expired =
-            tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
-                .expect("valid expired test deadline");
-        assert!(matches!(
-            tasks
-                .wait_for_lsp_upgrade(&route, &expired, &CancellationToken::new())
-                .await,
-            ProjectOpenWaitOutcome::TimedOut
-        ));
-        release.notify_one();
-    }
-
-    #[tokio::test]
-    async fn lsp_wait_requires_exact_route_identity_for_linked_worktrees() {
-        let tasks = ProjectOpenTasks::default();
-        let base_route = route("/workspace", None);
-        let linked_route = route("/workspace", Some("packages/api"));
-        let release = Arc::new(tokio::sync::Notify::new());
-        let open_release = Arc::clone(&release);
-        assert!(matches!(
-            tasks
-                .start(base_route.clone(), async move {
-                    open_release.notified().await;
-                    Ok(())
-                })
-                .await,
-            ProjectOpenTaskClaim::InFlight(_)
-        ));
-
-        let linked_deadline = open_deadline();
-        assert!(matches!(
-            tasks
-                .wait_for_lsp_upgrade(&linked_route, &linked_deadline, &CancellationToken::new(),)
-                .await,
-            ProjectOpenWaitOutcome::NotTracked
-        ));
-        release.notify_one();
-        let completion_deadline = open_deadline();
-        assert!(matches!(
-            tasks
-                .wait_for_lsp_upgrade(&base_route, &completion_deadline, &CancellationToken::new(),)
-                .await,
-            ProjectOpenWaitOutcome::Completed
-        ));
-    }
-
-    #[tokio::test]
-    async fn lsp_wait_preserves_a_typed_full_open_failure() {
-        let tasks = ProjectOpenTasks::default();
-        let route = route("/workspace", None);
-        assert!(matches!(
-            tasks
-                .start(route.clone(), async {
-                    Err(TraceDecayError::ResetRequired {
-                        authority: "lsp".to_owned(),
-                        reason: "owner registration was rejected".to_owned(),
-                    })
-                })
-                .await,
-            ProjectOpenTaskClaim::InFlight(_)
-        ));
-
-        let failure_deadline = open_deadline();
-        let outcome = tasks
-            .wait_for_lsp_upgrade(&route, &failure_deadline, &CancellationToken::new())
-            .await;
-        assert!(matches!(
-            outcome,
-            ProjectOpenWaitOutcome::Failed(TraceDecayError::ResetRequired {
-                authority,
-                reason,
-            }) if authority == "lsp" && reason == "owner registration was rejected"
-        ));
-    }
-}
+mod lsp_upgrade_tests;
+#[cfg(test)]
+mod quiescence_tests;

@@ -33,6 +33,8 @@ mod lifecycle;
 mod logging;
 mod multi_root_journey;
 mod ownership;
+mod remote_project_deletion;
+mod remote_project_recovery;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;
@@ -196,7 +198,15 @@ fn test_daemon_engine_for_profile(profile_root: &std::path::Path) -> DaemonEngin
     prepare_test_profile_root(profile_root);
     let profile_identity = crate::daemon::profile_identity::load_or_create(profile_root)
         .expect("load test profile identity");
-    DaemonEngine::default().with_profile_identity(profile_identity)
+    let engine = DaemonEngine::default().with_profile_identity(profile_identity);
+    engine
+        .store_administration
+        .install_remote_recovery_project_lifecycle(
+            engine.invocation.clone(),
+            Arc::clone(&engine.project_open_gates),
+        )
+        .unwrap();
+    engine
 }
 
 struct EnvVarGuard {

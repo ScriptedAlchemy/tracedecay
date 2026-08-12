@@ -17,7 +17,7 @@ use crate::daemon::shutdown_coordination::{ShutdownOwner, ShutdownStatus};
 use crate::daemon::shutdown_orchestration::{
     DaemonShutdownPlan, DaemonShutdownReceipt, coordinate_daemon_shutdown,
 };
-use crate::daemon::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt};
+use crate::daemon::store_shutdown::ShutdownTaskReceipt;
 use crate::daemon::{log_daemon_event, project_open_tasks, shutdown_project_servers};
 
 impl DaemonEngine {
@@ -30,13 +30,15 @@ impl DaemonEngine {
             self.store_administration
                 .session_temporal_refresh_schedulers(),
         );
-
         let automation_join = self.clone();
-        let repair_join = self.clone();
 
         let replay_join = self.store_administration.clone();
         let session_sync_join = self.store_administration.clone();
         let reaper_join = self.store_administration.clone();
+        let git_transactions_join =
+            Arc::clone(self.store_administration.git_index_transaction_services());
+        let native_integration_join =
+            Arc::clone(self.store_administration.native_integration_services());
 
         let maintenance_join = self.maintenance_coordinator.clone();
         let watcher_cancel = self.git_watcher.clone();
@@ -45,6 +47,9 @@ impl DaemonEngine {
         let pr_join = Arc::clone(&self.pr_autotrack_task);
 
         vec![
+            vec![ShutdownOwner::new("invocation", || {}, async move {
+                invocation_join.shutdown().await;
+            })],
             vec![
                 ShutdownOwner::with_deadline_status(
                     "project_open",
@@ -59,9 +64,6 @@ impl DaemonEngine {
                 ),
                 ShutdownOwner::new("automation", || {}, async move {
                     automation_join.shutdown_automation_schedulers().await;
-                }),
-                ShutdownOwner::new("memory_repair", || {}, async move {
-                    repair_join.shutdown_memory_repair_schedulers().await;
                 }),
                 ShutdownOwner::new("session_temporal_refresh", || {}, async move {
                     session_refresh.shutdown().await;
@@ -96,82 +98,83 @@ impl DaemonEngine {
                         task.shutdown().await;
                     }
                 }),
-            ],
-            vec![ShutdownOwner::new("invocation", || {}, async move {
-                invocation_join.shutdown().await;
-            })],
-            vec![
-                ShutdownOwner::new("retirement_reapers", || {}, async move {
-                    reaper_join.shutdown_retirement_reapers().await;
-                }),
                 ShutdownOwner::new("session_sync", || {}, async move {
                     session_sync_join.shutdown_session_sync().await;
                 }),
             ],
+            vec![
+                ShutdownOwner::with_deadline_result(
+                    "git_index_transactions",
+                    || {},
+                    move |_| async move {
+                        let receipt = git_transactions_join
+                            .shutdown()
+                            .await
+                            .map_err(|error| format!("{error:?}"))?;
+                        log_daemon_event(
+                            "daemon_shutdown",
+                            &[
+                                ("outcome", "git_transactions_joined".to_string()),
+                                ("services_closed", receipt.services_closed.to_string()),
+                                (
+                                    "store_actors_joined",
+                                    receipt.store_actors_joined.to_string(),
+                                ),
+                            ],
+                        );
+                        Ok::<(), String>(())
+                    },
+                ),
+                ShutdownOwner::with_deadline_result(
+                    "native_integration_transactions",
+                    || {},
+                    move |_| async move {
+                        let store_actors_joined = native_integration_join
+                            .shutdown()
+                            .await
+                            .map_err(|error| format!("{error:?}"))?;
+                        log_daemon_event(
+                            "daemon_shutdown",
+                            &[
+                                ("outcome", "native_integration_joined".to_string()),
+                                ("store_actors_joined", store_actors_joined.to_string()),
+                            ],
+                        );
+                        Ok::<(), String>(())
+                    },
+                ),
+            ],
+            vec![ShutdownOwner::new(
+                "retirement_reapers",
+                || {},
+                async move {
+                    reaper_join.shutdown_retirement_reapers().await;
+                },
+            )],
         ]
     }
 
-    /// Fence Git mutation admission and join every transaction store actor
-    /// before project servers close, so no native Git work outlives the
-    /// stores it journals into.
+    pub(in crate::daemon) fn memory_graph_reconciliation_shutdown_owner(&self) -> ShutdownOwner {
+        let administration = self.store_administration.clone();
+        ShutdownOwner::with_deadline_result(
+            "memory_graph_reconciliation",
+            || {},
+            move |_| async move {
+                let owner = administration
+                    .prepare_memory_graph_reconciliation_shutdown()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                owner.cancel();
+                owner.shutdown().await
+            },
+        )
+    }
+
     pub(in crate::daemon) async fn shutdown_servers(
         &self,
         deadline: tokio::time::Instant,
     ) -> ShutdownTaskReceipt {
-        let git_transactions = match self
-            .store_administration
-            .git_index_transaction_services()
-            .shutdown()
-            .await
-        {
-            Ok(receipt) => {
-                log_daemon_event(
-                    "daemon_shutdown",
-                    &[
-                        ("outcome", "git_transactions_joined".to_string()),
-                        ("services_closed", receipt.services_closed.to_string()),
-                        (
-                            "store_actors_joined",
-                            receipt.store_actors_joined.to_string(),
-                        ),
-                    ],
-                );
-                ShutdownTaskReceipt::default()
-            }
-            Err(error) => ShutdownTaskReceipt {
-                outcomes: vec![ShutdownTaskOutcome {
-                    owner: "git_index_transactions".to_owned(),
-                    status: ShutdownStatus::Failed(format!("{error:?}")),
-                }],
-            },
-        };
-        let native_integration = match self
-            .store_administration
-            .native_integration_services()
-            .shutdown()
-            .await
-        {
-            Ok(store_actors_joined) => {
-                log_daemon_event(
-                    "daemon_shutdown",
-                    &[
-                        ("outcome", "native_integration_joined".to_string()),
-                        ("store_actors_joined", store_actors_joined.to_string()),
-                    ],
-                );
-                ShutdownTaskReceipt::default()
-            }
-            Err(error) => ShutdownTaskReceipt {
-                outcomes: vec![ShutdownTaskOutcome {
-                    owner: "native_integration_transactions".to_owned(),
-                    status: ShutdownStatus::Failed(format!("{error:?}")),
-                }],
-            },
-        };
-        let mut receipt = shutdown_project_servers(deadline, &self.store_administration).await;
-        receipt.extend(git_transactions);
-        receipt.extend(native_integration);
-        receipt
+        shutdown_project_servers(deadline, &self.store_administration).await
     }
 
     #[cfg(test)]
@@ -181,12 +184,14 @@ impl DaemonEngine {
         let shutdown_engine = self.clone();
         coordinate_daemon_shutdown(&lifecycle, deadline, async move {
             let owner_phases = shutdown_engine.shutdown_owner_phases().await;
+            let terminal_owner = shutdown_engine.memory_graph_reconciliation_shutdown_owner();
             let server_engine = shutdown_engine.clone();
             DaemonShutdownPlan::new(
                 tokio::task::JoinSet::<crate::errors::Result<()>>::new(),
                 owner_phases,
                 async move { server_engine.shutdown_servers(deadline).await },
             )
+            .with_terminal_owner_phases(vec![vec![terminal_owner]])
         })
         .await
     }

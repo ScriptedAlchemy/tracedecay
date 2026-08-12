@@ -63,13 +63,13 @@ pub(super) fn converge_interrupted_restore(
     rollback: &Path,
     expected_destination_sha256: [u8; 32],
 ) -> Result<bool, RemoteRecoveryPhysicalEffectErrorV1> {
+    if !sha256_file(destination).is_ok_and(|digest| digest == expected_destination_sha256) {
+        return Ok(false);
+    }
     if rollback.exists() && !staging.exists() {
         validate_isolated_restore(destination)?;
         validate_isolated_restore(rollback)?;
         return Ok(true);
-    }
-    if !sha256_file(destination).is_ok_and(|digest| digest == expected_destination_sha256) {
-        return Ok(false);
     }
     if rollback.exists() {
         validate_isolated_restore(rollback)?;
@@ -132,6 +132,11 @@ pub(super) fn validate_isolated_restore(
         return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);
     }
     Ok(())
+}
+
+pub(super) fn sqlite_identity(path: &Path) -> Result<u64, RemoteRecoveryPhysicalEffectErrorV1> {
+    tracedecay_runtime_core::db::sqlite_generation_identity(path)
+        .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }
 
 /// Reapplies state whose current value is authoritative over an older backup.
@@ -220,7 +225,6 @@ const AUTHORITY_STATE_TABLES: &[&str] = &[
     "git_index_repository_quarantines",
     "observation_projection_dispositions",
     "observation_projection_rebuild_dispositions",
-    "session_temporal_migration_dispositions",
     "session_query_cursor_keys",
 ];
 
@@ -338,14 +342,6 @@ fn validate_authority_reference_closure(
                 WHERE rebuild.projector_version IS NULL
                    OR observation.observation_id IS NULL
                    OR receipt.receipt_id IS NULL
-             ) OR EXISTS(
-                SELECT 1
-                FROM current_authority.session_temporal_migration_dispositions
-                    AS disposition
-                LEFT JOIN main.session_temporal_generations AS generation
-                  ON generation.session_id = disposition.session_id
-                 AND generation.generation = disposition.generation
-                WHERE generation.session_id IS NULL
              )",
             (),
             |row| row.get(0),
@@ -565,6 +561,9 @@ pub(super) fn sha256_file(path: &Path) -> Result<[u8; 32], RemoteRecoveryPhysica
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_runtime_core::db::{
+        Database, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+    };
 
     fn project_database(path: &Path, marker: &str) {
         let connection = rusqlite::Connection::open(path).unwrap();
@@ -579,6 +578,29 @@ mod tests {
             .unwrap();
         connection
             .execute("INSERT INTO observations VALUES (?1)", [marker])
+            .unwrap();
+    }
+
+    async fn final_project_database(path: &Path, project_id: &str) {
+        tracedecay_global_db::register_test_schema_installer();
+        let authority =
+            DatabaseAuthority::acquire_test(path, "create remote recovery schema fixture").unwrap();
+        let (database, _) = Database::publish_registered_test_runtime(
+            path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+            TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: ProjectId::new(project_id).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        let writer = database
+            .writer_connection("install remote recovery schema fixture")
+            .await
+            .unwrap();
+        tracedecay_global_db::ensure_registered_schema(writer.engine_connection())
+            .await
             .unwrap();
     }
 
@@ -621,6 +643,26 @@ mod tests {
     }
 
     #[test]
+    fn restore_restart_rejects_wrong_destination_even_with_a_rollback_receipt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let destination = temporary.path().join("sessions.db");
+        let staging = temporary.path().join("sessions.restore.staging");
+        let rollback = temporary.path().join("sessions.restore.rollback");
+        project_database(&destination, "foreign-valid-destination");
+        project_database(&rollback, "original");
+        let requested = temporary.path().join("requested.db");
+        project_database(&requested, "requested-restored-authority");
+        let requested_digest = sha256_file(&requested).unwrap();
+
+        assert!(
+            !converge_interrupted_restore(&destination, &staging, &rollback, requested_digest)
+                .unwrap()
+        );
+        assert!(rollback.exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
     fn restore_rejects_a_noncanonical_schema_before_interpreting_state() {
         let temporary = tempfile::tempdir().unwrap();
         let current = temporary.path().join("sessions.current.db");
@@ -638,6 +680,55 @@ mod tests {
         assert_eq!(
             replay_current_authority_state(&current, &staging),
             Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption)
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_current_schema_restore_replays_current_cursor_authority() {
+        let temporary = tempfile::tempdir().unwrap();
+        let current = temporary.path().join("sessions.current.db");
+        let staging = temporary.path().join("sessions.restore.db");
+        final_project_database(&current, "project.remote-current").await;
+        final_project_database(&staging, "project.remote-staging").await;
+        rusqlite::Connection::open(&current)
+            .unwrap()
+            .execute(
+                "INSERT INTO session_query_cursor_keys
+                 VALUES ('cursor.current', 1, X'01', 10, NULL)",
+                (),
+            )
+            .unwrap();
+        rusqlite::Connection::open(&staging)
+            .unwrap()
+            .execute(
+                "INSERT INTO session_query_cursor_keys
+                 VALUES ('cursor.stale', 1, X'09', 1, NULL)",
+                (),
+            )
+            .unwrap();
+
+        assert_eq!(replay_current_authority_state(&current, &staging), Ok(()));
+
+        let staging_connection = rusqlite::Connection::open(&staging).unwrap();
+        let cursor_key: (String, i64, String, i64, Option<i64>) = staging_connection
+            .query_row(
+                "SELECT key_id, key_version, hex(key_material), created_at, retired_at
+                 FROM session_query_cursor_keys",
+                (),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            cursor_key,
+            ("cursor.current".to_owned(), 1, "01".to_owned(), 10, None)
         );
     }
 
@@ -665,9 +756,6 @@ mod tests {
                  CREATE TABLE observation_projection_rebuild_dispositions (
                     projector_version TEXT, generation TEXT,
                     observation_id TEXT, receipt_id TEXT
-                 );
-                 CREATE TABLE session_temporal_migration_dispositions (
-                    session_id TEXT, generation INTEGER
                  );
                  INSERT INTO retrieval_anchor_dispositions
                  VALUES ('anchor.missing', '{}', NULL);",

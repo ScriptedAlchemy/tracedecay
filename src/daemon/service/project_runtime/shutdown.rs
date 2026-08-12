@@ -1,4 +1,9 @@
-use super::*;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::sync::{Arc, atomic::Ordering};
+
+use super::{ProjectRuntime, ProjectRuntimeRegistryV1};
+use crate::daemon::service::invocation::UnavailableFeedbackCycleRuntimeV1;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ShutdownState {
@@ -10,30 +15,55 @@ pub(super) enum ShutdownState {
 impl ProjectRuntimeRegistryV1 {
     pub(crate) async fn retire_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
         {
-            let mut retired = self.lock_retired_roots();
-            retired.extend(roots.iter().cloned());
+            let mut fences = self.lock_root_fences();
+            fences.retired.extend(roots.iter().cloned());
         }
+        self.drain_roots(roots).await
+    }
+
+    pub(crate) async fn quiesce_roots(
+        &self,
+        roots: &BTreeSet<PathBuf>,
+    ) -> Option<ProjectRuntimeRootQuiescenceV1> {
+        {
+            let mut fences = self.lock_root_fences();
+            if roots.iter().any(|root| fences.contains(root)) {
+                return None;
+            }
+            fences.quiesced.extend(roots.iter().cloned());
+        }
+        if !self.drain_roots(roots).await {
+            self.release_quiesced_roots(roots);
+            return None;
+        }
+        Some(ProjectRuntimeRootQuiescenceV1 {
+            registry: self.clone(),
+            roots: roots.clone(),
+        })
+    }
+
+    async fn drain_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
         let retired =
             tokio::time::timeout(super::super::super::DAEMON_TASK_ABORT_DEADLINE, async {
                 loop {
                     let mut changed = self.reservation_changed.subscribe();
                     let retired = {
+                        let fences = self.lock_root_fences();
                         let mut current = self.lock_runtimes();
-                        roots
-                            .iter()
-                            .all(|root| {
+                        (fences.requests_drained(roots)
+                            && roots.iter().all(|root| {
                                 current
                                     .get(root)
                                     .is_none_or(|runtime| runtime.reservations.is_empty())
-                            })
-                            .then(|| {
-                                roots
-                                    .iter()
-                                    .filter_map(|root| {
-                                        current.remove(root).map(|runtime| (root.clone(), runtime))
-                                    })
-                                    .collect::<BTreeMap<_, _>>()
-                            })
+                            }))
+                        .then(|| {
+                            roots
+                                .iter()
+                                .filter_map(|root| {
+                                    current.remove(root).map(|runtime| (root.clone(), runtime))
+                                })
+                                .collect::<BTreeMap<_, _>>()
+                        })
                     };
                     if let Some(retired) = retired {
                         break retired;
@@ -52,6 +82,15 @@ impl ProjectRuntimeRegistryV1 {
             }
             Err(_) => false,
         }
+    }
+
+    fn release_quiesced_roots(&self, roots: &BTreeSet<PathBuf>) {
+        let mut fences = self.lock_root_fences();
+        for root in roots {
+            fences.quiesced.remove(root);
+        }
+        drop(fences);
+        self.signal_reservation_changed();
     }
 
     pub(crate) fn begin_shutdown(&self) {
@@ -138,14 +177,17 @@ impl ProjectRuntimeRegistryV1 {
             let observed_version = *version
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let fences = self.lock_root_fences();
             let mut runtimes = self.lock_runtimes();
-            if runtimes
-                .values()
-                .all(|runtime| runtime.reservations.is_empty())
+            if fences.request_leases.is_empty()
+                && runtimes
+                    .values()
+                    .all(|runtime| runtime.reservations.is_empty())
             {
                 break std::mem::take(&mut *runtimes);
             }
             drop(runtimes);
+            drop(fences);
             #[cfg(test)]
             if let Some(drain_waiting) = self
                 .drain_waiting
@@ -195,6 +237,17 @@ impl ProjectRuntimeRegistryV1 {
         }
         shut_down_runtimes(runtimes);
         clean
+    }
+}
+
+pub(crate) struct ProjectRuntimeRootQuiescenceV1 {
+    registry: ProjectRuntimeRegistryV1,
+    roots: BTreeSet<PathBuf>,
+}
+
+impl Drop for ProjectRuntimeRootQuiescenceV1 {
+    fn drop(&mut self) {
+        self.registry.release_quiesced_roots(&self.roots);
     }
 }
 

@@ -2,15 +2,17 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 
 use tokio::sync::Mutex;
 use tracedecay_agent_hosts::ports::project_runtime::{
     MemoryCurateOptions as AgentMemoryCurateOptions, ProfileRuntime, RuntimeFuture,
 };
 use tracedecay_domain::BrainNodeId;
-use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
+use tracedecay_store::{
+    AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
+};
 
 use super::register_registered_schema_installer;
 use super::registry::{
@@ -44,6 +46,10 @@ use retained_hook_tasks::RetainedHookTasks;
 pub(crate) use code_graph::RetainedCodeGraphRuntimeV1;
 
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
+
+fn remote_restore_quarantine_fence_path(database: &Path) -> std::path::PathBuf {
+    database.with_extension("remote-restore-quarantine.json")
+}
 
 pub(crate) fn mark_process_long_lived_for_session_maintenance() {
     LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
@@ -98,16 +104,100 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
             Arc<tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1>,
         >,
     >,
-    project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
+    project_memory: Arc<Mutex<BTreeMap<ProjectId, Arc<Database>>>>,
     project_sessions: Arc<Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     retained_hook_tasks: RetainedHookTasks,
-    memory_graph_reconciliation_tasks: RetainedMemoryGraphReconciliationTasksV1,
+    memory_graph_reconciliation_tasks: Arc<RetainedMemoryGraphReconciliationTasksV1>,
+    session_sync_service:
+        Arc<OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>>,
+    remote_recovery_project_lifecycle: Arc<
+        OnceLock<Weak<crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1>>,
+    >,
     #[cfg(test)]
     long_lived_session_maintenance_for_test: AtomicBool,
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    pub(crate) fn install_session_sync_service(
+        &self,
+        service: &Arc<crate::daemon::session_sync::DaemonSessionSyncService>,
+    ) -> Result<()> {
+        let service = Arc::downgrade(service);
+        if let Some(retained) = self.session_sync_service.get() {
+            return if Weak::ptr_eq(retained, &service) {
+                Ok(())
+            } else {
+                Err(TraceDecayError::Config {
+                    message:
+                        "session runtime registry already has a different session sync service"
+                            .to_owned(),
+                })
+            };
+        }
+        match self.session_sync_service.set(service) {
+            Ok(()) => Ok(()),
+            Err(service)
+                if self
+                    .session_sync_service
+                    .get()
+                    .is_some_and(|retained| Weak::ptr_eq(retained, &service)) =>
+            {
+                Ok(())
+            }
+            Err(_) => Err(TraceDecayError::Config {
+                message: "session runtime registry session sync installation raced".to_owned(),
+            }),
+        }
+    }
+
+    pub(in crate::daemon) fn install_remote_recovery_project_lifecycle(
+        &self,
+        lifecycle: &Arc<
+            crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1,
+        >,
+    ) -> Result<()> {
+        let lifecycle = Arc::downgrade(lifecycle);
+        if let Some(retained) = self.remote_recovery_project_lifecycle.get() {
+            return if Weak::ptr_eq(retained, &lifecycle) {
+                Ok(())
+            } else {
+                Err(TraceDecayError::Config {
+                    message: "session runtime registry already has a different remote recovery project lifecycle".to_owned(),
+                })
+            };
+        }
+        match self.remote_recovery_project_lifecycle.set(lifecycle) {
+            Ok(()) => Ok(()),
+            Err(lifecycle)
+                if self
+                    .remote_recovery_project_lifecycle
+                    .get()
+                    .is_some_and(|retained| Weak::ptr_eq(retained, &lifecycle)) =>
+            {
+                Ok(())
+            }
+            Err(_) => Err(TraceDecayError::Config {
+                message: "session runtime registry remote recovery lifecycle installation raced"
+                    .to_owned(),
+            }),
+        }
+    }
+
+    fn session_sync_service(
+        &self,
+    ) -> Arc<OnceLock<Weak<crate::daemon::session_sync::DaemonSessionSyncService>>> {
+        Arc::clone(&self.session_sync_service)
+    }
+
+    fn remote_recovery_project_lifecycle(
+        &self,
+    ) -> Arc<
+        OnceLock<Weak<crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1>>,
+    >{
+        Arc::clone(&self.remote_recovery_project_lifecycle)
+    }
+
     pub(crate) fn retain_hook_task<F, Fut>(
         &self,
         provider: &str,
@@ -219,6 +309,33 @@ async fn open_runtime(
         profile_pin,
         database_authority,
         initialize_if_missing,
+        false,
+        None,
+        operation,
+    )
+    .await
+    .map(|(runtime, _)| runtime)
+}
+
+async fn open_runtime_during_remote_restore(
+    registry: &StoreRuntimeRegistry,
+    resolver: &LocalStoreRuntimeResolverV1,
+    shard_id: StoreShardIdV1,
+    incarnation: StoreIncarnationV1,
+    profile_pin: Option<ProfileAuthorityPin>,
+    expected_opened_file_identity: u64,
+    operation: &'static str,
+) -> Result<StoreRuntimeHandle> {
+    open_runtime_with_presence(
+        registry,
+        resolver,
+        shard_id,
+        incarnation,
+        profile_pin,
+        None,
+        false,
+        true,
+        Some(expected_opened_file_identity),
         operation,
     )
     .await
@@ -234,6 +351,8 @@ async fn open_runtime_with_presence(
     profile_pin: Option<ProfileAuthorityPin>,
     database_authority: Option<DatabaseAuthority>,
     initialize_if_missing: bool,
+    allow_remote_restore_fence: bool,
+    required_opened_file_identity: Option<u64>,
     operation: &'static str,
 ) -> Result<(StoreRuntimeHandle, bool)> {
     let key = StoreRuntimeKey::new(shard_id.clone(), incarnation);
@@ -263,6 +382,15 @@ async fn open_runtime_with_presence(
             ),
         ));
     }
+    let expected_opened_file_identity = if let Some(expected) = required_opened_file_identity {
+        Some(expected)
+    } else if !allow_remote_restore_fence
+        && matches!(&shard_id.scope, StoreShardScopeV1::ProjectSessions { .. })
+    {
+        remote_recovery::remote_restore_activated_open_identity(locator.locator().path())?
+    } else {
+        None
+    };
     let exists = locator
         .locator()
         .path()
@@ -277,6 +405,10 @@ async fn open_runtime_with_presence(
         )
     } else {
         StoreRuntimeOpenRequest::new_authorized(shard_id, incarnation, profile_pin, authority)
+    };
+    let request = match expected_opened_file_identity {
+        Some(expected) => request.require_opened_file_identity(expected),
+        None => request,
     };
     match registry.open(request).await {
         StoreRuntimeOpenResult::Published(runtime) => Ok((runtime, exists)),

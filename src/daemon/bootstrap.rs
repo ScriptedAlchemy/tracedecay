@@ -48,6 +48,10 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let invocation = DaemonInvocationState::default();
     invocation.configure_github_read_only_credentials(authority.profile_identity());
+    store_administration.install_remote_recovery_project_lifecycle(
+        invocation.clone(),
+        Arc::clone(&project_open_gates),
+    )?;
     let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
         administration: store_administration.clone(),
         invocation: invocation.clone(),
@@ -166,7 +170,10 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let session_refresh = Arc::clone(store_administration.session_temporal_refresh_schedulers());
     let replay_join = store_administration.clone();
     let session_sync_join = store_administration.clone();
+    let memory_graph_reconciliation_join = store_administration.clone();
     let invocation_join = invocation.clone();
+    let git_transactions_join = Arc::clone(store_administration.git_index_transaction_services());
+    let native_integration_join = Arc::clone(store_administration.native_integration_services());
     let owner_phases = vec![
         vec![
             shutdown_coordination::ShutdownOwner::with_deadline_result(
@@ -223,7 +230,43 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 session_sync_join.shutdown_session_sync().await;
             },
         )],
+        vec![
+            shutdown_coordination::ShutdownOwner::with_deadline_result(
+                "git_index_transactions",
+                || {},
+                move |_| async move {
+                    git_transactions_join
+                        .shutdown()
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:?}"))
+                },
+            ),
+            shutdown_coordination::ShutdownOwner::with_deadline_result(
+                "native_integration_transactions",
+                || {},
+                move |_| async move {
+                    native_integration_join
+                        .shutdown()
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:?}"))
+                },
+            ),
+        ],
     ];
+    let memory_graph_reconciliation = shutdown_coordination::ShutdownOwner::with_deadline_result(
+        "memory_graph_reconciliation",
+        || {},
+        move |_| async move {
+            let owner = memory_graph_reconciliation_join
+                .prepare_memory_graph_reconciliation_shutdown()
+                .await
+                .map_err(|error| error.to_string())?;
+            owner.cancel();
+            owner.shutdown().await
+        },
+    );
     let server_store_administration = store_administration.clone();
     let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
         &lifecycle,
@@ -232,6 +275,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
             shutdown_orchestration::DaemonShutdownPlan::new(clients, owner_phases, async move {
                 shutdown_project_servers(shutdown_deadline, &server_store_administration).await
             })
+            .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
         },
     )
     .await;
@@ -323,6 +367,12 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     let engine = DaemonEngine::default()
         .with_profile_identity(authority.profile_identity().clone())
         .with_http_application_registry(http_application_registry.clone());
+    engine
+        .store_administration
+        .install_remote_recovery_project_lifecycle(
+            engine.invocation.clone(),
+            Arc::clone(&engine.project_open_gates),
+        )?;
     let deletion_owners = remote_deletion::RemoteDeletionRuntimeOwners {
         administration: engine.store_administration.clone(),
         invocation: engine.invocation.clone(),
@@ -501,6 +551,8 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         shutdown_deadline,
         async move {
             let mut owner_phases = shutdown_engine.shutdown_owner_phases().await;
+            let memory_graph_reconciliation =
+                shutdown_engine.memory_graph_reconciliation_shutdown_owner();
             let semantic_artifact_gc_owner =
                 shutdown_coordination::ShutdownOwner::with_deadline_result(
                     "semantic_artifact_gc",
@@ -525,6 +577,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                 owner_phases,
                 async move { server_engine.shutdown_servers(shutdown_deadline).await },
             )
+            .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
         },
     )
     .await;

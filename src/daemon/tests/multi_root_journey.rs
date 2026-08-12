@@ -9,9 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_application::{
-    CancellationContext, Deadline, MultiRootExecuteRequestV1, MultiRootOperationV1,
-    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
-    RegisteredRootSelectorV1,
+    ApplicationProblemKind, CancellationContext, Deadline, MultiRootExecuteRequestV1,
+    MultiRootOperationV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1,
+    MultiRootScopeSetReadRequestV1, RegisteredRootSelectorV1,
 };
 use tracedecay_domain::{ScopeSetId, UtcMicros};
 
@@ -104,6 +104,269 @@ fn authenticated_multi_root_journey_reaches_scope_set_storage() {
         .expect("multi-root journey thread")
         .join()
         .expect("multi-root journey thread must not panic");
+}
+
+#[test]
+fn multi_root_direct_routes_refuse_a_quiesced_project() {
+    const STACK_SIZE: usize = 16 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("multi-root-quiescence".to_owned())
+        .stack_size(STACK_SIZE)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(STACK_SIZE)
+                .enable_all()
+                .build()
+                .expect("multi-root quiescence runtime")
+                .block_on(run_multi_root_quiescence());
+        })
+        .expect("multi-root quiescence thread")
+        .join()
+        .expect("multi-root quiescence thread must not panic");
+}
+
+async fn run_multi_root_quiescence() {
+    let home = TempDir::new().expect("home");
+    let profile_root = home.path().join("profile");
+    let repository = repository();
+    let handshake = DaemonHandshake {
+        project_path: Some(repository.path().to_path_buf()),
+        allow_init: true,
+        client_identity: test_client_identity_for(profile_root.clone()),
+        ..test_handshake_defaults()
+    };
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "multi-root-quiescence");
+    let (server_key, _, _, _) = engine
+        .open_project_server(&handshake)
+        .await
+        .expect("project owner");
+    let project_id = tracedecay_domain::ProjectId::new(
+        server_key
+            .owner
+            .project_id
+            .clone()
+            .expect("project identity"),
+    )
+    .expect("valid project identity");
+    let profile_id = engine
+        .store_administration
+        .profile_identity()
+        .expect("profile identity")
+        .profile_id()
+        .clone();
+    let project_root = server_key.project_root;
+    let cancellation_scope_set =
+        ScopeSetId::new("scope-set.direct-cancellation").expect("scope set id");
+    let cancellation_observed_at = now();
+    let (active_deadline, active_cancellation) =
+        controls("direct-cancellation", cancellation_observed_at);
+    let cancelled_read_id = "request.multi-root.cancelled-read";
+    let cancelled_cas_id = "request.multi-root.cancelled-cas";
+    let cancelled_execute_id = "request.multi-root.cancelled-execute";
+    assert!(!crate::daemon::request_cancellation::cancel(
+        cancelled_read_id
+    ));
+    assert!(!crate::daemon::request_cancellation::cancel(
+        cancelled_cas_id
+    ));
+    assert!(!crate::daemon::request_cancellation::cancel(
+        cancelled_execute_id
+    ));
+    let interrupted = [
+        (
+            DaemonInvocationRequest::multi_root_scope_set_read(
+                cancelled_read_id,
+                MultiRootScopeSetReadRequestV1::new(cancellation_scope_set.clone())
+                    .expect("read request"),
+                cancellation_observed_at,
+                active_deadline.clone(),
+                active_cancellation.clone(),
+            ),
+            ApplicationProblemKind::Cancelled,
+        ),
+        (
+            DaemonInvocationRequest::multi_root_scope_set_read(
+                "request.multi-root.expired-read",
+                MultiRootScopeSetReadRequestV1::new(cancellation_scope_set.clone())
+                    .expect("read request"),
+                cancellation_observed_at,
+                Deadline::new(cancellation_observed_at).expect("expired deadline"),
+                active_cancellation.clone(),
+            ),
+            ApplicationProblemKind::TimedOut,
+        ),
+        (
+            DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+                cancelled_cas_id,
+                MultiRootScopeSetCasRequestV1::new(
+                    cancellation_scope_set.clone(),
+                    None,
+                    vec![
+                        RegisteredRootSelectorV1::new(project_id.clone(), project_root.clone())
+                            .expect("registered root selector"),
+                    ],
+                )
+                .expect("CAS request"),
+                cancellation_observed_at,
+                active_deadline.clone(),
+                active_cancellation.clone(),
+            ),
+            ApplicationProblemKind::Cancelled,
+        ),
+        (
+            DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+                "request.multi-root.expired-cas",
+                MultiRootScopeSetCasRequestV1::new(
+                    cancellation_scope_set.clone(),
+                    None,
+                    vec![
+                        RegisteredRootSelectorV1::new(project_id.clone(), project_root.clone())
+                            .expect("registered root selector"),
+                    ],
+                )
+                .expect("CAS request"),
+                cancellation_observed_at,
+                Deadline::new(cancellation_observed_at).expect("expired deadline"),
+                active_cancellation.clone(),
+            ),
+            ApplicationProblemKind::TimedOut,
+        ),
+        (
+            DaemonInvocationRequest::multi_root_execute(
+                cancelled_execute_id,
+                MultiRootExecuteRequestV1::new(
+                    cancellation_scope_set.clone(),
+                    tracedecay_domain::ScopeSetRevision::new(1).expect("scope revision"),
+                    tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                        .expect("scope digest"),
+                    MultiRootOperationV1::Query { request: json!({}) },
+                    0,
+                    None,
+                )
+                .expect("execute request"),
+                cancellation_observed_at,
+                active_deadline,
+                active_cancellation,
+            ),
+            ApplicationProblemKind::Cancelled,
+        ),
+        (
+            DaemonInvocationRequest::multi_root_execute(
+                "request.multi-root.expired-execute",
+                MultiRootExecuteRequestV1::new(
+                    cancellation_scope_set,
+                    tracedecay_domain::ScopeSetRevision::new(1).expect("scope revision"),
+                    tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                        .expect("scope digest"),
+                    MultiRootOperationV1::Query { request: json!({}) },
+                    0,
+                    None,
+                )
+                .expect("execute request"),
+                cancellation_observed_at,
+                Deadline::new(cancellation_observed_at).expect("expired deadline"),
+                CancellationContext::active("cancel.multi-root.expired-execute")
+                    .expect("cancellation"),
+            ),
+            ApplicationProblemKind::TimedOut,
+        ),
+    ];
+    for (request, expected) in interrupted {
+        let response = engine
+            .invocation
+            .invoke_for_project(
+                &engine.store_administration,
+                Some(&project_root),
+                request,
+                None,
+            )
+            .await;
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::ApplicationProblem { problem }
+                if problem.kind() == expected
+        ));
+    }
+
+    let quiescence = engine
+        .invocation
+        .service
+        .quiesce_project(
+            &engine.invocation.lsp_session_registry,
+            &profile_id,
+            &project_id,
+            &std::collections::BTreeSet::from([project_root.clone()]),
+        )
+        .await
+        .expect("project quiescence");
+    let scope_set_id = ScopeSetId::new("scope-set.quiesced").expect("scope set id");
+    let observed_at = now();
+    let (read_deadline, read_cancellation) = controls("quiesced-read", observed_at);
+    let (cas_deadline, cas_cancellation) = controls("quiesced-cas", observed_at);
+    let (execute_deadline, execute_cancellation) = controls("quiesced-execute", observed_at);
+    let requests = [
+        DaemonInvocationRequest::multi_root_scope_set_read(
+            "request.multi-root.quiesced-read",
+            MultiRootScopeSetReadRequestV1::new(scope_set_id.clone()).expect("read request"),
+            observed_at,
+            read_deadline,
+            read_cancellation,
+        ),
+        DaemonInvocationRequest::multi_root_scope_set_compare_and_swap(
+            "request.multi-root.quiesced-cas",
+            MultiRootScopeSetCasRequestV1::new(
+                scope_set_id.clone(),
+                None,
+                vec![
+                    RegisteredRootSelectorV1::new(project_id, project_root.clone())
+                        .expect("registered root selector"),
+                ],
+            )
+            .expect("CAS request"),
+            observed_at,
+            cas_deadline,
+            cas_cancellation,
+        ),
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.quiesced-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id,
+                tracedecay_domain::ScopeSetRevision::new(1).expect("scope revision"),
+                tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .expect("scope digest"),
+                MultiRootOperationV1::Query { request: json!({}) },
+                0,
+                None,
+            )
+            .expect("execute request"),
+            observed_at,
+            execute_deadline,
+            execute_cancellation,
+        ),
+    ];
+
+    for request in requests {
+        let response = engine
+            .invocation
+            .invoke_for_project(
+                &engine.store_administration,
+                Some(&project_root),
+                request,
+                None,
+            )
+            .await;
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::Unavailable
+            }
+        ));
+    }
+
+    drop(quiescence);
 }
 
 #[cfg(unix)]

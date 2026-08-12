@@ -19,6 +19,8 @@ use crate::errors::{Result, TraceDecayError};
 use super::service::invocation::DaemonRetainedRuntimeRegistrar;
 use super::*;
 
+mod project_invocation;
+
 /// Daemon-generation-local state for the closed invocation protocol.
 ///
 /// The Unix and portable brokers share this state so an authenticated LSP
@@ -91,10 +93,12 @@ impl Default for DaemonInvocationState {
 impl DaemonInvocationState {
     pub(super) async fn retire_remote_deleted_project(
         &self,
+        profile_id: &tracedecay_domain::configuration::UserProfileId,
         project_id: &tracedecay_domain::ProjectId,
         project_roots: &std::collections::BTreeSet<std::path::PathBuf>,
     ) -> Result<()> {
-        self.query_authority_provider.retire_project(project_id);
+        self.query_authority_provider
+            .retire_project(profile_id, project_id);
         if !self
             .code_index_schedulers
             .retire_project_roots(project_roots)
@@ -107,7 +111,16 @@ impl DaemonInvocationState {
                 ),
             });
         }
-        if !self.service.expire_project(project_id, project_roots).await {
+        if !self
+            .service
+            .expire_project(
+                &self.lsp_session_registry,
+                profile_id,
+                project_id,
+                project_roots,
+            )
+            .await
+        {
             return Err(TraceDecayError::Config {
                 message: format!(
                     "invocation runtime owners for remote-deleted project '{}' did not drain",
@@ -167,14 +180,18 @@ impl DaemonInvocationState {
     pub(super) async fn mount_query_authority_for_project(
         &self,
         project_root: &Path,
+        profile_id: &tracedecay_domain::configuration::UserProfileId,
         scope: &tracedecay_application::ResolvedScope,
     ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
     {
+        let provider = self
+            .query_authority_provider
+            .for_profile(profile_id.clone());
         code_index_scheduler::query_runtime::mount_query_authority_on_project_open(
             &self.code_index_schedulers,
             project_root,
             scope,
-            &self.query_authority_provider,
+            &provider,
         )
         .await
     }
@@ -204,6 +221,7 @@ impl DaemonInvocationState {
     pub(super) fn restore_initial_query_authority_for_project(
         &self,
         project_root: &Path,
+        profile_id: tracedecay_domain::configuration::UserProfileId,
         scope: tracedecay_application::ResolvedScope,
         state: crate::config::retrieval::RetrievalProfileStateV1,
         cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
@@ -213,7 +231,7 @@ impl DaemonInvocationState {
     > {
         let status = self
             .query_authority_provider
-            .install_evaluated_initial_state(scope, state.clone(), cursor_keys)?;
+            .install_evaluated_initial_state(profile_id, scope, state.clone(), cursor_keys)?;
         if !tracedecay_usecases::semantic_runtime::commit_project_initial_semantic_roots(
             project_root.to_path_buf(),
             &state,
@@ -344,6 +362,7 @@ impl DaemonInvocationState {
         observed_at: tracedecay_domain::UtcMicros,
         deadline: tracedecay_application::Deadline,
         cancellation: tracedecay_application::CancellationContext,
+        request_cancellation: Option<CancellationToken>,
     ) -> DaemonInvocationResponse {
         let Some(scope_set) = self
             .service
@@ -406,8 +425,52 @@ impl DaemonInvocationState {
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
+        let mut _project_request_leases = Vec::with_capacity(scope_set.roots().len());
         for (ordinal, root) in scope_set.roots().iter().enumerate() {
             let scope = root.scope();
+            if cancellation.is_cancelled()
+                || request_cancellation
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled)
+            {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                );
+            }
+            if deadline.is_elapsed_at(observed_at)
+                || deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+            {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                );
+            }
+            let Some(locator) = root.locator() else {
+                let Ok(generation) = denied_root_generation(scope) else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    );
+                };
+                generations.push(generation);
+                continue;
+            };
+            let Some(request_lease) = self.service.admit_project_request(&locator.canonical_root)
+            else {
+                let Ok(generation) = unavailable_root_generation(
+                    scope,
+                    tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+                ) else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        service::invocation::DaemonInvocationProblem::InvalidRequest,
+                    );
+                };
+                generations.push(generation);
+                continue;
+            };
+            _project_request_leases.push(request_lease.clone());
             let registry_context = match database
                 .project_registry_context_by_id(scope.project_id.as_str())
                 .await
@@ -509,8 +572,25 @@ impl DaemonInvocationState {
                     observed_at,
                     deadline.clone(),
                     cancellation.clone(),
+                    request_lease,
+                    request_cancellation.clone(),
                 )
                 .await;
+            if request_cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    tracedecay_application::ApplicationProblem::cancelled_before_admission(),
+                );
+            }
+            if deadline.is_elapsed_at(tracedecay_application::clock::now_micros()) {
+                return DaemonInvocationResponse::application_problem(
+                    request_id,
+                    tracedecay_application::ApplicationProblem::timed_out_before_admission(),
+                );
+            }
             let outcome = match value {
                 Ok(value) => tracedecay_domain::ScopeOutcome::Exact(vec![value]),
                 Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized) => {
@@ -616,6 +696,8 @@ impl DaemonInvocationState {
         observed_at: tracedecay_domain::UtcMicros,
         deadline: tracedecay_application::Deadline,
         cancellation: tracedecay_application::CancellationContext,
+        project_admission: crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1,
+        request_cancellation: Option<CancellationToken>,
     ) -> std::result::Result<Value, service::invocation::DaemonInvocationProblem> {
         match operation {
             tracedecay_application::MultiRootOperationV1::Work { request } => {
@@ -629,19 +711,33 @@ impl DaemonInvocationState {
                 ) {
                     return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
                 }
-                let response = Box::pin(self.invoke_for_project(
-                    store_administration,
-                    Some(root),
+                let control_cancellation = tracedecay_application::CancellationSignal::active(
+                    cancellation.token_id.as_str(),
+                )
+                .map_err(|_| service::invocation::DaemonInvocationProblem::InvalidRequest)?;
+                let executor = InProcessDaemonInvocationExecutor::with_project_admission(
+                    self.clone(),
+                    store_administration.clone(),
+                    root.to_path_buf(),
+                    scope.clone(),
+                    project_admission,
+                    request_cancellation,
+                );
+                let response = crate::daemon_client::DaemonInvocationExecutor::invoke_controlled(
+                    &executor,
                     DaemonInvocationRequest::work_application(
                         format!("request.multi-root.work.{ordinal}"),
                         request,
                         observed_at,
-                        deadline,
+                        deadline.clone(),
                         cancellation,
                     ),
-                    None,
-                ))
-                .await;
+                    deadline,
+                    control_cancellation,
+                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+                )
+                .await
+                .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
                 let service::invocation::DaemonInvocationOutcome::WorkApplication {
                     scope: actual_scope,
                     outcome,
@@ -666,11 +762,13 @@ impl DaemonInvocationState {
                     return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
                 }
                 crate::application_surface::invoke_multi_root_surface_request(
-                    Arc::new(InProcessDaemonInvocationExecutor::new(
+                    Arc::new(InProcessDaemonInvocationExecutor::with_project_admission(
                         self.clone(),
                         store_administration.clone(),
                         root.to_path_buf(),
                         scope.clone(),
+                        project_admission,
+                        request_cancellation,
                     )),
                     wire.operation,
                     tracedecay_application::RequestId::new(format!(
@@ -699,232 +797,6 @@ impl DaemonInvocationState {
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         self.service.expire_all().await;
-    }
-
-    pub(super) async fn invoke_for_project(
-        &self,
-        store_administration: &StoreAdministration,
-        project_path: Option<&Path>,
-        request: DaemonInvocationRequest,
-        request_cancellation: Option<CancellationToken>,
-    ) -> DaemonInvocationResponse {
-        if let Some(response) = invalid_multi_root_invocation_response(&request) {
-            return response;
-        }
-        let request_project_path = request.requires_project().then_some(project_path).flatten();
-        if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetRead {
-            request: scope_set_request,
-            observed_at,
-            deadline,
-            cancellation,
-        } = &request.payload
-        {
-            let Some(active_project_root) = request_project_path else {
-                return DaemonInvocationResponse::problem(
-                    request.request_id.clone(),
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            };
-            let scope_set = self
-                .service
-                .persisted_scope_set(active_project_root, &scope_set_request.scope_set_id)
-                .await;
-            let Ok(application_request_id) =
-                tracedecay_application::RequestId::new(request.request_id.clone())
-            else {
-                return DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
-                );
-            };
-            let Some((scope, outcome)) = self
-                .service
-                .multi_root_evidence(
-                    active_project_root,
-                    application_request_id,
-                    "scope_set_read",
-                    scope_set,
-                    *observed_at,
-                    deadline.clone(),
-                    cancellation.clone(),
-                )
-                .await
-            else {
-                return DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
-                );
-            };
-            return DaemonInvocationResponse::with_outcome(
-                request.request_id,
-                service::invocation::DaemonInvocationOutcome::MultiRootScopeSetRead {
-                    scope,
-                    outcome,
-                },
-            );
-        }
-        if let service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
-            request: scope_set_request,
-            observed_at,
-            deadline,
-            cancellation,
-        } = &request.payload
-        {
-            let Some(active_project_root) = request_project_path else {
-                return DaemonInvocationResponse::problem(
-                    request.request_id.clone(),
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            };
-            let roots = match resolve_multi_root_projects(
-                store_administration,
-                &self.service,
-                &scope_set_request.roots,
-            )
-            .await
-            {
-                Ok(roots) => roots,
-                Err(problem) => {
-                    return DaemonInvocationResponse::problem(request.request_id.clone(), problem);
-                }
-            };
-            let Ok(application_request_id) =
-                tracedecay_application::RequestId::new(request.request_id.clone())
-            else {
-                return DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::InvalidRequest,
-                );
-            };
-            return match self
-                .service
-                .compare_and_swap_scope_set(
-                    active_project_root,
-                    scope_set_request.clone(),
-                    roots,
-                    *observed_at,
-                )
-                .await
-            {
-                Some((_scope, result)) => {
-                    let Some((scope, outcome)) = self
-                        .service
-                        .multi_root_evidence(
-                            active_project_root,
-                            application_request_id,
-                            "scope_set_compare_and_swap",
-                            result,
-                            *observed_at,
-                            deadline.clone(),
-                            cancellation.clone(),
-                        )
-                        .await
-                    else {
-                        return DaemonInvocationResponse::problem(
-                            request.request_id,
-                            service::invocation::DaemonInvocationProblem::Unavailable,
-                        );
-                    };
-                    DaemonInvocationResponse::with_outcome(
-                        request.request_id,
-                        service::invocation::DaemonInvocationOutcome::MultiRootScopeSetCompareAndSwap {
-                            scope,
-                            outcome,
-                        },
-                    )
-                }
-                None => DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
-                ),
-            };
-        }
-        if let service::invocation::DaemonInvocationPayload::MultiRootExecute {
-            request: execute_request,
-            observed_at,
-            deadline,
-            cancellation,
-        } = &request.payload
-        {
-            let Some(active_project_root) = request_project_path else {
-                return DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            };
-            return self
-                .execute_multi_root_for_project(
-                    store_administration,
-                    active_project_root,
-                    request.request_id,
-                    execute_request.clone(),
-                    *observed_at,
-                    deadline.clone(),
-                    cancellation.clone(),
-                )
-                .await;
-        }
-        let lsp_workspace =
-            if request.operation() == service::invocation::DaemonInvocationOperation::LspOpen {
-                match request_project_path {
-                    Some(project_path) => {
-                        admitted_lsp_workspace_for_request(
-                            store_administration,
-                            &self.service,
-                            project_path,
-                            &request,
-                        )
-                        .await
-                    }
-                    None => None,
-                }
-            } else {
-                None
-            };
-        let git_service = if invocation_is_git_operation(request.operation()) {
-            git_service_for_project_path(store_administration, request_project_path).await
-        } else {
-            None
-        };
-        let native_integration_service =
-            if invocation_is_native_integration_operation(request.operation()) {
-                native_integration_service_for_project_path(
-                    store_administration,
-                    request_project_path,
-                )
-                .await
-            } else {
-                None
-            };
-        let lsp_frame_session = match &request.payload {
-            service::invocation::DaemonInvocationPayload::LspFrame { session, .. } => {
-                Some(session.clone())
-            }
-            _ => None,
-        };
-        let response = Box::pin(self.service.invoke_with_cancellation(
-            &self.lsp_session_registry,
-            request_project_path,
-            lsp_workspace,
-            git_service,
-            native_integration_service,
-            request,
-            request_cancellation,
-        ))
-        .await;
-        // A client frame may have parsed a fenced workspace-folder change; the
-        // daemon settles it here because only this layer can resolve and
-        // authorize the next root set.
-        if let (Some(session), Some(project_path)) = (lsp_frame_session, request_project_path) {
-            settle_pending_lsp_workspace_mutation(
-                store_administration,
-                &self.service,
-                project_path,
-                &session,
-            )
-            .await;
-        }
-        response
     }
 }
 

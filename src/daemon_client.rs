@@ -327,15 +327,6 @@ pub enum InvocationCancellationPolicy {
     AuthoritativeEffect,
 }
 
-impl InvocationCancellationPolicy {
-    pub(crate) const fn may_interrupt(self, stage: CancellationStage) -> bool {
-        match self {
-            Self::ReadOnly => true,
-            Self::AuthoritativeEffect => matches!(stage, CancellationStage::BeforeAdmission),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DaemonInvocationError {
     Cancelled { stage: CancellationStage },
@@ -675,76 +666,6 @@ impl DaemonInvocationClient {
                 message: "daemon returned an invalid semantic evaluation response".to_owned(),
             }),
         }
-    }
-
-    pub(crate) async fn invoke_controlled(
-        &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
-        deadline: Deadline,
-        cancellation: CancellationSignal,
-        policy: InvocationCancellationPolicy,
-    ) -> Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError> {
-        if cancellation.is_cancelled() {
-            return Err(DaemonInvocationError::Cancelled {
-                stage: CancellationStage::BeforeAdmission,
-            });
-        }
-        let remaining = deadline_remaining(&deadline).ok_or(DaemonInvocationError::TimedOut {
-            stage: CancellationStage::BeforeAdmission,
-        })?;
-        let target_request_id = request.request_id.clone();
-        let client = self.clone();
-        tokio::spawn(async move {
-            let stage = match policy {
-                InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
-                InvocationCancellationPolicy::AuthoritativeEffect => {
-                    CancellationStage::EffectInFlight
-                }
-            };
-            if !policy.may_interrupt(stage) {
-                return client
-                    .invoke(request)
-                    .await
-                    .map_err(|_| DaemonInvocationError::Unavailable);
-            }
-            let outcome = {
-                let invocation = client.invoke(request);
-                tokio::pin!(invocation);
-                let cancellation_wait = wait_for_cancellation(cancellation);
-                tokio::pin!(cancellation_wait);
-                tokio::select! {
-                    result = &mut invocation => result.map_err(|_| DaemonInvocationError::Unavailable),
-                    () = &mut cancellation_wait => {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            client.cancel_invocation(&target_request_id),
-                        )
-                        .await;
-                        Err(DaemonInvocationError::Cancelled { stage })
-                    },
-                    () = tokio::time::sleep(remaining) => {
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(250),
-                            client.cancel_invocation(&target_request_id),
-                        )
-                        .await;
-                        Err(DaemonInvocationError::TimedOut { stage })
-                    }
-                }
-            };
-            if matches!(
-                outcome,
-                Err(
-                    DaemonInvocationError::Cancelled { .. }
-                        | DaemonInvocationError::TimedOut { .. }
-                )
-            ) {
-                *client.state.lock().await = None;
-            }
-            outcome
-        })
-        .await
-        .map_err(|_| DaemonInvocationError::Unavailable)?
     }
 
     async fn cancel_invocation(&self, target_request_id: &str) -> crate::errors::Result<()> {
@@ -1088,11 +1009,16 @@ pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
     cancellation.cancelled().await;
 }
 
+mod controlled_invocation;
+
+#[cfg(test)]
+mod controlled_invocation_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonInvocationError, InvocationCancellationPolicy, SemanticEvaluationPublicationResultV1,
-        application_response, semantic_evaluation_application_problem,
+        DaemonInvocationError, SemanticEvaluationPublicationResultV1, application_response,
+        semantic_evaluation_application_problem,
     };
     use tracedecay_application::{
         ApplicationProblem, ApplicationProblemKind, CancellationStage, InvocationError, RequestId,
@@ -1164,17 +1090,6 @@ mod tests {
             assert_eq!(reason, expected_reason);
             assert!(!retryable);
         }
-    }
-
-    #[test]
-    fn effect_dispatch_waits_for_the_authoritative_commit_receipt() {
-        assert!(
-            !InvocationCancellationPolicy::AuthoritativeEffect
-                .may_interrupt(CancellationStage::EffectInFlight)
-        );
-        assert!(
-            InvocationCancellationPolicy::ReadOnly.may_interrupt(CancellationStage::DuringRead)
-        );
     }
 
     #[test]

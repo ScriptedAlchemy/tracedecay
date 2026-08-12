@@ -183,6 +183,8 @@ mod invocation_observability_tests;
 mod lsp_lease_tests;
 mod lsp_tests;
 mod primitive_tests;
+mod project_admission_tests;
+mod project_lifecycle_tests;
 mod types_tests;
 mod work_evidence_journey_tests;
 mod work_tests;

@@ -659,13 +659,22 @@ pub(super) async fn register_project_open_production_owners(
     };
     let _scout_registry = match invocation
         .context_scout_runtime_registrar()
-        .open_and_register(database.clone(), project_id.clone())
+        .open_and_register(
+            database.clone(),
+            session_db.binding().shard_id.profile_id.clone(),
+            project_id.clone(),
+            project_root.to_path_buf(),
+        )
         .await
     {
         Ok(registry) => registry,
         Err(DaemonContextScoutRuntimeRegistrationError::AlreadyRegistered) => invocation
             .context_scout_runtime_registrar()
-            .get(&project_id)
+            .get(
+                &session_db.binding().shard_id.profile_id,
+                &project_id,
+                project_root,
+            )
             .await
             .ok_or_else(|| TraceDecayError::Config {
                 message: "project-open Context Scout registry disappeared".to_owned(),
@@ -1170,6 +1179,7 @@ async fn register_semantic_activation_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("semantic retrieval current state unavailable: {error}"),
         })?;
+    let profile_id = session_db.binding().shard_id.profile_id.clone();
     let observer = invocation.query_activation_registrar(project_root, Arc::clone(&session_db));
     if let Some(current_state) = current_state {
         if current_state.audit().is_empty() {
@@ -1184,6 +1194,7 @@ async fn register_semantic_activation_owner(
             invocation
                 .restore_initial_query_authority_for_project(
                     project_root,
+                    profile_id.clone(),
                     scope.clone(),
                     current_state,
                     cursor_keys,
@@ -1210,7 +1221,7 @@ async fn register_semantic_activation_owner(
                 })?;
         }
         if let Err(error) = invocation
-            .mount_query_authority_for_project(project_root, &scope)
+            .mount_query_authority_for_project(project_root, &profile_id, &scope)
             .await
         {
             tracing::debug!(
@@ -1228,7 +1239,9 @@ async fn register_semantic_activation_owner(
                     invocation.clone(),
                     project_root.to_path_buf(),
                     scope.clone(),
-                    query_authority_upgrade::DeferredQueryAuthorityMountV1::Configured,
+                    query_authority_upgrade::DeferredQueryAuthorityMountV1::Configured {
+                        profile_id,
+                    },
                 );
             }
         }

@@ -210,6 +210,10 @@ async fn retire_project_servers(
     }
 }
 
+pub(super) async fn retire_project_servers_now(servers: Vec<Arc<crate::mcp::McpServer>>) {
+    retire_project_servers(servers, None).await;
+}
+
 pub(super) async fn schedule_project_server_retirement(
     store_administration: &StoreAdministration,
     owner: StoreOwnerKey,

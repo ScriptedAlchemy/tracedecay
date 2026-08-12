@@ -8,7 +8,7 @@ use tracedecay_domain::{
     CodeGenerationId, RefId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbRegistration, GraphGenerationDependency,
+    GraphCancellation, GraphDbError, GraphDbRegistration, GraphGenerationDependency,
     GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity, GraphProjectorRevision,
     GraphReplayCollectionOutcome, GraphWriteBatch, SealedCodeGenerationReplay,
     VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
@@ -36,6 +36,7 @@ mod memory_runtime;
 pub(super) use memory_runtime::{
     inline_graph_publication_input_digest, schedule_bound_memory_graph_reconciliation,
 };
+pub(super) mod graph_attachment;
 mod seals;
 mod semantic_vector;
 use seals::{
@@ -1185,40 +1186,18 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     /// Retains the daemon-owned native relation graph for one exact session
     /// shard and opens it through the shared graph registry.
-    pub(crate) async fn retain_session_relation_graph_runtime(
+    pub(super) async fn retain_session_relation_graph_runtime(
         &self,
         shard_id: StoreShardIdV1,
-    ) -> Result<Arc<GraphDb>> {
-        let authority = self
-            .registry
-            .retain_graph_store(StoreRuntimeKey::new(shard_id, self.incarnation))
-            .await
-            .map_err(|failure| {
-                session_registry_error(
-                    "retain exact session relation graph authority",
-                    format!("{failure:?}"),
-                )
-            })?;
-        let authority_lease: Arc<dyn RetainedGraphStoreLeaseV1> = authority;
-        let registration = GraphDbRegistration {
-            authority_lease,
-            cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                &self.graph_lifecycle_cancelled,
-            ))),
-            lifecycle_cancellation: Arc::new(AtomicGraphCancellationV1::new(Arc::clone(
-                &self.graph_lifecycle_cancelled,
-            ))),
-            deadline: Instant::now() + GRAPH_OPEN_DEADLINE,
-        };
-        let graph_registry = self.graph_registry.clone();
-        tokio::task::spawn_blocking(move || graph_registry.resolve(registration))
-            .await
-            .map_err(|error| {
-                session_registry_error("join session relation graph open", error.to_string())
-            })?
-            .map_err(|error| {
-                session_registry_error("open session relation graph runtime", error.to_string())
-            })
+    ) -> Result<graph_attachment::SessionRelationGraphAttachmentV1> {
+        graph_attachment::open_session_relation(
+            &self.registry,
+            &self.graph_registry,
+            &self.graph_lifecycle_cancelled,
+            self.incarnation,
+            shard_id,
+        )
+        .await
     }
 }
 

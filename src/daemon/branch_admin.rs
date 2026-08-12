@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 
 use serde_json::json;
 
@@ -23,14 +26,13 @@ use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
 use super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
-use super::{
-    DaemonHandshake, DatabaseOwnerRegistry, authority, project_server_lifecycle,
-    write_json_rpc_response,
-};
+use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 mod project_retirement;
 mod remote_deletion_lifecycle;
+pub(in crate::daemon) mod remote_recovery_lifecycle;
+mod session_runtime_shutdown;
 
 /// Resolves the writer scope for one store family.
 ///
@@ -280,15 +282,17 @@ impl Drop for RetirementReaperRegistrationBarrier {
     }
 }
 
-type SessionRuntimeRegistries = HashMap<
-    PathBuf,
-    Arc<
+#[derive(Clone)]
+pub(super) struct SessionRuntimeRegistryEntryV1 {
+    pub(super) identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    pub(super) registry: Arc<
         tokio::sync::OnceCell<
             Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
         >,
     >,
->;
-type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
+}
+type SessionRuntimeRegistries = HashMap<PathBuf, SessionRuntimeRegistryEntryV1>;
+pub(super) type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
 
 #[derive(Clone)]
 struct ProfileHostAdmissionBootstrapContext {
@@ -412,6 +416,7 @@ impl ProfileHostAdmissionBootstrapContext {
 pub(super) struct StoreAdministration {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
+    session_runtime_registry_admission_closed: Arc<AtomicBool>,
     gate: Arc<StoreWriterGates>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
     project_server_retirements:
@@ -438,6 +443,8 @@ pub(super) struct StoreAdministration {
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
     native_integration_services:
         Arc<crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry>,
+    remote_recovery_project_lifecycles:
+        remote_recovery_lifecycle::SharedRemoteRecoveryProjectLifecyclesV1,
     #[cfg(unix)]
     retirement_reapers: Arc<MaintenanceReaperRegistry>,
 }
@@ -445,12 +452,8 @@ pub(super) struct StoreAdministration {
 /// Retry ownership for a timed-out server, or a terminal failure receipt that
 /// must remain visible without retaining the server and its daemon callbacks.
 pub(super) enum RetainedProjectShutdownOwner {
-    TimedOut {
-        server: Arc<crate::mcp::McpServer>,
-    },
-    Failed {
-        error: String,
-    },
+    TimedOut { server: Arc<crate::mcp::McpServer> },
+    Failed { error: String },
 }
 
 impl Default for StoreAdministration {
@@ -458,6 +461,7 @@ impl Default for StoreAdministration {
         Self {
             profile_identity: None,
             session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            session_runtime_registry_admission_closed: Arc::new(AtomicBool::new(false)),
             gate: Arc::new(StoreWriterGates::default()),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
             project_server_retirements: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -484,6 +488,7 @@ impl Default for StoreAdministration {
                 crate::daemon::native_integration::DaemonNativeIntegrationServiceRegistry::default(
                 ),
             ),
+            remote_recovery_project_lifecycles: Default::default(),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
         }
@@ -507,7 +512,7 @@ impl StoreAdministration {
     ) -> Result<Self> {
         let profile_root = graph.retained_profile_root()?;
         let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-        let administration = Self::default().with_profile_identity(profile_identity);
+        let administration = Self::default().with_profile_identity(profile_identity.clone());
         let registry = Arc::new(tokio::sync::OnceCell::new());
         registry
             .set(graph.retained_store_runtime_registry())
@@ -518,7 +523,13 @@ impl StoreAdministration {
             .session_runtime_registries
             .lock()
             .await
-            .insert(authority::canonical_identity_path(&profile_root)?, registry);
+            .insert(
+                authority::canonical_identity_path(&profile_root)?,
+                SessionRuntimeRegistryEntryV1 {
+                    identity: profile_identity,
+                    registry,
+                },
+            );
         Ok(administration)
     }
 
@@ -538,48 +549,6 @@ impl StoreAdministration {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon profile identity authority is unavailable".to_string(),
             })
-    }
-
-    async fn session_runtime_registry(
-        &self,
-    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
-    {
-        let identity = self.profile_identity()?.clone();
-        let profile_root = authority::canonical_identity_path(identity.profile_root())?;
-        let registry = {
-            let mut registries = self.session_runtime_registries.lock().await;
-            Arc::clone(
-                registries
-                    .entry(profile_root)
-                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
-            )
-        };
-        registry
-            .get_or_try_init(|| async move {
-                crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                    identity,
-                )
-                .await
-                .map(Arc::new)
-            })
-            .await
-            .map(Arc::clone)
-    }
-
-    pub(super) async fn retained_runtime_registry(
-        &self,
-    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
-    {
-        self.ensure_account_active().await?;
-        self.session_runtime_registry().await
-    }
-
-    pub(super) async fn registered_runtime_registry(
-        &self,
-    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
-    {
-        self.ensure_account_active().await?;
-        self.session_runtime_registry().await
     }
 
     pub(super) async fn registered_profile_session_database(
@@ -657,7 +626,9 @@ impl StoreAdministration {
         };
         let registry = {
             let registries = self.session_runtime_registries.lock().await;
-            registries.get(&profile_root).cloned()
+            registries
+                .get(&profile_root)
+                .map(|entry| Arc::clone(&entry.registry))
         };
         let Some(registry) = registry.and_then(|registry| registry.get().cloned()) else {
             return Vec::new();
@@ -841,6 +812,15 @@ impl StoreAdministration {
         &self,
         profile_root: &Path,
     ) -> Result<()> {
+        if self
+            .session_runtime_registry_admission_closed
+            .load(Ordering::Acquire)
+        {
+            return Err(TraceDecayError::Config {
+                message: "session runtime registry admission is closed for daemon shutdown"
+                    .to_owned(),
+            });
+        }
         let profile_root = authority::canonical_identity_path(profile_root)?;
         let profile_identity = self.profile_identity()?.clone();
         let authority_profile_root =
@@ -852,10 +832,23 @@ impl StoreAdministration {
         }
         let session_runtime_registry = {
             let mut registries = self.session_runtime_registries.lock().await;
+            if self
+                .session_runtime_registry_admission_closed
+                .load(Ordering::Acquire)
+            {
+                return Err(TraceDecayError::Config {
+                    message: "session runtime registry admission is closed for daemon shutdown"
+                        .to_owned(),
+                });
+            }
             Arc::clone(
-                registries
+                &registries
                     .entry(profile_root.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+                    .or_insert_with(|| SessionRuntimeRegistryEntryV1 {
+                        identity: profile_identity.clone(),
+                        registry: Arc::new(tokio::sync::OnceCell::new()),
+                    })
+                    .registry,
             )
         };
         let context = ProfileHostAdmissionBootstrapContext {

@@ -12,6 +12,7 @@ use thiserror::Error;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
     ComponentRevision, ManifestDigest, PrivacyDomainId, RetrievalAnchorId, RetrieverKind,
+    configuration::UserProfileId,
 };
 
 use super::code_index_scheduler::query_runtime::{
@@ -33,6 +34,7 @@ use tracedecay_usecases::semantic_runtime::{
 pub(crate) enum QueryAuthorityUnavailableReasonV1 {
     ActivationUnavailable,
     ActivationNotCurrent,
+    #[cfg(test)]
     ScopeRequired,
     ScopeMismatch,
     KeyUnavailable,
@@ -45,6 +47,7 @@ impl QueryAuthorityUnavailableReasonV1 {
         match self {
             Self::ActivationUnavailable => "activation_unavailable",
             Self::ActivationNotCurrent => "activation_not_current",
+            #[cfg(test)]
             Self::ScopeRequired => "scope_required",
             Self::ScopeMismatch => "scope_mismatch",
             Self::KeyUnavailable => "key_unavailable",
@@ -82,12 +85,20 @@ pub(crate) enum QueryAuthorityUpdateErrorV1 {
 
 #[derive(Clone)]
 struct ActivatedQueryStateV1 {
+    profile_id: UserProfileId,
     scope: ResolvedScope,
     state: RetrievalProfileStateV1,
     cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct QueryAuthorityKeyV1 {
+    profile_id: UserProfileId,
+    scope_digest: ManifestDigest,
+}
+
 pub(crate) struct PreparedQueryActivationV1 {
+    profile_id: UserProfileId,
     scope: ResolvedScope,
     activated: RetrievalProfileStateV1,
     cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
@@ -114,7 +125,12 @@ impl PreparedQueryActivationV1 {
 /// durable project cursor-key authority loaded from its registered store.
 #[derive(Clone)]
 pub(crate) struct DaemonQueryAuthorityProviderV1 {
-    activated: Arc<RwLock<BTreeMap<ManifestDigest, ActivatedQueryStateV1>>>,
+    activated: Arc<RwLock<BTreeMap<QueryAuthorityKeyV1, ActivatedQueryStateV1>>>,
+}
+
+pub(super) struct DaemonProfileQueryAuthorityProviderV1 {
+    provider: DaemonQueryAuthorityProviderV1,
+    profile_id: UserProfileId,
 }
 
 #[derive(Clone)]
@@ -248,6 +264,7 @@ impl RetrievalProfileActivationObserverV1 for DaemonQueryActivationRegistrarV1 {
                 );
                 let prepared = provider
                     .prepare_after_successful_activation(
+                        session_db.binding().shard_id.profile_id.clone(),
                         scope.clone(),
                         committed.state.clone(),
                         cursor_keys,
@@ -326,16 +343,40 @@ impl fmt::Debug for DaemonQueryAuthorityProviderV1 {
 }
 
 impl DaemonQueryAuthorityProviderV1 {
-    pub(crate) fn retire_project(&self, project_id: &tracedecay_domain::ProjectId) {
+    fn profile_key(profile_id: &UserProfileId, scope: &ResolvedScope) -> QueryAuthorityKeyV1 {
+        QueryAuthorityKeyV1 {
+            profile_id: profile_id.clone(),
+            scope_digest: scope.scope_digest.clone(),
+        }
+    }
+
+    pub(super) fn for_profile(
+        &self,
+        profile_id: UserProfileId,
+    ) -> DaemonProfileQueryAuthorityProviderV1 {
+        DaemonProfileQueryAuthorityProviderV1 {
+            provider: self.clone(),
+            profile_id,
+        }
+    }
+
+    pub(crate) fn retire_project(
+        &self,
+        profile_id: &UserProfileId,
+        project_id: &tracedecay_domain::ProjectId,
+    ) {
         let mut activated = match self.activated.write() {
             Ok(activated) => activated,
             Err(poisoned) => poisoned.into_inner(),
         };
-        activated.retain(|_, activated| &activated.scope.project_id != project_id);
+        activated.retain(|key, activated| {
+            &key.profile_id != profile_id || &activated.scope.project_id != project_id
+        });
     }
 
     pub(crate) fn prepare_after_successful_activation(
         &self,
+        profile_id: UserProfileId,
         scope: ResolvedScope,
         activated: RetrievalProfileStateV1,
         cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
@@ -348,13 +389,16 @@ impl DaemonQueryAuthorityProviderV1 {
             .activated
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !current
-            .get(&scope.scope_digest)
-            .is_some_and(|installed| installed.scope == scope && installed.state == activated)
-        {
-            validate_successful_activation_update(&current, &scope, &activated)?;
+        let key = Self::profile_key(&profile_id, &scope);
+        if !current.get(&key).is_some_and(|installed| {
+            installed.profile_id == profile_id
+                && installed.scope == scope
+                && installed.state == activated
+        }) {
+            validate_successful_activation_update(&current, &key, &scope, &activated)?;
         }
         let candidate = ActivatedQueryStateV1 {
+            profile_id: profile_id.clone(),
             scope: scope.clone(),
             state: activated.clone(),
             cursor_keys: Arc::clone(&cursor_keys),
@@ -373,6 +417,7 @@ impl DaemonQueryAuthorityProviderV1 {
             .map_err(|_| QueryAuthorityUpdateErrorV1::ActivationNotCurrent)?,
         );
         Ok(PreparedQueryActivationV1 {
+            profile_id,
             scope,
             activated,
             cursor_keys,
@@ -388,18 +433,24 @@ impl DaemonQueryAuthorityProviderV1 {
             .activated
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if current
-            .get(&prepared.scope.scope_digest)
-            .is_some_and(|installed| {
-                installed.scope == prepared.scope && installed.state == prepared.activated
-            })
-        {
+        let key = Self::profile_key(&prepared.profile_id, &prepared.scope);
+        if current.get(&key).is_some_and(|installed| {
+            installed.profile_id == prepared.profile_id
+                && installed.scope == prepared.scope
+                && installed.state == prepared.activated
+        }) {
             return Ok(());
         }
-        validate_successful_activation_update(&current, &prepared.scope, &prepared.activated)?;
+        validate_successful_activation_update(
+            &current,
+            &key,
+            &prepared.scope,
+            &prepared.activated,
+        )?;
         current.insert(
-            prepared.scope.scope_digest.clone(),
+            key,
             ActivatedQueryStateV1 {
+                profile_id: prepared.profile_id.clone(),
                 scope: prepared.scope.clone(),
                 state: prepared.activated.clone(),
                 cursor_keys: Arc::clone(&prepared.cursor_keys),
@@ -414,6 +465,7 @@ impl DaemonQueryAuthorityProviderV1 {
     /// slot or audit history.
     pub(crate) fn install_evaluated_initial_state(
         &self,
+        profile_id: UserProfileId,
         scope: ResolvedScope,
         initial: RetrievalProfileStateV1,
         cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
@@ -431,7 +483,8 @@ impl DaemonQueryAuthorityProviderV1 {
             .activated
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(prior) = current.get(&scope.scope_digest) {
+        let key = Self::profile_key(&profile_id, &scope);
+        if let Some(prior) = current.get(&key) {
             if prior.scope != scope {
                 return Err(QueryAuthorityUpdateErrorV1::ScopeMismatch);
             }
@@ -440,17 +493,35 @@ impl DaemonQueryAuthorityProviderV1 {
             }
         }
         current.insert(
-            scope.scope_digest.clone(),
+            key,
             ActivatedQueryStateV1 {
+                profile_id: profile_id.clone(),
                 scope: scope.clone(),
                 state: initial,
                 cursor_keys,
             },
         );
         drop(current);
-        Ok(self.status(Some(&scope)))
+        Ok(self.status_for(&profile_id, &scope))
     }
 
+    fn status_for(
+        &self,
+        profile_id: &UserProfileId,
+        scope: &ResolvedScope,
+    ) -> QueryAuthorityProviderStatusV1 {
+        let current = self
+            .activated
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = Self::profile_key(profile_id, scope);
+        let Some(activated) = current.get(&key) else {
+            return unavailable(QueryAuthorityUnavailableReasonV1::ActivationUnavailable);
+        };
+        status_for_activated(scope, activated)
+    }
+
+    #[cfg(test)]
     pub(crate) fn status(&self, scope: Option<&ResolvedScope>) -> QueryAuthorityProviderStatusV1 {
         let current = self
             .activated
@@ -463,32 +534,25 @@ impl DaemonQueryAuthorityProviderV1 {
                 unavailable(QueryAuthorityUnavailableReasonV1::ScopeRequired)
             };
         };
-        let Some(activated) = current.get(&scope.scope_digest) else {
+        let mut matches = current
+            .values()
+            .filter(|activated| &activated.scope == scope);
+        let Some(activated) = matches.next() else {
             return unavailable(QueryAuthorityUnavailableReasonV1::ActivationUnavailable);
         };
-        if scope != &activated.scope {
-            return unavailable(QueryAuthorityUnavailableReasonV1::ScopeMismatch);
+        if matches.next().is_some() {
+            return unavailable(QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile);
         }
-        if !has_current_query_authority(&activated.state) {
-            return unavailable(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent);
-        }
-        let profile = match exact_query_profile(&activated.state) {
-            Ok(profile) => profile,
-            Err(reason) => return unavailable(reason),
-        };
-        QueryAuthorityProviderStatusV1::Available {
-            scope_digest: activated.scope.scope_digest.clone(),
-            profile_id: profile.profile().profile_id.clone(),
-            evaluation_anchor: profile.profile().evaluation_result_anchor.clone(),
-        }
+        status_for_activated(scope, activated)
     }
 
-    fn material_for(
+    fn material_for_profile(
         &self,
+        profile_id: &UserProfileId,
         scope: &ResolvedScope,
         privacy_domain: &PrivacyDomainId,
     ) -> Result<QueryAuthorityMaterialV1, QueryAuthorityUnavailableReasonV1> {
-        match self.status(Some(scope)) {
+        match self.status_for(profile_id, scope) {
             QueryAuthorityProviderStatusV1::Available { .. } => {}
             QueryAuthorityProviderStatusV1::Unavailable { reason } => return Err(reason),
         }
@@ -496,8 +560,9 @@ impl DaemonQueryAuthorityProviderV1 {
             .activated
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = Self::profile_key(profile_id, scope);
         let activated = current
-            .get(&scope.scope_digest)
+            .get(&key)
             .ok_or(QueryAuthorityUnavailableReasonV1::ActivationUnavailable)?;
         if &activated.scope != scope {
             return Err(QueryAuthorityUnavailableReasonV1::ScopeMismatch);
@@ -511,8 +576,9 @@ impl DaemonQueryAuthorityProviderV1 {
     /// Resolve the active evaluated all-lane profile for owning-source
     /// TaskSession selection. The fallback/rollback profile never satisfies
     /// this boundary, and key material remains inside the returned authority.
-    pub(crate) fn federated_authority_for(
+    fn federated_authority_for_profile(
         &self,
+        profile_id: &UserProfileId,
         scope: &ResolvedScope,
         privacy_domain: &PrivacyDomainId,
     ) -> Result<Arc<QueryAuthorityV1>, QueryAuthorityUnavailableReasonV1> {
@@ -526,8 +592,9 @@ impl DaemonQueryAuthorityProviderV1 {
             .activated
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = Self::profile_key(profile_id, scope);
         let activated = current
-            .get(&scope.scope_digest)
+            .get(&key)
             .ok_or(QueryAuthorityUnavailableReasonV1::ActivationUnavailable)?;
         if &activated.scope != scope {
             return Err(QueryAuthorityUnavailableReasonV1::ScopeMismatch);
@@ -555,10 +622,35 @@ impl DaemonQueryAuthorityProviderV1 {
         .map(Arc::new)
         .map_err(|_| QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile)
     }
+
+    pub(crate) fn federated_authority_for(
+        &self,
+        scope: &ResolvedScope,
+        privacy_domain: &PrivacyDomainId,
+    ) -> Result<Arc<QueryAuthorityV1>, QueryAuthorityUnavailableReasonV1> {
+        let profile_id = {
+            let current = self
+                .activated
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut matches = current
+                .keys()
+                .filter(|key| key.scope_digest == scope.scope_digest);
+            let Some(profile_id) = matches.next().map(|key| key.profile_id.clone()) else {
+                return Err(QueryAuthorityUnavailableReasonV1::ActivationUnavailable);
+            };
+            if matches.next().is_some() {
+                return Err(QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile);
+            }
+            profile_id
+        };
+        self.federated_authority_for_profile(&profile_id, scope, privacy_domain)
+    }
 }
 
 fn validate_successful_activation_update(
-    current: &BTreeMap<ManifestDigest, ActivatedQueryStateV1>,
+    current: &BTreeMap<QueryAuthorityKeyV1, ActivatedQueryStateV1>,
+    key: &QueryAuthorityKeyV1,
     scope: &ResolvedScope,
     activated: &RetrievalProfileStateV1,
 ) -> Result<(), QueryAuthorityUpdateErrorV1> {
@@ -567,7 +659,7 @@ fn validate_successful_activation_update(
     if activated.configuration_revision() != &event.result_revision {
         return Err(QueryAuthorityUpdateErrorV1::ActivationNotCurrent);
     }
-    if let Some(prior) = current.get(&scope.scope_digest) {
+    if let Some(prior) = current.get(key) {
         if prior.scope != *scope {
             return Err(QueryAuthorityUpdateErrorV1::ScopeMismatch);
         }
@@ -607,6 +699,27 @@ fn query_material_for_activated(
     })
 }
 
+fn status_for_activated(
+    scope: &ResolvedScope,
+    activated: &ActivatedQueryStateV1,
+) -> QueryAuthorityProviderStatusV1 {
+    if scope != &activated.scope {
+        return unavailable(QueryAuthorityUnavailableReasonV1::ScopeMismatch);
+    }
+    if !has_current_query_authority(&activated.state) {
+        return unavailable(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent);
+    }
+    let profile = match exact_query_profile(&activated.state) {
+        Ok(profile) => profile,
+        Err(reason) => return unavailable(reason),
+    };
+    QueryAuthorityProviderStatusV1::Available {
+        scope_digest: activated.scope.scope_digest.clone(),
+        profile_id: profile.profile().profile_id.clone(),
+        evaluation_anchor: profile.profile().evaluation_result_anchor.clone(),
+    }
+}
+
 fn map_unavailable_update_error(
     reason: QueryAuthorityUnavailableReasonV1,
 ) -> QueryAuthorityUpdateErrorV1 {
@@ -616,10 +729,13 @@ fn map_unavailable_update_error(
         }
         QueryAuthorityUnavailableReasonV1::ActivationUnavailable
         | QueryAuthorityUnavailableReasonV1::ActivationNotCurrent
-        | QueryAuthorityUnavailableReasonV1::ScopeRequired
         | QueryAuthorityUnavailableReasonV1::KeyUnavailable
         | QueryAuthorityUnavailableReasonV1::InvalidActivatedProfile
         | QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile => {
+            QueryAuthorityUpdateErrorV1::ActivationNotCurrent
+        }
+        #[cfg(test)]
+        QueryAuthorityUnavailableReasonV1::ScopeRequired => {
             QueryAuthorityUpdateErrorV1::ActivationNotCurrent
         }
     }
@@ -631,7 +747,56 @@ impl QueryAuthorityProviderV1 for DaemonQueryAuthorityProviderV1 {
         scope: &ResolvedScope,
         privacy_domain: &PrivacyDomainId,
     ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1> {
-        self.material_for(scope, privacy_domain)
+        scope.validate().map_err(|_| {
+            QueryAuthorityProviderErrorV1::Unavailable(
+                QueryAuthorityUnavailableReasonV1::ScopeMismatch
+                    .as_str()
+                    .to_owned(),
+            )
+        })?;
+        privacy_domain.validate().map_err(|_| {
+            QueryAuthorityProviderErrorV1::Unavailable(
+                QueryAuthorityUnavailableReasonV1::KeyUnavailable
+                    .as_str()
+                    .to_owned(),
+            )
+        })?;
+        let current = self
+            .activated
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let materials = current
+            .values()
+            .filter(|activated| &activated.scope == scope)
+            .map(|activated| {
+                if !has_current_query_authority(&activated.state) {
+                    return Err(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent);
+                }
+                query_material_for_activated(activated, privacy_domain)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|reason| {
+                QueryAuthorityProviderErrorV1::Unavailable(reason.as_str().to_owned())
+            })?;
+        if materials.is_empty() {
+            return Err(QueryAuthorityProviderErrorV1::Unavailable(
+                QueryAuthorityUnavailableReasonV1::ActivationUnavailable
+                    .as_str()
+                    .to_owned(),
+            ));
+        }
+        Ok(materials)
+    }
+}
+
+impl QueryAuthorityProviderV1 for DaemonProfileQueryAuthorityProviderV1 {
+    fn accepted_authorities(
+        &self,
+        scope: &ResolvedScope,
+        privacy_domain: &PrivacyDomainId,
+    ) -> Result<Vec<QueryAuthorityMaterialV1>, QueryAuthorityProviderErrorV1> {
+        self.provider
+            .material_for_profile(&self.profile_id, scope, privacy_domain)
             .map(|material| vec![material])
             .map_err(|reason| {
                 QueryAuthorityProviderErrorV1::Unavailable(reason.as_str().to_owned())

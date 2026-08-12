@@ -238,6 +238,46 @@ async fn disconnect_actor_failure_closes_state_without_scheduling_a_lease() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_retirement_fences_disconnect_and_joins_its_new_lease() {
+    let service = Arc::new(DaemonInvocationService::default());
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+    let session = open_session(&service, &registry, "request.retirement-disconnect").await;
+    let access = session.clone().into_access().expect("session access");
+    let admission = service.lsp_admission_open.lock().await;
+    service
+        .lsp_sessions
+        .lock()
+        .await
+        .remove(access.session_id());
+
+    let disconnect_service = Arc::clone(&service);
+    let disconnect_registry = Arc::clone(&registry);
+    let disconnect = tokio::spawn(async move {
+        disconnect_service
+            .disconnect_lsp_session(&disconnect_registry, session)
+            .await;
+    });
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        registry.lock().await.active_sessions(),
+        1,
+        "disconnect must wait behind project protocol retirement"
+    );
+    assert_eq!(service.lsp_lease_tasks.active_tasks(), 0);
+
+    drop(admission);
+    disconnect.await.expect("disconnect after retirement");
+
+    assert_eq!(registry.lock().await.active_sessions(), 0);
+    assert_eq!(
+        service.lsp_lease_tasks.active_tasks(),
+        0,
+        "a disconnect admitted after retirement must join its unused lease"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn explicit_detach_racing_disconnect_leaves_no_unowned_lease_task() {
     for attempt in 0..32 {
         let service = Arc::new(DaemonInvocationService::default());

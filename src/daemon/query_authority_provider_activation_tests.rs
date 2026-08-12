@@ -62,10 +62,12 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
             .await
             .expect("cursor keys"),
     );
+    let profile_id = session_db.binding().shard_id.profile_id.clone();
     let provider = DaemonQueryAuthorityProviderV1::default();
     let semantic = semantic_committed_state(scope.clone());
     let prepared = provider
         .prepare_after_successful_activation(
+            profile_id.clone(),
             scope.clone(),
             semantic.state.clone(),
             Arc::clone(&cursor_keys),
@@ -74,6 +76,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         .expect("prepare semantic activation");
     let delayed_semantic = provider
         .prepare_after_successful_activation(
+            profile_id.clone(),
             scope.clone(),
             semantic.state.clone(),
             Arc::clone(&cursor_keys),
@@ -167,6 +170,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     let rollback = query_rollback_committed_state(&semantic);
     let prepared = provider
         .prepare_after_successful_activation(
+            profile_id.clone(),
             scope.clone(),
             rollback.state.clone(),
             Arc::clone(&cursor_keys),
@@ -387,6 +391,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
         .expect("reserve exact rollback retry");
     let retry = provider
         .prepare_after_successful_activation(
+            profile_id.clone(),
             scope.clone(),
             rollback.state.clone(),
             Arc::clone(&cursor_keys),
@@ -412,6 +417,7 @@ async fn committed_query_routes_install_and_rollback_as_one_revision() {
     assert_eq!(
         provider
             .prepare_after_successful_activation(
+                profile_id,
                 scope.clone(),
                 conflicting_state,
                 cursor_keys,
@@ -556,7 +562,12 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     .expect("initial state");
     let provider = DaemonQueryAuthorityProviderV1::default();
     provider
-        .install_evaluated_initial_state(scope.clone(), state.clone(), cursor_keys)
+        .install_evaluated_initial_state(
+            database.binding().shard_id.profile_id.clone(),
+            scope.clone(),
+            state.clone(),
+            cursor_keys,
+        )
         .expect("install first production authority");
     let authority = crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
         &scope,
@@ -627,7 +638,12 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     );
     let reopened_provider = DaemonQueryAuthorityProviderV1::default();
     reopened_provider
-        .install_evaluated_initial_state(scope.clone(), state.clone(), Arc::clone(&reopened_keys))
+        .install_evaluated_initial_state(
+            reopened.binding().shard_id.profile_id.clone(),
+            scope.clone(),
+            state.clone(),
+            Arc::clone(&reopened_keys),
+        )
         .expect("install reopened production authority");
     let reopened_authority =
         crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
@@ -685,7 +701,12 @@ async fn project_cursor_authority_resumes_prepared_and_fusion_after_reopen() {
     );
     let mismatched_provider = DaemonQueryAuthorityProviderV1::default();
     mismatched_provider
-        .install_evaluated_initial_state(scope.clone(), state, foreign_keys)
+        .install_evaluated_initial_state(
+            foreign_database.binding().shard_id.profile_id.clone(),
+            scope.clone(),
+            state,
+            foreign_keys,
+        )
         .expect("install mismatched production authority");
     let mismatched_authority =
         crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(

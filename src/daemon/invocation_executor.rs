@@ -1,9 +1,7 @@
-//! In-process daemon invocation executor and its multi-root query helpers,
-//! including the `multi_root_family_allows` kill-switch predicate.
+//! In-process daemon invocation execution and multi-root query helpers.
 //!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic,
-//! signatures, or behavior changed. `use super::*` re-exposes every name the
-//! parent `daemon` module had in scope so the moved code resolves unchanged.
+//! Captured project admission and cancellation authority stay attached to
+//! nested multi-root calls so quiescence drains the whole request atomically.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +14,9 @@ use crate::errors::{Result, TraceDecayError};
 use tracedecay_usecases::operation_stream::OperationRequestControls;
 
 use super::*;
+
+#[cfg(test)]
+mod controlled_invocation_tests;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -200,6 +201,9 @@ pub(super) struct InProcessDaemonInvocationExecutor {
     store_administration: StoreAdministration,
     project_path: PathBuf,
     scope: tracedecay_application::ResolvedScope,
+    project_admission:
+        Option<crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1>,
+    admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
 }
 
 impl InProcessDaemonInvocationExecutor {
@@ -214,18 +218,69 @@ impl InProcessDaemonInvocationExecutor {
             store_administration,
             project_path,
             scope,
+            project_admission: None,
+            admitted_cancellation: None,
+        }
+    }
+
+    pub(super) fn with_project_admission(
+        invocation: DaemonInvocationState,
+        store_administration: StoreAdministration,
+        project_path: PathBuf,
+        scope: tracedecay_application::ResolvedScope,
+        project_admission: crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1,
+        admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
+    ) -> Self {
+        Self {
+            invocation,
+            store_administration,
+            project_path,
+            scope,
+            project_admission: Some(project_admission),
+            admitted_cancellation,
         }
     }
 
     async fn invoke_once(&self, request: DaemonInvocationRequest) -> DaemonInvocationResponse {
-        self.invocation
-            .invoke_for_project(
-                &self.store_administration,
-                Some(&self.project_path),
-                request,
-                None,
-            )
-            .await
+        if let Some(project_admission) = self.project_admission.as_ref() {
+            let git_service = if invocation_is_git_operation(request.operation()) {
+                git_service_for_project_path(&self.store_administration, Some(&self.project_path))
+                    .await
+            } else {
+                None
+            };
+            let native_integration_service =
+                if invocation_is_native_integration_operation(request.operation()) {
+                    native_integration_service_for_project_path(
+                        &self.store_administration,
+                        Some(&self.project_path),
+                    )
+                    .await
+                } else {
+                    None
+                };
+            self.invocation
+                .service
+                .invoke_with_project_admission(
+                    &self.invocation.lsp_session_registry,
+                    &self.project_path,
+                    git_service,
+                    native_integration_service,
+                    request,
+                    self.admitted_cancellation.clone(),
+                    project_admission,
+                )
+                .await
+        } else {
+            self.invocation
+                .invoke_for_project(
+                    &self.store_administration,
+                    Some(&self.project_path),
+                    request,
+                    None,
+                )
+                .await
+        }
     }
 }
 
@@ -495,6 +550,75 @@ impl tracedecay_application::ApplicationInvocationExecutor for InProcessDaemonIn
     }
 }
 
+async fn settle_in_process_invocation(
+    request_id: &str,
+    invocation: tokio::task::JoinHandle<DaemonInvocationResponse>,
+    remaining: Duration,
+    cancellation: tracedecay_application::CancellationSignal,
+    admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
+    policy: crate::daemon_client::InvocationCancellationPolicy,
+) -> std::result::Result<DaemonInvocationResponse, crate::daemon_client::DaemonInvocationError> {
+    use tracedecay_application::CancellationStage;
+
+    let stage = match policy {
+        crate::daemon_client::InvocationCancellationPolicy::ReadOnly => {
+            CancellationStage::DuringRead
+        }
+        crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
+            CancellationStage::EffectInFlight
+        }
+    };
+    let invocation = invocation;
+    tokio::pin!(invocation);
+    let cancellation_wait = crate::daemon_client::wait_for_cancellation(cancellation);
+    tokio::pin!(cancellation_wait);
+    let has_admitted_cancellation = admitted_cancellation.is_some();
+    let admitted_cancellation_wait = async move {
+        match admitted_cancellation {
+            Some(cancellation) => cancellation.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(admitted_cancellation_wait);
+    let timed_out = tokio::select! {
+        response = &mut invocation => {
+            return response.map_err(|_| crate::daemon_client::DaemonInvocationError::Unavailable);
+        }
+        () = &mut cancellation_wait => false,
+        () = &mut admitted_cancellation_wait => false,
+        () = tokio::time::sleep(remaining) => true,
+    };
+    if !has_admitted_cancellation {
+        crate::daemon::request_cancellation::cancel(request_id);
+    }
+    match policy {
+        crate::daemon_client::InvocationCancellationPolicy::ReadOnly => {
+            if tokio::time::timeout(Duration::from_secs(1), &mut invocation)
+                .await
+                .is_err()
+            {
+                invocation.abort();
+            }
+            if timed_out {
+                Err(crate::daemon_client::DaemonInvocationError::TimedOut { stage })
+            } else {
+                Err(crate::daemon_client::DaemonInvocationError::Cancelled { stage })
+            }
+        }
+        crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
+            match tokio::time::timeout(crate::daemon::DAEMON_TASK_ABORT_DEADLINE, &mut invocation)
+                .await
+            {
+                Ok(Ok(response)) => Ok(response),
+                Ok(Err(_)) | Err(_) => Ok(DaemonInvocationResponse::problem(
+                    request_id,
+                    crate::daemon_contract::DaemonInvocationProblem::ResetRequired,
+                )),
+            }
+        }
+    }
+}
+
 fn map_operation_event_invocation_error(
     error: tracedecay_usecases::operation_stream::OperationEventError,
 ) -> tracedecay_application::InvocationError {
@@ -538,7 +662,11 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
         Box::pin(async move {
             use tracedecay_application::CancellationStage;
 
-            if cancellation.is_cancelled() {
+            if cancellation.is_cancelled()
+                || self.admitted_cancellation.as_ref().is_some_and(
+                    tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled,
+                )
+            {
                 return Err(crate::daemon_client::DaemonInvocationError::Cancelled {
                     stage: CancellationStage::BeforeAdmission,
                 });
@@ -549,44 +677,19 @@ impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocatio
                 },
             )?;
             let executor = self.clone();
+            let admitted_cancellation = self.admitted_cancellation.clone();
             tokio::spawn(async move {
-                let stage = match policy {
-                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly => {
-                        CancellationStage::DuringRead
-                    }
-                    crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
-                        CancellationStage::EffectInFlight
-                    }
-                };
-                if !policy.may_interrupt(stage) {
-                    return Ok(executor.invoke_once(request).await);
-                }
                 let request_id = request.request_id.clone();
-                let invocation = executor.invoke_once(request);
-                tokio::pin!(invocation);
-                let cancellation_wait = crate::daemon_client::wait_for_cancellation(cancellation);
-                tokio::pin!(cancellation_wait);
-                tokio::select! {
-                    response = &mut invocation => Ok(response),
-                    () = &mut cancellation_wait => {
-                        crate::daemon::request_cancellation::cancel(&request_id);
-                        let _ = tokio::time::timeout(
-                            Duration::from_secs(1),
-                            &mut invocation,
-                        )
-                        .await;
-                        Err(crate::daemon_client::DaemonInvocationError::Cancelled { stage })
-                    }
-                    () = tokio::time::sleep(remaining) => {
-                        crate::daemon::request_cancellation::cancel(&request_id);
-                        let _ = tokio::time::timeout(
-                            Duration::from_secs(1),
-                            &mut invocation,
-                        )
-                        .await;
-                        Err(crate::daemon_client::DaemonInvocationError::TimedOut { stage })
-                    }
-                }
+                let invocation = tokio::spawn(async move { executor.invoke_once(request).await });
+                settle_in_process_invocation(
+                    &request_id,
+                    invocation,
+                    remaining,
+                    cancellation,
+                    admitted_cancellation,
+                    policy,
+                )
+                .await
             })
             .await
             .map_err(|_| crate::daemon_client::DaemonInvocationError::Unavailable)?

@@ -18,6 +18,14 @@ impl DaemonInvocationService {
         self.operation_events.clone()
     }
 
+    pub(in crate::daemon) fn admit_project_request(
+        &self,
+        project_root: &Path,
+    ) -> Option<crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1> {
+        self.project_runtimes
+            .admit_request(project_root, project_root.canonicalize().ok().as_deref())
+    }
+
     /// Executes a closed request after daemon socket authentication.
     /// `lsp_workspace` is supplied only after the daemon has resolved every
     /// requested root through registered project ownership.
@@ -56,6 +64,56 @@ impl DaemonInvocationService {
         request: DaemonInvocationRequest,
         admitted_cancellation: Option<CancellationToken>,
     ) -> DaemonInvocationResponse {
+        self.invoke_with_admission(
+            lsp_registry,
+            project_root,
+            lsp_workspace,
+            git_service,
+            native_integration_service,
+            request,
+            admitted_cancellation,
+            None,
+        )
+        .await
+    }
+
+    pub(in crate::daemon) async fn invoke_with_project_admission(
+        &self,
+        lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
+        project_root: &Path,
+        git_service: Option<DaemonGitInvocationOwner>,
+        native_integration_service: Option<DaemonNativeIntegrationOwner>,
+        request: DaemonInvocationRequest,
+        admitted_cancellation: Option<CancellationToken>,
+        project_admission: &crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1,
+    ) -> DaemonInvocationResponse {
+        self.invoke_with_admission(
+            lsp_registry,
+            Some(project_root),
+            None,
+            git_service,
+            native_integration_service,
+            request,
+            admitted_cancellation,
+            Some(project_admission),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_with_admission(
+        &self,
+        lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
+        project_root: Option<&Path>,
+        lsp_workspace: Option<AuthorizedLspWorkspace>,
+        git_service: Option<DaemonGitInvocationOwner>,
+        native_integration_service: Option<DaemonNativeIntegrationOwner>,
+        request: DaemonInvocationRequest,
+        admitted_cancellation: Option<CancellationToken>,
+        project_admission: Option<
+            &crate::daemon::service::project_runtime::ProjectRuntimeRequestLeaseV1,
+        >,
+    ) -> DaemonInvocationResponse {
         let request_id = request.request_id.clone();
         let cancellation_lease = if admitted_cancellation.is_none() {
             let Some(lease) = crate::daemon::request_cancellation::register(&request_id) else {
@@ -82,15 +140,22 @@ impl DaemonInvocationService {
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass
         // so dispatch sees one consistent view of the project.
-        let runtimes = self
-            .project_runtimes
-            .request_runtimes(
-                project_root,
-                project_root
-                    .and_then(|root| root.canonicalize().ok())
-                    .as_deref(),
-            )
-            .await;
+        let canonical_root = project_root.and_then(|root| root.canonicalize().ok());
+        let runtimes = match (project_root, project_admission) {
+            (Some(project_root), Some(project_admission)) => {
+                self.project_runtimes.request_runtimes_with_admission(
+                    project_root,
+                    canonical_root.as_deref(),
+                    project_admission,
+                )
+            }
+            _ => {
+                self.project_runtimes
+                    .request_runtimes(project_root, canonical_root.as_deref())
+                    .await
+            }
+        };
+        let project_runtime_admitted = runtimes.is_admitted();
         let feedback_runtime = runtimes.feedback;
         let observations = feedback_runtime
             .as_ref()
@@ -116,6 +181,23 @@ impl DaemonInvocationService {
                 );
             }
             return DaemonInvocationResponse::problem(request_id, problem);
+        }
+        let pre_admission_response = match &request.payload {
+            DaemonInvocationPayload::LspOpen {
+                deadline,
+                cancellation,
+                ..
+            } => admit_lsp_control(request_id.clone(), deadline, cancellation).err(),
+            _ => None,
+        };
+        if let Some(response) = pre_admission_response {
+            return *response;
+        }
+        if request.requires_project() && !project_runtime_admitted {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
         }
         let dispatched_at = current_micros();
         if is_observable_operation(operation) {

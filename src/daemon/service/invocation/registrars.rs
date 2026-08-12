@@ -537,6 +537,11 @@ impl DaemonConfigurationRuntimeRegistrar {
                 grants.clone(),
             )),
         )?;
+        let project_identity = InvocationProjectRuntimeIdentityV1::new(
+            profile_id,
+            scope.project_id.clone(),
+            project_root.clone(),
+        );
         self.service
             .project_runtimes
             .publish(
@@ -544,6 +549,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                 RegisteredConfigurationRuntime {
                     runtime,
                     scope,
+                    project_identity,
                     actor: grants.actor.clone(),
                     grants,
                     semantic_operation: Arc::new(OnceLock::new()),

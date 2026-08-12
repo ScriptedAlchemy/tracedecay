@@ -481,7 +481,12 @@ async fn evaluated_initial_query_state_is_available_without_a_fake_activation_ev
             .expect("cursor keys"),
     );
     let status = provider
-        .install_evaluated_initial_state(scope.clone(), state, cursor_keys)
+        .install_evaluated_initial_state(
+            database.binding().shard_id.profile_id.clone(),
+            scope.clone(),
+            state,
+            cursor_keys,
+        )
         .expect("evaluated initial state");
 
     assert!(matches!(
@@ -493,6 +498,144 @@ async fn evaluated_initial_query_state_is_available_without_a_fake_activation_ev
         provider.federated_authority_for(&scope, &id("privacy.query-initial")),
         Err(QueryAuthorityUnavailableReasonV1::ActivationNotCurrent)
     ));
+}
+
+#[tokio::test]
+async fn retiring_project_query_authority_preserves_same_project_in_another_profile() {
+    let provider = DaemonQueryAuthorityProviderV1::default();
+    let project_id = id::<ProjectId>("project.shared-across-profiles");
+    let scope = ResolvedScope::new(
+        project_id.clone(),
+        id("repository.shared-across-profiles"),
+        id("worktree.shared-across-profiles"),
+        None,
+    )
+    .expect("shared scope");
+    let query = accepted_profile(
+        "query-profile-retirement",
+        &RetrieverKind::QUERY_FALLBACK_LANES,
+    );
+    let state = RetrievalProfileStateV1::new(
+        id::<ConfigurationRevisionId>("configuration.profile-retirement.1"),
+        query,
+        &RetrievalRuntimeCompatibilityV1 {
+            retrieval_ceiling: RetrievalBudget {
+                max_candidates_per_lane: 32,
+                max_fused_candidates: 32,
+                max_hydrated_results: 16,
+                max_hydration_bytes: 65_536,
+                deadline_micros: None,
+            },
+            semantic: None,
+            semantic_ceiling: None,
+            rerank: None,
+            rerank_ceiling: None,
+        },
+    )
+    .expect("initial state");
+
+    let directory = TempDir::new().expect("temporary cursor store");
+    let (retiring_profile, retiring_cursor_keys) = {
+        let profile_root = directory.path().join("retiring-profile");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("retiring profile identity");
+        let _scope_guard =
+            crate::db::enter_daemon_database_scope(&profile_root, 1, "query-profile-retirement-a")
+                .expect("retiring database scope");
+        let session_registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("retiring session registry");
+        let database = session_registry
+            .profile_sessions()
+            .await
+            .expect("retiring session database");
+        let profile_id = database.binding().shard_id.profile_id.clone();
+        let cursor_keys = Arc::new(
+            database
+                .load_session_cursor_key_provider_result()
+                .await
+                .expect("retiring cursor keys"),
+        );
+        (profile_id, cursor_keys)
+    };
+    let (surviving_profile, surviving_cursor_keys) = {
+        let profile_root = directory.path().join("surviving-profile");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("surviving profile identity");
+        let _scope_guard =
+            crate::db::enter_daemon_database_scope(&profile_root, 2, "query-profile-retirement-b")
+                .expect("surviving database scope");
+        let session_registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                identity,
+            )
+            .await
+            .expect("surviving session registry");
+        let database = session_registry
+            .profile_sessions()
+            .await
+            .expect("surviving session database");
+        let profile_id = database.binding().shard_id.profile_id.clone();
+        let cursor_keys = Arc::new(
+            database
+                .load_session_cursor_key_provider_result()
+                .await
+                .expect("surviving cursor keys"),
+        );
+        (profile_id, cursor_keys)
+    };
+
+    provider
+        .install_evaluated_initial_state(
+            retiring_profile.clone(),
+            scope.clone(),
+            state.clone(),
+            retiring_cursor_keys,
+        )
+        .expect("retiring profile authority");
+    provider
+        .install_evaluated_initial_state(
+            surviving_profile.clone(),
+            scope.clone(),
+            state,
+            surviving_cursor_keys,
+        )
+        .expect("surviving profile authority");
+    assert!(matches!(
+        provider.status(Some(&scope)),
+        QueryAuthorityProviderStatusV1::Unavailable {
+            reason: QueryAuthorityUnavailableReasonV1::AmbiguousActivatedProfile,
+        }
+    ));
+    let surviving_provider = provider.for_profile(surviving_profile.clone());
+    crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
+        &scope,
+        &id("privacy.query-profile-retirement"),
+        &surviving_provider,
+    )
+    .expect("surviving profile cursor-backed authority before retirement");
+
+    provider.retire_project(&retiring_profile, &project_id);
+
+    assert!(matches!(
+        provider.status_for(&retiring_profile, &scope),
+        QueryAuthorityProviderStatusV1::Unavailable {
+            reason: QueryAuthorityUnavailableReasonV1::ActivationUnavailable,
+        }
+    ));
+    assert!(matches!(
+        provider.status_for(&surviving_profile, &scope),
+        QueryAuthorityProviderStatusV1::Available { .. }
+    ));
+    crate::daemon::code_index_scheduler::query_runtime::prepare_query_authority(
+        &scope,
+        &id("privacy.query-profile-retirement"),
+        &surviving_provider,
+    )
+    .expect("surviving profile cursor-backed authority after retirement");
 }
 
 #[test]
