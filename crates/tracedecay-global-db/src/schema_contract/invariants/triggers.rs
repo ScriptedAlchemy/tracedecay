@@ -1583,12 +1583,12 @@ pub(super) async fn replace_trigger(
     conn: &impl Executor,
     trigger: &Trigger,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    conn.execute(&format!("DROP TRIGGER IF EXISTS \"{}\"", trigger.name), ())
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    conn.execute_batch(trigger.create_sql)
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))
+    conn.execute_batch(&format!(
+        "DROP TRIGGER IF EXISTS \"{}\";\n{};",
+        trigger.name, trigger.create_sql
+    ))
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))
 }
 
 pub(super) async fn trigger_contracts_intact(
