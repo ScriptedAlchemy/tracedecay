@@ -2958,11 +2958,17 @@ pub fn real_symbol() {}
                 kind: EdgeKind::Receives,
                 line: None,
             },
+            Edge {
+                source: "node.alpha".to_owned(),
+                target: "node.beta".to_owned(),
+                kind: EdgeKind::DerivesMacro,
+                line: None,
+            },
         ];
 
         let (edges, abstentions) = canonical_relation_edges(&raw_edges, &symbols);
 
-        assert_eq!(edges.len(), 2);
+        assert_eq!(edges.len(), 3);
         assert_eq!(edges[0].from_occurrence.as_str(), "sym.alpha");
         assert_eq!(edges[0].to_occurrence.as_str(), "sym.middle");
         assert_eq!(edges[0].kind, RelationEdgeKindV1::Uses);
@@ -2977,6 +2983,9 @@ pub fn real_symbol() {}
         assert_eq!(edges[1].from_occurrence.as_str(), "sym.zeta");
         assert_eq!(edges[1].to_occurrence.as_str(), "sym.alpha");
         assert_eq!(edges[1].kind, RelationEdgeKindV1::Calls);
+        assert_eq!(edges[2].from_occurrence.as_str(), "sym.zeta");
+        assert_eq!(edges[2].to_occurrence.as_str(), "sym.alpha");
+        assert_eq!(edges[2].kind, RelationEdgeKindV1::Receives);
 
         assert_eq!(abstentions.len(), 2);
         let missing_endpoint = abstentions
@@ -2990,7 +2999,7 @@ pub fn real_symbol() {}
         assert_eq!(missing_endpoint.legacy_kind, EdgeKind::Calls.as_str());
         let unsupported_kind = abstentions
             .iter()
-            .find(|abstention| abstention.legacy_kind == EdgeKind::Receives.as_str())
+            .find(|abstention| abstention.legacy_kind == EdgeKind::DerivesMacro.as_str())
             .expect("unsupported kind abstention");
         assert!(matches!(
             &unsupported_kind.reason,
