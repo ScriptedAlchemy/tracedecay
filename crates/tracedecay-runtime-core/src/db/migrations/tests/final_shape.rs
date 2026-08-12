@@ -153,8 +153,18 @@ async fn stamped_final_store_with_missing_or_tampered_required_shape_is_reset_re
     assert_reset_required_without_repair(&path, "unexpected final-shape column").await;
 
     let (_directory, path) = fresh_current_store().await;
-    tamper(&path, "DROP TRIGGER memory_v2_proposals_require_keys;");
-    assert!(object_sql(&path, "trigger", "memory_v2_proposals_require_keys").is_none());
+    tamper(
+        &path,
+        "DROP TRIGGER memory_v2_automatic_fact_receipts_require_keys;",
+    );
+    assert!(
+        object_sql(
+            &path,
+            "trigger",
+            "memory_v2_automatic_fact_receipts_require_keys"
+        )
+        .is_none()
+    );
     assert_reset_required_without_repair(&path, "missing required trigger").await;
 
     let (_directory, path) = fresh_current_store().await;

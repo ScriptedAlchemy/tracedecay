@@ -1,0 +1,604 @@
+use std::future::Future;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
+
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+
+use super::{Database, WeakDatabase};
+
+const AUTOMATIC_RETRY_LIMIT: u32 = 3;
+const AUTOMATIC_RETRY_BASE: Duration = Duration::from_millis(25);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MemoryGraphReconciliationTaskScheduleV1 {
+    Scheduled,
+    AlreadyScheduled,
+    Closed,
+}
+
+#[derive(Default)]
+struct MemoryGraphReconciliationTaskStateV1 {
+    accepting: bool,
+    pending: bool,
+    running: bool,
+    current_identity: Option<Arc<()>>,
+    current: Option<JoinHandle<()>>,
+    retired: Vec<JoinHandle<()>>,
+    joining: bool,
+}
+
+struct MemoryGraphReconciliationSharedV1 {
+    state: Mutex<MemoryGraphReconciliationTaskStateV1>,
+    wake: Arc<Notify>,
+    joined: Arc<Notify>,
+}
+
+impl Default for MemoryGraphReconciliationSharedV1 {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(MemoryGraphReconciliationTaskStateV1 {
+                accepting: true,
+                ..MemoryGraphReconciliationTaskStateV1::default()
+            }),
+            wake: Arc::new(Notify::new()),
+            joined: Arc::new(Notify::new()),
+        }
+    }
+}
+
+impl Drop for MemoryGraphReconciliationSharedV1 {
+    fn drop(&mut self) {
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(task) = state.current.as_ref() {
+            task.abort();
+        }
+        for task in &state.retired {
+            task.abort();
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct MemoryGraphReconciliationCoordinatorV1 {
+    shared: Arc<MemoryGraphReconciliationSharedV1>,
+}
+
+#[derive(Clone)]
+pub struct MemoryGraphReconciliationTaskOwnerV1 {
+    shared: Arc<MemoryGraphReconciliationSharedV1>,
+    cancel_reconciliation: Arc<dyn Fn() + Send + Sync>,
+    close_reconciliation: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+}
+
+impl MemoryGraphReconciliationCoordinatorV1 {
+    pub(super) fn task_owner(
+        &self,
+        cancel_reconciliation: Arc<dyn Fn() + Send + Sync>,
+        close_reconciliation: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    ) -> MemoryGraphReconciliationTaskOwnerV1 {
+        MemoryGraphReconciliationTaskOwnerV1 {
+            shared: Arc::clone(&self.shared),
+            cancel_reconciliation,
+            close_reconciliation,
+        }
+    }
+
+    pub(super) fn schedule<Operation, OperationFuture>(
+        &self,
+        database: &Database,
+        operation: Operation,
+    ) -> MemoryGraphReconciliationTaskScheduleV1
+    where
+        Operation: Fn(WeakDatabase) -> OperationFuture + Send + 'static,
+        OperationFuture: Future<Output = bool> + Send + 'static,
+    {
+        self.schedule_weak(database.downgrade(), operation)
+    }
+
+    fn schedule_weak<Operation, OperationFuture>(
+        &self,
+        weak_database: WeakDatabase,
+        operation: Operation,
+    ) -> MemoryGraphReconciliationTaskScheduleV1
+    where
+        Operation: Fn(WeakDatabase) -> OperationFuture + Send + 'static,
+        OperationFuture: Future<Output = bool> + Send + 'static,
+    {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return MemoryGraphReconciliationTaskScheduleV1::Closed;
+        }
+        state.pending = true;
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            self.shared.wake.notify_one();
+            return MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled;
+        }
+        if let Some(finished) = state.current.take() {
+            state.retired.push(finished);
+        }
+        state.current_identity = None;
+        let worker_identity = Arc::new(());
+        let weak_shared = Arc::downgrade(&self.shared);
+        let wake = Arc::clone(&self.shared.wake);
+        let task_identity = Arc::clone(&worker_identity);
+        let task = tokio::spawn(async move {
+            run_memory_graph_reconciliation_worker(
+                weak_shared,
+                task_identity,
+                wake,
+                weak_database,
+                operation,
+            )
+            .await;
+        });
+        // The worker needs this same state lock before its first pass, so the
+        // join handle is retained before the task can complete or be replaced.
+        state.current_identity = Some(worker_identity);
+        state.current = Some(task);
+        self.shared.wake.notify_one();
+        MemoryGraphReconciliationTaskScheduleV1::Scheduled
+    }
+
+    pub(super) fn pending(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+    }
+}
+
+struct MemoryGraphReconciliationWorkerGuardV1 {
+    shared: Weak<MemoryGraphReconciliationSharedV1>,
+    identity: Arc<()>,
+}
+
+impl Drop for MemoryGraphReconciliationWorkerGuardV1 {
+    fn drop(&mut self) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let mut state = shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .current_identity
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &self.identity))
+        {
+            state.running = false;
+            if !state.accepting {
+                state.pending = false;
+            }
+        }
+    }
+}
+
+async fn run_memory_graph_reconciliation_worker<Operation, OperationFuture>(
+    weak_shared: Weak<MemoryGraphReconciliationSharedV1>,
+    identity: Arc<()>,
+    wake: Arc<Notify>,
+    weak_database: WeakDatabase,
+    operation: Operation,
+) where
+    Operation: Fn(WeakDatabase) -> OperationFuture + Send + 'static,
+    OperationFuture: Future<Output = bool> + Send + 'static,
+{
+    let _worker_guard = MemoryGraphReconciliationWorkerGuardV1 {
+        shared: weak_shared.clone(),
+        identity,
+    };
+    let mut automatic_failures = 0_u32;
+    loop {
+        let notified = wake.notified();
+        let Some(shared) = weak_shared.upgrade() else {
+            return;
+        };
+        let should_run = {
+            let mut state = shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !state.accepting {
+                return;
+            }
+            if state.pending {
+                state.pending = false;
+                state.running = true;
+                true
+            } else {
+                false
+            }
+        };
+        drop(shared);
+        if !should_run {
+            notified.await;
+            continue;
+        }
+
+        let settled = operation(weak_database.clone()).await;
+        let Some(shared) = weak_shared.upgrade() else {
+            return;
+        };
+        if settled {
+            automatic_failures = 0;
+        }
+        let Some((continue_now, retry_delay)) = ({
+            let mut state = shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.running = false;
+            if !state.accepting {
+                state.pending = false;
+                None
+            } else if !settled && !state.pending {
+                state.pending = true;
+                let retry_delay = (automatic_failures < AUTOMATIC_RETRY_LIMIT).then(|| {
+                    let delay = AUTOMATIC_RETRY_BASE.saturating_mul(1 << automatic_failures);
+                    automatic_failures += 1;
+                    delay
+                });
+                Some((false, retry_delay))
+            } else {
+                if state.pending {
+                    automatic_failures = 0;
+                }
+                Some((state.pending, None))
+            }
+        }) else {
+            return;
+        };
+        if continue_now {
+            continue;
+        }
+        if let Some(delay) = retry_delay {
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = notified => automatic_failures = 0,
+            }
+        } else {
+            notified.await;
+            automatic_failures = 0;
+        }
+    }
+}
+
+impl MemoryGraphReconciliationTaskOwnerV1 {
+    pub fn same_coordinator(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
+    pub fn cancel(&self) {
+        (self.cancel_reconciliation)();
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.accepting = false;
+        state.pending = false;
+        self.shared.wake.notify_waiters();
+    }
+
+    pub async fn shutdown(&self) -> Result<(), String> {
+        self.cancel();
+        loop {
+            let joined = self.shared.joined.notified();
+            let tasks = {
+                let mut state = self
+                    .shared
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.joining {
+                    None
+                } else {
+                    state.joining = true;
+                    let mut tasks = std::mem::take(&mut state.retired);
+                    if let Some(current) = state.current.take() {
+                        tasks.push(current);
+                    }
+                    Some(tasks)
+                }
+            };
+            let Some(tasks) = tasks else {
+                joined.await;
+                continue;
+            };
+            return self.join_and_close(tasks).await;
+        }
+    }
+
+    async fn join_and_close(&self, tasks: Vec<JoinHandle<()>>) -> Result<(), String> {
+        let mut lease = MemoryGraphReconciliationJoinLeaseV1 {
+            shared: Arc::clone(&self.shared),
+            tasks,
+        };
+        let mut failures = Vec::new();
+        while !lease.tasks.is_empty() {
+            let result = {
+                let Some(task) = lease.tasks.last_mut() else {
+                    break;
+                };
+                task.await
+            };
+            lease.tasks.pop();
+            match result {
+                Ok(()) => {}
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        if let Err(error) = (self.close_reconciliation)() {
+            failures.push(error);
+        }
+        drop(lease);
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+
+    pub fn pending(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+    }
+
+    pub fn running(&self) -> bool {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running
+    }
+}
+
+struct MemoryGraphReconciliationJoinLeaseV1 {
+    shared: Arc<MemoryGraphReconciliationSharedV1>,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl Drop for MemoryGraphReconciliationJoinLeaseV1 {
+    fn drop(&mut self) {
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.retired.append(&mut self.tasks);
+        state.joining = false;
+        if state.retired.is_empty() {
+            state.running = false;
+            state.current_identity = None;
+        }
+        self.shared.joined.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Weak;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use tokio::sync::Notify;
+
+    use super::*;
+    use crate::db::connection::registry::DatabaseInner;
+
+    fn closed_database() -> WeakDatabase {
+        WeakDatabase {
+            inner: Weak::<DatabaseInner>::new(),
+        }
+    }
+
+    fn task_owner(
+        coordinator: &MemoryGraphReconciliationCoordinatorV1,
+    ) -> (MemoryGraphReconciliationTaskOwnerV1, Arc<AtomicBool>) {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = Arc::clone(&cancelled);
+        let owner = coordinator.task_owner(
+            Arc::new(move || {
+                task_cancelled.store(true, Ordering::Release);
+            }),
+            Arc::new(|| Ok(())),
+        );
+        (owner, cancelled)
+    }
+
+    async fn wait_until(mut predicate: impl FnMut() -> bool) {
+        for _ in 0..256 {
+            if predicate() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("memory graph reconciliation task did not reach expected state");
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_start_refuses_task_admission() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, cancelled) = task_owner(&coordinator);
+        let calls = Arc::new(AtomicUsize::new(0));
+        owner.cancel();
+        assert!(cancelled.load(Ordering::Acquire));
+
+        let task_calls = Arc::clone(&calls);
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), move |_| {
+                let task_calls = Arc::clone(&task_calls);
+                async move {
+                    task_calls.fetch_add(1, Ordering::SeqCst);
+                    true
+                }
+            }),
+            MemoryGraphReconciliationTaskScheduleV1::Closed
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        owner.shutdown().await.expect("shutdown closed coordinator");
+    }
+
+    #[tokio::test]
+    async fn failed_pass_and_concurrent_trigger_have_no_lost_wakeup() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, _) = task_owner(&coordinator);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_started = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let task_calls = Arc::clone(&calls);
+        let task_started = Arc::clone(&first_started);
+        let task_release = Arc::clone(&release_first);
+
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), move |_| {
+                let call = task_calls.fetch_add(1, Ordering::SeqCst);
+                let task_started = Arc::clone(&task_started);
+                let task_release = Arc::clone(&task_release);
+                async move {
+                    if call == 0 {
+                        task_started.notify_one();
+                        task_release.notified().await;
+                        return false;
+                    }
+                    true
+                }
+            }),
+            MemoryGraphReconciliationTaskScheduleV1::Scheduled
+        );
+        first_started.notified().await;
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), |_| async { true }),
+            MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled
+        );
+        release_first.notify_one();
+        wait_until(|| calls.load(Ordering::SeqCst) == 2 && !owner.running()).await;
+        assert!(!owner.pending());
+        owner.shutdown().await.expect("join reconciler worker");
+    }
+
+    #[tokio::test]
+    async fn transient_failure_retries_without_a_later_write_trigger() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, _) = task_owner(&coordinator);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let succeeded = Arc::new(Notify::new());
+        let task_calls = Arc::clone(&calls);
+        let task_succeeded = Arc::clone(&succeeded);
+
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), move |_| {
+                let call = task_calls.fetch_add(1, Ordering::SeqCst);
+                let task_succeeded = Arc::clone(&task_succeeded);
+                async move {
+                    if call == 0 {
+                        false
+                    } else {
+                        task_succeeded.notify_one();
+                        true
+                    }
+                }
+            }),
+            MemoryGraphReconciliationTaskScheduleV1::Scheduled
+        );
+        tokio::time::timeout(Duration::from_secs(1), succeeded.notified())
+            .await
+            .expect("lifecycle retry must settle without another write");
+        wait_until(|| !owner.running()).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!owner.pending());
+        owner.shutdown().await.expect("join reconciler worker");
+    }
+
+    #[tokio::test]
+    async fn panicked_worker_clears_matching_running_identity() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, _) = task_owner(&coordinator);
+        let operation_started = Arc::new(Notify::new());
+        let task_started = Arc::clone(&operation_started);
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), move |_| {
+                let task_started = Arc::clone(&task_started);
+                async move {
+                    task_started.notify_one();
+                    panic!("forced reconciliation worker failure");
+                }
+            }),
+            MemoryGraphReconciliationTaskScheduleV1::Scheduled
+        );
+        operation_started.notified().await;
+        wait_until(|| !owner.running()).await;
+        assert!(owner.shutdown().await.is_err());
+        assert!(!owner.running());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installed_handle_remains_current_across_idle_reschedule_and_shutdown() {
+        let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
+        let (owner, cancelled) = task_owner(&coordinator);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_started = Arc::new(Notify::new());
+        let second_started = Arc::new(Notify::new());
+        let block_second = Arc::new(Notify::new());
+        let task_calls = Arc::clone(&calls);
+        let task_first_started = Arc::clone(&first_started);
+        let task_second_started = Arc::clone(&second_started);
+        let task_block = Arc::clone(&block_second);
+
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), move |_| {
+                let call = task_calls.fetch_add(1, Ordering::SeqCst);
+                let task_first_started = Arc::clone(&task_first_started);
+                let task_second_started = Arc::clone(&task_second_started);
+                let task_block = Arc::clone(&task_block);
+                async move {
+                    if call == 0 {
+                        task_first_started.notify_one();
+                    } else if call == 1 {
+                        task_second_started.notify_one();
+                        task_block.notified().await;
+                    }
+                    true
+                }
+            }),
+            MemoryGraphReconciliationTaskScheduleV1::Scheduled
+        );
+        first_started.notified().await;
+        wait_until(|| calls.load(Ordering::SeqCst) == 1 && !owner.running()).await;
+        assert_eq!(
+            coordinator.schedule_weak(closed_database(), |_| async { true }),
+            MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled
+        );
+        second_started.notified().await;
+
+        owner.cancel();
+        assert!(cancelled.load(Ordering::Acquire));
+        let shutdown_owner = owner.clone();
+        let shutdown = tokio::spawn(async move { shutdown_owner.shutdown().await });
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        block_second.notify_one();
+        shutdown
+            .await
+            .expect("join shutdown task")
+            .expect("cancel and join current persistent worker");
+        assert!(!owner.running());
+    }
+}

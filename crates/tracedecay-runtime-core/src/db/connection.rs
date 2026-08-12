@@ -1,6 +1,6 @@
 // Rust guideline compliant 2025-10-17
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use tracedecay_rusqlite_runtime::{CheckpointBlockers, CheckpointOutcome, CheckpointRequest};
 use tracedecay_store::{
@@ -19,6 +19,7 @@ use super::{DatabaseAuthority, DatabaseAuthorityRole};
 mod facade;
 mod graph_binding;
 mod integrity;
+mod memory_graph_reconciliation;
 mod pragmas;
 mod query_write;
 mod registry;
@@ -27,6 +28,8 @@ mod runtime_lifecycle;
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 mod test_runtime;
 
+pub use memory_graph_reconciliation::MemoryGraphReconciliationTaskOwnerV1;
+pub(crate) use memory_graph_reconciliation::MemoryGraphReconciliationTaskScheduleV1;
 #[cfg(test)]
 pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
 use registry::{DatabaseInner, database_slot};
@@ -47,6 +50,17 @@ let _ = (Database::publish_test_runtime, TestDatabaseRuntimeMode::Initialize);
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<DatabaseInner>,
+}
+
+#[derive(Clone)]
+pub(crate) struct WeakDatabase {
+    inner: Weak<DatabaseInner>,
+}
+
+impl WeakDatabase {
+    pub(crate) fn upgrade(&self) -> Option<Database> {
+        self.inner.upgrade().map(|inner| Database { inner })
+    }
 }
 
 pub enum DatabaseAccessMode {

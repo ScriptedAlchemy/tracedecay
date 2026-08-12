@@ -41,6 +41,13 @@ pub(super) fn profile_sessions_shard() -> StoreShardIdV1 {
     )
 }
 
+fn profile_memory_shard() -> StoreShardIdV1 {
+    StoreShardIdV1::profile_memory(
+        id::<BrainId>("brain.registry"),
+        id::<UserProfileId>("profile.registry"),
+    )
+}
+
 fn project_shard(project: &str) -> StoreShardIdV1 {
     StoreShardIdV1::project(
         id::<BrainId>("brain.registry"),
@@ -210,6 +217,10 @@ pub(super) async fn profile_pin(registry: &StoreRuntimeRegistry) -> ProfileAutho
 
 pub(super) fn project_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
     StoreRuntimeOpenRequest::new(project_shard(project), incarnation(), Some(pin.clone()))
+}
+
+pub(super) fn profile_memory_request(pin: &ProfileAuthorityPin) -> StoreRuntimeOpenRequest {
+    StoreRuntimeOpenRequest::new(profile_memory_shard(), incarnation(), Some(pin.clone()))
 }
 
 pub(super) fn project_sessions_request(

@@ -8,6 +8,49 @@ impl Database {
         &self.inner._runtime
     }
 
+    pub fn is_writable(&self) -> bool {
+        self.inner.writable
+    }
+
+    pub(crate) fn downgrade(&self) -> super::WeakDatabase {
+        super::WeakDatabase {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    pub(crate) fn schedule_memory_graph_reconciliation<Operation, OperationFuture>(
+        &self,
+        operation: Operation,
+    ) -> super::MemoryGraphReconciliationTaskScheduleV1
+    where
+        Operation: Fn(super::WeakDatabase) -> OperationFuture + Send + 'static,
+        OperationFuture: std::future::Future<Output = bool> + Send + 'static,
+    {
+        self.inner
+            .memory_graph_reconciliation
+            .schedule(self, operation)
+    }
+
+    pub fn memory_graph_reconciliation_task_owner(
+        &self,
+    ) -> Option<super::MemoryGraphReconciliationTaskOwnerV1> {
+        let runtime = self.memory_graph_runtime()?;
+        let cancel_runtime = Arc::clone(&runtime);
+        let close_runtime = Arc::clone(&runtime);
+        Some(self.inner.memory_graph_reconciliation.task_owner(
+            Arc::new(move || cancel_runtime.cancel_reconciliation()),
+            Arc::new(move || {
+                close_runtime
+                    .close_reconciliation()
+                    .map_err(|error| error.to_string())
+            }),
+        ))
+    }
+
+    pub(crate) fn memory_graph_reconciliation_pending(&self) -> bool {
+        self.inner.memory_graph_reconciliation.pending()
+    }
+
     /// Canonical path held by this database's verified runtime locator.
     pub fn canonical_database_path(&self) -> &Path {
         &self.inner.canonical_path

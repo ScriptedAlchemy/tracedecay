@@ -11,11 +11,12 @@ impl Database {
         if !matches!(
             &self.retained_runtime().binding().shard_id.scope,
             tracedecay_store::StoreShardScopeV1::Project { .. }
+                | tracedecay_store::StoreShardScopeV1::ProfileMemory
         ) {
             return Err(TraceDecayError::Database {
-                message: "graph publication storage is only available for project shards"
+                message: "graph publication storage requires a project or profile-memory shard"
                     .to_owned(),
-                operation: "attach project graph publication storage".to_owned(),
+                operation: "attach graph publication storage".to_owned(),
             });
         }
         let authority = self.write_authority()?;
@@ -23,17 +24,17 @@ impl Database {
             .retained_runtime()
             .authorized_exact_sql_handle(authority)
             .map_err(|error| TraceDecayError::Database {
-                message: format!("failed to attach project graph publication storage: {error:?}"),
-                operation: "attach project graph publication storage".to_owned(),
+                message: format!("failed to attach graph publication storage: {error:?}"),
+                operation: "attach graph publication storage".to_owned(),
             })?;
         if handle.binding() != self.retained_runtime().binding()
             || handle.verified_locator() != self.retained_runtime().locator().verified()
         {
             return Err(TraceDecayError::Database {
                 message:
-                    "authorized graph publication handle does not match retained project runtime"
+                    "authorized graph publication handle does not match retained shard runtime"
                         .to_owned(),
-                operation: "attach project graph publication storage".to_owned(),
+                operation: "attach graph publication storage".to_owned(),
             });
         }
         tracedecay_rusqlite_runtime::repository::GraphPublicationExactSqlStorage::from_authorized_handle(handle)
@@ -41,7 +42,7 @@ impl Database {
                 message: format!(
                     "failed to bind project graph publication storage: {error}"
                 ),
-                operation: "attach project graph publication storage".to_owned(),
+                operation: "attach graph publication storage".to_owned(),
             })
     }
 }

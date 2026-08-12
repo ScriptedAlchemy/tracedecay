@@ -6,6 +6,7 @@ use crate::db::{DatabaseAuthority, engine::Connection};
 use crate::errors::TraceDecayError;
 // The store-runtime registry moved into this kernel, so the facade retains the
 // concrete handle rather than an erased port.
+use super::memory_graph_reconciliation::MemoryGraphReconciliationCoordinatorV1;
 use crate::store_runtime::registry::StoreRuntimeHandle;
 
 pub(super) struct DatabaseInner {
@@ -23,6 +24,9 @@ pub(super) struct DatabaseInner {
     pub(super) opened_file_identity: u64,
     /// Serializes logical writers sharing this canonical database slot.
     pub(super) writer: tokio::sync::Mutex<()>,
+    /// Coalesces and retains background memory-graph catch-up for this exact
+    /// relational attachment.
+    pub(super) memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1,
     /// Canonical path from the runtime's verified locator.
     pub(super) canonical_path: PathBuf,
     /// The exact capability retained when this physical attachment was
@@ -31,7 +35,8 @@ pub(super) struct DatabaseInner {
     pub(super) _slot: Option<DatabaseSlot>,
     /// Rebuildable memory topology mounted from the same registered shard as
     /// this relational fact authority. Content never enters this graph.
-    pub(super) memory_relation_graph: OnceLock<Arc<tracedecay_graph_db::GraphDb>>,
+    pub(super) memory_graph_runtime:
+        OnceLock<Arc<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>>,
 }
 
 impl DatabaseInner {
@@ -99,9 +104,10 @@ impl DatabaseInner {
             writable,
             opened_file_identity,
             writer: tokio::sync::Mutex::new(()),
+            memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1::default(),
             _authority: authority,
             _slot: slot,
-            memory_relation_graph: OnceLock::new(),
+            memory_graph_runtime: OnceLock::new(),
         })
     }
 }

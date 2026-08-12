@@ -14,6 +14,7 @@ async fn exact_graph_scopes_publish_without_a_physical_runtime() {
     let requests = [
         project_request("project.graph-scope", &pin),
         project_sessions_request("project.graph-sessions", &pin),
+        profile_memory_request(&pin),
         profile_sessions_request(&pin),
     ];
 
@@ -29,13 +30,13 @@ async fn exact_graph_scopes_publish_without_a_physical_runtime() {
         leases.push(lease);
     }
 
-    assert_eq!(resolver.graph_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(resolver.graph_calls.load(Ordering::SeqCst), 4);
     assert_eq!(
         publisher.calls.load(Ordering::SeqCst),
         1,
         "only the profile pin may open a physical runtime"
     );
-    assert_eq!(registry.retained_graph_publications_for_test(), 3);
+    assert_eq!(registry.retained_graph_publications_for_test(), 4);
     drop(leases);
     assert_eq!(registry.retained_graph_publications_for_test(), 0);
 }
