@@ -973,8 +973,8 @@ mod tests {
             super::project_registry::PROJECT_REGISTRY_AUTHORITY
         );
         assert!(
-            reason.contains("primary_root_platform"),
-            "reset problem must identify the missing final column: {reason}"
+            reason.contains("code_projects") && reason.contains("incompatible number of columns"),
+            "reset problem must identify the incompatible final table: {reason}"
         );
         let mut rows = connection
             .query(
@@ -991,7 +991,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_audit_failure_preserves_completed_idempotent_repairs() {
+    async fn missing_trigger_is_refused_before_row_audit_without_repair() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
         {
@@ -1024,12 +1024,12 @@ mod tests {
         let connection = TestConnection::open(&database_path);
         let error = ensure_registered_schema(&connection)
             .await
-            .expect_err("corrupt cursor keys must fail the full offline audit");
+            .expect_err("a missing final trigger must fail schema admission");
         assert!(
             error
                 .to_string()
-                .contains("session cursor key rotation state is invalid"),
-            "unexpected audit failure: {error}"
+                .contains("projection_queue_identity_insert_v1"),
+            "schema refusal must identify the missing final trigger: {error}"
         );
 
         let mut rows = connection
@@ -1038,28 +1038,26 @@ mod tests {
             .unwrap();
         assert_eq!(
             rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-            0,
-            "an idempotent repair completed before a later audit failure must remain committed"
+            1,
+            "schema refusal must not repair queued rows before row admission"
         );
         drop(rows);
         let mut rows = connection
             .query(
-                "SELECT bounded_passes_since_exhaustive
-                 FROM authority_audit_checkpoints
-                 WHERE audit_name = 'observation-authority'",
+                "SELECT 1 FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = 'projection_queue_identity_insert_v1'",
                 (),
             )
             .await
             .unwrap();
-        assert_eq!(
-            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-            -1,
-            "validated exhaustive-audit frontiers must remain resumable after a late failure"
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "schema refusal must not recreate a missing final trigger"
         );
     }
 
     #[tokio::test]
-    async fn foreign_key_failure_remains_blocking_after_trigger_repair() {
+    async fn missing_trigger_refusal_precedes_foreign_key_audit_without_repair() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
         {
@@ -1088,13 +1086,26 @@ mod tests {
             let connection = TestConnection::open(&database_path);
             let error = ensure_registered_schema(&connection)
                 .await
-                .expect_err("an observed foreign-key violation must keep admission closed");
+                .expect_err("a missing final trigger must keep admission closed");
             assert!(
                 error
                     .to_string()
-                    .contains("global database contains a foreign-key violation"),
+                    .contains("projection_queue_identity_insert_v1"),
                 "open attempt {attempt} returned an unexpected error: {error}"
             );
         }
+        let connection = TestConnection::open(&database_path);
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM sqlite_schema
+                 WHERE type = 'trigger' AND name = 'projection_queue_identity_insert_v1'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "repeated schema refusals must not recreate the missing trigger"
+        );
     }
 }
