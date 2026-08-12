@@ -313,6 +313,10 @@ pub struct ExtractionBatchV1 {
     pub error_ranges: Vec<SourceSpan>,
     pub unsupported_ranges: Vec<SourceSpan>,
     pub coverage: ExtractionCoverageV1,
+    /// Digest of the canonical parser-emitted import rows before file
+    /// occurrence binding. Downstream artifacts compare against this single
+    /// parser authority instead of persisting a self-referential copy.
+    pub parser_import_rows_digest: ManifestDigest,
     pub rows_digest: ManifestDigest,
 }
 
