@@ -931,7 +931,7 @@ fn bind_test_session_relation_graph(
         .resolve(GraphDbRegistration {
             authority_lease: Arc::new(TestSessionGraphLease {
                 binding: binding.clone(),
-                verified_locator,
+                verified_locator: verified_locator.clone(),
                 canonical_path,
             }),
             cancellation: Arc::new(NeverCancelled),
@@ -944,7 +944,7 @@ fn bind_test_session_relation_graph(
                 message: error.to_string(),
             },
         )?;
-    database.bind_session_relation_graph(scope, graph)
+    database.bind_session_relation_graph(scope, graph, binding.clone(), verified_locator)
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
