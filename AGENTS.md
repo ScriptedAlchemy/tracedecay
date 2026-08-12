@@ -89,10 +89,6 @@ compiles.
   a published package, or in a live persisted format. Branch-local and
   unreleased contracts change in place; a `V1` suffix alone is not release
   evidence and does not justify compatibility scaffolding.
-- Keep hand-written modules focused: no new hand-written source file over
-  1,000 lines and do not grow an existing oversized file. When safely possible,
-  touching one should extract a cohesive responsibility. Generated code and
-  checked-in fixtures/data are exempt.
 - Keep boundaries explicit: use top-level explicit imports/reexports, avoid
   wildcard parent-child cycles and inline imports, maintain one generated wire
   authority, and do not hand-write duplicate DTOs.
