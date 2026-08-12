@@ -336,10 +336,6 @@ pub fn deploy_managed_skills_to_project(
     deploy_managed_skills(profile_root, Some(project_root))
 }
 
-pub fn deploy_managed_skills_globally(profile_root: &Path) -> ManagedSkillDeploymentReceipt {
-    deploy_managed_skills(profile_root, None)
-}
-
 fn deploy_managed_skills(
     profile_root: &Path,
     project_root: Option<&Path>,

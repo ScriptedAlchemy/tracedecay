@@ -682,20 +682,6 @@ pub fn inspect_receipt_backed_host_components(
     )
 }
 
-pub fn inspect_installed_host_components(
-    context: &HealthcheckContext,
-) -> Result<host_bundle_v2::HostBundleDoctorReportV1> {
-    let lifecycle_root = host_bundle_v2::resolved_host_bundle_lifecycle_root()?;
-    inspect_receipt_backed_host_components(context, &lifecycle_root).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!(
-                "could not inspect receipt-backed host components in {}: {error}",
-                lifecycle_root.display()
-            ),
-        }
-    })
-}
-
 // ---------------------------------------------------------------------------
 // DoctorCounters
 // ---------------------------------------------------------------------------

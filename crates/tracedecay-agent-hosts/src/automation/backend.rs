@@ -82,14 +82,6 @@ pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
     Ok(leaf_backend::extract_json_object_prefix(text)?)
 }
 
-pub fn extract_response_json_object(text: &str, contract: &AgentTaskContract) -> Result<Value> {
-    Ok(leaf_backend::extract_response_json_object(text, contract)?)
-}
-
-pub fn validate_response_schema(value: &Value, contract: &AgentTaskContract) -> Result<()> {
-    Ok(leaf_backend::validate_response_schema(value, contract)?)
-}
-
 #[derive(Debug, Clone)]
 pub struct CodexAppServerBackend {
     config: CodexAppServerSummaryConfig,

@@ -528,14 +528,6 @@ fn prune_missing_branch_dbs(
     changed
 }
 
-/// Compatibility wrapper for the PR-autotrack lifecycle. Administrative CLI
-/// removal uses [`prepare_branch_admin_mutation`] through the daemon so failures
-/// are surfaced instead of collapsed to `false`.
-pub fn remove_tracked_branch_store(tracedecay_dir: &Path, branch: &str) -> bool {
-    remove_tracked_branch_store_checked(tracedecay_dir, branch)
-        .is_ok_and(|report| report.outcome == BranchAdminOutcome::Removed)
-}
-
 /// Returns true if `branch` currently exists as a local `refs/heads/*` ref.
 ///
 /// Thin alias over [`local_branch_exists`] under the name the branch-store GC

@@ -376,13 +376,6 @@ pub fn opencode_agent_files() -> Vec<(&'static str, &'static str)> {
     )
 }
 
-pub fn opencode_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
-    vec![(
-        "tracedecay-mcp.ts",
-        include_str!("../../../../plugin/opencode/tracedecay-mcp.ts"),
-    )]
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
