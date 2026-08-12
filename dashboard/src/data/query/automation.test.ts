@@ -94,6 +94,43 @@ describe("runAutomaticCurator", () => {
     });
   });
 
+  it("rejects success and admitted-problem envelopes from another HTTP binding", async () => {
+    const success = curatorSuccess(automaticRun("run-dashboard"));
+    success.value.binding_id = "binding.http.fact_store_get.v1";
+    respond(success);
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const problem = automaticProblem("reset_required");
+    problem.value.binding_id = "binding.http.fact_store_get.v1";
+    respond(problem, { ok: false, statusCode: 503 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("rejects success and admitted-problem envelopes from another result contract", async () => {
+    const success = curatorSuccess(automaticRun("run-dashboard"));
+    success.value.contract.schema_id =
+      "schema.application.retained.fact-store-get.result";
+    respond(success);
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const problem = automaticProblem("reset_required");
+    problem.value.contract.schema_revision = 2;
+    respond(problem, { ok: false, statusCode: 503 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("rejects malformed success request identity and scope digest", async () => {
+    const wrongRequest = curatorSuccess(automaticRun("run-dashboard"));
+    wrongRequest.value.request_id = " request.dashboard.success";
+    respond(wrongRequest);
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const success = curatorSuccess(automaticRun("run-dashboard"));
+    success.value.scope.scope_digest = sha("9");
+    respond(success);
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("rejects a run for another automatic-memory task", async () => {
     const run = automaticRun("run-dashboard");
     run.task = "session_reflector";
@@ -139,6 +176,21 @@ describe("runAutomaticCurator", () => {
     run.terminal.summary.accepted_count = 1;
     run.committed_receipts = [curationReceipt("run-other")];
     respond({ run });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("accepts the Rust curation digest domain and rejects the retired legacy domain", async () => {
+    const canonical = curationReceipt("run-dashboard");
+    expect(canonical.receipt.receipt.operation_effects).not.toHaveLength(0);
+    respond({ run: automaticRunWithReceipt("run-dashboard", canonical) });
+    expect((await runAutomaticCurator()).outcome).toBe("ok");
+
+    const legacy = curationReceipt("run-dashboard");
+    legacy.receipt.canonical_digest = canonicalSha([
+      "tracedecay.memory-automation-run.curation-receipt.v1",
+      legacy.receipt.receipt,
+    ]);
+    respond({ run: automaticRunWithReceipt("run-dashboard", legacy) });
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
@@ -386,6 +438,30 @@ describe("runAutomaticCurator", () => {
     expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
+  it("rejects non-canonical partial-effect receipt scopes", async () => {
+    const invalidIdentity = automaticProblem("partial_effect");
+    const invalidIdentityReceipt =
+      invalidIdentity.value.problem.committed_receipt;
+    if (invalidIdentityReceipt === null) throw new Error("partial fixture drifted");
+    invalidIdentityReceipt.scope.project_id = " project.dashboard";
+    invalidIdentityReceipt.scope.scope_digest = canonicalSha([
+      "tracedecay.application.scope.v1",
+      invalidIdentityReceipt.scope.project_id,
+      invalidIdentityReceipt.scope.repository_id,
+      invalidIdentityReceipt.scope.worktree_id,
+      invalidIdentityReceipt.scope.reference,
+    ]);
+    respond(invalidIdentity, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const wrongDigest = automaticProblem("partial_effect");
+    const wrongDigestReceipt = wrongDigest.value.problem.committed_receipt;
+    if (wrongDigestReceipt === null) throw new Error("partial fixture drifted");
+    wrongDigestReceipt.scope.scope_digest = sha("9");
+    respond(wrongDigest, { ok: false, statusCode: 409 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("binds the problem contract and admitted request", async () => {
     const wrongContract = automaticProblem("reset_required");
     wrongContract.value.contract.schema_revision = 2;
@@ -582,7 +658,7 @@ function linkCurationReceipt(runId: string): CurationReceipt {
 
 function refreshCurationDigest(receipt: CurationReceipt): CurationReceipt {
   receipt.receipt.canonical_digest = canonicalSha([
-    "tracedecay.memory-automation-run.curation-receipt.v1",
+    "tracedecay.automation-run.curation-receipt.v1",
     receipt.receipt.receipt,
   ]);
   return receipt;
@@ -631,7 +707,7 @@ function curatorSuccess(run: unknown) {
   return {
     kind: "success",
     value: {
-      binding_id: "binding.application.retained.fact-store-curate.http",
+      binding_id: "binding.http.fact_store_curate.v1",
       contract: {
         schema_id: "schema.application.retained.fact-store-curate.result",
         schema_revision: 1,
@@ -642,7 +718,13 @@ function curatorSuccess(run: unknown) {
         repository_id: "repository.dashboard",
         worktree_id: "worktree.dashboard",
         reference: null,
-        scope_digest: sha("9"),
+        scope_digest: canonicalSha([
+          "tracedecay.application.scope.v1",
+          "project.dashboard",
+          "repository.dashboard",
+          "worktree.dashboard",
+          null,
+        ]),
       },
       outcome: {
         outcome: "effect",
@@ -689,7 +771,7 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
   return {
     kind: "problem",
     value: {
-      binding_id: "binding.application.retained.fact-store-curate.http",
+      binding_id: "binding.http.fact_store_curate.v1",
       contract: {
         schema_id: "schema.application.retained.fact-store-curate.result",
         schema_revision: 1,

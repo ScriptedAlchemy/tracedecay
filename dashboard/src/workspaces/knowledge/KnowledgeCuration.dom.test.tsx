@@ -298,7 +298,7 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
   return {
     kind: "problem",
     value: {
-      binding_id: "binding.application.retained.fact-store-curate.http",
+      binding_id: "binding.http.fact_store_curate.v1",
       contract: {
         schema_id: "schema.application.retained.fact-store-curate.result",
         schema_revision: 1,
@@ -336,7 +336,7 @@ function curatorSuccess(run: unknown) {
   return {
     kind: "success",
     value: {
-      binding_id: "binding.application.retained.fact-store-curate.http",
+      binding_id: "binding.http.fact_store_curate.v1",
       contract: {
         schema_id: "schema.application.retained.fact-store-curate.result",
         schema_revision: 1,
@@ -347,7 +347,13 @@ function curatorSuccess(run: unknown) {
         repository_id: "repository.dashboard",
         worktree_id: "worktree.dashboard",
         reference: null,
-        scope_digest: sha("9"),
+        scope_digest: canonicalSha([
+          "tracedecay.application.scope.v1",
+          "project.dashboard",
+          "repository.dashboard",
+          "worktree.dashboard",
+          null,
+        ]),
       },
       outcome: { outcome: "effect", value: { payload: run } },
     },

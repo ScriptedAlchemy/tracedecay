@@ -22,10 +22,12 @@
  * that no longer has a fixture fails too. So a new fixture cannot be added
  * outside this gate by omission.
  */
-import { describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { z, type ZodType } from 'zod';
 
+import { runAutomaticCurator } from '../../src/data/query/automation.ts';
 import { FIXTURES, FIXTURE_PREFIXES, resolveFixture } from './data.ts';
+import { fixtureServer } from './handlers.ts';
 import {
   AnalyticsOverviewPayloadV1Schema,
   AnalyticsAgentsPayloadV1Schema,
@@ -263,5 +265,43 @@ describe('fixtures parse against the generated contract for their route', () => 
       });
       expect(matched, `prefix ${prefix} serves a payload no exact route gates`).toBe(true);
     }
+  });
+});
+
+describe('fact_store_curate MSW fixture', () => {
+  const server = fixtureServer();
+
+  beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+  afterEach(() => server.resetHandlers());
+  afterAll(() => server.close());
+
+  it('settles through the same admitted-bounds decoder as the dashboard', async () => {
+    const pathname = '/api/application/retained/fact_store_curate';
+    expect(resolveFixture(pathname)).toMatchObject({
+      kind: 'success',
+      value: {
+        binding_id: 'binding.http.fact_store_curate.v1',
+        contract: {
+          schema_id: 'schema.application.retained.fact-store-curate.result',
+          schema_revision: 1,
+        },
+        request_id: 'request.story.fact-store-curate',
+        scope: {
+          project_id: 'project.story',
+          repository_id: 'repository.story',
+          worktree_id: 'worktree.story',
+          reference: null,
+          scope_digest:
+            'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
+        },
+      },
+    });
+    const result = await runAutomaticCurator(`http://localhost${pathname}`);
+
+    expect(result.outcome).toBe('ok');
+    if (result.outcome !== 'ok') return;
+    expect(result.run.request_digest).toBe(
+      'sha256:a566bcd0eee410d55c935f0e4b1964d052603493ef9fbbd4295747aa351f6571',
+    );
   });
 });

@@ -1554,7 +1554,7 @@ function automaticCuratorRunPayload(): Record<string, unknown> {
   return {
     kind: 'success',
     value: {
-      binding_id: 'binding.application.retained.fact-store-curate.http',
+      binding_id: 'binding.http.fact_store_curate.v1',
       contract: {
         schema_id: 'schema.application.retained.fact-store-curate.result',
         schema_revision: 1,
@@ -1565,7 +1565,8 @@ function automaticCuratorRunPayload(): Record<string, unknown> {
         repository_id: 'repository.story',
         worktree_id: 'worktree.story',
         reference: null,
-        scope_digest: `sha256:${'9'.repeat(64)}`,
+        scope_digest:
+          'sha256:e174c69787e410a452c13540b131bf291d25017a21e37aebf7f26eeb8e77fbe5',
       },
       outcome: {
         outcome: 'effect',
@@ -1573,7 +1574,8 @@ function automaticCuratorRunPayload(): Record<string, unknown> {
           payload: {
             run_id: 'run-story-memory-curator',
             task: 'memory_curator',
-            request_digest: `sha256:${'8'.repeat(64)}`,
+            request_digest:
+              'sha256:a566bcd0eee410d55c935f0e4b1964d052603493ef9fbbd4295747aa351f6571',
             terminal: {
               status: 'completed',
               summary: {

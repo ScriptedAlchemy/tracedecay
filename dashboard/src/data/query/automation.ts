@@ -31,9 +31,11 @@ import {
   AutomationSchedulerStatusV1Schema,
   ApplicationProblemEnvelopeSchema,
   AutomationRunResultV1Schema,
+  ResolvedScopeSchema,
   type ApplicationProblemEnvelope,
   type AutomationSchedulerStatusV1,
   type AutomationRunResultV1,
+  type ResolvedScope,
 } from "../../contracts/generated.ts";
 
 // Re-export the generated validator for the query-layer tests and consumers.
@@ -512,10 +514,34 @@ export type AutomationOutcomesPayload = z.infer<
 export type SkillOutcome = AutomationOutcomesPayload["skills"][number];
 export type FactOutcome = AutomationOutcomesPayload["facts"][number];
 
+const FACT_STORE_CURATE_HTTP_BINDING_ID = "binding.http.fact_store_curate.v1";
+const FACT_STORE_CURATE_RESULT_SCHEMA_ID =
+  "schema.application.retained.fact-store-curate.result";
+const FACT_STORE_CURATE_RESULT_SCHEMA_REVISION = 1;
+const CanonicalApplicationIdentifierSchema = z.string().refine(
+  canonicalApplicationIdentifier,
+);
+const CuratorResolvedScopeSchema = ResolvedScopeSchema.extend({
+  project_id: CanonicalApplicationIdentifierSchema,
+  repository_id: CanonicalApplicationIdentifierSchema,
+  worktree_id: CanonicalApplicationIdentifierSchema,
+  reference: CanonicalApplicationIdentifierSchema.nullable(),
+  scope_digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+});
+
 const AutomaticCuratorResponseSchema = z
   .object({
     kind: z.literal("success"),
     value: z.object({
+      binding_id: z.literal(FACT_STORE_CURATE_HTTP_BINDING_ID),
+      contract: z
+        .object({
+          schema_id: z.literal(FACT_STORE_CURATE_RESULT_SCHEMA_ID),
+          schema_revision: z.literal(FACT_STORE_CURATE_RESULT_SCHEMA_REVISION),
+        })
+        .strict(),
+      request_id: CanonicalApplicationIdentifierSchema,
+      scope: CuratorResolvedScopeSchema,
       outcome: z.object({
         outcome: z.literal("effect"),
         value: z.object({ payload: AutomationRunResultV1Schema }),
@@ -527,9 +553,20 @@ const AutomaticCuratorResponseSchema = z
 const ApplicationProblemResponseSchema = z
   .object({
     kind: z.literal("problem"),
-    value: ApplicationProblemEnvelopeSchema.extend({ binding_id: z.string().optional() }),
+    value: ApplicationProblemEnvelopeSchema.extend({
+      binding_id: z.literal(FACT_STORE_CURATE_HTTP_BINDING_ID),
+    }),
   })
   .strict();
+
+const CuratorAdmittedTerminalClaimSchema = z.object({
+  kind: z.literal("problem"),
+  value: z.object({
+    problem: z.object({
+      kind: z.enum(["partial_effect", "reset_required"]),
+    }),
+  }),
+});
 
 export type AutomaticCuratorRun = AutomationRunResultV1;
 export type AutomaticCuratorPartialEffect = ApplicationProblemEnvelope;
@@ -584,13 +621,19 @@ export async function runAutomaticCurator(
 
   if (response.ok) {
     const result = AutomaticCuratorResponseSchema.safeParse(body);
-    const run = result.success ? result.data.value.outcome.value.payload : undefined;
-    return run !== undefined && await automaticCuratorRunMatchesEndpoint(run)
-      ? { outcome: "ok", run }
-      : {
-          outcome: "unsupported_schema",
-          detail: "the automatic curator result does not match this build",
-        };
+    if (result.success) {
+      const run = result.data.value.outcome.value.payload;
+      if (
+        (await automaticCuratorScopeMatchesEndpoint(result.data.value.scope)) &&
+        (await automaticCuratorRunMatchesEndpoint(run))
+      ) {
+        return { outcome: "ok", run };
+      }
+    }
+    return {
+      outcome: "unsupported_schema",
+      detail: "the automatic curator result does not match this build",
+    };
   }
 
   const problemResponse = ApplicationProblemResponseSchema.safeParse(body);
@@ -598,13 +641,13 @@ export async function runAutomaticCurator(
     const problem = problemResponse.data.value;
     if (
       response.status === 409 &&
-      automaticCuratorProblemMatchesEndpoint(problem, "partial_effect")
+      await automaticCuratorProblemMatchesEndpoint(problem, "partial_effect")
     ) {
       return { outcome: "partial_effect", problem };
     }
     if (
       response.status === 503 &&
-      automaticCuratorProblemMatchesEndpoint(problem, "reset_required")
+      await automaticCuratorProblemMatchesEndpoint(problem, "reset_required")
     ) {
       return { outcome: "reset_required", problem };
     }
@@ -617,6 +660,12 @@ export async function runAutomaticCurator(
         detail: "the application terminal does not match fact_store_curate",
       };
     }
+  }
+  if (CuratorAdmittedTerminalClaimSchema.safeParse(body).success) {
+    return {
+      outcome: "unsupported_schema",
+      detail: "the application terminal does not match fact_store_curate",
+    };
   }
 
   switch (response.status) {
@@ -689,6 +738,21 @@ async function automaticCuratorRunMatchesEndpoint(
   );
 }
 
+async function automaticCuratorScopeMatchesEndpoint(
+  scope: ResolvedScope,
+): Promise<boolean> {
+  const parsed = CuratorResolvedScopeSchema.safeParse(scope);
+  if (!parsed.success) return false;
+  const canonical = parsed.data;
+  return canonical.scope_digest === await canonicalSha256([
+    "tracedecay.application.scope.v1",
+    canonical.project_id,
+    canonical.repository_id,
+    canonical.worktree_id,
+    canonical.reference,
+  ]);
+}
+
 function memoryCuratorSkipReason(reason: string): boolean {
   return [
     "automation_disabled",
@@ -710,18 +774,17 @@ function memoryCuratorSkipReason(reason: string): boolean {
   ].includes(reason);
 }
 
-const FACT_STORE_CURATE_RESULT_SCHEMA_ID =
-  "schema.application.retained.fact-store-curate.result";
 const FACT_STORE_CURATE_USE_CASE_ID =
   "use-case.application.retained.fact-store-curate";
 
-function automaticCuratorProblemMatchesEndpoint(
+async function automaticCuratorProblemMatchesEndpoint(
   terminal: ApplicationProblemEnvelope,
   kind: "partial_effect" | "reset_required",
-): boolean {
+): Promise<boolean> {
   if (
     terminal.contract.schema_id !== FACT_STORE_CURATE_RESULT_SCHEMA_ID ||
-    terminal.contract.schema_revision !== 1 ||
+    terminal.contract.schema_revision !== FACT_STORE_CURATE_RESULT_SCHEMA_REVISION ||
+    !canonicalApplicationIdentifier(terminal.request_id) ||
     terminal.request_id !== terminal.problem.request_id ||
     terminal.problem.kind !== kind
   ) {
@@ -734,7 +797,8 @@ function automaticCuratorProblemMatchesEndpoint(
     receipt.operation === FACT_STORE_CURATE_USE_CASE_ID &&
     receipt.request_id === terminal.request_id &&
     receipt.outcome === "partial" &&
-    receipt.committed_state !== null
+    receipt.committed_state !== null &&
+    (await automaticCuratorScopeMatchesEndpoint(receipt.scope))
   );
 }
 
@@ -752,7 +816,7 @@ async function automaticCurationReceiptMatches(
     receipt.automation_run_id !== runId ||
     !/^[0-9a-f]{64}$/.test(receipt.input_digest) ||
     settled.canonical_digest !== await canonicalSha256([
-      "tracedecay.memory-automation-run.curation-receipt.v1",
+      "tracedecay.automation-run.curation-receipt.v1",
       receipt,
     ]) ||
     receipt.operation_effects.length === 0 ||
@@ -1004,6 +1068,13 @@ async function canonicalSha256(value: unknown): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+function canonicalApplicationIdentifier(value: string): boolean {
+  return value.length > 0 &&
+    value.trim() === value &&
+    new TextEncoder().encode(value).length <= 512 &&
+    !/\p{Cc}/u.test(value);
 }
 
 function factIdMatchesOwner(
