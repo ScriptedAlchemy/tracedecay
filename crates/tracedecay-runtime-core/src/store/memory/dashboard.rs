@@ -1,700 +1,384 @@
-//! Dashboard compatibility read models (overview, banks, vector points, growth, oplog).
+//! Canonical project-memory dashboard read models.
 
-use std::collections::BTreeSet;
-
-use crate::memory::encoding::HolographicEncoder;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
-use serde_json::Value;
+use crate::memory::encoding::{HolographicEncoder, HolographicEncodingError};
+use crate::memory::entities::normalize_entity;
 
-use tracedecay_domain::{FactId, FactOwnerV1, UtcMicros};
+use tracedecay_domain::{FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1};
 use tracedecay_store::{
-    FactStoreError, LegacyFactQuery, ProjectMemoryDashboardFactDetailQueryV1,
-    ProjectMemoryDashboardFactDetailV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
-    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardOplogEntryV1,
-    ProjectMemoryDashboardOplogQueryV1, ProjectMemoryDashboardVectorPointV1,
-    ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryFactHistoryQueryV1,
-    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
-    ProjectMemoryResult,
+    FactReadControl, FactStoreError, FactStoreResult, ProjectMemoryDashboardEntityV1,
+    ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
+    ProjectMemoryDashboardFactEntityLinkV1, ProjectMemoryDashboardFactSummaryV1,
+    ProjectMemoryDashboardGrowthPointV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
+    ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryDashboardNamedCountV1,
+    ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
+    ProjectMemoryDashboardVectorPointV1, ProjectMemoryDashboardVectorPointsQueryV1,
+    ProjectMemoryEntityIdV1, ProjectMemoryFactHistoryQueryV1, ProjectMemoryFactIdV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactV1,
 };
 
-use super::crud::project_memory_fact_history_tx;
+use super::crud::{
+    list_project_memory_facts_controlled_tx, project_memory_fact_history_controlled_tx,
+};
 use super::primitives::{
-    OwnerKey, PROJECT_MEMORY_READ_OPERATION, compatibility_legacy_micros,
-    compatibility_source_store_id, from_json, nonnegative_u64, row_i64, row_optional_i64,
-    row_optional_string, row_string, storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, ensure_project_memory_read_active, from_json,
+    nonnegative_u64, row_i64, row_string, storage_error, storage_message,
 };
 use super::projection::{
-    load_project_memory_projection_tx, load_project_memory_projections_tx,
-    project_memory_legacy_mapping_tx, resolve_project_memory_target_tx,
+    load_project_memory_projection_controlled_tx, load_project_memory_projections_controlled_tx,
 };
 
-// Dashboard reads deliberately start from the immutable owner-bound V1 mapping.
-// The legacy tables remain a compatibility projection, never an alternate fact
-// authority or a source for ownerless rows.
-async fn dashboard_project_memory_fact_summaries_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    limit: usize,
-) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardFactSummaryV1>> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let limit = i64::try_from(limit).map_err(|_| FactStoreError::InvalidQueryLimit {
-        limit,
-        max: usize::MAX,
-    })?;
-    let mut rows = transaction
-        .query(
-            "SELECT mappings.fact_id, legacy_facts.hrr_vector IS NOT NULL
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-             ORDER BY legacy_facts.trust_score DESC,
-                      legacy_facts.updated_at DESC,
-                      mappings.fact_id ASC
-             LIMIT ?5",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                limit,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut mapped = Vec::with_capacity(usize::try_from(limit).unwrap_or_default());
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
-        let fact_id = FactId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
-            .map_err(FactStoreError::from)?;
-        mapped.push((
-            fact_id,
-            row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)? != 0,
-        ));
-    }
-    drop(rows);
-    let fact_ids = mapped
-        .iter()
-        .map(|(fact_id, _)| fact_id.clone())
-        .collect::<Vec<_>>();
-    let projections = load_project_memory_projections_tx(transaction, owner, &fact_ids).await?;
-    if projections.len() != mapped.len() {
-        return Err(storage_message(
-            PROJECT_MEMORY_READ_OPERATION,
-            "owner-bound dashboard mapping has no canonical fact projection",
-        )
-        .into());
-    }
-    Ok(mapped
-        .into_iter()
-        .zip(projections)
-        .map(
-            |((_, has_hrr_vector), fact)| tracedecay_store::ProjectMemoryDashboardFactSummaryV1 {
-                has_hrr_vector: has_hrr_vector
-                    && matches!(&fact, ProjectMemoryFactProjectionV1::Available(_)),
-                fact,
-            },
-        )
-        .collect())
+#[derive(Clone)]
+struct EntityAggregate {
+    name: String,
+    fact_ids: BTreeSet<FactId>,
 }
 
-async fn dashboard_project_memory_entities_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    limit: usize,
-) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardEntityV1>> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let limit = i64::try_from(limit).map_err(|_| FactStoreError::InvalidQueryLimit {
-        limit,
-        max: usize::MAX,
-    })?;
-    let mut rows = transaction
-        .query(
-            "SELECT entities.entity_id, entities.name, entities.entity_type,
-                    entities.aliases, entities.created_at,
-                    COUNT(DISTINCT legacy_facts.fact_id)
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             JOIN memory_fact_entities AS relations
-               ON relations.fact_id = legacy_facts.fact_id
-             JOIN memory_entities AS entities
-               ON entities.entity_id = relations.entity_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-             GROUP BY entities.entity_id, entities.name, entities.entity_type,
-                      entities.aliases, entities.created_at
-             ORDER BY COUNT(DISTINCT legacy_facts.fact_id) DESC,
-                      entities.name ASC, entities.entity_id ASC
-             LIMIT ?5",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                limit,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut entities = Vec::with_capacity(usize::try_from(limit).unwrap_or_default());
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
-        let aliases = from_json::<Vec<String>>(
-            &row_string(&row, 3, PROJECT_MEMORY_READ_OPERATION)?,
-            PROJECT_MEMORY_READ_OPERATION,
-        )?;
-        entities.push(tracedecay_store::ProjectMemoryDashboardEntityV1::new(
-            tracedecay_store::ProjectMemoryLegacyEntityTargetV1::new(
-                owner.clone(),
-                row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
-            )?,
-            row_string(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
-            row_string(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
-            aliases,
-            UtcMicros(row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?),
-            nonnegative_u64(
-                row_i64(&row, 5, PROJECT_MEMORY_READ_OPERATION)?,
-                "dashboard entity fact count",
-            )?,
-        )?);
-    }
-    Ok(entities)
+fn dashboard_fact_summary(
+    projection: ProjectMemoryFactProjectionV1,
+) -> ProjectMemoryDashboardFactSummaryV1 {
+    ProjectMemoryDashboardFactSummaryV1 { fact: projection }
 }
 
-async fn dashboard_project_memory_fact_entity_links_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    fact_ids: &BTreeSet<String>,
-    entity_ids: &BTreeSet<i64>,
-    limit: usize,
-) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardFactEntityLinkV1>> {
-    if fact_ids.is_empty() || entity_ids.is_empty() || limit == 0 {
-        return Ok(Vec::new());
-    }
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let fetch_limit = i64::try_from(limit).map_err(|_| FactStoreError::InvalidQueryLimit {
-        limit,
-        max: usize::MAX,
-    })?;
-    let mut rows = transaction
-        .query(
-            "SELECT mappings.fact_id, relations.entity_id
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             JOIN memory_fact_entities AS relations
-               ON relations.fact_id = legacy_facts.fact_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-             ORDER BY legacy_facts.trust_score DESC,
-                      legacy_facts.updated_at DESC,
-                      mappings.fact_id ASC, relations.entity_id ASC
-             LIMIT ?5",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                fetch_limit,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut links = Vec::with_capacity(usize::try_from(fetch_limit).unwrap_or_default());
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
-        let fact_id = row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?;
-        let entity_id = row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?;
-        if !fact_ids.contains(&fact_id) || !entity_ids.contains(&entity_id) {
-            continue;
+fn holographic_error(error: HolographicEncodingError) -> FactStoreError {
+    match error {
+        HolographicEncodingError::DimensionMismatch { expected, actual } => {
+            FactStoreError::HolographicDimensionMismatch { expected, actual }
         }
-        let fact_id = FactId::new(fact_id).map_err(FactStoreError::from)?;
-        links.push(
-            tracedecay_store::ProjectMemoryDashboardFactEntityLinkV1::new(
-                ProjectMemoryFactTargetV1::Canonical(ProjectMemoryFactIdV1::new(
-                    owner.clone(),
-                    fact_id,
-                )?),
-                tracedecay_store::ProjectMemoryLegacyEntityTargetV1::new(owner.clone(), entity_id)?,
-            )?,
-        );
     }
-    Ok(links)
 }
 
-async fn dashboard_project_memory_owner_count_tx(
+async fn dashboard_canonical_fact_count_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    entity_count: bool,
-) -> ProjectMemoryResult<u64> {
+    read_control: &FactReadControl,
+) -> FactStoreResult<u64> {
+    ensure_project_memory_read_active(read_control)?;
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let sql = if entity_count {
-        "SELECT COUNT(DISTINCT relations.entity_id)
-         FROM memory_facts AS legacy_facts
-         JOIN memory_v2_facts AS mappings
-           ON mappings.fact_id = legacy_facts.canonical_fact_id
-         JOIN memory_fact_entities AS relations
-           ON relations.fact_id = legacy_facts.fact_id
-         WHERE mappings.owner_kind = ?1
-           AND mappings.project_id = ?2
-           AND mappings.owner_json = ?3
-           AND ?4 = 'persisted-numeric-fact-id'"
-    } else {
-        "SELECT COUNT(*)
-         FROM memory_facts AS legacy_facts
-         JOIN memory_v2_facts AS mappings
-           ON mappings.fact_id = legacy_facts.canonical_fact_id
-         WHERE mappings.owner_kind = ?1
-           AND mappings.project_id = ?2
-           AND mappings.owner_json = ?3
-           AND ?4 = 'persisted-numeric-fact-id'"
-    };
     let mut rows = transaction
         .query(
-            sql,
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-            ],
+            "SELECT COUNT(*)
+             FROM memory_v2_current_facts AS current_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             WHERE current_facts.owner_kind = ?1
+               AND current_facts.project_id = ?2
+               AND facts.owner_json = ?3
+               AND current_facts.payload_access = 'eligible'
+               AND current_facts.active_assertion_id IS NOT NULL",
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    ensure_project_memory_read_active(read_control)?;
     let row = rows
         .next()
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_READ_OPERATION,
-                "compatibility dashboard owner count is missing",
-            )
-        })?;
+        .ok_or_else(|| storage_message(PROJECT_MEMORY_READ_OPERATION, "fact count is missing"))?;
     nonnegative_u64(
         row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
-        "compatibility dashboard owner count",
+        "dashboard fact count",
     )
-    .map_err(Into::into)
 }
 
-#[derive(Clone, Copy)]
-enum ProjectMemoryDashboardNamedCountKind {
-    Category,
-    EntityType,
-    TrustBucket,
-}
-
-async fn dashboard_project_memory_named_counts_tx(
+async fn dashboard_canonical_entity_count_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-    kind: ProjectMemoryDashboardNamedCountKind,
-) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardNamedCountV1>> {
+    read_control: &FactReadControl,
+) -> FactStoreResult<u64> {
+    ensure_project_memory_read_active(read_control)?;
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let (sql, limit) = match kind {
-        ProjectMemoryDashboardNamedCountKind::Category => (
-            "SELECT legacy_facts.category, COUNT(*)
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-             GROUP BY legacy_facts.category
-             ORDER BY COUNT(*) DESC, legacy_facts.category ASC
-             LIMIT 128",
-            128,
-        ),
-        ProjectMemoryDashboardNamedCountKind::EntityType => (
-            "SELECT entities.entity_type, COUNT(DISTINCT entities.entity_id)
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             JOIN memory_fact_entities AS relations
-               ON relations.fact_id = legacy_facts.fact_id
-             JOIN memory_entities AS entities
-               ON entities.entity_id = relations.entity_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-             GROUP BY entities.entity_type
-             ORDER BY COUNT(DISTINCT entities.entity_id) DESC, entities.entity_type ASC
-             LIMIT 128",
-            128,
-        ),
-        ProjectMemoryDashboardNamedCountKind::TrustBucket => (
-            "SELECT CASE
-                        WHEN legacy_facts.trust_score < 0.0 THEN 0
-                        WHEN legacy_facts.trust_score >= 1.0 THEN 9
-                        ELSE CAST(legacy_facts.trust_score * 10.0 AS INTEGER)
-                    END AS bucket,
-                    COUNT(*)
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-             GROUP BY bucket
-             ORDER BY bucket ASC
-             LIMIT 10",
-            10,
-        ),
-    };
     let mut rows = transaction
         .query(
-            sql,
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-            ],
+            "SELECT COUNT(DISTINCT lower(trim(CAST(entities.value AS TEXT))))
+             FROM memory_v2_current_facts AS current_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             JOIN memory_v2_assertion_payloads AS payloads
+               ON payloads.assertion_id = current_facts.active_assertion_id
+              AND payloads.fact_id = current_facts.fact_id
+              AND payloads.owner_kind = current_facts.owner_kind
+              AND payloads.project_id = current_facts.project_id
+             JOIN json_each(payloads.payload_json, '$.entities') AS entities
+             WHERE current_facts.owner_kind = ?1
+               AND current_facts.project_id = ?2
+               AND facts.owner_json = ?3
+               AND current_facts.payload_access = 'eligible'
+               AND current_facts.active_assertion_id IS NOT NULL
+               AND trim(CAST(entities.value AS TEXT)) <> ''",
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut counts = Vec::with_capacity(limit);
+    ensure_project_memory_read_active(read_control)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
+        .ok_or_else(|| storage_message(PROJECT_MEMORY_READ_OPERATION, "entity count is missing"))?;
+    nonnegative_u64(
+        row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
+        "dashboard entity count",
+    )
+}
+
+async fn dashboard_canonical_projections_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    limit: usize,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryFactProjectionV1>> {
+    ensure_project_memory_read_active(read_control)?;
+    let query = ProjectMemoryFactListQueryV1::new(owner.clone(), None, None, None, limit)?;
+    let projections = list_project_memory_facts_controlled_tx(transaction, &query, read_control)
+        .await?
+        .facts()
+        .to_vec();
+    ensure_project_memory_read_active(read_control)?;
+    Ok(projections)
+}
+
+fn dashboard_entity_aggregates(
+    facts: &[ProjectMemoryFactProjectionV1],
+    read_control: &FactReadControl,
+) -> FactStoreResult<BTreeMap<String, EntityAggregate>> {
+    let mut entities = BTreeMap::<String, EntityAggregate>::new();
+    for projection in facts {
+        ensure_project_memory_read_active(read_control)?;
+        let ProjectMemoryFactProjectionV1::Available(fact) = projection else {
+            continue;
+        };
+        for entity in fact.entities() {
+            ensure_project_memory_read_active(read_control)?;
+            let normalized = normalize_entity(entity);
+            if normalized.is_empty() {
+                continue;
+            }
+            let key = normalized.to_ascii_lowercase();
+            let aggregate = entities.entry(key).or_insert_with(|| EntityAggregate {
+                name: normalized,
+                fact_ids: BTreeSet::new(),
+            });
+            aggregate.fact_ids.insert(fact.fact_id().clone());
+        }
+    }
+    Ok(entities)
+}
+
+fn dashboard_entities(
+    owner: &FactOwnerV1,
+    aggregates: &BTreeMap<String, EntityAggregate>,
+    limit: usize,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryDashboardEntityV1>> {
+    ensure_project_memory_read_active(read_control)?;
+    let mut entities = aggregates.values().cloned().collect::<Vec<_>>();
+    entities.sort_by(|left, right| {
+        right
+            .fact_ids
+            .len()
+            .cmp(&left.fact_ids.len())
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    entities.truncate(limit);
+    let mut projected = Vec::with_capacity(entities.len());
+    for entity in entities {
+        ensure_project_memory_read_active(read_control)?;
+        projected.push(ProjectMemoryDashboardEntityV1::new(
+            ProjectMemoryEntityIdV1::new(owner.clone(), entity.name.clone())?,
+            entity.name,
+            entity.fact_ids.len() as u64,
+        )?);
+    }
+    Ok(projected)
+}
+
+fn dashboard_fact_entity_links(
+    owner: &FactOwnerV1,
+    aggregates: &BTreeMap<String, EntityAggregate>,
+    included_entities: &[ProjectMemoryDashboardEntityV1],
+    limit: usize,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryDashboardFactEntityLinkV1>> {
+    ensure_project_memory_read_active(read_control)?;
+    let included = included_entities
+        .iter()
+        .map(|entity| entity.target.entity().to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut links = Vec::new();
+    for (key, entity) in aggregates {
+        ensure_project_memory_read_active(read_control)?;
+        if !included.contains(key) {
+            continue;
+        }
+        for fact_id in &entity.fact_ids {
+            ensure_project_memory_read_active(read_control)?;
+            links.push(ProjectMemoryDashboardFactEntityLinkV1::new(
+                ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
+                ProjectMemoryEntityIdV1::new(owner.clone(), entity.name.clone())?,
+            )?);
+            if links.len() == limit {
+                return Ok(links);
+            }
+        }
+    }
+    Ok(links)
+}
+
+async fn dashboard_category_counts_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryDashboardNamedCountV1>> {
+    ensure_project_memory_read_active(read_control)?;
+    let key = OwnerKey::new(owner)?;
+    let mut rows = transaction
+        .query(
+            "SELECT json_extract(payloads.payload_json, '$.category'), COUNT(*)
+             FROM memory_v2_current_facts AS current_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             JOIN memory_v2_assertion_payloads AS payloads
+               ON payloads.assertion_id = current_facts.active_assertion_id
+              AND payloads.fact_id = current_facts.fact_id
+              AND payloads.owner_kind = current_facts.owner_kind
+              AND payloads.project_id = current_facts.project_id
+             WHERE current_facts.owner_kind = ?1
+               AND current_facts.project_id = ?2
+               AND facts.owner_json = ?3
+               AND current_facts.payload_access = 'eligible'
+               AND current_facts.active_assertion_id IS NOT NULL
+             GROUP BY json_extract(payloads.payload_json, '$.category')
+             ORDER BY COUNT(*) DESC, json_extract(payloads.payload_json, '$.category') ASC
+             LIMIT 128",
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
+        )
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    let mut counts = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let name = match kind {
-            ProjectMemoryDashboardNamedCountKind::TrustBucket => {
-                format!("trust-{}", row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
-            }
-            ProjectMemoryDashboardNamedCountKind::Category
-            | ProjectMemoryDashboardNamedCountKind::EntityType => {
-                row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?
-            }
-        };
-        counts.push(tracedecay_store::ProjectMemoryDashboardNamedCountV1::new(
-            name,
+        ensure_project_memory_read_active(read_control)?;
+        counts.push(ProjectMemoryDashboardNamedCountV1::new(
+            row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
             nonnegative_u64(
                 row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
-                "compatibility dashboard named count",
+                "dashboard category count",
             )?,
         )?);
     }
     Ok(counts)
 }
 
-fn dashboard_compatibility_dimension(dimension: Option<i64>) -> ProjectMemoryResult<Option<u32>> {
-    dimension
-        .map(|value| {
-            let value = u32::try_from(value).map_err(|_| {
-                storage_message(
-                    PROJECT_MEMORY_READ_OPERATION,
-                    "dashboard HRR dimension is outside u32 range",
-                )
-            })?;
-            if value == 0 {
-                return Err(storage_message(
-                    PROJECT_MEMORY_READ_OPERATION,
-                    "dashboard HRR dimension must be positive",
-                ));
-            }
-            Ok(value)
-        })
-        .transpose()
-        .map_err(Into::into)
-}
-
-async fn dashboard_compatibility_hrr_coverage_tx(
+async fn dashboard_trust_histogram_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardHrrCoverageV1>> {
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryDashboardNamedCountV1>> {
+    ensure_project_memory_read_active(read_control)?;
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
-            // Plan 39 Task 7 (owner decision 2026-08-07, second): the persisted
-            // bank projection is deleted, so coverage is recomputed from facts.
-            // A category is bank-backed when at least one of its facts carries
-            // canonical FHRR material; freshness is the newest fact update.
-            "SELECT legacy_facts.category,
-                    COUNT(*),
-                    COALESCE(SUM(CASE WHEN legacy_facts.hrr_vector IS NOT NULL THEN 1 ELSE 0 END), 0),
-                    MAX(legacy_facts.updated_at),
-                    COALESCE(SUM(CASE WHEN legacy_facts.hrr_vector IS NOT NULL
-                                       AND legacy_facts.hrr_algebra = 'amari_fhrr'
-                                       AND legacy_facts.hrr_dim = ?5
-                                       AND legacy_facts.hrr_precision = ?6
-                                       AND length(legacy_facts.hrr_vector) = ?7
-                                  THEN 1 ELSE 0 END), 0)
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-             GROUP BY legacy_facts.category
-             ORDER BY COUNT(*) DESC, legacy_facts.category ASC
-             LIMIT 128",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                HolographicEncoder::DIMENSIONS as i64,
-                HolographicEncoder::HRR_PRECISION,
-                HolographicEncoder::SERIALIZED_F32_BYTES as i64,
-            ],
+            "SELECT CASE
+                        WHEN current_facts.trust_score < 0.0 THEN 0
+                        WHEN current_facts.trust_score >= 1.0 THEN 9
+                        ELSE CAST(current_facts.trust_score * 10.0 AS INTEGER)
+                    END AS bucket,
+                    COUNT(*)
+             FROM memory_v2_current_facts AS current_facts
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = current_facts.fact_id
+              AND facts.owner_kind = current_facts.owner_kind
+              AND facts.project_id = current_facts.project_id
+             WHERE current_facts.owner_kind = ?1
+               AND current_facts.project_id = ?2
+               AND facts.owner_json = ?3
+               AND current_facts.payload_access = 'eligible'
+               AND current_facts.active_assertion_id IS NOT NULL
+             GROUP BY bucket
+             ORDER BY bucket ASC
+             LIMIT 10",
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut coverage = Vec::new();
+    let mut counts = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let category = row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?;
-        let fact_count = nonnegative_u64(
-            row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
-            "dashboard category fact count",
-        )?;
-        let vector_count = nonnegative_u64(
-            row_i64(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
-            "dashboard category vector count",
-        )?;
-        let canonical_vector_count = nonnegative_u64(
-            row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?,
-            "dashboard category canonical vector count",
-        )?;
-        let has_bank = canonical_vector_count > 0;
-        let state = if vector_count < fact_count {
-            tracedecay_store::ProjectMemoryDashboardHrrStateV1::MissingVectors
-        } else if !has_bank {
-            tracedecay_store::ProjectMemoryDashboardHrrStateV1::MissingBank
-        } else {
-            tracedecay_store::ProjectMemoryDashboardHrrStateV1::Ready
-        };
-        let coverage_basis_points = vector_count
-            .saturating_mul(10_000)
-            .checked_div(fact_count)
-            .map_or(0, |basis| u16::try_from(basis).unwrap_or(10_000));
-        coverage.push(tracedecay_store::ProjectMemoryDashboardHrrCoverageV1::new(
-            category.clone(),
-            fact_count,
-            vector_count,
-            coverage_basis_points,
-            category,
-            if has_bank { canonical_vector_count } else { 0 },
-            has_bank.then_some(HolographicEncoder::DIMENSIONS as u32),
-            if has_bank {
-                row_optional_i64(&row, 3, PROJECT_MEMORY_READ_OPERATION)?
-                    .and_then(compatibility_legacy_micros)
-            } else {
-                None
-            },
-            state,
+        ensure_project_memory_read_active(read_control)?;
+        let bucket = row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?;
+        counts.push(ProjectMemoryDashboardNamedCountV1::new(
+            format!("trust-{bucket}"),
+            nonnegative_u64(
+                row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
+                "dashboard trust count",
+            )?,
         )?);
     }
-    Ok(coverage)
+    Ok(counts)
 }
 
-fn dashboard_compatibility_memory_bank_from_row(
-    row: &crate::db::engine::Row,
-) -> ProjectMemoryResult<tracedecay_store::ProjectMemoryDashboardMemoryBankV1> {
-    tracedecay_store::ProjectMemoryDashboardMemoryBankV1::new(
-        row_string(row, 0, PROJECT_MEMORY_READ_OPERATION)?,
-        dashboard_compatibility_dimension(row_optional_i64(
-            row,
-            1,
-            PROJECT_MEMORY_READ_OPERATION,
-        )?)?,
-        nonnegative_u64(
-            row_i64(row, 3, PROJECT_MEMORY_READ_OPERATION)?,
-            "dashboard bank fact count",
-        )?,
-        nonnegative_u64(
-            row_i64(row, 4, PROJECT_MEMORY_READ_OPERATION)?,
-            "dashboard bank bundled fact count",
-        )?,
-        row_optional_i64(row, 2, PROJECT_MEMORY_READ_OPERATION)?
-            .and_then(compatibility_legacy_micros),
-    )
-    .map_err(Into::into)
-}
-
-/// Recomputes the dashboard bank read model directly from eligible facts.
-///
-/// Plan 39 Task 7 (owner decision 2026-08-07, second) deleted the persisted
-/// `memory_v2_banks` rows — stored bank vectors were never read back. Each
-/// category with encodable facts, plus the aggregate `all` bank, is derived
-/// here so the read model keeps its shape without shadow vector storage.
-async fn dashboard_compatibility_memory_banks_tx(
+async fn dashboard_growth_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
-) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardMemoryBankV1>> {
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryDashboardGrowthPointV1>> {
+    ensure_project_memory_read_active(read_control)?;
     let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
     let mut rows = transaction
         .query(
-            // The bank-eligible fact set is exactly what the deleted rebuild
-            // pass used: an eligible current fact whose mirrored vector is
-            // canonical FHRR material. A quarantined or malformed vector
-            // therefore still never becomes a dashboard bank.
-            "WITH bank_facts AS (
-                 SELECT legacy_facts.category AS category,
-                        legacy_facts.updated_at AS updated_at
-                 FROM memory_facts AS legacy_facts
-                 JOIN memory_v2_facts AS mappings
-                   ON mappings.fact_id = legacy_facts.canonical_fact_id
-                 JOIN memory_v2_current_facts AS current_facts
-                   ON current_facts.fact_id = mappings.fact_id
-                  AND current_facts.owner_kind = mappings.owner_kind
-                  AND current_facts.project_id = mappings.project_id
-                 WHERE mappings.owner_kind = ?1
-                   AND mappings.project_id = ?2
-                   AND mappings.owner_json = ?3
-                   AND ?4 = 'persisted-numeric-fact-id'
-                   AND current_facts.payload_access = 'eligible'
-                   AND legacy_facts.hrr_vector IS NOT NULL
-                   AND legacy_facts.hrr_algebra = 'amari_fhrr'
-                   AND legacy_facts.hrr_dim = ?5
-                   AND legacy_facts.hrr_precision = ?6
-                   AND length(legacy_facts.hrr_vector) = ?7
-             )
-             SELECT bank_name, hrr_dim, updated_at, fact_count, fact_count FROM (
-                 SELECT category AS bank_name,
-                        ?5 AS hrr_dim,
-                        MAX(updated_at) AS updated_at,
-                        COUNT(*) AS fact_count
-                 FROM bank_facts
-                 GROUP BY category
-                 UNION ALL
-                 SELECT 'all' AS bank_name,
-                        ?5 AS hrr_dim,
-                        MAX(updated_at) AS updated_at,
-                        COUNT(*) AS fact_count
-                 FROM bank_facts
-                 HAVING COUNT(*) > 0
-             )
-             ORDER BY fact_count DESC, bank_name ASC
-             LIMIT 128",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                HolographicEncoder::DIMENSIONS as i64,
-                HolographicEncoder::HRR_PRECISION,
-                HolographicEncoder::SERIALIZED_F32_BYTES as i64,
-            ],
+            "SELECT strftime('%Y-%m', facts.created_at / 1000000, 'unixepoch') AS period,
+                    COUNT(*)
+             FROM memory_v2_facts AS facts
+             JOIN memory_v2_current_facts AS current_facts
+               ON current_facts.fact_id = facts.fact_id
+              AND current_facts.owner_kind = facts.owner_kind
+              AND current_facts.project_id = facts.project_id
+             WHERE facts.owner_kind = ?1
+               AND facts.project_id = ?2
+               AND facts.owner_json = ?3
+               AND current_facts.payload_access = 'eligible'
+               AND current_facts.active_assertion_id IS NOT NULL
+             GROUP BY period
+             ORDER BY period ASC
+             LIMIT 1000",
+            params![key.kind, key.project_id.as_str(), key.json.as_str()],
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut banks = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
-        banks.push(dashboard_compatibility_memory_bank_from_row(&row)?);
-    }
-    Ok(banks)
-}
-
-async fn dashboard_project_memory_growth_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardGrowthPointV1>> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let mut rows = transaction
-        .query(
-            "WITH latest_days AS (
-                 SELECT date(legacy_facts.created_at, 'unixepoch') AS period,
-                        COUNT(*) AS fact_count
-                 FROM memory_facts AS legacy_facts
-                 JOIN memory_v2_facts AS mappings
-                   ON mappings.fact_id = legacy_facts.canonical_fact_id
-                 WHERE mappings.owner_kind = ?1
-                   AND mappings.project_id = ?2
-                   AND mappings.owner_json = ?3
-                   AND ?4 = 'persisted-numeric-fact-id'
-                   AND legacy_facts.created_at > 0
-                 GROUP BY period
-                 ORDER BY period DESC
-                 LIMIT 180
-             ), prior AS (
-                 SELECT COUNT(*) AS fact_count
-                 FROM memory_facts AS legacy_facts
-                 JOIN memory_v2_facts AS mappings
-                   ON mappings.fact_id = legacy_facts.canonical_fact_id
-                 WHERE mappings.owner_kind = ?5
-                   AND mappings.project_id = ?6
-                   AND mappings.owner_json = ?7
-                   AND ?8 = 'persisted-numeric-fact-id'
-                   AND legacy_facts.created_at > 0
-                   AND date(legacy_facts.created_at, 'unixepoch') < (
-                       SELECT MIN(period) FROM latest_days
-                   )
-             )
-             SELECT latest_days.period, latest_days.fact_count,
-                    prior.fact_count + SUM(latest_days.fact_count)
-                        OVER (ORDER BY latest_days.period ASC)
-             FROM latest_days CROSS JOIN prior
-             ORDER BY latest_days.period ASC",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    let mut cumulative = 0_u64;
     let mut growth = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        growth.push(tracedecay_store::ProjectMemoryDashboardGrowthPointV1::new(
+        ensure_project_memory_read_active(read_control)?;
+        let count = nonnegative_u64(
+            row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
+            "dashboard growth count",
+        )?;
+        cumulative = cumulative.saturating_add(count);
+        growth.push(ProjectMemoryDashboardGrowthPointV1::new(
             row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
-            nonnegative_u64(
-                row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
-                "dashboard daily fact count",
-            )?,
-            nonnegative_u64(
-                row_i64(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
-                "dashboard cumulative fact count",
-            )?,
+            count,
+            cumulative,
         )?);
     }
     Ok(growth)
@@ -703,139 +387,81 @@ async fn dashboard_project_memory_growth_tx(
 pub(super) async fn dashboard_project_memory_overview_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardMemoryOverviewQueryV1,
-) -> ProjectMemoryResult<ProjectMemoryDashboardMemoryOverviewV1> {
-    let owner = query.owner();
-    let fact_count = dashboard_project_memory_owner_count_tx(transaction, owner, false).await?;
-    let entity_count = dashboard_project_memory_owner_count_tx(transaction, owner, true).await?;
-    let facts =
-        dashboard_project_memory_fact_summaries_tx(transaction, owner, query.fact_limit()).await?;
-    let entities =
-        dashboard_project_memory_entities_tx(transaction, owner, query.graph_limit()).await?;
-    let fact_ids = facts
-        .iter()
-        .map(|fact| fact.fact.fact_id().as_str().to_owned())
-        .collect::<BTreeSet<_>>();
-    let entity_ids = entities
-        .iter()
-        .map(|entity| entity.target.legacy_entity_id())
-        .collect::<BTreeSet<_>>();
-    let fact_entity_links = dashboard_project_memory_fact_entity_links_tx(
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryDashboardMemoryOverviewV1> {
+    ensure_project_memory_read_active(read_control)?;
+    let fact_count =
+        dashboard_canonical_fact_count_tx(transaction, query.owner(), read_control).await?;
+    let graph_facts = dashboard_canonical_projections_tx(
         transaction,
-        owner,
-        &fact_ids,
-        &entity_ids,
+        query.owner(),
         query.graph_limit(),
+        read_control,
     )
     .await?;
-    let categories = dashboard_project_memory_named_counts_tx(
+    let projections = dashboard_canonical_projections_tx(
         transaction,
-        owner,
-        ProjectMemoryDashboardNamedCountKind::Category,
+        query.owner(),
+        query.fact_limit(),
+        read_control,
     )
     .await?;
-    let entity_types = dashboard_project_memory_named_counts_tx(
-        transaction,
-        owner,
-        ProjectMemoryDashboardNamedCountKind::EntityType,
-    )
-    .await?;
-    let hrr_coverage = dashboard_compatibility_hrr_coverage_tx(transaction, owner).await?;
-    let memory_banks = dashboard_compatibility_memory_banks_tx(transaction, owner).await?;
-    let trust_histogram = dashboard_project_memory_named_counts_tx(
-        transaction,
-        owner,
-        ProjectMemoryDashboardNamedCountKind::TrustBucket,
-    )
-    .await?;
-    let growth = dashboard_project_memory_growth_tx(transaction, owner).await?;
+    let mut facts = Vec::with_capacity(projections.len());
+    for projection in projections {
+        ensure_project_memory_read_active(read_control)?;
+        facts.push(dashboard_fact_summary(projection));
+    }
+    let aggregates = dashboard_entity_aggregates(&graph_facts, read_control)?;
+    let entity_count =
+        dashboard_canonical_entity_count_tx(transaction, query.owner(), read_control).await?;
+    let entities = dashboard_entities(
+        query.owner(),
+        &aggregates,
+        query.graph_limit(),
+        read_control,
+    )?;
+    let fact_entity_links = dashboard_fact_entity_links(
+        query.owner(),
+        &aggregates,
+        &entities,
+        query.graph_limit(),
+        read_control,
+    )?;
+    let categories = dashboard_category_counts_tx(transaction, query.owner(), read_control).await?;
+    let trust_histogram =
+        dashboard_trust_histogram_tx(transaction, query.owner(), read_control).await?;
+    let growth = dashboard_growth_tx(transaction, query.owner(), read_control).await?;
+    ensure_project_memory_read_active(read_control)?;
+
     ProjectMemoryDashboardMemoryOverviewV1::new(
-        owner.clone(),
+        query.owner().clone(),
         fact_count,
         entity_count,
-        memory_banks.len() as u64,
         facts,
         entities,
         fact_entity_links,
         categories,
-        entity_types,
-        hrr_coverage,
-        memory_banks,
         trust_histogram,
         growth,
     )
-    .map_err(Into::into)
 }
 
-async fn dashboard_project_memory_entities_for_fact_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    fact_id: &FactId,
-) -> ProjectMemoryResult<Vec<tracedecay_store::ProjectMemoryDashboardEntityV1>> {
-    let key = OwnerKey::new(owner)?;
-    let source_store_id = compatibility_source_store_id()?;
-    let mut rows = transaction
-        .query(
-            "SELECT entities.entity_id, entities.name, entities.entity_type,
-                    entities.aliases, entities.created_at,
-                    COUNT(DISTINCT related_mappings.fact_id)
-             FROM memory_facts AS target_facts
-             JOIN memory_v2_facts AS target_mappings
-               ON target_mappings.fact_id = target_facts.canonical_fact_id
-             JOIN memory_fact_entities AS target_relations
-               ON target_relations.fact_id = target_facts.fact_id
-             JOIN memory_entities AS entities
-               ON entities.entity_id = target_relations.entity_id
-             LEFT JOIN memory_fact_entities AS related_relations
-               ON related_relations.entity_id = entities.entity_id
-             LEFT JOIN memory_facts AS related_facts
-               ON related_facts.fact_id = related_relations.fact_id
-             LEFT JOIN memory_v2_facts AS related_mappings
-               ON related_mappings.fact_id = related_facts.canonical_fact_id
-              AND related_mappings.owner_kind = ?1
-              AND related_mappings.project_id = ?2
-              AND related_mappings.owner_json = ?3
-              AND ?4 = 'persisted-numeric-fact-id'
-             WHERE target_mappings.owner_kind = ?1
-               AND target_mappings.project_id = ?2
-               AND target_mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-               AND target_mappings.fact_id = ?5
-             GROUP BY entities.entity_id, entities.name, entities.entity_type,
-                      entities.aliases, entities.created_at
-             ORDER BY entities.name ASC, entities.entity_id ASC
-             LIMIT 128",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                fact_id.as_str(),
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+fn dashboard_entities_for_fact(
+    fact: &ProjectMemoryFactV1,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryDashboardEntityV1>> {
+    let mut seen = BTreeSet::new();
     let mut entities = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
-        entities.push(tracedecay_store::ProjectMemoryDashboardEntityV1::new(
-            tracedecay_store::ProjectMemoryLegacyEntityTargetV1::new(
-                owner.clone(),
-                row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
-            )?,
-            row_string(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
-            row_string(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
-            from_json::<Vec<String>>(
-                &row_string(&row, 3, PROJECT_MEMORY_READ_OPERATION)?,
-                PROJECT_MEMORY_READ_OPERATION,
-            )?,
-            UtcMicros(row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?),
-            nonnegative_u64(
-                row_i64(&row, 5, PROJECT_MEMORY_READ_OPERATION)?,
-                "dashboard entity fact count",
-            )?,
+    for entity in fact.entities() {
+        ensure_project_memory_read_active(read_control)?;
+        let entity = normalize_entity(entity);
+        if entity.is_empty() || !seen.insert(entity.to_ascii_lowercase()) {
+            continue;
+        }
+        entities.push(ProjectMemoryDashboardEntityV1::new(
+            ProjectMemoryEntityIdV1::new(fact.owner().clone(), entity.clone())?,
+            entity,
+            1,
         )?);
     }
     Ok(entities)
@@ -844,242 +470,227 @@ async fn dashboard_project_memory_entities_for_fact_tx(
 pub(super) async fn dashboard_project_memory_fact_detail_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardFactDetailQueryV1,
-) -> ProjectMemoryResult<Option<ProjectMemoryDashboardFactDetailV1>> {
-    let owner = query.target().owner();
-    let Some(fact_id) = resolve_project_memory_target_tx(transaction, query.target()).await? else {
-        return Ok(None);
-    };
-    if project_memory_legacy_mapping_tx(transaction, owner, &fact_id)
-        .await?
-        .is_none()
-    {
-        return Ok(None);
-    }
-    let Some(fact) = load_project_memory_projection_tx(transaction, owner, &fact_id).await? else {
-        return Ok(None);
-    };
-    let entities =
-        dashboard_project_memory_entities_for_fact_tx(transaction, owner, &fact_id).await?;
-    let target =
-        ProjectMemoryFactTargetV1::Canonical(ProjectMemoryFactIdV1::new(owner.clone(), fact_id)?);
-    let history = project_memory_fact_history_tx(
+    read_control: &FactReadControl,
+) -> FactStoreResult<Option<ProjectMemoryDashboardFactDetailV1>> {
+    ensure_project_memory_read_active(read_control)?;
+    let target = query.target();
+    let fact = load_project_memory_projection_controlled_tx(
         transaction,
-        &ProjectMemoryFactHistoryQueryV1::new(target, None, 128)?,
+        target.owner(),
+        target.fact_id(),
+        read_control,
     )
     .await?;
-    ProjectMemoryDashboardFactDetailV1::new(fact, entities, Some(history))
-        .map(Some)
-        .map_err(Into::into)
+    ensure_project_memory_read_active(read_control)?;
+    let Some(fact) = fact else {
+        return Ok(None);
+    };
+    let entities = match &fact {
+        ProjectMemoryFactProjectionV1::Available(fact) => {
+            dashboard_entities_for_fact(fact, read_control)?
+        }
+        ProjectMemoryFactProjectionV1::Unavailable(_) => Vec::new(),
+    };
+    ensure_project_memory_read_active(read_control)?;
+    let history = project_memory_fact_history_controlled_tx(
+        transaction,
+        &ProjectMemoryFactHistoryQueryV1::new(target.clone(), None, 128)?,
+        read_control,
+    )
+    .await?;
+    ensure_project_memory_read_active(read_control)?;
+    ProjectMemoryDashboardFactDetailV1::new(fact, entities, Some(history)).map(Some)
 }
 
-fn dashboard_project_memory_like_pattern(search: &str) -> String {
-    let escaped = search
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%{escaped}%")
-}
-
-pub(super) async fn dashboard_project_memory_vector_points_tx(
+async fn dashboard_vector_fact_ids_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardVectorPointsQueryV1,
-) -> ProjectMemoryResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<FactId>> {
+    ensure_project_memory_read_active(read_control)?;
     let key = OwnerKey::new(query.owner())?;
-    let source_store_id = compatibility_source_store_id()?;
     let limit = i64::try_from(query.limit()).map_err(|_| FactStoreError::InvalidQueryLimit {
         limit: query.limit(),
         max: usize::MAX,
     })?;
-    let search = query
-        .search()
-        .filter(|search| !search.trim().is_empty())
-        .map(dashboard_project_memory_like_pattern);
-    let mut rows = transaction
-        .query(
-            // The V1 dashboard reported a fact's graph connections as its
-            // entity-link count; parity keeps both columns on that basis.
-            // Plan 39 Task 7 (owner decision 2026-08-07, second): the bank a
-            // point belongs to is its own category, read from the fact rather
-            // than from the deleted `memory_v2_banks` projection.
-            "SELECT mappings.fact_id, legacy_facts.hrr_vector, legacy_facts.category,
-                    COUNT(DISTINCT relations.entity_id),
-                    COUNT(DISTINCT relations.entity_id)
-             FROM memory_facts AS legacy_facts
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             LEFT JOIN memory_fact_entities AS relations
-               ON relations.fact_id = legacy_facts.fact_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-               AND (
-                    ?5 IS NULL
-                    OR legacy_facts.content LIKE ?5 ESCAPE '\\'
-                    OR legacy_facts.tags LIKE ?5 ESCAPE '\\'
-               )
-             GROUP BY mappings.fact_id, legacy_facts.hrr_vector, legacy_facts.category
-             ORDER BY legacy_facts.trust_score DESC,
-                      legacy_facts.updated_at DESC,
-                      mappings.fact_id ASC
-             LIMIT ?6",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                search,
-                limit,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut raw_points = Vec::with_capacity(query.limit());
+    let mut rows = match query.search() {
+        Some(search) => {
+            transaction
+                .query(
+                    "SELECT current_facts.fact_id
+                     FROM memory_v2_current_facts AS current_facts
+                     JOIN memory_v2_facts AS facts
+                       ON facts.fact_id = current_facts.fact_id
+                      AND facts.owner_kind = current_facts.owner_kind
+                      AND facts.project_id = current_facts.project_id
+                     JOIN memory_v2_assertion_payloads AS payloads
+                       ON payloads.assertion_id = current_facts.active_assertion_id
+                      AND payloads.fact_id = current_facts.fact_id
+                      AND payloads.owner_kind = current_facts.owner_kind
+                      AND payloads.project_id = current_facts.project_id
+                     WHERE current_facts.owner_kind = ?1
+                       AND current_facts.project_id = ?2
+                       AND facts.owner_json = ?3
+                       AND current_facts.payload_access = 'eligible'
+                       AND current_facts.active_assertion_id IS NOT NULL
+                       AND instr(lower(payloads.payload_json), lower(?4)) > 0
+                     ORDER BY current_facts.updated_at DESC, current_facts.fact_id ASC
+                     LIMIT ?5",
+                    params![
+                        key.kind,
+                        key.project_id.as_str(),
+                        key.json.as_str(),
+                        search,
+                        limit,
+                    ],
+                )
+                .await
+        }
+        None => {
+            transaction
+                .query(
+                    "SELECT current_facts.fact_id
+                     FROM memory_v2_current_facts AS current_facts
+                     JOIN memory_v2_facts AS facts
+                       ON facts.fact_id = current_facts.fact_id
+                      AND facts.owner_kind = current_facts.owner_kind
+                      AND facts.project_id = current_facts.project_id
+                     WHERE current_facts.owner_kind = ?1
+                       AND current_facts.project_id = ?2
+                       AND facts.owner_json = ?3
+                       AND current_facts.payload_access = 'eligible'
+                       AND current_facts.active_assertion_id IS NOT NULL
+                     ORDER BY current_facts.updated_at DESC, current_facts.fact_id ASC
+                     LIMIT ?4",
+                    params![key.kind, key.project_id.as_str(), key.json.as_str(), limit,],
+                )
+                .await
+        }
+    }
+    .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    let mut fact_ids = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let fact_id = FactId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
-            .map_err(FactStoreError::from)?;
-        let vector = match row.get::<crate::db::engine::Value>(1) {
-            Ok(crate::db::engine::Value::Blob(bytes)) => HolographicEncoder::deserialize(&bytes)
-                .ok()
-                .filter(|vector| {
-                    !vector.is_empty()
-                        && vector.len() <= 16_384
-                        && vector.iter().all(|value| value.is_finite())
-                }),
-            Ok(crate::db::engine::Value::Null | _) | Err(_) => None,
-        };
-        raw_points.push((
-            fact_id,
-            vector,
-            row_optional_string(&row, 2, PROJECT_MEMORY_READ_OPERATION)?,
-            nonnegative_u64(
-                row_i64(&row, 3, PROJECT_MEMORY_READ_OPERATION)?,
-                "dashboard vector entity count",
-            )?,
-            nonnegative_u64(
-                row_i64(&row, 4, PROJECT_MEMORY_READ_OPERATION)?,
-                "dashboard vector connection count",
-            )?,
-        ));
+        ensure_project_memory_read_active(read_control)?;
+        fact_ids.push(
+            FactId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
+                .map_err(FactStoreError::from)?,
+        );
     }
-    drop(rows);
-    let fact_ids = raw_points
-        .iter()
-        .map(|(fact_id, ..)| fact_id.clone())
-        .collect::<Vec<_>>();
-    let facts = load_project_memory_projections_tx(transaction, query.owner(), &fact_ids).await?;
-    if facts.len() != raw_points.len() {
-        return Err(storage_message(
-            PROJECT_MEMORY_READ_OPERATION,
-            "owner-bound dashboard vector mapping has no canonical fact projection",
-        )
-        .into());
-    }
-    let mut points = Vec::with_capacity(raw_points.len());
-    for ((_, vector, bank_name, entity_count, connection_count), fact) in
-        raw_points.into_iter().zip(facts)
-    {
-        let vector = matches!(&fact, ProjectMemoryFactProjectionV1::Available(_))
-            .then_some(vector)
-            .flatten();
-        points.push(ProjectMemoryDashboardVectorPointV1::new(
-            tracedecay_store::ProjectMemoryDashboardFactSummaryV1 {
-                has_hrr_vector: vector.is_some(),
-                fact,
-            },
-            vector,
-            bank_name,
-            entity_count,
-            connection_count,
-        )?);
-    }
-    Ok(points)
+    Ok(fact_ids)
 }
 
-fn dashboard_project_memory_oplog_operation(value: &str) -> String {
-    match value {
-        "add" | "update" | "remove" | "feedback" | "reject_secret_like" | "curate_apply" => {
-            value.to_owned()
-        }
-        _ => "legacy_mutation".to_owned(),
-    }
+pub(super) async fn dashboard_project_memory_vector_points_tx(
+    transaction: &Transaction<'_>,
+    query: &ProjectMemoryDashboardVectorPointsQueryV1,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
+    let fact_ids = dashboard_vector_fact_ids_tx(transaction, query, read_control).await?;
+    ensure_project_memory_read_active(read_control)?;
+    let facts = load_project_memory_projections_controlled_tx(
+        transaction,
+        query.owner(),
+        &fact_ids,
+        read_control,
+    )
+    .await?;
+    ensure_project_memory_read_active(read_control)?;
+    let encoder = HolographicEncoder::new();
+    facts
+        .into_iter()
+        .map(|projection| {
+            ensure_project_memory_read_active(read_control)?;
+            let (vector, entity_count) = match &projection {
+                ProjectMemoryFactProjectionV1::Available(fact) => {
+                    let entities = fact.entities();
+                    (
+                        Some(
+                            encoder
+                                .encode_fact(fact.content(), entities)
+                                .map_err(holographic_error)?,
+                        ),
+                        entities
+                            .iter()
+                            .map(|entity| normalize_entity(entity).to_ascii_lowercase())
+                            .filter(|entity| !entity.is_empty())
+                            .collect::<BTreeSet<_>>()
+                            .len() as u64,
+                    )
+                }
+                ProjectMemoryFactProjectionV1::Unavailable(_) => (None, 0),
+            };
+            ensure_project_memory_read_active(read_control)?;
+            ProjectMemoryDashboardVectorPointV1::new(
+                dashboard_fact_summary(projection),
+                vector,
+                entity_count,
+                0,
+            )
+        })
+        .collect::<FactStoreResult<Vec<_>>>()
 }
 
-fn dashboard_project_memory_oplog_details(
-    raw: Option<String>,
-) -> tracedecay_store::ProjectMemoryDashboardOplogDetailsV1 {
-    match raw {
-        Some(raw) if serde_json::from_str::<Value>(&raw).is_ok() => {
-            tracedecay_store::ProjectMemoryDashboardOplogDetailsV1::Redacted
-        }
-        Some(_) | None => tracedecay_store::ProjectMemoryDashboardOplogDetailsV1::Unknown,
+fn dashboard_oplog_operation(kind: &FactLineageEventKindV1) -> &'static str {
+    match kind {
+        FactLineageEventKindV1::AssertionRecorded { .. } => "assertion_recorded",
+        FactLineageEventKindV1::TrustChanged { .. } => "trust_changed",
+        FactLineageEventKindV1::Curated { .. } => "curated",
+        FactLineageEventKindV1::PayloadAccessChanged { .. } => "payload_access_changed",
     }
 }
 
 pub(super) async fn dashboard_project_memory_oplog_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryDashboardOplogQueryV1,
-) -> ProjectMemoryResult<Vec<ProjectMemoryDashboardOplogEntryV1>> {
+    read_control: &FactReadControl,
+) -> FactStoreResult<Vec<ProjectMemoryDashboardOplogEntryV1>> {
+    ensure_project_memory_read_active(read_control)?;
     let key = OwnerKey::new(query.owner())?;
-    let source_store_id = compatibility_source_store_id()?;
     let limit = i64::try_from(query.limit()).map_err(|_| FactStoreError::InvalidQueryLimit {
         limit: query.limit(),
         max: usize::MAX,
     })?;
     let mut rows = transaction
         .query(
-            "SELECT oplog.id, oplog.ts, oplog.op, oplog.fact_id, oplog.detail_json
-             FROM memory_oplog AS oplog
-             JOIN memory_facts AS legacy_facts
-               ON legacy_facts.fact_id = oplog.fact_id
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = legacy_facts.canonical_fact_id
-             WHERE mappings.owner_kind = ?1
-               AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3
-               AND ?4 = 'persisted-numeric-fact-id'
-             ORDER BY oplog.id DESC
-             LIMIT ?5",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                limit,
-            ],
+            "SELECT events.event_sequence, events.event_json
+             FROM memory_v2_lineage_events AS events
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = events.fact_id
+              AND facts.owner_kind = events.owner_kind
+              AND facts.project_id = events.project_id
+             WHERE events.owner_kind = ?1
+               AND events.project_id = ?2
+               AND facts.owner_json = ?3
+             ORDER BY events.event_sequence DESC
+             LIMIT ?4",
+            params![key.kind, key.project_id.as_str(), key.json.as_str(), limit],
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut entries = Vec::with_capacity(query.limit());
+    let mut entries = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
-        let legacy_fact_id = row_i64(&row, 3, PROJECT_MEMORY_READ_OPERATION)?;
+        ensure_project_memory_read_active(read_control)?;
+        let event = from_json::<FactLineageEventV1>(
+            &row_string(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
+            PROJECT_MEMORY_READ_OPERATION,
+        )?;
         entries.push(ProjectMemoryDashboardOplogEntryV1::new(
             row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
-            UtcMicros(row_i64(&row, 1, PROJECT_MEMORY_READ_OPERATION)?),
-            dashboard_project_memory_oplog_operation(&row_string(
-                &row,
-                2,
-                PROJECT_MEMORY_READ_OPERATION,
-            )?),
-            Some(ProjectMemoryFactTargetV1::Legacy(LegacyFactQuery::new(
+            event.occurred_at(),
+            dashboard_oplog_operation(event.kind()).to_owned(),
+            Some(ProjectMemoryFactIdV1::new(
                 query.owner().clone(),
-                source_store_id.clone(),
-                legacy_fact_id,
-            )?)),
-            dashboard_project_memory_oplog_details(row_optional_string(
-                &row,
-                4,
-                PROJECT_MEMORY_READ_OPERATION,
+                event.fact_id().clone(),
             )?),
         )?);
     }
+    ensure_project_memory_read_active(read_control)?;
     Ok(entries)
 }

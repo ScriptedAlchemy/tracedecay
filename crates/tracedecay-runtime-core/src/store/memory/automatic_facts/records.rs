@@ -1,9 +1,9 @@
 //! Automatic fact-receipt parsing, projection, and bounded read queries.
 
-use super::super::crud::compatibility_payload_metadata;
+use super::super::crud::payload_metadata;
 use super::super::primitives::{
-    OwnerKey, PROJECT_MEMORY_READ_OPERATION, from_json, row_i64, row_optional_string, row_string,
-    storage_error, storage_message, to_json,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, ensure_project_memory_read_active, from_json, row_i64,
+    row_optional_string, row_string, storage_error, storage_message, to_json,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -13,11 +13,11 @@ use tracedecay_domain::{
     ProvenanceId, SanitizationReceiptV1, UtcMicros,
 };
 use tracedecay_store::{
-    FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
+    FactReadControl, FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
     ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
     ProjectMemoryAutomaticFactReceiptPageV1, ProjectMemoryAutomaticFactReceiptV1,
-    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactAddCommandV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactMappingV1, ProjectMemoryResult,
+    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactAddCommandV1,
+    ProjectMemoryFactAddMaterialV1, ProjectMemoryFactIdV1,
 };
 
 fn automatic_fact_required_string(
@@ -50,7 +50,7 @@ fn automatic_fact_optional_string(
     }
 }
 
-pub(super) fn project_memory_automatic_fact_request_value(
+pub(in crate::store::memory) fn project_memory_automatic_fact_request_value(
     request: &ProjectMemoryFactAddCommandV1,
 ) -> Value {
     json!({
@@ -58,10 +58,10 @@ pub(super) fn project_memory_automatic_fact_request_value(
         "operation_id": request.operation_id().as_str(),
         "content": request.content(),
         "category": super::super::primitives::project_memory_category_label(request.category()),
-        "source": request.source(),
+        "source_label": request.source_label(),
         "tags": request.tags(),
         "entities": request.entities(),
-        "metadata": compatibility_payload_metadata(request.metadata()),
+        "metadata": payload_metadata(request.metadata()),
         "sanitization_receipt": request.sanitization_receipt(),
         "automation_run_id": request.automation_run_id(),
         "default_trust": request.default_trust().as_f64(),
@@ -132,13 +132,12 @@ fn automatic_fact_request_from_value(
             })
             .collect::<FactStoreResult<Vec<_>>>()
     };
-    let metadata =
-        compatibility_payload_metadata(&object.get("metadata").cloned().ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_READ_OPERATION,
-                "automatic fact request metadata is missing",
-            )
-        })?);
+    let metadata = payload_metadata(&object.get("metadata").cloned().ok_or_else(|| {
+        storage_message(
+            PROJECT_MEMORY_READ_OPERATION,
+            "automatic fact request metadata is missing",
+        )
+    })?);
     let sanitization_receipt = from_json::<SanitizationReceiptV1>(
         &to_json(
             object.get("sanitization_receipt").ok_or_else(|| {
@@ -167,23 +166,20 @@ fn automatic_fact_request_from_value(
         .map(ActorId::new)
         .transpose()
         .map_err(FactStoreError::from)?;
-    let request = ProjectMemoryFactAddCommandV1::new(
+    ProjectMemoryFactAddMaterialV1::new(
         owner.clone(),
-        operation_id,
         content,
         category,
-        automatic_fact_optional_string(object, "source")?,
+        automatic_fact_optional_string(object, "source_label")?,
         strings("tags")?,
         strings("entities")?,
         metadata,
         sanitization_receipt,
+        automatic_fact_optional_string(object, "automation_run_id")?,
         trust,
         actor,
-    )?;
-    match automatic_fact_optional_string(object, "automation_run_id")? {
-        Some(run_id) => request.with_automation_run_id(run_id),
-        None => Ok(request),
-    }
+    )?
+    .into_command(operation_id)
 }
 
 pub(in crate::store::memory) fn project_memory_automatic_fact_state_label(
@@ -210,7 +206,7 @@ pub(in crate::store::memory) async fn project_memory_automatic_fact_receipt_reco
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     apply_id: &ProvenanceId,
-) -> ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
+) -> FactStoreResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
     let key = OwnerKey::new(owner)?;
     let mut rows = transaction
         .query(
@@ -280,13 +276,10 @@ pub(in crate::store::memory) async fn project_memory_automatic_fact_receipt_reco
                     )
                 })
                 .and_then(|value| FactEventId::new(value).map_err(FactStoreError::from))?;
-            let mapping = ProjectMemoryFactMappingV1::new(
-                ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
-                None,
-            )?;
+            let target = ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?;
             ProjectMemoryAutomaticFactEffectV1::Applied {
                 fact_id,
-                mapping,
+                target,
                 assertion_id,
                 event_id,
             }
@@ -319,8 +312,13 @@ pub(in crate::store::memory) async fn get_project_memory_automatic_fact_receipt_
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     apply_id: &ProvenanceId,
-) -> ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
-    project_memory_automatic_fact_receipt_record_tx(transaction, owner, apply_id).await
+    read_control: &FactReadControl,
+) -> FactStoreResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
+    ensure_project_memory_read_active(read_control)?;
+    let receipt =
+        project_memory_automatic_fact_receipt_record_tx(transaction, owner, apply_id).await?;
+    ensure_project_memory_read_active(read_control)?;
+    Ok(receipt)
 }
 
 pub(in crate::store::memory) async fn list_project_memory_automatic_fact_receipts_tx(
@@ -329,7 +327,9 @@ pub(in crate::store::memory) async fn list_project_memory_automatic_fact_receipt
     state: Option<ProjectMemoryAutomaticFactStateV1>,
     after_apply_id: Option<&ProvenanceId>,
     limit: usize,
-) -> ProjectMemoryResult<ProjectMemoryAutomaticFactReceiptPageV1> {
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryAutomaticFactReceiptPageV1> {
+    ensure_project_memory_read_active(read_control)?;
     if limit == 0 || limit > MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS {
         return Err(FactStoreError::InvalidQueryLimit {
             limit,
@@ -344,6 +344,7 @@ pub(in crate::store::memory) async fn list_project_memory_automatic_fact_receipt
             max: MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
         })?;
     let state = state.map(project_memory_automatic_fact_state_label);
+    ensure_project_memory_read_active(read_control)?;
     let mut rows = match (state, after_apply_id) {
         (Some(state), Some(after)) => {
             transaction
@@ -412,37 +413,48 @@ pub(in crate::store::memory) async fn list_project_memory_automatic_fact_receipt
         }
     }
     .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    ensure_project_memory_read_active(read_control)?;
     let mut ids = Vec::with_capacity(limit.saturating_add(1));
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
+    loop {
+        ensure_project_memory_read_active(read_control)?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+        ensure_project_memory_read_active(read_control)?;
+        let Some(row) = row else {
+            break;
+        };
         ids.push(
             ProvenanceId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
                 .map_err(FactStoreError::from)?,
         );
+        ensure_project_memory_read_active(read_control)?;
     }
     drop(rows);
+    ensure_project_memory_read_active(read_control)?;
     let has_more = ids.len() > limit;
     ids.truncate(limit);
     let mut receipts = Vec::with_capacity(ids.len());
     for apply_id in &ids {
-        receipts.push(
-            project_memory_automatic_fact_receipt_record_tx(transaction, owner, apply_id)
-                .await?
-                .ok_or_else(|| {
-                    storage_message(
-                        PROJECT_MEMORY_READ_OPERATION,
-                        "automatic fact receipt disappeared from its snapshot",
-                    )
-                })?,
-        );
+        ensure_project_memory_read_active(read_control)?;
+        let receipt =
+            project_memory_automatic_fact_receipt_record_tx(transaction, owner, apply_id).await?;
+        ensure_project_memory_read_active(read_control)?;
+        receipts.push(receipt.ok_or_else(|| {
+            storage_message(
+                PROJECT_MEMORY_READ_OPERATION,
+                "automatic fact receipt disappeared from its snapshot",
+            )
+        })?);
+        ensure_project_memory_read_active(read_control)?;
     }
-    ProjectMemoryAutomaticFactReceiptPageV1::new(
+    ensure_project_memory_read_active(read_control)?;
+    let page = ProjectMemoryAutomaticFactReceiptPageV1::new(
         owner.clone(),
         receipts,
         has_more.then(|| ids.last().cloned()).flatten(),
-    )
-    .map_err(Into::into)
+    )?;
+    ensure_project_memory_read_active(read_control)?;
+    Ok(page)
 }

@@ -1,42 +1,41 @@
-//! Compatibility fact add/update/remove commands and their replay batches.
+//! Canonical project-memory add, update, and remove commands.
 
 use super::super::envelope::{
     ProjectMemoryOperationReceiptV1, project_memory_digest,
-    project_memory_lookup_operation_receipt_tx, project_memory_record_operation_receipt_tx,
-    project_memory_target_digest,
+    project_memory_lookup_operation_receipt_tx, project_memory_receipt_u64,
+    project_memory_record_operation_receipt_tx,
 };
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_category_label,
-    project_memory_event_time, project_memory_now, project_memory_source_label, storage_error,
+    project_memory_event_time, project_memory_now, row_exists_params, storage_error,
     storage_message,
 };
-use super::super::projection::{
-    load_project_memory_projection_tx, project_memory_required_mapping_tx,
-    project_memory_source_for_fact_tx, resolve_project_memory_target_tx,
-};
+use super::super::projection::load_project_memory_projection_tx;
+use super::add::{ProjectMemoryAddClassification, classify_project_memory_add_tx};
 use super::{
-    CompatibilityMirrorInsertV1, compatibility_active_fact_count_tx, compatibility_commit_batch_tx,
-    compatibility_initial_batch, compatibility_last_insert_rowid_tx,
-    compatibility_legacy_mapping_for_new_fact, compatibility_mirror_insert_tx,
-    compatibility_mirror_update_tx, compatibility_payload_metadata, compatibility_sanitize_payload,
-    compatibility_verified_payload, load_current_fact_tx, load_current_projection,
+    active_fact_count_tx, commit_batch_tx, find_project_memory_fact_by_content_digest_tx,
+    initial_batch, load_current_fact_tx, load_current_projection, payload_metadata,
+    sanitize_payload, verified_payload,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
 use crate::db::tombstone_fact_derivatives_tx;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactEventId, FactId,
-    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
-    UtcMicros,
+    ActorId, Confidence, FactAssertionId, FactAssertionKindV1, FactAssertionV1, FactEventId,
+    FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, LocatorDigest,
+    PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{
-    FactStoreError, FactStoreResult, FactWriteBatch, ProjectMemoryFactAddCommandV1,
-    ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddOutcomeV1,
-    ProjectMemoryFactFeedbackActionV1, ProjectMemoryFactIdV1, ProjectMemoryFactRemoveCommandV1,
+    FactCommitReceipt, FactStoreError, FactStoreResult, FactWriteBatch,
+    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
+    ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactFeedbackActionV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactUpdateCommandV1,
-    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryResult, StoredFactV1,
+    ProjectMemoryFactUpdateOutcomeV1, StoredFactV1,
 };
+
 pub(super) fn project_memory_feedback_action_label(
     action: ProjectMemoryFactFeedbackActionV1,
 ) -> &'static str {
@@ -51,67 +50,6 @@ pub(super) fn project_memory_feedback_delta(action: ProjectMemoryFactFeedbackAct
         ProjectMemoryFactFeedbackActionV1::Helpful => 0.05,
         ProjectMemoryFactFeedbackActionV1::Unhelpful => -0.10,
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn compatibility_mirror_feedback_tx(
-    transaction: &Transaction<'_>,
-    legacy_fact_id: i64,
-    action: ProjectMemoryFactFeedbackActionV1,
-    old_trust: Confidence,
-    new_trust: Confidence,
-    timestamp: i64,
-    source: &str,
-    note: Option<&str>,
-) -> FactStoreResult<i64> {
-    let changed = transaction
-        .execute(
-            "UPDATE memory_facts SET
-                trust_score = ?1,
-                helpful_count = helpful_count + ?2,
-                unhelpful_count = unhelpful_count + ?3,
-                last_feedback_at = ?4,
-                updated_at = ?4
-             WHERE fact_id = ?5",
-            params![
-                new_trust.as_f64(),
-                i64::from(matches!(action, ProjectMemoryFactFeedbackActionV1::Helpful)),
-                i64::from(matches!(
-                    action,
-                    ProjectMemoryFactFeedbackActionV1::Unhelpful
-                )),
-                timestamp,
-                legacy_fact_id,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    if changed != 1 {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility feedback target is missing from the legacy mirror",
-        ));
-    }
-    transaction
-        .execute(
-            "INSERT INTO memory_feedback_events (
-                fact_id, action, trust_delta, old_trust, new_trust,
-                created_at, source, note
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                legacy_fact_id,
-                project_memory_feedback_action_label(action),
-                new_trust.as_f64() - old_trust.as_f64(),
-                old_trust.as_f64(),
-                new_trust.as_f64(),
-                timestamp,
-                source,
-                note,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    compatibility_last_insert_rowid_tx(transaction).await
 }
 
 pub(super) async fn project_memory_update_feedback_projection_tx(
@@ -146,7 +84,7 @@ pub(super) async fn project_memory_update_feedback_projection_tx(
     if changed != 1 {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility feedback target has no current projection",
+            "feedback target has no current canonical projection",
         ));
     }
     Ok(())
@@ -215,7 +153,6 @@ fn project_memory_correction_batch(
         events,
         Vec::new(),
         Vec::new(),
-        None,
         expected_last_event_id,
     )
 }
@@ -224,7 +161,7 @@ fn project_memory_removal_batch(
     owner: &FactOwnerV1,
     fact_id: &FactId,
     previous: PayloadAccessState,
-    expected_last_event_id: Option<FactEventId>,
+    expected_last_event_id: FactEventId,
     actor: Option<ActorId>,
     now: UtcMicros,
 ) -> FactStoreResult<FactWriteBatch> {
@@ -245,98 +182,213 @@ fn project_memory_removal_batch(
         vec![event],
         Vec::new(),
         Vec::new(),
-        None,
-        expected_last_event_id,
+        Some(expected_last_event_id),
     )
+}
+
+pub(super) fn commit_receipt_json(outcome: &'static str, receipt: &FactCommitReceipt) -> Value {
+    json!({
+        "outcome": outcome,
+        "committed_event_ids": receipt
+            .committed_event_ids()
+            .iter()
+            .map(FactEventId::as_str)
+            .collect::<Vec<_>>(),
+        "active_assertion_id": receipt
+            .active_assertion_id()
+            .map(FactAssertionId::as_str),
+    })
+}
+
+pub(super) async fn project_memory_commit_receipt_from_operation_tx(
+    transaction: &Transaction<'_>,
+    owner: &FactOwnerV1,
+    receipt: &ProjectMemoryOperationReceiptV1,
+) -> FactStoreResult<FactCommitReceipt> {
+    let fact_id = receipt
+        .fact_id
+        .clone()
+        .ok_or(FactStoreError::InvalidCommitReceipt)?;
+    let last_event_id = receipt
+        .event_id
+        .clone()
+        .ok_or(FactStoreError::InvalidCommitReceipt)?;
+    let committed_event_ids = receipt
+        .receipt
+        .get("committed_event_ids")
+        .and_then(Value::as_array)
+        .ok_or(FactStoreError::InvalidCommitReceipt)?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or(FactStoreError::InvalidCommitReceipt)
+                .and_then(|value| FactEventId::new(value.to_owned()).map_err(FactStoreError::from))
+        })
+        .collect::<FactStoreResult<Vec<_>>>()?;
+    let active_assertion_id = match receipt.receipt.get("active_assertion_id") {
+        Some(Value::Null) | None => None,
+        Some(Value::String(value)) => {
+            Some(FactAssertionId::new(value.clone()).map_err(FactStoreError::from)?)
+        }
+        _ => return Err(FactStoreError::InvalidCommitReceipt),
+    };
+    let canonical = FactCommitReceipt::new(
+        fact_id,
+        owner.clone(),
+        committed_event_ids,
+        last_event_id,
+        active_assertion_id,
+    )?;
+    let key = OwnerKey::new(owner)?;
+    for event_id in canonical.committed_event_ids() {
+        if !row_exists_params(
+            transaction,
+            "SELECT 1 FROM memory_v2_lineage_events
+             WHERE event_id = ?1 AND fact_id = ?2 AND owner_kind = ?3 AND project_id = ?4",
+            params![
+                event_id.as_str(),
+                canonical.fact_id().as_str(),
+                key.kind,
+                key.project_id.as_str(),
+            ],
+        )
+        .await?
+        {
+            return Err(FactStoreError::InvalidCommitReceipt);
+        }
+    }
+    if let Some(assertion_id) = canonical.active_assertion_id()
+        && !row_exists_params(
+            transaction,
+            "SELECT 1 FROM memory_v2_assertions
+             WHERE assertion_id = ?1 AND fact_id = ?2 AND owner_kind = ?3
+               AND project_id = ?4 AND owner_json = ?5",
+            params![
+                assertion_id.as_str(),
+                canonical.fact_id().as_str(),
+                key.kind,
+                key.project_id.as_str(),
+                key.json.as_str(),
+            ],
+        )
+        .await?
+    {
+        return Err(FactStoreError::InvalidCommitReceipt);
+    }
+    Ok(canonical)
+}
+
+pub(in crate::store::memory) async fn load_mutable_project_memory_fact_tx(
+    transaction: &Transaction<'_>,
+    target: &ProjectMemoryFactIdV1,
+) -> FactStoreResult<StoredFactV1> {
+    let fact_id = target.fact_id().clone();
+    match load_project_memory_projection_tx(transaction, target.owner(), &fact_id).await? {
+        None => Err(FactStoreError::FactNotFound { fact_id }),
+        Some(ProjectMemoryFactProjectionV1::Unavailable(unavailable)) => {
+            match unavailable.payload_access() {
+                PayloadAccessState::Deleted => Err(FactStoreError::FactDeleted { fact_id }),
+                PayloadAccessState::Eligible => Err(FactStoreError::PayloadAccessMismatch),
+                PayloadAccessState::Redacted
+                | PayloadAccessState::Quarantined
+                | PayloadAccessState::RetentionExpired
+                | PayloadAccessState::Unavailable
+                | PayloadAccessState::Ambiguous => Err(FactStoreError::FactUnavailable { fact_id }),
+            }
+        }
+        Some(ProjectMemoryFactProjectionV1::Available(_)) => {
+            let owner_key = OwnerKey::new(target.owner())?;
+            load_current_fact_tx(transaction, &owner_key, target.owner(), &fact_id)
+                .await?
+                .ok_or(FactStoreError::FactUnavailable { fact_id })
+        }
+    }
+}
+
+fn content_digest(content: &str) -> FactStoreResult<LocatorDigest> {
+    LocatorDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(content.as_bytes()))
+    ))
+    .map_err(FactStoreError::from)
 }
 
 async fn project_memory_replay_add_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &ProjectMemoryOperationReceiptV1,
-) -> ProjectMemoryResult<ProjectMemoryFactAddOutcomeV1> {
-    let outcome = receipt
+) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1> {
+    let outcome_kind = receipt
         .receipt
         .get("outcome")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility add receipt is malformed",
-            )
+            storage_message(PROJECT_MEMORY_WRITE_OPERATION, "add receipt is malformed")
         })?;
-    match outcome {
-        "rejected_secret_like" => ProjectMemoryFactAddOutcomeV1::new(
-            None,
-            ProjectMemoryFactAddDispositionV1::RejectedSecretLike,
-            None,
-            None,
-            receipt
-                .receipt
-                .get("reason")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned),
+    let fact_id = receipt
+        .fact_id
+        .as_ref()
+        .ok_or(FactStoreError::InvalidCommitReceipt)?;
+    let fact = load_project_memory_projection_tx(transaction, owner, fact_id)
+        .await?
+        .ok_or(FactStoreError::InvalidCommitReceipt)?;
+    match outcome_kind {
+        "added" => ProjectMemoryFactAddOutcomeV1::added(
+            fact,
+            project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt).await?,
+            true,
         )
         .map_err(Into::into),
-        "added" | "near_duplicate" => {
-            let fact_id = receipt.fact_id.as_ref().ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility add receipt fact is missing",
-                )
-            })?;
-            let fact = load_project_memory_projection_tx(transaction, owner, fact_id)
-                .await?
-                .ok_or_else(|| {
-                    storage_message(
-                        PROJECT_MEMORY_WRITE_OPERATION,
-                        "compatibility replay fact is missing",
-                    )
+        "normalized_duplicate" => ProjectMemoryFactAddOutcomeV1::normalized_duplicate(
+            fact,
+            ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?,
+        )
+        .map_err(Into::into),
+        "semantic_near_duplicate" | "possible_conflict" => {
+            let closest_id = receipt
+                .receipt
+                .get("closest_fact_id")
+                .and_then(Value::as_str)
+                .ok_or(FactStoreError::InvalidCommitReceipt)
+                .and_then(|value| FactId::new(value.to_owned()).map_err(FactStoreError::from))?;
+            let closest = ProjectMemoryFactIdV1::new(owner.clone(), closest_id)?;
+            let similarity = project_memory_receipt_u64(&receipt.receipt, "similarity_millionths")
+                .and_then(|value| {
+                    u32::try_from(value).map_err(|_| FactStoreError::InvalidCommitReceipt)
                 })?;
-            let closest = if outcome == "near_duplicate" {
-                Some(ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone())?)
-            } else {
-                None
-            };
-            ProjectMemoryFactAddOutcomeV1::new(
-                Some(fact),
-                if outcome == "added" {
-                    ProjectMemoryFactAddDispositionV1::Added
-                } else {
-                    ProjectMemoryFactAddDispositionV1::NearDuplicate
-                },
+            let commit_receipt =
+                project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt)
+                    .await?;
+            if outcome_kind == "semantic_near_duplicate" {
+                return ProjectMemoryFactAddOutcomeV1::semantic_near_duplicate(
+                    fact,
+                    closest,
+                    similarity,
+                    commit_receipt,
+                    true,
+                )
+                .map_err(Into::into);
+            }
+            ProjectMemoryFactAddOutcomeV1::possible_conflict(
+                fact,
                 closest,
-                None,
-                None,
+                similarity,
+                commit_receipt,
+                true,
             )
             .map_err(Into::into)
         }
-        _ => Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "unknown compatibility add receipt outcome",
-        )
-        .into()),
+        _ => Err(FactStoreError::InvalidCommitReceipt.into()),
     }
 }
 
 pub(in crate::store::memory) async fn add_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactAddCommandV1,
-) -> ProjectMemoryResult<ProjectMemoryFactAddOutcomeV1> {
-    let payload_metadata = compatibility_payload_metadata(request.metadata());
-    let request_digest = project_memory_digest(json!({
-        "owner": request.owner(),
-        "content": request.content(),
-        "category": project_memory_category_label(request.category()),
-        "source": request.source(),
-        "tags": request.tags(),
-        "entities": request.entities(),
-        "metadata": &payload_metadata,
-        "sanitization_receipt": request.sanitization_receipt(),
-        "automation_run_id": request.automation_run_id(),
-        "default_trust": request.default_trust().as_f64(),
-        "actor": request.actor().map(ActorId::as_str),
-    }))?;
+) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1> {
+    let payload_metadata = payload_metadata(request.metadata());
+    let request_digest = request.input_digest().to_owned();
     if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
@@ -348,115 +400,160 @@ pub(in crate::store::memory) async fn add_project_memory_fact_tx(
     {
         return project_memory_replay_add_tx(transaction, request.owner(), &receipt).await;
     }
+
     let now = project_memory_now()?;
-    let sanitized = compatibility_verified_payload(
+    let sanitized = verified_payload(
         request.content(),
         request.category(),
         request.tags(),
         request.entities(),
         &payload_metadata,
+        request.source_label(),
         request.sanitization_receipt().clone(),
     )?;
-    let source = project_memory_source_label(request.source())?;
-    match compatibility_mirror_insert_tx(
+    let duplicate_query = ProjectMemoryFactContentDigestQueryV1::new(
+        request.owner().clone(),
+        content_digest(sanitized.payload.content())?,
+    )?;
+    if let Some(fact) =
+        find_project_memory_fact_by_content_digest_tx(transaction, &duplicate_query).await?
+    {
+        let closest = ProjectMemoryFactIdV1::new(request.owner().clone(), fact.fact_id().clone())?;
+        project_memory_record_operation_receipt_tx(
+            transaction,
+            request.owner(),
+            request.operation_id(),
+            "add",
+            &request_digest,
+            Some(fact.fact_id()),
+            None,
+            &json!({
+                "outcome": "normalized_duplicate",
+            }),
+            now,
+        )
+        .await?;
+        return ProjectMemoryFactAddOutcomeV1::normalized_duplicate(fact, closest)
+            .map_err(Into::into);
+    }
+
+    let proposed_content = sanitized.payload.content().to_owned();
+    let proposed_entities = sanitized.payload.entities().to_vec();
+    let batch = initial_batch(
+        request.owner(),
+        request.operation_id(),
+        sanitized.payload,
+        sanitized.access,
+        request.default_trust(),
+        request.actor().cloned(),
+        now,
+    )?;
+    let classification = classify_project_memory_add_tx(
         transaction,
         request.owner(),
-        &sanitized.payload,
-        &source,
-        request.default_trust(),
-        now,
+        batch.fact_id(),
+        &proposed_content,
+        &proposed_entities,
+    )
+    .await?;
+    if let Some(ProjectMemoryAddClassification::NormalizedDuplicate(closest)) = &classification {
+        let closest_id =
+            ProjectMemoryFactIdV1::new(request.owner().clone(), closest.fact_id().clone())?;
+        project_memory_record_operation_receipt_tx(
+            transaction,
+            request.owner(),
+            request.operation_id(),
+            "add",
+            &request_digest,
+            Some(closest.fact_id()),
+            None,
+            &json!({
+                "outcome": "normalized_duplicate",
+            }),
+            now,
+        )
+        .await?;
+        return ProjectMemoryFactAddOutcomeV1::normalized_duplicate(
+            ProjectMemoryFactProjectionV1::Available(Box::new(closest.clone())),
+            closest_id,
+        )
+        .map_err(Into::into);
+    }
+    let comparison = match classification {
+        Some(ProjectMemoryAddClassification::SemanticNearDuplicate {
+            closest_fact_id,
+            similarity_millionths,
+        }) => Some((closest_fact_id, similarity_millionths, false)),
+        Some(ProjectMemoryAddClassification::PossibleConflict {
+            closest_fact_id,
+            similarity_millionths,
+        }) => Some((closest_fact_id, similarity_millionths, true)),
+        Some(ProjectMemoryAddClassification::NormalizedDuplicate(_)) | None => None,
+    };
+
+    let (canonical_receipt, replayed) = commit_batch_tx(transaction, &batch).await?;
+    let fact = load_project_memory_projection_tx(
+        transaction,
+        request.owner(),
+        canonical_receipt.fact_id(),
     )
     .await?
-    {
-        CompatibilityMirrorInsertV1::Existing { fact_id, .. } => {
-            let fact = load_project_memory_projection_tx(transaction, request.owner(), &fact_id)
-                .await?
-                .ok_or_else(|| {
-                    storage_message(
-                        PROJECT_MEMORY_WRITE_OPERATION,
-                        "duplicate compatibility fact projection is missing",
-                    )
-                })?;
-            let closest = ProjectMemoryFactIdV1::new(request.owner().clone(), fact_id.clone())?;
-            let receipt = json!({ "outcome": "near_duplicate" });
-            project_memory_record_operation_receipt_tx(
-                transaction,
-                request.owner(),
-                request.operation_id(),
-                "add",
-                &request_digest,
-                Some(&fact_id),
-                None,
-                &receipt,
-                now,
-            )
-            .await?;
-            ProjectMemoryFactAddOutcomeV1::new(
-                Some(fact),
-                ProjectMemoryFactAddDispositionV1::NearDuplicate,
-                Some(closest),
-                None,
-                None,
-            )
-            .map_err(Into::into)
-        }
-        CompatibilityMirrorInsertV1::Inserted(legacy_fact_id) => {
-            let (identity, mapping) =
-                compatibility_legacy_mapping_for_new_fact(request.owner(), legacy_fact_id, now)?;
-            let batch = compatibility_initial_batch(
-                request.owner(),
-                identity,
-                mapping.clone(),
-                sanitized.payload,
-                sanitized.access,
-                request.default_trust(),
-                request.actor().cloned(),
-                now,
-            )?;
-            let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-            let fact =
-                load_project_memory_projection_tx(transaction, request.owner(), mapping.fact_id())
-                    .await?
-                    .ok_or_else(|| {
-                        storage_message(
-                            PROJECT_MEMORY_WRITE_OPERATION,
-                            "added compatibility fact projection is missing",
-                        )
-                    })?;
-            let receipt = json!({ "outcome": "added" });
-            project_memory_record_operation_receipt_tx(
-                transaction,
-                request.owner(),
-                request.operation_id(),
-                "add",
-                &request_digest,
-                Some(mapping.fact_id()),
-                Some(canonical_receipt.last_event_id()),
-                &receipt,
-                now,
-            )
-            .await?;
-            ProjectMemoryFactAddOutcomeV1::new(
-                Some(fact),
-                ProjectMemoryFactAddDispositionV1::Added,
-                None,
-                None,
-                None,
-            )
-            .map_err(Into::into)
-        }
+    .ok_or_else(|| storage_message(PROJECT_MEMORY_WRITE_OPERATION, "added fact is missing"))?;
+    let outcome_kind = match comparison {
+        Some((_, _, true)) => "possible_conflict",
+        Some((_, _, false)) => "semantic_near_duplicate",
+        None => "added",
+    };
+    let mut receipt_json = commit_receipt_json(outcome_kind, &canonical_receipt);
+    if let Some((closest_fact_id, similarity_millionths, _)) = &comparison {
+        receipt_json["closest_fact_id"] = json!(closest_fact_id.as_str());
+        receipt_json["similarity_millionths"] = json!(similarity_millionths);
     }
+    project_memory_record_operation_receipt_tx(
+        transaction,
+        request.owner(),
+        request.operation_id(),
+        "add",
+        &request_digest,
+        Some(canonical_receipt.fact_id()),
+        Some(canonical_receipt.last_event_id()),
+        &receipt_json,
+        now,
+    )
+    .await?;
+    if let Some((closest_fact_id, similarity_millionths, conflict)) = comparison {
+        let closest = ProjectMemoryFactIdV1::new(request.owner().clone(), closest_fact_id)?;
+        if conflict {
+            return ProjectMemoryFactAddOutcomeV1::possible_conflict(
+                fact,
+                closest,
+                similarity_millionths,
+                canonical_receipt,
+                replayed,
+            )
+            .map_err(Into::into);
+        }
+        return ProjectMemoryFactAddOutcomeV1::semantic_near_duplicate(
+            fact,
+            closest,
+            similarity_millionths,
+            canonical_receipt,
+            replayed,
+        )
+        .map_err(Into::into);
+    }
+    ProjectMemoryFactAddOutcomeV1::added(fact, canonical_receipt, replayed).map_err(Into::into)
 }
 
 async fn project_memory_replay_update_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &ProjectMemoryOperationReceiptV1,
-) -> ProjectMemoryResult<ProjectMemoryFactUpdateOutcomeV1> {
+) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
     let fact_id = receipt.fact_id.as_ref().ok_or_else(|| {
         storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility update receipt fact is missing",
+            "update receipt fact is missing",
         )
     })?;
     let fact = load_project_memory_projection_tx(transaction, owner, fact_id)
@@ -464,7 +561,7 @@ async fn project_memory_replay_update_tx(
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility update replay fact is missing",
+                "replayed update fact is missing",
             )
         })?;
     let trust_delta_millionths = receipt
@@ -475,22 +572,28 @@ async fn project_memory_replay_update_tx(
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility update receipt is malformed",
+                "update receipt is malformed",
             )
         })?;
-    ProjectMemoryFactUpdateOutcomeV1::new(fact, trust_delta_millionths).map_err(Into::into)
+    ProjectMemoryFactUpdateOutcomeV1::committed(
+        fact,
+        trust_delta_millionths,
+        project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt).await?,
+        true,
+    )
+    .map_err(Into::into)
 }
 
 pub(in crate::store::memory) async fn update_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactUpdateCommandV1,
-) -> ProjectMemoryResult<ProjectMemoryFactUpdateOutcomeV1> {
+) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
     let request_digest = project_memory_digest(json!({
-        "target": project_memory_target_digest(request.target())?,
+        "fact_id": request.target().fact_id().as_str(),
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
         "content": request.patch().content(),
         "category": request.patch().category().map(project_memory_category_label),
-        "source": match request.patch().source() {
+        "source_label": match request.patch().source_label() {
             None => json!({"changed": false}),
             Some(value) => json!({"changed": true, "value": value}),
         },
@@ -512,26 +615,14 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
         return project_memory_replay_update_tx(transaction, request.target().owner(), &receipt)
             .await;
     }
-    let fact_id = resolve_project_memory_target_tx(transaction, request.target())
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility update target is missing",
-            )
-        })?;
-    let owner_key = OwnerKey::new(request.target().owner())?;
-    let current = load_current_fact_tx(transaction, &owner_key, request.target().owner(), &fact_id)
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility update target is unavailable",
-            )
-        })?;
+
+    let fact_id = request.target().fact_id().clone();
+    let current = load_mutable_project_memory_fact_tx(transaction, request.target()).await?;
     let previous_payload = current
         .payload()
-        .ok_or(FactStoreError::PayloadAccessMismatch)?;
+        .ok_or_else(|| FactStoreError::FactUnavailable {
+            fact_id: fact_id.clone(),
+        })?;
     let content = request
         .patch()
         .content()
@@ -549,22 +640,16 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
         .patch()
         .metadata()
         .unwrap_or(previous_payload.metadata());
-    let source = match request.patch().source() {
-        Some(Some(source)) => project_memory_source_label(Some(source))?,
-        Some(None) => "manual".to_owned(),
-        None => {
-            let mapping =
-                project_memory_required_mapping_tx(transaction, request.target().owner(), &fact_id)
-                    .await?;
-            project_memory_source_for_fact_tx(transaction, &mapping).await?
-        }
-    };
+    let source_label = request
+        .patch()
+        .source_label()
+        .unwrap_or_else(|| previous_payload.source_label());
     let Some(sanitized) =
-        compatibility_sanitize_payload(content, category, tags, entities, metadata)?
+        sanitize_payload(content, category, tags, entities, metadata, source_label)?
     else {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility update payload was rejected by the privacy sanitizer",
+            "update payload was rejected by the privacy sanitizer",
         )
         .into());
     };
@@ -572,7 +657,7 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
     let now = project_memory_now()?;
     let batch = project_memory_correction_batch(
         &current,
-        sanitized.payload.clone(),
+        sanitized.payload,
         sanitized.access,
         new_trust,
         request
@@ -582,29 +667,16 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
         request.actor().cloned(),
         now,
     )?;
-    let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-    let mapping =
-        project_memory_required_mapping_tx(transaction, request.target().owner(), &fact_id).await?;
-    compatibility_mirror_update_tx(
-        transaction,
-        mapping.legacy_fact_id(),
-        &sanitized.payload,
-        &source,
-        new_trust,
-        now,
-    )
-    .await?;
+    let (canonical_receipt, replayed) = commit_batch_tx(transaction, &batch).await?;
     let fact = load_project_memory_projection_tx(transaction, request.target().owner(), &fact_id)
         .await?
         .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "updated compatibility projection is missing",
-            )
+            storage_message(PROJECT_MEMORY_WRITE_OPERATION, "updated fact is missing")
         })?;
     let trust_delta_millionths =
         ((new_trust.as_f64() - current.trust().as_f64()) * 1_000_000.0).round() as i32;
-    let receipt = json!({ "trust_delta_millionths": trust_delta_millionths });
+    let mut receipt_json = commit_receipt_json("updated", &canonical_receipt);
+    receipt_json["trust_delta_millionths"] = json!(trust_delta_millionths);
     project_memory_record_operation_receipt_tx(
         transaction,
         request.target().owner(),
@@ -613,56 +685,68 @@ pub(in crate::store::memory) async fn update_project_memory_fact_tx(
         &request_digest,
         Some(&fact_id),
         Some(canonical_receipt.last_event_id()),
-        &receipt,
+        &receipt_json,
         now,
     )
     .await?;
-    ProjectMemoryFactUpdateOutcomeV1::new(fact, trust_delta_millionths).map_err(Into::into)
+    ProjectMemoryFactUpdateOutcomeV1::committed(
+        fact,
+        trust_delta_millionths,
+        canonical_receipt,
+        replayed,
+    )
+    .map_err(Into::into)
 }
 
 async fn project_memory_replay_remove_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &ProjectMemoryOperationReceiptV1,
-) -> ProjectMemoryResult<ProjectMemoryFactRemoveOutcomeV1> {
-    let fact_id = receipt.fact_id.as_ref().ok_or_else(|| {
-        storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility remove receipt fact is missing",
-        )
-    })?;
-    let fact = load_project_memory_projection_tx(transaction, owner, fact_id)
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility remove replay fact is missing",
-            )
-        })?;
-    let removed = receipt
+) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
+    let outcome = receipt
         .receipt
-        .get("removed")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility remove receipt is malformed",
+        .get("outcome")
+        .and_then(Value::as_str)
+        .ok_or(FactStoreError::InvalidCommitReceipt)?;
+    let remaining_fact_count =
+        project_memory_receipt_u64(&receipt.receipt, "remaining_fact_count")?;
+    match outcome {
+        "not_found" => Ok(ProjectMemoryFactRemoveOutcomeV1::not_found(
+            remaining_fact_count,
+        )),
+        "already_removed" | "removed" => {
+            let fact_id = receipt
+                .fact_id
+                .as_ref()
+                .ok_or(FactStoreError::InvalidCommitReceipt)?;
+            let fact = load_project_memory_projection_tx(transaction, owner, fact_id)
+                .await?
+                .ok_or(FactStoreError::InvalidCommitReceipt)?;
+            if outcome == "already_removed" {
+                return ProjectMemoryFactRemoveOutcomeV1::already_removed(
+                    fact,
+                    remaining_fact_count,
+                );
+            }
+            ProjectMemoryFactRemoveOutcomeV1::removed(
+                fact,
+                remaining_fact_count,
+                project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt)
+                    .await?,
+                true,
             )
-        })?;
-    let remaining_fact_count = compatibility_active_fact_count_tx(transaction, owner).await?;
-    Ok(ProjectMemoryFactRemoveOutcomeV1::new(
-        fact,
-        removed,
-        remaining_fact_count,
-    ))
+            .map_err(Into::into)
+        }
+        _ => Err(FactStoreError::InvalidCommitReceipt.into()),
+    }
 }
 
 pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactRemoveCommandV1,
-) -> ProjectMemoryResult<ProjectMemoryFactRemoveOutcomeV1> {
+) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
     let request_digest = project_memory_digest(json!({
-        "target": project_memory_target_digest(request.target())?,
+        "fact_id": request.target().fact_id().as_str(),
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
         "actor": request.actor().map(ActorId::as_str),
     }))?;
@@ -678,75 +762,94 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
         return project_memory_replay_remove_tx(transaction, request.target().owner(), &receipt)
             .await;
     }
+
     let now = project_memory_now()?;
-    // Resolving the target and loading its current projection inside this
-    // same transaction lets an absent fact -- whether it was never added, or
-    // was concurrently removed by another operation just before this one --
-    // surface as the idempotent no-op outcome below instead of a hard
-    // authority error. Callers no longer need a separate pre-read
-    // transaction to get that idempotency (see `remove_fact`).
-    let Some(fact_id) = resolve_project_memory_target_tx(transaction, request.target()).await?
-    else {
-        let remaining_fact_count =
-            compatibility_active_fact_count_tx(transaction, request.target().owner()).await?;
-        return Ok(ProjectMemoryFactRemoveOutcomeV1::not_found(
-            remaining_fact_count,
-        ));
-    };
+    let fact_id = request.target().fact_id().clone();
     let owner_key = OwnerKey::new(request.target().owner())?;
     let Some(current) = load_current_projection(transaction, &owner_key, &fact_id).await? else {
         let remaining_fact_count =
-            compatibility_active_fact_count_tx(transaction, request.target().owner()).await?;
+            active_fact_count_tx(transaction, request.target().owner()).await?;
+        project_memory_record_operation_receipt_tx(
+            transaction,
+            request.target().owner(),
+            request.operation_id(),
+            "remove",
+            &request_digest,
+            None,
+            None,
+            &json!({
+                "outcome": "not_found",
+                "remaining_fact_count": remaining_fact_count,
+            }),
+            now,
+        )
+        .await?;
         return Ok(ProjectMemoryFactRemoveOutcomeV1::not_found(
             remaining_fact_count,
         ));
     };
-    let removed = current.access != PayloadAccessState::Deleted;
-    let event_id = if removed {
-        let expected_last_event_id = request
-            .expected_last_event_id()
-            .cloned()
-            .or_else(|| current.last_event_id.clone())
-            .ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility remove target has no lineage CAS identity",
-                )
-            })?;
-        let batch = project_memory_removal_batch(
-            request.target().owner(),
-            &fact_id,
-            current.access,
-            Some(expected_last_event_id),
-            request.actor().cloned(),
-            now,
-        )?;
-        let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
-        let canonical_event_id = canonical_receipt.last_event_id().clone();
-        tombstone_fact_derivatives_tx(
+    if current.access == PayloadAccessState::Deleted {
+        let fact =
+            load_project_memory_projection_tx(transaction, request.target().owner(), &fact_id)
+                .await?
+                .ok_or_else(|| {
+                    storage_message(PROJECT_MEMORY_WRITE_OPERATION, "deleted fact is missing")
+                })?;
+        let remaining_fact_count =
+            active_fact_count_tx(transaction, request.target().owner()).await?;
+        project_memory_record_operation_receipt_tx(
             transaction,
             request.target().owner(),
-            fact_id.as_str(),
-            canonical_event_id.as_str(),
+            request.operation_id(),
+            "remove",
+            &request_digest,
+            Some(&fact_id),
+            None,
+            &json!({
+                "outcome": "already_removed",
+                "remaining_fact_count": remaining_fact_count,
+            }),
             now,
         )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-        Some(canonical_event_id)
-    } else {
-        None
-    };
-    let fact = load_project_memory_projection_tx(transaction, request.target().owner(), &fact_id)
-        .await?
+        .await?;
+        return ProjectMemoryFactRemoveOutcomeV1::already_removed(fact, remaining_fact_count);
+    }
+    let expected_last_event_id = request
+        .expected_last_event_id()
+        .cloned()
+        .or(current.last_event_id.clone())
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "removed compatibility projection is missing",
+                "remove target has no lineage CAS identity",
             )
         })?;
-    let remaining_fact_count =
-        compatibility_active_fact_count_tx(transaction, request.target().owner()).await?;
-    let receipt = json!({ "removed": removed });
+    let batch = project_memory_removal_batch(
+        request.target().owner(),
+        &fact_id,
+        current.access,
+        expected_last_event_id,
+        request.actor().cloned(),
+        now,
+    )?;
+    let (canonical_receipt, replayed) = commit_batch_tx(transaction, &batch).await?;
+    tombstone_fact_derivatives_tx(
+        transaction,
+        request.target().owner(),
+        fact_id.as_str(),
+        canonical_receipt.last_event_id().as_str(),
+        now,
+    )
+    .await
+    .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+    let fact = load_project_memory_projection_tx(transaction, request.target().owner(), &fact_id)
+        .await?
+        .ok_or_else(|| {
+            storage_message(PROJECT_MEMORY_WRITE_OPERATION, "removed fact is missing")
+        })?;
+    let remaining_fact_count = active_fact_count_tx(transaction, request.target().owner()).await?;
+    let mut receipt_json = commit_receipt_json("removed", &canonical_receipt);
+    receipt_json["remaining_fact_count"] = json!(remaining_fact_count);
     project_memory_record_operation_receipt_tx(
         transaction,
         request.target().owner(),
@@ -754,14 +857,16 @@ pub(in crate::store::memory) async fn remove_project_memory_fact_tx(
         "remove",
         &request_digest,
         Some(&fact_id),
-        event_id.as_ref(),
-        &receipt,
+        Some(canonical_receipt.last_event_id()),
+        &receipt_json,
         now,
     )
     .await?;
-    Ok(ProjectMemoryFactRemoveOutcomeV1::new(
+    ProjectMemoryFactRemoveOutcomeV1::removed(
         fact,
-        removed,
         remaining_fact_count,
-    ))
+        canonical_receipt,
+        replayed,
+    )
+    .map_err(Into::into)
 }

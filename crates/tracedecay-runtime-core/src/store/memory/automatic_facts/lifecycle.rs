@@ -1,9 +1,8 @@
 //! Terminal automatic fact-receipt persistence and replay.
 
-use super::super::crud::compatibility_payload_metadata;
 use super::super::envelope::{
-    ProjectMemoryOperationReceiptV1, project_memory_digest,
-    project_memory_lookup_operation_receipt_tx, project_memory_record_operation_receipt_tx,
+    ProjectMemoryOperationReceiptV1, project_memory_lookup_operation_receipt_tx,
+    project_memory_record_operation_receipt_tx,
 };
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_WRITE_OPERATION, project_memory_now, row_string, storage_error,
@@ -22,26 +21,8 @@ use tracedecay_domain::{
 use tracedecay_store::{
     FactStoreError, FactStoreResult, ProjectMemoryAutomaticFactEffectV1,
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryResult, ProjectMemoryStoreError,
+    ProjectMemoryFactAddCommandV1,
 };
-
-pub(in crate::store::memory) fn project_memory_automatic_fact_request_digest(
-    request: &ProjectMemoryFactAddCommandV1,
-) -> FactStoreResult<String> {
-    project_memory_digest(json!({
-        "owner": request.owner(),
-        "content": request.content(),
-        "category": super::super::primitives::project_memory_category_label(request.category()),
-        "source": request.source(),
-        "tags": request.tags(),
-        "entities": request.entities(),
-        "metadata": compatibility_payload_metadata(request.metadata()),
-        "sanitization_receipt": request.sanitization_receipt(),
-        "automation_run_id": request.automation_run_id(),
-        "default_trust": request.default_trust().as_f64(),
-        "actor": request.actor().map(tracedecay_domain::ActorId::as_str),
-    }))
-}
 
 async fn automatic_fact_receipt_digest_tx(
     transaction: &Transaction<'_>,
@@ -121,7 +102,7 @@ pub(in crate::store::memory) async fn project_memory_replay_automatic_fact_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &ProjectMemoryOperationReceiptV1,
-) -> ProjectMemoryResult<ProjectMemoryAutomaticFactReceiptV1> {
+) -> FactStoreResult<ProjectMemoryAutomaticFactReceiptV1> {
     let apply_id = automatic_fact_receipt_apply_id(receipt)?;
     project_memory_automatic_fact_receipt_record_tx(transaction, owner, &apply_id)
         .await?
@@ -195,7 +176,7 @@ pub(in crate::store::memory) async fn project_memory_existing_automatic_fact_rec
     owner: &FactOwnerV1,
     apply_id: &ProvenanceId,
     request_digest: &str,
-) -> ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
+) -> FactStoreResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
     if let Some(existing_digest) =
         automatic_fact_receipt_digest_tx(transaction, owner, apply_id).await?
     {
@@ -220,7 +201,7 @@ pub(in crate::store::memory) async fn project_memory_lookup_automatic_fact_opera
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactAddCommandV1,
     request_digest: &str,
-) -> ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
+) -> FactStoreResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
     let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
@@ -241,7 +222,7 @@ pub(in crate::store::memory) async fn project_memory_record_automatic_fact_opera
     transaction: &Transaction<'_>,
     receipt: &ProjectMemoryAutomaticFactReceiptV1,
     request_digest: &str,
-) -> ProjectMemoryResult<()> {
+) -> FactStoreResult<()> {
     let receipt_value = json!({
         "apply_id": receipt.apply_id().as_str(),
         "state": project_memory_automatic_fact_state_label(receipt.state()),
@@ -258,5 +239,4 @@ pub(in crate::store::memory) async fn project_memory_record_automatic_fact_opera
         project_memory_now()?,
     )
     .await
-    .map_err(ProjectMemoryStoreError::Store)
 }

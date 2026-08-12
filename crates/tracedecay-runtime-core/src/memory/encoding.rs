@@ -5,14 +5,17 @@ use sha2::{Digest, Sha256};
 
 type Fhrr2048 = FHRRAlgebra<2048>;
 
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum HolographicEncodingError {
+    #[error("holographic vector has dimension {actual}; expected {expected}")]
+    DimensionMismatch { expected: usize, actual: usize },
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct HolographicEncoder;
 
 impl HolographicEncoder {
     pub const DIMENSIONS: usize = 2048;
-    pub const SERIALIZED_F32_BYTES: usize = 8 + Self::DIMENSIONS * std::mem::size_of::<f32>();
-    pub const HRR_PRECISION: &'static str = "f32";
-    pub(crate) const LEGACY_HRR_PRECISION: &'static str = "f64";
     pub const ROLE_CONTENT: &'static str = "__hrr_role_content__";
     pub const ROLE_ENTITY: &'static str = "__hrr_role_entity__";
 
@@ -24,26 +27,27 @@ impl HolographicEncoder {
         normalize_coefficients(deterministic_coefficients(label))
     }
 
-    pub fn encode_text(&self, text: &str) -> Vec<f64> {
+    pub fn encode_text(&self, text: &str) -> Result<Vec<f64>, HolographicEncodingError> {
         let tokens = tokenize_text(text);
-        if tokens.is_empty() {
-            return self.encode_atom("text:__hrr_empty__");
-        }
-        let vectors: Vec<Vec<f64>> = tokens
-            .iter()
-            .map(|token| self.encode_atom(&format!("text:{token}")))
-            .collect();
-        average_coefficients(&vectors)
+        let Some((first, rest)) = tokens.split_first() else {
+            return Ok(self.encode_atom("text:__hrr_empty__"));
+        };
+        average_coefficients(
+            self.encode_atom(&format!("text:{first}")),
+            rest.iter()
+                .map(|token| self.encode_atom(&format!("text:{token}"))),
+        )
     }
 
-    pub fn encode_fact(&self, content: &str, entities: &[String]) -> Vec<f64> {
-        let (Some(content_role), Some(content_value)) = (
-            to_fhrr(&self.encode_atom(Self::ROLE_CONTENT)),
-            to_fhrr(&self.encode_text(content)),
-        ) else {
-            return Vec::new();
-        };
-        let mut components = vec![content_role.bind(&content_value).to_coefficients()];
+    pub fn encode_fact(
+        &self,
+        content: &str,
+        entities: &[String],
+    ) -> Result<Vec<f64>, HolographicEncodingError> {
+        let content_role = to_fhrr(&self.encode_atom(Self::ROLE_CONTENT))?;
+        let content_value = to_fhrr(&self.encode_text(content)?)?;
+        let content_component = content_role.bind(&content_value).to_coefficients();
+        let mut entity_components = Vec::new();
 
         let mut normalized_entities: Vec<String> = entities
             .iter()
@@ -54,59 +58,18 @@ impl HolographicEncoder {
         normalized_entities.dedup();
 
         for entity in normalized_entities {
-            let (Some(role), Some(value)) = (
-                to_fhrr(&self.encode_atom(Self::ROLE_ENTITY)),
-                to_fhrr(&self.encode_text(&entity)),
-            ) else {
-                continue;
-            };
-
+            let role = to_fhrr(&self.encode_atom(Self::ROLE_ENTITY))?;
+            let value = to_fhrr(&self.encode_text(&entity)?)?;
             let bound = role.bind(&value);
-            components.push(bound.to_coefficients());
+            entity_components.push(bound.to_coefficients());
         }
 
-        average_coefficients(&components)
+        average_coefficients(content_component, entity_components)
     }
 
-    pub fn similarity(&self, left: &[f64], right: &[f64]) -> f64 {
-        if let (Some(left_fhrr), Some(right_fhrr)) = (to_fhrr(left), to_fhrr(right)) {
-            return left_fhrr.similarity(&right_fhrr);
-        }
-
-        cosine_similarity(left, right)
+    pub fn similarity(&self, left: &[f64], right: &[f64]) -> Result<f64, HolographicEncodingError> {
+        Ok(to_fhrr(left)?.similarity(&to_fhrr(right)?))
     }
-
-    pub fn serialize(coefficients: &[f64]) -> bincode::Result<Vec<u8>> {
-        let compact: Vec<f32> = coefficients.iter().map(|value| *value as f32).collect();
-        bincode::serialize(&compact)
-    }
-
-    pub fn deserialize(bytes: &[u8]) -> bincode::Result<Vec<f64>> {
-        match serialized_vector_precision(bytes) {
-            Some(HolographicEncoder::HRR_PRECISION) => {
-                let compact: Vec<f32> = bincode::deserialize(bytes)?;
-                Ok(compact.into_iter().map(f64::from).collect())
-            }
-            Some(HolographicEncoder::LEGACY_HRR_PRECISION) | None => bincode::deserialize(bytes),
-            Some(_) => unreachable!("precision detector only returns known precision tags"),
-        }
-    }
-}
-
-fn serialized_vector_precision(bytes: &[u8]) -> Option<&'static str> {
-    let len_bytes = bytes.get(..8)?;
-    let mut len = [0_u8; 8];
-    len.copy_from_slice(len_bytes);
-    let elements = u64::from_le_bytes(len) as usize;
-    let f32_bytes = 8_usize.checked_add(elements.checked_mul(std::mem::size_of::<f32>())?)?;
-    if bytes.len() == f32_bytes {
-        return Some(HolographicEncoder::HRR_PRECISION);
-    }
-    let f64_bytes = 8_usize.checked_add(elements.checked_mul(std::mem::size_of::<f64>())?)?;
-    if bytes.len() == f64_bytes {
-        return Some(HolographicEncoder::LEGACY_HRR_PRECISION);
-    }
-    None
 }
 
 fn deterministic_coefficients(label: &str) -> Vec<f64> {
@@ -162,27 +125,34 @@ fn push_token(tokens: &mut Vec<String>, current: &mut String) {
     }
 }
 
-fn average_coefficients(vectors: &[Vec<f64>]) -> Vec<f64> {
-    if vectors.is_empty() {
-        return vec![0.0; HolographicEncoder::DIMENSIONS];
+fn average_coefficients(
+    first: Vec<f64>,
+    rest: impl IntoIterator<Item = Vec<f64>>,
+) -> Result<Vec<f64>, HolographicEncodingError> {
+    if first.len() != HolographicEncoder::DIMENSIONS {
+        return Err(HolographicEncodingError::DimensionMismatch {
+            expected: HolographicEncoder::DIMENSIONS,
+            actual: first.len(),
+        });
     }
-    let mut average = vec![0.0; HolographicEncoder::DIMENSIONS];
-    let mut count = 0.0;
-    for vector in vectors {
+    let mut average = first;
+    let mut count = 1.0;
+    for vector in rest {
         if vector.len() != HolographicEncoder::DIMENSIONS {
-            continue;
+            return Err(HolographicEncodingError::DimensionMismatch {
+                expected: HolographicEncoder::DIMENSIONS,
+                actual: vector.len(),
+            });
         }
         count += 1.0;
-        for (target, value) in average.iter_mut().zip(vector) {
+        for (target, value) in average.iter_mut().zip(&vector) {
             *target += value;
         }
     }
-    if count > 0.0 {
-        for value in &mut average {
-            *value /= count;
-        }
+    for value in &mut average {
+        *value /= count;
     }
-    normalize_coefficients(average)
+    Ok(normalize_coefficients(average))
 }
 
 fn normalize_coefficients(mut coefficients: Vec<f64>) -> Vec<f64> {
@@ -201,25 +171,51 @@ fn normalize_coefficients(mut coefficients: Vec<f64>) -> Vec<f64> {
     coefficients
 }
 
-fn to_fhrr(coefficients: &[f64]) -> Option<Fhrr2048> {
-    Fhrr2048::from_coefficients(coefficients).ok()
+fn to_fhrr(coefficients: &[f64]) -> Result<Fhrr2048, HolographicEncodingError> {
+    if coefficients.len() != HolographicEncoder::DIMENSIONS {
+        return Err(HolographicEncodingError::DimensionMismatch {
+            expected: HolographicEncoder::DIMENSIONS,
+            actual: coefficients.len(),
+        });
+    }
+    Fhrr2048::from_coefficients(coefficients).map_err(|_| {
+        HolographicEncodingError::DimensionMismatch {
+            expected: HolographicEncoder::DIMENSIONS,
+            actual: coefficients.len(),
+        }
+    })
 }
 
-fn cosine_similarity(left: &[f64], right: &[f64]) -> f64 {
-    if left.len() != right.len() || left.is_empty() {
-        return 0.0;
+#[cfg(test)]
+mod tests {
+    use super::{HolographicEncoder, HolographicEncodingError};
+
+    #[test]
+    fn fact_encoding_is_restart_deterministic_without_persisted_vectors() {
+        let entities = vec!["SQLite".to_owned(), "Grafeo".to_owned()];
+        let first = HolographicEncoder::new()
+            .encode_fact("canonical facts use deterministic FHRR", &entities)
+            .unwrap();
+        let reopened = HolographicEncoder::new()
+            .encode_fact("canonical facts use deterministic FHRR", &entities)
+            .unwrap();
+
+        assert_eq!(first.len(), HolographicEncoder::DIMENSIONS);
+        assert_eq!(first, reopened);
     }
 
-    let (dot, left_norm, right_norm) = left
-        .iter()
-        .zip(right.iter())
-        .fold((0.0, 0.0, 0.0), |(dot, left_norm, right_norm), (l, r)| {
-            (dot + l * r, left_norm + l * l, right_norm + r * r)
-        });
+    #[test]
+    fn similarity_rejects_noncanonical_dimensions() {
+        let error = HolographicEncoder::new()
+            .similarity(&[0.0; 3], &[0.0; 3])
+            .unwrap_err();
 
-    if left_norm <= f64::EPSILON || right_norm <= f64::EPSILON {
-        0.0
-    } else {
-        dot / (left_norm.sqrt() * right_norm.sqrt())
+        assert_eq!(
+            error,
+            HolographicEncodingError::DimensionMismatch {
+                expected: HolographicEncoder::DIMENSIONS,
+                actual: 3,
+            },
+        );
     }
 }

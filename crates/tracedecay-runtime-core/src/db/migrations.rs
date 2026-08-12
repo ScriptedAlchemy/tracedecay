@@ -198,6 +198,7 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
                        'memory_oplog', 'memory_fact_relations',
                        'memory_banks', 'memory_bank_dirty',
                        'memory_v2_banks', 'memory_v2_bank_dirty',
+                       'memory_v2_fact_relations',
                        'memory_v2_assertion_vectors',
                        'memory_v2_legacy_map', 'memory_v2_legacy_quarantine',
                        'memory_v2_backfill_progress',

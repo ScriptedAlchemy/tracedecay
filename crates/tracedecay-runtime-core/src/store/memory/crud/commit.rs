@@ -6,8 +6,7 @@ use super::super::primitives::{
 };
 use super::{
     CommitAttempt, ensure_event_references, ensure_fact_identity, event_exists, event_matches,
-    insert_event, insert_legacy_mapping, legacy_mapping_exists, legacy_mapping_matches,
-    payload_is_purged_projection, publish_current_projection, receipt_outcome,
+    insert_event, payload_is_purged_projection, publish_current_projection, receipt_outcome,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -87,9 +86,6 @@ pub(super) async fn commit_fact_tx(
     }
     if let Some(assertion) = batch.assertion() {
         insert_assertion(transaction, &owner, assertion).await?;
-    }
-    if let Some(mapping) = batch.legacy_mapping() {
-        insert_legacy_mapping(transaction, &owner, mapping).await?;
     }
     for event in batch.events() {
         ensure_event_references(transaction, &owner, event).await?;
@@ -193,11 +189,6 @@ async fn batch_is_exact_replay(
     {
         return Ok(false);
     }
-    if let Some(mapping) = batch.legacy_mapping()
-        && !legacy_mapping_matches(transaction, owner, mapping).await?
-    {
-        return Ok(false);
-    }
     for event in batch.events() {
         if !event_matches(transaction, owner, event).await? {
             return Ok(false);
@@ -233,15 +224,6 @@ async fn batch_identity_collision(
         return Ok(Some(collision(
             "assertion",
             assertion.assertion_id().as_str(),
-        )));
-    }
-    if let Some(mapping) = batch.legacy_mapping()
-        && legacy_mapping_exists(transaction, owner, mapping).await?
-        && !legacy_mapping_matches(transaction, owner, mapping).await?
-    {
-        return Ok(Some(collision(
-            "legacy mapping",
-            mapping.fact_id().as_str(),
         )));
     }
     for event in batch.events() {
@@ -614,7 +596,7 @@ fn superseded_assertions(kind: &FactAssertionKindV1) -> Vec<&FactAssertionId> {
     match kind {
         FactAssertionKindV1::Correction { supersedes } => vec![supersedes],
         FactAssertionKindV1::Merge { supersedes } => supersedes.iter().collect(),
-        FactAssertionKindV1::Initial | FactAssertionKindV1::LegacyImport => Vec::new(),
+        FactAssertionKindV1::Initial => Vec::new(),
     }
 }
 

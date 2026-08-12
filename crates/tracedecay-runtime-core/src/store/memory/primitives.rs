@@ -3,33 +3,23 @@
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::privacy::sanitize_provider_metadata_text;
-
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use serde::{Serialize, de::DeserializeOwned};
 
-use tracedecay_domain::{
-    FactCategoryV1, FactOwnerV1, PayloadAccessState, SourceStoreId, UtcMicros,
-};
-use tracedecay_store::{FactStoreError, FactStoreResult};
+use tracedecay_domain::{FactCategoryV1, FactOwnerV1, PayloadAccessState, UtcMicros};
+use tracedecay_store::{FactReadControl, FactStoreError, FactStoreResult};
 
 pub(super) const COMMIT_OPERATION: &str = "commit canonical memory fact";
 
 pub(super) const QUERY_OPERATION: &str = "query canonical memory facts";
 
-pub(super) const PROJECT_MEMORY_READ_OPERATION: &str = "read compatibility memory facts";
+pub(super) const PROJECT_MEMORY_READ_OPERATION: &str = "read project memory facts";
 
-pub(super) const PROJECT_MEMORY_WRITE_OPERATION: &str = "write compatibility memory facts";
-
-const COMPATIBILITY_SOURCE_STORE: &str = "persisted-numeric-fact-id";
+pub(super) const PROJECT_MEMORY_WRITE_OPERATION: &str = "write project memory facts";
 
 pub(super) fn nonnegative_u64(value: i64, field: &'static str) -> FactStoreResult<u64> {
-    u64::try_from(value).map_err(|_| {
-        storage_message(
-            QUERY_OPERATION,
-            format!("compatibility {field} must be non-negative"),
-        )
-    })
+    u64::try_from(value)
+        .map_err(|_| storage_message(QUERY_OPERATION, format!("{field} must be non-negative")))
 }
 
 pub(super) fn project_memory_category_label(category: FactCategoryV1) -> &'static str {
@@ -50,44 +40,27 @@ pub(super) fn project_memory_now() -> FactStoreResult<UtcMicros> {
     let micros = i64::try_from(elapsed.as_micros()).map_err(|_| {
         storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility clock exceeds supported timestamp range",
+            "project-memory clock exceeds supported timestamp range",
         )
     })?;
     Ok(UtcMicros(micros))
 }
 
-pub(super) fn compatibility_source_store_id() -> FactStoreResult<SourceStoreId> {
-    SourceStoreId::new(COMPATIBILITY_SOURCE_STORE.to_owned()).map_err(FactStoreError::from)
-}
-
-pub(super) fn project_memory_source_label(source: Option<&str>) -> FactStoreResult<String> {
-    let source = source.unwrap_or("manual");
-    sanitize_provider_metadata_text(source).ok_or_else(|| {
-        storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility source is not eligible for persistence",
-        )
-    })
-}
-
-pub(super) fn compatibility_legacy_timestamp(now: UtcMicros) -> i64 {
-    now.0.div_euclid(1_000_000)
-}
-
-/// Inverse of [`compatibility_legacy_timestamp`]: lifts a legacy second-grained
-/// mirror timestamp back into [`UtcMicros`]. Read models that recompute derived
-/// projections from facts need this because the deleted bank rows stored
-/// microseconds while the legacy mirror stores seconds. Out-of-range values
-/// yield `None` rather than a wrapped timestamp.
-pub(super) fn compatibility_legacy_micros(seconds: i64) -> Option<UtcMicros> {
-    seconds.checked_mul(1_000_000).map(UtcMicros)
+pub(super) fn ensure_project_memory_read_active(
+    read_control: &FactReadControl,
+) -> FactStoreResult<()> {
+    if read_control.interrupted() {
+        Err(FactStoreError::ReadCancelled)
+    } else {
+        Ok(())
+    }
 }
 
 pub(super) fn project_memory_event_time(now: UtcMicros, offset: i64) -> FactStoreResult<UtcMicros> {
     now.0.checked_add(offset).map(UtcMicros).ok_or_else(|| {
         storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility event timestamp overflow",
+            "project-memory event timestamp overflow",
         )
     })
 }

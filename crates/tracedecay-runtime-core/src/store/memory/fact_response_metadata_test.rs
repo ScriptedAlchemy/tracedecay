@@ -19,8 +19,8 @@ use super::*;
 use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 use tempfile::tempdir;
 use tracedecay_domain::{
-    FactCurationActionV1, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
-    FactLineageEventV1, PayloadAccessState, UtcMicros,
+    FactCurationActionV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
+    FactLineageEventKindV1, FactLineageEventV1, PayloadAccessState, UtcMicros,
 };
 use tracedecay_store::{FactContradictionStateV1, FactCurrentQuery, FactQueryCoverageV1};
 

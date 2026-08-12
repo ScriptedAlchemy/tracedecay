@@ -1,197 +1,185 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{FactAssertionId, FactId, FactOwnerV1, RetrievalAnchorId};
+use tracedecay_domain::{
+    FactAssertionId, FactCurationActionV1, FactId, FactLineageEventKindV1, FactLineageEventV1,
+    FactOwnerV1, FactPayloadV1, FactRelationKindV1, ProjectMemoryGraphRelationKindV1,
+    RetrievalAnchorId,
+};
 use tracedecay_graph_db::{
-    GraphEntity, GraphEntityId, GraphLabel, GraphNamespace, GraphProjectionId,
-    GraphProjectionReadRequest, GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId,
-    GraphRelationKind, GraphTraversalDirection, GraphWatermark, MAX_VERIFIED_GENERATION_ENTITIES,
-    MAX_VERIFIED_GENERATION_RELATIONS, NeverCancelled, ProjectionReplacement, SourceGeneration,
-    TraversalRequest,
+    GraphEntityId, GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
+    GraphProjectionReadRequest, GraphRelationKind, GraphRelationRef, GraphTraversalDirection,
+    MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS, TraversalRequest,
 };
 use tracedecay_store::{
-    FactStoreError, FactStoreResult, ProjectMemoryFactIdV1, ProjectMemoryGraphPageV1,
-    ProjectMemoryGraphQueryV1, ProjectMemoryGraphRelationKindV1, ProjectMemoryGraphRelationV1,
-    ProjectMemoryGraphTargetV1, ProjectMemoryLegacyEntityTargetV1, ProjectMemoryResult,
+    FactReadControl, FactStoreError, FactStoreResult, ProjectMemoryEntityIdV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1, ProjectMemoryGraphPageV1,
+    ProjectMemoryGraphQueryV1, ProjectMemoryGraphRelationV1, ProjectMemoryGraphTargetV1,
+    StoreShardScopeV1,
 };
 
 use crate::db::Database;
 use crate::db::engine::params;
 
 use super::envelope::finish_read_snapshot;
-use super::primitives::{OwnerKey, row_i64, row_string, storage_error, storage_message};
-use super::projection::load_project_memory_projections_tx;
+use super::graph_manifest::{MemoryGraphSource, SourceRelation, build_manifest, source_watermark};
+use super::primitives::{
+    OwnerKey, row_optional_string, row_string, storage_error, storage_message,
+};
+use super::projection::load_project_memory_projections_controlled_tx;
 
 const OPERATION: &str = "project memory relation graph";
 const PROJECTION: &str = "project-memory-relations";
-const SUPPORTS: &str = "memory-supports";
 const CONTRADICTS: &str = "memory-contradicts";
 const SUPERSEDES: &str = "memory-supersedes";
+const SUPPORTS: &str = "memory-supports";
 const DERIVED_FROM: &str = "memory-derived-from";
 const MENTIONS: &str = "memory-mentions";
 const ACTIVE_ASSERTION: &str = "memory-active-assertion";
 const EVIDENCE_ANCHOR: &str = "memory-evidence-anchor";
-const MAX_PROJECTION_PUBLICATION_ATTEMPTS: usize = 4;
-
-#[derive(Clone, Debug, Serialize)]
-struct SourceRelation {
-    source: String,
-    target: String,
-    kind: String,
+pub(super) struct ProjectedRelation {
+    pub(super) source: GraphEntityId,
+    pub(super) target: GraphEntityId,
+    pub(super) kind: GraphRelationKind,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct MemoryGraphSource {
-    owner: String,
-    entities: Vec<String>,
-    relations: Vec<SourceRelation>,
-}
+struct SharedGraphCancellation(FactReadControl);
 
-enum ProjectionPublicationOutcome {
-    Current,
-    Conflict,
+impl tracedecay_graph_db::GraphCancellation for SharedGraphCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.interrupted()
+    }
 }
 
 pub(super) async fn project_memory_graph(
     db: &Database,
     query: ProjectMemoryGraphQueryV1,
-) -> ProjectMemoryResult<ProjectMemoryGraphPageV1> {
-    let graph = db.memory_relation_graph().ok_or_else(|| {
-        storage_message(
-            OPERATION,
-            "registered memory relation graph authority is unavailable",
-        )
-    })?;
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryGraphPageV1> {
     let owner = query.owner().clone();
+    let fact_runtime =
+        super::runtime::retained_fact_runtime(db)?.ok_or(FactStoreError::GraphUnavailable)?;
+    super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
+    let runtime = db
+        .memory_graph_runtime()
+        .ok_or(FactStoreError::GraphUnavailable)?;
     let namespace = namespace(&owner)?;
     let projection = GraphProjectionId::new(PROJECTION).map_err(graph_error)?;
-    let mut published_watermark = None;
-    for _ in 0..MAX_PROJECTION_PUBLICATION_ATTEMPTS {
-        let source = load_source(db, &owner).await?;
-        let (watermark, entities, relations) = build_projection(&source)?;
-        let graph_for_projection = Arc::clone(&graph);
-        let namespace_for_projection = namespace.clone();
-        let projection_for_projection = projection.clone();
-        let watermark_for_projection = watermark.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
-                Arc::new(NeverCancelled);
-            let current =
-                graph_for_projection.projection_telemetry(GraphProjectionTelemetryRequest {
-                    namespace: namespace_for_projection.clone(),
-                    projection: projection_for_projection.clone(),
-                    cancellation: Arc::clone(&cancellation),
-                })?;
-            if current.as_ref().map(|state| &state.watermark) == Some(&watermark_for_projection) {
-                return Ok::<_, tracedecay_graph_db::GraphDbError>(
-                    ProjectionPublicationOutcome::Current,
-                );
-            }
-            let expected = current.map(|state| state.watermark);
-            match graph_for_projection.replace_projection_unverified_if_current(
-                ProjectionReplacement {
-                    namespace: namespace_for_projection,
-                    projection: projection_for_projection,
-                    source_generation: SourceGeneration::new(format!(
-                        "project-memory:{}",
-                        watermark_for_projection.as_str()
-                    ))?,
-                    next_watermark: watermark_for_projection,
-                    entities,
-                    relations,
-                    cancellation,
-                },
-                expected.as_ref(),
-            ) {
-                Ok(_) => Ok(ProjectionPublicationOutcome::Current),
-                Err(tracedecay_graph_db::GraphDbError::Conflict) => {
-                    Ok(ProjectionPublicationOutcome::Conflict)
-                }
-                Err(error) => Err(error),
-            }
-        })
-        .await
-        .map_err(|error| storage_error(OPERATION, error))?
-        .map_err(graph_error)?;
-        if matches!(outcome, ProjectionPublicationOutcome::Conflict) {
-            continue;
-        }
-        let verified_source = load_source(db, &owner).await?;
-        if source_watermark(&verified_source)? == watermark {
-            published_watermark = Some(watermark);
-            break;
-        }
+    let projection_identity = GraphProjectionIdentity::new(namespace.clone(), projection.clone());
+    ensure_not_cancelled(read_control)?;
+    let source = load_source(db, &owner, Some(read_control)).await?;
+    let expected_watermark = source_watermark(&source, Some(read_control))?;
+    let expected_manifest = build_manifest(
+        projection_identity.clone(),
+        &source,
+        expected_watermark.clone(),
+        Some(read_control),
+    )?;
+    let expected_generation = expected_manifest.generation;
+    ensure_source_read_active(Some(read_control))?;
+    let runtime_for_read = Arc::clone(&runtime);
+    let control_for_snapshot = read_control.clone();
+    let projection_for_snapshot = projection_identity.clone();
+    let verified_snapshot = tokio::task::spawn_blocking(move || {
+        runtime_for_read.verified_snapshot(&projection_for_snapshot, control_for_snapshot)
+    })
+    .await
+    .map_err(|error| storage_error(OPERATION, error))?
+    .map_err(graph_error)?
+    .ok_or(FactStoreError::GraphUnavailable)?;
+    if verified_snapshot.projection() != &projection_identity
+        || verified_snapshot.generation() != &expected_generation
+    {
+        return Err(FactStoreError::GraphConflict);
     }
-    let published_watermark = published_watermark
-        .ok_or_else(|| graph_error(tracedecay_graph_db::GraphDbError::Conflict))?;
 
     let max_relations = query.max_relations();
     let roots = query.roots().to_vec();
     let hydration_roots = roots.clone();
-    let graph_for_read = Arc::clone(&graph);
+    let snapshot_for_read = verified_snapshot;
+    let control_for_read = read_control.clone();
     let namespace_for_read = namespace.clone();
     let projection_for_read = projection.clone();
+    let projection_identity_for_read = projection_identity;
     let page = tokio::task::spawn_blocking(move || {
         let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
-            Arc::new(NeverCancelled);
-        let snapshot = graph_for_read.snapshot()?;
+            Arc::new(SharedGraphCancellation(control_for_read));
         let max_page = max_relations
             .checked_add(1)
             .ok_or(tracedecay_graph_db::GraphDbError::BudgetExhausted)?;
         let relations = if roots.is_empty() {
-            let projection_page = snapshot.read_projection(GraphProjectionReadRequest {
-                namespace: namespace_for_read,
-                projection: projection_for_read,
-                after_entity: None,
-                after_relation: None,
-                max_entities: 0,
-                max_relations: max_page,
-                cancellation,
-            })?;
+            let projection_page =
+                snapshot_for_read.read_projection(GraphProjectionReadRequest {
+                    namespace: namespace_for_read,
+                    projection: projection_for_read,
+                    after_entity: None,
+                    after_relation: None,
+                    max_entities: 0,
+                    max_relations: max_page,
+                    cancellation,
+                })?;
             if projection_page.next_relation.is_some() {
                 return Err(tracedecay_graph_db::GraphDbError::BudgetExhausted);
             }
-            projection_page.relations
+            projection_page
+                .relations
+                .into_iter()
+                .map(|relation| ProjectedRelation {
+                    source: relation.from,
+                    target: relation.to,
+                    kind: relation.kind,
+                })
+                .collect()
         } else {
             let relation_kinds = relation_kinds()?;
-            let mut accepted = BTreeSet::new();
+            let relation_sentinel = max_relations
+                .checked_add(1)
+                .ok_or(tracedecay_graph_db::GraphDbError::BudgetExhausted)?;
+            let entity_sentinel = relation_sentinel
+                .checked_add(1)
+                .ok_or(tracedecay_graph_db::GraphDbError::BudgetExhausted)?;
+            let mut accepted_entities = BTreeSet::new();
             for root in roots {
                 let start = fact_entity_id(&root)?;
-                let result = snapshot.traverse(TraversalRequest {
+                let result = snapshot_for_read.traverse(TraversalRequest {
                     namespace: namespace_for_read.clone(),
                     start,
                     relation_kinds: relation_kinds.clone(),
                     direction: GraphTraversalDirection::Both,
-                    max_depth: max_relations,
-                    max_visits: max_page,
-                    max_results: max_page,
+                    max_depth: relation_sentinel,
+                    max_visits: entity_sentinel,
+                    max_results: entity_sentinel,
                     cancellation: Arc::clone(&cancellation),
                 })?;
-                if result.visits.len() == max_page {
+                if result.visits.len() == entity_sentinel {
                     return Err(tracedecay_graph_db::GraphDbError::BudgetExhausted);
                 }
-                accepted.extend(result.visits.into_iter().map(|visit| visit.entity));
+                accepted_entities
+                    .extend(result.visits.into_iter().map(|visit| visit.entity.identity));
             }
-            let starts = accepted.iter().cloned().collect::<Vec<_>>();
-            let batches = snapshot.outgoing_relations(
-                &namespace_for_read,
+            let starts = accepted_entities.iter().cloned().collect::<Vec<_>>();
+            let relation_ids = snapshot_for_read.outgoing_relation_ids(
                 &starts,
                 &relation_kinds,
-                max_page,
-                cancellation,
+                relation_sentinel,
+                Arc::clone(&cancellation),
             )?;
-            let mut seen = BTreeSet::new();
-            batches
-                .into_iter()
-                .flatten()
-                .filter(|relation| {
-                    accepted.contains(&relation.from)
-                        && accepted.contains(&relation.to)
-                        && seen.insert(relation.identity.clone())
-                })
-                .collect::<Vec<_>>()
+            let relation_ids = relation_ids.into_iter().flatten().collect::<BTreeSet<_>>();
+            let mut relations = Vec::with_capacity(relation_ids.len());
+            for relation_id in relation_ids {
+                let reference =
+                    GraphRelationRef::new(projection_identity_for_read.clone(), relation_id);
+                let relation = snapshot_for_read
+                    .relation(&reference, Arc::clone(&cancellation))?
+                    .ok_or(tracedecay_graph_db::GraphDbError::Conflict)?;
+                relations.push(ProjectedRelation {
+                    source: relation.from.identity,
+                    target: relation.to.identity,
+                    kind: relation.kind,
+                });
+            }
+            validate_rooted_relations(&accepted_entities, relations, max_relations)?
         };
         if relations.len() > max_relations {
             return Err(tracedecay_graph_db::GraphDbError::BudgetExhausted);
@@ -202,14 +190,148 @@ pub(super) async fn project_memory_graph(
     .map_err(|error| storage_error(OPERATION, error))?
     .map_err(graph_error)?;
 
-    let hydrated = hydrate_page(db, owner.clone(), &hydration_roots, page).await?;
-    if source_watermark(&load_source(db, &owner).await?)? != published_watermark {
-        return Err(graph_error(tracedecay_graph_db::GraphDbError::Conflict).into());
+    ensure_not_cancelled(read_control)?;
+    let hydrated = hydrate_page(db, owner.clone(), &hydration_roots, page, read_control).await?;
+    if source_watermark(
+        &load_source(db, &owner, Some(read_control)).await?,
+        Some(read_control),
+    )? != expected_watermark
+    {
+        return Err(graph_error(tracedecay_graph_db::GraphDbError::Conflict));
     }
     Ok(hydrated)
 }
 
-async fn load_source(db: &Database, owner: &FactOwnerV1) -> FactStoreResult<MemoryGraphSource> {
+pub(super) fn schedule_project_memory_graph_reconciliation(
+    db: Database,
+) -> super::ProjectMemoryGraphReconciliationScheduleV1 {
+    if db.memory_graph_runtime().is_none() {
+        return super::ProjectMemoryGraphReconciliationScheduleV1::NotMounted;
+    }
+    match db.schedule_memory_graph_reconciliation(|weak_db| async move {
+        let Some(db) = weak_db.upgrade() else {
+            return true;
+        };
+        match reconcile_project_memory_graph_pass(&db).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    error_kind = reconciliation_error_kind(&error),
+                    "project memory graph reconciliation remains pending"
+                );
+                false
+            }
+        }
+    }) {
+        crate::db::MemoryGraphReconciliationTaskScheduleV1::Scheduled => {
+            super::ProjectMemoryGraphReconciliationScheduleV1::Scheduled
+        }
+        crate::db::MemoryGraphReconciliationTaskScheduleV1::AlreadyScheduled => {
+            super::ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled
+        }
+        crate::db::MemoryGraphReconciliationTaskScheduleV1::Closed => {
+            super::ProjectMemoryGraphReconciliationScheduleV1::LifecycleClosed
+        }
+    }
+}
+
+async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<()> {
+    let owner = bound_owner(db)?;
+    let runtime = db
+        .memory_graph_runtime()
+        .ok_or(FactStoreError::GraphUnavailable)?;
+    let fact_runtime =
+        super::runtime::retained_fact_runtime(db)?.ok_or(FactStoreError::GraphUnavailable)?;
+    super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
+    let projection = GraphProjectionIdentity::new(
+        namespace(&owner)?,
+        GraphProjectionId::new(PROJECTION).map_err(graph_error)?,
+    );
+    let source = load_source(db, &owner, None).await?;
+    let watermark = source_watermark(&source, None)?;
+    let manifest = build_manifest(projection.clone(), &source, watermark.clone(), None)?;
+    let expected_generation = manifest.generation.clone();
+    let idempotency_key =
+        GraphIdempotencyKey::new(format!("publish:{}", expected_generation.as_str()))
+            .map_err(graph_error)?;
+    let runtime_for_reconciliation = Arc::clone(&runtime);
+    let snapshot = tokio::task::spawn_blocking(move || {
+        runtime_for_reconciliation.reconcile_verified_manifest(&manifest, idempotency_key)
+    })
+    .await
+    .map_err(|error| storage_error(OPERATION, error))?
+    .map_err(graph_error)?;
+    if snapshot.projection() != &projection || snapshot.generation() != &expected_generation {
+        return Err(FactStoreError::GraphConflict);
+    }
+    if source_watermark(&load_source(db, &owner, None).await?, None)? != watermark
+        && !db.memory_graph_reconciliation_pending()
+    {
+        return Err(FactStoreError::GraphConflict);
+    }
+    Ok(())
+}
+
+fn bound_owner(db: &Database) -> FactStoreResult<FactOwnerV1> {
+    match &db.retained_runtime().binding().shard_id.scope {
+        StoreShardScopeV1::ProfileMemory => Ok(FactOwnerV1::Profile),
+        StoreShardScopeV1::Project { project_id } => Ok(FactOwnerV1::Project {
+            project_id: project_id.clone(),
+        }),
+        _ => Err(FactStoreError::GraphUnavailable),
+    }
+}
+
+const fn reconciliation_error_kind(error: &FactStoreError) -> &'static str {
+    match error {
+        FactStoreError::GraphConflict => "conflict",
+        FactStoreError::GraphUnavailable => "unavailable",
+        FactStoreError::GraphCancelled => "cancelled",
+        FactStoreError::GraphBudgetExhausted => "budget_exhausted",
+        FactStoreError::GraphDeadlineExceeded => "deadline_exceeded",
+        FactStoreError::OwnerMismatch => "owner_mismatch",
+        FactStoreError::Storage { .. } => "storage",
+        _ => "canonical_source",
+    }
+}
+
+pub(super) fn validate_rooted_relations(
+    accepted_entities: &BTreeSet<GraphEntityId>,
+    relations: Vec<ProjectedRelation>,
+    max_relations: usize,
+) -> Result<Vec<ProjectedRelation>, tracedecay_graph_db::GraphDbError> {
+    if relations.iter().any(|relation| {
+        !accepted_entities.contains(&relation.source)
+            || !accepted_entities.contains(&relation.target)
+    }) {
+        return Err(tracedecay_graph_db::GraphDbError::Conflict);
+    }
+    if relations.len() > max_relations {
+        return Err(tracedecay_graph_db::GraphDbError::BudgetExhausted);
+    }
+    Ok(relations)
+}
+
+fn ensure_not_cancelled(read_control: &FactReadControl) -> FactStoreResult<()> {
+    if read_control.interrupted() {
+        return Err(graph_error(tracedecay_graph_db::GraphDbError::Cancelled));
+    }
+    Ok(())
+}
+
+fn ensure_source_read_active(read_control: Option<&FactReadControl>) -> FactStoreResult<()> {
+    if read_control.is_some_and(FactReadControl::interrupted) {
+        return Err(FactStoreError::ReadCancelled);
+    }
+    Ok(())
+}
+
+async fn load_source(
+    db: &Database,
+    owner: &FactOwnerV1,
+    read_control: Option<&FactReadControl>,
+) -> FactStoreResult<MemoryGraphSource> {
+    ensure_source_read_active(read_control)?;
     let key = OwnerKey::new(owner)?;
     let transaction = db
         .begin_memory_read_transaction(OPERATION)
@@ -217,81 +339,177 @@ async fn load_source(db: &Database, owner: &FactOwnerV1) -> FactStoreResult<Memo
         .map_err(|error| storage_error(OPERATION, error))?;
     let result = async {
         let mut entities = Vec::new();
+        let mut all_fact_ids = BTreeSet::new();
+        let mut fact_ids = BTreeSet::new();
+        let mut active_assertions = BTreeMap::new();
         let mut rows = transaction
             .query(
                 "SELECT fact_id
                  FROM memory_v2_facts
-                 WHERE owner_kind = ?1 AND project_id = ?2
+                 WHERE owner_kind = ?1 AND project_id = ?2 AND owner_json = ?3
                  ORDER BY fact_id",
-                params![key.kind, key.project_id.as_str()],
+                params![key.kind, key.project_id.as_str(), key.json.as_str()],
             )
             .await
             .map_err(|error| storage_error(OPERATION, error))?;
+        ensure_source_read_active(read_control)?;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage_error(OPERATION, error))?
         {
-            push_source_entity(
-                &mut entities,
-                fact_entity_id_from_str(&row_string(&row, 0, OPERATION)?)?,
-            )?;
+            ensure_source_read_active(read_control)?;
+            let fact_id = FactId::new(row_string(&row, 0, OPERATION)?)?;
+            fact_id
+                .validate_owner(owner)
+                .map_err(|_| FactStoreError::OwnerMismatch)?;
+            if !all_fact_ids.insert(fact_id) {
+                return Err(storage_message(
+                    OPERATION,
+                    "canonical memory source contains a duplicate fact identity",
+                ));
+            }
         }
         drop(rows);
-        let mut relations = Vec::new();
         let mut rows = transaction
             .query(
-                "SELECT source_fact_id, target_fact_id, relation
-                 FROM memory_v2_fact_relations
-                 WHERE owner_kind = ?1 AND project_id = ?2
-                 ORDER BY source_fact_id, target_fact_id, relation",
-                params![key.kind, key.project_id.as_str()],
+                "SELECT current_facts.fact_id, current_facts.active_assertion_id
+                 FROM memory_v2_current_facts AS current_facts
+                 JOIN memory_v2_facts AS facts
+                   ON facts.fact_id = current_facts.fact_id
+                  AND facts.owner_kind = current_facts.owner_kind
+                  AND facts.project_id = current_facts.project_id
+                 WHERE current_facts.owner_kind = ?1 AND current_facts.project_id = ?2
+                   AND facts.owner_json = ?3
+                   AND current_facts.payload_access = 'eligible'
+                 ORDER BY current_facts.fact_id",
+                params![key.kind, key.project_id.as_str(), key.json.as_str()],
             )
             .await
             .map_err(|error| storage_error(OPERATION, error))?;
+        ensure_source_read_active(read_control)?;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage_error(OPERATION, error))?
         {
+            ensure_source_read_active(read_control)?;
+            let fact_id = FactId::new(row_string(&row, 0, OPERATION)?)?;
+            ensure_projected_fact_exists(&all_fact_ids, owner, &fact_id)?;
+            let active_assertion = row_optional_string(&row, 1, OPERATION)?
+                .ok_or(FactStoreError::PayloadAccessMismatch)?;
+            push_source_entity(&mut entities, fact_entity_id_from_str(fact_id.as_str())?)?;
+            active_assertions.insert(fact_id.clone(), active_assertion);
+            fact_ids.insert(fact_id);
+        }
+        drop(rows);
+        let mut relations = BTreeSet::new();
+        let mut rows = transaction
+            .query(
+                "SELECT fact_id, event_json
+                 FROM memory_v2_lineage_events
+                 WHERE owner_kind = ?1 AND project_id = ?2
+                   AND json_extract(event_json, '$.kind.kind') = 'curated'
+                   AND json_extract(event_json, '$.kind.action.kind') IN (
+                       'contradicted_by', 'superseded_by', 'merged_into', 'linked'
+                   )
+                 ORDER BY fact_id, event_sequence",
+                params![key.kind, key.project_id.as_str()],
+            )
+            .await
+            .map_err(|error| storage_error(OPERATION, error))?;
+        ensure_source_read_active(read_control)?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage_error(OPERATION, error))?
+        {
+            ensure_source_read_active(read_control)?;
+            let stored_fact_id = FactId::new(row_string(&row, 0, OPERATION)?)?;
+            let event =
+                serde_json::from_str::<FactLineageEventV1>(&row_string(&row, 1, OPERATION)?)
+                    .map_err(|error| storage_error(OPERATION, error))?;
+            if event.owner() != owner || event.fact_id() != &stored_fact_id {
+                return Err(storage_message(
+                    OPERATION,
+                    "canonical lineage event does not match its owner-scoped storage key",
+                ));
+            }
+            let (source_fact_id, target_fact_id, kind, evidence_visible) = match event.kind() {
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::ContradictedBy { fact_id },
+                    ..
+                } => (&stored_fact_id, fact_id, CONTRADICTS, true),
+                FactLineageEventKindV1::Curated {
+                    action:
+                        FactCurationActionV1::SupersededBy { fact_id }
+                        | FactCurationActionV1::MergedInto { fact_id },
+                    ..
+                } => (fact_id, &stored_fact_id, SUPERSEDES, true),
+                FactLineageEventKindV1::Curated {
+                    action: FactCurationActionV1::Linked { relation },
+                    ..
+                } => {
+                    if relation.owner() != owner || relation.source_fact_id() != &stored_fact_id {
+                        return Err(storage_message(
+                            OPERATION,
+                            "canonical linked relation does not match its lineage authority",
+                        ));
+                    }
+                    let mut evidence_visible = true;
+                    for evidence_fact_id in relation.evidence_fact_ids() {
+                        ensure_projected_fact_exists(&all_fact_ids, owner, evidence_fact_id)?;
+                        evidence_visible &= fact_ids.contains(evidence_fact_id);
+                    }
+                    let kind = match relation.kind() {
+                        FactRelationKindV1::Supports => SUPPORTS,
+                        FactRelationKindV1::Contradicts => CONTRADICTS,
+                        FactRelationKindV1::Supersedes => SUPERSEDES,
+                        FactRelationKindV1::DerivedFrom => DERIVED_FROM,
+                    };
+                    (
+                        relation.source_fact_id(),
+                        relation.target_fact_id(),
+                        kind,
+                        evidence_visible,
+                    )
+                }
+                _ => {
+                    return Err(storage_message(
+                        OPERATION,
+                        "canonical lineage relation query returned an unsupported event",
+                    ));
+                }
+            };
+            ensure_projected_fact_exists(&all_fact_ids, owner, source_fact_id)?;
+            ensure_projected_fact_exists(&all_fact_ids, owner, target_fact_id)?;
+            if !evidence_visible
+                || !fact_ids.contains(source_fact_id)
+                || !fact_ids.contains(target_fact_id)
+            {
+                continue;
+            }
             push_source_relation(
                 &mut relations,
                 SourceRelation {
-                    source: fact_entity_id_from_str(&row_string(&row, 0, OPERATION)?)?,
-                    target: fact_entity_id_from_str(&row_string(&row, 1, OPERATION)?)?,
-                    kind: explicit_relation_kind(&row_string(&row, 2, OPERATION)?)?.to_owned(),
+                    source: fact_entity_id_from_str(source_fact_id.as_str())?,
+                    target: fact_entity_id_from_str(target_fact_id.as_str())?,
+                    kind: kind.to_owned(),
                 },
             )?;
         }
         drop(rows);
-        let mut rows = transaction
-            .query(
-                "SELECT fact_id, active_assertion_id
-                 FROM memory_v2_current_facts
-                 WHERE owner_kind = ?1 AND project_id = ?2
-                   AND active_assertion_id IS NOT NULL
-                 ORDER BY fact_id, active_assertion_id",
-                params![key.kind, key.project_id.as_str()],
-            )
-            .await
-            .map_err(|error| storage_error(OPERATION, error))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| storage_error(OPERATION, error))?
-        {
-            let fact = row_string(&row, 0, OPERATION)?;
-            let assertion = row_string(&row, 1, OPERATION)?;
+        for (fact, assertion) in &active_assertions {
+            ensure_source_read_active(read_control)?;
             push_source_relation(
                 &mut relations,
                 SourceRelation {
-                    source: fact_entity_id_from_str(&fact)?,
-                    target: assertion_entity_id_from_str(&fact, &assertion)?,
+                    source: fact_entity_id_from_str(fact.as_str())?,
+                    target: assertion_entity_id_from_str(fact.as_str(), assertion)?,
                     kind: ACTIVE_ASSERTION.to_owned(),
                 },
             )?;
         }
-        drop(rows);
         let mut rows = transaction
             .query(
                 "SELECT assertion_evidence.fact_id, assertion_evidence.assertion_id,
@@ -302,25 +520,34 @@ async fn load_source(db: &Database, owner: &FactOwnerV1) -> FactStoreResult<Memo
                   AND evidence.fact_id = assertion_evidence.fact_id
                   AND evidence.owner_kind = assertion_evidence.owner_kind
                   AND evidence.project_id = assertion_evidence.project_id
+                 JOIN memory_v2_current_facts AS current_facts
+                   ON current_facts.fact_id = assertion_evidence.fact_id
+                  AND current_facts.owner_kind = assertion_evidence.owner_kind
+                  AND current_facts.project_id = assertion_evidence.project_id
+                  AND current_facts.active_assertion_id = assertion_evidence.assertion_id
                  WHERE assertion_evidence.owner_kind = ?1
                    AND assertion_evidence.project_id = ?2
+                   AND current_facts.payload_access = 'eligible'
                  ORDER BY assertion_evidence.fact_id, assertion_evidence.assertion_id,
                           assertion_evidence.ordinal",
                 params![key.kind, key.project_id.as_str()],
             )
             .await
             .map_err(|error| storage_error(OPERATION, error))?;
+        ensure_source_read_active(read_control)?;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage_error(OPERATION, error))?
         {
-            let fact = row_string(&row, 0, OPERATION)?;
+            ensure_source_read_active(read_control)?;
+            let fact = FactId::new(row_string(&row, 0, OPERATION)?)?;
+            ensure_projected_fact_exists(&fact_ids, owner, &fact)?;
             let assertion = row_string(&row, 1, OPERATION)?;
             push_source_relation(
                 &mut relations,
                 SourceRelation {
-                    source: assertion_entity_id_from_str(&fact, &assertion)?,
+                    source: assertion_entity_id_from_str(fact.as_str(), &assertion)?,
                     target: anchor_entity_id_from_str(&row_string(&row, 2, OPERATION)?)?,
                     kind: EVIDENCE_ANCHOR.to_owned(),
                 },
@@ -329,40 +556,47 @@ async fn load_source(db: &Database, owner: &FactOwnerV1) -> FactStoreResult<Memo
         drop(rows);
         let mut rows = transaction
             .query(
-                "SELECT mappings.fact_id, links.entity_id
-                 FROM memory_v2_facts AS mappings
-                 JOIN memory_facts AS legacy ON legacy.canonical_fact_id = mappings.fact_id
-                 JOIN memory_fact_entities AS links ON links.fact_id = legacy.fact_id
-                 WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-                 ORDER BY mappings.fact_id, links.entity_id",
+                "SELECT current_facts.fact_id, payloads.payload_json
+                 FROM memory_v2_current_facts AS current_facts
+                 LEFT JOIN memory_v2_assertion_payloads AS payloads
+                   ON payloads.assertion_id = current_facts.active_assertion_id
+                  AND payloads.fact_id = current_facts.fact_id
+                  AND payloads.owner_kind = current_facts.owner_kind
+                  AND payloads.project_id = current_facts.project_id
+                 WHERE current_facts.owner_kind = ?1 AND current_facts.project_id = ?2
+                   AND current_facts.payload_access = 'eligible'
+                 ORDER BY current_facts.fact_id",
                 params![key.kind, key.project_id.as_str()],
             )
             .await
             .map_err(|error| storage_error(OPERATION, error))?;
+        ensure_source_read_active(read_control)?;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage_error(OPERATION, error))?
         {
-            push_source_relation(
-                &mut relations,
-                SourceRelation {
-                    source: fact_entity_id_from_str(&row_string(&row, 0, OPERATION)?)?,
-                    target: entity_entity_id(row_i64(&row, 1, OPERATION)?)?,
-                    kind: MENTIONS.to_owned(),
-                },
-            )?;
+            ensure_source_read_active(read_control)?;
+            let fact = FactId::new(row_string(&row, 0, OPERATION)?)?;
+            ensure_projected_fact_exists(&fact_ids, owner, &fact)?;
+            let payload_json = row_optional_string(&row, 1, OPERATION)?
+                .ok_or(FactStoreError::PayloadAccessMismatch)?;
+            let payload = serde_json::from_str::<FactPayloadV1>(&payload_json)
+                .map_err(|error| storage_error(OPERATION, error))?;
+            for entity in payload.entities() {
+                ensure_source_read_active(read_control)?;
+                let target = ProjectMemoryEntityIdV1::new(owner.clone(), entity.clone())?;
+                push_source_relation(
+                    &mut relations,
+                    SourceRelation {
+                        source: fact_entity_id_from_str(fact.as_str())?,
+                        target: entity_entity_id(&target),
+                        kind: MENTIONS.to_owned(),
+                    },
+                )?;
+            }
         }
-        relations.sort_by(|left, right| {
-            (&left.source, &left.target, &left.kind).cmp(&(
-                &right.source,
-                &right.target,
-                &right.kind,
-            ))
-        });
-        relations.dedup_by(|left, right| {
-            left.source == right.source && left.target == right.target && left.kind == right.kind
-        });
+        ensure_source_read_active(read_control)?;
         Ok(MemoryGraphSource {
             owner: key.json,
             entities,
@@ -371,6 +605,46 @@ async fn load_source(db: &Database, owner: &FactOwnerV1) -> FactStoreResult<Memo
     }
     .await;
     finish_read_snapshot(transaction, result).await
+}
+
+fn ensure_projected_fact_exists(
+    facts: &BTreeSet<FactId>,
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+) -> FactStoreResult<()> {
+    fact_id
+        .validate_owner(owner)
+        .map_err(|_| FactStoreError::OwnerMismatch)?;
+    if !facts.contains(fact_id) {
+        return Err(FactStoreError::FactNotFound {
+            fact_id: fact_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(in crate::store::memory) async fn relation_kinds_from_canonical_source_for_test(
+    db: &Database,
+    owner: &FactOwnerV1,
+    read_control: &FactReadControl,
+) -> FactStoreResult<BTreeSet<FactRelationKindV1>> {
+    load_source(db, owner, Some(read_control))
+        .await?
+        .relations
+        .iter()
+        .filter_map(|relation| match relation.kind.as_str() {
+            SUPPORTS => Some(Ok(FactRelationKindV1::Supports)),
+            CONTRADICTS => Some(Ok(FactRelationKindV1::Contradicts)),
+            SUPERSEDES => Some(Ok(FactRelationKindV1::Supersedes)),
+            DERIVED_FROM => Some(Ok(FactRelationKindV1::DerivedFrom)),
+            MENTIONS | ACTIVE_ASSERTION | EVIDENCE_ANCHOR => None,
+            _ => Some(Err(storage_message(
+                OPERATION,
+                "canonical source contains an unknown relation kind",
+            ))),
+        })
+        .collect()
 }
 
 fn push_source_entity(entities: &mut Vec<String>, entity: String) -> FactStoreResult<()> {
@@ -385,101 +659,32 @@ fn push_source_entity(entities: &mut Vec<String>, entity: String) -> FactStoreRe
 }
 
 fn push_source_relation(
-    relations: &mut Vec<SourceRelation>,
+    relations: &mut BTreeSet<SourceRelation>,
     relation: SourceRelation,
 ) -> FactStoreResult<()> {
-    if relations.len() >= MAX_VERIFIED_GENERATION_RELATIONS {
+    if !relations.contains(&relation) && relations.len() >= MAX_VERIFIED_GENERATION_RELATIONS {
         return Err(storage_message(
             OPERATION,
             "canonical memory topology exceeds native graph relation capacity",
         ));
     }
-    relations.push(relation);
+    relations.insert(relation);
     Ok(())
-}
-
-fn build_projection(
-    source: &MemoryGraphSource,
-) -> FactStoreResult<(GraphWatermark, Vec<GraphEntity>, Vec<GraphRelation>)> {
-    let watermark = source_watermark(source)?;
-    let mut entity_ids = source
-        .entities
-        .iter()
-        .map(|identity| GraphEntityId::new(identity.clone()).map_err(graph_error))
-        .collect::<FactStoreResult<BTreeSet<_>>>()?;
-    let mut relations = Vec::with_capacity(source.relations.len());
-    for relation in &source.relations {
-        let from = GraphEntityId::new(relation.source.clone()).map_err(graph_error)?;
-        let to = GraphEntityId::new(relation.target.clone()).map_err(graph_error)?;
-        insert_projection_entity(&mut entity_ids, from.clone())?;
-        insert_projection_entity(&mut entity_ids, to.clone())?;
-        let relation_digest = hex::encode(Sha256::digest(
-            format!(
-                "{}\0{}\0{}",
-                relation.source, relation.target, relation.kind
-            )
-            .as_bytes(),
-        ));
-        relations.push(
-            GraphRelation::new(
-                GraphRelationId::new(format!("memory-relation:{relation_digest}"))
-                    .map_err(graph_error)?,
-                from,
-                to,
-                GraphRelationKind::new(relation.kind.clone()).map_err(graph_error)?,
-                BTreeMap::new(),
-            )
-            .map_err(graph_error)?,
-        );
-    }
-    let entities = entity_ids
-        .into_iter()
-        .map(|identity| {
-            GraphEntity::new(
-                identity.clone(),
-                BTreeSet::from([GraphLabel::new(label_for_entity(identity.as_str())?)?]),
-                BTreeMap::new(),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(graph_error)?;
-    Ok((watermark, entities, relations))
-}
-
-fn insert_projection_entity(
-    entities: &mut BTreeSet<GraphEntityId>,
-    entity: GraphEntityId,
-) -> FactStoreResult<()> {
-    if !entities.contains(&entity) && entities.len() >= MAX_VERIFIED_GENERATION_ENTITIES {
-        return Err(storage_message(
-            OPERATION,
-            "canonical memory topology exceeds native graph entity capacity",
-        ));
-    }
-    entities.insert(entity);
-    Ok(())
-}
-
-fn source_watermark(source: &MemoryGraphSource) -> FactStoreResult<GraphWatermark> {
-    let encoded = serde_json::to_vec(source).map_err(|error| storage_error(OPERATION, error))?;
-    GraphWatermark::new(format!(
-        "memory-relations:{}",
-        hex::encode(Sha256::digest(encoded))
-    ))
-    .map_err(graph_error)
 }
 
 async fn hydrate_page(
     db: &Database,
     owner: FactOwnerV1,
     roots: &[FactId],
-    relations: Vec<GraphRelation>,
+    relations: Vec<ProjectedRelation>,
+    read_control: &FactReadControl,
 ) -> FactStoreResult<ProjectMemoryGraphPageV1> {
     let mut fact_ids = roots.iter().cloned().collect::<BTreeSet<_>>();
     let mut projected = Vec::with_capacity(relations.len());
     for relation in relations {
-        let source = parse_target(&owner, relation.from.as_str())?;
-        let target = parse_target(&owner, relation.to.as_str())?;
+        ensure_not_cancelled(read_control)?;
+        let source = parse_target(&owner, relation.source.as_str())?;
+        let target = parse_target(&owner, relation.target.as_str())?;
         if let ProjectMemoryGraphTargetV1::Fact(fact) = &source {
             fact_ids.insert(fact.fact_id().clone());
         } else if let ProjectMemoryGraphTargetV1::Assertion { fact_id, .. } = &source {
@@ -501,14 +706,33 @@ async fn hydrate_page(
         .begin_memory_read_transaction(OPERATION)
         .await
         .map_err(|error| storage_error(OPERATION, error))?;
-    let result = load_project_memory_projections_tx(
+    let result = load_project_memory_projections_controlled_tx(
         &transaction,
         &owner,
         &fact_ids.into_iter().collect::<Vec<_>>(),
+        read_control,
     )
     .await
-    .and_then(|facts| ProjectMemoryGraphPageV1::new(owner, facts, projected));
+    .and_then(|facts| {
+        if facts
+            .iter()
+            .any(|fact| matches!(fact, ProjectMemoryFactProjectionV1::Unavailable(_)))
+        {
+            return Err(FactStoreError::PayloadAccessMismatch);
+        }
+        ProjectMemoryGraphPageV1::new(owner, facts, projected)
+    });
     finish_read_snapshot(transaction, result).await
+}
+
+#[cfg(test)]
+pub(in crate::store::memory) async fn hydrate_roots_from_canonical_source_for_test(
+    db: &Database,
+    owner: FactOwnerV1,
+    roots: &[FactId],
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryGraphPageV1> {
+    hydrate_page(db, owner, roots, Vec::new(), read_control).await
 }
 
 fn namespace(owner: &FactOwnerV1) -> FactStoreResult<GraphNamespace> {
@@ -522,9 +746,9 @@ fn namespace(owner: &FactOwnerV1) -> FactStoreResult<GraphNamespace> {
 
 fn relation_kinds() -> Result<BTreeSet<GraphRelationKind>, tracedecay_graph_db::GraphDbError> {
     [
-        SUPPORTS,
         CONTRADICTS,
         SUPERSEDES,
+        SUPPORTS,
         DERIVED_FROM,
         MENTIONS,
         ACTIVE_ASSERTION,
@@ -535,24 +759,11 @@ fn relation_kinds() -> Result<BTreeSet<GraphRelationKind>, tracedecay_graph_db::
     .collect()
 }
 
-fn explicit_relation_kind(value: &str) -> FactStoreResult<&'static str> {
-    match value {
-        "supports" => Ok(SUPPORTS),
-        "contradicts" => Ok(CONTRADICTS),
-        "supersedes" => Ok(SUPERSEDES),
-        "derived_from" => Ok(DERIVED_FROM),
-        _ => Err(storage_message(
-            OPERATION,
-            "unknown canonical memory relation kind",
-        )),
-    }
-}
-
 fn public_relation_kind(value: &str) -> FactStoreResult<ProjectMemoryGraphRelationKindV1> {
     match value {
-        SUPPORTS => Ok(ProjectMemoryGraphRelationKindV1::Supports),
         CONTRADICTS => Ok(ProjectMemoryGraphRelationKindV1::Contradicts),
         SUPERSEDES => Ok(ProjectMemoryGraphRelationKindV1::Supersedes),
+        SUPPORTS => Ok(ProjectMemoryGraphRelationKindV1::Supports),
         DERIVED_FROM => Ok(ProjectMemoryGraphRelationKindV1::DerivedFrom),
         MENTIONS => Ok(ProjectMemoryGraphRelationKindV1::Mentions),
         ACTIVE_ASSERTION => Ok(ProjectMemoryGraphRelationKindV1::ActiveAssertion),
@@ -561,22 +772,6 @@ fn public_relation_kind(value: &str) -> FactStoreResult<ProjectMemoryGraphRelati
             OPERATION,
             "unknown projected memory relation kind",
         )),
-    }
-}
-
-fn label_for_entity(identity: &str) -> Result<&'static str, tracedecay_graph_db::GraphDbError> {
-    if identity.starts_with("memory-fact:") {
-        Ok("memory-fact-reference")
-    } else if identity.starts_with("memory-entity:") {
-        Ok("memory-entity-reference")
-    } else if identity.starts_with("memory-assertion:") {
-        Ok("memory-assertion-reference")
-    } else if identity.starts_with("memory-anchor:") {
-        Ok("retrieval-anchor-reference")
-    } else {
-        Err(tracedecay_graph_db::GraphDbError::invalid(
-            "unknown memory relation entity identity",
-        ))
     }
 }
 
@@ -602,13 +797,8 @@ fn assertion_entity_id_from_str(fact: &str, assertion: &str) -> FactStoreResult<
     ))
 }
 
-fn entity_entity_id(entity_id: i64) -> FactStoreResult<String> {
-    if entity_id <= 0 {
-        return Err(FactStoreError::InvalidLegacyFactId {
-            legacy_fact_id: entity_id,
-        });
-    }
-    Ok(format!("memory-entity:{entity_id}"))
+fn entity_entity_id(entity: &ProjectMemoryEntityIdV1) -> String {
+    format!("memory-entity:{}", hex::encode(entity.entity().as_bytes()))
 }
 
 fn anchor_entity_id_from_str(value: &str) -> FactStoreResult<String> {
@@ -627,11 +817,8 @@ fn parse_target(
         ));
     }
     if let Some(encoded) = identity.strip_prefix("memory-entity:") {
-        let entity_id = encoded
-            .parse::<i64>()
-            .map_err(|error| storage_error(OPERATION, error))?;
         return Ok(ProjectMemoryGraphTargetV1::Entity(
-            ProjectMemoryLegacyEntityTargetV1::new(owner.clone(), entity_id)?,
+            ProjectMemoryEntityIdV1::new(owner.clone(), decode_identity(encoded)?)?,
         ));
     }
     if let Some(encoded) = identity.strip_prefix("memory-assertion:") {
@@ -661,6 +848,16 @@ fn decode_identity(value: &str) -> FactStoreResult<String> {
     String::from_utf8(bytes).map_err(|error| storage_error(OPERATION, error))
 }
 
-fn graph_error(error: tracedecay_graph_db::GraphDbError) -> FactStoreError {
-    storage_error(OPERATION, error)
+pub(super) fn graph_error(error: tracedecay_graph_db::GraphDbError) -> FactStoreError {
+    match error {
+        tracedecay_graph_db::GraphDbError::Conflict => FactStoreError::GraphConflict,
+        tracedecay_graph_db::GraphDbError::Cancelled => FactStoreError::GraphCancelled,
+        tracedecay_graph_db::GraphDbError::BudgetExhausted => FactStoreError::GraphBudgetExhausted,
+        tracedecay_graph_db::GraphDbError::DeadlineExceeded => {
+            FactStoreError::GraphDeadlineExceeded
+        }
+        tracedecay_graph_db::GraphDbError::Unavailable { .. }
+        | tracedecay_graph_db::GraphDbError::Closed => FactStoreError::GraphUnavailable,
+        other => storage_error(OPERATION, other),
+    }
 }

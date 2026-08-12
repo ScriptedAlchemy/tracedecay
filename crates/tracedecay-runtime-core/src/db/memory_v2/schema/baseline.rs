@@ -155,12 +155,6 @@ pub(super) const BASELINE_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_v2_f
             last_retrieved_at INTEGER,
             last_recalled_at INTEGER,
             last_feedback_at INTEGER,
-            projection_state TEXT NOT NULL DEFAULT 'unavailable' CHECK(projection_state IN (
-                'ready', 'rebuilding', 'stale', 'unavailable'
-            )),
-            vector_watermark_json TEXT CHECK(
-                vector_watermark_json IS NULL OR json_valid(vector_watermark_json)
-            ),
             PRIMARY KEY(fact_id, owner_kind, project_id),
             FOREIGN KEY(fact_id, owner_kind, project_id)
                 REFERENCES memory_v2_facts(fact_id, owner_kind, project_id),

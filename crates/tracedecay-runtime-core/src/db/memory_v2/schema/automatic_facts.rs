@@ -5,12 +5,10 @@ use crate::errors::Result;
 use super::super::{MemoryV2Executor, db_error};
 
 pub(super) const CURRENT_PROJECTION_INDEXES_SCHEMA: &str =
-    "CREATE INDEX IF NOT EXISTS idx_memory_v2_current_compatibility_search
+    "CREATE INDEX IF NOT EXISTS idx_memory_v2_current_search
          ON memory_v2_current_facts(
              owner_kind, project_id, updated_at DESC, fact_id
-         );
-     CREATE INDEX IF NOT EXISTS idx_memory_v2_current_projection_state
-         ON memory_v2_current_facts(owner_kind, project_id, projection_state);";
+         );";
 
 pub(super) const AUTOMATIC_FACT_RECEIPT_INTEGRITY_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS memory_v2_automatic_fact_receipts_require_keys

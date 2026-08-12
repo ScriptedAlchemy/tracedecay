@@ -1,16 +1,12 @@
 //! Database-backed authority for append-only facts, evidence, and provenance.
 
-use std::sync::Arc;
-
 use crate::db::Database;
 
-use tracedecay_domain::{
-    FactId, FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2,
-};
+use tracedecay_domain::{FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2};
 use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactStore, FactStoreResult,
-    FactWriteBatch, LegacyFactQuery, ProjectMemoryAutomaticFactApplyResultV1,
+    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactReadControl, FactStore,
+    FactStoreResult, FactWriteBatch, FactWriteControl, ProjectMemoryAutomaticFactApplyResultV1,
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
     ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardFactDetailV1,
@@ -23,15 +19,14 @@ use tracedecay_store::{
     ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactFeedbackCommandV1,
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
-    ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
-    ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1, ProjectMemoryFactPageV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactIdV1, ProjectMemoryFactInspectionV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactMergeCommandV1, ProjectMemoryFactMergeOutcomeV1,
+    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveCommandV1,
     ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactRetrievalCommandV1,
-    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
-    ProjectMemoryFactTargetV1, ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
-    ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore,
-    ProjectMemoryMemoryRepairCommandV1, ProjectMemoryMemoryRepairStatsV1,
-    ProjectMemoryMemoryStatusV1, ProjectMemoryResult, RetrievalAnchorQuery, StoredFactV1,
+    ProjectMemoryFactRetrievalOutcomeV1, ProjectMemoryFactSearchPageV1,
+    ProjectMemoryFactSearchQuery, ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1,
+    ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
+    ProjectMemoryGraphStore, ProjectMemoryMemoryStatusV1, RetrievalAnchorQuery, StoredFactV1,
 };
 
 use automatic_facts::{
@@ -39,9 +34,10 @@ use automatic_facts::{
 };
 use crud::{
     add_project_memory_fact_tx, apply_project_memory_automatic_fact_tx, fact_response_metadata_tx,
-    find_project_memory_fact_by_content_digest_tx, get_project_memory_fact_tx,
-    get_retrieval_anchor_tx, inspect_project_memory_fact_tx, list_project_memory_facts_tx,
-    project_memory_fact_feedback_history_tx, project_memory_fact_history_tx,
+    find_project_memory_fact_by_content_digest_controlled_tx,
+    get_project_memory_fact_controlled_tx, get_retrieval_anchor_tx,
+    inspect_project_memory_fact_controlled_tx, list_project_memory_facts_controlled_tx,
+    project_memory_fact_feedback_history_tx, project_memory_fact_history_controlled_tx,
     query_current_facts_tx, query_fact_as_of_response_tx, query_fact_as_of_tx,
     query_fact_current_response_tx, query_fact_current_tx, query_fact_lineage_response_tx,
     query_fact_lineage_tx, record_project_memory_fact_feedback_tx, remove_project_memory_fact_tx,
@@ -53,25 +49,31 @@ use dashboard::{
     dashboard_project_memory_overview_tx, dashboard_project_memory_vector_points_tx,
 };
 use envelope::finish_read_snapshot;
-use primitives::{QUERY_OPERATION, storage_error};
-use projection::resolve_legacy_fact_tx;
-use repair::repair_project_memory_tx;
+use primitives::{COMMIT_OPERATION, QUERY_OPERATION, storage_error};
 use search::{
-    find_project_memory_contradictions_tx, probe_project_memory_facts_tx,
-    reason_project_memory_facts_tx, record_project_memory_fact_retrieval_tx,
-    related_project_memory_facts_tx, search_project_memory_facts_tx,
+    ensure_project_memory_search_not_cancelled, find_project_memory_contradictions_tx,
+    probe_project_memory_facts_tx, reason_project_memory_facts_tx,
+    record_project_memory_fact_retrieval_tx, related_project_memory_facts,
+    search_project_memory_facts,
 };
 use status::project_memory_status_tx;
 
 mod automatic_facts;
+mod candidates;
 mod crud;
 mod curation;
 mod dashboard;
+#[cfg(test)]
+mod dashboard_tests;
 mod envelope;
 mod graph;
+mod graph_manifest;
+#[cfg(test)]
+mod graph_reconciliation_tests;
+#[cfg(test)]
+mod graph_tests;
 mod primitives;
 mod projection;
-mod repair;
 mod runtime;
 mod scoring;
 mod search;
@@ -88,59 +90,63 @@ use primitives::OwnerKey;
 /// transactions are delegated to the retained [`Database`] authority.
 pub struct DatabaseFactStore<'a> {
     db: &'a Database,
-    write_control: Option<FactWriteControl>,
 }
 
-/// Transport-neutral arbitration for one externally controlled fact write.
-#[derive(Clone)]
-pub struct FactWriteControl {
-    interrupted: Arc<dyn Fn() -> bool + Send + Sync>,
-    try_begin_commit: Arc<dyn Fn() -> bool + Send + Sync>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum ProjectMemoryGraphReconciliationScheduleV1 {
+    NotMounted,
+    Scheduled,
+    AlreadyScheduled,
+    LifecycleClosed,
 }
 
-impl FactWriteControl {
-    pub fn new(
-        interrupted: Arc<dyn Fn() -> bool + Send + Sync>,
-        try_begin_commit: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Self {
-        Self {
-            interrupted,
-            try_begin_commit,
-        }
-    }
-
-    fn interrupted(&self) -> bool {
-        (self.interrupted)()
-    }
-
-    fn try_begin_commit(&self) -> bool {
-        (self.try_begin_commit)()
-    }
+/// Internal daemon mount/write hook for derived verified-graph catch-up.
+///
+/// Product callers mutate canonical facts through [`ProjectMemoryFactStore`];
+/// they never reconcile topology directly.
+#[doc(hidden)]
+pub fn schedule_project_memory_graph_reconciliation(
+    db: Database,
+) -> ProjectMemoryGraphReconciliationScheduleV1 {
+    graph::schedule_project_memory_graph_reconciliation(db)
 }
 
 impl<'a> DatabaseFactStore<'a> {
     pub const fn new(db: &'a Database) -> Self {
-        Self {
-            db,
-            write_control: None,
-        }
-    }
-
-    pub fn new_controlled(db: &'a Database, write_control: FactWriteControl) -> Self {
-        Self {
-            db,
-            write_control: Some(write_control),
-        }
+        Self { db }
     }
 }
 
 impl FactStore for DatabaseFactStore<'_> {
-    async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
+    async fn commit_fact(
+        &self,
+        batch: FactWriteBatch,
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<FactCommitOutcome> {
         match runtime::retained_fact_runtime(self.db)? {
-            Some(runtime) => {
-                runtime::commit_fact(self.db, runtime, batch, self.write_control.clone()).await
+            Some(_) => {
+                let db = (*self.db).clone();
+                let write_control = write_control.clone();
+                // The task owns the retained-dispatch receipt path so caller
+                // cancellation cannot strand a durable commit before its
+                // derived graph reconciliation trigger is recorded.
+                tokio::spawn(async move {
+                    let retained = db.retained_runtime();
+                    let outcome =
+                        runtime::commit_fact(&db, retained, batch, &write_control).await?;
+                    if matches!(
+                        &outcome,
+                        FactCommitOutcome::Committed(_) | FactCommitOutcome::IdempotentReplay(_)
+                    ) {
+                        schedule_project_memory_graph_reconciliation(db.clone());
+                    }
+                    Ok(outcome)
+                })
+                .await
+                .map_err(|error| storage_error(COMMIT_OPERATION, error))?
             }
-            None => self.commit_batch(&batch).await,
+            None => self.commit_batch(&batch, write_control).await,
         }
     }
 
@@ -284,16 +290,6 @@ impl FactStore for DatabaseFactStore<'_> {
         finish_read_snapshot(snapshot, result).await
     }
 
-    async fn resolve_legacy_fact(&self, query: LegacyFactQuery) -> FactStoreResult<Option<FactId>> {
-        let snapshot = self
-            .db
-            .begin_memory_read_transaction(QUERY_OPERATION)
-            .await
-            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
-        let result = resolve_legacy_fact_tx(&snapshot, &query).await;
-        finish_read_snapshot(snapshot, result).await
-    }
-
     async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
@@ -312,9 +308,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactPageV1> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactPageV1> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(async move { list_project_memory_facts_tx(transaction, &query).await })
+            Box::pin(async move {
+                list_project_memory_facts_controlled_tx(transaction, &query, &read_control).await
+            })
         })
         .await
     }
@@ -322,61 +322,79 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn search_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
-        self.project_memory_read(move |transaction| {
-            Box::pin(async move { search_project_memory_facts_tx(transaction, &query).await })
-        })
-        .await
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+        search_project_memory_facts(self.db, &query, read_control).await
     }
 
     async fn probe_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
-        self.project_memory_read(move |transaction| {
-            Box::pin(async move { probe_project_memory_facts_tx(transaction, &query).await })
-        })
-        .await
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+        ensure_project_memory_search_not_cancelled(read_control)?;
+        let owned_read_control = read_control.clone();
+        let page = self
+            .project_memory_read(move |transaction| {
+                Box::pin(async move {
+                    probe_project_memory_facts_tx(transaction, &query, &owned_read_control).await
+                })
+            })
+            .await?;
+        ensure_project_memory_search_not_cancelled(read_control)?;
+        Ok(page)
     }
 
     async fn related_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
-        self.project_memory_read(move |transaction| {
-            Box::pin(async move { related_project_memory_facts_tx(transaction, &query).await })
-        })
-        .await
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+        related_project_memory_facts(self.db, &query, read_control).await
     }
 
     async fn reason_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
-        self.project_memory_read(move |transaction| {
-            Box::pin(async move { reason_project_memory_facts_tx(transaction, &query).await })
-        })
-        .await
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+        ensure_project_memory_search_not_cancelled(read_control)?;
+        let owned_read_control = read_control.clone();
+        let page = self
+            .project_memory_read(move |transaction| {
+                Box::pin(async move {
+                    reason_project_memory_facts_tx(transaction, &query, &owned_read_control).await
+                })
+            })
+            .await?;
+        ensure_project_memory_search_not_cancelled(read_control)?;
+        Ok(page)
     }
 
     async fn find_project_memory_contradictions(
         &self,
         query: ProjectMemoryFactContradictionQueryV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactContradictionPageV1> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactContradictionPageV1> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(
-                async move { find_project_memory_contradictions_tx(transaction, &query).await },
-            )
+            Box::pin(async move {
+                find_project_memory_contradictions_tx(transaction, &query, &read_control).await
+            })
         })
         .await
     }
 
     async fn get_project_memory_fact(
         &self,
-        target: ProjectMemoryFactTargetV1,
-    ) -> ProjectMemoryResult<Option<ProjectMemoryFactProjectionV1>> {
+        target: ProjectMemoryFactIdV1,
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(async move { get_project_memory_fact_tx(transaction, &target).await })
+            Box::pin(async move {
+                get_project_memory_fact_controlled_tx(transaction, &target, &read_control).await
+            })
         })
         .await
     }
@@ -384,9 +402,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn project_memory_fact_history(
         &self,
         query: ProjectMemoryFactHistoryQueryV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactHistoryV1> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactHistoryV1> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(async move { project_memory_fact_history_tx(transaction, &query).await })
+            Box::pin(async move {
+                project_memory_fact_history_controlled_tx(transaction, &query, &read_control).await
+            })
         })
         .await
     }
@@ -394,19 +416,27 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn project_memory_status(
         &self,
         owner: FactOwnerV1,
-    ) -> ProjectMemoryResult<ProjectMemoryMemoryStatusV1> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryMemoryStatusV1> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(async move { project_memory_status_tx(transaction, &owner).await })
+            Box::pin(
+                async move { project_memory_status_tx(transaction, &owner, &read_control).await },
+            )
         })
         .await
     }
 
     async fn inspect_project_memory_fact(
         &self,
-        target: ProjectMemoryFactTargetV1,
-    ) -> ProjectMemoryResult<Option<ProjectMemoryFactInspectionV1>> {
+        target: ProjectMemoryFactIdV1,
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryFactInspectionV1>> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(async move { inspect_project_memory_fact_tx(transaction, &target).await })
+            Box::pin(async move {
+                inspect_project_memory_fact_controlled_tx(transaction, &target, &read_control).await
+            })
         })
         .await
     }
@@ -414,8 +444,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn add_project_memory_fact(
         &self,
         request: ProjectMemoryFactAddCommandV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactAddOutcomeV1> {
-        self.project_memory_write(move |transaction| {
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1> {
+        self.project_memory_write(write_control, move |transaction| {
             Box::pin(async move { add_project_memory_fact_tx(transaction, &request).await })
         })
         .await
@@ -424,8 +455,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn update_project_memory_fact(
         &self,
         request: ProjectMemoryFactUpdateCommandV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactUpdateOutcomeV1> {
-        self.project_memory_write(move |transaction| {
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
+        self.project_memory_write(write_control, move |transaction| {
             Box::pin(async move { update_project_memory_fact_tx(transaction, &request).await })
         })
         .await
@@ -434,8 +466,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn remove_project_memory_fact(
         &self,
         request: ProjectMemoryFactRemoveCommandV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactRemoveOutcomeV1> {
-        self.project_memory_write(move |transaction| {
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
+        self.project_memory_write(write_control, move |transaction| {
             Box::pin(async move { remove_project_memory_fact_tx(transaction, &request).await })
         })
         .await
@@ -444,8 +477,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn record_project_memory_fact_feedback(
         &self,
         request: ProjectMemoryFactFeedbackCommandV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactFeedbackOutcomeV1> {
-        self.project_memory_write(move |transaction| {
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactFeedbackOutcomeV1> {
+        self.project_memory_write(write_control, move |transaction| {
             Box::pin(
                 async move { record_project_memory_fact_feedback_tx(transaction, &request).await },
             )
@@ -456,11 +490,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn project_memory_fact_feedback_history(
         &self,
         query: ProjectMemoryFactFeedbackHistoryQueryV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactFeedbackHistoryV1> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactFeedbackHistoryV1> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(
-                async move { project_memory_fact_feedback_history_tx(transaction, &query).await },
-            )
+            Box::pin(async move {
+                project_memory_fact_feedback_history_tx(transaction, &query, &read_control).await
+            })
         })
         .await
     }
@@ -468,10 +504,17 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn find_project_memory_fact_by_content_digest(
         &self,
         query: ProjectMemoryFactContentDigestQueryV1,
-    ) -> ProjectMemoryResult<Option<ProjectMemoryFactProjectionV1>> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
             Box::pin(async move {
-                find_project_memory_fact_by_content_digest_tx(transaction, &query).await
+                find_project_memory_fact_by_content_digest_controlled_tx(
+                    transaction,
+                    &query,
+                    &read_control,
+                )
+                .await
             })
         })
         .await
@@ -480,8 +523,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn apply_project_memory_fact_curation(
         &self,
         request: ProjectMemoryFactCurationBatchV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactCurationReceiptV1> {
-        self.project_memory_write(move |transaction| {
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
+        self.project_memory_write(write_control, move |transaction| {
             Box::pin(
                 async move { apply_project_memory_fact_curation_tx(transaction, &request).await },
             )
@@ -492,19 +536,10 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn merge_project_memory_facts(
         &self,
         request: ProjectMemoryFactMergeCommandV1,
-    ) -> ProjectMemoryResult<ProjectMemoryFactMergeOutcomeV1> {
-        self.project_memory_write(move |transaction| {
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
+        self.project_memory_write(write_control, move |transaction| {
             Box::pin(async move { merge_project_memory_facts_tx(transaction, &request).await })
-        })
-        .await
-    }
-
-    async fn repair_project_memory(
-        &self,
-        request: ProjectMemoryMemoryRepairCommandV1,
-    ) -> ProjectMemoryResult<ProjectMemoryMemoryRepairStatsV1> {
-        self.project_memory_write(move |transaction| {
-            Box::pin(async move { repair_project_memory_tx(transaction, &request).await })
         })
         .await
     }
@@ -512,9 +547,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn dashboard_project_memory_overview(
         &self,
         query: ProjectMemoryDashboardMemoryOverviewQueryV1,
-    ) -> ProjectMemoryResult<ProjectMemoryDashboardMemoryOverviewV1> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryDashboardMemoryOverviewV1> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(async move { dashboard_project_memory_overview_tx(transaction, &query).await })
+            Box::pin(async move {
+                dashboard_project_memory_overview_tx(transaction, &query, &read_control).await
+            })
         })
         .await
     }
@@ -522,11 +561,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn dashboard_project_memory_fact_detail(
         &self,
         query: ProjectMemoryDashboardFactDetailQueryV1,
-    ) -> ProjectMemoryResult<Option<ProjectMemoryDashboardFactDetailV1>> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryDashboardFactDetailV1>> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(
-                async move { dashboard_project_memory_fact_detail_tx(transaction, &query).await },
-            )
+            Box::pin(async move {
+                dashboard_project_memory_fact_detail_tx(transaction, &query, &read_control).await
+            })
         })
         .await
     }
@@ -534,11 +575,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn dashboard_project_memory_vector_points(
         &self,
         query: ProjectMemoryDashboardVectorPointsQueryV1,
-    ) -> ProjectMemoryResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(
-                async move { dashboard_project_memory_vector_points_tx(transaction, &query).await },
-            )
+            Box::pin(async move {
+                dashboard_project_memory_vector_points_tx(transaction, &query, &read_control).await
+            })
         })
         .await
     }
@@ -546,9 +589,13 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn dashboard_project_memory_oplog(
         &self,
         query: ProjectMemoryDashboardOplogQueryV1,
-    ) -> ProjectMemoryResult<Vec<ProjectMemoryDashboardOplogEntryV1>> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<Vec<ProjectMemoryDashboardOplogEntryV1>> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
-            Box::pin(async move { dashboard_project_memory_oplog_tx(transaction, &query).await })
+            Box::pin(async move {
+                dashboard_project_memory_oplog_tx(transaction, &query, &read_control).await
+            })
         })
         .await
     }
@@ -556,8 +603,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
     async fn record_project_memory_fact_retrieval(
         &self,
         request: ProjectMemoryFactRetrievalCommandV1,
-    ) -> ProjectMemoryResult<Vec<ProjectMemoryFactProjectionV1>> {
-        self.project_memory_write(move |transaction| {
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactRetrievalOutcomeV1> {
+        self.project_memory_write(write_control, move |transaction| {
             Box::pin(
                 async move { record_project_memory_fact_retrieval_tx(transaction, &request).await },
             )
@@ -570,8 +618,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         apply_id: ProvenanceId,
         request: ProjectMemoryFactAddCommandV1,
         evidence: ProjectMemoryAutomaticFactEvidenceV1,
-    ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1> {
-        self.project_memory_write(move |transaction| {
+        write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryAutomaticFactApplyResultV1> {
+        self.project_memory_write(write_control, move |transaction| {
             Box::pin(async move {
                 apply_project_memory_automatic_fact_tx(transaction, apply_id, &request, &evidence)
                     .await
@@ -584,10 +633,18 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         &self,
         owner: FactOwnerV1,
         apply_id: ProvenanceId,
-    ) -> ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
             Box::pin(async move {
-                get_project_memory_automatic_fact_receipt_tx(transaction, &owner, &apply_id).await
+                get_project_memory_automatic_fact_receipt_tx(
+                    transaction,
+                    &owner,
+                    &apply_id,
+                    &read_control,
+                )
+                .await
             })
         })
         .await
@@ -599,7 +656,9 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
         state: Option<ProjectMemoryAutomaticFactStateV1>,
         after_apply_id: Option<ProvenanceId>,
         limit: usize,
-    ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactReceiptPageV1> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryAutomaticFactReceiptPageV1> {
+        let read_control = read_control.clone();
         self.project_memory_read(move |transaction| {
             Box::pin(async move {
                 list_project_memory_automatic_fact_receipts_tx(
@@ -608,6 +667,7 @@ impl ProjectMemoryFactStore for DatabaseFactStore<'_> {
                     state,
                     after_apply_id.as_ref(),
                     limit,
+                    &read_control,
                 )
                 .await
             })
@@ -620,8 +680,9 @@ impl ProjectMemoryGraphStore for DatabaseFactStore<'_> {
     async fn project_memory_graph(
         &self,
         query: ProjectMemoryGraphQueryV1,
-    ) -> ProjectMemoryResult<ProjectMemoryGraphPageV1> {
-        graph::project_memory_graph(self.db, query).await
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryGraphPageV1> {
+        graph::project_memory_graph(self.db, query, read_control).await
     }
 }
 
@@ -702,7 +763,10 @@ macro_rules! delegate_fact_store_methods {
 
 impl FactStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
-        fn commit_fact(batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome>;
+        fn commit_fact(
+            batch: FactWriteBatch,
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<FactCommitOutcome>;
         fn query_current_facts(query: CurrentFactsQuery) -> FactStoreResult<Vec<StoredFactV1>>;
         fn query_fact_current(query: FactCurrentQuery) -> FactStoreResult<Option<StoredFactV1>>;
         fn query_fact_current_response(
@@ -714,7 +778,6 @@ impl FactStore for ProjectFactStore<'_> {
         fn query_fact_lineage_response(
             query: FactLineageQuery,
         ) -> FactStoreResult<FactLineageResponseV1>;
-        fn resolve_legacy_fact(query: LegacyFactQuery) -> FactStoreResult<Option<FactId>>;
         fn get_retrieval_anchor(
             query: RetrievalAnchorQuery,
         ) -> FactStoreResult<Option<RetrievalAnchorRecordV2>>;
@@ -725,91 +788,114 @@ impl ProjectMemoryFactStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
         fn list_project_memory_facts(
             query: ProjectMemoryFactListQueryV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactPageV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryFactPageV1>;
         fn search_project_memory_facts(
             query: ProjectMemoryFactSearchQuery,
-        ) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryFactSearchPageV1>;
         fn probe_project_memory_facts(
             query: ProjectMemoryFactSearchQuery,
-        ) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryFactSearchPageV1>;
         fn related_project_memory_facts(
             query: ProjectMemoryFactSearchQuery,
-        ) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryFactSearchPageV1>;
         fn reason_project_memory_facts(
             query: ProjectMemoryFactSearchQuery,
-        ) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryFactSearchPageV1>;
         fn find_project_memory_contradictions(
             query: ProjectMemoryFactContradictionQueryV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactContradictionPageV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryFactContradictionPageV1>;
         fn get_project_memory_fact(
-            target: ProjectMemoryFactTargetV1,
-        ) -> ProjectMemoryResult<Option<ProjectMemoryFactProjectionV1>>;
+            target: ProjectMemoryFactIdV1,
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>>;
         fn project_memory_fact_history(
             query: ProjectMemoryFactHistoryQueryV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactHistoryV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryFactHistoryV1>;
         fn project_memory_status(
             owner: FactOwnerV1,
-        ) -> ProjectMemoryResult<ProjectMemoryMemoryStatusV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryMemoryStatusV1>;
         fn inspect_project_memory_fact(
-            target: ProjectMemoryFactTargetV1,
-        ) -> ProjectMemoryResult<Option<ProjectMemoryFactInspectionV1>>;
+            target: ProjectMemoryFactIdV1,
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<Option<ProjectMemoryFactInspectionV1>>;
         fn add_project_memory_fact(
             request: ProjectMemoryFactAddCommandV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactAddOutcomeV1>;
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1>;
         fn update_project_memory_fact(
             request: ProjectMemoryFactUpdateCommandV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactUpdateOutcomeV1>;
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1>;
         fn remove_project_memory_fact(
             request: ProjectMemoryFactRemoveCommandV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactRemoveOutcomeV1>;
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1>;
         fn record_project_memory_fact_feedback(
             request: ProjectMemoryFactFeedbackCommandV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactFeedbackOutcomeV1>;
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryFactFeedbackOutcomeV1>;
         fn project_memory_fact_feedback_history(
             query: ProjectMemoryFactFeedbackHistoryQueryV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactFeedbackHistoryV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryFactFeedbackHistoryV1>;
         fn find_project_memory_fact_by_content_digest(
             query: ProjectMemoryFactContentDigestQueryV1,
-        ) -> ProjectMemoryResult<Option<ProjectMemoryFactProjectionV1>>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>>;
         fn apply_project_memory_fact_curation(
             request: ProjectMemoryFactCurationBatchV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactCurationReceiptV1>;
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1>;
         fn merge_project_memory_facts(
             request: ProjectMemoryFactMergeCommandV1,
-        ) -> ProjectMemoryResult<ProjectMemoryFactMergeOutcomeV1>;
-        fn repair_project_memory(
-            request: ProjectMemoryMemoryRepairCommandV1,
-        ) -> ProjectMemoryResult<ProjectMemoryMemoryRepairStatsV1>;
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1>;
         fn dashboard_project_memory_overview(
             query: ProjectMemoryDashboardMemoryOverviewQueryV1,
-        ) -> ProjectMemoryResult<ProjectMemoryDashboardMemoryOverviewV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryDashboardMemoryOverviewV1>;
         fn dashboard_project_memory_fact_detail(
             query: ProjectMemoryDashboardFactDetailQueryV1,
-        ) -> ProjectMemoryResult<Option<ProjectMemoryDashboardFactDetailV1>>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<Option<ProjectMemoryDashboardFactDetailV1>>;
         fn dashboard_project_memory_vector_points(
             query: ProjectMemoryDashboardVectorPointsQueryV1,
-        ) -> ProjectMemoryResult<Vec<ProjectMemoryDashboardVectorPointV1>>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<Vec<ProjectMemoryDashboardVectorPointV1>>;
         fn dashboard_project_memory_oplog(
             query: ProjectMemoryDashboardOplogQueryV1,
-        ) -> ProjectMemoryResult<Vec<ProjectMemoryDashboardOplogEntryV1>>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<Vec<ProjectMemoryDashboardOplogEntryV1>>;
         fn record_project_memory_fact_retrieval(
             request: ProjectMemoryFactRetrievalCommandV1,
-        ) -> ProjectMemoryResult<Vec<ProjectMemoryFactProjectionV1>>;
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryFactRetrievalOutcomeV1>;
         fn apply_project_memory_automatic_fact(
             apply_id: ProvenanceId,
             request: ProjectMemoryFactAddCommandV1,
             evidence: ProjectMemoryAutomaticFactEvidenceV1,
-        ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1>;
+            write_control: &FactWriteControl,
+        ) -> FactStoreResult<ProjectMemoryAutomaticFactApplyResultV1>;
         fn get_project_memory_automatic_fact_receipt(
             owner: FactOwnerV1,
             apply_id: ProvenanceId,
-        ) -> ProjectMemoryResult<Option<ProjectMemoryAutomaticFactReceiptV1>>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<Option<ProjectMemoryAutomaticFactReceiptV1>>;
         fn list_project_memory_automatic_fact_receipts(
             owner: FactOwnerV1,
             state: Option<ProjectMemoryAutomaticFactStateV1>,
             after_apply_id: Option<ProvenanceId>,
             limit: usize,
-        ) -> ProjectMemoryResult<ProjectMemoryAutomaticFactReceiptPageV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryAutomaticFactReceiptPageV1>;
     }
 }
 
@@ -817,10 +903,14 @@ impl ProjectMemoryGraphStore for ProjectFactStore<'_> {
     delegate_fact_store_methods! {
         fn project_memory_graph(
             query: ProjectMemoryGraphQueryV1,
-        ) -> ProjectMemoryResult<ProjectMemoryGraphPageV1>;
+            read_control: &FactReadControl,
+        ) -> FactStoreResult<ProjectMemoryGraphPageV1>;
     }
 }
 
 #[cfg(test)]
 #[path = "fact_response_metadata_test.rs"]
 mod fact_response_metadata_test;
+
+#[cfg(test)]
+mod search_tests;

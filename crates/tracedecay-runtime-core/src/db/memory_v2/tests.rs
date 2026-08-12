@@ -1,9 +1,8 @@
 use tempfile::TempDir;
 use tracedecay_domain::FactOwnerV1;
 
-use crate::db::engine::{Connection, TestConnection, params};
+use crate::db::engine::{Connection, TestConnection};
 
-use super::schema::{table_exists, table_has_column};
 use super::*;
 
 async fn database() -> (TestConnection, TempDir) {
@@ -30,6 +29,15 @@ async fn scalar(conn: &Connection, sql: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
+async fn string_column(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut rows = conn.query(sql, ()).await.unwrap();
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        values.push(row.get(0).unwrap());
+    }
+    values
+}
+
 #[tokio::test]
 async fn fresh_store_carries_only_the_final_memory_shape() {
     let (runtime, _dir) = database().await;
@@ -38,111 +46,59 @@ async fn fresh_store_carries_only_the_final_memory_shape() {
         scalar(&conn, "PRAGMA user_version").await,
         i64::from(super::super::migrations::SCHEMA_VERSION)
     );
-    for legacy in [
-        "memory_v2_legacy_map",
-        "memory_v2_legacy_quarantine",
-        "memory_v2_backfill_progress",
-        "memory_v2_legacy_proposal_map",
-        "memory_v2_legacy_feedback_event_map",
-        "memory_v2_feedback_history_repair_progress",
-        "memory_v2_compatibility_operation_receipts",
-        "memory_v2_compatibility_banks",
-        "memory_v2_compatibility_bank_dirty",
-        // Plan 39 Task 7 (owner decision 2026-08-07, second): derived vector
-        // storage is deleted, not relocated. Recall re-encodes from canonical
-        // content at query time, so a fresh final store carries no bank rows,
-        // no dirty queue, and no per-assertion vector table.
-        "memory_v2_banks",
-        "memory_v2_bank_dirty",
-        "memory_v2_assertion_vectors",
-    ] {
-        assert!(
-            !table_exists(&conn, legacy).await.unwrap(),
-            "legacy table {legacy} must not exist in a fresh final store"
-        );
-    }
-    for table in [
-        "memory_v2_operation_receipts",
-        "memory_v2_feedback_history",
-        "memory_v2_fact_relations",
-    ] {
-        assert!(
-            table_exists(&conn, table).await.unwrap(),
-            "final table {table} is missing"
-        );
-    }
-    assert!(
-        table_has_column(&conn, "memory_facts", "canonical_fact_id", "final_shape")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_has_column(&conn, "memory_v2_proposals", "origin", "final_shape")
-            .await
-            .unwrap(),
-        "proposal origin column is import machinery and must be gone"
-    );
-}
-
-#[tokio::test]
-async fn fact_relations_enforce_owner_evidence_and_identity() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    let owner = owner_key(&owner()).unwrap();
-    conn.execute_batch(&format!(
-        "INSERT INTO memory_v2_facts(
-            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
-         ) VALUES
-            ('relation.source', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
-            ('relation.target', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1),
-            ('relation.evidence', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1);
-         INSERT INTO memory_v2_fact_relations(
-            owner_kind, project_id, source_fact_id, target_fact_id, relation,
-            confidence, source_label, provenance_json, evidence_fact_ids_json,
-            occurred_at, updated_at
-         ) VALUES(
-            '{kind}', '{project_id}', 'relation.source', 'relation.target',
-            'supports', 0.8, 'fixture', '{{}}', '[\"relation.evidence\"]', 1, 1
-         );",
-        kind = owner.kind,
-        project_id = owner.project_id,
-        owner_json = owner.json,
-    ))
-    .await
-    .unwrap();
-    // The final shape accepts every canonical relation without an upgrade
-    // dance.
-    conn.execute(
-        "INSERT INTO memory_v2_fact_relations(
-            owner_kind, project_id, source_fact_id, target_fact_id, relation,
-            confidence, source_label, provenance_json, evidence_fact_ids_json,
-            occurred_at, updated_at
-         ) VALUES(?1, ?2, 'relation.source', 'relation.target',
-                   'contradicts', 0.8, 'fixture', '{}', '[\"relation.evidence\"]', 2, 2)",
-        params![owner.kind, owner.project_id.as_str()],
-    )
-    .await
-    .unwrap();
-    // Evidence outside the owner's facts is refused by the validation trigger.
-    let unknown_evidence = conn
-        .execute(
-            "INSERT INTO memory_v2_fact_relations(
-                owner_kind, project_id, source_fact_id, target_fact_id, relation,
-                confidence, source_label, provenance_json, evidence_fact_ids_json,
-                occurred_at, updated_at
-             ) VALUES(?1, ?2, 'relation.source', 'relation.target',
-                       'supersedes', 0.8, 'fixture', '{}', '[\"relation.unknown\"]', 3, 3)",
-            params![owner.kind, owner.project_id.as_str()],
+    assert_eq!(
+        string_column(
+            &conn,
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name GLOB 'memory_v2_*'
+             ORDER BY name",
         )
-        .await;
-    assert!(unknown_evidence.is_err());
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_fact_relations").await,
-        2
+        .await,
+        [
+            "memory_v2_assertion_evidence",
+            "memory_v2_assertion_payloads",
+            "memory_v2_assertion_payloads_fts",
+            "memory_v2_assertion_payloads_fts_config",
+            "memory_v2_assertion_payloads_fts_data",
+            "memory_v2_assertion_payloads_fts_docsize",
+            "memory_v2_assertion_payloads_fts_idx",
+            "memory_v2_assertion_supersession",
+            "memory_v2_assertions",
+            "memory_v2_automatic_fact_receipts",
+            "memory_v2_current_facts",
+            "memory_v2_evidence",
+            "memory_v2_facts",
+            "memory_v2_feedback_history",
+            "memory_v2_lineage_events",
+            "memory_v2_operation_receipts",
+        ],
+        "a fresh store must contain exactly the final memory tables and FTS shadows",
     );
     assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
-        0
+        string_column(
+            &conn,
+            "SELECT name FROM pragma_table_xinfo('memory_v2_current_facts')
+             ORDER BY cid",
+        )
+        .await,
+        [
+            "fact_id",
+            "owner_kind",
+            "project_id",
+            "payload_access",
+            "trust_score",
+            "active_assertion_id",
+            "last_event_id",
+            "updated_at",
+            "retrieval_count",
+            "access_count",
+            "helpful_count",
+            "unhelpful_count",
+            "last_retrieved_at",
+            "last_recalled_at",
+            "last_feedback_at",
+        ],
+        "the current projection must expose only the exact final columns",
     );
 }
 

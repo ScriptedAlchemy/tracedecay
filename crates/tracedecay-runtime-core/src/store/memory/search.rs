@@ -1,66 +1,88 @@
-//! Compatibility fact search, ranking, cursors, and retrieval recording.
+//! Canonical fact search, ranking, cursors, and retrieval recording.
 
 use std::collections::BTreeSet;
 
 use crate::memory::entities::normalize_entity;
 
-use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
-use serde_json::{Value, json};
+use crate::db::{Database, DatabaseMemoryTransaction as Transaction};
+use serde::{Deserialize, Serialize};
 
-use tracedecay_domain::{Confidence, FactCategoryV1, FactId, FactOwnerV1, UtcMicros};
+use tracedecay_domain::{Confidence, DomainError, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
 use tracedecay_store::{
-    FactStoreError, FactStoreResult, ProjectMemoryFactContradictionPageV1,
-    ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactContradictionV1,
-    ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1,
-    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchCursorV1,
+    FactReadControl, FactStoreError, FactStoreResult, MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
+    ProjectMemoryFactContradictionPageV1, ProjectMemoryFactContradictionQueryV1,
+    ProjectMemoryFactContradictionV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactRetrievalOutcomeV1,
+    ProjectMemoryFactRetrievalReceiptV1, ProjectMemoryFactSearchCursorV1,
+    ProjectMemoryFactSearchGraphCoverageV1, ProjectMemoryFactSearchGraphDegradationV1,
     ProjectMemoryFactSearchHitV1, ProjectMemoryFactSearchKindV1, ProjectMemoryFactSearchPageV1,
     ProjectMemoryFactSearchQuery, ProjectMemoryFactSearchScoresV1, ProjectMemoryFactV1,
-    ProjectMemoryResult,
+    ProjectMemoryGraphQueryV1,
 };
 
-use super::crud::{list_project_memory_facts_tx, load_current_fact_tx};
+use super::candidates::{
+    SearchCandidates, project_memory_available_facts_tx, project_memory_matches_all_entities,
+    project_memory_matches_entity, project_memory_probe_candidates_tx,
+    project_memory_reason_candidates_tx, project_memory_related_candidates_tx,
+    project_memory_search_candidates_tx,
+};
+use super::crud::load_mutable_project_memory_fact_tx;
 use super::envelope::{
-    ProjectMemoryOperationReceiptV1, project_memory_digest,
+    ProjectMemoryOperationReceiptV1, finish_read_snapshot,
     project_memory_lookup_operation_receipt_tx, project_memory_record_operation_receipt_tx,
-    project_memory_target_digest,
 };
 use super::primitives::{
-    OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION,
-    compatibility_legacy_timestamp, compatibility_source_store_id, project_memory_category_label,
-    project_memory_now, row_i64, row_string, storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION, project_memory_now,
+    storage_error, storage_message,
 };
 use super::projection::{
-    load_project_memory_projections_tx, project_memory_required_mapping_tx,
-    resolve_project_memory_target_tx,
+    load_project_memory_projections_controlled_tx, load_project_memory_projections_tx,
 };
 use super::scoring::{
-    project_memory_fact_tokens, project_memory_holographic_score, project_memory_jaccard,
-    project_memory_millionths, project_memory_temporal_decay, project_memory_term_coverage,
-    project_memory_tokens,
+    project_memory_combined_score, project_memory_fact_tokens, project_memory_fts_component,
+    project_memory_holographic_error, project_memory_holographic_score, project_memory_jaccard,
+    project_memory_millionths, project_memory_score_millionths, project_memory_temporal_decay,
+    project_memory_term_coverage, project_memory_tokens,
 };
 use crate::memory::encoding::HolographicEncoder;
+
+pub(super) fn ensure_project_memory_search_not_cancelled(
+    read_control: &FactReadControl,
+) -> FactStoreResult<()> {
+    if read_control.interrupted() {
+        Err(FactStoreError::ReadCancelled)
+    } else {
+        Ok(())
+    }
+}
 
 fn project_memory_search_scores(
     query_tokens: &[String],
     encoder: &HolographicEncoder,
     query_vector: &[f64],
+    normalized_bm25: f64,
     fact: &ProjectMemoryFactV1,
     now: UtcMicros,
 ) -> FactStoreResult<(ProjectMemoryFactSearchScoresV1, String)> {
     let fact_tokens = project_memory_fact_tokens(fact);
     let coverage = project_memory_term_coverage(query_tokens, &fact_tokens);
-    let fts = coverage;
+    let fts = project_memory_fts_component(normalized_bm25, coverage);
     let jaccard = project_memory_jaccard(query_tokens, &fact_tokens);
-    let holographic = project_memory_holographic_score(encoder, query_vector, fact);
-    let trust = fact.fact().trust().as_f64();
+    let holographic = project_memory_holographic_score(encoder, query_vector, fact)?;
+    let trust = fact.trust().as_f64();
     let temporal_decay = project_memory_temporal_decay(fact.telemetry().updated_at(), now);
-    let usage_boost = 1.0 + (0.02 * (fact.telemetry().retrieval_count() as f64).ln_1p()).min(0.5);
-    let score =
-        (fts * 0.40 + jaccard * 0.30 + holographic * 0.30) * trust * temporal_decay * usage_boost;
+    let score = project_memory_combined_score(
+        fts,
+        jaccard,
+        holographic,
+        trust,
+        temporal_decay,
+        fact.telemetry().retrieval_count(),
+    );
     Ok((
         ProjectMemoryFactSearchScoresV1::new(
-            project_memory_millionths(score),
+            project_memory_score_millionths(score),
             project_memory_millionths(fts),
             project_memory_millionths(jaccard),
             project_memory_millionths(holographic),
@@ -78,7 +100,7 @@ fn project_memory_search_scores(
 ///
 /// The comparator and the cursor predicate are one unit and must stay that
 /// way: a cursor is only resumable against the exact order it was cut from, so
-/// every paged compatibility search shares this single definition.
+/// every paged canonical search shares this single definition.
 fn rank_and_seek(
     ranked: &mut Vec<(ProjectMemoryFactSearchHitV1, UtcMicros)>,
     after: Option<&ProjectMemoryFactSearchCursorV1>,
@@ -101,199 +123,72 @@ fn rank_and_seek(
     }
 }
 
-async fn project_memory_available_facts_tx(
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    category: Option<FactCategoryV1>,
-    min_trust: Option<Confidence>,
-) -> ProjectMemoryResult<Vec<ProjectMemoryFactV1>> {
-    let query = ProjectMemoryFactListQueryV1::new(owner.clone(), category, min_trust, None, 1_000)?;
-    let page = list_project_memory_facts_tx(transaction, &query).await?;
-    Ok(page
-        .facts()
-        .iter()
-        .filter_map(|projection| match projection {
-            ProjectMemoryFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
-            ProjectMemoryFactProjectionV1::Unavailable(_) => None,
-        })
-        .collect())
-}
-
-async fn project_memory_search_candidates_tx(
-    transaction: &Transaction<'_>,
-    query: &ProjectMemoryFactSearchQuery,
-    min_trust: Confidence,
-) -> ProjectMemoryResult<Vec<ProjectMemoryFactV1>> {
-    let text = query.query().ok_or_else(|| {
-        storage_message(
-            PROJECT_MEMORY_READ_OPERATION,
-            "compatibility search query is missing",
-        )
-    })?;
-    let mut tokens = project_memory_tokens(text)
-        .into_iter()
-        .map(|token| token.to_ascii_lowercase())
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    tokens.sort();
-    tokens.dedup();
-    if tokens.is_empty() {
-        return project_memory_available_facts_tx(
-            transaction,
-            query.owner(),
-            query.filter().category(),
-            Some(min_trust),
-        )
-        .await;
-    }
-    tokens.truncate(8);
-
-    let key = OwnerKey::new(query.owner())?;
-    let mut values = vec![
-        crate::db::engine::Value::Text(key.kind.to_string()),
-        crate::db::engine::Value::Text(key.project_id.clone()),
-        crate::db::engine::Value::Text(key.json.clone()),
-        crate::db::engine::Value::Real(min_trust.as_f64()),
-    ];
-    let category_filter = query
-        .filter()
-        .category()
-        .map_or_else(String::new, |category| {
-            let index = values.len() + 1;
-            values.push(crate::db::engine::Value::Text(
-                project_memory_category_label(category).to_owned(),
-            ));
-            format!("AND json_extract(payloads.payload_json, '$.category') = ?{index}")
-        });
-    let mut token_filters = Vec::with_capacity(tokens.len());
-    for token in tokens {
-        let content_index = values.len() + 1;
-        values.push(crate::db::engine::Value::Text(format!("%{token}%")));
-        let payload_index = values.len() + 1;
-        values.push(crate::db::engine::Value::Text(format!("%{token}%")));
-        token_filters.push(format!(
-            "(lower(payloads.content) LIKE ?{content_index} \
-              OR lower(payloads.payload_json) LIKE ?{payload_index})"
-        ));
-    }
-    let limit_index = values.len() + 1;
-    let candidate_limit = query.limit().saturating_mul(2).clamp(4, 32);
-    values.push(crate::db::engine::Value::Integer(
-        i64::try_from(candidate_limit).unwrap_or(256),
-    ));
-    let sql = format!(
-        "SELECT current_facts.fact_id
-         FROM memory_v2_current_facts AS current_facts
-         JOIN memory_v2_facts AS facts
-           ON facts.fact_id = current_facts.fact_id
-          AND facts.owner_kind = current_facts.owner_kind
-          AND facts.project_id = current_facts.project_id
-         JOIN memory_v2_assertion_payloads AS payloads
-           ON payloads.assertion_id = current_facts.active_assertion_id
-          AND payloads.fact_id = current_facts.fact_id
-          AND payloads.owner_kind = current_facts.owner_kind
-          AND payloads.project_id = current_facts.project_id
-         WHERE current_facts.owner_kind = ?1
-           AND current_facts.project_id = ?2
-           AND facts.owner_json = ?3
-           AND current_facts.active_assertion_id IS NOT NULL
-           AND current_facts.trust_score >= ?4
-           {category_filter}
-           AND ({})
-         ORDER BY current_facts.updated_at DESC, current_facts.fact_id ASC
-         LIMIT ?{limit_index}",
-        token_filters.join(" OR ")
-    );
-    let mut rows = transaction
-        .query(&sql, values)
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut fact_ids = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
-        fact_ids.push(
-            FactId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
-                .map_err(FactStoreError::from)?,
-        );
-    }
-    drop(rows);
-    let facts = load_project_memory_projections_tx(transaction, query.owner(), &fact_ids)
-        .await?
-        .into_iter()
-        .filter_map(|projection| match projection {
-            ProjectMemoryFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
-            ProjectMemoryFactProjectionV1::Unavailable(_) => None,
-        })
-        .collect();
-    Ok(facts)
-}
-
-fn project_memory_matches_entity(fact: &ProjectMemoryFactV1, entity: &str) -> bool {
-    let normalized = normalize_entity(entity).to_ascii_lowercase();
-    !normalized.is_empty()
-        && fact.entities().is_some_and(|entities| {
-            entities.iter().any(|candidate| {
-                normalize_entity(candidate).eq_ignore_ascii_case(normalized.as_str())
-            })
-        })
-}
-
-fn project_memory_matches_all_entities(fact: &ProjectMemoryFactV1, entities: &[String]) -> bool {
-    entities
-        .iter()
-        .all(|entity| project_memory_matches_entity(fact, entity))
-}
-
 async fn project_memory_rank_facts_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactSearchQuery,
-) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
+    mut candidates: Option<SearchCandidates>,
+    graph_coverage: ProjectMemoryFactSearchGraphCoverageV1,
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+    ensure_project_memory_search_not_cancelled(read_control)?;
     let min_trust = query
         .filter()
         .min_trust()
         .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?);
-    let mut facts = if matches!(query.kind(), ProjectMemoryFactSearchKindV1::Search) {
-        project_memory_search_candidates_tx(transaction, query, min_trust).await?
+    let fts_scores = candidates
+        .as_mut()
+        .map(|candidates| std::mem::take(&mut candidates.fts_scores))
+        .unwrap_or_default();
+    let mut facts = if let Some(candidates) = candidates.take() {
+        ensure_project_memory_search_not_cancelled(read_control)?;
+        let projections = load_project_memory_projections_controlled_tx(
+            transaction,
+            query.owner(),
+            &candidates.fact_ids.iter().cloned().collect::<Vec<_>>(),
+            read_control,
+        )
+        .await?;
+        ensure_project_memory_search_not_cancelled(read_control)?;
+        projections
+            .into_iter()
+            .filter_map(|projection| match projection {
+                ProjectMemoryFactProjectionV1::Available(fact) => Some(fact.as_ref().clone()),
+                ProjectMemoryFactProjectionV1::Unavailable(_) => None,
+            })
+            .collect()
     } else {
         project_memory_available_facts_tx(
             transaction,
             query.owner(),
             query.filter().category(),
             Some(min_trust),
+            read_control,
         )
         .await?
     };
+    ensure_project_memory_search_not_cancelled(read_control)?;
     let now = project_memory_now()?;
     let mut ranked = Vec::with_capacity(facts.len());
     match query.kind() {
         ProjectMemoryFactSearchKindV1::Search => {
             let text = query.query().ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_READ_OPERATION,
-                    "compatibility search query is missing",
-                )
+                storage_message(PROJECT_MEMORY_READ_OPERATION, "search query is missing")
             })?;
             let tokens = project_memory_tokens(text);
             let encoder = HolographicEncoder::new();
-            let query_vector = encoder.encode_fact(text, &tokens);
+            let query_vector = encoder
+                .encode_fact(text, &tokens)
+                .map_err(project_memory_holographic_error)?;
             for fact in facts.drain(..) {
-                let (scores, why) =
-                    project_memory_search_scores(&tokens, &encoder, &query_vector, &fact, now)?;
-                // Mirror the legacy retriever's relevance floor: a non-empty
-                // query only returns facts with a real textual signal (FTS/term
-                // overlap). Facts surfaced solely by the dense holographic
-                // baseline or trust are never relevant matches, so scoring them
-                // above zero must not pull unrelated facts into the results (or
-                // bump their access counts).
-                if !tokens.is_empty()
-                    && scores.fts_score_millionths() == 0
-                    && scores.jaccard_score_millionths() == 0
-                {
-                    continue;
-                }
+                ensure_project_memory_search_not_cancelled(read_control)?;
+                let (scores, why) = project_memory_search_scores(
+                    &tokens,
+                    &encoder,
+                    &query_vector,
+                    fts_scores.get(fact.fact_id()).copied().unwrap_or(0.0),
+                    &fact,
+                    now,
+                )?;
                 if query
                     .filter()
                     .threshold_millionths()
@@ -309,16 +204,14 @@ async fn project_memory_rank_facts_tx(
         }
         ProjectMemoryFactSearchKindV1::Probe => {
             let entity = query.query().ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_READ_OPERATION,
-                    "compatibility probe query is missing",
-                )
+                storage_message(PROJECT_MEMORY_READ_OPERATION, "probe query is missing")
             })?;
-            for fact in facts
-                .drain(..)
-                .filter(|fact| project_memory_matches_entity(fact, entity))
-            {
-                let trust = project_memory_millionths(fact.fact().trust().as_f64());
+            for fact in facts.drain(..) {
+                ensure_project_memory_search_not_cancelled(read_control)?;
+                if !project_memory_matches_entity(&fact, entity) {
+                    continue;
+                }
+                let trust = project_memory_millionths(fact.trust().as_f64());
                 let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
                 ranked.push((
                     ProjectMemoryFactSearchHitV1::new(
@@ -331,28 +224,27 @@ async fn project_memory_rank_facts_tx(
             }
         }
         ProjectMemoryFactSearchKindV1::Related { entity } => {
-            for fact in facts
-                .drain(..)
-                .filter(|fact| project_memory_matches_entity(fact, &entity))
-            {
-                let trust = project_memory_millionths(fact.fact().trust().as_f64());
+            for fact in facts.drain(..) {
+                ensure_project_memory_search_not_cancelled(read_control)?;
+                let trust = project_memory_millionths(fact.trust().as_f64());
                 let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
                 ranked.push((
                     ProjectMemoryFactSearchHitV1::new(
                         fact.clone(),
                         scores,
-                        Some("entity related".to_owned()),
+                        Some(format!("entity/relation co-occurrence from {entity}")),
                     )?,
                     fact.telemetry().updated_at(),
                 ));
             }
         }
         ProjectMemoryFactSearchKindV1::Reason { entities } => {
-            for fact in facts
-                .drain(..)
-                .filter(|fact| project_memory_matches_all_entities(fact, &entities))
-            {
-                let trust = project_memory_millionths(fact.fact().trust().as_f64());
+            for fact in facts.drain(..) {
+                ensure_project_memory_search_not_cancelled(read_control)?;
+                if !project_memory_matches_all_entities(&fact, &entities) {
+                    continue;
+                }
+                let trust = project_memory_millionths(fact.trust().as_f64());
                 let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
                 ranked.push((
                     ProjectMemoryFactSearchHitV1::new(
@@ -365,7 +257,9 @@ async fn project_memory_rank_facts_tx(
             }
         }
     }
+    ensure_project_memory_search_not_cancelled(read_control)?;
     rank_and_seek(&mut ranked, query.after());
+    ensure_project_memory_search_not_cancelled(read_control)?;
     let has_more = ranked.len() > query.limit();
     ranked.truncate(query.limit());
     let next_after = if has_more {
@@ -384,289 +278,239 @@ async fn project_memory_rank_facts_tx(
         query.owner().clone(),
         ranked.into_iter().map(|(hit, _)| hit).collect(),
         next_after,
+        graph_coverage,
     )
-    .map_err(Into::into)
-}
-
-pub(super) async fn search_project_memory_facts_tx(
-    transaction: &Transaction<'_>,
-    query: &ProjectMemoryFactSearchQuery,
-) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
-    project_memory_rank_facts_tx(transaction, query).await
 }
 
 pub(super) async fn probe_project_memory_facts_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactSearchQuery,
-) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
-    project_memory_rank_facts_tx(transaction, query).await
-}
-
-pub(super) async fn related_project_memory_facts_tx(
-    transaction: &Transaction<'_>,
-    query: &ProjectMemoryFactSearchQuery,
-) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
-    let ProjectMemoryFactSearchKindV1::Related { entity } = query.kind() else {
-        return Err(storage_message(
-            PROJECT_MEMORY_READ_OPERATION,
-            "compatibility related query has the wrong kind",
-        )
-        .into());
-    };
-    let key = OwnerKey::new(query.owner())?;
-    let source_store_id = compatibility_source_store_id()?;
-    let normalized = normalize_entity(&entity).to_ascii_lowercase();
-    let mut entity_rows = transaction
-        .query(
-            "SELECT DISTINCT entities.entity_id
-             FROM memory_entities AS entities
-             JOIN memory_fact_entities AS links ON links.entity_id = entities.entity_id
-             JOIN memory_facts AS projections ON projections.fact_id = links.fact_id
-             JOIN memory_v2_facts AS mappings
-               ON mappings.fact_id = projections.canonical_fact_id
-             WHERE mappings.owner_kind = ?1 AND mappings.project_id = ?2
-               AND mappings.owner_json = ?3 AND ?4 = 'persisted-numeric-fact-id'
-               AND (
-                    entities.normalized_name = ?5
-                    OR (
-                        json_valid(entities.aliases)
-                        AND EXISTS(
-                            SELECT 1 FROM json_each(entities.aliases) AS aliases
-                            WHERE lower(trim(CAST(aliases.value AS TEXT))) = ?5
-                        )
-                    )
-               )
-              ORDER BY entities.name ASC, entities.entity_id ASC
-              LIMIT 256",
-            params![
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                source_store_id.as_str(),
-                normalized,
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut source_entity_ids = Vec::new();
-    while let Some(row) = entity_rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
-        source_entity_ids.push(row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?);
-    }
-    drop(entity_rows);
-    if source_entity_ids.is_empty() {
-        return ProjectMemoryFactSearchPageV1::new(query.owner().clone(), Vec::new(), None)
-            .map_err(Into::into);
-    }
-
-    let placeholders = std::iter::repeat_n("?", source_entity_ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut values = Vec::with_capacity(source_entity_ids.len() + 4);
-    values.push(crate::db::engine::Value::Text(key.kind.to_string()));
-    values.push(crate::db::engine::Value::Text(key.project_id.clone()));
-    values.push(crate::db::engine::Value::Text(key.json.clone()));
-    values.push(crate::db::engine::Value::Text(
-        source_store_id.as_str().to_owned(),
-    ));
-    values.extend(
-        source_entity_ids
-            .iter()
-            .copied()
-            .map(crate::db::engine::Value::Integer),
-    );
-    let sql = format!(
-        "SELECT DISTINCT co_entities.entity_id, co_entities.name
-         FROM memory_fact_entities AS source_links
-         JOIN memory_fact_entities AS co_links ON co_links.fact_id = source_links.fact_id
-         JOIN memory_entities AS co_entities ON co_entities.entity_id = co_links.entity_id
-         JOIN memory_facts AS projections ON projections.fact_id = source_links.fact_id
-         JOIN memory_v2_facts AS mappings
-           ON mappings.fact_id = projections.canonical_fact_id
-         WHERE mappings.owner_kind = ? AND mappings.project_id = ?
-           AND mappings.owner_json = ? AND ? = 'persisted-numeric-fact-id'
-           AND source_links.entity_id IN ({placeholders})
-           AND co_links.entity_id NOT IN ({placeholders})
-         ORDER BY co_entities.name ASC, co_entities.entity_id ASC
-         LIMIT ?",
-    );
-    // The source-id list appears twice. Bind a separate, fixed-width value
-    // list so this remains parameterized rather than interpolating identifiers.
-    let mut co_values = values.clone();
-    co_values.extend(
-        source_entity_ids
-            .iter()
-            .copied()
-            .map(crate::db::engine::Value::Integer),
-    );
-    co_values.push(crate::db::engine::Value::Integer(query.limit() as i64));
-    let mut co_rows = transaction
-        .query(&sql, co_values)
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let mut co_entities = Vec::new();
-    while let Some(row) = co_rows
-        .next()
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-    {
-        co_entities.push((
-            row_i64(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
-            row_string(&row, 1, PROJECT_MEMORY_READ_OPERATION)?,
-        ));
-    }
-    drop(co_rows);
-
-    let per_entity_limit = query.limit().saturating_mul(2).max(1);
-    let mut encountered = Vec::new();
-    let mut seen = BTreeSet::new();
-    for (entity_id, _) in co_entities {
-        let category = query.filter().category().map(project_memory_category_label);
-        let min_trust = query
-            .filter()
-            .min_trust()
-            .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?)
-            .as_f64();
-        let mut rows = match category {
-            Some(category) => {
-                transaction
-                    .query(
-                        "SELECT mappings.fact_id
-                     FROM memory_fact_entities AS links
-                     JOIN memory_facts AS legacy_facts ON legacy_facts.fact_id = links.fact_id
-                     JOIN memory_v2_facts AS mappings
-                       ON mappings.fact_id = legacy_facts.canonical_fact_id
-                     WHERE links.entity_id = ?1
-                       AND mappings.owner_kind = ?2 AND mappings.project_id = ?3
-                       AND mappings.owner_json = ?4 AND ?5 = 'persisted-numeric-fact-id'
-                       AND legacy_facts.category = ?6 AND legacy_facts.trust_score >= ?7
-                     ORDER BY legacy_facts.updated_at DESC, mappings.fact_id ASC LIMIT ?8",
-                        params![
-                            entity_id,
-                            key.kind,
-                            key.project_id.as_str(),
-                            key.json.as_str(),
-                            source_store_id.as_str(),
-                            category,
-                            min_trust,
-                            per_entity_limit as i64,
-                        ],
-                    )
-                    .await
-            }
-            None => {
-                transaction
-                    .query(
-                        "SELECT mappings.fact_id
-                     FROM memory_fact_entities AS links
-                     JOIN memory_facts AS legacy_facts ON legacy_facts.fact_id = links.fact_id
-                     JOIN memory_v2_facts AS mappings
-                       ON mappings.fact_id = legacy_facts.canonical_fact_id
-                     WHERE links.entity_id = ?1
-                       AND mappings.owner_kind = ?2 AND mappings.project_id = ?3
-                       AND mappings.owner_json = ?4 AND ?5 = 'persisted-numeric-fact-id'
-                       AND legacy_facts.trust_score >= ?6
-                     ORDER BY legacy_facts.updated_at DESC, mappings.fact_id ASC LIMIT ?7",
-                        params![
-                            entity_id,
-                            key.kind,
-                            key.project_id.as_str(),
-                            key.json.as_str(),
-                            source_store_id.as_str(),
-                            min_trust,
-                            per_entity_limit as i64,
-                        ],
-                    )
-                    .await
-            }
-        }
-        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
-        {
-            let fact_id = FactId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
-                .map_err(FactStoreError::from)?;
-            if seen.insert(fact_id.clone()) {
-                encountered.push(fact_id);
-            }
-        }
-    }
-    let mut ranked = Vec::new();
-    for projection in
-        load_project_memory_projections_tx(transaction, query.owner(), &encountered).await?
-    {
-        let ProjectMemoryFactProjectionV1::Available(fact) = projection else {
-            continue;
-        };
-        let trust = project_memory_millionths(fact.fact().trust().as_f64());
-        let scores = ProjectMemoryFactSearchScoresV1::new(trust, 0, 0, 1_000_000, trust)?;
-        let updated_at = fact.telemetry().updated_at();
-        ranked.push((
-            ProjectMemoryFactSearchHitV1::new(
-                *fact,
-                scores,
-                Some("co-occurring entity".to_owned()),
-            )?,
-            updated_at,
-        ));
-    }
-    rank_and_seek(&mut ranked, query.after());
-    ranked.truncate(query.limit());
-    // V1 related-fact traversal is one bounded, name-ordered co-occurrence
-    // expansion rather than a cursorable global search. Exposing a cursor
-    // here would falsely imply coverage beyond the intentionally capped
-    // co-entity frontier.
-    let next_after = None;
-    ProjectMemoryFactSearchPageV1::new(
-        query.owner().clone(),
-        ranked.into_iter().map(|(hit, _)| hit).collect(),
-        next_after,
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+    let min_trust = query
+        .filter()
+        .min_trust()
+        .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?);
+    let candidates =
+        project_memory_probe_candidates_tx(transaction, query, min_trust, read_control).await?;
+    project_memory_rank_facts_tx(
+        transaction,
+        query,
+        Some(candidates),
+        ProjectMemoryFactSearchGraphCoverageV1::NotApplicable,
+        read_control,
     )
-    .map_err(Into::into)
+    .await
 }
 
 pub(super) async fn reason_project_memory_facts_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactSearchQuery,
-) -> ProjectMemoryResult<ProjectMemoryFactSearchPageV1> {
-    project_memory_rank_facts_tx(transaction, query).await
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+    let min_trust = query
+        .filter()
+        .min_trust()
+        .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?);
+    let candidates =
+        project_memory_reason_candidates_tx(transaction, query, min_trust, read_control).await?;
+    project_memory_rank_facts_tx(
+        transaction,
+        query,
+        Some(candidates),
+        ProjectMemoryFactSearchGraphCoverageV1::NotApplicable,
+        read_control,
+    )
+    .await
+}
+
+async fn project_memory_candidates_snapshot(
+    db: &Database,
+    query: &ProjectMemoryFactSearchQuery,
+    read_control: &FactReadControl,
+) -> FactStoreResult<SearchCandidates> {
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    let transaction = db
+        .begin_memory_read_transaction(PROJECT_MEMORY_READ_OPERATION)
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    let min_trust = query
+        .filter()
+        .min_trust()
+        .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?);
+    let result = match query.kind() {
+        ProjectMemoryFactSearchKindV1::Search => {
+            project_memory_search_candidates_tx(&transaction, query, min_trust, read_control).await
+        }
+        ProjectMemoryFactSearchKindV1::Related { .. } => {
+            project_memory_related_candidates_tx(&transaction, query, min_trust, read_control).await
+        }
+        _ => Err(storage_message(
+            PROJECT_MEMORY_READ_OPERATION,
+            "graph-assisted search has an unsupported kind",
+        )),
+    };
+    finish_read_snapshot(transaction, result).await
+}
+
+async fn project_memory_graph_assist(
+    db: &Database,
+    query: &ProjectMemoryFactSearchQuery,
+    candidates: &mut SearchCandidates,
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactSearchGraphCoverageV1> {
+    if db.memory_graph_runtime().is_none() {
+        return Ok(ProjectMemoryFactSearchGraphCoverageV1::NotMounted);
+    }
+    let roots = candidates
+        .relation_roots
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Ok(ProjectMemoryFactSearchGraphCoverageV1::Complete {
+            root_count: 0,
+            relation_count: 0,
+            expanded_fact_count: 0,
+        });
+    }
+    let graph_query = ProjectMemoryGraphQueryV1::new(
+        query.owner().clone(),
+        roots.clone(),
+        MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
+    )?;
+    let page = match super::graph::project_memory_graph(db, graph_query, read_control).await {
+        Ok(page) => page,
+        Err(FactStoreError::GraphCancelled) => return Err(FactStoreError::GraphCancelled),
+        Err(error) => match project_memory_graph_degradation(&error) {
+            Some(reason) => {
+                return Ok(ProjectMemoryFactSearchGraphCoverageV1::Degraded { reason });
+            }
+            None => return Err(error),
+        },
+    };
+    let before = candidates.fact_ids.len();
+    candidates
+        .fact_ids
+        .extend(page.facts().iter().filter_map(|fact| {
+            matches!(fact, ProjectMemoryFactProjectionV1::Available(_))
+                .then(|| fact.fact_id().clone())
+        }));
+    Ok(ProjectMemoryFactSearchGraphCoverageV1::Complete {
+        root_count: roots.len(),
+        relation_count: page.relations().len(),
+        expanded_fact_count: candidates.fact_ids.len().saturating_sub(before),
+    })
+}
+
+pub(super) fn project_memory_graph_degradation(
+    error: &FactStoreError,
+) -> Option<ProjectMemoryFactSearchGraphDegradationV1> {
+    match error {
+        FactStoreError::GraphConflict => Some(ProjectMemoryFactSearchGraphDegradationV1::Conflict),
+        FactStoreError::GraphUnavailable => {
+            Some(ProjectMemoryFactSearchGraphDegradationV1::Unavailable)
+        }
+        FactStoreError::GraphBudgetExhausted => {
+            Some(ProjectMemoryFactSearchGraphDegradationV1::BudgetExhausted)
+        }
+        FactStoreError::GraphDeadlineExceeded => {
+            Some(ProjectMemoryFactSearchGraphDegradationV1::DeadlineExceeded)
+        }
+        _ => None,
+    }
+}
+
+async fn project_memory_rank_snapshot(
+    db: &Database,
+    query: &ProjectMemoryFactSearchQuery,
+    candidates: SearchCandidates,
+    graph_coverage: ProjectMemoryFactSearchGraphCoverageV1,
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    let transaction = db
+        .begin_memory_read_transaction(PROJECT_MEMORY_READ_OPERATION)
+        .await
+        .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    let result = project_memory_rank_facts_tx(
+        &transaction,
+        query,
+        Some(candidates),
+        graph_coverage,
+        read_control,
+    )
+    .await;
+    finish_read_snapshot(transaction, result).await
+}
+
+pub(super) async fn search_project_memory_facts(
+    db: &Database,
+    query: &ProjectMemoryFactSearchQuery,
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    let mut candidates = project_memory_candidates_snapshot(db, query, read_control).await?;
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    let graph_coverage =
+        project_memory_graph_assist(db, query, &mut candidates, read_control).await?;
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    let page =
+        project_memory_rank_snapshot(db, query, candidates, graph_coverage, read_control).await?;
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    Ok(page)
+}
+
+pub(super) async fn related_project_memory_facts(
+    db: &Database,
+    query: &ProjectMemoryFactSearchQuery,
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+    let ProjectMemoryFactSearchKindV1::Related { .. } = query.kind() else {
+        return Err(storage_message(
+            PROJECT_MEMORY_READ_OPERATION,
+            "related query has the wrong kind",
+        ));
+    };
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    let mut candidates = project_memory_candidates_snapshot(db, query, read_control).await?;
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    let graph_coverage =
+        project_memory_graph_assist(db, query, &mut candidates, read_control).await?;
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    let page =
+        project_memory_rank_snapshot(db, query, candidates, graph_coverage, read_control).await?;
+    ensure_project_memory_search_not_cancelled(read_control)?;
+    Ok(page)
 }
 
 pub(super) async fn find_project_memory_contradictions_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactContradictionQueryV1,
-) -> ProjectMemoryResult<ProjectMemoryFactContradictionPageV1> {
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactContradictionPageV1> {
+    ensure_project_memory_search_not_cancelled(read_control)?;
     let mut facts = project_memory_available_facts_tx(
         transaction,
         query.owner(),
         query.category(),
         Some(Confidence::new(0.0).map_err(FactStoreError::from)?),
+        read_control,
     )
     .await?;
+    ensure_project_memory_search_not_cancelled(read_control)?;
     facts.sort_by(|left, right| left.fact_id().cmp(right.fact_id()));
     let mut contradictions = Vec::new();
     'outer: for (index, left) in facts.iter().enumerate() {
         for right in facts.iter().skip(index + 1) {
-            let Some(left_content) = left.content() else {
-                continue;
-            };
-            let Some(right_content) = right.content() else {
-                continue;
-            };
+            ensure_project_memory_search_not_cancelled(read_control)?;
             let left_entities = left
                 .entities()
-                .unwrap_or_default()
                 .iter()
                 .map(|entity| normalize_entity(entity).to_ascii_lowercase())
                 .collect::<BTreeSet<_>>();
             let right_entities = right
                 .entities()
-                .unwrap_or_default()
                 .iter()
                 .map(|entity| normalize_entity(entity).to_ascii_lowercase())
                 .collect::<BTreeSet<_>>();
@@ -694,9 +538,9 @@ pub(super) async fn find_project_memory_contradictions_tx(
                 continue;
             }
             let (existing, new_content) = if left_negative {
-                (right.clone(), left_content)
+                (right.clone(), left.content())
             } else {
-                (left.clone(), right_content)
+                (left.clone(), right.content())
             };
             contradictions.push(ProjectMemoryFactContradictionV1::new(
                 existing,
@@ -730,7 +574,11 @@ async fn project_memory_update_retrieval_projection_tx(
                 access_count = access_count + ?1,
                 last_retrieved_at = ?2,
                 last_recalled_at = CASE WHEN ?1 = 1 THEN ?2 ELSE last_recalled_at END
-             WHERE fact_id = ?3 AND owner_kind = ?4 AND project_id = ?5",
+             WHERE fact_id = ?3
+               AND owner_kind = ?4
+               AND project_id = ?5
+               AND payload_access = 'eligible'
+               AND active_assertion_id IS NOT NULL",
             params![
                 i64::from(recall),
                 timestamp.0,
@@ -744,85 +592,94 @@ async fn project_memory_update_retrieval_projection_tx(
     if changed != 1 {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility retrieval target has no current projection",
-        ));
-    }
-    let mapping = project_memory_required_mapping_tx(transaction, owner, fact_id).await?;
-    let changed = transaction
-        .execute(
-            "UPDATE memory_facts SET
-                retrieval_count = retrieval_count + 1,
-                access_count = access_count + ?1,
-                last_retrieved_at = ?2,
-                last_recalled_at = CASE WHEN ?1 = 1 THEN ?2 ELSE last_recalled_at END
-             WHERE fact_id = ?3",
-            params![
-                i64::from(recall),
-                compatibility_legacy_timestamp(timestamp),
-                mapping.legacy_fact_id()
-            ],
-        )
-        .await
-        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    if changed != 1 {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility retrieval target is missing from the legacy mirror",
+            "retrieval target has no current projection",
         ));
     }
     Ok(())
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectMemoryFactRetrievalReceiptWire {
+    owner: FactOwnerV1,
+    operation_id: ProvenanceId,
+    input_digest: String,
+    fact_ids: Vec<FactId>,
+    recall: bool,
+}
+
+impl From<&ProjectMemoryFactRetrievalReceiptV1> for ProjectMemoryFactRetrievalReceiptWire {
+    fn from(receipt: &ProjectMemoryFactRetrievalReceiptV1) -> Self {
+        Self {
+            owner: receipt.owner().clone(),
+            operation_id: receipt.operation_id().clone(),
+            input_digest: receipt.input_digest().to_owned(),
+            fact_ids: receipt
+                .fact_ids()
+                .iter()
+                .map(|fact_id| fact_id.fact_id().clone())
+                .collect(),
+            recall: receipt.recall(),
+        }
+    }
+}
+
+fn invalid_project_memory_retrieval_receipt() -> FactStoreError {
+    FactStoreError::Contract(DomainError::NonCanonical {
+        field: "project memory fact retrieval operation receipt",
+    })
+}
+
 async fn project_memory_replay_retrieval_tx(
     transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-    receipt: &ProjectMemoryOperationReceiptV1,
-) -> ProjectMemoryResult<Vec<ProjectMemoryFactProjectionV1>> {
-    let fact_ids = receipt
-        .receipt
-        .get("fact_ids")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility retrieval receipt fact ids are missing",
-            )
-        })?;
-    let mut parsed_ids = Vec::with_capacity(fact_ids.len());
-    for value in fact_ids {
-        parsed_ids.push(
-            FactId::new(value.as_str().ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility retrieval receipt fact id is malformed",
-                )
-            })?)
-            .map_err(FactStoreError::from)?,
-        );
+    request: &ProjectMemoryFactRetrievalCommandV1,
+    input_digest: &str,
+    operation_receipt: &ProjectMemoryOperationReceiptV1,
+) -> FactStoreResult<ProjectMemoryFactRetrievalOutcomeV1> {
+    if operation_receipt.fact_id.is_some() || operation_receipt.event_id.is_some() {
+        return Err(invalid_project_memory_retrieval_receipt());
     }
-    let facts = load_project_memory_projections_tx(transaction, owner, &parsed_ids).await?;
-    if facts.len() != parsed_ids.len() {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility retrieval replay fact is missing",
-        )
-        .into());
+    let persisted = serde_json::from_value::<ProjectMemoryFactRetrievalReceiptWire>(
+        operation_receipt.receipt.clone(),
+    )
+    .map_err(|_| invalid_project_memory_retrieval_receipt())?;
+    if &persisted.owner != request.owner()
+        || &persisted.operation_id != request.operation_id()
+        || persisted.input_digest != input_digest
+        || persisted.recall != request.recall()
+    {
+        return Err(invalid_project_memory_retrieval_receipt());
     }
-    Ok(facts)
+    let fact_ids = persisted
+        .fact_ids
+        .into_iter()
+        .map(|fact_id| ProjectMemoryFactIdV1::new(persisted.owner.clone(), fact_id))
+        .collect::<FactStoreResult<Vec<_>>>()?;
+    if fact_ids != request.targets() {
+        return Err(invalid_project_memory_retrieval_receipt());
+    }
+    let receipt = ProjectMemoryFactRetrievalReceiptV1::from_replay(
+        persisted.owner,
+        persisted.operation_id,
+        persisted.input_digest,
+        fact_ids,
+        persisted.recall,
+    )?;
+    let projection_ids = receipt
+        .fact_ids()
+        .iter()
+        .map(|fact_id| fact_id.fact_id().clone())
+        .collect::<Vec<_>>();
+    let projections =
+        load_project_memory_projections_tx(transaction, receipt.owner(), &projection_ids).await?;
+    ProjectMemoryFactRetrievalOutcomeV1::new(receipt, projections)
 }
 
 pub(super) async fn record_project_memory_fact_retrieval_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactRetrievalCommandV1,
-) -> ProjectMemoryResult<Vec<ProjectMemoryFactProjectionV1>> {
-    let request_digest = project_memory_digest(json!({
-        "targets": request
-            .targets()
-            .iter()
-            .map(project_memory_target_digest)
-            .collect::<FactStoreResult<Vec<_>>>()?,
-        "recall": request.recall(),
-    }))?;
+) -> FactStoreResult<ProjectMemoryFactRetrievalOutcomeV1> {
+    let request_digest = request.input_digest()?;
     if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
         transaction,
         request.owner(),
@@ -832,36 +689,19 @@ pub(super) async fn record_project_memory_fact_retrieval_tx(
     )
     .await?
     {
-        return project_memory_replay_retrieval_tx(transaction, request.owner(), &receipt).await;
+        return project_memory_replay_retrieval_tx(transaction, request, &request_digest, &receipt)
+            .await;
     }
-    let mut fact_ids = Vec::with_capacity(request.targets().len());
-    let mut seen = BTreeSet::new();
+
     for target in request.targets() {
-        let fact_id = resolve_project_memory_target_tx(transaction, target)
-            .await?
-            .ok_or_else(|| {
-                storage_message(
-                    PROJECT_MEMORY_WRITE_OPERATION,
-                    "compatibility retrieval target is missing",
-                )
-            })?;
-        if seen.insert(fact_id.clone()) {
-            fact_ids.push(fact_id);
-        }
+        load_mutable_project_memory_fact_tx(transaction, target).await?;
     }
-    let owner_key = OwnerKey::new(request.owner())?;
-    for fact_id in &fact_ids {
-        if load_current_fact_tx(transaction, &owner_key, request.owner(), fact_id)
-            .await?
-            .is_none()
-        {
-            return Err(storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility retrieval target is unavailable",
-            )
-            .into());
-        }
-    }
+    let fact_ids = request
+        .targets()
+        .iter()
+        .map(|target| target.fact_id().clone())
+        .collect::<Vec<_>>();
+
     let now = project_memory_now()?;
     for fact_id in &fact_ids {
         project_memory_update_retrieval_projection_tx(
@@ -877,13 +717,22 @@ pub(super) async fn record_project_memory_fact_retrieval_tx(
     if facts.len() != fact_ids.len() {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility retrieval projection is missing",
+            "retrieval projection is missing",
         )
         .into());
     }
-    let receipt = json!({
-        "fact_ids": fact_ids.iter().map(FactId::as_str).collect::<Vec<_>>(),
-    });
+    let receipt = ProjectMemoryFactRetrievalReceiptV1::recorded(
+        request.owner().clone(),
+        request.operation_id().clone(),
+        request_digest.clone(),
+        request.targets().to_vec(),
+        request.recall(),
+    )?;
+    let outcome = ProjectMemoryFactRetrievalOutcomeV1::new(receipt, facts)?;
+    let persisted_receipt = serde_json::to_value(ProjectMemoryFactRetrievalReceiptWire::from(
+        outcome.receipt(),
+    ))
+    .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
     project_memory_record_operation_receipt_tx(
         transaction,
         request.owner(),
@@ -892,9 +741,9 @@ pub(super) async fn record_project_memory_fact_retrieval_tx(
         &request_digest,
         None,
         None,
-        &receipt,
+        &persisted_receipt,
         now,
     )
     .await?;
-    Ok(facts)
+    Ok(outcome)
 }

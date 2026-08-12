@@ -11,7 +11,7 @@ pub(super) const FINAL_MEMORY_SUPPORT_SCHEMA: &str =
             operation_id TEXT NOT NULL CHECK(length(operation_id) > 0),
             operation_kind TEXT NOT NULL CHECK(operation_kind IN (
                 'add', 'update', 'remove', 'feedback', 'retrieval',
-                'curation', 'merge', 'repair', 'automatic_fact_apply'
+                'curation', 'merge', 'automatic_fact_apply'
             )),
             request_digest TEXT NOT NULL CHECK(length(request_digest) > 0),
             fact_id TEXT,
@@ -58,45 +58,6 @@ pub(super) const FINAL_MEMORY_SUPPORT_SCHEMA: &str =
             )
         );
 
-        CREATE TABLE IF NOT EXISTS memory_v2_fact_relations (
-            owner_kind TEXT NOT NULL CHECK(owner_kind IN ('profile', 'project')),
-            project_id TEXT NOT NULL,
-            source_fact_id TEXT NOT NULL,
-            target_fact_id TEXT NOT NULL,
-            relation TEXT NOT NULL CHECK(relation IN (
-                'supports', 'contradicts', 'supersedes', 'derived_from'
-            )),
-            confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
-            source_label TEXT NOT NULL CHECK(
-                length(source_label) > 0
-                AND length(source_label) <= 4096
-                AND trim(source_label) = source_label
-            ),
-            provenance_json TEXT NOT NULL CHECK(
-                json_valid(provenance_json)
-                AND length(CAST(provenance_json AS BLOB)) <= 4096
-            ),
-            evidence_fact_ids_json TEXT NOT NULL CHECK(
-                json_valid(evidence_fact_ids_json)
-                AND json_type(evidence_fact_ids_json) = 'array'
-                AND json_array_length(evidence_fact_ids_json) BETWEEN 1 AND 256
-            ),
-            occurred_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL CHECK(updated_at >= occurred_at),
-            PRIMARY KEY(
-                owner_kind, project_id, source_fact_id, target_fact_id, relation
-            ),
-            FOREIGN KEY(source_fact_id, owner_kind, project_id)
-                REFERENCES memory_v2_facts(fact_id, owner_kind, project_id),
-            FOREIGN KEY(target_fact_id, owner_kind, project_id)
-                REFERENCES memory_v2_facts(fact_id, owner_kind, project_id),
-            CHECK(source_fact_id <> target_fact_id),
-            CHECK(
-                (owner_kind = 'profile' AND project_id = '') OR
-                (owner_kind = 'project' AND project_id <> '')
-            )
-        );
-
         CREATE INDEX IF NOT EXISTS idx_memory_v2_operation_receipts_fact
             ON memory_v2_operation_receipts(
                 fact_id, owner_kind, project_id, recorded_at
@@ -104,14 +65,6 @@ pub(super) const FINAL_MEMORY_SUPPORT_SCHEMA: &str =
         CREATE INDEX IF NOT EXISTS idx_memory_v2_feedback_history_fact
             ON memory_v2_feedback_history(
                 owner_kind, project_id, fact_id, occurred_at, event_id
-            );
-        CREATE INDEX IF NOT EXISTS idx_memory_v2_fact_relations_source
-            ON memory_v2_fact_relations(
-                owner_kind, project_id, source_fact_id, relation, updated_at DESC
-            );
-        CREATE INDEX IF NOT EXISTS idx_memory_v2_fact_relations_target
-            ON memory_v2_fact_relations(
-                owner_kind, project_id, target_fact_id, relation, updated_at DESC
             );
         CREATE TRIGGER IF NOT EXISTS memory_v2_operation_receipts_no_update
         BEFORE UPDATE ON memory_v2_operation_receipts BEGIN
@@ -160,54 +113,6 @@ pub(super) const FINAL_MEMORY_SUPPORT_SCHEMA: &str =
         CREATE TRIGGER IF NOT EXISTS memory_v2_feedback_history_no_delete
         BEFORE DELETE ON memory_v2_feedback_history BEGIN
             SELECT RAISE(ABORT, 'memory_v2 feedback history records are immutable');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_fact_relations_validate_evidence_insert
-        BEFORE INSERT ON memory_v2_fact_relations
-        WHEN EXISTS (
-            SELECT 1 FROM json_each(NEW.evidence_fact_ids_json)
-            WHERE type <> 'text' OR length(value) = 0
-        ) OR EXISTS (
-            SELECT 1 FROM json_each(NEW.evidence_fact_ids_json) AS evidence
-            LEFT JOIN memory_v2_facts AS fact
-              ON fact.fact_id = evidence.value
-             AND fact.owner_kind = NEW.owner_kind
-             AND fact.project_id = NEW.project_id
-            WHERE fact.fact_id IS NULL
-        ) OR EXISTS (
-            SELECT value FROM json_each(NEW.evidence_fact_ids_json)
-            GROUP BY value HAVING COUNT(*) > 1
-        ) BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 fact relation evidence must be unique owner facts');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_fact_relations_validate_evidence_update
-        BEFORE UPDATE ON memory_v2_fact_relations
-        WHEN EXISTS (
-            SELECT 1 FROM json_each(NEW.evidence_fact_ids_json)
-            WHERE type <> 'text' OR length(value) = 0
-        ) OR EXISTS (
-            SELECT 1 FROM json_each(NEW.evidence_fact_ids_json) AS evidence
-            LEFT JOIN memory_v2_facts AS fact
-              ON fact.fact_id = evidence.value
-             AND fact.owner_kind = NEW.owner_kind
-             AND fact.project_id = NEW.project_id
-            WHERE fact.fact_id IS NULL
-        ) OR EXISTS (
-            SELECT value FROM json_each(NEW.evidence_fact_ids_json)
-            GROUP BY value HAVING COUNT(*) > 1
-        ) BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 fact relation evidence must be unique owner facts');
-        END;
-        CREATE TRIGGER IF NOT EXISTS memory_v2_fact_relations_identity_guard
-        BEFORE UPDATE ON memory_v2_fact_relations
-        WHEN NEW.owner_kind IS NOT OLD.owner_kind
-            OR NEW.project_id IS NOT OLD.project_id
-            OR NEW.source_fact_id IS NOT OLD.source_fact_id
-            OR NEW.target_fact_id IS NOT OLD.target_fact_id
-            OR NEW.relation IS NOT OLD.relation
-            OR NEW.occurred_at IS NOT OLD.occurred_at
-            OR NEW.updated_at < OLD.updated_at
-        BEGIN
-            SELECT RAISE(ABORT, 'memory_v2 fact relation identity is immutable');
         END;";
 
 pub(super) async fn install_final_memory_support(

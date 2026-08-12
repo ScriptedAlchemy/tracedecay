@@ -5,8 +5,6 @@ use serde::Serialize;
 #[cfg(test)]
 use tracedecay_domain::FactOwnerV1;
 
-#[cfg(test)]
-use crate::db::engine;
 use crate::db::engine::Executor;
 #[cfg(test)]
 use crate::errors::Result;
@@ -49,23 +47,6 @@ fn owner_key(owner: &FactOwnerV1) -> Result<OwnerKey> {
 fn json_text(value: &(impl Serialize + ?Sized)) -> Result<String> {
     serde_json::to_string(value)
         .map_err(|_| db_message(OPERATION, "canonical JSON encoding failed"))
-}
-
-#[cfg(test)]
-async fn row_exists(
-    conn: &impl MemoryV2Executor,
-    sql: &str,
-    params: impl engine::IntoParams,
-) -> Result<bool> {
-    let mut rows = conn
-        .query(sql, params)
-        .await
-        .map_err(|error| db_error(OPERATION, error))?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|error| db_error(OPERATION, error))?
-        .is_some())
 }
 
 fn db_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {

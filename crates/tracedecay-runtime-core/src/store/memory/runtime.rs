@@ -5,19 +5,19 @@ use tracedecay_domain::{FactEventId, FactOwnerV1, UtcMicros, canonical_sha256};
 use tracedecay_store::{
     CommandDigestV1, ConsistencyModeV1, DurabilityClassV1, FactCommitConflict, FactCommitOutcome,
     FactCommitReceipt, FactCurrentQuery, FactLineageQuery, FactReadOperationV1, FactReadResultV1,
-    FactStoreError, FactStoreResult, FactWriteBatch, IdempotencyIdentityV1, OperationPriorityV1,
-    ProjectReadOperationV1, ProjectReadResultV1, RepositoryOperationEnvelopeV1,
-    RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
-    RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
-    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
-    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
-    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1, StoreOperationIdV1,
-    StoreOperationMetadataV1, StoreRuntimeBindingV1, StoreShardScopeV1, StoredFactV1,
-    VerifiedStoreLocatorV1,
+    FactStoreError, FactStoreResult, FactWriteBatch, FactWriteControl, IdempotencyIdentityV1,
+    OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1,
+    RepositoryOperationEnvelopeV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1,
+    RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
+    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreClientIdV1, StoreIdempotencyKeyV1,
+    StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, StoreShardScopeV1,
+    StoredFactV1, VerifiedStoreLocatorV1,
 };
 
-use super::{Database, FactWriteControl};
+use super::Database;
 // The store-runtime registry moved into this kernel, so the fact store reaches
 // the concrete handle directly rather than through an erased port.
 use crate::store_runtime::registry::StoreRuntimeHandle;
@@ -96,7 +96,7 @@ fn fact_capable_scope(scope: &StoreShardScopeV1) -> bool {
     )
 }
 
-fn validate_owner_binding(
+pub(super) fn validate_owner_binding(
     binding: &StoreRuntimeBindingV1,
     owner: &FactOwnerV1,
     operation: &'static str,
@@ -127,7 +127,7 @@ pub(super) async fn commit_fact(
     db: &Database,
     runtime: &StoreRuntimeHandle,
     batch: FactWriteBatch,
-    write_control: Option<FactWriteControl>,
+    write_control: &FactWriteControl,
 ) -> FactStoreResult<FactCommitOutcome> {
     validate_owner_binding(runtime.binding(), batch.owner(), COMMIT_OPERATION)?;
     let command = fact_command(&batch);
@@ -151,9 +151,9 @@ pub(super) async fn commit_fact(
         digest.as_str(),
         &idempotency_key,
     )?;
-    let probe = Arc::new(RuntimeFactProbe::from_control(
+    let probe = Arc::new(RuntimeFactProbe::for_write(
         request.control(),
-        write_control,
+        write_control.clone(),
     ));
     let write_authority = db
         .write_authority()
@@ -278,7 +278,7 @@ fn dispatch_fact_read(
     operation_name: &'static str,
 ) -> FactStoreResult<FactReadResultV1> {
     let request = build_read_request(runtime.binding(), operation, operation_name)?;
-    let probe = RuntimeFactProbe::from_control(request.control(), None);
+    let probe = RuntimeFactProbe::for_read(request.control());
     let outcome = runtime
         .dispatch_read(request, &probe)
         .map_err(|error| runtime_error(operation_name, format!("{error:?}")))?;
@@ -377,7 +377,7 @@ fn build_submit_request(
         .max(1),
         admitted_at,
     };
-    let compatibility = RuntimeBatchCompatibilityV1::from_operation(&metadata)
+    let batch_compatibility = RuntimeBatchCompatibilityV1::from_operation(&metadata)
         .map_err(|error| runtime_error(COMMIT_OPERATION, error.to_string()))?;
     let transaction_scope = RuntimeTransactionScopeV1 {
         transaction_id: RuntimeTransactionIdV1::new(format!(
@@ -385,7 +385,7 @@ fn build_submit_request(
             metadata.operation_id.as_str()
         ))
         .map_err(|error| runtime_error(COMMIT_OPERATION, error.to_string()))?,
-        compatibility,
+        compatibility: batch_compatibility,
         opened_at: admitted_at,
     };
     RuntimeSubmitRequestV1::new(
@@ -406,7 +406,6 @@ fn fact_command(batch: &FactWriteBatch) -> serde_json::Value {
         "events": batch.events(),
         "new_anchors": batch.new_anchors(),
         "referenced_anchor_ids": batch.referenced_anchor_ids(),
-        "legacy_mapping": batch.legacy_mapping(),
         "expected_last_event_id": batch.expected_last_event_id(),
     })
 }
@@ -449,21 +448,31 @@ fn runtime_now() -> UtcMicros {
     UtcMicros(i64::try_from(micros).unwrap_or(i64::MAX))
 }
 
+enum RuntimeFactProbeMode {
+    Read,
+    Write(FactWriteControl),
+}
+
 struct RuntimeFactProbe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
-    write_control: Option<FactWriteControl>,
+    mode: RuntimeFactProbeMode,
 }
 
 impl RuntimeFactProbe {
-    fn from_control(
-        control: &RuntimeRequestControlV1,
-        write_control: Option<FactWriteControl>,
-    ) -> Self {
+    fn for_read(control: &RuntimeRequestControlV1) -> Self {
         Self {
             cancellation: control.cancellation.clone(),
             deadline: control.deadline.clone(),
-            write_control,
+            mode: RuntimeFactProbeMode::Read,
+        }
+    }
+
+    fn for_write(control: &RuntimeRequestControlV1, write_control: FactWriteControl) -> Self {
+        Self {
+            cancellation: control.cancellation.clone(),
+            deadline: control.deadline.clone(),
+            mode: RuntimeFactProbeMode::Write(write_control),
         }
     }
 }
@@ -478,20 +487,23 @@ impl RuntimeRequestProbeV1 for RuntimeFactProbe {
     }
 
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-        self.write_control
-            .as_ref()
-            .is_some_and(FactWriteControl::interrupted)
-            .then_some(RuntimeInterruptionV1::Cancelled)
+        match &self.mode {
+            RuntimeFactProbeMode::Read => None,
+            RuntimeFactProbeMode::Write(write_control) => write_control
+                .interrupted()
+                .then_some(RuntimeInterruptionV1::Cancelled),
+        }
     }
 
     fn try_begin_commit(&self) -> bool {
-        self.write_control
-            .as_ref()
-            .is_some_and(FactWriteControl::try_begin_commit)
+        match &self.mode {
+            RuntimeFactProbeMode::Read => false,
+            RuntimeFactProbeMode::Write(write_control) => write_control.try_begin_commit(),
+        }
     }
 
     fn requires_isolated_commit(&self) -> bool {
-        self.write_control.is_some()
+        matches!(&self.mode, RuntimeFactProbeMode::Write(_))
     }
 }
 
@@ -505,6 +517,8 @@ fn runtime_error(operation: &'static str, message: impl Into<String>) -> FactSto
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tracedecay_domain::{
         BrainId, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
@@ -767,17 +781,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let batch = FactWriteBatch::new(
-            fact_id,
-            owner,
-            None,
-            vec![event],
-            vec![],
-            vec![],
-            None,
-            None,
-        )
-        .unwrap();
+        let batch =
+            FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap();
         let command = fact_command(&batch);
         let digest = canonical_sha256(&command).unwrap();
         let request = build_submit_request(
@@ -820,6 +825,36 @@ mod tests {
     }
 
     #[test]
+    fn fact_write_probe_uses_caller_interruption_and_commit_admission() {
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let commit_admitted = Arc::new(AtomicBool::new(false));
+        let write_control = FactWriteControl::new(
+            {
+                let interrupted = Arc::clone(&interrupted);
+                Arc::new(move || interrupted.load(Ordering::Acquire))
+            },
+            {
+                let commit_admitted = Arc::clone(&commit_admitted);
+                Arc::new(move || commit_admitted.load(Ordering::Acquire))
+            },
+        );
+        let request_control = request_control("probe", UtcMicros(1), COMMIT_OPERATION).unwrap();
+        let probe = RuntimeFactProbe::for_write(&request_control, write_control);
+
+        assert!(probe.interruption().is_none());
+        assert!(!probe.try_begin_commit());
+        assert!(probe.requires_isolated_commit());
+
+        commit_admitted.store(true, Ordering::Release);
+        interrupted.store(true, Ordering::Release);
+        assert!(matches!(
+            probe.interruption(),
+            Some(RuntimeInterruptionV1::Cancelled)
+        ));
+        assert!(probe.try_begin_commit());
+    }
+
+    #[test]
     fn committed_purge_returns_receipt_without_active_assertion() {
         let owner = FactOwnerV1::Profile;
         let fact_id = fact_id(owner.clone());
@@ -835,17 +870,8 @@ mod tests {
         )
         .unwrap();
         let last_event_id = event.event_id().clone();
-        let batch = FactWriteBatch::new(
-            fact_id,
-            owner,
-            None,
-            vec![event],
-            vec![],
-            vec![],
-            None,
-            None,
-        )
-        .unwrap();
+        let batch =
+            FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap();
 
         let outcome = finish_commit_outcome(&batch, last_event_id, None, false).unwrap();
 

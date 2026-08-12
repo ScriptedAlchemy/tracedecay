@@ -1,7 +1,6 @@
-//! Compatibility fact feedback, history, inspection, and automatic fact apply dispatch.
+//! Canonical fact feedback, history, inspection, and automatic fact apply dispatch.
 
 use super::super::automatic_facts::{
-    project_memory_automatic_fact_request_digest,
     project_memory_existing_automatic_fact_receipt_tx,
     project_memory_lookup_automatic_fact_operation_tx,
     project_memory_record_automatic_fact_operation_tx,
@@ -10,24 +9,24 @@ use super::super::automatic_facts::{
 use super::super::envelope::{
     ProjectMemoryOperationReceiptV1, project_memory_digest,
     project_memory_lookup_operation_receipt_tx, project_memory_receipt_u64,
-    project_memory_record_operation_receipt_tx, project_memory_target_digest,
+    project_memory_record_operation_receipt_tx,
 };
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION,
-    compatibility_legacy_timestamp, from_json, project_memory_event_time, project_memory_now,
-    row_f64, row_i64, row_optional_string, row_string, storage_error, storage_message,
+    ensure_project_memory_read_active, from_json, project_memory_now, row_f64, row_i64,
+    row_optional_string, row_string, storage_error, storage_message,
 };
 use super::super::projection::{
-    load_project_memory_projection_tx, project_memory_fact_status_tx,
-    project_memory_projection_metadata_tx, project_memory_required_mapping_tx,
-    resolve_project_memory_target_tx,
+    load_project_memory_projection_controlled_tx, load_project_memory_projection_tx,
+    project_memory_fact_status_tx, project_memory_projection_metadata_tx,
 };
 use super::super::scoring::project_memory_millionths;
 use super::{
-    DEFAULT_TRUST, compatibility_commit_batch_tx, compatibility_mirror_feedback_tx,
-    compatibility_payload_metadata, compatibility_sanitize_payload, load_current_fact_tx,
+    commit_batch_tx, commit_receipt_json, initial_batch, load_mutable_project_memory_fact_tx,
+    payload_metadata, project_memory_commit_receipt_from_operation_tx,
     project_memory_feedback_action_label, project_memory_feedback_delta,
-    project_memory_update_feedback_projection_tx, query_fact_lineage_tx,
+    project_memory_update_feedback_projection_tx, query_fact_lineage_controlled_tx,
+    query_fact_lineage_tx, sanitize_payload,
 };
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -35,14 +34,12 @@ use crate::db::publish_fact_feedback_finding_tx;
 use crate::privacy::sanitize_provider_metadata_text;
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    ActorId, Confidence, FactAssertionKindV1, FactAssertionV1, FactCurationActionV1, FactEventId,
-    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
-    FactLineageEventV1, FactOwnerV1, PayloadAccessState, ProvenanceId, RetrievalAnchorRecordV2,
-    UtcMicros,
+    ActorId, Confidence, FactCurationActionV1, FactEventId, FactId, FactLineageEventKindV1,
+    FactLineageEventV1, FactOwnerV1, ProvenanceId, RetrievalAnchorRecordV2, UtcMicros,
 };
 use tracedecay_store::{
-    FactCommitOutcome, FactLineageCursor, FactLineageQuery, FactStoreError, FactStoreResult,
-    FactWriteBatch, ProjectMemoryAutomaticFactApplyDispositionV1,
+    FactCommitOutcome, FactLineageCursor, FactLineageQuery, FactReadControl, FactStoreError,
+    FactStoreResult, FactWriteBatch, ProjectMemoryAutomaticFactApplyDispositionV1,
     ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryAutomaticFactEffectV1,
     ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptV1,
     ProjectMemoryFactAddCommandV1, ProjectMemoryFactFeedbackActionV1,
@@ -50,8 +47,7 @@ use tracedecay_store::{
     ProjectMemoryFactFeedbackHistoryEntryV1, ProjectMemoryFactFeedbackHistoryQueryV1,
     ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryFactFeedbackOutcomeV1,
     ProjectMemoryFactHistoryV1, ProjectMemoryFactIdV1, ProjectMemoryFactInspectionV1,
-    ProjectMemoryFactMappingV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactTargetV1,
-    ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryResult, StoredFactV1,
+    ProjectMemoryFactProjectionV1, StoredFactV1,
 };
 fn project_memory_receipt_i32(receipt: &Value, field: &'static str) -> FactStoreResult<i32> {
     receipt
@@ -61,7 +57,7 @@ fn project_memory_receipt_i32(receipt: &Value, field: &'static str) -> FactStore
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                format!("compatibility receipt {field} is malformed"),
+                format!("receipt {field} is malformed"),
             )
         })
 }
@@ -74,7 +70,7 @@ fn project_memory_receipt_confidence(
     if millionths > 1_000_000 {
         return Err(storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            format!("compatibility receipt {field} is out of range"),
+            format!("receipt {field} is out of range"),
         ));
     }
     Confidence::new(millionths as f64 / 1_000_000.0).map_err(FactStoreError::from)
@@ -87,32 +83,29 @@ fn project_memory_feedback_detail(value: Option<&str>) -> Option<String> {
 }
 
 fn project_memory_feedback_details(
-    source: Option<&str>,
+    source_label: Option<&str>,
     reason: Option<&str>,
 ) -> (
-    String,
     Option<String>,
     Option<String>,
     ProjectMemoryFactFeedbackDetailsAvailabilityV1,
 ) {
-    let persisted_source = match source {
-        Some(source) => project_memory_feedback_detail(Some(source)),
-        None => Some("mcp".to_owned()),
-    };
+    let persisted_source = project_memory_feedback_detail(source_label);
     let persisted_note = project_memory_feedback_detail(reason);
-    let details_available = reason.is_none() || persisted_note.is_some();
-    if let Some(source) = persisted_source
-        && details_available
-    {
+    if persisted_source.is_some() || persisted_note.is_some() {
         (
-            source.clone(),
-            Some(source),
+            persisted_source,
             persisted_note,
             ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available,
         )
+    } else if source_label.is_some() || reason.is_some() {
+        (
+            None,
+            None,
+            ProjectMemoryFactFeedbackDetailsAvailabilityV1::Redacted,
+        )
     } else {
         (
-            "mcp".to_owned(),
             None,
             None,
             ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown,
@@ -153,7 +146,6 @@ fn project_memory_feedback_batch(
         vec![event],
         Vec::new(),
         Vec::new(),
-        None,
         expected_last_event_id,
     )
 }
@@ -163,7 +155,7 @@ fn project_memory_feedback_details_label(
 ) -> &'static str {
     match availability {
         ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available => "available",
-        ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted => "redacted",
+        ProjectMemoryFactFeedbackDetailsAvailabilityV1::Redacted => "redacted",
         ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown => "unknown",
     }
 }
@@ -173,85 +165,13 @@ fn project_memory_feedback_details_availability(
 ) -> FactStoreResult<ProjectMemoryFactFeedbackDetailsAvailabilityV1> {
     match value {
         "available" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::Available),
-        "redacted" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::LegacyRedacted),
+        "redacted" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::Redacted),
         "unknown" => Ok(ProjectMemoryFactFeedbackDetailsAvailabilityV1::Unknown),
         _ => Err(storage_message(
             PROJECT_MEMORY_READ_OPERATION,
-            format!("unknown compatibility feedback detail availability {value:?}"),
+            format!("unknown feedback detail availability {value:?}"),
         )),
     }
-}
-
-fn automatic_fact_initial_batch(
-    request: &ProjectMemoryFactAddCommandV1,
-    payload: tracedecay_domain::FactPayloadV1,
-    access: PayloadAccessState,
-    now: UtcMicros,
-) -> FactStoreResult<FactWriteBatch> {
-    let identity = FactIdentityMaterialV1::new(
-        request.owner().clone(),
-        FactIdentitySourceV1::Application {
-            operation_id: request.operation_id().clone(),
-        },
-    )?;
-    let fact_id = FactId::derive(&identity)?;
-    let assertion = FactAssertionV1::new(
-        fact_id.clone(),
-        request.owner().clone(),
-        FactAssertionKindV1::Initial,
-        payload,
-        Vec::new(),
-        now,
-        request.actor().cloned(),
-    )?;
-    let mut events = vec![FactLineageEventV1::new(
-        fact_id.clone(),
-        request.owner().clone(),
-        FactLineageEventKindV1::AssertionRecorded {
-            assertion_id: assertion.assertion_id().clone(),
-        },
-        now,
-        request.actor().cloned(),
-    )?];
-    let mut next_offset = 1;
-    if access != PayloadAccessState::Eligible {
-        events.push(FactLineageEventV1::new(
-            fact_id.clone(),
-            request.owner().clone(),
-            FactLineageEventKindV1::PayloadAccessChanged {
-                previous: PayloadAccessState::Eligible,
-                current: access,
-            },
-            project_memory_event_time(now, next_offset)?,
-            request.actor().cloned(),
-        )?);
-        next_offset += 1;
-    }
-    let default_trust = Confidence::new(DEFAULT_TRUST)?;
-    if request.default_trust() != default_trust {
-        events.push(FactLineageEventV1::new(
-            fact_id.clone(),
-            request.owner().clone(),
-            FactLineageEventKindV1::TrustChanged {
-                previous: default_trust,
-                current: request.default_trust(),
-                evidence_ids: Vec::new(),
-            },
-            project_memory_event_time(now, next_offset)?,
-            request.actor().cloned(),
-        )?);
-    }
-    FactWriteBatch::new(
-        fact_id,
-        request.owner().clone(),
-        Some(assertion),
-        events,
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-    )?
-    .with_identity_material(identity)
 }
 
 fn project_memory_feedback_action(
@@ -262,7 +182,7 @@ fn project_memory_feedback_action(
         "unhelpful" => Ok(ProjectMemoryFactFeedbackActionV1::Unhelpful),
         _ => Err(storage_message(
             PROJECT_MEMORY_READ_OPERATION,
-            format!("unknown compatibility feedback action {value:?}"),
+            format!("unknown feedback action {value:?}"),
         )),
     }
 }
@@ -311,17 +231,17 @@ async fn project_memory_replay_feedback_tx(
     transaction: &Transaction<'_>,
     owner: &FactOwnerV1,
     receipt: &ProjectMemoryOperationReceiptV1,
-) -> ProjectMemoryResult<ProjectMemoryFactFeedbackOutcomeV1> {
+) -> FactStoreResult<ProjectMemoryFactFeedbackOutcomeV1> {
     let fact_id = receipt.fact_id.as_ref().ok_or_else(|| {
         storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility feedback receipt fact is missing",
+            "feedback receipt fact is missing",
         )
     })?;
     let event_id = receipt.event_id.as_ref().ok_or_else(|| {
         storage_message(
             PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility feedback receipt event is missing",
+            "feedback receipt event is missing",
         )
     })?;
     let fact = load_project_memory_projection_tx(transaction, owner, fact_id)
@@ -329,28 +249,19 @@ async fn project_memory_replay_feedback_tx(
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility feedback replay fact is missing",
+                "replayed feedback fact is missing",
             )
         })?;
-    let legacy_feedback_event_id = i64::try_from(project_memory_receipt_u64(
-        &receipt.receipt,
-        "legacy_feedback_event_id",
-    )?)
-    .map_err(|_| {
-        storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "compatibility feedback receipt legacy event id is out of range",
-        )
-    })?;
-    ProjectMemoryFactFeedbackOutcomeV1::new(
+    ProjectMemoryFactFeedbackOutcomeV1::committed(
         fact,
         event_id.clone(),
-        Some(legacy_feedback_event_id),
         project_memory_receipt_confidence(&receipt.receipt, "old_trust_millionths")?,
         project_memory_receipt_confidence(&receipt.receipt, "new_trust_millionths")?,
         project_memory_receipt_i32(&receipt.receipt, "trust_delta_millionths")?,
         project_memory_receipt_u64(&receipt.receipt, "helpful_count")?,
         project_memory_receipt_u64(&receipt.receipt, "unhelpful_count")?,
+        project_memory_commit_receipt_from_operation_tx(transaction, owner, receipt).await?,
+        true,
     )
     .map_err(Into::into)
 }
@@ -358,13 +269,13 @@ async fn project_memory_replay_feedback_tx(
 pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
     transaction: &Transaction<'_>,
     request: &ProjectMemoryFactFeedbackCommandV1,
-) -> ProjectMemoryResult<ProjectMemoryFactFeedbackOutcomeV1> {
+) -> FactStoreResult<ProjectMemoryFactFeedbackOutcomeV1> {
     let request_digest = project_memory_digest(json!({
-        "target": project_memory_target_digest(request.target())?,
+        "fact_id": request.target().fact_id().as_str(),
         "expected_last_event_id": request.expected_last_event_id().map(FactEventId::as_str),
         "action": project_memory_feedback_action_label(request.action()),
         "actor": request.actor().map(ActorId::as_str),
-        "source": request.source(),
+        "source_label": request.source_label(),
         "reason": request.reason(),
     }))?;
     if let Some(receipt) = project_memory_lookup_operation_receipt_tx(
@@ -379,23 +290,8 @@ pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
         return project_memory_replay_feedback_tx(transaction, request.target().owner(), &receipt)
             .await;
     }
-    let fact_id = resolve_project_memory_target_tx(transaction, request.target())
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility feedback target is missing",
-            )
-        })?;
-    let owner_key = OwnerKey::new(request.target().owner())?;
-    let current = load_current_fact_tx(transaction, &owner_key, request.target().owner(), &fact_id)
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility feedback target is unavailable",
-            )
-        })?;
+    let fact_id = request.target().fact_id().clone();
+    let current = load_mutable_project_memory_fact_tx(transaction, request.target()).await?;
     let old_trust = current.trust();
     let new_trust = Confidence::new(
         (old_trust.as_f64() + project_memory_feedback_delta(request.action())).clamp(0.0, 1.0),
@@ -412,7 +308,7 @@ pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
         request.actor().cloned(),
         now,
     )?;
-    let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
+    let (canonical_receipt, replayed) = commit_batch_tx(transaction, &batch).await?;
     let event_id = canonical_receipt.last_event_id().clone();
     publish_fact_feedback_finding_tx(
         transaction,
@@ -422,21 +318,8 @@ pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
     )
     .await
     .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-    let mapping =
-        project_memory_required_mapping_tx(transaction, request.target().owner(), &fact_id).await?;
-    let (mirror_source, history_source, history_note, availability) =
-        project_memory_feedback_details(request.source(), request.reason());
-    let legacy_feedback_event_id = compatibility_mirror_feedback_tx(
-        transaction,
-        mapping.legacy_fact_id(),
-        request.action(),
-        old_trust,
-        new_trust,
-        compatibility_legacy_timestamp(now),
-        &mirror_source,
-        history_note.as_deref(),
-    )
-    .await?;
+    let (history_source, history_note, availability) =
+        project_memory_feedback_details(request.source_label(), request.reason());
     project_memory_record_feedback_history_tx(
         transaction,
         request.target().owner(),
@@ -464,26 +347,20 @@ pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_WRITE_OPERATION,
-                "compatibility feedback projection is missing",
+                "feedback projection is missing",
             )
         })?;
-    let (_, _, telemetry) = project_memory_projection_metadata_tx(
-        transaction,
-        request.target().owner(),
-        &fact_id,
-        Some(&mapping),
-    )
-    .await?;
+    let (_, telemetry) =
+        project_memory_projection_metadata_tx(transaction, request.target().owner(), &fact_id)
+            .await?;
     let trust_delta_millionths =
         ((new_trust.as_f64() - old_trust.as_f64()) * 1_000_000.0).round() as i32;
-    let receipt = json!({
-        "old_trust_millionths": project_memory_millionths(old_trust.as_f64()),
-        "new_trust_millionths": project_memory_millionths(new_trust.as_f64()),
-        "trust_delta_millionths": trust_delta_millionths,
-        "helpful_count": telemetry.helpful_count(),
-        "unhelpful_count": telemetry.unhelpful_count(),
-        "legacy_feedback_event_id": legacy_feedback_event_id,
-    });
+    let mut receipt = commit_receipt_json("feedback", &canonical_receipt);
+    receipt["old_trust_millionths"] = json!(project_memory_millionths(old_trust.as_f64()));
+    receipt["new_trust_millionths"] = json!(project_memory_millionths(new_trust.as_f64()));
+    receipt["trust_delta_millionths"] = json!(trust_delta_millionths);
+    receipt["helpful_count"] = json!(telemetry.helpful_count());
+    receipt["unhelpful_count"] = json!(telemetry.unhelpful_count());
     project_memory_record_operation_receipt_tx(
         transaction,
         request.target().owner(),
@@ -496,15 +373,16 @@ pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
         now,
     )
     .await?;
-    ProjectMemoryFactFeedbackOutcomeV1::new(
+    ProjectMemoryFactFeedbackOutcomeV1::committed(
         fact,
         event_id,
-        Some(legacy_feedback_event_id),
         old_trust,
         new_trust,
         trust_delta_millionths,
         telemetry.helpful_count(),
         telemetry.unhelpful_count(),
+        canonical_receipt,
+        replayed,
     )
     .map_err(Into::into)
 }
@@ -512,15 +390,20 @@ pub(in crate::store::memory) async fn record_project_memory_fact_feedback_tx(
 pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
     transaction: &Transaction<'_>,
     query: &ProjectMemoryFactFeedbackHistoryQueryV1,
-) -> ProjectMemoryResult<ProjectMemoryFactFeedbackHistoryV1> {
-    let fact_id = resolve_project_memory_target_tx(transaction, query.target())
-        .await?
-        .ok_or_else(|| {
-            storage_message(
-                PROJECT_MEMORY_READ_OPERATION,
-                "compatibility feedback history target is missing",
-            )
-        })?;
+    read_control: &FactReadControl,
+) -> FactStoreResult<ProjectMemoryFactFeedbackHistoryV1> {
+    ensure_project_memory_read_active(read_control)?;
+    let fact_id = query.target().fact_id().clone();
+    let projection =
+        load_project_memory_projection_tx(transaction, query.target().owner(), &fact_id).await?;
+    ensure_project_memory_read_active(read_control)?;
+    if projection.is_none() {
+        return Err(storage_message(
+            PROJECT_MEMORY_READ_OPERATION,
+            "feedback history target is missing",
+        )
+        .into());
+    }
     let key = OwnerKey::new(query.target().owner())?;
     let fetch_limit = i64::try_from(query.limit().saturating_add(1)).map_err(|_| {
         FactStoreError::InvalidQueryLimit {
@@ -563,6 +446,7 @@ pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
+        ensure_project_memory_read_active(read_control)?;
         events.push(ProjectMemoryFactFeedbackHistoryEntryV1::new(
             FactEventId::new(row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?)
                 .map_err(FactStoreError::from)?,
@@ -582,6 +466,7 @@ pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
         )?);
     }
     let has_more = events.len() > query.limit();
+    ensure_project_memory_read_active(read_control)?;
     events.truncate(query.limit());
     let next_after = has_more
         .then(|| {
@@ -591,34 +476,57 @@ pub(in crate::store::memory) async fn project_memory_fact_feedback_history_tx(
         })
         .flatten()
         .transpose()?;
-    ProjectMemoryFactFeedbackHistoryV1::new_with_repair_progress(
-        query.target().owner().clone(),
-        events,
-        next_after,
-        ProjectMemoryFeedbackRepairProgressV1::NotRequired,
-    )
-    .map_err(Into::into)
+    ProjectMemoryFactFeedbackHistoryV1::new(query.target().owner().clone(), events, next_after)
+        .map_err(Into::into)
 }
 
-pub(in crate::store::memory) async fn inspect_project_memory_fact_tx(
+pub(in crate::store::memory) async fn inspect_project_memory_fact_controlled_tx(
     transaction: &Transaction<'_>,
-    target: &ProjectMemoryFactTargetV1,
-) -> ProjectMemoryResult<Option<ProjectMemoryFactInspectionV1>> {
-    let Some(fact_id) = resolve_project_memory_target_tx(transaction, target).await? else {
+    target: &ProjectMemoryFactIdV1,
+    read_control: &FactReadControl,
+) -> FactStoreResult<Option<ProjectMemoryFactInspectionV1>> {
+    inspect_project_memory_fact_inner_tx(transaction, target, Some(read_control)).await
+}
+
+async fn inspect_project_memory_fact_inner_tx(
+    transaction: &Transaction<'_>,
+    target: &ProjectMemoryFactIdV1,
+    read_control: Option<&FactReadControl>,
+) -> FactStoreResult<Option<ProjectMemoryFactInspectionV1>> {
+    if let Some(read_control) = read_control {
+        ensure_project_memory_read_active(read_control)?;
+    }
+    let fact_id = target.fact_id().clone();
+    let projection = match read_control {
+        Some(read_control) => {
+            load_project_memory_projection_controlled_tx(
+                transaction,
+                target.owner(),
+                &fact_id,
+                read_control,
+            )
+            .await?
+        }
+        None => load_project_memory_projection_tx(transaction, target.owner(), &fact_id).await?,
+    };
+    let Some(ProjectMemoryFactProjectionV1::Available(fact)) = projection else {
         return Ok(None);
     };
-    let Some(ProjectMemoryFactProjectionV1::Available(fact)) =
-        load_project_memory_projection_tx(transaction, target.owner(), &fact_id).await?
-    else {
-        return Ok(None);
-    };
+    if let Some(read_control) = read_control {
+        ensure_project_memory_read_active(read_control)?;
+    }
     let lineage = FactLineageQuery::new(target.owner().clone(), fact_id.clone(), None, 1_000)?;
-    let history = ProjectMemoryFactHistoryV1::new(
-        target.owner().clone(),
-        fact_id.clone(),
-        query_fact_lineage_tx(transaction, &lineage).await?,
-        None,
-    )?;
+    let events = match read_control {
+        Some(read_control) => {
+            query_fact_lineage_controlled_tx(transaction, &lineage, read_control).await?
+        }
+        None => query_fact_lineage_tx(transaction, &lineage).await?,
+    };
+    if let Some(read_control) = read_control {
+        ensure_project_memory_read_active(read_control)?;
+    }
+    let history =
+        ProjectMemoryFactHistoryV1::new(target.owner().clone(), fact_id.clone(), events, None)?;
     let key = OwnerKey::new(target.owner())?;
     let mut rows = transaction
         .query(
@@ -657,12 +565,18 @@ pub(in crate::store::memory) async fn inspect_project_memory_fact_tx(
         )
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
+    if let Some(read_control) = read_control {
+        ensure_project_memory_read_active(read_control)?;
+    }
     let mut anchors = Vec::new();
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?
     {
+        if let Some(read_control) = read_control {
+            ensure_project_memory_read_active(read_control)?;
+        }
         let anchor = from_json::<RetrievalAnchorRecordV2>(
             &row_string(&row, 0, PROJECT_MEMORY_READ_OPERATION)?,
             PROJECT_MEMORY_READ_OPERATION,
@@ -672,14 +586,20 @@ pub(in crate::store::memory) async fn inspect_project_memory_fact_tx(
         }
         anchors.push(anchor);
     }
+    if let Some(read_control) = read_control {
+        ensure_project_memory_read_active(read_control)?;
+    }
     let status = project_memory_fact_status_tx(transaction, target.owner(), &fact_id)
         .await?
         .ok_or_else(|| {
             storage_message(
                 PROJECT_MEMORY_READ_OPERATION,
-                "compatibility inspection status is missing",
+                "fact inspection status is missing",
             )
         })?;
+    if let Some(read_control) = read_control {
+        ensure_project_memory_read_active(read_control)?;
+    }
     ProjectMemoryFactInspectionV1::new(*fact, history, anchors, status)
         .map(Some)
         .map_err(Into::into)
@@ -695,8 +615,8 @@ pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
     apply_id: ProvenanceId,
     request: &ProjectMemoryFactAddCommandV1,
     evidence: &ProjectMemoryAutomaticFactEvidenceV1,
-) -> ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1> {
-    let request_digest = project_memory_automatic_fact_request_digest(request)?;
+) -> FactStoreResult<ProjectMemoryAutomaticFactApplyResultV1> {
+    let request_digest = request.input_digest().to_owned();
     if let Some(receipt) =
         project_memory_lookup_automatic_fact_operation_tx(transaction, request, &request_digest)
             .await?
@@ -730,13 +650,14 @@ pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
         return automatic_fact_apply_result(receipt, disposition);
     }
     let now = project_memory_now()?;
-    let payload_metadata = compatibility_payload_metadata(request.metadata());
-    let sanitized = compatibility_sanitize_payload(
+    let payload_metadata = payload_metadata(request.metadata());
+    let sanitized = sanitize_payload(
         request.content(),
         request.category(),
         request.tags(),
         request.entities(),
         &payload_metadata,
+        request.source_label(),
     )?;
     let Some(sanitized) = sanitized else {
         let effect = ProjectMemoryAutomaticFactEffectV1::Quarantined {
@@ -768,8 +689,16 @@ pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
             ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined,
         );
     };
-    let batch = automatic_fact_initial_batch(request, sanitized.payload, sanitized.access, now)?;
-    let (canonical_receipt, _) = compatibility_commit_batch_tx(transaction, &batch).await?;
+    let batch = initial_batch(
+        request.owner(),
+        request.operation_id(),
+        sanitized.payload,
+        sanitized.access,
+        request.default_trust(),
+        request.actor().cloned(),
+        now,
+    )?;
+    let (canonical_receipt, _) = commit_batch_tx(transaction, &batch).await?;
     let fact_id = canonical_receipt.fact_id().clone();
     let assertion_id = canonical_receipt
         .active_assertion_id()
@@ -781,13 +710,10 @@ pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
             )
         })?;
     let event_id = canonical_receipt.last_event_id().clone();
-    let mapping = ProjectMemoryFactMappingV1::new(
-        ProjectMemoryFactIdV1::new(request.owner().clone(), fact_id.clone())?,
-        None,
-    )?;
+    let target = ProjectMemoryFactIdV1::new(request.owner().clone(), fact_id.clone())?;
     let effect = ProjectMemoryAutomaticFactEffectV1::Applied {
         fact_id,
-        mapping,
+        target,
         assertion_id,
         event_id,
     };
@@ -821,6 +747,6 @@ pub(in crate::store::memory) async fn apply_project_memory_automatic_fact_tx(
 fn automatic_fact_apply_result(
     receipt: ProjectMemoryAutomaticFactReceiptV1,
     disposition: ProjectMemoryAutomaticFactApplyDispositionV1,
-) -> ProjectMemoryResult<ProjectMemoryAutomaticFactApplyResultV1> {
+) -> FactStoreResult<ProjectMemoryAutomaticFactApplyResultV1> {
     ProjectMemoryAutomaticFactApplyResultV1::new(receipt, disposition).map_err(Into::into)
 }

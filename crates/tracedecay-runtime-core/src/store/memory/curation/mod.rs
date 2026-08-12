@@ -1,13 +1,16 @@
-//! Compatibility curation apply, relations, entity merges, and fact merges.
-//!
-//! Re-exports below preserve every path used outside this module.
+//! Canonical tag curation and fact merges.
 
 mod apply;
-mod entities;
 mod relations;
+
+#[cfg(test)]
+mod merge_tests;
 #[cfg(test)]
 mod tests;
 
-pub(super) use self::apply::*;
-use self::entities::*;
-pub(super) use self::relations::*;
+pub(super) use self::apply::{
+    apply_project_memory_fact_curation_tx, merge_project_memory_facts_tx,
+};
+use self::relations::{
+    available_curation_fact_tx, curated_correction_batch, link_facts_tx, normalize_tags_tx,
+};

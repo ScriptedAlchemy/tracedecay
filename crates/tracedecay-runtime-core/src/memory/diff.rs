@@ -1,28 +1,13 @@
-//! Write-time near-duplicate / conflict classification for `add_fact`.
-//!
-//! `MemoryStore::add_fact` runs every new fact through this module after the
-//! exact-duplicate check: FTS candidates are scored with lexical overlap plus
-//! real cosine similarity for stored holographic vectors, and the strongest
-//! match is classified as `near_duplicate` or `possible_conflict`. The result
-//! is a REPORT returned to the writer — nothing here auto-deletes or
-//! auto-merges, and nothing here calls an LLM; review stays with the caller
-//! (agent, human, or the Hermes
-//! LLM curation layer).
+//! Shared content-change cues for canonical contradiction analysis.
 
-use super::encoding::HolographicEncoder;
-use super::similarity::lexical_overlap;
-use super::types::AddFactDiffKind;
-
-/// A new fact whose strongest candidate scores above this is a near-duplicate.
-pub(crate) const NEAR_DUPLICATE_THRESHOLD: f64 = 0.9;
-/// Negation/state-change cues only flag a conflict at or above this
-/// similarity; below it, texts can share domain vocabulary without being
-/// about the same subject.
-pub(crate) const CONFLICT_THRESHOLD: f64 = 0.7;
-/// Vector cosine similarity only contributes to the combined score above this
-/// floor: same-domain content clusters in the 0.70–0.85 band and would
-/// otherwise produce false near-duplicate matches.
-const COSINE_CONTRIBUTION_FLOOR: f64 = 0.85;
+/// A strongest match above this score is a near duplicate unless a conflict
+/// cue takes precedence.
+pub const NEAR_DUPLICATE_SCORE_MILLIONTHS: u32 = 900_000;
+/// State-change cues classify a match at or above this score as a possible
+/// conflict.
+pub const POSSIBLE_CONFLICT_SCORE_MILLIONTHS: u32 = 700_000;
+/// Matches below this score are not useful add-time comparison evidence.
+pub const ADD_COMPARISON_REPORT_FLOOR_MILLIONTHS: u32 = 500_000;
 
 /// Negation / state-change cues that signal a possible supersession or
 /// conflict between two similar facts.
@@ -50,60 +35,17 @@ pub fn contains_negation_cue(text: &str) -> bool {
     NEGATION_CUES.iter().any(|cue| lower.contains(cue))
 }
 
-/// Conservative content-normalized equivalence: equal after case folding and
-/// collapsing whitespace runs. Used as the ONLY justification for skipping an
-/// insert on a `>0.9` near-duplicate — anything weaker still inserts and
-/// merely reports.
-pub fn normalized_equivalent(a: &str, b: &str) -> bool {
-    fn normalize(text: &str) -> String {
-        text.split_whitespace()
+/// Exact add deduplication is deliberately narrower than semantic similarity:
+/// only case-folding and whitespace normalization may suppress a new commit.
+pub fn normalized_equivalent(left: &str, right: &str) -> bool {
+    fn normalize(value: &str) -> String {
+        value
+            .split_whitespace()
             .map(str::to_lowercase)
             .collect::<Vec<_>>()
             .join(" ")
     }
-    normalize(a) == normalize(b)
-}
-
-/// Combined lexical + holographic similarity between a new fact and one
-/// existing candidate. Token overlap is the baseline; real vector cosine
-/// contributes only when it is high enough to be trustworthy (mnemon's
-/// combination rule, adapted to stored holographic vectors).
-pub(crate) fn combined_similarity(
-    new_content: &str,
-    existing_content: &str,
-    cosine: Option<f64>,
-) -> f64 {
-    let (_, token_overlap, _) = lexical_overlap(new_content, existing_content);
-    let mut similarity = token_overlap;
-    if let Some(cos) = cosine
-        && cos >= COSINE_CONTRIBUTION_FLOOR
-        && cos > similarity
-    {
-        similarity = cos;
-    }
-    similarity
-}
-
-/// Convenience wrapper for callers holding both stored holographic vectors.
-pub fn vector_similarity(a: &[f64], b: &[f64]) -> f64 {
-    HolographicEncoder::new().similarity(a, b)
-}
-
-/// Classifies how a new fact relates to its strongest existing candidate.
-pub(crate) fn classify_add_diff(
-    similarity: f64,
-    new_content: &str,
-    existing_content: &str,
-) -> AddFactDiffKind {
-    if similarity >= CONFLICT_THRESHOLD
-        && (contains_negation_cue(new_content) || contains_negation_cue(existing_content))
-    {
-        return AddFactDiffKind::PossibleConflict;
-    }
-    if similarity > NEAR_DUPLICATE_THRESHOLD {
-        return AddFactDiffKind::NearDuplicate;
-    }
-    AddFactDiffKind::Add
+    normalize(left) == normalize(right)
 }
 
 #[cfg(test)]
@@ -125,63 +67,14 @@ mod tests {
     }
 
     #[test]
-    fn normalized_equivalence_is_whitespace_and_case_only() {
+    fn normalized_equivalence_is_case_and_whitespace_only() {
         assert!(normalized_equivalent(
             "Use  pnpm\tfor installs",
-            "use pnpm for installs"
+            "use pnpm for installs",
         ));
         assert!(!normalized_equivalent(
             "Use pnpm for installs",
-            "Use pnpm for installs."
+            "Use pnpm for installs.",
         ));
-        assert!(!normalized_equivalent("Use pnpm", "Use npm"));
-    }
-
-    #[test]
-    fn classify_add_diff_tiers() {
-        assert_eq!(
-            classify_add_diff(0.95, "same fact body", "same fact body"),
-            AddFactDiffKind::NearDuplicate
-        );
-        assert_eq!(
-            classify_add_diff(0.75, "we no longer use Redis", "we use Redis for caching"),
-            AddFactDiffKind::PossibleConflict
-        );
-        assert_eq!(
-            classify_add_diff(0.4, "unrelated", "facts"),
-            AddFactDiffKind::Add
-        );
-        // Below the conflict threshold, cues do not flag conflicts.
-        assert_eq!(
-            classify_add_diff(0.5, "we no longer use Redis", "butterfly survey notes"),
-            AddFactDiffKind::Add
-        );
-    }
-
-    #[test]
-    fn combined_similarity_ignores_low_cosine() {
-        let sim = combined_similarity("alpha beta gamma", "alpha beta gamma", Some(0.5));
-        assert!((sim - 1.0).abs() < f64::EPSILON);
-        // Low token overlap + sub-floor cosine stays low.
-        let sim = combined_similarity("alpha beta", "delta epsilon", Some(0.80));
-        assert!(sim < 0.1);
-        // High cosine lifts the score.
-        let sim = combined_similarity("alpha beta", "delta epsilon", Some(0.95));
-        assert!((sim - 0.95).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn vector_similarity_uses_real_cosine_for_normalized_vectors() {
-        let mut left = vec![0.0; 2048];
-        let mut right = vec![0.0; 2048];
-        left[0] = 1.0;
-        right[1] = 1.0;
-
-        let sim = vector_similarity(&left, &right);
-
-        assert!(
-            sim.abs() < f64::EPSILON,
-            "expected orthogonal vectors to score near 0, got {sim}"
-        );
     }
 }

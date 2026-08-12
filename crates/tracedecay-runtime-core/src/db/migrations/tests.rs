@@ -104,6 +104,15 @@ async fn scalar_i64(conn: &Connection, sql: &str) -> i64 {
     row.get(0).expect("failed to read scalar value")
 }
 
+async fn string_column(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut rows = conn.query(sql, ()).await.expect("failed to query strings");
+    let mut values = Vec::new();
+    while let Some(row) = rows.next().await.expect("failed to read string row") {
+        values.push(row.get(0).expect("failed to read string value"));
+    }
+    values
+}
+
 async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
     let mut rows = conn
         .query(&format!("PRAGMA table_info({table})"), ())
@@ -255,6 +264,7 @@ async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_require
         "memory_feedback_events",
         "memory_oplog",
         "memory_fact_relations",
+        "memory_v2_fact_relations",
         "memory_facts_fts",
         "memory_facts_fts_data",
         "memory_banks",
@@ -294,6 +304,34 @@ async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_require
             "the refusal must identify the retired object: {error}"
         );
         assert!(table_exists(&conn, retired).await);
+        assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    }
+}
+
+#[tokio::test]
+async fn a_current_stamp_with_retired_memory_projection_columns_is_reset_required() {
+    for retired in ["source_label", "projection_state", "vector_watermark_json"] {
+        let (conn, _dir) = create_schema_db().await;
+        conn.execute_batch(&format!(
+            "ALTER TABLE memory_v2_current_facts ADD COLUMN {retired} TEXT;"
+        ))
+        .await
+        .unwrap();
+
+        let error = ensure_schema_current_connection(&conn)
+            .await
+            .expect_err("a current stamp must not conceal retired projection columns");
+        assert_eq!(
+            error
+                .reset_required_context()
+                .map(|(authority, _reason)| authority),
+            Some("SQLite store")
+        );
+        assert!(
+            error.to_string().contains("memory_v2_current_facts"),
+            "the refusal must identify the incompatible projection table: {error}"
+        );
+        assert!(column_exists(&conn, "memory_v2_current_facts", retired).await);
         assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
     }
 }
@@ -342,10 +380,38 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "memory_v2_lineage_events",
         "memory_v2_current_facts",
         "memory_v2_automatic_fact_receipts",
-        "memory_v2_fact_relations",
     ] {
         assert!(table_exists(&conn, table).await, "missing table {table}");
     }
+
+    assert_eq!(
+        string_column(
+            &conn,
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name GLOB 'memory_v2_*'
+             ORDER BY name",
+        )
+        .await,
+        [
+            "memory_v2_assertion_evidence",
+            "memory_v2_assertion_payloads",
+            "memory_v2_assertion_payloads_fts",
+            "memory_v2_assertion_payloads_fts_config",
+            "memory_v2_assertion_payloads_fts_data",
+            "memory_v2_assertion_payloads_fts_docsize",
+            "memory_v2_assertion_payloads_fts_idx",
+            "memory_v2_assertion_supersession",
+            "memory_v2_assertions",
+            "memory_v2_automatic_fact_receipts",
+            "memory_v2_current_facts",
+            "memory_v2_evidence",
+            "memory_v2_facts",
+            "memory_v2_feedback_history",
+            "memory_v2_lineage_events",
+            "memory_v2_operation_receipts",
+        ],
+        "fresh creation must install exactly the final memory table inventory",
+    );
 
     for retired in [
         "nodes",
@@ -416,11 +482,10 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "memory_v2_compatibility_operation_receipts",
         "memory_v2_compatibility_banks",
         "memory_v2_compatibility_bank_dirty",
-        // Plan 39 Task 7 (owner decision 2026-08-07, second): the unread
-        // derived-vector storage is deleted, not migrated.
         "memory_v2_banks",
         "memory_v2_bank_dirty",
         "memory_v2_assertion_vectors",
+        "memory_v2_fact_relations",
     ] {
         assert!(
             !table_exists(&conn, retired).await,
@@ -438,12 +503,16 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "last_retrieved_at",
         "last_recalled_at",
         "last_feedback_at",
-        "projection_state",
-        "vector_watermark_json",
     ] {
         assert!(
             column_exists(&conn, "memory_v2_current_facts", column).await,
             "missing memory_v2_current_facts.{column}"
+        );
+    }
+    for retired in ["source_label", "projection_state", "vector_watermark_json"] {
+        assert!(
+            !column_exists(&conn, "memory_v2_current_facts", retired).await,
+            "retired memory_v2_current_facts.{retired} must not be created"
         );
     }
 
