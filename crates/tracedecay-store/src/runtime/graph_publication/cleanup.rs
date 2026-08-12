@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     GraphProjectionIdentityV1, GraphPublicationReplayCursorV1, GraphPublicationReplayTombstoneV1,
     MAX_GRAPH_REPLAY_PAGE_RECORDS_V1, MAX_GRAPH_REPLAY_PAGE_SOURCE_BYTES_V1,
-    StorageRuntimeContractErrorV1, validate_project_shard,
+    StorageRuntimeContractErrorV1, validate_graph_publication_shard,
 };
 
 /// Bounded keyset request for retired publications whose native graph state
@@ -32,7 +32,7 @@ impl GraphPublicationRetiredCleanupPageRequestV1 {
     }
 
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        validate_project_shard(
+        validate_graph_publication_shard(
             &self.projection.shard_id,
             "graph retired replay cleanup page",
         )?;

@@ -1,8 +1,9 @@
 use std::sync::Arc;
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use std::sync::atomic::Ordering;
 
 use crate::location::PersistentGraphStoreState;
-#[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use crate::{GraphCancellation, GraphDbLocation, GraphDurability, GraphFormatVersion};
 use crate::{GraphDb, GraphDbError, GraphDbOpenOptions, GraphDbRuntimeState};
 
@@ -20,7 +21,7 @@ impl std::fmt::Debug for GraphDbOwner {
 }
 
 impl GraphDbOwner {
-    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     pub fn memory(cancellation: Arc<dyn GraphCancellation>) -> Result<Self, GraphDbError> {
         Self::open(GraphDbOpenOptions {
             location: GraphDbLocation::Memory,
@@ -30,6 +31,7 @@ impl GraphDbOwner {
         })
     }
 
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn open(options: GraphDbOpenOptions) -> Result<Self, GraphDbError> {
         GraphDb::open(options).map(|database| Self { database })
     }
@@ -67,6 +69,7 @@ impl GraphDbOwner {
         Arc::strong_count(&self.database) == 1
     }
 
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn is_closed(&self) -> bool {
         self.database.inner.closed.load(Ordering::Acquire)
     }

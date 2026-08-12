@@ -79,6 +79,7 @@ impl std::fmt::Debug for GraphSnapshot {
 }
 
 impl GraphDb {
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn open(options: GraphDbOpenOptions) -> Result<Arc<Self>, GraphDbError> {
         Self::open_with_store_state(options, None)
     }

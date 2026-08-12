@@ -449,6 +449,7 @@ impl GraphDbRegistry {
         Ok(())
     }
 
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn reopen(
         &self,
         registration: GraphDbRegistration,
@@ -520,6 +521,28 @@ impl GraphDbRegistry {
         self.complete_close(*reservation, close_result.clone())?;
         close_result?;
         check_deadline(registration.deadline)?;
+        Ok(true)
+    }
+
+    /// Closes an already-retained graph by its complete store identity.
+    ///
+    /// Destructive lifecycle recovery uses this after an external actor has
+    /// removed the store root. The registry entry remains the path/format
+    /// authority; this operation never reconstructs or canonicalizes a path
+    /// from the missing filesystem tree.
+    pub fn close_retained(
+        &self,
+        binding: &StoreRuntimeBindingV1,
+        verified_locator: &VerifiedStoreLocatorV1,
+    ) -> Result<bool, GraphDbError> {
+        let reservation = match self.reserve_close(binding, verified_locator, None)? {
+            CloseReservation::Absent => return Ok(false),
+            CloseReservation::Removed => return Ok(true),
+            CloseReservation::Closing(reservation) => reservation,
+        };
+        let close_result = reservation.owner.close();
+        self.complete_close(*reservation, close_result.clone())?;
+        close_result?;
         Ok(true)
     }
 
@@ -802,6 +825,7 @@ impl GraphDbRegistry {
         Ok(())
     }
 
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     fn remove_closed_fault(
         &self,
         binding: &StoreRuntimeBindingV1,

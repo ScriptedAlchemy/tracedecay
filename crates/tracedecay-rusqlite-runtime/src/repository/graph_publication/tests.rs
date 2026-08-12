@@ -412,24 +412,6 @@ fn exact_writer_rejects_foreign_owner_and_pages_through_covering_index() {
 }
 
 #[test]
-fn graph_publication_attachment_rejects_non_project_shards() {
-    let fixture = Fixture::new_for_shard(tracedecay_store::StoreShardIdV1::profile(
-        BrainId::new("brain.fixture").unwrap(),
-        UserProfileId::new("profile.fixture").unwrap(),
-    ));
-
-    assert!(matches!(
-        GraphPublicationExactSqlStorage::from_authorized_handle(fixture.handle.clone()),
-        Err(GraphPublicationStoreErrorV1::InvalidRequest(
-            tracedecay_store::StorageRuntimeContractErrorV1::OperationScopeMismatch {
-                operation: "attach graph publication exact SQL storage",
-                shard_family: "non-project",
-            }
-        ))
-    ));
-}
-
-#[test]
 fn exact_writer_append_is_idempotent_and_projection_isolated() {
     let fixture = Fixture::new();
     let (control, probe) = control_and_probe("append", None);
@@ -967,3 +949,5 @@ fn project_shard_projection_inventory_uses_bounded_keyset_pages() {
 
 #[path = "tests/relational.rs"]
 mod relational;
+#[path = "tests/scope.rs"]
+mod scope;

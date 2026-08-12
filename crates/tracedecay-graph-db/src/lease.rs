@@ -4,11 +4,14 @@ use std::sync::Arc;
 
 use parking_lot::RawRwLock;
 use parking_lot::lock_api::ArcRwLockReadGuard;
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use sha2::{Digest, Sha256};
+use tracedecay_store::runtime::GraphVerifiedHeadV1;
+#[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 use tracedecay_store::runtime::{
     BrainId, GraphGenerationIdV1, GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1,
     GraphPublicationIdempotencyKeyV1, GraphPublicationInputDigestV1, GraphPublicationKeyV1,
-    GraphPublicationSequenceV1, GraphVerifiedHeadV1, ProjectId, StoreShardIdV1, UserProfileId,
+    GraphPublicationSequenceV1, ProjectId, StoreShardIdV1, UserProfileId,
 };
 
 use crate::generation::physical_namespace;

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::watch;
 use tracedecay_store::{
-    RuntimePublicationIdV1, StoreAuthorityEpochV1, StoreRuntimeBindingV1,
-    StoreRuntimeRegistryPublicationV1,
+    RuntimeMaintenanceStateV1, RuntimePublicationIdV1, StoreAuthorityEpochV1,
+    StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1,
 };
 
 use super::capacity::CapacityReservation;
@@ -109,6 +109,7 @@ pub(super) struct OpeningRuntime {
     pub(super) attempt: u64,
     pub(super) updates: watch::Sender<OpenState>,
     pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
+    pub(super) expected_opened_file_identity: Option<u64>,
     pub(super) mode: StoreRuntimeOpenMode,
     pub(super) access: StoreRuntimeAccessMode,
 }
@@ -174,7 +175,22 @@ impl StoreRuntimeRegistry {
                                     ready.handle.inner.database_authority.as_ref(),
                                 )) =>
                     {
-                        StoreRuntimeOpenBegin::Ready(ready.handle.clone())
+                        match request.expected_opened_file_identity {
+                            Some(expected)
+                                if ready.handle.opened_file_identity() != Some(expected) =>
+                            {
+                                StoreRuntimeOpenBegin::Rejected(
+                                    StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                        operation: "join identity-bound registered runtime open",
+                                        message: format!(
+                                            "opened identity {:?} does not match expected identity {expected}",
+                                            ready.handle.opened_file_identity()
+                                        ),
+                                    },
+                                )
+                            }
+                            Some(_) | None => StoreRuntimeOpenBegin::Ready(ready.handle.clone()),
+                        }
                     }
                     RegistryEntry::Opening(opening)
                         if open_access_compatible(request, opening)
@@ -241,6 +257,7 @@ impl StoreRuntimeRegistry {
                     attempt,
                     updates: updates.clone(),
                     database_authority: request.database_authority.clone(),
+                    expected_opened_file_identity: request.expected_opened_file_identity,
                     mode: request.mode,
                     access: request.access,
                 }),
@@ -263,11 +280,51 @@ impl StoreRuntimeRegistry {
         let database_authority = request.database_authority.clone();
         let mode = request.mode;
         let access = request.access;
+        let expected_opened_file_identity = request.expected_opened_file_identity;
         tokio::spawn(async move {
             let guard = OpenAttemptGuard::new(registry.clone(), key.clone(), attempt, updates);
             let outcome = registry
                 .build_runtime(&key, binding, database_authority, mode, access)
                 .await;
+            let outcome = match (outcome, expected_opened_file_identity) {
+                (Ok((published, locator, authority)), Some(expected)) => {
+                    let opened = published.opened_file_identity();
+                    let current = authority
+                        .as_ref()
+                        .and_then(|_| crate::db::sqlite_generation_identity(locator.path()).ok());
+                    let current_mismatch = authority.is_some() && current != Some(expected);
+                    match opened {
+                        Ok(opened) if opened != expected || current_mismatch => {
+                            let close = tokio::task::spawn_blocking(move || {
+                                close_unpublished_runtime(published)
+                            })
+                            .await
+                            .map_err(|error| error.to_string())
+                            .and_then(|result| result);
+                            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                operation: "publish identity-bound registered runtime open",
+                                message: format!(
+                                    "opened identity {opened} and current identity {current:?} do not both match expected identity {expected}; unpublished close={close:?}"
+                                ),
+                            })
+                        }
+                        Ok(_) => Ok((published, locator, authority)),
+                        Err(message) => {
+                            let close = tokio::task::spawn_blocking(move || {
+                                close_unpublished_runtime(published)
+                            })
+                            .await
+                            .map_err(|error| error.to_string())
+                            .and_then(|result| result);
+                            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                operation: "capture identity-bound opened SQLite file identity",
+                                message: format!("{message}; unpublished close={close:?}"),
+                            })
+                        }
+                    }
+                }
+                (outcome, _) => outcome,
+            };
             guard.complete(outcome);
         });
         StoreRuntimeOpenBegin::Started(join)
@@ -386,6 +443,9 @@ impl StoreRuntimeRegistry {
 }
 
 fn open_access_compatible(request: &StoreRuntimeOpenRequest, opening: &OpeningRuntime) -> bool {
+    if request.expected_opened_file_identity != opening.expected_opened_file_identity {
+        return false;
+    }
     match request.access {
         StoreRuntimeAccessMode::ReadOnly => true,
         StoreRuntimeAccessMode::ReadWrite => {
@@ -396,6 +456,24 @@ fn open_access_compatible(request: &StoreRuntimeOpenRequest, opening: &OpeningRu
                 )
         }
     }
+}
+
+fn close_unpublished_runtime(published: PublishedShardRuntime) -> Result<(), String> {
+    let (runtime, attachment) = published.into_parts();
+    let draining = runtime
+        .transition(RuntimeMaintenanceStateV1::Draining)
+        .map_err(|error| error.to_string());
+    let closed = attachment.drain().and_then(|_| attachment.close_and_join());
+    let outcome = draining.and(closed);
+    let target = if outcome.is_ok() {
+        RuntimeMaintenanceStateV1::Closed
+    } else {
+        RuntimeMaintenanceStateV1::Faulted
+    };
+    let lifecycle = runtime
+        .transition(target)
+        .map_err(|error| error.to_string());
+    outcome.and(lifecycle)
 }
 
 fn retained_database_key(state: &RegistryState, path: &std::path::Path) -> Option<StoreRuntimeKey> {

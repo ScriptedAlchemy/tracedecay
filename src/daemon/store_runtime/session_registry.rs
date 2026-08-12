@@ -299,7 +299,7 @@ fn session_registry_error(operation: &'static str, message: String) -> TraceDeca
 }
 
 #[cfg(test)]
-mod project_graph_runtime_port_contract_tests;
+mod verified_graph_runtime_port_contract_tests;
 
 #[cfg(test)]
 mod project_memory_relation_graph_contract_tests;

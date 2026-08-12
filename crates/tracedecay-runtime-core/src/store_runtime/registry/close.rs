@@ -88,7 +88,34 @@ impl StoreRuntimeRegistry {
         expected: &StoreRuntimeBindingV1,
         authority: &DatabaseAuthority,
     ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
-        let reservation = self.reserve_exact_close(expected, authority)?;
+        self.close_exact_with_opened_identity(expected, authority, None)
+            .await
+    }
+
+    /// Closes an exact retained runtime after the canonical path has already
+    /// advanced to another inode under an exclusive recovery authority.
+    pub async fn close_exact_stale_attachment(
+        &self,
+        expected: &StoreRuntimeBindingV1,
+        authority: &DatabaseAuthority,
+        expected_opened_file_identity: u64,
+    ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
+        self.close_exact_with_opened_identity(
+            expected,
+            authority,
+            Some(expected_opened_file_identity),
+        )
+        .await
+    }
+
+    async fn close_exact_with_opened_identity(
+        &self,
+        expected: &StoreRuntimeBindingV1,
+        authority: &DatabaseAuthority,
+        stale_opened_file_identity: Option<u64>,
+    ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
+        let reservation =
+            self.reserve_exact_close(expected, authority, stale_opened_file_identity)?;
         let registry = self.clone();
         // The completion task owns the reservation. Dropping this caller's
         // join handle detaches the task, so physical close still reaches the
@@ -105,10 +132,21 @@ impl StoreRuntimeRegistry {
                     .and_then(|result| result);
 
             if outcome.is_ok() {
-                outcome = reservation
-                    .handle
-                    .validate_opened_file_identity("complete exact registered runtime close")
-                    .map(|_| ());
+                outcome = match stale_opened_file_identity {
+                    Some(expected_identity)
+                        if reservation.handle.opened_file_identity() == Some(expected_identity) =>
+                    {
+                        Ok(())
+                    }
+                    Some(_) => Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "complete stale registered runtime close",
+                        message: "retained opened identity changed during stale close".to_owned(),
+                    }),
+                    None => reservation
+                        .handle
+                        .validate_opened_file_identity("complete exact registered runtime close")
+                        .map(|_| ()),
+                };
             }
             if outcome.is_ok() {
                 outcome = reservation
@@ -139,6 +177,7 @@ impl StoreRuntimeRegistry {
         &self,
         expected: &StoreRuntimeBindingV1,
         authority: &DatabaseAuthority,
+        stale_opened_file_identity: Option<u64>,
     ) -> Result<CloseReservation, StoreRuntimeRegistryFailure> {
         let key = StoreRuntimeKey::from_binding(expected);
         let mut state = self.lock_state();
@@ -188,7 +227,25 @@ impl StoreRuntimeRegistry {
                     .to_owned(),
             });
         }
-        if let Err(failure) = ready
+        if let Some(expected_identity) = stale_opened_file_identity {
+            if let Err(error) =
+                authority.require_active_write_scope("reserve stale registered runtime close")
+            {
+                state.entries.insert(key, RegistryEntry::Ready(ready));
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "reserve stale registered runtime close",
+                    message: error.to_string(),
+                });
+            }
+            if ready.handle.opened_file_identity() != Some(expected_identity) {
+                state.entries.insert(key, RegistryEntry::Ready(ready));
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "reserve stale registered runtime close",
+                    message: "retained runtime does not match the expected opened identity"
+                        .to_owned(),
+                });
+            }
+        } else if let Err(failure) = ready
             .handle
             .validate_database_write_authority(authority, "reserve exact registered runtime close")
         {
@@ -387,6 +444,15 @@ mod tests {
         }
     }
 
+    async fn seed_final_graph_db(path: PathBuf) -> PathBuf {
+        let connection = crate::db::engine::TestConnection::open(&path);
+        crate::db::migrations::create_schema_connection(&connection)
+            .await
+            .expect("seed exact final graph schema");
+        drop(connection);
+        path.canonicalize().unwrap()
+    }
+
     async fn mount_code_runtime(
         path: PathBuf,
     ) -> (
@@ -395,6 +461,7 @@ mod tests {
         StoreRuntimeHandle,
         DatabaseAuthority,
     ) {
+        let path = seed_final_graph_db(path).await;
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount exact-close code runtime").unwrap();
         let profile_path = path.with_file_name("profile.db");
@@ -454,8 +521,6 @@ mod tests {
     async fn exact_close_refuses_facades_runtime_references_and_leases_before_closing() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
-        rusqlite::Connection::open(&path).unwrap();
-        let path = path.canonicalize().unwrap();
         let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
         let binding = code.binding().clone();
 
@@ -507,12 +572,34 @@ mod tests {
         drop(profile);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_exact_close_uses_retained_binding_authority_and_opened_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
+        let binding = code.binding().clone();
+        let opened_identity = code.opened_file_identity().unwrap();
+        let detached = path.with_extension("detached.db");
+        let replacement = path.with_extension("replacement.db");
+        rusqlite::Connection::open(&replacement).unwrap();
+        std::fs::rename(&path, &detached).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        drop(code);
+
+        let closed = registry
+            .close_exact_stale_attachment(&binding, &authority, opened_identity)
+            .await
+            .unwrap();
+        assert_eq!(closed.binding(), &binding);
+        assert_eq!(closed.opened_file_identity(), opened_identity);
+        drop(profile);
+    }
+
     #[tokio::test]
     async fn destructive_reservation_fences_open_until_preserved_store_reopens() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
-        rusqlite::Connection::open(&path).unwrap();
-        let path = path.canonicalize().unwrap();
         let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
         let old_runtime_identity = code.runtime_identity();
         let authority_token = authority.token().to_owned();
@@ -576,8 +663,6 @@ mod tests {
     async fn destructive_reservation_atomically_rejects_open_begin() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
-        rusqlite::Connection::open(&path).unwrap();
-        let path = path.canonicalize().unwrap();
         let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
         drop(code);
 
@@ -612,8 +697,6 @@ mod tests {
     async fn failed_destructive_close_releases_reservation_for_retry() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
-        rusqlite::Connection::open(&path).unwrap();
-        let path = path.canonicalize().unwrap();
         let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
         let target =
             super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path]).unwrap();
@@ -639,11 +722,7 @@ mod tests {
     async fn destructive_reservation_does_not_block_unrelated_database_under_same_root() {
         let temporary = tempfile::tempdir().unwrap();
         let reserved_path = temporary.path().join("reserved.db");
-        let unrelated_path = temporary.path().join("unrelated.db");
-        rusqlite::Connection::open(&reserved_path).unwrap();
-        rusqlite::Connection::open(&unrelated_path).unwrap();
-        let reserved_path = reserved_path.canonicalize().unwrap();
-        let unrelated_path = unrelated_path.canonicalize().unwrap();
+        let unrelated_path = seed_final_graph_db(temporary.path().join("unrelated.db")).await;
         let (registry, profile, code, _authority) = mount_code_runtime(reserved_path.clone()).await;
         drop(code);
         let reservation = registry

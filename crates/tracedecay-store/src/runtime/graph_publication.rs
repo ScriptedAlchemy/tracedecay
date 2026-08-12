@@ -219,7 +219,10 @@ impl GraphPublicationReplayV1 {
     }
 
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        validate_project_shard(&self.key.projection.shard_id, "graph publication replay")?;
+        validate_graph_publication_shard(
+            &self.key.projection.shard_id,
+            "graph publication replay",
+        )?;
         if self
             .expected_prior_head
             .as_ref()
@@ -319,16 +322,19 @@ fn validate_direct_dependency_generations(
     encoded_direct_dependency_bytes(dependencies).map(|_| ())
 }
 
-fn validate_project_shard(
+fn validate_graph_publication_shard(
     shard_id: &StoreShardIdV1,
     operation: &'static str,
 ) -> Result<(), StorageRuntimeContractErrorV1> {
-    if matches!(&shard_id.scope, StoreShardScopeV1::Project { .. }) {
+    if matches!(
+        &shard_id.scope,
+        StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileMemory
+    ) {
         Ok(())
     } else {
         Err(StorageRuntimeContractErrorV1::OperationScopeMismatch {
             operation,
-            shard_family: "non-project",
+            shard_family: "non-graph-publication",
         })
     }
 }
@@ -403,7 +409,7 @@ impl GraphPublicationReplayCursorV1 {
         projection: GraphProjectionIdentityV1,
         sequence: GraphPublicationSequenceV1,
     ) -> Result<Self, StorageRuntimeContractErrorV1> {
-        validate_project_shard(&projection.shard_id, "graph publication replay cursor")?;
+        validate_graph_publication_shard(&projection.shard_id, "graph publication replay cursor")?;
         Ok(Self {
             projection,
             sequence,
@@ -456,7 +462,10 @@ impl GraphPublicationReplayPageRequestV1 {
     }
 
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        validate_project_shard(&self.projection.shard_id, "graph publication replay page")?;
+        validate_graph_publication_shard(
+            &self.projection.shard_id,
+            "graph publication replay page",
+        )?;
         if self
             .after
             .as_ref()
@@ -566,7 +575,7 @@ impl GraphPublicationReplayPageV1 {
     }
 }
 
-/// Bounded keyset inventory request for graph projections in one project shard.
+/// Bounded keyset inventory request for one project or profile-memory shard.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GraphPublicationProjectionPageRequestV1 {
@@ -591,7 +600,7 @@ impl GraphPublicationProjectionPageRequestV1 {
     }
 
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        validate_project_shard(&self.shard_id, "graph publication projection inventory")?;
+        validate_graph_publication_shard(&self.shard_id, "graph publication projection inventory")?;
         if self
             .after
             .as_ref()
@@ -723,7 +732,7 @@ impl GraphPublicationReplayRetirementV1 {
     }
 
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        validate_project_shard(
+        validate_graph_publication_shard(
             &self.key.projection.shard_id,
             "graph publication replay retirement",
         )?;
@@ -865,7 +874,7 @@ pub struct GraphVerifiedHeadCompareAndSwapV1 {
 
 impl GraphVerifiedHeadCompareAndSwapV1 {
     pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        validate_project_shard(
+        validate_graph_publication_shard(
             &self.publication_key.projection.shard_id,
             "graph verified head compare and swap",
         )?;

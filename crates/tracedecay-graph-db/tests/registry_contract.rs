@@ -669,6 +669,34 @@ fn close_and_retention_refuse_an_active_handle() {
     assert!(active.snapshot().is_ok());
 }
 
+#[cfg(unix)]
+#[test]
+fn retained_close_uses_exact_registry_identity_after_root_loss() {
+    let temp = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let binding = identity("profile-a", "project-a");
+    let request = registration(binding.clone(), temp.path());
+    let locator = request.authority_lease.verified_locator().clone();
+    let database = registry.resolve(request).unwrap();
+    drop(database);
+
+    let foreign_binding = StoreRuntimeBindingV1::new(
+        binding.shard_id.clone(),
+        binding.incarnation,
+        StoreAuthorityEpochV1::new(binding.authority_epoch.get() + 1).unwrap(),
+    );
+    assert_eq!(
+        registry
+            .close_retained(&foreign_binding, &locator)
+            .unwrap_err(),
+        GraphDbError::Conflict
+    );
+
+    std::fs::remove_dir_all(temp.path()).unwrap();
+    assert!(registry.close_retained(&binding, &locator).unwrap());
+    assert!(!registry.close_retained(&binding, &locator).unwrap());
+}
+
 #[test]
 fn snapshot_lease_prevents_close_after_operation_handle_is_dropped() {
     let temp = TempDir::new().unwrap();

@@ -27,6 +27,7 @@ use crate::{
 };
 
 impl GraphDb {
+    #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
     pub(crate) fn verify_generation_in_place(
         &self,
         manifest: &GraphGenerationManifest,

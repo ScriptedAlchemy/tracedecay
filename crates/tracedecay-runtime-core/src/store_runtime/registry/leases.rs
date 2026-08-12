@@ -26,6 +26,7 @@ pub struct StoreRuntimeOpenRequest {
     pub(super) key: StoreRuntimeKey,
     pub(super) profile_authority: Option<ProfileAuthorityPin>,
     pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
+    pub(super) expected_opened_file_identity: Option<u64>,
     pub(super) mode: StoreRuntimeOpenMode,
     pub(super) access: StoreRuntimeAccessMode,
 }
@@ -53,6 +54,7 @@ impl StoreRuntimeOpenRequest {
             key: StoreRuntimeKey::new(shard_id, incarnation),
             profile_authority,
             database_authority: Some(database_authority),
+            expected_opened_file_identity: None,
             mode: StoreRuntimeOpenMode::Existing,
             access: StoreRuntimeAccessMode::ReadWrite,
         }
@@ -68,6 +70,7 @@ impl StoreRuntimeOpenRequest {
             key: StoreRuntimeKey::new(shard_id, incarnation),
             profile_authority,
             database_authority: Some(database_authority),
+            expected_opened_file_identity: None,
             mode: StoreRuntimeOpenMode::Initialize,
             access: StoreRuntimeAccessMode::ReadWrite,
         }
@@ -82,6 +85,7 @@ impl StoreRuntimeOpenRequest {
             key: StoreRuntimeKey::new(shard_id, incarnation),
             profile_authority,
             database_authority: None,
+            expected_opened_file_identity: None,
             mode: StoreRuntimeOpenMode::Existing,
             access: StoreRuntimeAccessMode::ReadOnly,
         }
@@ -97,6 +101,7 @@ impl StoreRuntimeOpenRequest {
             key: StoreRuntimeKey::new(shard_id, incarnation),
             profile_authority,
             database_authority: None,
+            expected_opened_file_identity: None,
             mode: StoreRuntimeOpenMode::Existing,
             access: StoreRuntimeAccessMode::ReadWrite,
         }
@@ -104,6 +109,11 @@ impl StoreRuntimeOpenRequest {
 
     pub fn key(&self) -> &StoreRuntimeKey {
         &self.key
+    }
+
+    pub fn require_opened_file_identity(mut self, expected: u64) -> Self {
+        self.expected_opened_file_identity = Some(expected);
+        self
     }
 }
 

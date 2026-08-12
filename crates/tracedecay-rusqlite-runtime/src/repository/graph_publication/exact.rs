@@ -104,11 +104,12 @@ impl GraphPublicationExactSqlStorage {
         if !matches!(
             &handle.binding().shard_id.scope,
             tracedecay_store::StoreShardScopeV1::Project { .. }
+                | tracedecay_store::StoreShardScopeV1::ProfileMemory
         ) {
             return Err(GraphPublicationStoreErrorV1::InvalidRequest(
                 tracedecay_store::StorageRuntimeContractErrorV1::OperationScopeMismatch {
                     operation: "attach graph publication exact SQL storage",
-                    shard_family: "non-project",
+                    shard_family: "non-graph-publication",
                 },
             ));
         }

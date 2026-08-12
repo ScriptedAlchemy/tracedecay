@@ -494,7 +494,7 @@ fn checked_sorted_dependencies(
         }
     }
     check()?;
-    Ok(sorted.into_iter().collect())
+    collect_checked(sorted, check)
 }
 
 fn checked_sorted_entities(
@@ -512,7 +512,7 @@ fn checked_sorted_entities(
         }
     }
     check()?;
-    Ok(sorted.into_values().collect())
+    collect_checked(sorted.into_values(), check)
 }
 
 fn checked_sorted_relations(
@@ -530,7 +530,20 @@ fn checked_sorted_relations(
         }
     }
     check()?;
-    Ok(sorted.into_values().collect())
+    collect_checked(sorted.into_values(), check)
+}
+
+fn collect_checked<T>(
+    values: impl IntoIterator<Item = T>,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<Vec<T>, GraphDbError> {
+    let mut collected = Vec::new();
+    for value in values {
+        check()?;
+        collected.push(value);
+    }
+    check()?;
+    Ok(collected)
 }
 
 pub(crate) fn physical_namespace(

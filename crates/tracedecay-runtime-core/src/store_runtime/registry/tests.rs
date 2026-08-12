@@ -87,6 +87,55 @@ async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
 }
 
 #[tokio::test]
+async fn identity_bound_open_rejects_foreign_attachment_before_registry_publication() {
+    let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    let request = project_request("project.identity-bound", &pin).require_opened_file_identity(2);
+
+    assert!(matches!(
+        registry.open(request).await,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "publish identity-bound registered runtime open",
+            message,
+        }) if message.contains("unpublished close=Ok(())")
+    ));
+
+    let inventory = registry.inventory(tracedecay_store::AdmissionConfigV1::default(), None);
+    assert_eq!(inventory.opening_shards, 0);
+    assert_eq!(
+        inventory.entries.len(),
+        1,
+        "only the profile runtime remains"
+    );
+}
+
+#[tokio::test]
+async fn identity_bound_open_refusal_preserves_an_existing_matching_runtime() {
+    let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    let project = project_request("project.identity-retained", &pin);
+    let request = StoreRuntimeOpenRequest::new_read_only(
+        project.key().shard_id().clone(),
+        incarnation(),
+        Some(pin),
+    );
+    let retained = open_published(&registry, request.clone().require_opened_file_identity(1)).await;
+
+    assert!(matches!(
+        registry.open(request.require_opened_file_identity(2)).await,
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "join identity-bound registered runtime open",
+            ..
+        })
+    ));
+    assert!(matches!(
+        registry.lookup(retained.binding()),
+        StoreRuntimeLookup::Ready(handle)
+            if Arc::ptr_eq(handle.runtime(), retained.runtime())
+    ));
+}
+
+#[tokio::test]
 async fn inventory_exposes_admitted_open_before_publication() {
     let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;

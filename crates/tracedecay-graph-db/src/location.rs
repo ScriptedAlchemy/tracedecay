@@ -9,6 +9,7 @@ use crate::{GraphCancellation, GraphDbError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphDbLocation {
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     Memory,
     Persistent(PathBuf),
 }
@@ -22,6 +23,7 @@ impl GraphFormatVersion {
         Self(2)
     }
 
+    #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
     pub fn new(value: u32) -> Result<Self, GraphDbError> {
         if value == 0 {
             return Err(GraphDbError::invalid(
@@ -92,6 +94,7 @@ impl GraphDbOpenOptions {
         }
         let expected_format = self.expected_format;
         match self.location {
+            #[cfg(any(test, feature = "test-helpers", feature = "eval-helpers"))]
             GraphDbLocation::Memory => {
                 if self.durability != GraphDurability::Memory {
                     return Err(GraphDbError::invalid(

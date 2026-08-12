@@ -59,11 +59,14 @@ pub(super) fn ensure_shard_owner(
     handle: &ExactSqlHandle,
     shard_id: &StoreShardIdV1,
 ) -> GraphPublicationStoreResultV1<()> {
-    if !matches!(&shard_id.scope, StoreShardScopeV1::Project { .. }) {
+    if !matches!(
+        &shard_id.scope,
+        StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileMemory
+    ) {
         return Err(GraphPublicationStoreErrorV1::InvalidRequest(
             tracedecay_store::StorageRuntimeContractErrorV1::OperationScopeMismatch {
                 operation: "graph publication exact SQL attachment",
-                shard_family: "non-project",
+                shard_family: "non-graph-publication",
             },
         ));
     }

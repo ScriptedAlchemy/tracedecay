@@ -54,6 +54,7 @@ impl Database {
 mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
+    use tracedecay_domain::LocatorDigest;
     use tracedecay_graph_db::{
         GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
         VerifiedGraphSnapshot,
@@ -156,5 +157,30 @@ mod tests {
                 .expect("bound graph runtime"),
             &runtime
         ));
+    }
+
+    #[tokio::test]
+    async fn graph_runtime_binding_rejects_the_right_shard_with_the_wrong_locator() {
+        let directory = tempfile::tempdir().expect("graph locator binding directory");
+        let database_path = directory.path().join("memory.db");
+        let authority = DatabaseAuthority::acquire_test(&database_path, "graph locator test")
+            .expect("database authority");
+        let (database, _) = Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("database runtime");
+        let mut locator = database.retained_runtime().locator().verified().clone();
+        locator.locator_digest =
+            LocatorDigest::new(format!("sha256:{}", "f".repeat(64))).expect("foreign locator");
+        let runtime: Arc<dyn VerifiedGraphRuntimePortV1> = Arc::new(TestGraphRuntime {
+            binding: database.retained_runtime().binding().clone(),
+            locator,
+        });
+
+        assert!(database.bind_memory_graph_runtime(runtime).is_err());
+        assert!(database.memory_graph_runtime().is_none());
     }
 }

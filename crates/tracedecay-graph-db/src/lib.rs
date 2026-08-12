@@ -57,8 +57,6 @@ pub use projection::{
 pub use projection::{NeverCancelled, ProjectionReplacement};
 #[cfg(any(feature = "test-helpers", feature = "eval-helpers"))]
 pub use projection_read::GraphProjectionLabelPage;
-#[cfg(not(any(feature = "test-helpers", feature = "eval-helpers")))]
-pub(crate) use projection_read::GraphProjectionLabelPage;
 pub use projection_read::{
     GraphProjectionPage, GraphProjectionReadRequest, GraphProjectionTelemetry,
     GraphProjectionTelemetryRequest,
