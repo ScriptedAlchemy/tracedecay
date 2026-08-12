@@ -16,6 +16,8 @@ mod registered_lcm_render;
 mod relation_projection;
 mod relation_receipts;
 pub use relation_projection::seed_session_relation_projection;
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) use relation_receipts::{apply_relation_projection, record_relation_receipt};
 pub mod relations;
 pub mod render;
 mod retrieval;

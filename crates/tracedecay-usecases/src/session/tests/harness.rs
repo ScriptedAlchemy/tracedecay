@@ -22,6 +22,9 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_sessions::runtime::lcm::payload::{upsert_payload_metadata, write_external_payload};
+use tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication;
+use tracedecay_sessions::runtime::lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 pub(super) const PROJECT_ID: &str = "project.tracedecay";
 pub(super) const INLINE_PAYLOAD: &str = "non-empty inline occurrence payload";
@@ -79,17 +82,6 @@ impl RegisteredTemporalHarness {
             policy_digest_bytes(&external_anchor),
             "one registered authority namespace must produce one access policy"
         );
-        let authority = fixture_observation(
-            3,
-            "session.temporal.application",
-            "provider.application",
-            "message-3",
-            "record-3",
-            "receipt-3",
-            "payload authority",
-            false,
-        );
-        let authority_anchor = self.persist_observation(&authority).await;
         self.seed_session(
             "session.temporal.application",
             "provider.application",
@@ -107,7 +99,7 @@ impl RegisteredTemporalHarness {
             2,
         )
         .await;
-        self.seed_external_payload(&authority_anchor).await;
+        self.seed_external_payload().await;
         policy_digest_bytes(&inline_anchor)
     }
 
@@ -135,6 +127,8 @@ impl RegisteredTemporalHarness {
             1,
         )
         .await;
+        self.publish_session_relation_projection("session.temporal.application")
+            .await;
         [0x5a; 32]
     }
 
@@ -173,6 +167,7 @@ impl RegisteredTemporalHarness {
                 .await;
             self.seed_occurrence(&observation, &anchor, message_id, payload, 1)
                 .await;
+            self.publish_session_relation_projection(session_id).await;
         }
         let foreign = fixture_observation(
             1,
@@ -201,6 +196,8 @@ impl RegisteredTemporalHarness {
             1,
         )
         .await;
+        self.publish_session_relation_projection("session.root.foreign")
+            .await;
         digest.expect("root fixture policy digest")
     }
 
@@ -227,6 +224,8 @@ impl RegisteredTemporalHarness {
             1,
         )
         .await;
+        self.publish_session_relation_projection("session.temporal.privacy")
+            .await;
         policy_digest_bytes(&anchor)
     }
 
@@ -260,11 +259,23 @@ impl RegisteredTemporalHarness {
     /// Reopens the profile sessions store through the registry, so a test can
     /// assert a property survives losing and re-acquiring the handle rather
     /// than only rebuilding the objects layered over one.
-    pub(super) async fn remount(&self) -> Arc<RegisteredGlobalDb> {
-        self._runtime
-            .remount_profile_database_for_test()
+    pub(super) async fn remount(self) -> Self {
+        let Self {
+            registered,
+            _directory,
+            _runtime,
+        } = self;
+        drop(registered);
+        let runtime = _runtime
+            .reopen_profile_database_for_test()
             .await
-            .expect("remounted profile sessions")
+            .expect("remounted profile sessions");
+        let registered = runtime.profile_database_arc();
+        Self {
+            registered,
+            _directory,
+            _runtime: runtime,
+        }
     }
 
     /// Every full-text sink the schema currently defines. Enumerated rather
@@ -414,11 +425,15 @@ impl RegisteredTemporalHarness {
             .await
             .expect("activate generation");
         transaction.commit().await.expect("commit session fixture");
+    }
+
+    async fn publish_session_relation_projection(&self, session_id: &str) {
         tracedecay_global_db::tests::harness::publish_test_session_relation_projection(
             self.registered.as_ref(),
             session_id,
             1,
         )
+        .await
         .expect("publish fixture session relation projection");
     }
 
@@ -540,6 +555,14 @@ impl RegisteredTemporalHarness {
             }
         })
         .to_string();
+        let sanitization = tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(payload)
+            .expect("sanitize fixture LCM payload");
+        let raw_metadata = json!({
+            "ingest_protection": {
+                "sanitization_receipt": sanitization.receipt()
+            }
+        })
+        .to_string();
         let writer = self
             .registered
             .writer_connection()
@@ -594,10 +617,10 @@ impl RegisteredTemporalHarness {
                     "INSERT INTO lcm_raw_messages (
                         provider, message_id, session_id, role, ordinal, timestamp,
                         content, content_hash, storage_kind, payload_ref,
-                        snippet_text, index_text, legacy_source, legacy_truncated
+                        snippet_text, index_text, legacy_source, legacy_truncated, metadata_json
                      ) VALUES (
                         ?1, ?2, ?3, 'assistant', ?4, ?4, ?5, ?6,
-                        'inline', NULL, ?5, ?5, 0, 0
+                        'inline', NULL, ?5, ?5, 0, 0, ?7
                      )",
                     params![
                         observation.source().provider().as_str(),
@@ -605,7 +628,8 @@ impl RegisteredTemporalHarness {
                         observation.source().session_id().as_str(),
                         ordinal,
                         payload,
-                        payload_digest(payload)
+                        payload_digest(payload),
+                        raw_metadata
                     ],
                 )
                 .await
@@ -613,7 +637,7 @@ impl RegisteredTemporalHarness {
         }
     }
 
-    async fn seed_external_payload(&self, authority_anchor: &RetrievalAnchorRecord) {
+    async fn seed_external_payload(&self) {
         let db_path = self.registered.db_path();
         let payload = write_external_payload(
             db_path.parent().unwrap(),
@@ -625,6 +649,15 @@ impl RegisteredTemporalHarness {
             None,
         )
         .expect("write external payload through production filesystem authority");
+        let sanitization =
+            tracedecay_runtime_core::privacy::sanitize_lcm_payload_text(EXTERNAL_PAYLOAD)
+                .expect("sanitize external fixture LCM payload");
+        let raw_metadata = json!({
+            "ingest_protection": {
+                "sanitization_receipt": sanitization.receipt()
+            }
+        })
+        .to_string();
         let transaction = self
             .registered
             .begin_write_transaction()
@@ -635,15 +668,16 @@ impl RegisteredTemporalHarness {
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
                     content, content_hash, storage_kind, payload_ref,
-                    snippet_text, index_text, legacy_source, legacy_truncated
+                    snippet_text, index_text, legacy_source, legacy_truncated, metadata_json
                  ) VALUES (
                     'provider.application', 'message-2', 'session.temporal.application',
-                    'assistant', 2, 2, NULL, ?1, 'external', ?2, ?3, ?3, 0, 0
+                    'assistant', 2, 2, NULL, ?1, 'external', ?2, ?3, ?3, 0, 0, ?4
                  )",
                 params![
                     payload.content_hash.as_str(),
                     payload.payload_ref.as_str(),
-                    EXTERNAL_PAYLOAD
+                    EXTERNAL_PAYLOAD,
+                    raw_metadata
                 ],
             )
             .await
@@ -651,53 +685,38 @@ impl RegisteredTemporalHarness {
         upsert_payload_metadata(&transaction, &payload)
             .await
             .expect("seed external payload");
-        let manifest = json!({
-            "provider": payload.provider.as_str(),
-            "session_id": payload.session_id.as_str(),
-            "message_id": payload.message_id.as_str(),
-            "byte_count": payload.byte_count,
-            "char_count": payload.char_count
-        })
-        .to_string();
-        let publication = json!({
-            "receipt_id": "receipt-3",
-            "payloads": [{
-                "payload_ref": payload.payload_ref.as_str(),
-                "digest": payload.content_hash.as_str(),
-                "manifest_json": manifest.as_str()
-            }]
-        })
-        .to_string();
-        transaction
-            .execute(
-                "INSERT INTO session_summary_nodes (
-                    summary_id, session_id, summary_anchor_id, summary_text,
-                    index_text, source_horizon_json, publication_json, created_at
-                 ) VALUES (
-                    'summary-external-authority', 'session.temporal.application', ?1,
-                    'payload authority', 'payload authority', '{}', ?2, 1
-                 )",
-                params![authority_anchor.anchor_id().as_str(), publication],
-            )
-            .await
-            .expect("seed external payload authority");
-        transaction
-            .execute(
-                "INSERT INTO session_external_payload_manifests (
-                    payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
-                 ) VALUES (?1, 'session.temporal.application', ?2, ?3, 'receipt-3', 1)",
-                params![
-                    payload.payload_ref.as_str(),
-                    payload.content_hash.as_str(),
-                    manifest
-                ],
-            )
-            .await
-            .expect("seed external payload manifest");
         transaction
             .commit()
             .await
             .expect("commit external payload fixture");
+        let raw_store_id = self.raw_store_id("message-2").await;
+        self.registered
+            .lcm_publish_immutable_summary_guarded(
+                LcmImmutableSummaryPublication {
+                    summary_id: "summary-external-authority".to_owned(),
+                    predecessor_summary_id: None,
+                    draft: LcmSummaryNodeDraft {
+                        provider: payload.provider,
+                        conversation_id: "session.temporal.application".to_owned(),
+                        session_id: payload.session_id,
+                        depth: 0,
+                        summary_text: "payload authority".to_owned(),
+                        source_refs: vec![LcmSourceRef::RawMessage {
+                            store_id: raw_store_id,
+                        }],
+                        source_token_count: 3,
+                        summary_token_count: 2,
+                        source_time_start: Some(2),
+                        source_time_end: Some(2),
+                        expand_hint: None,
+                        metadata_json: None,
+                    },
+                },
+                &ExecutionControl::default(),
+                || Ok(()),
+            )
+            .await
+            .expect("publish external payload authority");
     }
 }
 
@@ -798,8 +817,5 @@ fn policy_digest_bytes(anchor: &RetrievalAnchorRecord) -> [u8; 32] {
 }
 
 fn payload_digest(payload: &str) -> String {
-    format!(
-        "sha256:{}",
-        hex::encode(sha2::Sha256::digest(payload.as_bytes()))
-    )
+    hex::encode(sha2::Sha256::digest(payload.as_bytes()))
 }

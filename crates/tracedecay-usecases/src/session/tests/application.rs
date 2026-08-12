@@ -192,7 +192,7 @@ async fn registered_root_cursor_survives_service_restart_and_rejects_scope_drift
     let SessionRetrievalOutcome::Partial { items, omitted, .. } = first else {
         panic!("first root page was not partial: {first:?}");
     };
-    assert_eq!(omitted, 1);
+    assert_eq!(omitted, 0);
     let first_anchor = items[0].ranked[0].anchor_id.to_string();
     let cursor = items[0].next_cursor.clone().expect("root continuation");
 

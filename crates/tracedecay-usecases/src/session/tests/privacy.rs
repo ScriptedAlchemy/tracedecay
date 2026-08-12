@@ -246,9 +246,12 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
         SessionRetrievalConfiguration::new(3, 5).unwrap(),
     );
     let before = service.retrieve(&context, &binding, privacy_query()).await;
+    drop(service);
+    drop(execution);
 
-    let remounted = harness.remount().await;
-    let reopened_execution = RegisteredGlobalDbSessionTemporalExecution::new(remounted.as_ref());
+    let harness = harness.remount().await;
+    let reopened_execution =
+        RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let reopened_service = SessionRetrievalService::new(
         AllowAuthorizer,
         &reopened_execution,
@@ -361,8 +364,8 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
         1,
     )
     .with_compatibility_filter_digest("surface.describe.v1".to_owned());
-    assert_surface_completed(
-        &service
+    let described = only_result(
+        service
             .retrieve(&context, &binding, describe_query.clone())
             .await,
         "describe",
@@ -374,7 +377,7 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
                 session_id: "session.temporal.application".to_owned(),
                 target: LcmDescribeTarget::Session,
             },
-            None,
+            Some(described.snapshot.request().execution_control()),
         )
         .await
         .expect("authorized describe render");
@@ -625,21 +628,6 @@ async fn registered_direct_anchor_replay_and_continuation_reauthorize_without_st
         SessionRetrievalOutcome::Denied
     ));
     assert_storage_unchanged(&harness, &baseline, "revoked continuation");
-}
-
-fn assert_surface_completed(
-    outcome: &SessionRetrievalOutcome<TemporalKernelResult>,
-    surface: &str,
-) {
-    assert!(
-        matches!(
-            outcome,
-            SessionRetrievalOutcome::Complete { .. }
-                | SessionRetrievalOutcome::CompleteZero { .. }
-                | SessionRetrievalOutcome::Partial { .. }
-        ),
-        "{surface} must complete through the canonical service: {outcome:?}"
-    );
 }
 
 fn only_result(
