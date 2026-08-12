@@ -561,12 +561,13 @@ mod tests {
     #[tokio::test]
     async fn file_open_failure_remains_runtime_without_a_committed_receipt() {
         let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir(temp.path().join("occupied")).expect("occupied target");
+        let output_root = temp.path().join(JOB_OUTPUT_DIR);
+        std::fs::create_dir_all(output_root.join("occupied")).expect("occupied target");
         let job: AutomationJob = serde_json::from_value(json!({
             "id": "private-file",
             "name": "Private file",
             "prompt": "write",
-            "delivery": {"mode": "file", "path": "occupied"}
+            "delivery": {"mode": "file", "path": "job-output/occupied"}
         }))
         .expect("job");
         let response = AgentTaskResponse {
@@ -588,19 +589,25 @@ mod tests {
         )
         .await
         .expect_err("opening a directory as a delivery file must be unattempted");
-        assert!(matches!(error, AutomationRunError::Runtime(_)));
+        assert!(matches!(
+            error,
+            AutomationRunError::Runtime(TraceDecayError::Config { message })
+                if message.starts_with("failed to open job output:")
+        ));
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn file_write_failure_after_open_is_a_bound_partial_effect() {
         let temp = tempfile::tempdir().expect("tempdir");
-        std::os::unix::fs::symlink("/dev/full", temp.path().join("sink")).expect("full device");
+        let output_root = temp.path().join(JOB_OUTPUT_DIR);
+        std::fs::create_dir_all(&output_root).expect("job output root");
+        std::os::unix::fs::symlink("/dev/full", output_root.join("sink")).expect("full device");
         let job: AutomationJob = serde_json::from_value(json!({
             "id": "private-file",
             "name": "Private file",
             "prompt": "write",
-            "delivery": {"mode": "file", "path": "sink"}
+            "delivery": {"mode": "file", "path": "job-output/sink"}
         }))
         .expect("job");
         let response = AgentTaskResponse {
@@ -632,6 +639,10 @@ mod tests {
         };
         assert!(ledger_record.is_none());
         assert_eq!(receipt.task_key(), "user_job:private-file");
+        assert!(matches!(
+            receipt.disposition(),
+            ExternalAutomationEffectDisposition::UserJobDeliveryIndeterminate { mode: "file", .. }
+        ));
         let debug = format!("{receipt:?}");
         assert!(!debug.contains("sink"));
         assert!(!debug.contains("private delivery body"));
