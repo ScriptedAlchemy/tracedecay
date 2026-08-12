@@ -479,12 +479,12 @@ async fn refused_daily_projection_releases_its_claim_and_leaves_the_day_dirty() 
     let db = runtime.project_database_arc().expect("project database");
     let scope = "project.observability.v2".to_owned();
     let day_start_seconds = 172_800_i64;
-    let mut partial = topology_envelope(&scope, 1, day_start_seconds * 1_000_000 + 1);
-    partial.coverage = CoverageStateV1::Partial;
+    let mut stale = topology_envelope(&scope, 1, day_start_seconds * 1_000_000 + 1);
+    stale.coverage = CoverageStateV1::Stale;
     RegisteredObservabilityPortV1::new(&db)
-        .record(partial)
+        .record(stale)
         .await
-        .expect("record partial topology source event");
+        .expect("record stale topology source event");
 
     let producer = BoundedObservabilityProducerV1::start(
         Arc::clone(&db),
