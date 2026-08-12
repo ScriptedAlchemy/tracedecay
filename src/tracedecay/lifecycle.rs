@@ -182,16 +182,33 @@ impl TraceDecay {
         }
 
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
+        let mut selected_via_exact_registry_alias = false;
         let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
             .then(|| crate::worktree::git_common_dir(project_root))
             .flatten();
         if selected.is_none()
             && let Some(global_db) = open_options.open_global_db().await
         {
-            if let Some(resolution) = global_db
-                .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
-                .await
-            {
+            let resolution = match global_db.resolve_project_store_by_alias(project_root).await {
+                Some(resolution) => {
+                    selected_via_exact_registry_alias = resolution
+                        .project
+                        .git_common_dir
+                        .as_deref()
+                        .zip(git_common_dir.as_deref())
+                        .is_some_and(|(registered, live)| {
+                            crate::global_db::GlobalDb::canonical_project_key(Path::new(registered))
+                                == crate::global_db::GlobalDb::canonical_project_key(live)
+                        });
+                    Some(resolution)
+                }
+                None => {
+                    global_db
+                        .resolve_project_store_by_identity(project_root, git_common_dir.as_deref())
+                        .await
+                }
+            };
+            if let Some(resolution) = resolution {
                 selected = Some(storage::profile_sharded_layout(
                     project_root,
                     &profile_root,
@@ -217,6 +234,7 @@ impl TraceDecay {
             selected,
             candidates,
             selected_manifest_matches_exact_root,
+            selected_via_exact_registry_alias,
             allow_repair,
         )
         .await?
@@ -231,15 +249,17 @@ impl TraceDecay {
         selected: Option<StoreLayout>,
         candidates: Vec<StoreLayout>,
         selected_manifest_matches_exact_root: bool,
+        selected_via_exact_registry_alias: bool,
         allow_repair: bool,
     ) -> Result<Option<StoreLayout>> {
-        // A populated store selected by the repository marker or registry
-        // remains authoritative when its own manifest names this exact root.
+        // A populated store remains authoritative when its own manifest names
+        // this exact root or the registry selected it through this exact path
+        // alias. Shared Git identity alone does not grant this precedence.
         // This resolver uses bounded presence probes only; the subsequent
         // serving open performs full integrity validation and fails closed.
         // Legacy duplicates stay untouched, while an empty or unreadable
         // selected store still reaches the fail-closed diagnostics.
-        if selected_manifest_matches_exact_root
+        if (selected_manifest_matches_exact_root || selected_via_exact_registry_alias)
             && !candidates.is_empty()
             && let Some(selected) = selected.as_ref()
         {

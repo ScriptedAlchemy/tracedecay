@@ -13,7 +13,7 @@ use tracedecay::config::{
     discover_project_root, get_config_path, load_config, save_config_to_path,
 };
 use tracedecay::db::{Database, DatabaseAuthority};
-use tracedecay::global_db::GlobalDb;
+use tracedecay::global_db::{GlobalDb, StoreInstanceUpsert};
 use tracedecay::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
@@ -1805,6 +1805,185 @@ async fn registered_exact_root_ignores_sibling_worktree_manifests() {
         Some(main_project_id.as_str())
     );
     assert_path_eq(&layout.data_root, &main_data_root);
+}
+
+#[tokio::test]
+async fn linked_worktree_exact_registry_alias_ignores_duplicate_shared_legacy_manifests() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let worktree = dir.path().join("repo-wt");
+    let unregistered_worktree = dir.path().join("repo-wt-unregistered");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    let global_db_path = profile_root.join("global.db");
+    let _home_guard = HomeGuard::set(&home);
+
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn canonical() {}\n").unwrap();
+    init_repo_with_commit(&project);
+
+    let canonical = TraceDecay::init(&project).await.unwrap();
+    canonical.index_all().await.unwrap();
+    let canonical_project_id = canonical
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .unwrap();
+    let canonical_data_root = canonical.store_layout().data_root.clone();
+    canonical.close();
+
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/exact-registry-alias",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let linked = TraceDecay::open(&worktree).await.unwrap();
+    linked.close();
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/shared-git-fallback",
+            unregistered_worktree.to_str().unwrap(),
+        ],
+    );
+
+    let global_db = GlobalDb::open().await.unwrap();
+    let registered = global_db
+        .resolve_project_store_by_alias(&worktree)
+        .await
+        .expect("opening the linked worktree must register its exact path alias");
+    assert_eq!(registered.project.project_id, canonical_project_id);
+
+    let mut legacy_roots = Vec::new();
+    for project_id in ["proj_shared_legacy_one", "proj_shared_legacy_two"] {
+        let candidate_source = dir.path().join(format!("{project_id}-source"));
+        fs::create_dir_all(candidate_source.join("src")).unwrap();
+        fs::write(
+            candidate_source.join("src/lib.rs"),
+            format!("pub fn {}() {{}}\n", project_id),
+        )
+        .unwrap();
+        init_repo_with_commit(&candidate_source);
+
+        let candidate = TraceDecay::init(&candidate_source).await.unwrap();
+        candidate.index_all().await.unwrap();
+        let candidate_root = candidate.store_layout().data_root.clone();
+        candidate.close();
+
+        let candidate_git_common_dir = tracedecay::worktree::git_common_dir(&candidate_source)
+            .expect("candidate must have its own Git identity");
+        global_db
+            .upsert_code_project(
+                project_id,
+                &candidate_source,
+                Some(&candidate_git_common_dir),
+                None,
+                Some("main"),
+            )
+            .await
+            .unwrap();
+
+        let legacy_root = profile_root.join(format!("projects/{project_id}"));
+        relocate_store_as_legacy(&candidate_root, &legacy_root, &project, project_id);
+        global_db
+            .upsert_store_instance(StoreInstanceUpsert {
+                store_id: format!("store_{project_id}"),
+                project_id: project_id.to_string(),
+                store_kind: "code_project".to_string(),
+                storage_mode: "profile_sharded".to_string(),
+                store_relpath: format!("projects/{project_id}"),
+                manifest_relpath: Some(format!(
+                    "projects/{project_id}/{STORE_MANIFEST_FILENAME}"
+                )),
+                last_verified_at: None,
+                last_write_at: None,
+            })
+            .await
+            .unwrap();
+        fs::write(legacy_root.join("untouched-sentinel"), project_id).unwrap();
+        legacy_roots.push((
+            project_id,
+            legacy_root.clone(),
+            fs::read(legacy_root.join(STORE_MANIFEST_FILENAME)).unwrap(),
+        ));
+    }
+
+    fs::remove_file(repository_identity_path(&worktree).unwrap()).unwrap();
+    let fallback_error = TraceDecay::resolve_store_layout_for_identity_with_options(
+        &unregistered_worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(global_db_path.clone()),
+        },
+    )
+    .await
+    .expect_err("generic Git-common-dir fallback must remain fail-closed");
+    assert!(
+        fallback_error
+            .to_string()
+            .contains("ambiguous legacy profile stores")
+    );
+
+    global_db
+        .upsert_project_alias(&unregistered_worktree, "proj_shared_legacy_one")
+        .await
+        .unwrap();
+    let stale_alias = global_db
+        .resolve_project_store_by_alias(&unregistered_worktree)
+        .await
+        .expect("the reused path must resolve through its stale exact alias");
+    assert_eq!(stale_alias.project.project_id, "proj_shared_legacy_one");
+    TraceDecay::resolve_store_layout_for_identity_with_options(
+        &unregistered_worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(global_db_path.clone()),
+        },
+    )
+    .await
+    .expect_err("an exact alias from a different Git identity must remain fail-closed");
+    global_db
+        .upsert_project_alias(&unregistered_worktree, &canonical_project_id)
+        .await
+        .unwrap();
+
+    let layout = TraceDecay::resolve_store_layout_for_identity_with_options(
+        &worktree,
+        &TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: Some(global_db_path),
+        },
+    )
+    .await
+    .expect("the exact linked-worktree alias must keep the canonical selected store authoritative");
+
+    assert_eq!(
+        layout.identity.project_id.as_deref(),
+        Some(canonical_project_id.as_str())
+    );
+    assert_path_eq(&layout.data_root, &canonical_data_root);
+    for (project_id, legacy_root, manifest_before) in legacy_roots {
+        assert_eq!(
+            fs::read_to_string(legacy_root.join("untouched-sentinel")).unwrap(),
+            project_id,
+            "legacy stores must remain untouched as recoverable history"
+        );
+        assert_eq!(
+            fs::read(legacy_root.join(STORE_MANIFEST_FILENAME)).unwrap(),
+            manifest_before,
+            "legacy manifests must not be rewritten"
+        );
+    }
 }
 
 #[tokio::test]
