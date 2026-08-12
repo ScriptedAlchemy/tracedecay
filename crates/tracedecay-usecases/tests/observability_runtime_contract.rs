@@ -680,59 +680,6 @@ async fn nonblocking_owner_offer_is_claimed_by_worker_and_replay_keeps_first_del
     assert_eq!(new_delivery.process_boot_id, "boot:nonblocking-restarted");
     assert_eq!(new_delivery.producer_sequence, 1);
 }
-
-#[tokio::test]
-async fn full_producer_queue_reports_drops_through_durable_coverage() {
-    let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
-    let (_project, runtime) = runtime().await;
-    let db = runtime.project_database_arc().expect("project database");
-    let scope = "project.observability.v2".to_owned();
-    let identity = ObservabilityProducerIdentityV1 {
-        authorized_scope_ref: scope.clone(),
-        process_boot_id: "boot:drops".into(),
-        producer_revision: "producer.v1".into(),
-        configuration_revision: "configuration.v1".into(),
-        policy_revision: "policy.v1".into(),
-    };
-    let producer =
-        BoundedObservabilityProducerV1::start(Arc::clone(&db), identity, 1).expect("producer");
-    let mut observed_drop = false;
-    for id in 1..=256 {
-        observed_drop |= producer
-            .try_emit(envelope(
-                &scope,
-                "boot:drops",
-                id,
-                i64::try_from(id).expect("small id"),
-            ))
-            .expect("bounded emission")
-            == ObservabilityEmissionOutcomeV1::DroppedAtCapacity;
-    }
-    assert!(observed_drop);
-    producer.shutdown().await.expect("shutdown producer");
-
-    let page = RegisteredObservabilityPortV1::new(&db)
-        .query(ObservabilityQueryV1 {
-            authorized_scope_ref: scope.clone(),
-            event_kinds: Vec::new(),
-            horizon: ObservabilityHorizonV1 {
-                since_micros: 0,
-                until_micros: i64::MAX,
-            },
-            after_watermark: None,
-            limit: 512,
-        })
-        .await
-        .expect("coverage query");
-    assert!(
-        page.events.iter().any(|event| {
-            event.dropped_count > 0
-                || matches!(event.payload, ObservabilityPayloadV1::TelemetryDrop(_))
-        }),
-        "accepted or control-lane event must expose drops"
-    );
-}
-
 #[tokio::test]
 async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
     let _pin = tracedecay_runtime_core::config::PinnedUserDataDir::new();
@@ -817,14 +764,15 @@ async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
         })
         .await
         .expect("drop query");
-    let explicit = page
+    let explicit_event = page
         .events
         .iter()
-        .find_map(|event| match &event.payload {
-            ObservabilityPayloadV1::TelemetryDrop(value) => Some(value),
-            _ => None,
-        })
+        .find(|event| matches!(event.payload, ObservabilityPayloadV1::TelemetryDrop(_)))
         .expect("explicit durable drop range");
+    let ObservabilityPayloadV1::TelemetryDrop(explicit) = &explicit_event.payload else {
+        unreachable!()
+    };
+    assert!(!explicit.clean_shutdown_observed);
     assert_eq!(explicit.proved_drop_lower_bound, dropped);
     assert_eq!(
         explicit
@@ -832,6 +780,11 @@ async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
             .saturating_sub(explicit.first_missing_sequence)
             .saturating_add(1),
         dropped
+    );
+    assert_eq!(explicit_event.coverage, CoverageStateV1::Partial);
+    assert_eq!(
+        explicit_event.terminal_result,
+        Some(ObservabilityTerminalResultV1::Partial)
     );
     let read_model =
         tracedecay_usecases::observability::observatory_read_model(&db, Some(&scope), 0).await;

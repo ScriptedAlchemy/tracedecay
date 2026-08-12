@@ -482,10 +482,19 @@ pub(in crate::execution_topology_metrics) fn classify_execution_topology_page(
     }
 
     let mut receipt_map: BTreeMap<DropCarrierJoinV1, ExplicitDropReceiptV1> = BTreeMap::new();
+    let mut terminal_coverage = CoverageStateV1::Known;
     for (_, envelope) in &accepted {
         let ObservabilityPayloadV1::TelemetryDrop(drop) = &envelope.payload else {
             continue;
         };
+        if drop.proved_drop_lower_bound == 0 && !drop.clean_shutdown_observed {
+            terminal_coverage = CoverageStateV1::Unknown;
+        }
+        if drop.proved_drop_lower_bound == 0 {
+            // A reserved zero-drop terminal is closure evidence, not an
+            // unresolved loss edge. An unclean one remains Unknown above.
+            continue;
+        }
         let receipt = ExplicitDropReceiptV1 {
             join: DropCarrierJoinV1 {
                 process_boot_ref: envelope.process_boot_id.clone(),
@@ -565,7 +574,7 @@ pub(in crate::execution_topology_metrics) fn classify_execution_topology_page(
         sampled_events,
         replayed,
         payload_coverage_state,
-        source_coverage_state: page.coverage,
+        source_coverage_state: worse_state(page.coverage, terminal_coverage),
         explicit_drop_receipts: receipt_map.into_values().collect(),
         drop_carriers,
         drill_cursors,

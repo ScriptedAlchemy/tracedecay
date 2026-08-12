@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep_until, timeout};
+use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tracedecay_application::{
     ApplicationContractError, EXECUTION_TOPOLOGY_EVENT_KINDS_V1, now_micros,
 };
@@ -372,6 +372,7 @@ impl BoundedObservabilityProducerV1 {
         &self,
         cancelled: bool,
     ) -> Result<ObservabilityProducerSummaryV1, ApplicationContractError> {
+        let shutdown_deadline = Instant::now() + self.deadlines.shutdown;
         if self
             .state
             .compare_exchange(
@@ -386,25 +387,103 @@ impl BoundedObservabilityProducerV1 {
                 "observability_producer_closed".to_owned(),
             ));
         }
-        let (reply, result) = oneshot::channel();
-        self.control
-            .try_send(ProducerControl::Shutdown { cancelled, reply })
-            .map_err(|_| {
-                ApplicationContractError::Domain("observability_control_lane_closed".to_owned())
-            })?;
-        let worker = self
-            .worker
-            .lock()
-            .map_err(|_| {
-                ApplicationContractError::Domain("observability_producer_lock_poisoned".to_owned())
-            })?
-            .take();
-        let outcome = match timeout(self.deadlines.shutdown, result).await {
-            Ok(result) => result.map_err(|_| {
-                ApplicationContractError::Domain("observability_worker_stopped".to_owned())
-            })?,
-            Err(_) => {
+        let mut worker = match self.worker.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                let worker = guard.take();
+                drop(guard);
                 if let Some(worker) = worker {
+                    worker.abort();
+                    let _ = worker.await;
+                }
+                self.state.store(PRODUCER_STOPPED, Ordering::Release);
+                return Err(ApplicationContractError::Domain(
+                    "observability_producer_lock_poisoned".to_owned(),
+                ));
+            }
+        };
+        // STOPPING rejects new synchronous admissions immediately. Polling the
+        // lock under the same absolute deadline then fences any admission that
+        // had already validated RUNNING without blocking the async executor.
+        loop {
+            match self.emission_lock.try_lock() {
+                Ok(guard) => {
+                    drop(guard);
+                    break;
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    if let Some(worker) = worker.take() {
+                        worker.abort();
+                        let _ = worker.await;
+                    }
+                    self.state.store(PRODUCER_STOPPED, Ordering::Release);
+                    return Err(ApplicationContractError::Domain(
+                        "observability_producer_lock_poisoned".to_owned(),
+                    ));
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= shutdown_deadline {
+                        if let Some(worker) = worker.take() {
+                            worker.abort();
+                            let _ = worker.await;
+                        }
+                        self.state.store(PRODUCER_STOPPED, Ordering::Release);
+                        return Err(ApplicationContractError::Domain(
+                            "observability_shutdown_deadline".to_owned(),
+                        ));
+                    }
+                    sleep_until((now + Duration::from_millis(1)).min(shutdown_deadline)).await;
+                }
+            }
+        }
+        // An owner fact may have passed admission under the async durable
+        // lock just before the state transition. Wait for that claim and its
+        // sequence allocation before sealing the worker stream.
+        let durable_guard =
+            match timeout_at(shutdown_deadline, self.durable_emission_lock.lock()).await {
+                Ok(guard) => guard,
+                Err(_) => {
+                    if let Some(worker) = worker.take() {
+                        worker.abort();
+                        let _ = worker.await;
+                    }
+                    self.state.store(PRODUCER_STOPPED, Ordering::Release);
+                    return Err(ApplicationContractError::Domain(
+                        "observability_shutdown_deadline".to_owned(),
+                    ));
+                }
+            };
+        drop(durable_guard);
+        let (reply, result) = oneshot::channel();
+        if self
+            .control
+            .try_send(ProducerControl::Shutdown { cancelled, reply })
+            .is_err()
+        {
+            if let Some(worker) = worker.take() {
+                worker.abort();
+                let _ = worker.await;
+            }
+            self.state.store(PRODUCER_STOPPED, Ordering::Release);
+            return Err(ApplicationContractError::Domain(
+                "observability_control_lane_closed".to_owned(),
+            ));
+        }
+        let outcome = match timeout_at(shutdown_deadline, result).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_)) => {
+                if let Some(worker) = worker.take() {
+                    let _ = worker.await;
+                }
+                self.state.store(PRODUCER_STOPPED, Ordering::Release);
+                return Err(ApplicationContractError::Domain(
+                    "observability_worker_stopped".to_owned(),
+                ));
+            }
+            Err(_) => {
+                if let Some(worker) = worker.take() {
                     worker.abort();
                     let _ = worker.await;
                 }
@@ -414,7 +493,7 @@ impl BoundedObservabilityProducerV1 {
                 ));
             }
         };
-        if let Some(worker) = worker {
+        if let Some(worker) = worker.take() {
             worker.await.map_err(|error| {
                 ApplicationContractError::Domain(format!(
                     "observability worker join failed: {error}"
@@ -663,11 +742,36 @@ async fn settle_worker(
             state.deadlines.persistence,
         )
         .await;
-        if let Some(pending) = take_pending_drop(state) {
-            let drop_envelope = telemetry_drop_envelope(identity, pending, clean_shutdown_observed);
+        let pending = take_pending_drop(state);
+        let had_pending = pending.is_some();
+        if let Some(pending) = pending {
+            let closes_cleanly = clean_shutdown_observed && progress.first_error.is_none();
+            let drop_envelope = telemetry_drop_envelope(identity, pending, closes_cleanly);
             record(
                 db,
                 drop_envelope,
+                &mut progress.persisted,
+                &mut progress.first_error,
+                state.deadlines.persistence,
+            )
+            .await;
+        }
+        if clean_shutdown_observed && (!had_pending || progress.first_error.is_some()) {
+            let sequence = state.next_sequence.fetch_add(1, Ordering::AcqRel);
+            // TelemetryDrop is Plan 26's reserved terminal carrier. A zero
+            // lower bound seals this sequence without asserting a drop.
+            let zero_terminal = telemetry_drop_envelope(
+                identity,
+                DropRange {
+                    first: sequence,
+                    last: sequence,
+                    count: 0,
+                },
+                progress.first_error.is_none(),
+            );
+            record(
+                db,
+                zero_terminal,
                 &mut progress.persisted,
                 &mut progress.first_error,
                 state.deadlines.persistence,
@@ -842,12 +946,24 @@ fn telemetry_drop_envelope(
         valid_until_micros: None,
         quantity: Some(range.count as f64),
         unit: Some("events".to_owned()),
-        terminal_result: Some(ObservabilityTerminalResultV1::Partial),
+        terminal_result: Some(if range.count > 0 {
+            ObservabilityTerminalResultV1::Partial
+        } else if clean_shutdown_observed {
+            ObservabilityTerminalResultV1::Succeeded
+        } else {
+            ObservabilityTerminalResultV1::Unknown
+        }),
         producer_revision: identity.producer_revision.clone(),
         configuration_revision: identity.configuration_revision.clone(),
         policy_revision: identity.policy_revision.clone(),
         watermark: format!("{}:{last_missing}", identity.process_boot_id),
-        coverage: CoverageStateV1::Partial,
+        coverage: if range.count > 0 {
+            CoverageStateV1::Partial
+        } else if clean_shutdown_observed {
+            CoverageStateV1::Known
+        } else {
+            CoverageStateV1::Unknown
+        },
         sampling_probability: None,
         retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
         emitted_count: 1,

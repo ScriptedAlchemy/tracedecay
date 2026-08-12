@@ -127,17 +127,31 @@ pub async fn provider_latency_read_model(
             limit: EVENT_LIMIT.min(u32::MAX as usize) as u32,
         })
         .await;
-    let (drop_coverage, standalone_drop, drop_watermark) = match drop_page {
-        Ok(page) => (
-            page.coverage,
-            page.events
-                .iter()
-                .any(|event| matches!(&event.payload, ObservabilityPayloadV1::TelemetryDrop(_))),
-            page.watermark,
-        ),
+    let (drop_coverage, drop_watermark) = match drop_page {
+        Ok(page) => {
+            let receipt_coverage =
+                page.events
+                    .iter()
+                    .fold(CoverageStateV1::Known, |state, event| {
+                        let ObservabilityPayloadV1::TelemetryDrop(drop) = &event.payload else {
+                            return state;
+                        };
+                        let receipt_state = if drop.proved_drop_lower_bound > 0 {
+                            CoverageStateV1::Partial
+                        } else if !drop.clean_shutdown_observed {
+                            CoverageStateV1::Unknown
+                        } else {
+                            CoverageStateV1::Known
+                        };
+                        weaker_coverage(state, receipt_state)
+                    });
+            (
+                weaker_coverage(page.coverage, receipt_coverage),
+                page.watermark,
+            )
+        }
         Err(_) => (
             CoverageStateV1::Unknown,
-            false,
             "analytics:drop-unavailable".to_owned(),
         ),
     };
@@ -146,7 +160,7 @@ pub async fn provider_latency_read_model(
             && (event.coverage != CoverageStateV1::Known || event.dropped_count > 0)
     });
     let mut source_coverage = weaker_coverage(page.coverage, drop_coverage);
-    if standalone_drop || carried_drop {
+    if carried_drop {
         source_coverage = weaker_coverage(source_coverage, CoverageStateV1::Partial);
     }
     let complete = source_coverage == CoverageStateV1::Known;

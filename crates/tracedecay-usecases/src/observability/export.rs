@@ -89,6 +89,14 @@ impl ObservabilityAggregateExportPort for RegisteredAggregateShareExporterV1<'_>
                     _ => None,
                 })
                 .collect::<BTreeMap<_, _>>();
+            let unknown_terminal = events.iter().any(|event| {
+                matches!(
+                    &event.payload,
+                    ObservabilityPayloadV1::TelemetryDrop(drop)
+                        if drop.proved_drop_lower_bound == 0
+                            && !drop.clean_shutdown_observed
+                )
+            });
             for envelope in &events {
                 accumulate(&mut accumulators, envelope);
                 if !matches!(envelope.payload, ObservabilityPayloadV1::TelemetryDrop(_)) {
@@ -105,7 +113,9 @@ impl ObservabilityAggregateExportPort for RegisteredAggregateShareExporterV1<'_>
             let candidate_cell_count = accumulators.len();
             let mut cells = accumulators
                 .into_values()
-                .filter_map(|accumulator| accumulator.finish(source_capped, invalid_source))
+                .filter_map(|accumulator| {
+                    accumulator.finish(source_capped, invalid_source, unknown_terminal)
+                })
                 .collect::<Vec<_>>();
             let suppressed_cell_count = candidate_cell_count.saturating_sub(cells.len()) as u64;
             cells.sort_by_key(|cell| cell.metric as u8);
@@ -180,7 +190,12 @@ impl CellAccumulator {
         self.coverage_known &= event.coverage == CoverageStateV1::Known;
     }
 
-    fn finish(self, source_capped: bool, invalid_source: bool) -> Option<AggregateShareCellV1> {
+    fn finish(
+        self,
+        source_capped: bool,
+        invalid_source: bool,
+        unknown_terminal: bool,
+    ) -> Option<AggregateShareCellV1> {
         let contribution_windows = self.windows.len() as u64;
         if contribution_windows
             < tracedecay_application::AGGREGATE_SHARE_MIN_CONTRIBUTION_WINDOWS_V1
@@ -189,6 +204,8 @@ impl CellAccumulator {
         }
         let coverage = if source_capped {
             CoverageStateV1::Capped
+        } else if unknown_terminal {
+            CoverageStateV1::Unknown
         } else if !invalid_source && self.coverage_known && self.censored == 0 && self.unknown == 0
         {
             CoverageStateV1::Known
@@ -204,7 +221,7 @@ impl CellAccumulator {
             completed: self.completed,
             censored: self.censored,
             unknown: self.unknown,
-            value: (!source_capped && !invalid_source && self.coverage_known)
+            value: (!source_capped && !invalid_source && !unknown_terminal && self.coverage_known)
                 .then_some(self.value_sum),
             coverage,
             contribution_windows,
@@ -412,7 +429,9 @@ fn accumulate(cells: &mut BTreeMap<CellKey, CellAccumulator>, event: &Observabil
             );
         }
         ObservabilityPayloadV1::TelemetryDrop(value) => {
-            accumulate_telemetry_drop(cells, event, value.proved_drop_lower_bound);
+            if value.proved_drop_lower_bound > 0 {
+                accumulate_telemetry_drop(cells, event, value.proved_drop_lower_bound);
+            }
         }
         ObservabilityPayloadV1::Storage(value) => {
             if let Some(duration_micros) = value.duration_micros {
