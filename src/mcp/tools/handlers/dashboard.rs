@@ -323,7 +323,7 @@ fn dashboard_tool_result(cg: &TraceDecay, args: &Value, payload: &Value) -> Tool
 pub(super) async fn handle_dashboard(
     cg: &TraceDecay,
     args: Value,
-    retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    retained_project_server_resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
     code_graph_read_admission: Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     code_graph_projection_read_port: Option<crate::mcp::server::CodeGraphProjectionReadPort>,
     registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
@@ -410,9 +410,10 @@ pub(super) async fn handle_dashboard(
             // Shared construction with the CLI path: resolved LCM/session store
             // selection included. No catch-up ingest spawn here — the host
             // MCP server already swept hookless transcripts at startup.
-            let retained_cg = retained_project_graph_resolver.as_ref().ok_or_else(|| {
+            let retained_server = retained_project_server_resolver.as_ref().ok_or_else(|| {
                 TraceDecayError::Config {
-                    message: "retained dashboard project graph resolver is unavailable".to_string(),
+                    message: "retained dashboard project server resolver is unavailable"
+                        .to_string(),
                 }
             })?(
                 crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
@@ -421,15 +422,61 @@ pub(super) async fn handle_dashboard(
             )
             .await?
             .ok_or_else(|| TraceDecayError::Config {
-                message: "retained dashboard project graph is unavailable".to_string(),
+                message: "retained dashboard project server is unavailable".to_string(),
             })?;
+            if let Some(expected_profile_id) = daemon_user_profile_id.as_ref()
+                && retained_server
+                    .profile_identity()
+                    .is_none_or(|identity| identity.profile_id() != expected_profile_id)
+            {
+                return Err(TraceDecayError::project_route(
+                    "project_route_not_authorized",
+                    false,
+                    "retained dashboard project belongs to another profile",
+                ));
+            }
+            let retained_graph = retained_server.cg_snapshot().await;
+            let retained_root = retained_graph
+                .project_root()
+                .canonicalize()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "retained dashboard project root '{}' is unavailable: {error}",
+                        retained_graph.project_root().display()
+                    ),
+                })?;
+            let requested_root =
+                cg.project_root()
+                    .canonicalize()
+                    .map_err(|error| TraceDecayError::Config {
+                        message: format!(
+                            "dashboard project root '{}' is unavailable: {error}",
+                            cg.project_root().display()
+                        ),
+                    })?;
+            if retained_root != requested_root {
+                return Err(TraceDecayError::project_route(
+                    "project_route_unavailable",
+                    true,
+                    "retained dashboard project server resolved a different root",
+                ));
+            }
+            let retained_cg: Arc<dyn crate::dashboard::DashboardProjectRuntime> = retained_graph;
+            let dashboard_project_graph_resolver = retained_project_server_resolver
+                .clone()
+                .zip(daemon_user_profile_id.clone())
+                .map(|(resolver, profile_id)| {
+                    crate::mcp::server::dashboard_retained_project_graph_resolver(
+                        resolver, profile_id,
+                    )
+                });
             let automation_observation = daemon_invocation_service
                 .clone()
                 .map(crate::daemon::dashboard_automation::dashboard_automation_observation_port);
             let automation_authority = match (
                 daemon_profile_root,
                 daemon_user_profile_id.clone(),
-                retained_project_graph_resolver.clone(),
+                dashboard_project_graph_resolver.clone(),
                 daemon_invocation_service,
             ) {
                 (
@@ -454,8 +501,6 @@ pub(super) async fn handle_dashboard(
                     });
                 }
             };
-            let dashboard_project_graph_resolver = retained_project_graph_resolver
-                .map(crate::mcp::server::dashboard_retained_project_graph_resolver);
             // The profile write resolves its configuration layer through the
             // profile identity the daemon handshake bound, which every
             // daemon-owned server carries. Reading it from the project-session

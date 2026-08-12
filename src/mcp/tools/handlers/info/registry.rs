@@ -162,7 +162,12 @@ fn registry_listing_result(
 }
 
 fn project_context_selector(cg: &TraceDecay, args: &Value) -> ProjectRegistrySelector {
-    if let Some(project_id) = args.get("project_id").and_then(Value::as_str) {
+    if let Some(project_id) = args
+        .get("project_selector")
+        .and_then(Value::as_object)
+        .and_then(|selector| selector.get("project_id"))
+        .and_then(Value::as_str)
+    {
         return ProjectRegistrySelector::ProjectId(project_id.to_owned());
     }
     let Some(path) = args.get("path").and_then(Value::as_str) else {

@@ -332,7 +332,7 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
 }
 
 #[test]
-fn retrieve_tool_schema_requires_handle_and_accepts_project_selector() {
+fn retrieve_tool_schema_requires_handle_and_canonical_project_selector() {
     let tools = get_tool_definitions().expect("tool definitions");
     let retrieve = tools
         .iter()
@@ -342,10 +342,28 @@ fn retrieve_tool_schema_requires_handle_and_accepts_project_selector() {
 
     assert!(properties.contains_key("handle"));
     assert!(properties.contains_key("project_selector"));
-    assert!(properties.contains_key("project_id"));
-    assert!(properties.contains_key("project_path"));
+    for alias in ["project_id", "project_path", "project_root", "root"] {
+        assert!(!properties.contains_key(alias));
+    }
     assert!(!properties.contains_key("retrieve_handle"));
     assert_eq!(retrieve.input_schema["required"], json!(["handle"]));
+    assert_eq!(
+        properties["project_selector"]["required"],
+        json!(["project_id"])
+    );
+    assert_eq!(
+        properties["project_selector"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        properties["project_selector"]["properties"]
+            .as_object()
+            .expect("closed selector properties")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["project_id"]
+    );
 
     assert!(retrieve.description.contains("tracedecay_retrieve"));
     assert!(retrieve.description.contains("required argument `handle`"));
@@ -366,24 +384,31 @@ fn retrieve_tool_schema_requires_handle_and_accepts_project_selector() {
 #[test]
 fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
     let tools = get_tool_definitions().expect("tool definitions");
-    let selector_keys = ["project_selector", "project_id", "project_path"];
 
     // Registered-project readers dispatch to other mounted projects, so the
     // selector has to be discoverable from the schema.
     for name in ["tracedecay_context", "tracedecay_grep", "tracedecay_read"] {
         let properties = tool_properties(&tools, name);
-        for key in selector_keys {
-            assert!(
-                properties.contains_key(key),
-                "registered-project reader {name} should advertise {key}"
-            );
+        assert!(properties.contains_key("project_selector"));
+        for alias in ["project_id", "project_path", "project_root", "root"] {
+            assert!(!properties.contains_key(alias));
         }
+        assert_eq!(
+            properties["project_selector"]["required"],
+            json!(["project_id"])
+        );
     }
 
     // `tracedecay_search` is authority-bound to the active project and rejects
     // selectors at dispatch, so advertising them would make the schema lie.
     let search_properties = tool_properties(&tools, "tracedecay_search");
-    for key in selector_keys {
+    for key in [
+        "project_selector",
+        "project_id",
+        "project_path",
+        "project_root",
+        "root",
+    ] {
         assert!(
             !search_properties.contains_key(key),
             "active-project-only tracedecay_search must not advertise {key}"

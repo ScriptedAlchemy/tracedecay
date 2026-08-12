@@ -1,48 +1,107 @@
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::hook_events;
-use super::tools::tool_dispatches_registered_project_reader;
 use crate::global_db::ProjectRegistryContext;
-use crate::tracedecay::TraceDecay;
 
 const MAX_HOOK_ROUTE_CACHE_ENTRIES: usize = 256;
 
 #[derive(Clone)]
 pub(crate) struct ResolvedProjectRoute {
-    pub(crate) graph: Arc<TraceDecay>,
+    server: Weak<crate::mcp::server::McpServer>,
     pub(crate) owner: ProjectRegistryContext,
+    pub(crate) profile_id: tracedecay_domain::UserProfileId,
     pub(crate) requested_root: PathBuf,
     /// Git identity observed when the route was resolved. Retained on the
     /// route value for scope/diagnostic cutover; dispatch today keys only on
-    /// `requested_root` + mounted graph.
+    /// `requested_root` + mounted server.
     #[allow(dead_code)]
     pub(crate) requested_git_common_dir: Option<PathBuf>,
     #[allow(dead_code)]
     pub(crate) requested_branch: Option<String>,
     /// The exact application scope resolved ONCE at the entry point for this
     /// route (plan: `docs/superpowers/plans/v2/01-domain-request-context.md`).
-    /// Query-facing handlers consume the routed graph; the scope names the
-    /// exact project/repository/worktree that graph answers for.
+    /// Query-facing handlers consume the routed server; the scope names the
+    /// exact project/repository/worktree that server answers for.
     pub(crate) scope: tracedecay_application::ResolvedScope,
+}
+
+impl ResolvedProjectRoute {
+    pub(crate) fn retained_server(
+        &self,
+    ) -> crate::errors::Result<Arc<crate::mcp::server::McpServer>> {
+        self.server.upgrade().ok_or_else(|| {
+            crate::errors::TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                format!(
+                    "registered project '{}' is no longer mounted",
+                    self.owner.project.project_id
+                ),
+            )
+        })
+    }
 }
 
 impl std::fmt::Debug for ResolvedProjectRoute {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // `graph` is a live engine handle with no useful Debug form; the
+        // `server` is a live authority bundle with no useful Debug form; the
         // scope naming what it answers for is the diagnostic payload.
         formatter
             .debug_struct("ResolvedProjectRoute")
             .field("owner", &self.owner)
+            .field("profile_id", &self.profile_id)
             .field("requested_root", &self.requested_root)
             .field("requested_git_common_dir", &self.requested_git_common_dir)
             .field("requested_branch", &self.requested_branch)
             .field("scope", &self.scope)
             .finish_non_exhaustive()
     }
+}
+
+pub(crate) async fn resolve_registered_project_route(
+    context: ProjectRegistryContext,
+    requested_path: &Path,
+    global_db: &crate::global_db::RegisteredGlobalDb,
+    resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
+) -> crate::errors::Result<ResolvedProjectRoute> {
+    let Some(resolver) = resolver else {
+        return Err(crate::errors::TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            "registered project server resolver is unavailable",
+        ));
+    };
+    let requested_path = requested_path.to_path_buf();
+    let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
+        context.clone(),
+        requested_path.clone(),
+    );
+    let server = resolver(request.clone()).await?.ok_or_else(|| {
+        crate::errors::TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            format!(
+                "registered project '{}' is not mounted for workspace {}",
+                context.project.project_id,
+                requested_path.display()
+            ),
+        )
+    })?;
+    let scope = crate::mcp::scope::resolve_query_scope(&context, &requested_path)
+        .map_err(|error| error.into_route_failure().into_error())?;
+    Ok(ResolvedProjectRoute {
+        server: Arc::downgrade(&server),
+        owner: context,
+        profile_id: global_db.binding().shard_id.profile_id.clone(),
+        requested_root: requested_path,
+        requested_git_common_dir: request.requested_git_common_dir,
+        requested_branch: request.requested_branch,
+        scope,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,9 +183,10 @@ pub(crate) enum WorkspaceProjectRoute {
 
 #[derive(Clone, Default)]
 pub(crate) struct HookProjectRouteCache {
-    project_path: Option<String>,
-    paths_by_session: HashMap<String, String>,
-    paths_by_thread: HashMap<String, String>,
+    /// Route observed on this exact transport connection. It is never copied
+    /// into [`SharedHookProjectRouteCache`]; only structural session/thread
+    /// routes may cross from a hook socket to an agent socket.
+    connection_route: Option<WorkspaceProjectRoute>,
     routes_by_session: HashMap<String, WorkspaceProjectRoute>,
     routes_by_thread: HashMap<String, WorkspaceProjectRoute>,
     threads_by_session: HashMap<String, String>,
@@ -136,21 +196,36 @@ pub(crate) struct HookProjectRouteCache {
 }
 
 impl HookProjectRouteCache {
-    /// Evicts cached graph routes for a tombstoned project. A route retains a
-    /// live graph handle, so leaving it behind would let a stale hook session
-    /// bypass the daemon's durable replay fence.
-    pub(crate) fn forget_project(&mut self, project_id: &str) {
+    /// Evicts cached routes for a tombstoned project. The cached server lease
+    /// is weak, but retaining the identity would make every later request fail
+    /// against a retired project instead of allowing a newly resolved route.
+    pub(crate) fn forget_project(
+        &mut self,
+        profile_id: &tracedecay_domain::UserProfileId,
+        project_id: &str,
+    ) {
         let belongs_to = |route: &WorkspaceProjectRoute| {
             matches!(route, WorkspaceProjectRoute::Resolved(resolved)
-                if resolved.owner.project.project_id == project_id)
+            if project_route_identity_matches(
+                &resolved.profile_id,
+                &resolved.owner.project.project_id,
+                profile_id,
+                project_id,
+            ))
         };
+        if self
+            .connection_route
+            .as_ref()
+            .is_some_and(|route| belongs_to(route))
+        {
+            self.connection_route = None;
+        }
         let sessions = self
             .routes_by_session
             .iter()
             .filter_map(|(session_id, route)| belongs_to(route).then_some(session_id.clone()))
             .collect::<Vec<_>>();
         for session_id in sessions {
-            self.paths_by_session.remove(&session_id);
             self.routes_by_session.remove(&session_id);
             if let Some(thread_id) = self.threads_by_session.remove(&session_id) {
                 self.remove_thread_route(&thread_id);
@@ -164,7 +239,6 @@ impl HookProjectRouteCache {
         for thread_id in threads {
             self.remove_thread_route(&thread_id);
         }
-        self.project_path = None;
     }
 
     pub(crate) fn route_cwd(event: &hook_events::HookEvent) -> Option<&std::path::Path> {
@@ -175,62 +249,28 @@ impl HookProjectRouteCache {
             .or(event.cwd.as_deref())
     }
 
-    /// Path-only cache population used by unit tests that exercise
-    /// [`Self::apply_to_tool_arguments`] without a full workspace route.
-    /// Production hook dispatch records [`Self::observe_workspace_route`].
-    #[cfg(test)]
-    pub(crate) fn observe_hook_event(
-        &mut self,
-        event: &hook_events::HookEvent,
-        project_path: Option<String>,
-    ) {
-        self.project_path.clone_from(&project_path);
-        let Some(project_path) = project_path else {
-            return;
-        };
-        if let Some(route) = event.route.as_ref() {
-            if let Some(session_id) = route.session_id.as_deref().filter(|id| !id.is_empty()) {
-                self.insert_session_route(session_id.to_string(), project_path.clone());
-                if let Some(thread_id) = route.thread_id.as_deref().filter(|id| !id.is_empty())
-                    && let Some(old_thread_id) = self
-                        .threads_by_session
-                        .insert(session_id.to_string(), thread_id.to_string())
-                    && old_thread_id != thread_id
-                {
-                    self.remove_thread_route(&old_thread_id);
-                }
-            }
-            if let Some(thread_id) = route.thread_id.as_deref().filter(|id| !id.is_empty()) {
-                let session_id = route.session_id.as_deref().filter(|id| !id.is_empty());
-                self.insert_thread_route(thread_id.to_string(), project_path, session_id);
-            }
-        }
-    }
-
     pub(crate) fn observe_workspace_route(
         &mut self,
         event: &hook_events::HookEvent,
         route: WorkspaceProjectRoute,
     ) {
-        self.project_path = match &route {
-            WorkspaceProjectRoute::Resolved(resolved) => {
-                Some(resolved.requested_root.to_string_lossy().into_owned())
-            }
-            WorkspaceProjectRoute::Failed(_) => None,
-        };
+        self.connection_route = Some(route.clone());
         let Some(metadata) = event.route.as_ref() else {
             return;
         };
-        if let Some(session_id) = metadata
+        let session_id = metadata
             .session_id
             .as_deref()
             .filter(|identity| !identity.is_empty())
-        {
+            .and_then(|identity| crate::privacy::protect_sensitive_structural_id(identity).ok());
+        let thread_id = metadata
+            .thread_id
+            .as_deref()
+            .filter(|identity| !identity.is_empty())
+            .and_then(|identity| crate::privacy::protect_sensitive_structural_id(identity).ok());
+        if let Some(session_id) = session_id.as_deref() {
             self.insert_session_workspace_route(session_id.to_owned(), route.clone());
-            if let Some(thread_id) = metadata
-                .thread_id
-                .as_deref()
-                .filter(|identity| !identity.is_empty())
+            if let Some(thread_id) = thread_id.as_deref()
                 && let Some(old_thread_id) = self
                     .threads_by_session
                     .insert(session_id.to_owned(), thread_id.to_owned())
@@ -239,106 +279,36 @@ impl HookProjectRouteCache {
                 self.remove_thread_route(&old_thread_id);
             }
         }
-        if let Some(thread_id) = metadata
-            .thread_id
-            .as_deref()
-            .filter(|identity| !identity.is_empty())
-        {
-            self.insert_thread_workspace_route(
-                thread_id.to_owned(),
-                route,
-                metadata.session_id.as_deref(),
-            );
+        if let Some(thread_id) = thread_id {
+            self.insert_thread_workspace_route(thread_id, route, session_id.as_deref());
         }
     }
 
-    pub(crate) fn apply_to_tool_arguments(&self, tool_name: &str, mut arguments: Value) -> Value {
-        if !tool_dispatches_registered_project_reader(tool_name)
-            || arguments_have_project_selector(&arguments)
-        {
-            return arguments;
-        }
-        let Some(project_path) = self.project_path_for_arguments(&arguments) else {
-            return arguments;
-        };
-        if let Some(map) = arguments.as_object_mut() {
-            map.insert(
-                "project_selector".to_string(),
-                json!({ "path": project_path }),
-            );
-        }
-        arguments
-    }
-
-    pub(crate) fn route_tool_arguments(
+    pub(crate) fn workspace_route_for_arguments(
         &self,
-        tool_name: &str,
-        arguments: Value,
-    ) -> crate::errors::Result<(Value, Option<ResolvedProjectRoute>)> {
-        if !tool_dispatches_registered_project_reader(tool_name)
-            || arguments_have_project_selector(&arguments)
-        {
-            return Ok((arguments, None));
-        }
-        let route = self.workspace_route_for_arguments(&arguments);
-        match route {
-            Some(WorkspaceProjectRoute::Resolved(resolved)) => {
-                let mut arguments = arguments;
-                if let Some(map) = arguments.as_object_mut() {
-                    map.insert(
-                        "project_selector".to_string(),
-                        json!({ "path": resolved.requested_root }),
-                    );
-                }
-                Ok((arguments, Some(resolved.as_ref().clone())))
-            }
-            Some(WorkspaceProjectRoute::Failed(failure)) => Err(failure.clone().into_error()),
-            None => Ok((self.apply_to_tool_arguments(tool_name, arguments), None)),
-        }
-    }
-
-    fn workspace_route_for_arguments(&self, arguments: &Value) -> Option<&WorkspaceProjectRoute> {
-        if let Some(thread_id) = mcp_route_thread_id(arguments)
-            && let Some(route) = self.routes_by_thread.get(&thread_id)
+        arguments: &Value,
+    ) -> Option<&WorkspaceProjectRoute> {
+        let thread_id = mcp_route_thread_id(arguments);
+        if let Some(thread_id) = thread_id.as_ref()
+            && let Some(route) = self.routes_by_thread.get(thread_id)
         {
             return Some(route);
         }
-        if let Some(session_id) = mcp_analytics_session_id(arguments)
-            && let Some(route) = self.routes_by_session.get(&session_id)
+        let session_id = mcp_analytics_session_id(arguments);
+        if let Some(session_id) = session_id.as_ref()
+            && let Some(route) = self.routes_by_session.get(session_id)
         {
             return Some(route);
         }
-        None
-    }
-
-    fn project_path_for_arguments(&self, arguments: &Value) -> Option<&str> {
-        if let Some(thread_id) = mcp_route_thread_id(arguments)
-            && let Some(project_path) = self.paths_by_thread.get(&thread_id)
-        {
-            return Some(project_path.as_str());
+        // A structural identity is an explicit routing claim. If it does not
+        // match the connection/shared cache, fail closed instead of silently
+        // inheriting the last workspace observed on this socket. A stale
+        // thread may still converge through its matching current session
+        // above; only identity-free calls use the connection-local route.
+        if thread_id.is_some() || session_id.is_some() {
+            return None;
         }
-        if let Some(session_id) = mcp_analytics_session_id(arguments)
-            && let Some(project_path) = self.paths_by_session.get(&session_id)
-        {
-            return Some(project_path.as_str());
-        }
-        self.project_path.as_deref()
-    }
-
-    /// Overwrite every field except `project_path` from an already-cloned
-    /// shared snapshot, taking ownership so no second deep clone is needed.
-    fn refresh_from_owned(&mut self, mut shared: HookProjectRouteCache) {
-        shared.project_path = self.project_path.take();
-        *self = shared;
-    }
-
-    #[cfg(test)]
-    fn insert_session_route(&mut self, session_id: String, project_path: String) {
-        if !self.paths_by_session.contains_key(&session_id) {
-            self.session_order.push_back(session_id.clone());
-        }
-        self.paths_by_session.insert(session_id, project_path);
-        self.evict_old_session_routes();
+        self.connection_route.as_ref()
     }
 
     fn insert_session_workspace_route(&mut self, session_id: String, route: WorkspaceProjectRoute) {
@@ -347,32 +317,6 @@ impl HookProjectRouteCache {
         }
         self.routes_by_session.insert(session_id, route);
         self.evict_old_session_routes();
-    }
-
-    #[cfg(test)]
-    fn insert_thread_route(
-        &mut self,
-        thread_id: String,
-        project_path: String,
-        session_id: Option<&str>,
-    ) {
-        if !self.paths_by_thread.contains_key(&thread_id) {
-            self.thread_order.push_back(thread_id.clone());
-        }
-        if let Some(session_id) = session_id
-            && let Some(old_session_id) = self
-                .session_by_thread
-                .insert(thread_id.clone(), session_id.to_string())
-            && old_session_id != session_id
-            && self
-                .threads_by_session
-                .get(&old_session_id)
-                .is_some_and(|old_thread_id| old_thread_id == &thread_id)
-        {
-            self.threads_by_session.remove(&old_session_id);
-        }
-        self.paths_by_thread.insert(thread_id, project_path);
-        self.evict_old_thread_routes();
     }
 
     fn insert_thread_workspace_route(
@@ -401,7 +345,6 @@ impl HookProjectRouteCache {
     }
 
     fn remove_thread_route(&mut self, thread_id: &str) {
-        self.paths_by_thread.remove(thread_id);
         self.routes_by_thread.remove(thread_id);
         if let Some(session_id) = self.session_by_thread.remove(thread_id)
             && self
@@ -414,29 +357,19 @@ impl HookProjectRouteCache {
     }
 
     fn evict_old_session_routes(&mut self) {
-        while self
-            .paths_by_session
-            .len()
-            .max(self.routes_by_session.len())
-            > MAX_HOOK_ROUTE_CACHE_ENTRIES
-        {
+        while self.routes_by_session.len() > MAX_HOOK_ROUTE_CACHE_ENTRIES {
             let Some(session_id) = self.session_order.pop_front() else {
                 break;
             };
-            let removed_path = self.paths_by_session.remove(&session_id).is_some();
             let removed_route = self.routes_by_session.remove(&session_id).is_some();
-            if (removed_path || removed_route)
-                && let Some(thread_id) = self.threads_by_session.remove(&session_id)
-            {
+            if removed_route && let Some(thread_id) = self.threads_by_session.remove(&session_id) {
                 self.remove_thread_route(&thread_id);
             }
         }
     }
 
     fn evict_old_thread_routes(&mut self) {
-        while self.paths_by_thread.len().max(self.routes_by_thread.len())
-            > MAX_HOOK_ROUTE_CACHE_ENTRIES
-        {
+        while self.routes_by_thread.len() > MAX_HOOK_ROUTE_CACHE_ENTRIES {
             let Some(thread_id) = self.thread_order.pop_front() else {
                 break;
             };
@@ -451,49 +384,60 @@ pub(crate) struct SharedHookProjectRouteCache {
 }
 
 impl SharedHookProjectRouteCache {
-    pub(crate) fn snapshot(&self) -> HookProjectRouteCache {
+    fn unavailable(operation: &str) -> crate::errors::TraceDecayError {
+        crate::errors::TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            format!("project route cache is unavailable during {operation}"),
+        )
+    }
+
+    pub(crate) fn snapshot(&self) -> crate::errors::Result<HookProjectRouteCache> {
         self.inner
             .lock()
             .map(|cache| cache.clone())
-            .unwrap_or_default()
+            .map_err(|_| Self::unavailable("snapshot"))
     }
 
-    pub(crate) fn store(&self, cache: &HookProjectRouteCache) {
-        if let Ok(mut shared) = self.inner.lock() {
-            let mut cache = cache.clone();
-            cache.project_path = None;
-            shared.clone_from(&cache);
-        }
+    pub(crate) fn store(&self, cache: &HookProjectRouteCache) -> crate::errors::Result<()> {
+        let mut shared = self.inner.lock().map_err(|_| Self::unavailable("update"))?;
+        let mut cache = cache.clone();
+        cache.connection_route = None;
+        shared.clone_from(&cache);
+        Ok(())
     }
 
-    /// Refresh `target` from the shared cache with a single deep clone taken
-    /// under the lock, preserving `target`'s local `project_path`.
-    pub(crate) fn refresh_into(&self, target: &mut HookProjectRouteCache) {
-        let cloned = self
-            .inner
-            .lock()
-            .map(|cache| cache.clone())
-            .unwrap_or_default();
-        target.refresh_from_owned(cloned);
+    /// Refresh `target` from the shared cache with one clone under the lock.
+    pub(crate) fn refresh_into(
+        &self,
+        target: &mut HookProjectRouteCache,
+    ) -> crate::errors::Result<()> {
+        let connection_route = target.connection_route.take();
+        *target = self.snapshot()?;
+        target.connection_route = connection_route;
+        Ok(())
     }
 
     pub(crate) fn forget_project(
         &self,
+        profile_id: &tracedecay_domain::UserProfileId,
         project_id: &str,
     ) -> Result<(), crate::errors::TraceDecayError> {
         let mut cache = self
             .inner
             .lock()
-            .map_err(|_| crate::errors::TraceDecayError::Config {
-                message: "project route cache lock is poisoned during remote deletion".to_owned(),
-            })?;
-        cache.forget_project(project_id);
+            .map_err(|_| Self::unavailable("project retirement"))?;
+        cache.forget_project(profile_id, project_id);
         Ok(())
     }
 }
 
 pub(crate) fn mcp_analytics_session_id(arguments: &Value) -> Option<String> {
     route_identity_from_arguments(arguments, &["session_id", "sessionId"])
+}
+
+pub(crate) fn arguments_have_structural_route_identity(arguments: &Value) -> bool {
+    mcp_route_thread_id(arguments).is_some() || mcp_analytics_session_id(arguments).is_some()
 }
 
 pub(crate) fn protect_tool_structural_ids(arguments: &mut Value) -> Result<(), ()> {
@@ -564,182 +508,401 @@ fn route_identity_from_arguments(arguments: &Value, keys: &[&str]) -> Option<Str
         .find_map(|value| keys.iter().find_map(|key| string_field(value, key)))
 }
 
-fn arguments_have_project_selector(arguments: &Value) -> bool {
+pub(crate) fn arguments_have_project_selector(arguments: &Value) -> bool {
     arguments.get("project_selector").is_some()
         || arguments.get("project_id").is_some()
         || arguments.get("project_path").is_some()
         || arguments.get("project_root").is_some()
+        || arguments.get("root").is_some()
+}
+
+fn project_route_identity_matches(
+    route_profile_id: &tracedecay_domain::UserProfileId,
+    route_project_id: &str,
+    target_profile_id: &tracedecay_domain::UserProfileId,
+    target_project_id: &str,
+) -> bool {
+    route_profile_id == target_profile_id && route_project_id == target_project_id
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::Arc;
 
     use serde_json::json;
+    use tempfile::TempDir;
 
-    use super::{HookProjectRouteCache, MAX_HOOK_ROUTE_CACHE_ENTRIES, SharedHookProjectRouteCache};
-    use crate::daemon::{HookAgent, HookRouteMetadata};
+    use super::{
+        HookProjectRouteCache, MAX_HOOK_ROUTE_CACHE_ENTRIES, SharedHookProjectRouteCache,
+        project_route_identity_matches,
+    };
+    use crate::daemon::{HookAgent, HookRouteMetadata, ProductionProjectCompositionHarnessV1};
     use crate::mcp::hook_events::{HookEvent, HookEventKind};
+    use crate::mcp::server::McpServer;
 
-    #[test]
-    fn route_prefers_thread_then_session_then_last_hook_path() {
-        let mut cache = HookProjectRouteCache {
-            project_path: Some("/repo/default".to_string()),
-            ..HookProjectRouteCache::default()
-        };
-        cache
-            .paths_by_session
-            .insert("session-a".to_string(), "/repo/session-a".to_string());
-        cache
-            .paths_by_thread
-            .insert("thread-a".to_string(), "/repo/thread-a".to_string());
-
-        assert_eq!(
-            cache.project_path_for_arguments(
-                &json!({"session_id": "session-a", "thread_id": "thread-a"})
-            ),
-            Some("/repo/thread-a")
-        );
-        assert_eq!(
-            cache.project_path_for_arguments(&json!({"session_id": "session-a"})),
-            Some("/repo/session-a")
-        );
-        assert_eq!(
-            cache.project_path_for_arguments(&json!({"session_id": "unknown"})),
-            Some("/repo/default")
-        );
+    struct ResolvedRouteFixture {
+        _isolation: TempDir,
+        _harness: ProductionProjectCompositionHarnessV1,
+        server: Arc<McpServer>,
+        event: HookEvent,
     }
 
-    #[test]
-    fn route_reads_thread_and_session_ids_from_meta() {
-        let mut cache = HookProjectRouteCache::default();
-        cache
-            .paths_by_session
-            .insert("session-meta".to_string(), "/repo/session-meta".to_string());
-        cache
-            .paths_by_thread
-            .insert("thread-meta".to_string(), "/repo/thread-meta".to_string());
-
-        assert_eq!(
-            cache.project_path_for_arguments(
-                &json!({"_meta": {"sessionId": "session-meta", "threadId": "thread-meta"}})
-            ),
-            Some("/repo/thread-meta")
-        );
-    }
-
-    #[test]
-    fn route_injects_selector_without_overriding_explicit_selector() {
-        let mut cache = HookProjectRouteCache::default();
-        cache
-            .paths_by_session
-            .insert("session-a".to_string(), "/repo/session-a".to_string());
-
-        let routed = cache.apply_to_tool_arguments(
-            "tracedecay_context",
-            json!({"task": "inspect routing", "session_id": "session-a"}),
-        );
-        assert_eq!(routed["project_selector"]["path"], "/repo/session-a");
-
-        let explicit = cache.apply_to_tool_arguments(
-            "tracedecay_context",
-            json!({
-                "task": "inspect routing",
-                "session_id": "session-a",
-                "project_selector": {"path": "/repo/explicit"},
-            }),
-        );
-        assert_eq!(explicit["project_selector"]["path"], "/repo/explicit");
-    }
-
-    #[test]
-    fn shared_route_survives_fresh_request_cache_and_invalidates_old_ids() {
-        let shared = SharedHookProjectRouteCache::default();
-        let first_event = hook_event("session-a", "thread-a", "/work/project-a");
-        let mut hook_connection_cache = shared.snapshot();
-        hook_connection_cache.observe_hook_event(&first_event, Some("/repo/a".to_string()));
-        shared.store(&hook_connection_cache);
-
-        let tool_connection_cache = shared.snapshot();
-        let routed = tool_connection_cache.apply_to_tool_arguments(
-            "tracedecay_context",
-            json!({"task": "inspect", "session_id": "session-a", "thread_id": "thread-a"}),
-        );
-        assert_eq!(routed["project_selector"]["path"], "/repo/a");
-
-        let second_event = hook_event("session-a", "thread-b", "/work/project-b");
-        let mut later_hook_connection_cache = shared.snapshot();
-        later_hook_connection_cache.observe_hook_event(&second_event, Some("/repo/b".to_string()));
-        shared.store(&later_hook_connection_cache);
-
-        let fresh_tool_connection_cache = shared.snapshot();
-        let rerouted = fresh_tool_connection_cache.apply_to_tool_arguments(
-            "tracedecay_context",
-            json!({"task": "inspect", "session_id": "session-a", "thread_id": "thread-b"}),
-        );
-        assert_eq!(rerouted["project_selector"]["path"], "/repo/b");
-
-        let stale_thread = fresh_tool_connection_cache.apply_to_tool_arguments(
-            "tracedecay_context",
-            json!({"task": "inspect", "session_id": "session-a", "thread_id": "thread-a"}),
-        );
-        assert_eq!(stale_thread["project_selector"]["path"], "/repo/b");
-    }
-
-    #[test]
-    fn shared_route_does_not_publish_last_hook_fallback() {
-        let shared = SharedHookProjectRouteCache::default();
-        let event = hook_event("session-a", "thread-a", "/work/project-a");
-        let mut hook_connection_cache = shared.snapshot();
-        hook_connection_cache.observe_hook_event(&event, Some("/repo/a".to_string()));
-        shared.store(&hook_connection_cache);
-
-        let fresh_tool_connection_cache = shared.snapshot();
-        let unrouted = fresh_tool_connection_cache
-            .apply_to_tool_arguments("tracedecay_context", json!({"task": "inspect"}));
-        assert!(
-            unrouted.get("project_selector").is_none(),
-            "daemon-wide shared state must not route identity-free calls by last hook"
-        );
-    }
-
-    #[test]
-    fn shared_route_evicts_oldest_session_and_thread_routes() {
-        let shared = SharedHookProjectRouteCache::default();
-        let mut hook_connection_cache = shared.snapshot();
-
-        for index in 0..=MAX_HOOK_ROUTE_CACHE_ENTRIES {
-            let event = hook_event(
-                &format!("session-{index}"),
-                &format!("thread-{index}"),
-                &format!("/work/project-{index}"),
+    async fn resolved_route_fixture(session_id: &str, thread_id: &str) -> ResolvedRouteFixture {
+        let isolation = TempDir::new().expect("route isolation");
+        let project = isolation.path().join("route-project");
+        fs::create_dir_all(project.join("src")).expect("route source directory");
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"route_fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("route manifest");
+        fs::write(project.join("src/lib.rs"), "pub fn route_marker() {}\n").expect("route source");
+        for args in [
+            &["init", "--quiet"][..],
+            &["add", "."][..],
+            &[
+                "-c",
+                "user.name=TraceDecay Tests",
+                "-c",
+                "user.email=tests@tracedecay.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ][..],
+        ] {
+            assert!(
+                Command::new(crate::git::git_program())
+                    .args(args)
+                    .current_dir(&project)
+                    .status()
+                    .expect("git route fixture")
+                    .success()
             );
-            hook_connection_cache.observe_hook_event(&event, Some(format!("/repo/{index}")));
         }
-        shared.store(&hook_connection_cache);
+        let harness =
+            ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+                .await
+                .expect("route composition");
+        let server = harness.server(&project).expect("registered route server");
+        let route_root = server
+            .cg()
+            .await
+            .project_root()
+            .to_string_lossy()
+            .into_owned();
+        let event = hook_event(session_id, thread_id, &route_root);
+        ResolvedRouteFixture {
+            _isolation: isolation,
+            _harness: harness,
+            server,
+            event,
+        }
+    }
 
-        let fresh_tool_connection_cache = shared.snapshot();
-        let evicted = fresh_tool_connection_cache.apply_to_tool_arguments(
-            "tracedecay_context",
-            json!({"task": "inspect", "session_id": "session-0", "thread_id": "thread-0"}),
+    #[test]
+    fn project_route_retirement_keeps_same_project_id_in_another_profile() {
+        let profile_a = tracedecay_domain::UserProfileId::new("profile.a").expect("profile A");
+        let profile_b = tracedecay_domain::UserProfileId::new("profile.b").expect("profile B");
+
+        assert!(project_route_identity_matches(
+            &profile_a,
+            "proj-shared",
+            &profile_a,
+            "proj-shared"
+        ));
+        assert!(!project_route_identity_matches(
+            &profile_b,
+            "proj-shared",
+            &profile_a,
+            "proj-shared"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cached_resolved_route_is_out_of_band_and_preserves_arguments() {
+        let fixture = resolved_route_fixture("session.route-cache", "thread.route-cache").await;
+        let expected_graph = fixture.server.cg().await;
+        let expected_project_id = expected_graph
+            .store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .expect("route fixture project identity");
+        let mut cache = HookProjectRouteCache::default();
+        fixture
+            .server
+            .update_hook_workspace_route(&fixture.event, &mut cache)
+            .await
+            .expect("hook route resolves");
+        let arguments = json!({
+            "layout": "flat",
+            "session_id": "session.route-cache",
+            "thread_id": "thread.route-cache",
+            "_meta": {"client": "fixture"}
+        });
+        let original_bytes = serde_json::to_vec(&arguments).expect("serialize original arguments");
+
+        let selected = resolved_route_for_arguments(&cache, &arguments);
+        let routed = arguments;
+        let selected = selected.expect("cached route travels out of band");
+
+        assert_eq!(
+            serde_json::to_vec(&routed).expect("serialize routed arguments"),
+            original_bytes,
+            "route selection must not rewrite caller arguments"
         );
         assert!(
-            evicted.get("project_selector").is_none(),
-            "oldest identity routes should be evicted once the shared cache is full"
+            routed.get("project_selector").is_none()
+                && routed.get("project_path").is_none()
+                && routed.get("project_root").is_none(),
+            "cached routes must not inject public selector aliases: {routed}"
         );
-
-        let retained = fresh_tool_connection_cache.apply_to_tool_arguments(
-            "tracedecay_context",
-            json!({
-                "task": "inspect",
-                "session_id": format!("session-{MAX_HOOK_ROUTE_CACHE_ENTRIES}"),
-                "thread_id": format!("thread-{MAX_HOOK_ROUTE_CACHE_ENTRIES}")
-            }),
+        assert!(Arc::ptr_eq(
+            &selected
+                .retained_server()
+                .expect("cached server remains live"),
+            &fixture.server
+        ));
+        assert_eq!(
+            selected.owner.project.project_id.as_str(),
+            expected_project_id
         );
         assert_eq!(
-            retained["project_selector"]["path"],
-            format!("/repo/{MAX_HOOK_ROUTE_CACHE_ENTRIES}")
+            selected.owner.project.canonical_root,
+            expected_graph.project_root().to_string_lossy()
         );
+        assert_eq!(selected.scope.project_id.as_str(), expected_project_id);
+        selected
+            .scope
+            .validate()
+            .expect("cached route scope validates");
+    }
+
+    #[tokio::test]
+    async fn shared_host_retry_retains_exact_route_without_json_mutation() {
+        let fixture = resolved_route_fixture("session.host-retry", "thread.host-retry").await;
+        let shared = SharedHookProjectRouteCache::default();
+        let mut hook_connection = shared.snapshot().expect("shared route snapshot");
+        fixture
+            .server
+            .update_hook_workspace_route(&fixture.event, &mut hook_connection)
+            .await
+            .expect("host hook route resolves");
+        let expected = resolved_route_for_arguments(
+            &hook_connection,
+            &json!({
+                "layout": "flat",
+                "session_id": "session.host-retry",
+                "thread_id": "thread.host-retry"
+            }),
+        );
+        let expected = expected.expect("initial host route is out of band");
+        shared
+            .store(&hook_connection)
+            .expect("store shared hook route");
+
+        let retry_connection = shared.snapshot().expect("shared retry snapshot");
+        let arguments = json!({
+            "layout": "flat",
+            "session_id": "session.host-retry",
+            "thread_id": "thread.host-retry"
+        });
+        let original_bytes = serde_json::to_vec(&arguments).expect("serialize retry arguments");
+        let selected = resolved_route_for_arguments(&retry_connection, &arguments);
+        let routed = arguments;
+        let selected = selected.expect("host retry carries a resolved route");
+
+        assert_eq!(
+            serde_json::to_vec(&routed).expect("serialize routed retry arguments"),
+            original_bytes,
+            "a host retry must preserve its caller JSON"
+        );
+        let expected_server = expected
+            .retained_server()
+            .expect("expected route server remains live");
+        assert!(Arc::ptr_eq(
+            &selected
+                .retained_server()
+                .expect("selected route server remains live"),
+            &expected_server
+        ));
+        assert_eq!(selected.owner, expected.owner);
+        assert_eq!(selected.scope, expected.scope);
+        let next_event = hook_event(
+            "session.host-retry",
+            "thread.host-retry.next",
+            expected_server
+                .cg_snapshot()
+                .await
+                .project_root()
+                .to_string_lossy()
+                .as_ref(),
+        );
+        let mut refreshed = shared.snapshot().expect("shared refreshed snapshot");
+        fixture
+            .server
+            .update_hook_workspace_route(&next_event, &mut refreshed)
+            .await
+            .expect("updated host route resolves");
+        assert!(
+            !refreshed.routes_by_thread.contains_key("thread.host-retry")
+                && refreshed
+                    .routes_by_thread
+                    .contains_key("thread.host-retry.next"),
+            "a new thread for the session must invalidate its stale thread route"
+        );
+        shared.store(&refreshed).expect("store refreshed route");
+
+        let retry_connection = shared.snapshot().expect("shared session snapshot");
+        let stale_thread_arguments = json!({
+            "layout": "flat",
+            "session_id": "session.host-retry",
+            "thread_id": "thread.host-retry"
+        });
+        let stale_thread_selected =
+            resolved_route_for_arguments(&retry_connection, &stale_thread_arguments);
+        let stale_thread_routed = stale_thread_arguments.clone();
+        assert_eq!(
+            stale_thread_routed, stale_thread_arguments,
+            "session fallback must not rewrite stale-thread arguments"
+        );
+        let stale_thread_selected = stale_thread_selected.expect("current session route exists");
+        assert!(Arc::ptr_eq(
+            &stale_thread_selected
+                .retained_server()
+                .expect("session route server remains live"),
+            &expected_server
+        ));
+
+        let identity_free = json!({"layout": "flat"});
+        let identity_free_selected =
+            resolved_route_for_arguments(&retry_connection, &identity_free);
+        let identity_free_routed = identity_free.clone();
+        assert_eq!(identity_free_routed, identity_free);
+        assert!(
+            identity_free_selected.is_none(),
+            "daemon-wide shared state must not route identity-free calls by the last hook"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_explicit_identity_never_inherits_last_connection_project() {
+        let project_a = resolved_route_fixture("session.project-a", "thread.project-a").await;
+        let project_b = resolved_route_fixture("session.project-b", "thread.project-b").await;
+        let mut cache = HookProjectRouteCache::default();
+        project_a
+            .server
+            .update_hook_workspace_route(&project_a.event, &mut cache)
+            .await
+            .expect("project A route resolves");
+        project_b
+            .server
+            .update_hook_workspace_route(&project_b.event, &mut cache)
+            .await
+            .expect("project B route resolves");
+
+        for arguments in [
+            json!({"session_id": "session.unknown"}),
+            json!({"thread_id": "thread.unknown"}),
+            json!({
+                "session_id": "session.unknown",
+                "thread_id": "thread.unknown"
+            }),
+        ] {
+            assert!(
+                cache.workspace_route_for_arguments(&arguments).is_none(),
+                "unknown explicit identity must not inherit the last connection route: {arguments}"
+            );
+        }
+
+        let identity_free = cache
+            .workspace_route_for_arguments(&json!({"layout": "flat"}))
+            .expect("identity-free request keeps the exact connection-local route");
+        let WorkspaceProjectRoute::Resolved(identity_free) = identity_free else {
+            panic!("project B connection route must remain resolved");
+        };
+        assert!(Arc::ptr_eq(
+            &identity_free
+                .retained_server()
+                .expect("project B route remains live"),
+            &project_b.server
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_resolved_routes_evict_oldest_session_and_thread() {
+        let fixture = resolved_route_fixture("session.seed", "thread.seed").await;
+        let mut seed = HookProjectRouteCache::default();
+        fixture
+            .server
+            .update_hook_workspace_route(&fixture.event, &mut seed)
+            .await
+            .expect("seed route resolves");
+        let route = seed
+            .routes_by_session
+            .get("session.seed")
+            .expect("seed session route")
+            .clone();
+        let mut bounded = HookProjectRouteCache::default();
+        for index in 0..=MAX_HOOK_ROUTE_CACHE_ENTRIES {
+            bounded.observe_workspace_route(
+                &hook_event(
+                    &format!("session-{index}"),
+                    &format!("thread-{index}"),
+                    route_root(&route).as_ref(),
+                ),
+                route.clone(),
+            );
+        }
+        let shared = SharedHookProjectRouteCache::default();
+        shared.store(&bounded).expect("store bounded routes");
+        let fresh = shared.snapshot().expect("bounded route snapshot");
+
+        let evicted = json!({
+            "layout": "flat",
+            "session_id": "session-0",
+            "thread_id": "thread-0"
+        });
+        let evicted_route = resolved_route_for_arguments(&fresh, &evicted);
+        let evicted_routed = evicted.clone();
+        assert_eq!(evicted_routed, evicted);
+        assert!(evicted_route.is_none(), "oldest route must be evicted");
+
+        let newest = json!({
+            "layout": "flat",
+            "_meta": {
+                "sessionId": format!("session-{MAX_HOOK_ROUTE_CACHE_ENTRIES}"),
+                "threadId": format!("thread-{MAX_HOOK_ROUTE_CACHE_ENTRIES}")
+            }
+        });
+        let newest_route = resolved_route_for_arguments(&fresh, &newest);
+        let newest_routed = newest.clone();
+        assert_eq!(newest_routed, newest);
+        assert!(newest_route.is_some(), "newest route must remain cached");
+    }
+
+    fn route_root(route: &super::WorkspaceProjectRoute) -> std::borrow::Cow<'_, str> {
+        match route {
+            super::WorkspaceProjectRoute::Resolved(route) => route.requested_root.to_string_lossy(),
+            super::WorkspaceProjectRoute::Failed(_) => unreachable!("seed route resolved"),
+        }
+    }
+
+    fn resolved_route_for_arguments(
+        cache: &HookProjectRouteCache,
+        arguments: &serde_json::Value,
+    ) -> Option<super::ResolvedProjectRoute> {
+        match cache.workspace_route_for_arguments(arguments) {
+            Some(super::WorkspaceProjectRoute::Resolved(route)) => Some(route.as_ref().clone()),
+            Some(super::WorkspaceProjectRoute::Failed(failure)) => {
+                panic!("unexpected failed route: {}", failure.detail)
+            }
+            None => None,
+        }
     }
 
     fn hook_event(session_id: &str, thread_id: &str, cwd: &str) -> HookEvent {

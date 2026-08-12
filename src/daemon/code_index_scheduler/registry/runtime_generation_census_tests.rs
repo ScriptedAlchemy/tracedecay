@@ -13,7 +13,7 @@ use crate::daemon::project_open_owners::{
     project_code_index_generation_census_reader, resolved_scope_for_project,
 };
 use crate::mcp::tools::handlers::{
-    ToolCallRegistryOptions, handle_tool_call_with_registry_and_implicit_project,
+    ToolCallRegistryOptions, handle_tool_call_with_registry_options,
 };
 use crate::runtime_telemetry::{GenerationCensusSnapshot, GenerationCensusUnavailableReason};
 use crate::tracedecay::TraceDecay;
@@ -61,7 +61,7 @@ async fn runtime_mcp_reports_exact_counts_from_the_mounted_sealed_generation() {
         .expect("sealed generation must publish for the mounted root");
     }
 
-    let result = handle_tool_call_with_registry_and_implicit_project(
+    let result = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_runtime",
         json!({ "format": "json" }),

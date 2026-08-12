@@ -109,7 +109,7 @@ async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
             tool_name.strip_prefix("tracedecay_").unwrap()
         ))
         .unwrap();
-        let result = handle_tool_call_with_registry_and_implicit_project(
+        let result = handle_tool_call_with_registry_options(
             &cg,
             tool_name,
             json!({

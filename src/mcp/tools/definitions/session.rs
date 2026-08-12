@@ -234,7 +234,7 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 },
                 "project_key": {
                     "type": "string",
-                    "description": "Optional provider-level project key/path filter within the selected session-message store. This is not a registered-project selector; use project_id or project_path to search another registered project's store."
+                    "description": "Optional provider-level project key/path filter within the selected session-message store. This is not a registered-project selector; use project_selector.project_id to search another registered project's store."
                 },
                 "include_subagents": {
                     "type": "boolean",
@@ -278,21 +278,12 @@ pub(super) fn def_message_search() -> ToolDefinition {
                     "default": 10,
                     "description": "Maximum number of messages to return (default: 10, max: 50)."
                 },
-                "project_selector": closed_project_selector_object(
-                    "Advanced optional registered project selector. Omit to use the active project.",
-                    "search",
+                "project_selector": project_selector_object(
+                    "Advanced optional registered project selector. Omit to use the active project."
                 ),
-                "project_id": {
-                    "type": "string",
-                    "description": "Optional registered project id to search instead of the active project."
-                },
-                "project_path": {
-                    "type": "string",
-                    "description": "Optional registered project root path or alias to search instead of the active project."
-                },
                 "project_scope": {
                     "type": "string",
-                    "description": "all_registered fans the search out over every registered project's durable session store (bounded, deterministic merge, per-root provenance). Cannot be combined with project_id, project_path, project_selector, cursor, or catch_up.",
+                    "description": "all_registered fans the search out over every registered project's durable session store (bounded, deterministic merge, per-root provenance). Cannot be combined with project_selector, cursor, or catch_up.",
                     "enum": ["all_registered"]
                 },
                 "branch": git_scope::branch_schema("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
@@ -316,17 +307,6 @@ pub(super) fn def_message_search() -> ToolDefinition {
             ]
         }),
     )
-}
-
-fn closed_project_selector_object(description: &str, verb: &str) -> Value {
-    let mut schema = project_selector_object(description, verb);
-    // project_selector_object always builds a schema object.
-    #[allow(clippy::expect_used)]
-    schema
-        .as_object_mut()
-        .expect("project selector schema must be an object")
-        .insert("additionalProperties".to_string(), Value::Bool(false));
-    schema
 }
 
 pub(super) fn def_sessions_for() -> ToolDefinition {

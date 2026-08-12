@@ -1,11 +1,10 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::sync::Arc;
 
 use super::*;
 use crate::config::USER_DATA_DIR_ENV;
-use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 
 #[derive(Clone)]
 struct FixtureCodeGraphProjection {
@@ -160,42 +159,6 @@ pub(super) fn verified_graph_options<'a>(
     options
 }
 
-pub(super) struct SelectorRegistry {
-    database: Arc<RegisteredGlobalDb>,
-    _registry: DaemonSessionRuntimeRegistryV1,
-    _scope: crate::db::DaemonDatabaseScope,
-}
-
-impl SelectorRegistry {
-    pub(super) async fn open() -> Self {
-        let profile_root = crate::config::user_data_dir().expect("selector profile root");
-        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
-            .expect("selector profile identity");
-        let scope = crate::db::enter_daemon_database_scope(
-            identity.profile_root(),
-            1,
-            "host-admission-test-runtime",
-        )
-        .expect("selector daemon database scope");
-        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
-            .await
-            .expect("selector session runtime registry");
-        let database = registry
-            .profile_database()
-            .await
-            .expect("selector registered profile database");
-        Self {
-            database,
-            _registry: registry,
-            _scope: scope,
-        }
-    }
-
-    pub(super) fn database(&self) -> &Arc<RegisteredGlobalDb> {
-        &self.database
-    }
-}
-
 /// A second registered project fixture mounted through the caller's existing
 /// test runtime. The profile session-relation graph has exactly one writer,
 /// so multi-project tests must mount sibling projects through the first
@@ -229,27 +192,6 @@ pub(super) async fn init_sibling_registered_fixture(
         .await
         .expect("sibling project graph");
     (graph, sibling)
-}
-
-pub(super) fn selector_options(
-    registry: &SelectorRegistry,
-    graphs: Vec<Arc<TraceDecay>>,
-) -> ToolCallRegistryOptions<'_> {
-    let graphs = Arc::new(
-        graphs
-            .into_iter()
-            .map(|graph| (graph.project_root().to_path_buf(), graph))
-            .collect::<BTreeMap<_, _>>(),
-    );
-    let resolver: crate::mcp::server::RetainedProjectGraphResolver = Arc::new(move |request| {
-        let graph = graphs.get(&request.registered_root).cloned();
-        Box::pin(async move { Ok(graph) })
-    });
-    ToolCallRegistryOptions {
-        global_db: Some(registry.database()),
-        retained_project_graph_resolver: Some(resolver),
-        ..Default::default()
-    }
 }
 
 struct EnvVarGuard {

@@ -123,7 +123,7 @@ async fn available_configuration_effect_reaches_canonical_executor() {
         tracedecay_application::CancellationSignal::active("configuration-set-canonical-effect")
             .unwrap();
 
-    let result = handle_tool_call_with_registry_and_implicit_project(
+    let result = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_configuration_set",
         request,
@@ -237,7 +237,7 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
             tool_name.strip_prefix("tracedecay_").unwrap()
         ))
         .unwrap();
-        let result = handle_tool_call_with_registry_and_implicit_project(
+        let result = handle_tool_call_with_registry_options(
             &cg,
             tool_name,
             request.clone(),
@@ -343,7 +343,7 @@ async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handl
     ];
 
     for (tool_name, _, request) in &reads {
-        let result = handle_tool_call_with_registry_and_implicit_project(
+        let result = handle_tool_call_with_registry_options(
             &cg,
             tool_name,
             request.clone(),

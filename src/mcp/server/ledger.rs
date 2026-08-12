@@ -62,6 +62,8 @@ pub(crate) struct McpToolErrorAnalyticsRequest<'a> {
     pub(crate) arguments: &'a Value,
     pub(crate) duration_us: Option<u64>,
     pub(crate) error: &'a TraceDecayError,
+    pub(crate) connection_client_name: Option<&'a str>,
+    pub(crate) connection_instance_id: Option<&'a str>,
 }
 
 impl McpServer {
@@ -285,11 +287,12 @@ impl McpServer {
             arguments,
             duration_us,
             error,
+            connection_client_name,
+            connection_instance_id,
         } = request;
         let LedgerSink::Mounted(gdb) = self.ledger_sink() else {
             return;
         };
-        let client_name = self.client_name();
         // `TraceDecayError`'s `Display` (via `thiserror`) already carries a
         // variant-classified, human-readable message (e.g. "config error:
         // missing required parameter: handle"); bounded truncation happens
@@ -308,8 +311,8 @@ impl McpServer {
             request_id,
             arguments,
             internal_analytics: None,
-            client_name: client_name.as_deref(),
-            mcp_instance_id: self.connection_identity.instance_id(),
+            client_name: connection_client_name,
+            mcp_instance_id: connection_instance_id,
             failure_reason: Some(&failure_reason),
         });
         self.spawn_observed_ledger_write(async move {
@@ -370,7 +373,11 @@ impl McpServer {
     /// so the notification hot path never blocks on repeated writes (spans
     /// merge regardless, so a dropped observation only widens a span slightly
     /// less).
-    pub(crate) async fn record_hook_span_observation(&self, event: &hook_events::HookEvent) {
+    pub(crate) async fn record_hook_span_observation(
+        &self,
+        event: &hook_events::HookEvent,
+        selected: &crate::mcp::project_route::ResolvedProjectRoute,
+    ) {
         const MAX_SPAN_IDENTIFIER_BYTES: usize = 256;
 
         let Some(route) = event.route.as_ref() else {
@@ -395,22 +402,14 @@ impl McpServer {
         let Some(cwd) = route_cwd else {
             return;
         };
-        let arguments = json!({
-            "project_selector": {
-                "path": cwd.to_string_lossy(),
-            }
-        });
-        let Ok(Some(selected)) = crate::mcp::tools::handlers::selected_registered_project_reader(
-            "tracedecay_files".to_owned(),
-            arguments,
-            self.registry_db.as_deref(),
-            self.retained_project_graph_resolver.clone(),
-        )
-        .await
-        else {
+        let Ok(selected_server) = selected.retained_server() else {
             return;
         };
-        let project_root = selected.graph.project_root().to_path_buf();
+        let project_root = selected_server
+            .cg_snapshot()
+            .await
+            .project_root()
+            .to_path_buf();
         let active_project_root = self.cg_snapshot().await.project_root().to_path_buf();
         if RegisteredGlobalDb::canonical_project_key(&project_root)
             != RegisteredGlobalDb::canonical_project_key(&active_project_root)

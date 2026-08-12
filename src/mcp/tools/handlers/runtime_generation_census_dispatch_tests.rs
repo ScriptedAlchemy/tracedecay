@@ -25,7 +25,7 @@ async fn runtime_mcp_marks_missing_generation_census_authority_unavailable() {
     .await
     .expect("open v32 mounted runtime fixture");
 
-    let result = handle_tool_call_with_registry_and_implicit_project(
+    let result = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_runtime",
         json!({ "format": "json" }),

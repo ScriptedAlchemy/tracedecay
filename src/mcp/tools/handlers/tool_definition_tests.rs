@@ -39,10 +39,14 @@ fn terminal_application_definitions_project_canonical_request_schemas() {
             .unwrap_or_else(|| panic!("{tool_name} request properties"));
         assert!(properties.remove("format").is_some(), "{tool_name} format");
         if admits_project_selector {
-            for selector in ["project_selector", "project_id", "project_path"] {
+            assert!(
+                properties.remove("project_selector").is_some(),
+                "{tool_name} must expose project_selector.project_id",
+            );
+            for alias in ["project_id", "project_path", "project_root", "root"] {
                 assert!(
-                    properties.remove(selector).is_some(),
-                    "{tool_name} must expose transport selector {selector}",
+                    !properties.contains_key(alias),
+                    "{tool_name} must not expose legacy selector alias {alias}",
                 );
             }
         }

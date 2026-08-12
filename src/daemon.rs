@@ -207,7 +207,7 @@ mod git_watch;
 mod github_credential_lifecycle;
 mod graph_resolution;
 pub(crate) mod native_integration;
-use graph_resolution::retained_project_graph_resolver;
+use graph_resolution::retained_project_server_resolver;
 mod http_application;
 mod http_application_router;
 mod remote_protocol;

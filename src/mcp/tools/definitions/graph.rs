@@ -54,7 +54,7 @@ pub(super) fn def_grep() -> ToolDefinition {
     def_always_load(
         "tracedecay_grep",
         "Grep Content",
-        "grep, ripgrep, rg, text search, find string. Literal/regex content search over UTF-8 text sources in the project working tree (respects .gitignore; binary and non-UTF-8 files are outside the search scope), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_body. Bounded file or line omissions and unavailable source candidates are reported as partial coverage. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_id/project_path only when intentionally searching another registered project.",
+        "grep, ripgrep, rg, text search, find string. Literal/regex content search over UTF-8 text sources in the project working tree (respects .gitignore; binary and non-UTF-8 files are outside the search scope), graph-enriched: each hit resolves the enclosing symbol so the natural next call is tracedecay_body. Bounded file or line omissions and unavailable source candidates are reported as partial coverage. Routing: use this for literal/regex content search (string literals, config keys, error messages); for symbol names use tracedecay_search; for concepts use tracedecay_context. Defaults to the active project; pass project_selector.project_id only when intentionally searching another registered project.",
         json!({
             "type": "object",
             "properties": with_project_selector_properties(json!({
@@ -92,7 +92,7 @@ pub(super) fn def_retrieve() -> ToolDefinition {
     def(
         "tracedecay_retrieve",
         "Retrieve Truncated Response",
-        "Use `tracedecay_retrieve` with required argument `handle` to retrieve the exact cached original text for a local response handle emitted by a truncated MCP response. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. If the original truncated response used project_id/project_path, pass the same selector here. Only call it when the missing details are needed to answer the user's request.",
+        "Use `tracedecay_retrieve` with required argument `handle` to retrieve the exact cached original text for a local response handle emitted by a truncated MCP response. This does not re-run the source tool or read a file/session/node again; handles are scoped to the active project store, expire automatically, and never reference remote storage. If the original truncated response used project_selector.project_id, pass the same selector here. Only call it when the missing details are needed to answer the user's request.",
         json!({
             "type": "object",
             "properties": with_project_selector_properties(json!({
@@ -101,7 +101,8 @@ pub(super) fn def_retrieve() -> ToolDefinition {
                     "description": "The required `handle` argument copied exactly from a truncated MCP response envelope."
                 }
             })),
-            "required": ["handle"]
+            "required": ["handle"],
+            "additionalProperties": false
         }),
     )
 }

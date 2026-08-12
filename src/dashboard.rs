@@ -78,7 +78,7 @@ pub fn dashboard_automation_authority_for_test(
     let profile_root = profile_root.as_ref().canonicalize()?;
     let retained_root = cg.project_root().canonicalize()?;
     let retained_graph = std::sync::Arc::clone(&cg);
-    let resolver: crate::mcp::server::RetainedProjectGraphResolver =
+    let resolver: tracedecay_dashboard_api::project_graph::RetainedProjectGraphResolver =
         std::sync::Arc::new(move |request| {
             let retained_graph = std::sync::Arc::clone(&retained_graph);
             let retained_root = retained_root.clone();

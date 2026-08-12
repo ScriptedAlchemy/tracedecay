@@ -476,7 +476,7 @@ pub(super) async fn production_project_server(
             code_search_scope.clone(),
         ));
     let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
-    let retained_graph_resolver = retained_project_graph_resolver(store_administration.clone());
+    let retained_server_resolver = retained_project_server_resolver(store_administration.clone());
     let mut core_context = crate::mcp::server::McpServerConstructionContext::daemon_owned_core(
         Arc::clone(&cg),
         handshake.scope_prefix.clone(),
@@ -506,7 +506,7 @@ pub(super) async fn production_project_server(
     .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(Arc::clone(&application_invocation_executor))
     .with_daemon_invocation_service(invocation.service.clone())
-    .with_retained_project_graph_resolver(Arc::clone(&retained_graph_resolver));
+    .with_retained_project_server_resolver(Arc::clone(&retained_server_resolver));
     if let Some(reconciler) = automation_scheduler_reconciler.as_ref() {
         core_context = core_context.with_automation_scheduler_reconciler(Arc::clone(reconciler));
     }
@@ -880,7 +880,7 @@ pub(super) async fn production_project_server(
             .with_application_invocation_executor(application_invocation_executor)
             .with_daemon_invocation_service(invocation.service.clone())
             .with_startup_catch_up_enabled(runtime.startup_catch_up())
-            .with_retained_project_graph_resolver(retained_graph_resolver);
+            .with_retained_project_server_resolver(retained_server_resolver);
             if let Some(reconciler) = automation_scheduler_reconciler {
                 full_context = full_context.with_automation_scheduler_reconciler(reconciler);
             }

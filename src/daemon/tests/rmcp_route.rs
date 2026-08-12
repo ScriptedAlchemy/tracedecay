@@ -139,6 +139,42 @@ fn blocked_tool_request(id: u64) -> Value {
     })
 }
 
+#[cfg(unix)]
+fn selected_grep_request(id: u64, target_project_id: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_grep",
+            "arguments": {
+                "pattern": "RMCP_SELECTED_TARGET_MARKER",
+                "fixed_strings": true,
+                "project_selector": {"project_id": target_project_id},
+                "format": "json"
+            }
+        }
+    })
+}
+
+#[cfg(unix)]
+fn selected_blocked_request(id: u64, target_project_id: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_fact_store_list",
+            "arguments": {
+                "category": "project",
+                "min_trust": 0.0,
+                "project_selector": {"project_id": target_project_id},
+                "format": "json"
+            }
+        }
+    })
+}
+
 fn ping_request(id: u64) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "method": "ping"})
 }
@@ -517,6 +553,186 @@ async fn wait_for_count(counter: &AtomicUsize, expected: usize, message: &str) {
     })
     .await
     .expect(message);
+}
+
+#[cfg(unix)]
+async fn mount_rmcp_target(
+    fixture: &RmcpRouteFixture,
+) -> (DaemonHandshake, String, ProjectServerKey, ProjectRouteKey) {
+    let project = fixture._temp.path().join("target-project");
+    std::fs::create_dir_all(project.join("src")).expect("target source directory");
+    std::fs::write(
+        project.join("src/target.rs"),
+        "pub const RMCP_SELECTED_TARGET_MARKER: &str = \"target-beta\";\n",
+    )
+    .expect("target source marker");
+    initialize_test_project(&project, &fixture.handshake.client_identity).await;
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity: fixture.handshake.client_identity.clone(),
+        client_instance_id: "rmcp-selected-target".to_owned(),
+        ..test_handshake_defaults()
+    };
+    let target = fixture
+        .engine
+        .project_server(&handshake)
+        .await
+        .expect("mount target project server");
+    let graph = target.cg().await;
+    let project_id = graph
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("target project identity");
+    let key =
+        ProjectServerKey::from_open_project(&graph, &handshake).expect("target project server key");
+    let route =
+        ProjectRouteKey::from_handshake(&project, &handshake).expect("target project route key");
+    (handshake, project_id, key, route)
+}
+
+#[cfg(unix)]
+fn response_text(response: &Value) -> &str {
+    response["result"]["content"]
+        .as_array()
+        .and_then(|content| content.iter().find_map(|item| item["text"].as_str()))
+        .unwrap_or_else(|| panic!("RMCP response omitted text content: {response}"))
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selected_target_rmcp_flushes_response_and_full_disconnect_cancels_target() {
+    let fixture = rmcp_route_fixture("rmcp-selected-target-disconnect").await;
+    let (target_handshake, target_project_id, target_key, target_route) =
+        mount_rmcp_target(&fixture).await;
+    let target_server = {
+        let owners = fixture
+            .engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await;
+        owners
+            .get(&target_key)
+            .cloned()
+            .expect("mounted target server")
+    };
+
+    let (server_stream, client_stream) =
+        tokio::net::UnixStream::pair().expect("selected target socket pair");
+    let engine = fixture.engine.clone();
+    let server_task = tokio::spawn(async move {
+        Box::pin(super::super::serve_socket_client(server_stream, engine)).await
+    });
+    let (reader, mut writer) = client_stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    writer
+        .write_all(
+            fixture
+                .handshake
+                .to_line()
+                .expect("selected target handshake")
+                .as_bytes(),
+        )
+        .await
+        .expect("write selected target handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    write_line(&mut writer, &initialize_request()).await;
+    assert_eq!(
+        read_value(&mut reader, "initialize selected target route").await["id"],
+        json!(1)
+    );
+
+    let caller_before = fixture.server.server_stats_json().await["total_requests"]
+        .as_u64()
+        .expect("caller request count");
+    let target_before = target_server.server_stats_json().await["total_requests"]
+        .as_u64()
+        .expect("target request count");
+    write_line(&mut writer, &selected_grep_request(20, &target_project_id)).await;
+    let selected = read_value(&mut reader, "selected target response flush").await;
+    assert_eq!(selected["id"], json!(20));
+    assert!(
+        response_text(&selected).contains("target-beta"),
+        "RMCP selected response came from the wrong project: {selected}"
+    );
+    assert_eq!(
+        fixture.server.server_stats_json().await["total_requests"],
+        json!(caller_before),
+        "selected project call was accounted to the connection server"
+    );
+    assert_eq!(
+        target_server.server_stats_json().await["total_requests"],
+        json!(target_before + 1),
+        "selected project call was not accounted to the execution server"
+    );
+
+    let executor = Arc::new(ControlledCancellationExecutor::new());
+    let graph = super::super::open_project_for_handshake(
+        target_handshake
+            .project_path
+            .as_deref()
+            .expect("target project path"),
+        &target_handshake,
+        &fixture.engine.store_administration,
+    )
+    .await
+    .expect("open controlled target project");
+    let controlled = crate::mcp::McpServer::new_with_context(
+        crate::mcp::server::McpServerConstructionContext::direct(graph, None)
+            .with_application_invocation_executor(executor.clone()),
+    )
+    .await;
+    let controlled_key = target_key.clone();
+    {
+        let mut owners = fixture
+            .engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await;
+        owners.insert_route(target_route, target_key, controlled);
+        assert!(owners.mark_ready(&controlled_key));
+    }
+    drop(target_server);
+
+    write_line(
+        &mut writer,
+        &selected_blocked_request(21, &target_project_id),
+    )
+    .await;
+    wait_for_count(
+        &executor.started,
+        1,
+        "selected request never reached target executor",
+    )
+    .await;
+    writer
+        .shutdown()
+        .await
+        .expect("close selected target client write half");
+    drop(writer);
+    drop(reader);
+    wait_for_count(
+        &executor.cancellation_observed,
+        1,
+        "full peer disconnect did not reach selected target cancellation",
+    )
+    .await;
+    executor.release_first.store(true, Ordering::SeqCst);
+    wait_for_count(
+        &executor.completed,
+        1,
+        "selected target did not settle after disconnect cancellation",
+    )
+    .await;
+    let served = tokio::time::timeout(PHASE_TIMEOUT, server_task)
+        .await
+        .expect("selected target connection did not terminate after full disconnect");
+    served
+        .expect("join selected target connection")
+        .expect("serve selected target connection");
 }
 
 #[cfg(unix)]

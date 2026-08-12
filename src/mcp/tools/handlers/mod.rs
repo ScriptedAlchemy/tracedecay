@@ -120,10 +120,10 @@ mod tool_definition_tests;
 pub use session_authorities::SessionAuthorities;
 use std::path::Path;
 use std::sync::Arc;
-pub(crate) use tool_call_support::selected_registered_project_reader;
+pub(crate) use tool_call_support::resolve_registered_project_route_for_tool;
 pub(super) use tool_call_support::{json_result, text_tool_result};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tracedecay_application::RetainedSurfaceOperation;
 #[cfg(test)]
 use tracedecay_application::{
@@ -135,7 +135,6 @@ use tracedecay_tool_catalog::{ProfileId, SurfaceOperationName};
 
 use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
-    tool_dispatches_registered_project_reader,
 };
 use super::{LegacyToolCompatibilityOwner, ToolResult};
 #[cfg(test)]
@@ -198,7 +197,7 @@ pub async fn handle_tool_call(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
-    Box::pin(handle_tool_call_with_registry_and_implicit_project(
+    Box::pin(handle_tool_call_with_registry_options(
         cg,
         tool_name,
         args,
@@ -229,7 +228,7 @@ pub struct ToolCallRegistryOptions<'a> {
     /// absent on the core server that answers the first tool calls.
     pub(crate) daemon_user_profile_id: Option<tracedecay_domain::configuration::UserProfileId>,
     pub profile_root: Option<&'a Path>,
-    pub implicit_project_path: Option<&'a Path>,
+    pub(crate) resolved_project_route: Option<&'a crate::mcp::project_route::ResolvedProjectRoute>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub(crate) doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
@@ -269,13 +268,14 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::CodeGraphReadAdmissionPort>,
     /// Exact-scope sealed-generation census authority for runtime telemetry.
     pub(crate) generation_census_reader: Option<crate::runtime_telemetry::GenerationCensusReader>,
-    pub(crate) retained_project_graph_resolver:
-        Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    /// Retained server authority consumed by the dashboard boundary. Project
+    /// selection itself is completed before handler dispatch.
+    pub(crate) retained_project_server_resolver:
+        Option<crate::mcp::server::RetainedProjectServerResolver>,
     /// Daemon-owned bounded native transcript and session/Git convergence.
     /// Absence is a typed unavailable authority, never a local store fallback.
     pub(crate) session_sync_service:
         Option<&'a dyn tracedecay_application::session_sync::SessionSyncServicePort>,
-    pub preselected_project_reader: bool,
     pub session_authorities: SessionAuthorities<'a>,
 }
 
@@ -291,7 +291,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             dashboard_session_retrieval_identity: None,
             daemon_user_profile_id: None,
             profile_root: None,
-            implicit_project_path: None,
+            resolved_project_route: None,
             automation_scheduler_reconciler: None,
             automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
@@ -318,9 +318,8 @@ impl Default for ToolCallRegistryOptions<'_> {
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
             generation_census_reader: None,
-            retained_project_graph_resolver: None,
+            retained_project_server_resolver: None,
             session_sync_service: None,
-            preselected_project_reader: false,
             session_authorities: SessionAuthorities::default(),
         }
     }
@@ -335,7 +334,7 @@ impl<'a> ToolCallRegistryOptions<'a> {
     }
 }
 
-pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
+pub fn handle_tool_call_with_registry_options<'a>(
     cg: &'a TraceDecay,
     tool_name: &'a str,
     mut args: Value,
@@ -442,45 +441,21 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 ),
             });
         }
-        if let Some(project_path) = options.implicit_project_path
-            && tool_dispatches_registered_project_reader(tool_name)
-            && !rejected_tool_project_selector_present(tool_name, &args)
-            && let Some(map) = args.as_object_mut()
+        if tool_accepts_registered_project_selector(tool_name)
+            && crate::mcp::project_route::arguments_have_project_selector(&args)
+            && options.resolved_project_route.is_none()
         {
-            map.insert(
-                "project_path".to_string(),
-                json!(project_path.to_string_lossy().to_string()),
-            );
+            return Err(TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                "registered project selection was not resolved before handler dispatch",
+            ));
         }
-        let selected_project = if options.preselected_project_reader {
-            None
-        } else {
-            boxed_send(selected_registered_project_reader(
-                tool_name.to_owned(),
-                args.clone(),
-                options.global_db.map(std::sync::Arc::as_ref),
-                options.retained_project_graph_resolver.clone(),
-            ))
-            .await?
-        };
-        let selected_scope_prefix =
-            if options.preselected_project_reader || selected_project.is_some() {
-                None
-            } else {
-                scope_prefix
-            };
-        let cg = selected_project
+        let selected_scope_prefix = scope_prefix;
+        let project_session_db = options
+            .registered_project_session_db
             .as_ref()
-            .map_or(cg, |selected| selected.graph.as_ref());
-        let active_project_session_db = (!options.preselected_project_reader
-            && selected_project.is_none())
-        .then(|| {
-            options
-                .registered_project_session_db
-                .as_ref()
-                .or(options.session_authorities.project)
-        })
-        .flatten();
+            .or(options.session_authorities.project);
         // Classify before moving `args` so large payloads are not cloned into every
         // group probe. Application-surface tools still run before catalog checks;
         // `tracedecay_diagnostics` without an executor falls through to the
@@ -601,7 +576,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         server_stats,
                         scope_prefix,
                         selected_scope_prefix,
-                        active_project_session_db,
+                        project_session_db,
                         options.clone(),
                     ))
                     .await
@@ -615,7 +590,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         cg,
                         args,
                         scope_prefix,
-                        active_project_session_db,
+                        project_session_db,
                         options.clone(),
                     ))
                     .await
@@ -632,7 +607,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         cg,
                         args,
                         scope_prefix,
-                        active_project_session_db,
+                        project_session_db,
                         options.clone(),
                     ))
                     .await
@@ -643,7 +618,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         cg,
                         args,
                         scope_prefix,
-                        active_project_session_db,
+                        project_session_db,
                         options.clone(),
                     ))
                     .await

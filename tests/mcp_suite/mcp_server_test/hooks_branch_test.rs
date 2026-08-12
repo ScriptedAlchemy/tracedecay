@@ -16,7 +16,8 @@ struct RoutedProjects {
     active_dir: TempDir,
     target_dir: TempDir,
     active: TraceDecay,
-    target: TraceDecay,
+    /// Keeps the target store/runtime alive while registry routes are exercised.
+    _target: TraceDecay,
     active_project_id: String,
     target_project_id: String,
 }
@@ -165,7 +166,7 @@ async fn routed_projects() -> RoutedProjects {
         active_dir,
         target_dir,
         active,
-        target,
+        _target: target,
         active_project_id,
         target_project_id,
     }
@@ -442,13 +443,13 @@ async fn hook_route_to_ambiguously_registered_project_fails_closed() {
         )
         .await
         .expect("duplicate registration of the target root is accepted by the registry");
-    // The target graph *is* mounted, so a failure here can only come from the
-    // ambiguous registration.
-    let server = McpServer::new_with_retained_test_graphs_for_test(
+    // Route selection fails on the ambiguous registration before retained
+    // server lookup.
+    let server = McpServer::new_with_retained_test_servers_for_test(
         projects.active,
         None,
         registry_db,
-        vec![Arc::new(projects.target)],
+        Vec::new(),
     )
     .await
     .expect("registered test server");
@@ -471,12 +472,10 @@ async fn hook_route_to_ambiguously_registered_project_fails_closed() {
 }
 
 /// An identity-free hook whose workspace belongs to no registered project
-/// leaves follow-up reads on the active project. That is the contract, and it
-/// is only sound because the answer is the active project's own data — never
-/// another project's, and never the active project's presented as if the route
-/// had resolved somewhere else.
+/// leaves a failed route on that exact connection. A follow-up read must not
+/// fall back to the active project and present unrelated data as success.
 #[tokio::test]
-async fn hook_route_from_unregistered_cwd_serves_the_active_project() {
+async fn hook_route_from_unregistered_cwd_fails_closed_without_active_fallback() {
     let projects = production_routed_projects().await;
     let unregistered = TempDir::new().unwrap();
     let unregistered_workspace = unregistered.path().to_path_buf();
@@ -487,11 +486,32 @@ async fn hook_route_from_unregistered_cwd_serves_the_active_project() {
         vec![workspace_open(&unregistered_workspace), files_call(1)],
     )
     .await;
-    assert_served_project(
+    assert_route_failed_closed(
         &response_with_id(&responses, json!(1)),
         "unresolvable hook route",
-        "active_only.rs",
-        "target_only.rs",
+        "did not resolve to a registered project",
+    );
+    projects.shutdown().await;
+}
+
+#[tokio::test]
+async fn unknown_explicit_identity_does_not_inherit_connection_project() {
+    let projects = production_routed_projects().await;
+    let target_workspace = projects.target_root().to_path_buf();
+    let server = projects.server();
+
+    let responses = run_client_connection_with_messages(
+        server,
+        vec![
+            workspace_open(&target_workspace),
+            files_call_for_session(1, "session.unknown-route"),
+        ],
+    )
+    .await;
+    assert_route_failed_closed(
+        &response_with_id(&responses, json!(1)),
+        "unknown explicit identity after a target workspace route",
+        "has no registered private project route",
     );
     projects.shutdown().await;
 }

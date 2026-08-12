@@ -233,8 +233,8 @@ async fn message_search_rejects_all_registered_with_project_selector() {
     let (cg, _env, _dir) = setup_empty_project().await;
     for selector in [
         json!({"project_id": "proj_x"}),
-        json!({"project_path": "/some/path"}),
         json!({"project_selector": {"path": "/some/path"}}),
+        json!({"project_selector": {"project_path": "/some/path"}}),
     ] {
         let mut args = json!({"query": "anything", "project_scope": "all_registered"});
         args.as_object_mut()
@@ -244,12 +244,29 @@ async fn message_search_rejects_all_registered_with_project_selector() {
             handle_tool_call(&cg, "tracedecay_message_search", args, None, None).await,
         );
         assert!(
-            err.contains(
-                "project_scope cannot be combined with project_id, project_path, or project_selector"
-            ),
+            err.contains("project_route_invalid_selector"),
             "unexpected error for selector {selector}: {err}"
         );
     }
+
+    let err = expect_tool_error(
+        handle_tool_call(
+            &cg,
+            "tracedecay_message_search",
+            json!({
+                "query": "anything",
+                "project_scope": "all_registered",
+                "project_path": "/some/path"
+            }),
+            None,
+            None,
+        )
+        .await,
+    );
+    assert!(
+        err.contains("project_scope cannot be combined"),
+        "message-search project_path remains a semantic filter: {err}"
+    );
 }
 
 #[cfg(feature = "test-transport")]

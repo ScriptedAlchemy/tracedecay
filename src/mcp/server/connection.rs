@@ -3,6 +3,8 @@
 
 use super::*;
 
+mod response_delivery;
+
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
 pub(in crate::mcp::server) struct McpShutdownCompletion {
@@ -232,23 +234,36 @@ fn queued_cancellable_request_key(
         .then_some(expected)
 }
 
+fn current_cancellable_request_key(
+    request: &JsonRpcRequest,
+    request_id: &Value,
+    connection_scope: &str,
+) -> Option<String> {
+    let current = request
+        .id
+        .as_ref()
+        .and_then(|id| application_surface_request_id(id, connection_scope))?;
+    let cancelled = application_surface_request_id(request_id, connection_scope)?;
+    (current == cancelled).then_some(current)
+}
+
 impl McpServer {
     async fn write_response_line_or_revoke(
         &self,
         transport: &mut impl crate::mcp::transport::McpTransport,
         output: &str,
-        revocable: bool,
+        response_revoked: Option<&tracedecay_usecases::context::CancellationToken>,
     ) -> std::io::Result<bool> {
         let write = async {
             transport.write_line(output).await?;
             transport.flush().await
         };
-        if !revocable {
+        let Some(response_revoked) = response_revoked else {
             return write.await.map(|()| true);
-        }
+        };
         tokio::select! {
             biased;
-            () = self.project_server_lifecycle.response_revoked().cancelled() => Ok(false),
+            () = response_revoked.cancelled() => Ok(false),
             result = write => result.map(|()| true),
         }
     }
@@ -276,6 +291,7 @@ impl McpServer {
             pre_cancelled,
         ));
         tokio::pin!(handling);
+        let mut current_cancellation: Option<Value> = None;
         // One-shot clients (the CLI and the stdio proxy) shut down their write
         // half once the request is on the wire, so end-of-input means "no more
         // requests", not "peer is gone". Stop watching for cancellations and
@@ -285,15 +301,30 @@ impl McpServer {
             std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
         > = None;
         loop {
+            let cancellation_id = current_cancellation.clone();
+            let wait_for_current_cancellation_registration = async {
+                let Some(cancellation_id) = cancellation_id.as_ref() else {
+                    std::future::pending::<()>().await;
+                    return;
+                };
+                while !self.cancel_application_surface_request(cancellation_id, &connection_scope) {
+                    tokio::task::yield_now().await;
+                }
+            };
+            tokio::pin!(wait_for_current_cancellation_registration);
             if let Some(peer_close_check) = peer_close_check.as_mut() {
                 tokio::select! {
-                    response = &mut handling => return Ok((response, false)),
+                    biased;
                     () = &mut shutdown_requested => {
                         if let Some(id) = request.id.as_ref() {
                             let _ = self.cancel_application_surface_request(id, &connection_scope);
                         }
                         return Ok((None, true));
                     }
+                    () = &mut wait_for_current_cancellation_registration => {
+                        current_cancellation = None;
+                    }
+                    response = &mut handling => return Ok((response, false)),
                     () = peer_close_check => {
                         if let Some(id) = request.id.as_ref() {
                             let _ = self.cancel_application_surface_request(id, &connection_scope);
@@ -303,13 +334,17 @@ impl McpServer {
                 }
             }
             tokio::select! {
-                response = &mut handling => return Ok((response, false)),
+                biased;
                 () = &mut shutdown_requested => {
                     if let Some(id) = request.id.as_ref() {
                         let _ = self.cancel_application_surface_request(id, &connection_scope);
                     }
                     return Ok((None, true));
                 }
+                () = &mut wait_for_current_cancellation_registration => {
+                    current_cancellation = None;
+                }
+                response = &mut handling => return Ok((response, false)),
                 incoming = transport.read_line() => {
                     let line = match incoming {
                         Ok(Some(line)) => line,
@@ -338,7 +373,16 @@ impl McpServer {
                             .as_ref()
                             .and_then(|params| params.get("requestId"))
                             && !self.cancel_application_surface_request(id, &connection_scope)
-                                && pending_cancellations.len()
+                        {
+                            if current_cancellable_request_key(
+                                request,
+                                id,
+                                &connection_scope,
+                            )
+                            .is_some()
+                            {
+                                current_cancellation = Some(id.clone());
+                            } else if pending_cancellations.len()
                                     < MAX_PENDING_CANCELLABLE_REQUEST_LINES
                                 && let Some(key) = queued_cancellable_request_key(
                                     pending_lines,
@@ -348,6 +392,7 @@ impl McpServer {
                             {
                                 pending_cancellations.insert(key);
                             }
+                        }
                         continue;
                     }
                     if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
@@ -455,33 +500,6 @@ impl McpServer {
         }
     }
 
-    /// Process a single raw JSON-RPC line and write the response.
-    /// Used to replay a peeked `initialize` message that was consumed before
-    /// the server's main loop started.
-    pub async fn handle_and_write(
-        &self,
-        line: &str,
-        transport: &mut impl crate::mcp::transport::McpTransport,
-    ) -> Result<()> {
-        let parsed: std::result::Result<crate::mcp::transport::JsonRpcRequest, _> =
-            serde_json::from_str(line);
-        let response = match parsed {
-            Ok(request) => Box::pin(self.handle_request(&request)).await,
-            Err(e) => Some(crate::mcp::transport::JsonRpcResponse::error(
-                Value::Null,
-                crate::mcp::transport::ErrorCode::ParseError,
-                format!("failed to parse JSON-RPC request: {e}"),
-            )),
-        };
-        if let Some(resp) = response {
-            let mut json_str = serialize_response_line(&resp);
-            json_str.push('\n');
-            transport.write_line(&json_str).await?;
-            transport.flush().await?;
-        }
-        Ok(())
-    }
-
     /// Runs the server, reading JSON-RPC requests from stdin and writing
     /// responses to stdout. Runs until stdin is closed or a shutdown signal
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
@@ -550,11 +568,7 @@ impl McpServer {
                 .expect("failed to register SIGTERM handler")
         });
 
-        let mut connection_route =
-            self.new_connection_route_state()
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("MCP connection identity unavailable: {error}"),
-                })?;
+        let mut connection_route = self.new_connection_route_state()?;
         let mut pending_lines = VecDeque::new();
         let mut pending_cancellations = HashSet::new();
 
@@ -618,20 +632,6 @@ impl McpServer {
                 let tool_name = request.params.as_ref()?.get("name")?.as_str()?.to_owned();
                 Some((id, tool_name))
             });
-            let project_tool_call = parsed
-                .as_ref()
-                .is_ok_and(|request| request.method == "tools/call")
-                && self.project_server_live.is_some();
-            let project_request_guard = if project_tool_call {
-                Some(self.project_server_lifecycle.response_gate().read().await)
-            } else {
-                None
-            };
-            let project_request_admitted = project_request_guard.is_none()
-                || !self
-                    .project_server_lifecycle
-                    .response_revoked()
-                    .is_cancelled();
             let request_activity =
                 request_lifecycle.and_then(crate::daemon::DaemonLifecycle::try_enter);
             let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
@@ -648,33 +648,9 @@ impl McpServer {
                         )
                     })
                 })
-            } else if !project_request_admitted {
-                revocable_tool_call.as_ref().map(|(id, tool_name)| {
-                    JsonRpcResponse::error_with_data(
-                        id.clone(),
-                        ErrorCode::InternalError,
-                        "tool project route failed: project server was retired".to_owned(),
-                        Some(serde_json::json!({
-                            "tool": tool_name,
-                            "reason_code": "project_server_retired",
-                            "retryable": true,
-                            "detail": "the retained project server was replaced or revoked; retry against the current owner",
-                        })),
-                    )
-                })
             } else {
                 match parsed {
                     Ok(request) => {
-                        if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
-                            && self.initialize_root_routing_enabled.load(Ordering::Relaxed)
-                        {
-                            connection_route
-                                .observe_initialize(
-                                    request.params.as_ref(),
-                                    self.registry_db.as_deref(),
-                                )
-                                .await;
-                        }
                         let cancellable_tool_call = request.method == "tools/call"
                             && request
                                 .params
@@ -707,12 +683,7 @@ impl McpServer {
                                 }
                             };
                             tokio::pin!(external_shutdown_requested);
-                            let shutdown_requested = async {
-                                tokio::select! {
-                                    () = &mut external_shutdown_requested => {}
-                                    () = self.project_server_lifecycle.request_abort().cancelled() => {}
-                                }
-                            };
+                            let shutdown_requested = external_shutdown_requested;
                             tokio::pin!(shutdown_requested);
                             let (response, closed) = self
                                 .handle_cancellable_application_request(
@@ -752,12 +723,7 @@ impl McpServer {
                                 }
                             };
                             tokio::pin!(external_shutdown_requested);
-                            let shutdown_requested = async {
-                                tokio::select! {
-                                    () = &mut external_shutdown_requested => {}
-                                    () = self.project_server_lifecycle.request_abort().cancelled() => {}
-                                }
-                            };
+                            let shutdown_requested = external_shutdown_requested;
                             tokio::pin!(shutdown_requested);
                             let (response, closed) = self
                                 .handle_non_cancellable_application_request(
@@ -781,13 +747,16 @@ impl McpServer {
                 }
             };
 
+            let selected_response_lease = connection_route.take_selected_response_lease();
+
             if peer_closed {
-                drop(project_request_guard);
                 drop(request_activity);
                 break;
             }
 
-            let revocable_response = project_tool_call && !project_request_admitted;
+            let response_revoked = selected_response_lease
+                .as_ref()
+                .map(crate::mcp::server::routing::SelectedProjectResponseLease::revoked);
 
             // Drain and write any pending notifications (e.g., version warnings).
             {
@@ -801,7 +770,7 @@ impl McpServer {
                             .write_response_line_or_revoke(
                                 transport,
                                 &format!("{s}\n"),
-                                revocable_response,
+                                response_revoked,
                             )
                             .await
                         {
@@ -826,7 +795,7 @@ impl McpServer {
                 let json_line = serialize_response_line(&resp);
                 let output = format!("{json_line}\n");
                 match self
-                    .write_response_line_or_revoke(transport, &output, revocable_response)
+                    .write_response_line_or_revoke(transport, &output, response_revoked)
                     .await
                 {
                     Ok(true) => {}
@@ -844,7 +813,7 @@ impl McpServer {
                     }
                 }
             }
-            drop(project_request_guard);
+            drop(selected_response_lease);
             drop(request_activity);
             if rejecting_for_drain
                 || request_lifecycle.is_some_and(|lifecycle| !lifecycle.accepting())
@@ -1176,6 +1145,45 @@ impl McpServer {
 mod cancellable_queue_tests {
     use super::*;
 
+    struct ObservedTransport {
+        inner: crate::mcp::transport::ChannelTransport,
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::mcp::transport::McpTransport for ObservedTransport {
+        async fn read_line(&mut self) -> std::io::Result<Option<String>> {
+            let line = self.inner.read_line().await?;
+            if line.is_some() {
+                self.reads.fetch_add(1, Ordering::Release);
+            }
+            Ok(line)
+        }
+
+        async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
+            self.inner.write_line(line).await
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush().await
+        }
+
+        fn peer_fully_closed_after_eof(
+            &self,
+        ) -> impl std::future::Future<Output = ()> + Send + 'static {
+            self.inner.peer_fully_closed_after_eof()
+        }
+    }
+
+    async fn wait_for_transport_reads(reads: &std::sync::atomic::AtomicUsize, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while reads.load(Ordering::Acquire) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("transport did not consume the expected request lines");
+    }
+
     #[test]
     fn queued_request_cancellation_is_type_preserving() {
         let pending = VecDeque::from([
@@ -1205,6 +1213,149 @@ mod cancellable_queue_tests {
         assert!(
             queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_route_resolution_reaches_selected_live_target() {
+        let isolation = tempfile::TempDir::new().expect("route cancellation isolation");
+        let active_root = isolation.path().join("active");
+        let target_root = isolation.path().join("target");
+        for root in [&active_root, &target_root] {
+            std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
+            std::fs::write(root.join("src/lib.rs"), "pub fn route_fixture() {}\n")
+                .expect("fixture source");
+            super::super::writer_test_support::git(root, &["init", "-q", "-b", "main"]);
+            super::super::writer_test_support::git(
+                root,
+                &["config", "user.email", "route@test.invalid"],
+            );
+            super::super::writer_test_support::git(root, &["config", "user.name", "Route Test"]);
+            super::super::writer_test_support::git(root, &["add", "."]);
+            super::super::writer_test_support::git(root, &["commit", "-q", "-m", "fixture"]);
+        }
+        let harness = crate::daemon::ProductionProjectCompositionHarnessV1::open(
+            isolation.path(),
+            [active_root.clone(), target_root.clone()],
+        )
+        .await
+        .expect("production route composition");
+        let mounted_active = harness.server(&active_root).expect("mounted active server");
+        let target = harness.server(&target_root).expect("mounted target server");
+        let target_project_id = target
+            .cg_snapshot()
+            .await
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("target project identity");
+
+        let route_entered = Arc::new(tokio::sync::Notify::new());
+        let release_route = Arc::new(tokio::sync::Notify::new());
+        let resolver_target = Arc::clone(&target);
+        let resolver_entered = Arc::clone(&route_entered);
+        let resolver_release = Arc::clone(&release_route);
+        let resolver: super::super::RetainedProjectServerResolver = Arc::new(move |_request| {
+            let target = Arc::clone(&resolver_target);
+            let entered = Arc::clone(&resolver_entered);
+            let release = Arc::clone(&resolver_release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Ok(Some(target))
+            })
+        });
+        let context = super::super::McpServerConstructionContext::direct(
+            mounted_active.cg_snapshot().await,
+            None,
+        )
+        .with_direct_databases(
+            mounted_active.global_db.clone(),
+            mounted_active.registry_db.clone(),
+            mounted_active.session_db.clone(),
+            mounted_active.user_session_db.clone(),
+        )
+        .with_retained_project_server_resolver(resolver);
+        let caller = super::super::McpServer::new_with_context(context).await;
+        let (inner_transport, sender, mut responses) =
+            crate::mcp::transport::ChannelTransport::new();
+        let transport_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut transport = ObservedTransport {
+            inner: inner_transport,
+            reads: Arc::clone(&transport_reads),
+        };
+        let serving = tokio::spawn({
+            let caller = Arc::clone(&caller);
+            async move { caller.run_connection(&mut transport).await }
+        });
+
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 41,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "tracedecay_fact_store_search",
+                        "arguments": {
+                            "query": "route cancellation",
+                            "project_selector": {"project_id": target_project_id}
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .expect("send selected request");
+        route_entered.notified().await;
+        sender
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": 41, "reason": "route still resolving"}
+                })
+                .to_string(),
+            )
+            .expect("cancel selected request during route resolution");
+        wait_for_transport_reads(&transport_reads, 2).await;
+
+        // The connection's original server may retire while the route is
+        // unresolved. It must not reject or authorize the selected target.
+        caller.project_server_response_lifecycle().revoke();
+        release_route.notify_one();
+
+        let response_line =
+            tokio::time::timeout(std::time::Duration::from_secs(5), responses.recv())
+                .await
+                .expect("selected cancellation response timeout")
+                .expect("selected cancellation response");
+        let response: Value =
+            serde_json::from_str(response_line.trim()).expect("selected cancellation JSON");
+        assert_eq!(response["id"], serde_json::json!(41));
+        assert_eq!(
+            response["error"]["data"]["reason_code"],
+            serde_json::json!("tool_dispatch_cancelled"),
+            "cancellation captured before registration must reach selected target: {response}"
+        );
+        assert_eq!(
+            caller.stats.total_requests.load(Ordering::Relaxed),
+            0,
+            "caller must not account a request owned by the selected target"
+        );
+        assert_eq!(
+            target.stats.total_requests.load(Ordering::Relaxed),
+            1,
+            "selected target must own request/error accounting"
+        );
+        assert_eq!(target.stats.errors.load(Ordering::Relaxed), 1);
+
+        drop(sender);
+        tokio::time::timeout(std::time::Duration::from_secs(5), serving)
+            .await
+            .expect("selected cancellation connection close timeout")
+            .expect("join selected cancellation connection")
+            .expect("serve selected cancellation connection");
+        harness.shutdown().await;
     }
 }
 

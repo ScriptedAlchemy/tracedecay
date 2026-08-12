@@ -23,6 +23,92 @@ use crate::mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 use super::{ConnectionRouteState, McpServer};
 
+/// Per-RMCP-connection handoff from handler completion to the transport write.
+///
+/// A selected project response owns a read lease from its exact target server.
+/// `rmcp` separates handler completion from response serialization, so the
+/// lease must cross that gap keyed by the JSON-RPC request id. The transport
+/// removes it exactly once when it sends or suppresses the response.
+#[derive(Clone, Default)]
+pub(crate) struct RmcpSelectedProjectResponseAuthority {
+    leases: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, super::routing::SelectedProjectResponseLease>,
+        >,
+    >,
+}
+
+impl RmcpSelectedProjectResponseAuthority {
+    fn request_key(id: &Value) -> crate::errors::Result<String> {
+        if id.is_null() {
+            return Err(crate::errors::TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                "selected RMCP response has no request identity",
+            ));
+        }
+        serde_json::to_string(id).map_err(|error| {
+            crate::errors::TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                format!("selected RMCP response identity is invalid: {error}"),
+            )
+        })
+    }
+
+    pub(crate) fn retain(
+        &self,
+        id: &Value,
+        lease: super::routing::SelectedProjectResponseLease,
+    ) -> crate::errors::Result<()> {
+        let key = Self::request_key(id)?;
+        let mut leases = self.leases.lock().map_err(|_| {
+            crate::errors::TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                "selected RMCP response authority is poisoned during handler handoff",
+            )
+        })?;
+        if leases.contains_key(&key) {
+            return Err(crate::errors::TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                "selected RMCP response identity is already awaiting transport delivery",
+            ));
+        }
+        leases.insert(key, lease);
+        Ok(())
+    }
+
+    pub(crate) fn take(
+        &self,
+        id: Option<&Value>,
+    ) -> crate::errors::Result<Option<super::routing::SelectedProjectResponseLease>> {
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        // JSON-RPC error responses may legitimately carry `id: null` when no
+        // request identity could be recovered. They cannot correspond to a
+        // retained selected-project lease, so leave them deliverable through
+        // the ordinary connection lifecycle rather than fabricating a route
+        // authority failure.
+        if id.is_null() {
+            return Ok(None);
+        }
+        let key = Self::request_key(id)?;
+        self.leases
+            .lock()
+            .map_err(|_| {
+                crate::errors::TraceDecayError::project_route(
+                    "project_route_unavailable",
+                    true,
+                    "selected RMCP response authority is poisoned during transport delivery",
+                )
+            })
+            .map(|mut leases| leases.remove(&key))
+    }
+}
+
 /// Allows daemon routing to enrich the legacy `initialize` response without
 /// coupling this MCP module to daemon route types.
 pub(crate) type RmcpInitializeResponseDecorator =
@@ -154,6 +240,7 @@ pub(crate) struct RmcpConnectionAdapter {
     connection: Mutex<ConnectionRouteState>,
     memory_request_scope: String,
     timings_enabled: bool,
+    selected_project_responses: RmcpSelectedProjectResponseAuthority,
     initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
     /// The accepted connection's admission slot, captured on the connection task.
     ///
@@ -169,7 +256,7 @@ impl RmcpConnectionAdapter {
         server: Arc<McpServer>,
         timings_enabled: bool,
         initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
-    ) -> Result<Self, crate::request_identity::RequestIdentityError> {
+    ) -> crate::errors::Result<Self> {
         let connection = server.new_connection_route_state()?;
         let memory_request_scope = connection.memory_request_scope().to_owned();
         Ok(Self {
@@ -177,6 +264,7 @@ impl RmcpConnectionAdapter {
             connection: Mutex::new(connection),
             memory_request_scope,
             timings_enabled,
+            selected_project_responses: RmcpSelectedProjectResponseAuthority::default(),
             initialize_response_decorator,
             admission: crate::daemon::current_connection_admission(),
         })
@@ -187,6 +275,10 @@ impl RmcpConnectionAdapter {
             self.server.delivery_settlement_recorder.clone(),
             self.memory_request_scope.clone(),
         )
+    }
+
+    pub(crate) fn selected_project_responses(&self) -> RmcpSelectedProjectResponseAuthority {
+        self.selected_project_responses.clone()
     }
 
     async fn dispatch(
@@ -210,27 +302,6 @@ impl RmcpConnectionAdapter {
     ) -> Result<JsonRpcResponse, ErrorData> {
         let request_id = context.id;
         let request_cancellation = context.ct;
-        let project_tool_call = method == "tools/call" && self.server.project_server_live.is_some();
-        let _response_guard = if project_tool_call {
-            let response_gate = self.server.project_server_lifecycle.response_gate();
-            Some(tokio::select! {
-                guard = response_gate.read() => guard,
-                () = request_cancellation.cancelled() => {
-                    return Err(request_cancelled_error());
-                }
-            })
-        } else {
-            None
-        };
-        if project_tool_call
-            && self
-                .server
-                .project_server_lifecycle
-                .response_revoked()
-                .is_cancelled()
-        {
-            return Err(project_server_retired_error());
-        }
         let id = serde_json::to_value(request_id)
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         let request = JsonRpcRequest {
@@ -267,14 +338,25 @@ impl RmcpConnectionAdapter {
             .await
         }
         .ok_or_else(|| ErrorData::internal_error("MCP request did not produce a response", None))?;
-        if project_tool_call
-            && self
-                .server
-                .project_server_lifecycle
-                .response_revoked()
-                .is_cancelled()
+        let selected_response_lease = connection.take_selected_response_lease();
+        if selected_response_lease
+            .as_ref()
+            .is_some_and(crate::mcp::server::routing::SelectedProjectResponseLease::is_revoked)
         {
             return Err(project_server_retired_error());
+        }
+        if let Some(selected_response_lease) = selected_response_lease {
+            self.selected_project_responses
+                .retain(&id, selected_response_lease)
+                .map_err(|error| {
+                    ErrorData::internal_error(
+                        error.to_string(),
+                        Some(json!({
+                            "reason_code": "project_route_unavailable",
+                            "retryable": true,
+                        })),
+                    )
+                })?;
         }
         Ok(response)
     }
@@ -415,16 +497,6 @@ fn project_server_retired_error() -> ErrorData {
             "reason_code": "project_server_retired",
             "retryable": true,
             "detail": "the retained project server was replaced or revoked; retry against the current owner",
-        })),
-    )
-}
-
-fn request_cancelled_error() -> ErrorData {
-    ErrorData::internal_error(
-        "MCP request cancelled before project-route admission",
-        Some(json!({
-            "reason_code": "request_cancelled",
-            "retryable": false,
         })),
     )
 }

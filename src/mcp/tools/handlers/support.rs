@@ -4,7 +4,7 @@
 //! argument normalization, scope filtering, and registered-project selection.
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -16,7 +16,7 @@ use tokio::sync::Semaphore;
 use super::super::ToolResult;
 use super::super::render;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{CodeProjectRecord, ProjectRegistryContext, RegisteredGlobalDb};
+use crate::global_db::{ProjectRegistryContext, RegisteredGlobalDb};
 
 const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
 static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
@@ -290,14 +290,7 @@ pub(crate) fn decode_primitive_request<T: DeserializeOwned>(
     require_object_args(args, tool_name)?;
     let mut request = args.clone();
     if let Some(object) = request.as_object_mut() {
-        for key in [
-            "format",
-            "__mcp_request_id",
-            "project_selector",
-            "project_id",
-            "project_path",
-            "project_root",
-        ] {
+        for key in ["format", "__mcp_request_id", "project_selector"] {
             object.remove(key);
         }
     }
@@ -441,215 +434,63 @@ mod bounded_search_tests {
     }
 }
 
-pub(super) fn profile_root_for_global_db(
-    global_db: Option<&RegisteredGlobalDb>,
-) -> Result<PathBuf> {
-    if let Some(global_db) = global_db {
-        return global_db
-            .db_path()
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "could not resolve tracedecay profile root".to_string(),
-            });
-    }
-    Err(TraceDecayError::Config {
-        message: "client project registry is unavailable for selector resolution".to_string(),
-    })
+fn invalid_registered_project_selector(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("project_route_invalid_selector", false, detail.into())
 }
 
-pub(super) fn project_selector_present(args: &Value, top_level_path_keys: &[&str]) -> bool {
-    args.get("project_selector").is_some()
-        || args.get("project_id").is_some()
-        || top_level_path_keys
-            .iter()
-            .any(|key| args.get(*key).is_some())
-}
-
-pub(super) async fn project_registry_context(
+pub(super) async fn registered_project_context(
     args: &Value,
-    top_level_path_keys: &[&str],
+    semantic_top_level_fields: &[&str],
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<Option<ProjectRegistryContext>> {
-    let selector_present = project_selector_present(args, top_level_path_keys);
-    let selector = args
-        .get("project_selector")
-        .map(|value| {
-            value.as_object().ok_or_else(|| TraceDecayError::Config {
-                message: "project_selector must be an object".to_string(),
-            })
-        })
-        .transpose()?;
-    let project_id = selector
-        .and_then(|selector| selector.get("project_id"))
-        .or_else(|| args.get("project_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let project_path = selector
-        .and_then(|selector| {
-            selector
-                .get("path")
-                .or_else(|| selector.get("project_path"))
-        })
-        .or_else(|| top_level_path_keys.iter().find_map(|key| args.get(*key)))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if project_id.is_none() && project_path.is_none() {
-        if selector_present {
-            return Err(TraceDecayError::Config {
-                message: "project selector must include project_id or project_path".to_string(),
-            });
-        }
+    if let Some(alias) = ["project_id", "project_path", "project_root", "root"]
+        .into_iter()
+        .find(|key| !semantic_top_level_fields.contains(key) && args.get(*key).is_some())
+    {
+        return Err(invalid_registered_project_selector(format!(
+            "top-level `{alias}` is not a registered-project selector; use project_selector.project_id"
+        )));
+    }
+    let Some(selector_value) = args.get("project_selector") else {
         return Ok(None);
-    }
-
-    let db = match global_db {
-        Some(db) => db,
-        None => {
-            return Err(TraceDecayError::Config {
-                message: "client project registry is unavailable for selector resolution"
-                    .to_string(),
-            });
-        }
     };
-    match resolve_project_registry_context(db, project_id, project_path).await? {
-        ProjectSelectorResolution::Resolved(context) => Ok(Some(context)),
-        ProjectSelectorResolution::Unresolved => {
-            Err(unresolved_project_selector_error(project_id, project_path))
-        }
-        ProjectSelectorResolution::Ambiguous { candidates } => Err(
-            ambiguous_project_selector_error(project_id, project_path, &candidates),
-        ),
+    let selector = selector_value
+        .as_object()
+        .ok_or_else(|| invalid_registered_project_selector("project_selector must be an object"))?;
+    if selector.len() != 1 || !selector.contains_key("project_id") {
+        return Err(invalid_registered_project_selector(
+            "project_selector accepts only project_id",
+        ));
     }
-}
-
-/// The three outcomes a project selector can have. "No single registered
-/// project" is not one state: a selector that matches several registered
-/// projects is ambiguous and must say so, because reporting it as unresolved
-/// sends the caller looking for a registration that already exists.
-enum ProjectSelectorResolution {
-    Resolved(ProjectRegistryContext),
-    Unresolved,
-    Ambiguous { candidates: Vec<String> },
-}
-
-impl From<Option<ProjectRegistryContext>> for ProjectSelectorResolution {
-    fn from(context: Option<ProjectRegistryContext>) -> Self {
-        context.map_or(Self::Unresolved, Self::Resolved)
-    }
-}
-
-async fn resolve_project_registry_context(
-    db: &RegisteredGlobalDb,
-    project_id: Option<&str>,
-    project_path: Option<&str>,
-) -> Result<ProjectSelectorResolution> {
-    if let Some(project_id) = project_id {
-        return Ok(db.project_registry_context_by_id(project_id).await?.into());
-    }
-    let Some(project_path) = project_path else {
-        return Ok(ProjectSelectorResolution::Unresolved);
-    };
-    let selector_path = Path::new(project_path);
-    if let Some(store) = db
-        .try_resolve_project_store_record_by_alias(selector_path)
+    let project_id = selector
+        .get("project_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            invalid_registered_project_selector(
+                "project_selector.project_id must be a non-empty string",
+            )
+        })?;
+    let db = global_db.ok_or_else(|| {
+        TraceDecayError::project_route(
+            "project_route_not_authorized",
+            false,
+            "client project registry is unavailable for selector resolution",
+        )
+    })?;
+    db.project_registry_context_by_id(project_id)
         .await?
-    {
-        // A store-instance alias hit still names a root that several
-        // registered projects may claim; picking the store's project here
-        // would serve an arbitrary claimant, so this resolution path keeps
-        // the same sole-claimant guard as the project-alias paths below.
-        return match db.project_registry_context_by_id(&store.project_id).await? {
-            Some(context) => sole_claimant_of_its_root(db, context).await,
-            None => Ok(ProjectSelectorResolution::Unresolved),
-        };
-    }
-    if is_explicit_project_path_selector(project_path) {
-        // A registered project needs no registered *store instance* row to be
-        // selectable: its registry identity is what names the project. Resolve
-        // the project itself so a project registered before its store instance
-        // was recorded still selects, instead of reporting an unregistered
-        // project.
-        if let Some(context) = db.project_registry_context_by_alias(selector_path).await? {
-            return sole_claimant_of_its_root(db, context).await;
-        }
-        let git_common_dir = crate::worktree::git_common_dir(selector_path);
-        if let Some(context) = db
-            .project_registry_context_by_identity(selector_path, git_common_dir.as_deref())
-            .await?
-        {
-            return sole_claimant_of_its_root(db, context).await;
-        }
-        let canonical_path = selector_path
-            .canonicalize()
-            .unwrap_or_else(|_| selector_path.to_path_buf());
-        for parent in canonical_path.ancestors().skip(1) {
-            if let Some(context) = db.project_registry_context_by_alias(parent).await? {
-                return sole_claimant_of_its_root(db, context).await;
-            }
-        }
-    }
-    let Some(basename) = bare_project_name(project_path) else {
-        return Ok(ProjectSelectorResolution::Unresolved);
-    };
-    unique_project_basename_context(db, basename).await
-}
-
-/// Keeps a path-resolved context only while one registered project claims its
-/// canonical root.
-///
-/// A path maps to exactly one row in the alias table, so registering a second
-/// project at the same root silently rebinds that path. Serving whichever
-/// project the alias last named would answer for an arbitrary one, so a root
-/// several projects claim is reported as ambiguous instead.
-async fn sole_claimant_of_its_root(
-    db: &RegisteredGlobalDb,
-    context: ProjectRegistryContext,
-) -> Result<ProjectSelectorResolution> {
-    let canonical_root = context.project.canonical_root.clone();
-    let mut claimants = Vec::new();
-    for project in db
-        .try_search_code_projects(&canonical_root, usize::MAX)
-        .await?
-    {
-        if project.canonical_root == canonical_root && !claimants.contains(&project.project_id) {
-            claimants.push(project.project_id);
-        }
-    }
-    if claimants.len() > 1 {
-        claimants.sort();
-        return Ok(ProjectSelectorResolution::Ambiguous {
-            candidates: claimants,
-        });
-    }
-    Ok(ProjectSelectorResolution::Resolved(context))
-}
-
-async fn unique_project_basename_context(
-    db: &RegisteredGlobalDb,
-    basename: &str,
-) -> Result<ProjectSelectorResolution> {
-    let mut matching_ids = Vec::new();
-    for project in db.try_search_code_projects(basename, usize::MAX).await? {
-        if !project_basename_matches(&project, basename)
-            || matching_ids.contains(&project.project_id)
-        {
-            continue;
-        }
-        matching_ids.push(project.project_id);
-    }
-    if matching_ids.len() > 1 {
-        matching_ids.sort();
-        return Ok(ProjectSelectorResolution::Ambiguous {
-            candidates: matching_ids,
-        });
-    }
-    let Some(project_id) = matching_ids.into_iter().next() else {
-        return Ok(ProjectSelectorResolution::Unresolved);
-    };
-    Ok(db.project_registry_context_by_id(&project_id).await?.into())
+        .map(Some)
+        .ok_or_else(|| {
+            TraceDecayError::project_route(
+                "project_route_not_found",
+                false,
+                format!(
+                    "registered project not found for project_selector.project_id={project_id}; run tracedecay_project_search"
+                ),
+            )
+        })
 }
 
 /// Whether a selector names a path rather than a bare project name. This is
@@ -663,65 +504,6 @@ pub(super) fn is_explicit_project_path_selector(selector: &str) -> bool {
             || selector == ".."
             || selector.contains('/')
             || selector.contains('\\'))
-}
-
-fn bare_project_name(value: &str) -> Option<&str> {
-    let mut components = Path::new(value).components();
-    let first = components.next()?;
-    if components.next().is_some() {
-        return None;
-    }
-    match first {
-        Component::Normal(name) => name.to_str().filter(|name| !name.is_empty()),
-        _ => None,
-    }
-}
-
-fn project_basename_matches(project: &CodeProjectRecord, basename: &str) -> bool {
-    [
-        project.display_root.as_str(),
-        project.canonical_root.as_str(),
-    ]
-    .into_iter()
-    .filter_map(|root| Path::new(root).file_name())
-    .any(|name| name == basename)
-}
-
-fn selector_label(project_id: Option<&str>, project_path: Option<&str>) -> String {
-    project_id
-        .map(|value| format!("project_id={value}"))
-        .or_else(|| project_path.map(|value| format!("project_path={value}")))
-        .unwrap_or_else(|| "empty selector".to_string())
-}
-
-fn unresolved_project_selector_error(
-    project_id: Option<&str>,
-    project_path: Option<&str>,
-) -> TraceDecayError {
-    let selector = selector_label(project_id, project_path);
-    TraceDecayError::Config {
-        message: format!(
-            "registered project not found for selector ({selector}); run tracedecay_project_search to find the registered project_id or full project_path"
-        ),
-    }
-}
-
-/// An ambiguous selector still resolved no single project, so it keeps the
-/// unresolved wording callers and hosts match on, and adds which registrations
-/// collided so the caller can disambiguate instead of re-searching.
-fn ambiguous_project_selector_error(
-    project_id: Option<&str>,
-    project_path: Option<&str>,
-    candidates: &[String],
-) -> TraceDecayError {
-    let selector = selector_label(project_id, project_path);
-    TraceDecayError::Config {
-        message: format!(
-            "registered project not found for selector ({selector}): the selector is ambiguous across {} registered projects ({}); pass project_id or the full project_path",
-            candidates.len(),
-            candidates.join(", ")
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -829,13 +611,20 @@ mod tests {
             &json!({
                 "node_id": "function:canonical",
                 "format": "json",
-                "project_id": "project.fixture",
+                "project_selector": {"project_id": "project.fixture"},
                 "__mcp_request_id": "request.fixture",
             }),
             "tracedecay_node",
         )
         .expect("transport keys must not enter the canonical request body");
         assert_eq!(decoded.node_id, "function:canonical");
+
+        let error = decode_primitive_request::<NodeSurfaceRequestV1>(
+            &json!({"node_id": "function:canonical", "project_id": "project.legacy"}),
+            "tracedecay_node",
+        )
+        .expect_err("the top-level project id alias is not a transport key");
+        assert!(error.to_string().contains("unknown field `project_id`"));
 
         let error = decode_primitive_request::<NodeSurfaceRequestV1>(
             &json!({"id": "function:legacy"}),

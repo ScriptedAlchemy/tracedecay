@@ -506,17 +506,17 @@ impl RegisteredProject {
         self.mcp_server_retaining(Vec::new()).await
     }
 
-    /// [`Self::mcp_server`] plus graphs for projects other than this one, which
+    /// [`Self::mcp_server`] plus servers for projects other than this one, which
     /// cross-project tools reach only through the retained resolver.
     pub async fn mcp_server_retaining(
         &self,
-        retained_graphs: Vec<Arc<TraceDecay>>,
+        retained_servers: Vec<Arc<tracedecay::mcp::McpServer>>,
     ) -> Arc<tracedecay::mcp::McpServer> {
-        tracedecay::mcp::McpServer::new_with_retained_test_graphs_for_test(
+        tracedecay::mcp::McpServer::new_with_retained_test_servers_for_test(
             self.reopen().await,
             None,
             self.project_scoped_runtime(),
-            retained_graphs,
+            retained_servers,
         )
         .await
         .expect("registered test server")

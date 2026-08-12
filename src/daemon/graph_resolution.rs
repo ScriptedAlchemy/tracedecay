@@ -1,35 +1,44 @@
-//! Retained-handle project graph resolution.
+//! Retained-handle project server resolution.
 //!
-//! Resolves an already-mounted `TraceDecay` graph for a requested worktree
-//! root, rejecting ambiguous multi-graph matches instead of guessing.
+//! Resolves an already-mounted `McpServer` for a requested worktree root,
+//! rejecting ambiguous matches instead of mixing one graph with another
+//! server's query, session, application, or lifecycle authorities.
 //!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
+//! The resolver returns the selected retained server rather than reconstructing
+//! a graph-only authority from registry paths.
 
 use super::*;
 
-fn sole_mounted_graph_matching(
-    graphs: &[Arc<crate::tracedecay::TraceDecay>],
+fn sole_mounted_server_matching(
+    servers: &[(
+        Arc<crate::mcp::McpServer>,
+        Arc<crate::tracedecay::TraceDecay>,
+    )],
     predicate: impl Fn(&crate::tracedecay::TraceDecay) -> bool,
-) -> std::result::Result<Option<Arc<crate::tracedecay::TraceDecay>>, ()> {
-    let mut matches = graphs.iter().filter(|graph| predicate(graph.as_ref()));
-    let Some(graph) = matches.next() else {
+) -> std::result::Result<Option<Arc<crate::mcp::McpServer>>, ()> {
+    let mut matches = servers
+        .iter()
+        .filter(|(_, graph)| predicate(graph.as_ref()));
+    let Some((server, _)) = matches.next() else {
         return Ok(None);
     };
     if matches.next().is_some() {
         return Err(());
     }
-    Ok(Some(Arc::clone(graph)))
+    Ok(Some(Arc::clone(server)))
 }
 
-pub(super) fn retained_project_graph_resolver(
+pub(super) fn retained_project_server_resolver(
     administration: StoreAdministration,
-) -> crate::mcp::server::RetainedProjectGraphResolver {
+) -> crate::mcp::server::RetainedProjectServerResolver {
     Arc::new(move |request| {
         let administration = administration.clone();
         Box::pin(async move {
-            let graphs = administration.mounted_project_graphs().await;
+            let mounted_servers = administration.mounted_project_servers().await;
+            let mut servers = Vec::with_capacity(mounted_servers.len());
+            for server in mounted_servers {
+                servers.push((Arc::clone(&server), server.cg().await));
+            }
             let requested_root = authority::canonical_identity_path(
                 &request.requested_worktree_root,
             )
@@ -55,7 +64,7 @@ pub(super) fn retained_project_graph_resolver(
                     )
                 })?;
             let Some(owner) = request.owner.as_ref() else {
-                return sole_mounted_graph_matching(&graphs, |graph| {
+                return sole_mounted_server_matching(&servers, |graph| {
                     authority::canonical_identity_path(graph.project_root()).ok()
                         == Some(requested_root.clone())
                 })
@@ -64,16 +73,16 @@ pub(super) fn retained_project_graph_resolver(
                         "project_route_ambiguous",
                         false,
                         format!(
-                            "multiple mounted graphs claim workspace {}",
+                            "multiple mounted project servers claim workspace {}",
                             request.requested_worktree_root.display()
                         ),
                     )
                 });
             };
             let project_id = owner.project.project_id.as_str();
-            let candidates = graphs
+            let candidates = servers
                 .into_iter()
-                .filter(|graph| {
+                .filter(|(_, graph)| {
                     graph.store_layout().identity.project_id.as_deref() == Some(project_id)
                         && request
                             .requested_git_common_dir
@@ -98,27 +107,27 @@ pub(super) fn retained_project_graph_resolver(
                     == Some(root.to_path_buf())
             };
             for selected in [
-                sole_mounted_graph_matching(&candidates, |graph| {
+                sole_mounted_server_matching(&candidates, |graph| {
                     root_matches(graph, &requested_root) && branch_matches(graph)
                 }),
-                sole_mounted_graph_matching(&candidates, branch_matches),
-                sole_mounted_graph_matching(&candidates, |graph| {
+                sole_mounted_server_matching(&candidates, branch_matches),
+                sole_mounted_server_matching(&candidates, |graph| {
                     root_matches(graph, &requested_root)
                 }),
-                sole_mounted_graph_matching(&candidates, |graph| {
+                sole_mounted_server_matching(&candidates, |graph| {
                     root_matches(graph, &registered_root)
                 }),
-                sole_mounted_graph_matching(&candidates, |_| true),
+                sole_mounted_server_matching(&candidates, |_| true),
             ] {
                 match selected {
-                    Ok(Some(graph)) => return Ok(Some(graph)),
+                    Ok(Some(server)) => return Ok(Some(server)),
                     Ok(None) => {}
                     Err(()) => {
                         return Err(TraceDecayError::project_route(
                             "project_route_ambiguous",
                             false,
                             format!(
-                                "multiple mounted graphs claim registered project '{}'",
+                                "multiple mounted project servers claim registered project '{}'",
                                 owner.project.project_id
                             ),
                         ));

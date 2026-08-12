@@ -9,10 +9,10 @@ use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 
 use super::super::ToolResult;
-use super::super::binding::tool_dispatches_registered_project_reader;
+use super::super::binding::tool_accepts_registered_project_selector;
 use super::super::render;
 use super::support;
-use super::support::{project_registry_context, project_selector_present};
+use super::support::registered_project_context;
 
 pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
     support::text_tool_result(text, Vec::new())
@@ -39,84 +39,48 @@ pub(crate) const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
     "tracedecay_hook_runtime",
 ];
 
-pub(super) fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool {
-    let top_level_path_keys = if tool_name.starts_with("tracedecay_lcm_") {
-        &["project_path"][..]
-    } else {
-        &["project_path", "project_root"][..]
-    };
-    project_selector_present(args, top_level_path_keys)
+pub(super) fn rejected_tool_project_selector_present(_tool_name: &str, args: &Value) -> bool {
+    args.get("project_selector").is_some()
 }
 
-pub(crate) async fn selected_registered_project_reader(
+pub(crate) async fn resolve_registered_project_route_for_tool(
     tool_name: String,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
 ) -> Result<Option<crate::mcp::project_route::ResolvedProjectRoute>> {
-    if !tool_dispatches_registered_project_reader(&tool_name) {
+    if !tool_accepts_registered_project_selector(&tool_name) {
         return Ok(None);
     }
-    let context = boxed_send(project_registry_context(
+    let semantic_top_level_fields = match tool_name.as_str() {
+        "tracedecay_message_search" => &["project_path"][..],
+        _ => &[][..],
+    };
+    let context = boxed_send(registered_project_context(
         &args,
-        &["project_path", "project_root"],
+        semantic_top_level_fields,
         global_db,
     ));
-    let Some(context) = context.await.map_err(|error| {
-        crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error).into_error()
-    })?
-    else {
+    let Some(context) = context.await? else {
         return Ok(None);
     };
 
-    let Some(resolver) = resolver else {
-        return Err(TraceDecayError::project_route(
-            "project_route_unavailable",
-            true,
-            "registered project graph resolver is unavailable",
-        ));
-    };
-    let requested_path = args
-        .get("project_selector")
-        .and_then(Value::as_object)
-        .and_then(|selector| {
-            selector
-                .get("path")
-                .or_else(|| selector.get("project_path"))
-        })
-        .or_else(|| args.get("project_path"))
-        .or_else(|| args.get("project_root"))
-        .and_then(Value::as_str)
-        .map(Path::new)
-        .and_then(|path| {
-            crate::worktree::git_worktree_root(path).or_else(|| path.canonicalize().ok())
-        })
-        .unwrap_or_else(|| Path::new(&context.project.canonical_root).to_path_buf());
-    let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
-        context.clone(),
-        requested_path.clone(),
-    );
-    let graph = resolver(request.clone()).await?.ok_or_else(|| {
+    let database = global_db.ok_or_else(|| {
         TraceDecayError::project_route(
-            "project_route_unavailable",
-            true,
-            format!(
-                "registered project '{}' is not mounted for workspace {}",
-                context.project.project_id,
-                requested_path.display()
-            ),
+            "project_route_not_authorized",
+            false,
+            "registered project route has no authenticated profile authority",
         )
     })?;
-    let scope = crate::mcp::scope::resolve_query_scope(&context, &requested_path)
-        .map_err(|error| error.into_route_failure().into_error())?;
-    Ok(Some(crate::mcp::project_route::ResolvedProjectRoute {
-        graph,
-        owner: context,
-        requested_root: requested_path,
-        requested_git_common_dir: request.requested_git_common_dir,
-        requested_branch: request.requested_branch,
-        scope,
-    }))
+    let requested_path = context.project.canonical_root.clone();
+    crate::mcp::project_route::resolve_registered_project_route(
+        context,
+        Path::new(&requested_path),
+        database,
+        resolver,
+    )
+    .await
+    .map(Some)
 }
 
 pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {

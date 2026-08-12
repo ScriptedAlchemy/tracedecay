@@ -442,12 +442,15 @@ pub(super) struct StoreAdministration {
     retirement_reapers: Arc<MaintenanceReaperRegistry>,
 }
 
-/// A project server whose shutdown attempt has not completed cleanly yet.
-/// Retained across shutdown retries so a second pass re-drives exactly the
-/// unfinished servers instead of losing them or re-shutting clean ones.
-pub(super) struct RetainedProjectShutdownOwner {
-    pub(super) server: Arc<crate::mcp::McpServer>,
-    pub(super) status: super::shutdown_coordination::ShutdownStatus,
+/// Retry ownership for a timed-out server, or a terminal failure receipt that
+/// must remain visible without retaining the server and its daemon callbacks.
+pub(super) enum RetainedProjectShutdownOwner {
+    TimedOut {
+        server: Arc<crate::mcp::McpServer>,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 impl Default for StoreAdministration {

@@ -215,17 +215,8 @@ fn def_path_flag_tool(
 fn project_selector_properties() -> Value {
     json!({
         "project_selector": project_selector_object(
-            "Optional registered project selector. Omit to use the active project.",
-            "query",
-        ),
-        "project_id": {
-            "type": "string",
-            "description": "Convenience selector: registered project id to query instead of the active project."
-        },
-        "project_path": {
-            "type": "string",
-            "description": "Convenience selector: registered project root path or alias to query instead of the active project."
-        }
+            "Optional registered project selector. Omit to use the active project."
+        )
     })
 }
 
@@ -235,30 +226,24 @@ fn with_project_selector_properties(mut properties: Value) -> Value {
     };
     if let Some(selector_props) = project_selector_properties().as_object() {
         for (key, value) in selector_props {
-            target.insert(key.clone(), value.clone());
+            target.entry(key.clone()).or_insert_with(|| value.clone());
         }
     }
     properties
 }
 
-fn project_selector_object(description: &str, verb: &str) -> Value {
+fn project_selector_object(description: &str) -> Value {
     json!({
         "type": "object",
         "description": description,
         "properties": {
             "project_id": {
                 "type": "string",
-                "description": format!("Registered project id to {verb}.")
-            },
-            "path": {
-                "type": "string",
-                "description": format!("Registered project root path or alias to {verb}.")
-            },
-            "project_path": {
-                "type": "string",
-                "description": "Alias for path."
+                "description": "Registered project id to query."
             }
-        }
+        },
+        "required": ["project_id"],
+        "additionalProperties": false
     })
 }
 

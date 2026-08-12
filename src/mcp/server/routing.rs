@@ -6,7 +6,37 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::global_db::RegisteredGlobalDb;
-use crate::mcp::project_route::HookProjectRouteCache;
+use crate::mcp::project_route::{
+    HookProjectRouteCache, ProjectRouteFailure, ProjectRouteFailureKind, WorkspaceProjectRoute,
+};
+
+/// Exact selected-project response authority retained until the transport has
+/// emitted (or refused) the response. This is runtime lifecycle state, never a
+/// wire contract or a second routing identity.
+pub(crate) struct SelectedProjectResponseLease {
+    _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    revoked: tracedecay_usecases::context::CancellationToken,
+}
+
+impl SelectedProjectResponseLease {
+    pub(crate) fn new(
+        guard: tokio::sync::OwnedRwLockReadGuard<()>,
+        revoked: tracedecay_usecases::context::CancellationToken,
+    ) -> Self {
+        Self {
+            _guard: guard,
+            revoked,
+        }
+    }
+
+    pub(crate) fn revoked(&self) -> &tracedecay_usecases::context::CancellationToken {
+        &self.revoked
+    }
+
+    pub(crate) fn is_revoked(&self) -> bool {
+        self.revoked.is_cancelled()
+    }
+}
 
 /// Per-connection routing and identity context, constructed once per client
 /// connection (or per initialize-replay dispatch) and threaded through
@@ -14,21 +44,25 @@ use crate::mcp::project_route::HookProjectRouteCache;
 /// persisted application request correlation and cancellation scoped to the
 /// exact client connection.
 pub(crate) struct ConnectionRouteState {
-    implicit_project_path: Option<PathBuf>,
+    initialize_route: Option<WorkspaceProjectRoute>,
     /// Connection-scoped prefix (`{mcp_instance_id}-c{seq}`) that widens
     /// client-chosen, connection-local envelope ids into store-unique
     /// application request identities.
     memory_request_scope: String,
     /// Hook workspace routing cache, refreshed per request.
     pub(crate) route_cache: HookProjectRouteCache,
+    selected_response_lease: Option<SelectedProjectResponseLease>,
+    selected_request_server: Option<std::sync::Arc<super::McpServer>>,
 }
 
 impl ConnectionRouteState {
     pub(crate) fn new(memory_request_scope: String, route_cache: HookProjectRouteCache) -> Self {
         Self {
-            implicit_project_path: None,
+            initialize_route: None,
             memory_request_scope,
             route_cache,
+            selected_response_lease: None,
+            selected_request_server: None,
         }
     }
 
@@ -36,21 +70,167 @@ impl ConnectionRouteState {
         &mut self,
         params: Option<&Value>,
         registry_db: Option<&RegisteredGlobalDb>,
+        resolver: Option<super::RetainedProjectServerResolver>,
     ) {
-        self.implicit_project_path =
-            resolve_initialize_roots_project_path(params, registry_db).await;
+        self.initialize_route =
+            resolve_initialize_roots_project_route(params, registry_db, resolver).await;
     }
 
-    pub(crate) fn implicit_project_path(&self) -> Option<&Path> {
-        self.implicit_project_path.as_deref()
+    pub(crate) fn initialize_route(&self) -> Option<&WorkspaceProjectRoute> {
+        self.initialize_route.as_ref()
     }
 
     pub(crate) fn memory_request_scope(&self) -> &str {
         &self.memory_request_scope
     }
+
+    pub(crate) fn install_selected_response_lease(&mut self, lease: SelectedProjectResponseLease) {
+        self.selected_response_lease = Some(lease);
+    }
+
+    pub(crate) fn take_selected_response_lease(&mut self) -> Option<SelectedProjectResponseLease> {
+        self.selected_response_lease.take()
+    }
+
+    pub(crate) fn clear_selected_response_lease(&mut self) {
+        self.selected_response_lease = None;
+    }
+
+    pub(crate) fn install_selected_request_server(
+        &mut self,
+        server: std::sync::Arc<super::McpServer>,
+    ) {
+        self.selected_request_server = Some(server);
+    }
+
+    pub(crate) fn take_selected_request_server(
+        &mut self,
+    ) -> Option<std::sync::Arc<super::McpServer>> {
+        self.selected_request_server.take()
+    }
+
+    pub(crate) fn clear_selected_request_server(&mut self) {
+        self.selected_request_server = None;
+    }
 }
 
-pub(crate) async fn resolve_initialize_roots_project_path(
+async fn resolve_initialize_roots_project_route(
+    params: Option<&Value>,
+    registry_db: Option<&RegisteredGlobalDb>,
+    resolver: Option<super::RetainedProjectServerResolver>,
+) -> Option<WorkspaceProjectRoute> {
+    let roots = initialize_root_paths(params);
+    if roots.is_empty() {
+        return None;
+    }
+    for root in roots {
+        let route = resolve_private_project_route(&root, registry_db, resolver.clone()).await;
+        if !matches!(
+            &route,
+            WorkspaceProjectRoute::Failed(ProjectRouteFailure {
+                kind: ProjectRouteFailureKind::NotFound,
+                ..
+            })
+        ) {
+            return Some(route);
+        }
+    }
+    Some(WorkspaceProjectRoute::Failed(ProjectRouteFailure {
+        kind: ProjectRouteFailureKind::NotFound,
+        detail: "initialize roots did not resolve to a registered project".to_owned(),
+    }))
+}
+
+pub(crate) async fn resolve_private_project_route(
+    requested_path: &Path,
+    registry_db: Option<&RegisteredGlobalDb>,
+    resolver: Option<super::RetainedProjectServerResolver>,
+) -> WorkspaceProjectRoute {
+    let Some(registry_db) = registry_db else {
+        return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
+            kind: ProjectRouteFailureKind::NotAuthorized,
+            detail: "private project route has no project registry authority".to_owned(),
+        });
+    };
+    let selected_path =
+        match resolve_initialize_root_project_path(requested_path, registry_db).await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
+                    kind: ProjectRouteFailureKind::NotFound,
+                    detail: format!(
+                        "workspace {} did not resolve to a registered project",
+                        requested_path.display()
+                    ),
+                });
+            }
+            Err(InitializeRootResolutionError::AmbiguousIdentity) => {
+                return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
+                    kind: ProjectRouteFailureKind::Ambiguous,
+                    detail: format!(
+                        "workspace {} matches multiple registered projects",
+                        requested_path.display()
+                    ),
+                });
+            }
+            Err(InitializeRootResolutionError::AuthorityUnavailable) => {
+                return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
+                    kind: ProjectRouteFailureKind::Unavailable,
+                    detail: "private project route authority is unavailable".to_owned(),
+                });
+            }
+        };
+    let context = match registry_db
+        .project_registry_context_by_alias(&selected_path)
+        .await
+    {
+        Ok(Some(context)) => Some(context),
+        Ok(None) => {
+            let git_common_dir = crate::worktree::git_common_dir(&selected_path);
+            match registry_db
+                .project_registry_context_by_identity(&selected_path, git_common_dir.as_deref())
+                .await
+            {
+                Ok(context) => context,
+                Err(error) => {
+                    return WorkspaceProjectRoute::Failed(
+                        ProjectRouteFailure::from_selection_error(&error),
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            return WorkspaceProjectRoute::Failed(ProjectRouteFailure::from_selection_error(
+                &error,
+            ));
+        }
+    };
+    let Some(context) = context else {
+        return WorkspaceProjectRoute::Failed(ProjectRouteFailure {
+            kind: ProjectRouteFailureKind::NotFound,
+            detail: format!(
+                "workspace {} lost its registered project identity",
+                selected_path.display()
+            ),
+        });
+    };
+    match crate::mcp::project_route::resolve_registered_project_route(
+        context,
+        &selected_path,
+        registry_db,
+        resolver,
+    )
+    .await
+    {
+        Ok(route) => WorkspaceProjectRoute::Resolved(Box::new(route)),
+        Err(error) => {
+            WorkspaceProjectRoute::Failed(ProjectRouteFailure::from_selection_error(&error))
+        }
+    }
+}
+
+#[cfg(test)]
+async fn resolve_initialize_roots_project_path(
     params: Option<&Value>,
     registry_db: Option<&RegisteredGlobalDb>,
 ) -> Option<PathBuf> {

@@ -1,10 +1,7 @@
-//! Query-facing route scope convergence tests (plan:
-//! `docs/superpowers/plans/v2/01-domain-request-context.md`, "Direct:
-//! exact-root CLI/MCP/HTTP/LSP calls resolve the same project and scope" and
-//! the negative fail-closed cases).
+//! Query-facing route scope convergence and fail-closed tests.
 //!
 //! These tests pin that the query-facing MCP entry point
-//! (`selected_registered_project_reader`) resolves scope ONCE into the
+//! (`resolve_registered_project_route_for_tool`) resolves scope ONCE into the
 //! transport-neutral `tracedecay_application::ResolvedScope` and carries it
 //! on the routed project reader, failing closed exactly as the unrouted
 //! selection already did.
@@ -13,10 +10,10 @@ use serde_json::json;
 
 use super::McpServer;
 use super::writer_test_support::{init_indexed_repo, registered_context};
-use crate::mcp::tools::handlers::selected_registered_project_reader;
+use crate::mcp::tools::handlers::resolve_registered_project_route_for_tool;
 
 #[tokio::test]
-async fn exact_root_reader_resolves_same_project_and_scope_via_application_type() {
+async fn canonical_project_id_reader_resolves_same_project_and_scope_via_application_type() {
     let (cg, _dir, authority) = init_indexed_repo().await;
     let project_root = cg.project_root().to_path_buf();
     let context = registered_context(cg, &authority);
@@ -25,26 +22,26 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
         .expect("registered test server");
 
     let arguments = json!({
-        "project_selector": { "path": project_root.to_string_lossy() }
+        "project_selector": { "project_id": "project.mcp-writer" }
     });
-    let first = selected_registered_project_reader(
+    let first = resolve_registered_project_route_for_tool(
         "tracedecay_files".to_owned(),
         arguments.clone(),
         server.registry_db.as_deref(),
-        server.retained_project_graph_resolver.clone(),
+        server.retained_project_server_resolver.clone(),
     )
     .await
-    .expect("exact-root reader resolves")
-    .expect("exact-root reader selects a route");
-    let second = selected_registered_project_reader(
+    .expect("project-id reader resolves")
+    .expect("project-id reader selects a route");
+    let second = resolve_registered_project_route_for_tool(
         "tracedecay_files".to_owned(),
         arguments,
         server.registry_db.as_deref(),
-        server.retained_project_graph_resolver.clone(),
+        server.retained_project_server_resolver.clone(),
     )
     .await
-    .expect("exact-root reader resolves again")
-    .expect("exact-root reader selects a route again");
+    .expect("project-id reader resolves again")
+    .expect("project-id reader selects a route again");
 
     let scope = &first.scope;
     scope.validate().expect("route scope validates");
@@ -56,7 +53,7 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
     );
     assert_eq!(
         scope, &second.scope,
-        "the same exact root resolves the same scope, digest included"
+        "the same project id resolves the same scope, digest included"
     );
     assert_eq!(
         scope
@@ -84,9 +81,14 @@ async fn exact_root_reader_resolves_same_project_and_scope_via_application_type(
         Some(scope),
         "handler admission must consume the exact scope resolved at routing"
     );
+    let selected_graph = first
+        .retained_server()
+        .expect("selected server remains mounted")
+        .cg_snapshot()
+        .await;
     assert_eq!(
         super::requests::accounting_project_root(
-            first.graph.project_root(),
+            selected_graph.project_root(),
             Some(&first.owner),
             Some(scope),
         ),
@@ -103,19 +105,14 @@ async fn unregistered_selector_still_fails_closed_without_substitution() {
         .await
         .expect("registered test server");
 
-    // The unregistered root must live OUTSIDE the registered repository: a
-    // path inside it legitimately converges to the registered worktree.
-    let outside = tempfile::TempDir::new().expect("outside tempdir");
-    let sibling = outside.path().join("unregistered-sibling");
-    std::fs::create_dir_all(&sibling).expect("sibling root exists on disk");
-    let error = selected_registered_project_reader(
+    let error = resolve_registered_project_route_for_tool(
         "tracedecay_files".to_owned(),
-        json!({ "project_selector": { "path": sibling.to_string_lossy() } }),
+        json!({ "project_selector": { "project_id": "project.missing" } }),
         server.registry_db.as_deref(),
-        server.retained_project_graph_resolver.clone(),
+        server.retained_project_server_resolver.clone(),
     )
     .await
-    .expect_err("an unregistered path must fail closed");
+    .expect_err("an unregistered project id must fail closed");
 
     let message = error.to_string();
     assert!(
@@ -153,11 +150,11 @@ async fn registered_but_unmounted_project_still_reports_unavailable() {
         .await
         .expect("registered test server");
 
-    let error = selected_registered_project_reader(
+    let error = resolve_registered_project_route_for_tool(
         "tracedecay_files".to_owned(),
-        json!({ "project_selector": { "path": phantom_root.to_string_lossy() } }),
+        json!({ "project_selector": { "project_id": "project.mcp-writer-unmounted" } }),
         server.registry_db.as_deref(),
-        server.retained_project_graph_resolver.clone(),
+        server.retained_project_server_resolver.clone(),
     )
     .await
     .expect_err("an unmounted registered project must fail closed");

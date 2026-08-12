@@ -48,7 +48,7 @@ pub(crate) use handlers::{
 };
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,
-    handle_tool_call_with_registry_and_implicit_project,
+    handle_tool_call_with_registry_options,
 };
 
 /// Maximum character length for a tool response before truncation.

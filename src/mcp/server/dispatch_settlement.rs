@@ -259,6 +259,10 @@ impl RetainedDispatchAuthority {
     }
 
     pub(super) async fn shutdown(&self) {
+        let requested_at = tracedecay_application::clock::now_micros();
+        for cancellation in super::requests::recover_lock(&self.cancellations).values() {
+            let _ = cancellation.cancel(requested_at);
+        }
         self.registry.shutdown().await;
     }
 }

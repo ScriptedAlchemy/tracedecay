@@ -20,6 +20,7 @@ use tracedecay_agent_hosts::automation::runner::{
 };
 use tracedecay_agent_hosts::automation::skill_writer::deploy_managed_skills_to_project;
 use tracedecay_automation::managed_skills::validate_skill_id;
+use tracedecay_dashboard_api::project_graph::RetainedProjectGraphResolver;
 use tracedecay_dashboard_api::{
     DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
     DashboardAutomationObservationRecorderV1, DashboardAutomationRunPortV1,
@@ -30,7 +31,7 @@ use tracedecay_dashboard_api::{
 use tracedecay_domain::configuration::UserProfileId;
 
 use crate::errors::{Result, TraceDecayError};
-use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectGraphResolver};
+use crate::mcp::server::RetainedProjectGraphRequest;
 use crate::tracedecay::TraceDecay;
 
 type DashboardAutomationResult<T> = std::result::Result<T, DashboardAutomationAuthorityErrorV1>;

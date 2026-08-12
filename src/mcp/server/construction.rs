@@ -21,6 +21,49 @@ pub(crate) type DatabaseOwnerReconciler = Arc<
     dyn Fn(Arc<TraceDecay>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync + 'static,
 >;
 
+/// Concrete route bridge to a project server already mounted by the daemon.
+/// Routed handlers retain the whole server so its graph, query ports, session
+/// stores, application executor, and lifecycle remain one authority.
+pub(crate) use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
+pub(crate) type RetainedProjectServerFuture = Pin<
+    Box<dyn Future<Output = crate::errors::Result<Option<Arc<super::McpServer>>>> + Send + 'static>,
+>;
+pub(crate) type RetainedProjectServerResolver =
+    Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectServerFuture + Send + Sync + 'static>;
+
+/// Dashboard admission erases the concrete graph only at its consumer
+/// boundary after the selected server's profile identity is validated.
+pub(crate) fn dashboard_retained_project_graph_resolver(
+    resolver: RetainedProjectServerResolver,
+    expected_profile_id: tracedecay_domain::UserProfileId,
+) -> tracedecay_dashboard_api::project_graph::RetainedProjectGraphResolver {
+    Arc::new(move |request| {
+        let resolver = Arc::clone(&resolver);
+        let expected_profile_id = expected_profile_id.clone();
+        Box::pin(async move {
+            let server = resolver(request).await?;
+            let graph = match server {
+                Some(server) => {
+                    let profile_matches = server
+                        .profile_identity()
+                        .is_some_and(|identity| identity.profile_id() == &expected_profile_id);
+                    if !profile_matches {
+                        return Err(crate::errors::TraceDecayError::project_route(
+                            "project_route_not_authorized",
+                            false,
+                            "retained dashboard project belongs to another profile",
+                        ));
+                    }
+                    Some(server.cg_snapshot().await)
+                }
+                None => None,
+            };
+            Ok(graph
+                .map(|graph| graph as Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime>))
+        })
+    })
+}
+
 /// Cohesive dependencies used to construct an MCP server.
 pub(crate) struct McpServerConstructionContext {
     pub(crate) cg: Arc<TraceDecay>,
@@ -67,7 +110,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_graph_projection_read_port: Option<super::CodeGraphProjectionReadPort>,
     pub(crate) code_graph_read_admission_port: Option<super::CodeGraphReadAdmissionPort>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
-    pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    pub(crate) retained_project_server_resolver: Option<super::RetainedProjectServerResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
@@ -173,7 +216,7 @@ impl McpServerConstructionContext {
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
             code_index_search_authority: None,
-            retained_project_graph_resolver: None,
+            retained_project_server_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
             daemon_invocation_service: None,
@@ -257,7 +300,7 @@ impl McpServerConstructionContext {
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
             code_index_search_authority: None,
-            retained_project_graph_resolver: None,
+            retained_project_server_resolver: None,
             project_routes,
             application_invocation_executor: None,
             daemon_invocation_service: None,
@@ -317,7 +360,7 @@ impl McpServerConstructionContext {
             code_graph_projection_read_port: None,
             code_graph_read_admission_port: None,
             code_index_search_authority: None,
-            retained_project_graph_resolver: None,
+            retained_project_server_resolver: None,
             project_routes,
             application_invocation_executor: None,
             daemon_invocation_service: None,
@@ -413,11 +456,11 @@ impl McpServerConstructionContext {
         self
     }
 
-    pub(crate) fn with_retained_project_graph_resolver(
+    pub(crate) fn with_retained_project_server_resolver(
         mut self,
-        resolver: super::RetainedProjectGraphResolver,
+        resolver: super::RetainedProjectServerResolver,
     ) -> Self {
-        self.retained_project_graph_resolver = Some(resolver);
+        self.retained_project_server_resolver = Some(resolver);
         self
     }
 

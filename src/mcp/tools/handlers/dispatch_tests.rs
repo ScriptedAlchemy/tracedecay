@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -105,7 +105,7 @@ async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     ];
 
     for (tool_name, args) in requests {
-        let result = handle_tool_call_with_registry_and_implicit_project(
+        let result = handle_tool_call_with_registry_options(
             &cg,
             tool_name,
             args,
@@ -317,7 +317,7 @@ async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
                 "{tool_name} must fail closed with executor_available={executor_available}"
             );
         }
-        let rejected = handle_tool_call_with_registry_and_implicit_project(
+        let rejected = handle_tool_call_with_registry_options(
             &cg,
             tool_name,
             json!({}),
@@ -351,16 +351,30 @@ fn retained_operations_for_advertised_tool(tool_name: &str) -> Vec<RetainedSurfa
 fn graph_reader_selector_dispatch_policy_is_allowlisted() {
     for tool in get_tool_definitions().expect("tool definitions") {
         let properties = &tool.input_schema["properties"];
-        let schema_has_registered_project_selector =
-            ["project_selector", "project_id", "project_path"]
-                .iter()
-                .any(|selector_key| properties.get(*selector_key).is_some());
+        let schema_has_registered_project_selector = properties.get("project_selector").is_some();
         assert_eq!(
             tool_accepts_registered_project_selector(&tool.name),
             schema_has_registered_project_selector,
             "{} registered-project selector schema and dispatch policy should stay in lockstep",
             tool.name
         );
+        if schema_has_registered_project_selector {
+            for alias in ["project_id", "project_path", "project_root", "root"] {
+                assert!(properties.get(alias).is_none());
+            }
+            let selector = &properties["project_selector"];
+            assert_eq!(selector["required"], json!(["project_id"]));
+            assert_eq!(selector["additionalProperties"], false);
+            assert_eq!(
+                selector["properties"]
+                    .as_object()
+                    .expect("closed selector properties")
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["project_id"]
+            );
+        }
     }
 
     for tool_name in [
@@ -393,127 +407,6 @@ fn graph_reader_selector_dispatch_policy_is_allowlisted() {
             "{tool_name} should route through the graph-reader selector policy"
         );
     }
-}
-
-#[tokio::test]
-async fn graph_reader_selector_dispatch_accepts_unique_project_basename() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let active_project = dir.path().join("active");
-    let target_project = dir.path().join("target");
-    fs::create_dir_all(active_project.join("src")).unwrap();
-    fs::create_dir_all(target_project.join("src")).unwrap();
-    fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
-    fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
-
-    let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &active_project,
-        "project.mcp-active-basename",
-    )
-    .await
-    .unwrap();
-    let (target, _target_runtime) = init_sibling_registered_fixture(
-        &active_runtime,
-        &target_project,
-        "project.mcp-target-basename",
-    )
-    .await;
-    let target = Arc::new(target);
-    let registry = SelectorRegistry::open().await;
-
-    let result = handle_tool_call_with_registry_and_implicit_project(
-        &active,
-        "tracedecay_grep",
-        json!({
-            "project_selector": {"path": "target"},
-            "pattern": "target",
-            "limit": 5,
-        }),
-        None,
-        None,
-        selector_options(&registry, vec![Arc::clone(&target)]),
-    )
-    .await
-    .unwrap();
-    let text = result.value["content"][0]["text"].as_str().unwrap();
-
-    assert!(
-        text.contains("target"),
-        "unique basename selector should return target graph results: {text}"
-    );
-    assert!(
-        !text.contains("active"),
-        "unique basename selector should not query the active graph: {text}"
-    );
-
-    active.checkpoint().await.unwrap();
-    target.checkpoint().await.unwrap();
-    active.close();
-    Arc::into_inner(target)
-        .expect("basename target graph should no longer be retained")
-        .close();
-}
-
-#[tokio::test]
-async fn graph_reader_selector_rejects_ambiguous_project_basename() {
-    let _env_lock = lock_user_data_dir_test_env();
-    let dir = TempDir::new().unwrap();
-    let _env = SelectorEnv::new(dir.path());
-    let active_project = dir.path().join("active");
-    let first_target = dir.path().join("first").join("target");
-    let second_target = dir.path().join("second").join("target");
-    fs::create_dir_all(&active_project).unwrap();
-    fs::create_dir_all(&first_target).unwrap();
-    fs::create_dir_all(&second_target).unwrap();
-
-    let (active, active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        &active_project,
-        "project.mcp-active-ambiguous",
-    )
-    .await
-    .unwrap();
-    let (first, _first_runtime) = init_sibling_registered_fixture(
-        &active_runtime,
-        &first_target,
-        "project.mcp-first-ambiguous",
-    )
-    .await;
-    let (second, _second_runtime) = init_sibling_registered_fixture(
-        &active_runtime,
-        &second_target,
-        "project.mcp-second-ambiguous",
-    )
-    .await;
-    let registry = SelectorRegistry::open().await;
-
-    let err = handle_tool_call_with_registry_and_implicit_project(
-        &active,
-        "tracedecay_grep",
-        json!({
-            "project_selector": {"path": "target"},
-            "pattern": "target",
-        }),
-        None,
-        None,
-        ToolCallRegistryOptions {
-            global_db: Some(registry.database()),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        format!("{err}").contains("registered project not found for selector"),
-        "ambiguous basename selector should be rejected: {err}"
-    );
-
-    active.checkpoint().await.unwrap();
-    first.checkpoint().await.unwrap();
-    second.checkpoint().await.unwrap();
-    active.close();
-    first.close();
-    second.close();
 }
 
 #[tokio::test]
@@ -588,7 +481,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
         ),
         ..Default::default()
     };
-    let status = handle_tool_call_with_registry_and_implicit_project(
+    let status = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
         json!({
@@ -603,7 +496,7 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     )
     .await
     .unwrap();
-    let runtime_result = handle_tool_call_with_registry_and_implicit_project(
+    let runtime_result = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_runtime",
         json!({
@@ -658,7 +551,9 @@ async fn unsupported_selector_tool_rejects_explicit_project_selector() {
         &cg,
         "tracedecay_status",
         json!({
-            "project_id": "explicit-selector-should-not-fall-open",
+            "project_selector": {
+                "project_id": "explicit-selector-should-not-fall-open"
+            },
         }),
         None,
         None,
@@ -694,7 +589,9 @@ async fn query_search_rejects_cross_project_selector() {
         &cg,
         "tracedecay_search",
         json!({
-            "project_id": "cross-project-must-not-be-relabelled",
+            "project_selector": {
+                "project_id": "cross-project-must-not-be-relabelled"
+            },
             "query": "target",
         }),
         None,
@@ -744,13 +641,19 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
     )
     .await
     .unwrap();
-    let (target, _target_runtime) = init_sibling_registered_fixture(
+    let (target, target_runtime) = init_sibling_registered_fixture(
         &active_runtime,
         &target_project,
         "project.mcp-target-retrieval",
     )
     .await;
-    let target = Arc::new(target);
+    let active_project_id = active
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .expect("active project should be registered")
+        .to_string();
     let target_project_id = target
         .store_layout()
         .identity
@@ -758,30 +661,55 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
         .as_deref()
         .expect("target project should be registered")
         .to_string();
-
-    let registry = SelectorRegistry::open().await;
-    let result = handle_tool_call_with_registry_and_implicit_project(
-        &active,
-        "tracedecay_grep",
-        json!({
-            "pattern": "selected_project_handle_marker",
-            "project_id": target_project_id,
-            "max_results": LARGE_RESPONSE_MARKER_COUNT,
-            "context_lines": 3,
-            "format": "json"
-        }),
+    let target_server = crate::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+        target,
         None,
-        None,
-        selector_options(&registry, vec![Arc::clone(&target)]),
+        crate::host_admission::ProjectScopedTestRuntimeV1::new(target_runtime)
+            .expect("target project-scoped runtime"),
     )
     .await
-    .unwrap();
-    let envelope: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("search result text"),
+    .expect("target retained server");
+    let server = crate::mcp::McpServer::new_with_retained_test_servers_for_test(
+        active,
+        None,
+        crate::host_admission::ProjectScopedTestRuntimeV1::new(active_runtime)
+            .expect("active project-scoped runtime"),
+        vec![target_server],
     )
-    .expect("truncated search envelope");
+    .await
+    .expect("active routed server");
+
+    let result = server
+        .handle_request(&crate::mcp::transport::JsonRpcRequest {
+            jsonrpc: "2.0".to_owned(),
+            id: Some(json!(1)),
+            method: "tools/call".to_owned(),
+            params: Some(json!({
+                "name": "tracedecay_grep",
+                "arguments": {
+                    "pattern": "selected_project_handle_marker",
+                    "project_selector": {"project_id": target_project_id},
+                    "max_results": LARGE_RESPONSE_MARKER_COUNT,
+                    "context_lines": 3,
+                    "format": "json"
+                }
+            })),
+        })
+        .await
+        .expect("selected-project grep response");
+    let result = result
+        .result
+        .unwrap_or_else(|| panic!("selected-project grep failed: {:?}", result.error));
+    let envelope: Value = result["content"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item["text"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str(text).ok())
+            })
+        })
+        .expect("truncated search JSON envelope");
     assert_eq!(envelope["truncated"], true);
     let handle = envelope["handle"]
         .as_str()
@@ -794,26 +722,35 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
         "selected-project envelopes should tell clients to retrieve from the same project: {retrieve_instruction}"
     );
 
-    let retrieved = handle_tool_call_with_registry_and_implicit_project(
-        &active,
-        "tracedecay_retrieve",
-        json!({
-            "handle": handle,
-            "project_id": target.store_layout().identity.project_id.as_deref().unwrap(),
-            "format": "json"
-        }),
-        None,
-        None,
-        selector_options(&registry, vec![Arc::clone(&target)]),
-    )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(
-        retrieved.value["content"][0]["text"]
-            .as_str()
-            .expect("retrieve result text"),
-    )
-    .expect("retrieve payload");
+    let retrieved = server
+        .handle_request(&crate::mcp::transport::JsonRpcRequest {
+            jsonrpc: "2.0".to_owned(),
+            id: Some(json!(2)),
+            method: "tools/call".to_owned(),
+            params: Some(json!({
+                "name": "tracedecay_retrieve",
+                "arguments": {
+                    "handle": handle,
+                    "project_selector": {"project_id": target_project_id},
+                    "format": "json"
+                }
+            })),
+        })
+        .await
+        .expect("selected-project retrieve response");
+    let retrieved = retrieved
+        .result
+        .unwrap_or_else(|| panic!("selected-project retrieve failed: {:?}", retrieved.error));
+    let payload: Value = retrieved["content"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item["text"]
+                    .as_str()
+                    .and_then(|text| serde_json::from_str(text).ok())
+            })
+        })
+        .expect("retrieve JSON payload");
 
     assert_eq!(payload["expired"], false);
     assert!(
@@ -824,6 +761,55 @@ async fn selected_project_retrieve_finds_selected_project_response_handle() {
             ))),
         "selected project retrieve should return the full selected-project response: {payload}"
     );
+
+    for (id, label, arguments) in [
+        (
+            3,
+            "active/default retrieval",
+            json!({"handle": handle, "format": "json"}),
+        ),
+        (
+            4,
+            "wrong-project retrieval",
+            json!({
+                "handle": handle,
+                "project_selector": {"project_id": active_project_id},
+                "format": "json"
+            }),
+        ),
+    ] {
+        let missing = server
+            .handle_request(&crate::mcp::transport::JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: Some(json!(id)),
+                method: "tools/call".to_owned(),
+                params: Some(json!({
+                    "name": "tracedecay_retrieve",
+                    "arguments": arguments
+                })),
+            })
+            .await
+            .unwrap_or_else(|| panic!("{label} response"));
+        let missing = missing
+            .result
+            .unwrap_or_else(|| panic!("{label} failed: {:?}", missing.error));
+        let missing_payload: Value = missing["content"]
+            .as_array()
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    item["text"]
+                        .as_str()
+                        .and_then(|text| serde_json::from_str(text).ok())
+                })
+            })
+            .unwrap_or_else(|| panic!("{label} JSON payload"));
+        assert_eq!(
+            missing_payload["reason_code"], "handle_not_found",
+            "{label} must not read the selected target's handle: {missing_payload}"
+        );
+        assert_eq!(missing_payload["expired"], Value::Null, "{label}");
+        assert_eq!(missing_payload["content"], Value::Null, "{label}");
+    }
 }
 
 /// Runs a git command in `root`, panicking on failure. The git-dispatch
@@ -1205,7 +1191,7 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
     .await
     .unwrap();
     let started = std::time::Instant::now();
-    let result = handle_tool_call_with_registry_and_implicit_project(
+    let result = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_context",
         json!({ "task": "probe" }),
@@ -1250,7 +1236,7 @@ async fn user_lcm_doctor_reports_a_missing_store_without_opening_it() {
     let profile_root = dir.path().join("unavailable-user-lcm-profile");
     let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
 
-    let result = handle_tool_call_with_registry_and_implicit_project(
+    let result = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_lcm_doctor",
         json!({ "storage_scope": "user", "format": "json" }),
@@ -1295,7 +1281,7 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     let profile_root = dir.path().join("retired-user-lcm-profile");
     let sessions_db = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
 
-    let error = handle_tool_call_with_registry_and_implicit_project(
+    let error = handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_lcm_compress",
         json!({

@@ -134,7 +134,7 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         &cg,
         &registry_runtime,
         "tracedecay_project_context",
-        json!({"project_id": "proj_alpha", "format": "json"}),
+        json!({"project_selector": {"project_id": "proj_alpha"}, "format": "json"}),
         None,
         None,
     )
@@ -250,7 +250,7 @@ async fn project_registry_tools_missing_registry_carries_stable_shape() {
     let context = handle_tool_call(
         &cg,
         "tracedecay_project_context",
-        json!({"project_id": "project.missing", "format": "json"}),
+        json!({"project_selector": {"project_id": "project.missing"}, "format": "json"}),
         None,
         None,
     )
@@ -468,7 +468,7 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
     let context = handle_real_server_tool_call(
         &server,
         "tracedecay_project_context",
-        json!({"project_id": "proj_alpha", "format": "json"}),
+        json!({"project_selector": {"project_id": "proj_alpha"}, "format": "json"}),
     )
     .await;
     let context_payload: Value = serde_json::from_str(extract_real_server_text(&context)).unwrap();
@@ -561,19 +561,26 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         .open_project_graph_read_only_for_test(target_project, target_options)
         .await
         .expect("target project graph opens through its own scoped runtime");
-    let server = tracedecay::mcp::McpServer::new_with_retained_test_graphs_for_test(
+    let target_server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+        target_graph,
+        None,
+        target_runtime,
+    )
+    .await
+    .expect("target project server");
+    let server = tracedecay::mcp::McpServer::new_with_retained_test_servers_for_test(
         tracedecay::tracedecay::TraceDecay::open(cg.project_root())
             .await
             .unwrap(),
         None,
         registry,
-        vec![std::sync::Arc::new(target_graph)],
+        vec![target_server],
     )
     .await
     .expect("registered test server");
 
     let read_args = json!({
-        "project_id": target_project_key,
+        "project_selector": {"project_id": target_project_key},
         "file": "src/main.rs",
         "mode": "full",
         "format": "json"

@@ -34,9 +34,8 @@ use tracedecay_usecases::host_admission::{
 
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
-    ProjectRegistryReadPort, SessionRefreshServicePort, ToolCallRegistryOptions, ToolRegistryMode,
-    default_catalog_discovery_authority, explore_call_budget,
-    handle_tool_call_with_registry_and_implicit_project, project_catalog_discovery_scope,
+    ProjectRegistryReadPort, SessionRefreshServicePort, ToolRegistryMode,
+    default_catalog_discovery_authority, explore_call_budget, project_catalog_discovery_scope,
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
@@ -78,7 +77,8 @@ pub(crate) use live_transcript_refresh::{
 pub(crate) use protocol::*;
 use read_coalescing::*;
 pub(crate) use rmcp::{
-    RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpWorkDeliverySettlement,
+    RmcpConnectionAdapter, RmcpInitializeResponseDecorator,
+    RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement,
 };
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
@@ -217,36 +217,6 @@ pub(crate) struct SourceEditRollbackInvocationV1 {
 pub(crate) type SourceEditRollbackExecutor =
     Arc<dyn Fn(SourceEditRollbackInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
 
-/// Concrete read bridge to a graph already mounted by the daemon. MCP project
-/// selectors retain the root graph type because routed handlers require the
-/// complete [`TraceDecay`] runtime.
-pub(crate) use tracedecay_dashboard_api::project_graph::RetainedProjectGraphRequest;
-pub(crate) type RetainedProjectGraphFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Option<Arc<TraceDecay>>>> + Send + 'static>,
->;
-pub(crate) type RetainedProjectGraphResolver =
-    Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectGraphFuture + Send + Sync + 'static>;
-
-/// Dashboard admission erases the concrete graph only at its consumer
-/// boundary.
-pub(crate) type DashboardRetainedProjectGraphResolver =
-    tracedecay_dashboard_api::project_graph::RetainedProjectGraphResolver;
-
-pub(crate) fn dashboard_retained_project_graph_resolver(
-    resolver: RetainedProjectGraphResolver,
-) -> DashboardRetainedProjectGraphResolver {
-    Arc::new(move |request| {
-        let resolver = Arc::clone(&resolver);
-        Box::pin(async move {
-            resolver(request).await.map(|graph| {
-                graph.map(|graph| {
-                    graph as Arc<dyn tracedecay_dashboard_api::DashboardProjectRuntime>
-                })
-            })
-        })
-    })
-}
-
 /// The MCP server wrapping a `TraceDecay` instance.
 // Lock ordering: file_token_map -> method/resource/tool call counts (never nested)
 pub struct McpServer {
@@ -368,7 +338,7 @@ pub struct McpServer {
     /// Admission supplied by an authenticated daemon application route. It is
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
-    retained_project_graph_resolver: Option<RetainedProjectGraphResolver>,
+    retained_project_server_resolver: Option<RetainedProjectServerResolver>,
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime: Option<Arc<crate::host_admission::HostAdmissionTestRuntimeV1>>,
     initialize_root_routing_enabled: AtomicBool,
@@ -596,24 +566,23 @@ impl McpServer {
         scope_prefix: Option<String>,
         runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
     ) -> crate::errors::Result<Arc<Self>> {
-        Self::new_with_retained_test_graphs_for_test(cg, scope_prefix, runtime, Vec::new()).await
+        Self::new_with_retained_test_servers_for_test(cg, scope_prefix, runtime, Vec::new()).await
     }
 
-    /// As [`Self::new_with_host_admission_test_runtime_for_test`], plus graphs
-    /// for projects other than `cg`'s.
+    /// As [`Self::new_with_host_admission_test_runtime_for_test`], plus exact
+    /// servers for projects other than `cg`'s.
     ///
     /// Tools that name another project reach it only through the retained
-    /// resolver (see `handlers::selected_registered_project_reader`), and a
-    /// test runtime is scoped to a single project, so a cross-project fixture
-    /// has to open each additional graph through its own scoped runtime and
-    /// hand the result in here.
+    /// resolver. A cross-project fixture therefore supplies the whole target
+    /// server, preserving the graph, ports, session stores, and lifecycle as
+    /// one authority.
     #[cfg(any(test, feature = "test-transport"))]
     #[doc(hidden)]
-    pub async fn new_with_retained_test_graphs_for_test(
+    pub async fn new_with_retained_test_servers_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
         runtime: crate::host_admission::ProjectScopedTestRuntimeV1,
-        retained_graphs: Vec<Arc<TraceDecay>>,
+        retained_servers: Vec<Arc<McpServer>>,
     ) -> crate::errors::Result<Arc<Self>> {
         let runtime = runtime.into_runtime();
         let mut context = runtime.mcp_server_context_for_test(cg, scope_prefix)?;
@@ -639,17 +608,16 @@ impl McpServer {
                 tracedecay_usecases::host_admission::HostAdmissionBroker::new(admission_runtime),
             ));
         }
-        Self::new_with_registered_test_context(context, retained_graphs).await
+        Self::new_with_registered_test_context(context, retained_servers).await
     }
 
-    /// Mounts the daemon-equivalent retained project-graph resolver on an
+    /// Mounts the daemon-equivalent retained project-server resolver on an
     /// already-assembled registered test context, then constructs the server.
     ///
     /// Path-selector reads — including the hook workspace route resolved
-    /// before durable host admission — go through
-    /// `handlers::selected_registered_project_reader`, which needs both the
-    /// registry database the test runtime supplies and a resolver that can
-    /// mount the selected project. A context without the resolver makes every
+    /// before durable host admission — need both the registry database the
+    /// test runtime supplies and a resolver for the selected server. A context
+    /// without the resolver makes every
     /// hook notification fail closed as `project_registry_route_unavailable`
     /// before it ever reaches the spool, which is a fixture gap rather than
     /// the daemon's behaviour.
@@ -657,75 +625,87 @@ impl McpServer {
     #[doc(hidden)]
     pub(crate) async fn new_with_registered_test_context(
         mut context: McpServerConstructionContext,
-        retained_graphs: Vec<Arc<TraceDecay>>,
+        retained_servers: Vec<Arc<McpServer>>,
     ) -> crate::errors::Result<Arc<Self>> {
-        let runtime = Arc::clone(context.host_admission_test_runtime.as_ref().ok_or_else(
-            || crate::errors::TraceDecayError::Config {
+        context
+            .host_admission_test_runtime
+            .as_ref()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
                 message: "registered test context is missing its host-admission runtime".to_owned(),
-            },
-        )?);
+            })?;
         let retained_root = context.cg.project_root().to_path_buf();
-        let profile_root = runtime.profile_root_for_test().to_path_buf();
-        let mut retained: Vec<(PathBuf, Arc<TraceDecay>)> = retained_graphs
-            .into_iter()
-            .map(|graph| (canonical_or_original(graph.project_root()), graph))
-            .collect();
-        // The runtime's resolver only mounts stores inside its own profile
-        // root. A runtime supplied purely as an injected registry for a graph
-        // in another profile has no graph here to retain; retaining
-        // unconditionally instead resolved a store path never created.
-        if graph_lives_under_profile(&context.cg, &profile_root) {
-            let active = runtime
-                .open_project_graph_for_test(
-                    &retained_root,
-                    crate::tracedecay::TraceDecayOpenOptions {
-                        global_db_path: Some(profile_root.join("global.db")),
-                        profile_root: Some(profile_root),
-                    },
-                )
-                .await?;
-            retained.push((canonical_or_original(&retained_root), Arc::new(active)));
-        }
         // The daemon always has the active project mounted, so its resolver can
         // serve it like any other registered project. Mirror that here through
-        // a late-bound slot: the server's own graph is only available after
-        // construction, so the resolver captures the slot now and the slot is
-        // filled from the finished server below. Without this fallback a
-        // repo-local fixture (whose graph never enters `retained` above) makes
+        // a late-bound weak slot: the server is only available after
+        // construction, and retaining it strongly in its own resolver would
+        // create a lifecycle cycle. Without this fallback a repo-local fixture makes
         // every path-selector read — including hook route resolution — report
         // the active project as unmounted.
-        let active_graph_slot: Arc<std::sync::OnceLock<Arc<TraceDecay>>> =
+        let active_server_slot: Arc<std::sync::OnceLock<std::sync::Weak<McpServer>>> =
             Arc::new(std::sync::OnceLock::new());
-        let resolver_slot = Arc::clone(&active_graph_slot);
+        let resolver_slot = Arc::clone(&active_server_slot);
         let active_root = canonical_or_original(&retained_root);
-        let resolver: RetainedProjectGraphResolver = Arc::new(move |request| {
-            let requested = canonical_or_original(&request.requested_worktree_root);
-            let registered = canonical_or_original(&request.registered_root);
-            let project_id = request
-                .owner
-                .as_ref()
-                .map(|owner| owner.project.project_id.as_str());
-            let identity_matches = |graph: &Arc<TraceDecay>| {
-                project_id.is_none_or(|project_id| {
+        let resolver: RetainedProjectServerResolver = Arc::new(move |request| {
+            let retained_servers = retained_servers.clone();
+            let resolver_slot = Arc::clone(&resolver_slot);
+            let active_root = active_root.clone();
+            Box::pin(async move {
+                let requested = canonical_or_original(&request.requested_worktree_root);
+                let registered = canonical_or_original(&request.registered_root);
+                let project_id = request
+                    .owner
+                    .as_ref()
+                    .map(|owner| owner.project.project_id.as_str());
+                let mut matches = Vec::new();
+                for server in &retained_servers {
+                    let graph = server.cg_snapshot().await;
+                    let root = canonical_or_original(graph.project_root());
+                    let identity_matches = project_id.is_none_or(|project_id| {
+                        graph.store_layout().identity.project_id.as_deref() == Some(project_id)
+                    });
+                    if (root == requested || root == registered) && identity_matches {
+                        matches.push(Arc::clone(server));
+                    }
+                }
+                if matches.len() == 1 {
+                    return Ok(matches.pop());
+                }
+                if !matches.is_empty() {
+                    return Err(crate::errors::TraceDecayError::project_route(
+                        "project_route_ambiguous",
+                        false,
+                        "multiple retained test servers match one registered project route",
+                    ));
+                }
+                let active = resolver_slot.get().and_then(std::sync::Weak::upgrade);
+                let Some(active) = active else {
+                    return Ok(None);
+                };
+                let graph = active.cg_snapshot().await;
+                let identity_matches = project_id.is_none_or(|project_id| {
                     graph.store_layout().identity.project_id.as_deref() == Some(project_id)
-                })
-            };
-            let mut matches = retained.iter().filter(|(root, graph)| {
-                (*root == requested || *root == registered) && identity_matches(graph)
-            });
-            let graph = matches.next().map(|(_, graph)| Arc::clone(graph));
-            let graph = matches.next().is_none().then_some(graph).flatten();
-            let graph = graph.or_else(|| {
-                ((active_root == requested || active_root == registered)
-                    && resolver_slot.get().is_some_and(identity_matches))
-                .then(|| resolver_slot.get().map(Arc::clone))
-                .flatten()
-            });
-            Box::pin(async move { Ok(graph) })
+                });
+                Ok(
+                    ((active_root == requested || active_root == registered) && identity_matches)
+                        .then_some(active),
+                )
+            })
         });
-        context = context.with_retained_project_graph_resolver(resolver);
+        context = context.with_retained_project_server_resolver(resolver);
         let server = Self::new_with_context(context).await;
-        let _ = active_graph_slot.set(server.cg_snapshot().await);
+        // Registered test servers exercise real completion without consulting
+        // the operator's network. A fresh cache entry for this exact build
+        // keeps version-notice behavior deterministic while preserving the
+        // production completion path.
+        {
+            let mut version_cache = server
+                .version_cache
+                .lock()
+                .expect("registered test server version cache");
+            version_cache.latest = Some(env!("CARGO_PKG_VERSION").to_owned());
+            version_cache.checked_at = Some(Instant::now());
+        }
+        let _ = active_server_slot.set(Arc::downgrade(&server));
         Ok(server)
     }
 
@@ -780,7 +760,7 @@ impl McpServer {
             code_graph_projection_read_port,
             code_graph_read_admission_port,
             code_index_search_authority,
-            retained_project_graph_resolver,
+            retained_project_server_resolver,
             project_routes,
             application_invocation_executor,
             daemon_invocation_service,
@@ -1015,7 +995,7 @@ impl McpServer {
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             source_edit_rollback_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
-            retained_project_graph_resolver,
+            retained_project_server_resolver,
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),
@@ -1247,7 +1227,7 @@ impl McpServer {
 
     /// Clones out the currently served `TraceDecay` instance. The lock is
     /// held only for the clone, never across an await on the instance.
-    async fn cg_snapshot(&self) -> Arc<TraceDecay> {
+    pub(crate) async fn cg_snapshot(&self) -> Arc<TraceDecay> {
         self.cg.read().await.clone()
     }
 
@@ -1349,14 +1329,6 @@ impl McpServer {
 #[cfg(any(test, feature = "test-transport"))]
 fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Whether `cg`'s graph store sits inside `profile_root`, which is the only
-/// region a test runtime rooted there is allowed to mount.
-#[cfg(any(test, feature = "test-transport"))]
-fn graph_lives_under_profile(cg: &TraceDecay, profile_root: &Path) -> bool {
-    canonical_or_original(&cg.store_layout().graph_db_path)
-        .starts_with(canonical_or_original(profile_root))
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {

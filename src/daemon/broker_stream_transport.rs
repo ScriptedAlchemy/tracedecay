@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
-use crate::mcp::server::RmcpWorkDeliverySettlement;
+use crate::mcp::server::{RmcpSelectedProjectResponseAuthority, RmcpWorkDeliverySettlement};
 use crate::mcp::{JsonRpcResponse, McpTransport};
 
 use super::BrokerStream;
@@ -25,6 +25,7 @@ pub(super) struct BrokerStreamTransport {
     >,
     replay: VecDeque<String>,
     response_lifecycle: Option<crate::mcp::server::ProjectServerResponseLifecycle>,
+    selected_project_responses: Option<RmcpSelectedProjectResponseAuthority>,
     work_delivery_settlement: Option<RmcpWorkDeliverySettlement>,
 }
 
@@ -59,6 +60,7 @@ impl BrokerStreamTransport {
             active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
             replay: VecDeque::new(),
             response_lifecycle: None,
+            selected_project_responses: None,
             work_delivery_settlement: None,
         }
     }
@@ -90,6 +92,14 @@ impl BrokerStreamTransport {
         settlement: RmcpWorkDeliverySettlement,
     ) -> Self {
         self.work_delivery_settlement = Some(settlement);
+        self
+    }
+
+    pub(super) fn with_rmcp_selected_project_responses(
+        mut self,
+        responses: RmcpSelectedProjectResponseAuthority,
+    ) -> Self {
+        self.selected_project_responses = Some(responses);
         self
     }
 
@@ -293,11 +303,18 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         let writer = Arc::clone(&self.writer);
         let active_requests = Arc::clone(&self.active_requests);
         let response_lifecycle = self.response_lifecycle.clone();
+        let selected_project_responses = self.selected_project_responses.clone();
         let work_delivery_settlement = self.work_delivery_settlement.clone();
         async move {
             let value = serde_json::to_value(&item)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             let request_key = Self::response_request_key(&value);
+            let selected_response_lease = match selected_project_responses {
+                Some(authority) => authority
+                    .take(value.get("id"))
+                    .map_err(|error| std::io::Error::other(error.to_string()))?,
+                None => None,
+            };
             let mut bytes = serde_json::to_vec(&value)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             bytes.push(b'\n');
@@ -306,17 +323,25 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
             else {
                 return Ok(());
             };
-            let write_result = match response_lifecycle {
+            let response_revoked = selected_response_lease
+                .as_ref()
+                .map(crate::mcp::server::SelectedProjectResponseLease::revoked)
+                .or_else(|| {
+                    response_lifecycle
+                        .as_ref()
+                        .map(crate::mcp::server::ProjectServerResponseLifecycle::response_revoked)
+                });
+            let write_result = match response_revoked {
                 None => Self::write_all_and_flush(writer, bytes)
                     .await
                     .map_err(RmcpResponseWriteFailure::Transport),
-                Some(lifecycle) if lifecycle.response_revoked().is_cancelled() => {
+                Some(response_revoked) if response_revoked.is_cancelled() => {
                     Err(RmcpResponseWriteFailure::Cancelled)
                 }
-                Some(lifecycle) => {
+                Some(response_revoked) => {
                     tokio::select! {
                         biased;
-                        () = lifecycle.response_revoked().cancelled() => {
+                        () = response_revoked.cancelled() => {
                             Err(RmcpResponseWriteFailure::Cancelled)
                         }
                         result = Self::write_all_and_flush(writer, bytes) => {
@@ -582,6 +607,172 @@ mod peer_close_tests {
                 .expect("rmcp receive must finish after full peer close")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn rmcp_selected_target_retirement_between_handler_and_send_suppresses_response() {
+        let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let active_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
+        let target_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
+        let selected_responses =
+            crate::mcp::server::RmcpSelectedProjectResponseAuthority::default();
+        let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
+            .with_project_response_lifecycle(active_lifecycle.clone())
+            .with_rmcp_selected_project_responses(selected_responses.clone());
+        let (client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"tracedecay_files","arguments":{}}}
+"#,
+            )
+            .await
+            .expect("selected-target request");
+        client_writer
+            .flush()
+            .await
+            .expect("flush selected-target request");
+        assert!(
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport
+            )
+            .await
+            .is_some(),
+            "RMCP transport must retain the selected-target response slot"
+        );
+
+        let response_guard = Arc::clone(target_lifecycle.response_gate())
+            .read_owned()
+            .await;
+        selected_responses
+            .retain(
+                &serde_json::json!(7),
+                crate::mcp::server::SelectedProjectResponseLease::new(
+                    response_guard,
+                    target_lifecycle.response_revoked().clone(),
+                ),
+            )
+            .expect("handler-to-transport selected response handoff");
+
+        // The active connection remains live. Only the selected target is
+        // retired after handler completion but before rmcp calls `send`.
+        target_lifecycle.revoke();
+        assert!(!active_lifecycle.response_revoked().is_cancelled());
+        let target_drain = tokio::spawn({
+            let target_lifecycle = target_lifecycle.clone();
+            async move { target_lifecycle.wait_for_request_drain().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !target_drain.is_finished(),
+            "the handler lease must keep target retirement from completing before send"
+        );
+
+        let response = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {"content": [{"type": "text", "text": "must-not-leak"}]}
+        }))
+        .expect("typed selected-target response");
+        let error = <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
+            &mut transport,
+            response,
+        )
+        .await
+        .expect_err("retired selected target must suppress its response");
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        tokio::time::timeout(std::time::Duration::from_secs(1), target_drain)
+            .await
+            .expect("selected response lease must release after suppression")
+            .expect("join target drain");
+
+        let mut client_reader = tokio::io::BufReader::new(client_reader);
+        let mut line = String::new();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                client_reader.read_line(&mut line),
+            )
+            .await
+            .is_err(),
+            "the live active server must not authorize a retired target payload: {line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rmcp_selected_target_response_does_not_fall_back_to_retired_active_server() {
+        let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let active_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
+        let target_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
+        let selected_responses =
+            crate::mcp::server::RmcpSelectedProjectResponseAuthority::default();
+        let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
+            .with_project_response_lifecycle(active_lifecycle.clone())
+            .with_rmcp_selected_project_responses(selected_responses.clone());
+        let (client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"tracedecay_files","arguments":{}}}
+"#,
+            )
+            .await
+            .expect("selected-target request");
+        client_writer
+            .flush()
+            .await
+            .expect("flush selected-target request");
+        assert!(
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport
+            )
+            .await
+            .is_some(),
+            "RMCP transport must retain the selected-target response slot"
+        );
+
+        let response_guard = Arc::clone(target_lifecycle.response_gate())
+            .read_owned()
+            .await;
+        selected_responses
+            .retain(
+                &serde_json::json!(8),
+                crate::mcp::server::SelectedProjectResponseLease::new(
+                    response_guard,
+                    target_lifecycle.response_revoked().clone(),
+                ),
+            )
+            .expect("handler-to-transport selected response handoff");
+
+        // The accepted connection's original project retires after target
+        // selection. Its lifecycle must neither suppress nor authorize a
+        // response owned by the still-live selected target.
+        active_lifecycle.revoke();
+        assert!(!target_lifecycle.response_revoked().is_cancelled());
+
+        let response = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "result": {"content": [{"type": "text", "text": "target-owned"}]}
+        }))
+        .expect("typed selected-target response");
+        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
+            &mut transport,
+            response,
+        )
+        .await
+        .expect("live selected target must retain response authority");
+
+        let mut client_reader = tokio::io::BufReader::new(client_reader);
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client_reader.read_line(&mut line),
+        )
+        .await
+        .expect("selected-target response timeout")
+        .expect("read selected-target response");
+        assert!(line.contains("target-owned"), "unexpected response: {line}");
     }
 
     #[tokio::test]

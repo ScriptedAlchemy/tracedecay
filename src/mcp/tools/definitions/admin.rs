@@ -78,14 +78,13 @@ pub(super) fn def_project_context() -> ToolDefinition {
     def(
         "tracedecay_project_context",
         "Project Context",
-        "Return registry context for one project: project metadata, aliases, store instances, graph scopes, and artifacts. Defaults to the active project alias when neither project_id nor path is provided.",
+        "Return registry context for one project: project metadata, aliases, store instances, graph scopes, and artifacts. Defaults to the active project alias when neither project_selector nor path is provided.",
         json!({
             "type": "object",
             "properties": {
-                "project_id": {
-                    "type": "string",
-                    "description": "Registered project id to inspect"
-                },
+                "project_selector": project_selector_object(
+                    "Optional registered project id to inspect. Omit to use path or the active project."
+                ),
                 "path": {
                     "type": "string",
                     "description": "Project path or registered alias to resolve"
@@ -173,17 +172,8 @@ pub(super) fn def_analytics() -> ToolDefinition {
                     "description": "Optional filter to a single section. Omit to return all sections."
                 },
                 "project_selector": project_selector_object(
-                    "Advanced optional registered project selector. Omit to use the active project.",
-                    "inspect analytics for"
-                ),
-                "project_id": {
-                    "type": "string",
-                    "description": "Convenience selector: registered project id to query instead of the active project."
-                },
-                "project_path": {
-                    "type": "string",
-                    "description": "Convenience selector: registered project root path or alias to query instead of the active project."
-                }
+                    "Advanced optional registered project selector. Omit to use the active project."
+                )
             }
         }),
     )

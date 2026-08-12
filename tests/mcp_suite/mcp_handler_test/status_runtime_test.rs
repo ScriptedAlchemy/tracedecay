@@ -113,7 +113,7 @@ async fn status_reports_daemon_owned_partial_history_catch_up() {
             .unwrap()
     );
 
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_status",
         json!({"format": "json"}),
@@ -175,7 +175,7 @@ async fn runtime_exposes_cursor_ingest_health_for_daemon_owned_doctor_checks() {
         );
     }
 
-    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
+    let result = tracedecay::mcp::tools::handle_tool_call_with_registry_options(
         &cg,
         "tracedecay_runtime",
         json!({ "format": "json", "session_ingest_health": true }),

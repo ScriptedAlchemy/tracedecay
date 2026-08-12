@@ -40,40 +40,15 @@ impl McpServer {
         &self,
         event: &hook_events::HookEvent,
         route_cache: &mut HookProjectRouteCache,
-    ) -> crate::errors::Result<()> {
+    ) -> crate::errors::Result<crate::mcp::project_route::ResolvedProjectRoute> {
         let route = match HookProjectRouteCache::route_cwd(event) {
             Some(cwd) => {
-                let arguments = json!({
-                    "project_selector": {
-                        "path": cwd.to_string_lossy(),
-                    }
-                });
-                match crate::mcp::tools::handlers::selected_registered_project_reader(
-                    "tracedecay_files".to_owned(),
-                    arguments,
+                crate::mcp::server::routing::resolve_private_project_route(
+                    cwd,
                     self.registry_db.as_deref(),
-                    self.retained_project_graph_resolver.clone(),
+                    self.retained_project_server_resolver.clone(),
                 )
                 .await
-                {
-                    Ok(Some(route)) => {
-                        crate::mcp::project_route::WorkspaceProjectRoute::Resolved(Box::new(route))
-                    }
-                    Ok(None) => crate::mcp::project_route::WorkspaceProjectRoute::Failed(
-                        crate::mcp::project_route::ProjectRouteFailure {
-                            kind: crate::mcp::project_route::ProjectRouteFailureKind::NotFound,
-                            detail: format!(
-                                "workspace {} did not resolve to a registered project",
-                                cwd.display()
-                            ),
-                        },
-                    ),
-                    Err(error) => crate::mcp::project_route::WorkspaceProjectRoute::Failed(
-                        crate::mcp::project_route::ProjectRouteFailure::from_selection_error(
-                            &error,
-                        ),
-                    ),
-                }
             }
             None => crate::mcp::project_route::WorkspaceProjectRoute::Failed(
                 crate::mcp::project_route::ProjectRouteFailure {
@@ -82,15 +57,25 @@ impl McpServer {
                 },
             ),
         };
-        let failure = match &route {
-            crate::mcp::project_route::WorkspaceProjectRoute::Resolved(_) => None,
+        let resolved = match &route {
+            crate::mcp::project_route::WorkspaceProjectRoute::Resolved(resolved) => {
+                Some(resolved.as_ref().clone())
+            }
             crate::mcp::project_route::WorkspaceProjectRoute::Failed(failure) => {
-                Some(failure.clone())
+                route_cache.observe_workspace_route(event, route.clone());
+                self.hook_project_routes.store(route_cache)?;
+                return Err(failure.clone().into_error());
             }
         };
         route_cache.observe_workspace_route(event, route);
-        self.hook_project_routes.store(route_cache);
-        failure.map_or(Ok(()), |failure| Err(failure.into_error()))
+        self.hook_project_routes.store(route_cache)?;
+        resolved.ok_or_else(|| {
+            crate::errors::TraceDecayError::project_route(
+                "project_route_unavailable",
+                true,
+                "hook route was not retained under its structural identity",
+            )
+        })
     }
 
     pub(crate) async fn run_hook_event_plan(

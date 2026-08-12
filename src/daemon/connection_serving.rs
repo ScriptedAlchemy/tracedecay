@@ -104,12 +104,10 @@ pub(super) async fn serve_routed_rmcp_connection(
         transport.push_replay(line)?;
     }
     let adapter =
-        RmcpConnectionAdapter::new(server, timings_enabled, initialize_response_decorator)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("MCP connection identity unavailable: {error}"),
-            })?;
-    let transport =
-        transport.with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
+        RmcpConnectionAdapter::new(server, timings_enabled, initialize_response_decorator)?;
+    let transport = transport
+        .with_rmcp_selected_project_responses(adapter.selected_project_responses())
+        .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
     let running = adapter
         .serve(transport)
         .await
