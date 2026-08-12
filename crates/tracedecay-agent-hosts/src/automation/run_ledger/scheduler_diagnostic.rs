@@ -105,6 +105,7 @@ fn find_before_anchor(
         let Ok(record) = serde_json::from_slice::<AutomationRunLedgerRecord>(line) else {
             continue;
         };
+        let is_effectful_anchor = effectful_anchor_run_id == Some(record.run_id.as_str());
         if record.run_id == candidate.run_id {
             if existing.is_some() {
                 return Err(config_error(format!(
@@ -124,7 +125,7 @@ fn find_before_anchor(
             }
             existing = Some(record);
         }
-        if effectful_anchor_run_id == Some(record.run_id.as_str()) {
+        if is_effectful_anchor {
             reached_anchor = true;
             break;
         }

@@ -104,6 +104,20 @@ fn context_evidence_mode(context: &Value) -> Value {
     }
 }
 
+fn session_reflection_summary(record: &AutomationRunLedgerRecord) -> Value {
+    json!({
+        "status": record.status,
+        "reviewed_count": record.reviewed_count,
+        "accepted_count": record.accepted_count,
+        "rejected_count": record.rejected_count,
+        "skipped_count": record.skipped_count,
+        "proposed_ops_hash": validation_report_hash(record.proposed_ops.as_ref()),
+        "applied_ops_hash": validation_report_hash(record.applied_ops.as_ref()),
+        "rejected_ops_hash": validation_report_hash(record.rejected_ops.as_ref()),
+        "validation_report_hash": validation_report_hash(record.validation_report.as_ref()),
+    })
+}
+
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {
     json!({
         "schema_version": 1,

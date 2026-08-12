@@ -768,7 +768,7 @@ mod tests {
             "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
              \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
              \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{completed_at}\",\
-             \"completed_at\":\"{completed_at}\",\"completed_at_micros\":{}}}"
+             \"completed_at\":\"{completed_at}\",\"completed_at_micros\":{}}}",
             completed_at.saturating_mul(1_000_000),
         )
     }

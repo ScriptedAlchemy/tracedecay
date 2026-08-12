@@ -370,6 +370,7 @@ pub(crate) async fn task_run_gate(
 /// Appends a skipped run record unless the caller already determined it is a
 /// repeat scheduler skip. Performs no ledger reads: `is_repeat` must be
 /// computed from the records the gate evaluation loaded.
+#[cfg(test)]
 pub(crate) async fn append_skipped_record(
     run: &AgentTaskRunContext<'_>,
     evidence_hash: Option<String>,

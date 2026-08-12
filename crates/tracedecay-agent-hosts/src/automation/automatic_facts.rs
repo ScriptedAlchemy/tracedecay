@@ -517,6 +517,7 @@ impl SettledAutomaticFactReceipt {
             .map(tracedecay_domain::FactId::as_str)
     }
 
+    #[cfg(test)]
     pub(crate) fn ledger_value(&self) -> Value {
         let result = self.authority_result();
         let receipt = result.receipt();

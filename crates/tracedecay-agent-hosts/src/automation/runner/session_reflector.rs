@@ -361,7 +361,6 @@ pub(super) struct ProposedAgentOutput<'a> {
     pub(super) retry_report: &'a AgentTaskRetryReport,
     pub(super) evidence: &'a Value,
     pub(super) evidence_hash: Option<String>,
-    pub(super) proposed_ops: &'a Value,
     pub(super) proposals: &'a [Value],
 }
 
@@ -393,7 +392,6 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         retry_report,
         evidence,
         evidence_hash,
-        proposed_ops,
         proposals,
     } = output;
     let run_id = finalizer.run_id();
@@ -705,7 +703,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             });
         }
     };
-    let (mut proposed_ops, mut proposals) = finalizer
+    let (proposed_ops, mut proposals) = finalizer
         .response_output_array(
             &response,
             evidence_hash.clone(),
@@ -792,7 +790,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             }
         };
         retry_report.append(repair_retry_report);
-        (proposed_ops, proposals) = finalizer
+        (_, proposals) = finalizer
             .response_output_array(
                 &response,
                 evidence_hash.clone(),
@@ -813,7 +811,6 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             retry_report: &retry_report,
             evidence: &evidence,
             evidence_hash: evidence_hash.clone(),
-            proposed_ops: &proposed_ops,
             proposals: &proposals,
         },
         &validation_repairs,

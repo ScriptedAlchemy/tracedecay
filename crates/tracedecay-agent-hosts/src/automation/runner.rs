@@ -699,7 +699,6 @@ async fn run_combined_review_for_retrieval(
                 retry_report: &retry_report,
                 evidence: &reflector_bundle.evidence,
                 evidence_hash: reflector_bundle.evidence_hash.clone(),
-                proposed_ops: &output,
                 proposals: &facts,
             },
             &validation_repairs,
@@ -947,6 +946,7 @@ async fn append_combined_failed_records(
     Ok((reflector_record, skill_record))
 }
 
+#[cfg(test)]
 fn combined_reflector_failure_projection(output: &Value) -> Value {
     let facts = output
         .get("facts")

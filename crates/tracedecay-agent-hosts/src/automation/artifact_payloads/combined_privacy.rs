@@ -22,9 +22,7 @@ mod tests {
     use crate::automation::artifact_policy::artifact_policy;
     use crate::automation::backend::{AgentTaskKind, AgentTaskRequest, AgentTaskResponse};
     use crate::automation::outcomes::AutomationOutcomesSnapshot;
-    use crate::automation::run_ledger::{
-        AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger,
-    };
+    use crate::automation::run_ledger::AutomationRunLedgerRecord;
 
     #[test]
     fn combined_skill_response_excludes_fact_output_payloads() {

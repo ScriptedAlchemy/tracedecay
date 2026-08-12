@@ -148,7 +148,9 @@ pub(super) async fn run_skill_writer_for_store(
     let _run_lock = match run.gate().await? {
         SchedulerGate::Proceed(lock) => lock,
         SchedulerGate::Skip(reason) => {
-            return skipped_skill_writer_run(&run, reason, None).await;
+            return skipped_skill_writer_run(&run, reason, None)
+                .await
+                .map_err(Into::into);
         }
     };
     let evidence_bundle = match build_skill_writer_evidence(
@@ -264,7 +266,8 @@ pub(super) async fn run_skill_writer_for_store(
             AgentTaskKind::SkillWriter,
             format!(
                 "Repair the previous skill proposal JSON. Return only {{\"skills\": [...]}}. Preserve valid intent, fix every validation error, and do not add unrelated changes.\n{}",
-                serde_json::to_string_pretty(validation_repairs.last().unwrap_or(&Value::Null))?
+                serde_json::to_string_pretty(validation_repairs.last().unwrap_or(&Value::Null))
+                    .map_err(TraceDecayError::from)?
             ),
             evidence_hash.clone(),
             json!({

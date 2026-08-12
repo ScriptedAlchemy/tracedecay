@@ -180,6 +180,7 @@ fn resolve_endpoint(url: &Url) -> Result<WebhookEndpoint> {
     })
 }
 
+#[cfg(test)]
 fn post_json(endpoint: &WebhookEndpoint, payload: &Value, timeout: Duration) -> Result<u16> {
     post_json_phased(endpoint, payload, timeout).map_err(|error| match error {
         WebhookPostError::NotAttempted(error) => error,

@@ -306,7 +306,7 @@ fn memory_curator_accepts_all_six_canonical_operations_with_exact_cas() {
         (source.clone(), source_event.clone()),
         (target.clone(), target_event.clone()),
         (removable.clone(), removable_event.clone()),
-        (evidence.clone(), evidence_event),
+        (evidence.clone(), evidence_event.clone()),
     ]);
     let (accepted, rejected) = validate_memory_curation_ops(
         &json!({
