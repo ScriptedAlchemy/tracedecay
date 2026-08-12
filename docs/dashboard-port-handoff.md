@@ -144,7 +144,7 @@ Hermes `~/.hermes/memory_store.db` (`facts`/`entities`/`memory_banks`).
 | `GET /projection` | numpy PCA over `hrr_vector` blobs (float64) | Rust dual-PCA (Gram matrix power iteration) over bincode-encoded `Vec<f64>` phase vectors | working |
 | `GET /similarity` | pure-python `mean(cos(p_i−p_j))` + lexical overlap + classification | same math in Rust (`SIMILARITY_FACT_CAP` 500, identical thresholds) | working |
 | `GET /archive` / `POST /archive/{id}/restore` | `facts.state='archived'` / provider restore | **removed by design** — tracedecay curation hard-DELETEs losing facts; there is no archive state and no restore. The UI's Archive tab was removed accordingly. | n/a |
-| `POST /api/automation/run/memory-curator` | automation runner | Queues autonomous memory curation; accepted operations apply through policy and emit ledger/activity/artifact telemetry | **working** |
+| `POST /api/application/retained/fact_store_curate` | retained application | Runs autonomous memory curation; accepted operations apply through policy and emit ledger/activity/artifact telemetry | **working** |
 | `providers` block in `GET /` | hermes provider discovery | static tracedecay stub | stubbed |
 
 Mapping notes: bank names are the category itself in tracedecay (old store
@@ -286,7 +286,7 @@ The tracedecay backend does not have an LLM integration, so built-in curation is
 2. For each pair classified `likely_duplicate` (similarity ≥ 0.95 + lexical
    overlap threshold), proposes to DELETE the **lower-trust** fact (`delete`
    action with `duplicate_of` pointing to the surviving winner).
-3. Autonomous dashboard runs queue through `POST /api/automation/run/memory-curator`.
+3. Autonomous dashboard runs use the sole retained application operation at `POST /api/application/retained/fact_store_curate`.
    Accepted operations are validated and applied by automation policy, with
    ledger, artifact, telemetry, and activity events.
 4. Terminal automation results expose durable committed receipts and typed

@@ -109,7 +109,7 @@ function AutomaticCuratorSettlement({
         </div>
       );
     case "partial_effect": {
-      const receipt = result.problem.problem.problem.committed_receipt;
+      const receipt = result.problem.problem.committed_receipt;
       if (receipt === null) {
         return (
           <p role="status" className="text-2xs leading-relaxed text-state-error">
@@ -119,19 +119,17 @@ function AutomaticCuratorSettlement({
       }
       return (
         <div role="status" className="text-2xs leading-relaxed text-state-partial">
-          <p>{result.problem.problem.problem.message}</p>
+          <p>{result.problem.problem.message}</p>
           <p>
-            reconciliation required · {result.problem.committed_receipts.length.toLocaleString()} canonical receipt
-            {result.problem.committed_receipts.length === 1 ? "" : "s"} · admitted effect {receipt.operation} · request {receipt.request_id}
+            reconciliation required · committed effect {receipt.operation} · request {receipt.request_id}
           </p>
-          <CommittedCurationEffects run={result.problem} />
         </div>
       );
     }
     case "reset_required":
       return (
         <p role="status" className="text-2xs leading-relaxed text-state-error">
-          reset required · {result.problem.problem.problem.message}
+          reset required · {result.problem.problem.message}
         </p>
       );
     case "not_dispatched":

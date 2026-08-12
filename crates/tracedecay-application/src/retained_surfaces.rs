@@ -41,7 +41,7 @@ pub use service::*;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RetainedSurfaceOperation {
-    AutomationRun,
+    FactStoreCurate,
     FactStoreAdd,
     FactStoreSearch,
     FactStoreProbe,
@@ -75,7 +75,7 @@ impl RetainedSurfaceOperation {
     /// Canonical catalog operations. The broad `session_refresh` translator is
     /// intentionally not a catalog operation.
     pub const ALL: [Self; 26] = [
-        Self::AutomationRun,
+        Self::FactStoreCurate,
         Self::FactStoreAdd,
         Self::FactStoreSearch,
         Self::FactStoreProbe,
@@ -105,7 +105,8 @@ impl RetainedSurfaceOperation {
 
     /// Operations with a current callable transport. Daemon grants, HTTP
     /// routes, and the SDK all derive from this exact mounted set.
-    pub const CALLABLE: [Self; 25] = [
+    pub const CALLABLE: [Self; 26] = [
+        Self::FactStoreCurate,
         Self::FactStoreAdd,
         Self::FactStoreSearch,
         Self::FactStoreProbe,
@@ -135,7 +136,8 @@ impl RetainedSurfaceOperation {
 
     /// Every current retained action has an exact project-open production
     /// adapter. SDK clients invoke the operation-selected routes.
-    pub const SDK_EXECUTABLE: [Self; 25] = [
+    pub const SDK_EXECUTABLE: [Self; 26] = [
+        Self::FactStoreCurate,
         Self::FactStoreAdd,
         Self::FactStoreSearch,
         Self::FactStoreProbe,
@@ -164,12 +166,12 @@ impl RetainedSurfaceOperation {
     ];
 
     pub const fn is_callable(self) -> bool {
-        !matches!(self, Self::AutomationRun | Self::SessionRefresh)
+        !matches!(self, Self::SessionRefresh)
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::AutomationRun => "automation_run",
+            Self::FactStoreCurate => "fact_store_curate",
             Self::FactStoreAdd => "fact_store_add",
             Self::FactStoreSearch => "fact_store_search",
             Self::FactStoreProbe => "fact_store_probe",
@@ -344,6 +346,12 @@ fn retained_surface_executable_schemas(
     contribution: &CatalogContributionV1,
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
     Ok(vec![
+        retained_surface_executable_schema::<FactStoreCurateRequestV1, AutomationRunResultV1>(
+            contribution,
+            RetainedSurfaceOperation::FactStoreCurate,
+            "tracedecay_application::retained_surfaces::FactStoreCurateRequestV1",
+            "tracedecay_application::retained_surfaces::AutomationRunResultV1",
+        )?,
         retained_surface_executable_schema::<FactStoreAddRequestV1, FactStoreAddResultV1>(
             contribution,
             RetainedSurfaceOperation::FactStoreAdd,
@@ -847,12 +855,7 @@ mod tests {
 
     #[test]
     fn broad_fact_store_translator_is_not_a_v2_operation() {
-        for name in [
-            "fact_store",
-            "tracedecay_fact_store",
-            "fact_store_curate",
-            "tracedecay_fact_store_curate",
-        ] {
+        for name in ["fact_store", "tracedecay_fact_store"] {
             assert_eq!(RetainedSurfaceOperation::from_operation_name(name), None);
             assert_eq!(RetainedSurfaceOperation::from_tool_name(name), None);
         }
@@ -878,28 +881,28 @@ mod tests {
     }
 
     #[test]
-    fn automation_run_is_registered_without_a_public_route() {
+    fn fact_store_curate_is_the_only_public_automation_launcher() {
         let contribution = retained_surface_catalog_contribution().expect("contribution");
-        let operation = RetainedSurfaceOperation::AutomationRun;
+        let operation = RetainedSurfaceOperation::FactStoreCurate;
         let capability = CapabilityId::new(capability_id(operation)).expect("capability id");
 
         assert!(RetainedSurfaceOperation::ALL.contains(&operation));
-        assert!(!RetainedSurfaceOperation::CALLABLE.contains(&operation));
-        assert!(!RetainedSurfaceOperation::SDK_EXECUTABLE.contains(&operation));
+        assert!(RetainedSurfaceOperation::CALLABLE.contains(&operation));
+        assert!(RetainedSurfaceOperation::SDK_EXECUTABLE.contains(&operation));
         assert!(
             contribution
                 .capabilities()
                 .iter()
                 .any(|entry| entry.capability_id() == &capability)
         );
-        assert!(contribution.executable_schema(&capability).is_none());
+        assert!(contribution.executable_schema(&capability).is_some());
         assert_eq!(
-            RetainedSurfaceOperation::from_operation_name("automation_run"),
-            None
+            RetainedSurfaceOperation::from_operation_name("fact_store_curate"),
+            Some(operation)
         );
         assert_eq!(
-            RetainedSurfaceOperation::from_tool_name("tracedecay_automation_run"),
-            None
+            RetainedSurfaceOperation::from_tool_name("tracedecay_fact_store_curate"),
+            Some(operation)
         );
         retained_surface_application_operation(operation).expect("registered application use case");
     }

@@ -1219,10 +1219,10 @@ impl McpServer {
                     .map(|mounted| Arc::clone(&mounted.service)),
                 project_workflow_index,
                 project_lcm: self.project_lcm_authority.clone(),
+                invocation_service: self.daemon_invocation_service.clone(),
             },
         )
     }
-
     /// Clones out the currently served `TraceDecay` instance. The lock is
     /// held only for the clone, never across an await on the instance.
     pub(crate) async fn cg_snapshot(&self) -> Arc<TraceDecay> {

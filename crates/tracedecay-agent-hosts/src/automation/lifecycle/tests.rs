@@ -368,6 +368,7 @@ async fn on_demand_triggers_bypass_only_scheduler_enablement() {
         AutomationTrigger::ManualCli,
         AutomationTrigger::ManualMcp,
         AutomationTrigger::Dashboard,
+        AutomationTrigger::Application,
     ] {
         let (gate, _) = task_run_gate(
             &disabled,

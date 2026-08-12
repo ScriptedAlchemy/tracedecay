@@ -161,19 +161,6 @@ pub enum AutomationConfigAction {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum AutomationRunAction {
-    /// Build a memory-curation review, call the configured backend, and validate proposed ops.
-    #[command(name = "memory-curation")]
-    MemoryCuration {
-        /// Maximum canonical facts included in the backend review request.
-        #[arg(long, default_value_t = tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_FACT_REVIEW_LIMIT)]
-        fact_review_limit: usize,
-        /// Confidence floor below which backend ops are rejected.
-        #[arg(long, default_value_t = tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_MIN_CONFIDENCE)]
-        min_confidence: f64,
-        /// Project path (default: current directory, with discovery).
-        #[arg(short, long)]
-        path: Option<String>,
-    },
     /// Build and automatically apply session-reflection facts from LCM evidence.
     #[command(name = "session-reflection")]
     SessionReflection {

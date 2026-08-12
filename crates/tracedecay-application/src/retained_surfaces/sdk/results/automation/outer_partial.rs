@@ -17,11 +17,12 @@ use crate::{
 fn outer_delivery_partial(result: AutomationRunResultV1) -> Value {
     let request_id = RequestId::new("request.automation.outer-partial").expect("request");
     let scope = memory_scope();
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("operation");
     let committed_state = canonical_sha256(&(
         "tracedecay.retained.effect.committed-state.v1",
-        RetainedSurfaceOperation::AutomationRun.as_str(),
+        RetainedSurfaceOperation::FactStoreCurate.as_str(),
         result.run_id.as_str(),
         &result,
     ))

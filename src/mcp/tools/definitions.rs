@@ -587,7 +587,7 @@ pub(super) fn get_maximal_tool_definitions()
         def_fact_store_list(request_schema("fact_store_list")?),
         def_fact_feedback(request_schema("fact_feedback")?),
         def_memory_status(request_schema("memory_status")?),
-        def_memory_automation_run(),
+        def_fact_store_curate(request_schema("fact_store_curate")?),
         def_automation_run_list(),
         def_automation_run_view(),
         def_automation_run_artifact_view(),
@@ -855,6 +855,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     // memory
     "tracedecay_memory_status",
     "tracedecay_fact_store_add",
+    "tracedecay_fact_store_curate",
     "tracedecay_fact_store_search",
     "tracedecay_fact_store_probe",
     "tracedecay_fact_store_related",
@@ -921,6 +922,7 @@ pub fn tool_defaults_to_markdown(tool_name: &str) -> bool {
             | "tracedecay_dsm"
             | "tracedecay_fact_feedback"
             | "tracedecay_fact_store_add"
+            | "tracedecay_fact_store_curate"
             | "tracedecay_fact_store_search"
             | "tracedecay_fact_store_probe"
             | "tracedecay_fact_store_related"

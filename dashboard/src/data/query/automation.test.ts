@@ -39,12 +39,19 @@ function scheduler(overrides: Record<string, unknown> = {}) {
 }
 
 function respond(body: unknown, init?: { ok?: boolean; statusCode?: number }) {
+  const value =
+    init?.ok !== false &&
+    typeof body === "object" &&
+    body !== null &&
+    "run" in body
+      ? curatorSuccess((body as { run: unknown }).run)
+      : body;
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => ({
       ok: init?.ok ?? true,
       status: init?.statusCode ?? 200,
-      json: async () => body,
+      json: async () => value,
     })),
   );
 }
@@ -74,14 +81,17 @@ describe("setSchedulerPaused", () => {
 });
 
 describe("runAutomaticCurator", () => {
-  it("decodes the generated run terminal without sending policy defaults", async () => {
+  it("decodes the retained application terminal with explicit caller bounds", async () => {
     respond({ run: automaticRun("run-dashboard") });
 
     const result = await runAutomaticCurator();
     expect(result.outcome).toBe("ok");
     const call = vi.mocked(fetch).mock.calls[0];
-    expect(call?.[0]).toBe("/api/automation/run/memory-curator");
-    expect((call?.[1] as RequestInit).body).toBe("{}");
+    expect(call?.[0]).toBe("/api/application/retained/fact_store_curate");
+    expect(JSON.parse(String((call?.[1] as RequestInit).body))).toEqual({
+      fact_review_limit: 24,
+      min_confidence_millionths: 720_000,
+    });
   });
 
   it("rejects a run for another automatic-memory task", async () => {
@@ -341,104 +351,25 @@ describe("runAutomaticCurator", () => {
     expect((await runScopedAutomaticCurator()).outcome).toBe("partial_effect");
   });
 
-  it("requires the exact canonical committed state for a partial terminal", async () => {
-    const body = automaticProblem("partial_effect") as {
-      value: { problem: { problem: { committed_receipt: { committed_state: string } } } };
-    };
-    body.value.problem.problem.committed_receipt.committed_state = sha("f");
-    respond(body, { ok: false, statusCode: 409 });
-
-    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("rejects duplicate outer curation identities with an exact partial-state digest", async () => {
+  it("rejects a partial terminal belonging to another application effect", async () => {
     const body = automaticProblem("partial_effect");
-    const second = curationReceipt("run.dashboard.partial");
-    const effect = firstNormalizeEffect(second);
-    const secondFactId = factId("2");
-    effect.fact_id = secondFactId;
-    effect.commit.fact_id = secondFactId;
-    effect.commit.committed_event_ids = [
-      "event.dashboard.second.fact",
-      "event.dashboard.second.assertion",
-    ];
-    effect.commit.last_event_id = "event.dashboard.second.assertion";
-    second.receipt.receipt.replay_fact_id = secondFactId;
-    second.receipt.receipt.replay_event_id = "event.dashboard.second.assertion";
-    second.receipt.receipt.changed_fact_ids = [secondFactId];
-    refreshCurationDigest(second);
-
-    const receipts = [body.value.committed_receipts[0]!, second];
-    body.value.committed_receipts = receipts;
-    const effectReceipt = body.value.problem.problem.committed_receipt;
-    if (effectReceipt === null) throw new Error("partial fixture drifted");
-    effectReceipt.committed_state = canonicalSha([
-      "tracedecay.memory-automation-run.partial-state.v1",
-      body.value.run_id,
-      receipts,
-    ]);
+    const receipt = body.value.problem.committed_receipt;
+    if (receipt === null) throw new Error("partial fixture drifted");
+    receipt.operation = "use-case.application.retained.fact-store-add";
     respond(body, { ok: false, statusCode: 409 });
-
-    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
-  it("rejects a partial terminal belonging to another outer effect", async () => {
-    const body = automaticProblem("partial_effect") as {
-      value: { problem: { problem: { committed_receipt: { operation: string } } } };
-    };
-    body.value.problem.problem.committed_receipt.operation =
-      "use-case.application.retained.fact-store-curate";
-    respond(
-      body,
-      { ok: false, statusCode: 409 },
-    );
+  it("binds the problem contract and admitted request", async () => {
+    const wrongContract = automaticProblem("reset_required");
+    wrongContract.value.contract.schema_revision = 2;
+    respond(wrongContract, { ok: false, statusCode: 503 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
 
-    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("binds the problem envelope to the admitted request", async () => {
-    const body = automaticProblem("partial_effect") as {
-      value: { problem: { request_id: string } };
-    };
-    body.value.problem.request_id = "request.dashboard.other";
-    respond(body, { ok: false, statusCode: 409 });
-    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("binds a partial problem to the curator run and exact scope", async () => {
-    const wrongTask = automaticProblem("partial_effect") as {
-      value: { task: string };
-    };
-    wrongTask.value.task = "session_reflector";
-    respond(wrongTask, { ok: false, statusCode: 409 });
-    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
-
-    const wrongRun = automaticProblem("partial_effect") as {
-      value: { run_id: string };
-    };
-    wrongRun.value.run_id = "run.dashboard.other";
-    respond(wrongRun, { ok: false, statusCode: 409 });
-    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
-
-    const wrongScope = automaticProblem("partial_effect") as {
-      value: {
-        problem: { problem: { committed_receipt: { scope: { project_id: string } } } };
-      };
-    };
-    wrongScope.value.problem.problem.committed_receipt.scope.project_id =
-      "project.other";
-    respond(wrongScope, { ok: false, statusCode: 409 });
-    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
-  });
-
-  it("rejects a terminal from an unknown automation contract revision", async () => {
-    const body = automaticProblem("reset_required") as {
-      value: { problem: { contract: { schema_revision: number } } };
-    };
-    body.value.problem.contract.schema_revision = 2;
-    respond(body, { ok: false, statusCode: 503 });
-
-    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
+    const wrongRequest = automaticProblem("reset_required");
+    wrongRequest.value.problem.request_id = "request.dashboard.other";
+    respond(wrongRequest, { ok: false, statusCode: 503 });
+    expect((await runAutomaticCurator()).outcome).toBe("unsupported_schema");
   });
 
   it("decodes the generated reset-required terminal", async () => {
@@ -454,47 +385,12 @@ describe("runAutomaticCurator", () => {
     expect((await runAutomaticCurator()).outcome).toBe("reset_required");
   });
 
-  it("rejects a non-canonical selected scope digest for partial and reset", async () => {
-    for (const [kind, statusCode] of [
-      ["partial_effect", 409],
-      ["reset_required", 503],
-    ] as const) {
-      const body = automaticProblem(kind);
-      body.value.scope.scope_digest = sha("f");
-      respond(body, { ok: false, statusCode });
-      expect((await runScopedAutomaticCurator()).outcome).toBe(
-        "unsupported_schema",
-      );
-    }
-  });
-
-  it("binds reset-required to the selected project and admitted request", async () => {
-    respond(automaticProblem("reset_required"), { ok: false, statusCode: 503 });
-    expect((await runAutomaticCurator(
-      "/api/projects/project.dashboard/automation/run/memory-curator",
-    )).outcome).toBe("reset_required");
-
-    respond(automaticProblem("reset_required"), { ok: false, statusCode: 503 });
-    expect((await runAutomaticCurator(
-      "/api/projects/project.other/automation/run/memory-curator",
-    )).outcome).toBe("unsupported_schema");
-
-    const wrongRequest = automaticProblem("reset_required") as {
-      value: { problem: { request_id: string } };
-    };
-    wrongRequest.value.problem.request_id = "request.dashboard.other";
-    respond(wrongRequest, { ok: false, statusCode: 503 });
-    expect((await runAutomaticCurator(
-      "/api/projects/project.dashboard/automation/run/memory-curator",
-    )).outcome).toBe("unsupported_schema");
-  });
 });
 
 const sha = (seed: string) => `sha256:${seed.repeat(64)}`;
 const PROJECT_OWNER_BINDING =
   "cdab36393497f7ad3d6e0144484b711458ed01517e7108bc1dbf8cc0e3b33f88";
-const SCOPED_CURATOR_URL =
-  "/api/projects/project.dashboard/automation/run/memory-curator";
+const SCOPED_CURATOR_URL = "/api/application/retained/fact_store_curate";
 
 function runScopedAutomaticCurator() {
   return runAutomaticCurator(SCOPED_CURATOR_URL);
@@ -691,6 +587,31 @@ function automaticRunWithReceipt(
   return run;
 }
 
+function curatorSuccess(run: unknown) {
+  return {
+    kind: "success",
+    value: {
+      binding_id: "binding.application.retained.fact-store-curate.http",
+      contract: {
+        schema_id: "schema.application.retained.fact-store-curate.result",
+        schema_revision: 1,
+      },
+      request_id: "request.dashboard.success",
+      scope: {
+        project_id: "project.dashboard",
+        repository_id: "repository.dashboard",
+        worktree_id: "worktree.dashboard",
+        reference: null,
+        scope_digest: sha("9"),
+      },
+      outcome: {
+        outcome: "effect",
+        value: { payload: run },
+      },
+    },
+  };
+}
+
 function automaticProblem(kind: "partial_effect" | "reset_required") {
   const requestId = `request.dashboard.${kind}`;
   const scope = {
@@ -706,25 +627,18 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
       null,
     ]),
   };
-  const committedReceipts = kind === "partial_effect"
-    ? [curationReceipt("run.dashboard.partial")]
-    : [];
   const effectReceipt = kind === "partial_effect"
     ? {
         actor: "actor.dashboard",
         catalog_digest: sha("1"),
-        committed_state: canonicalSha([
-          "tracedecay.memory-automation-run.partial-state.v1",
-          "run.dashboard.partial",
-          committedReceipts,
-        ]),
+        committed_state: sha("2"),
         configuration_digest: sha("3"),
         effect_class: "administrative",
         expected_state: sha("4"),
         external_proof: null,
         idempotency_key: "idempotency.dashboard",
         input_digest: sha("5"),
-        operation: "use-case.application.retained.memory-automation-run",
+        operation: "use-case.application.retained.fact-store-curate",
         outcome: "partial",
         policy_digest: sha("6"),
         privacy_digest: sha("7"),
@@ -735,39 +649,34 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
   return {
     kind: "problem",
     value: {
-      run_id: "run.dashboard.partial",
-      task: "memory_curator",
-      scope,
-      problem: {
-        contract: {
-          schema_id: "schema.application.retained.memory-automation-run.result",
-          schema_revision: 1,
-        },
-        request_id: requestId,
-        problem: {
-          revision: 1,
-          kind,
-          code: `automation.memory-curator.${kind}`,
-          message: kind === "partial_effect"
-            ? "curation committed before projection failed"
-            : "the retained memory store must be reset",
-          diagnostic: null,
-          committed_receipt: effectReceipt,
-          owning_layer: "runtime",
-          terminality: "admitted_terminal",
-          retryable: false,
-          retry: "never",
-          retry_scope: null,
-          retry_after_millis: null,
-          cancellation_stage: null,
-          request_id: requestId,
-          trace_id: requestId,
-          details: [],
-          legal_actions: [kind === "partial_effect" ? "reconcile" : "reset"],
-          coverage: null,
-        },
+      binding_id: "binding.application.retained.fact-store-curate.http",
+      contract: {
+        schema_id: "schema.application.retained.fact-store-curate.result",
+        schema_revision: 1,
       },
-      committed_receipts: committedReceipts,
+      request_id: requestId,
+      problem: {
+        revision: 1,
+        kind,
+        code: `automation.memory-curator.${kind}`,
+        message: kind === "partial_effect"
+          ? "curation committed before projection failed"
+          : "the retained memory store must be reset",
+        diagnostic: null,
+        committed_receipt: effectReceipt,
+        owning_layer: "runtime",
+        terminality: "admitted_terminal",
+        retryable: false,
+        retry: "never",
+        retry_scope: null,
+        retry_after_millis: null,
+        cancellation_stage: null,
+        request_id: requestId,
+        trace_id: requestId,
+        details: [],
+        legal_actions: [kind === "partial_effect" ? "reconcile" : "reset"],
+        coverage: null,
+      },
     },
   };
 }

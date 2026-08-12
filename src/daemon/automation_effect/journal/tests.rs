@@ -51,8 +51,9 @@ fn reset_problem(
     scope: &ResolvedScope,
     request: &AutomationRunRequestV1,
 ) -> AutomationRunProblemV1 {
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("operation");
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::ProjectResetRequired);
     let problem = ApplicationProblemEnvelope::new(
@@ -112,8 +113,9 @@ fn external_admission(run_id: &str, request_id: &str) -> DurableAutomationAdmiss
 }
 
 fn partial_receipt_template(request_id: &RequestId, scope: &ResolvedScope) -> EffectReceipt {
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("operation");
     EffectReceipt {
         operation: operation.use_case_id().clone(),
         request_id: request_id.clone(),
@@ -156,8 +158,9 @@ fn success_terminal(
     admission: &DurableAutomationAdmission,
     result_run_id: &str,
 ) -> AutomationSettledTerminal {
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("operation");
     let expected_state = digest('5');
     let idempotency_key = IdempotencyKey::new("idempotency.memory-journal").expect("key");
     let receipt = EffectReceipt {
@@ -206,7 +209,7 @@ fn success_terminal(
         .expect("execution"),
         ReconciliationState::Reconciled,
         receipt,
-        Some(RetainedSurfaceResultV1::AutomationRun(result)),
+        Some(RetainedSurfaceResultV1::FactStoreCurate(result)),
     )
     .expect("effect result");
     AutomationSettledTerminal::Outcome {
@@ -237,8 +240,9 @@ fn partial_terminal(admission: &DurableAutomationAdmission) -> AutomationSettled
         &committed_receipts,
     ))
     .expect("committed state");
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("operation");
     let effect_receipt = EffectReceipt {
         operation: operation.use_case_id().clone(),
         request_id: admission.request_id.clone(),

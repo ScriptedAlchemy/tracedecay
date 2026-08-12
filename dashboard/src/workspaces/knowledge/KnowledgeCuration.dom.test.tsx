@@ -49,7 +49,7 @@ describe("curation console", () => {
     ).toBeTruthy();
   });
 
-  it("starts the policy-owned automatic curator with an empty request", async () => {
+  it("starts the policy-owned automatic curator with closed review bounds", async () => {
     const fetchMock = stubRoutes({
       runResponse: { run: automaticRun("run-dashboard") },
     });
@@ -62,11 +62,14 @@ describe("curation console", () => {
     expect(await screen.findByText(/run run-dashboard settled completed/)).toBeTruthy();
     const dispatch = fetchMock.mock.calls.find(
       ([input, init]) =>
-        String(input) === "/api/automation/run/memory-curator" &&
+        String(input) === "/api/application/retained/fact_store_curate" &&
         (init as RequestInit | undefined)?.method === "POST",
     );
     expect(dispatch).toBeTruthy();
-    expect((dispatch?.[1] as RequestInit).body).toBe("{}");
+    expect(JSON.parse(String((dispatch?.[1] as RequestInit).body))).toEqual({
+      fact_review_limit: 24,
+      min_confidence_millionths: 720_000,
+    });
   });
 
   it("preserves a committed partial-effect receipt and reconcile action", async () => {
@@ -80,11 +83,9 @@ describe("curation console", () => {
     expect(await screen.findByText(/curation committed before projection failed/)).toBeTruthy();
     expect(
       await screen.findByText(
-        /reconciliation required · 1 canonical receipt · admitted effect use-case\.application\.retained\.memory-automation-run · request request\.dashboard\.partial/,
+        /reconciliation required · committed effect use-case\.application\.retained\.fact-store-curate · request request\.dashboard\.partial/,
       ),
     ).toBeTruthy();
-    expect(await screen.findByText(/normalize tags · fact fact\.v1\./)).toBeTruthy();
-    expect(await screen.findByText(/event event\.dashboard\.assertion/)).toBeTruthy();
   });
 
   it("keeps reset-required separate from availability failure", async () => {
@@ -113,13 +114,14 @@ describe("curation console", () => {
     expect(
       fetchMock.mock.calls.some(
         ([input, init]) =>
-          String(input) === "/api/automation/run/memory-curator" &&
+          String(input) ===
+            "/api/projects/project-active/application/retained/fact_store_curate" &&
           (init as RequestInit | undefined)?.method === "POST",
       ),
     ).toBe(false);
   });
 
-  it("dispatches a selected active project through its exact project gateway", async () => {
+  it("dispatches an active project through the canonical application route", async () => {
     const fetchMock = stubRoutes();
     useScope.getState().selectProject("project-active", "Active", "active");
     renderConsole();
@@ -135,17 +137,18 @@ describe("curation console", () => {
       fetchMock.mock.calls.some(
         ([input, init]) =>
           String(input) ===
-            "/api/projects/project-active/automation/run/memory-curator" &&
+            "/api/projects/project-active/application/retained/fact_store_curate" &&
           (init as RequestInit | undefined)?.method === "POST",
       ),
     ).toBe(true);
     expect(
-      fetchMock.mock.calls.some(
+      fetchMock.mock.calls.filter(
         ([input, init]) =>
-          String(input) === "/api/automation/run/memory-curator" &&
+          String(input) ===
+            "/api/projects/project-active/application/retained/fact_store_curate" &&
           (init as RequestInit | undefined)?.method === "POST",
-      ),
-    ).toBe(false);
+      ).length,
+    ).toBe(1);
   });
 
   it("does not show project A's settled run after scope changes to project B", async () => {
@@ -259,69 +262,18 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
       null,
     ]),
   };
-  const committedReceipts = kind === "partial_effect"
-    ? [(() => {
-        const ownerHash = createHash("sha256")
-          .update(canonicalJson([
-            "fact-owner.v1",
-            { kind: "project", project_id: "project.dashboard" },
-          ]))
-          .digest("hex");
-        const factId = `fact.v1.${ownerHash}.${"d".repeat(64)}`;
-        const receipt = {
-          owner: { kind: "project", project_id: "project.dashboard" },
-          operation_id: "operation.dashboard",
-          input_digest: "c".repeat(64),
-          automation_run_id: "run.dashboard.partial",
-          operation_effects: [{
-            kind: "normalize_tags",
-            fact_id: factId,
-            commit: {
-              disposition: "committed",
-              fact_id: factId,
-              owner: { kind: "project", project_id: "project.dashboard" },
-              committed_event_ids: [
-                "event.dashboard.fact",
-                "event.dashboard.assertion",
-              ],
-              last_event_id: "event.dashboard.assertion",
-              active_assertion_id: "assertion.dashboard",
-            },
-          }],
-          replay_fact_id: factId,
-          replay_event_id: "event.dashboard.assertion",
-          changed_fact_ids: [factId],
-          normalized_tags: 1,
-          facts_linked: 0,
-        };
-        return {
-        kind: "curation",
-        receipt: {
-          canonical_digest: canonicalSha([
-            "tracedecay.memory-automation-run.curation-receipt.v1",
-            receipt,
-          ]),
-          receipt,
-        },
-      };
-      })()]
-    : [];
   const effectReceipt = kind === "partial_effect"
     ? {
         actor: "actor.dashboard",
         catalog_digest: sha("1"),
-        committed_state: canonicalSha([
-          "tracedecay.memory-automation-run.partial-state.v1",
-          "run.dashboard.partial",
-          committedReceipts,
-        ]),
+        committed_state: sha("2"),
         configuration_digest: sha("3"),
         effect_class: "administrative",
         expected_state: sha("4"),
         external_proof: null,
         idempotency_key: "idempotency.dashboard",
         input_digest: sha("5"),
-        operation: "use-case.application.retained.memory-automation-run",
+        operation: "use-case.application.retained.fact-store-curate",
         outcome: "partial",
         policy_digest: sha("6"),
         privacy_digest: sha("7"),
@@ -332,39 +284,56 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
   return {
     kind: "problem",
     value: {
-      run_id: "run.dashboard.partial",
-      task: "memory_curator",
-      scope,
-      problem: {
-        contract: {
-          schema_id: "schema.application.retained.memory-automation-run.result",
-          schema_revision: 1,
-        },
-        request_id: requestId,
-        problem: {
-          revision: 1,
-          kind,
-          code: `automation.memory-curator.${kind}`,
-          message: kind === "partial_effect"
-            ? "curation committed before projection failed"
-            : "the retained memory store must be reset",
-          diagnostic: null,
-          committed_receipt: effectReceipt,
-          owning_layer: "runtime",
-          terminality: "admitted_terminal",
-          retryable: false,
-          retry: "never",
-          retry_scope: null,
-          retry_after_millis: null,
-          cancellation_stage: null,
-          request_id: requestId,
-          trace_id: requestId,
-          details: [],
-          legal_actions: [kind === "partial_effect" ? "reconcile" : "reset"],
-          coverage: null,
-        },
+      binding_id: "binding.application.retained.fact-store-curate.http",
+      contract: {
+        schema_id: "schema.application.retained.fact-store-curate.result",
+        schema_revision: 1,
       },
-      committed_receipts: committedReceipts,
+      request_id: requestId,
+      problem: {
+        revision: 1,
+        kind,
+        code: `automation.memory-curator.${kind}`,
+        message: kind === "partial_effect"
+          ? "curation committed before projection failed"
+          : "the retained memory store must be reset",
+        diagnostic: null,
+        committed_receipt: effectReceipt,
+        owning_layer: "runtime",
+        terminality: "admitted_terminal",
+        retryable: false,
+        retry: "never",
+        retry_scope: null,
+        retry_after_millis: null,
+        cancellation_stage: null,
+        request_id: requestId,
+        trace_id: requestId,
+        details: [],
+        legal_actions: [kind === "partial_effect" ? "reconcile" : "reset"],
+        coverage: null,
+      },
+    },
+  };
+}
+
+function curatorSuccess(run: unknown) {
+  return {
+    kind: "success",
+    value: {
+      binding_id: "binding.application.retained.fact-store-curate.http",
+      contract: {
+        schema_id: "schema.application.retained.fact-store-curate.result",
+        schema_revision: 1,
+      },
+      request_id: "request.dashboard.success",
+      scope: {
+        project_id: "project.dashboard",
+        repository_id: "repository.dashboard",
+        worktree_id: "worktree.dashboard",
+        reference: null,
+        scope_digest: sha("9"),
+      },
+      outcome: { outcome: "effect", value: { payload: run } },
     },
   };
 }
@@ -431,10 +400,21 @@ function stubRoutes(options?: {
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const isRunDispatch =
-        url.endsWith("/automation/run/memory-curator") &&
+        (url === "/api/application/retained/fact_store_curate" ||
+          /^\/api\/projects\/[^/]+\/application\/retained\/fact_store_curate$/.test(
+            url,
+          )) &&
         init?.method === "POST";
-      const body = isRunDispatch
+      const rawRunResponse = isRunDispatch
         ? await (options?.runResponse ?? { run: automaticRun("run-dashboard") })
+        : undefined;
+      const body = isRunDispatch
+        ? options?.status === undefined &&
+          typeof rawRunResponse === "object" &&
+          rawRunResponse !== null &&
+          "run" in rawRunResponse
+          ? curatorSuccess((rawRunResponse as { run: unknown }).run)
+          : rawRunResponse
         : url.endsWith("/automation/runs/run-1/artifacts/traces")
           ? {
               run_id: "run-1",

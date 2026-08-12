@@ -530,7 +530,7 @@ impl AutomationRunProblemV1 {
 
     pub fn matches_terminal(&self, request_id: &RequestId) -> bool {
         let Ok(operation) =
-            retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+            retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
         else {
             return false;
         };
@@ -541,7 +541,7 @@ impl AutomationRunProblemV1 {
             || self.problem.contract != *operation.result_contract()
             || !self.problem.problem.source().is_admitted_terminal()
             || !retained_surface_problem_matches_terminal(
-                RetainedSurfaceOperation::AutomationRun,
+                RetainedSurfaceOperation::FactStoreCurate,
                 request_id,
                 Some(&self.scope),
                 self.problem.problem.source(),
@@ -572,7 +572,7 @@ impl AutomationRunProblemV1 {
             }
             let Ok(committed_state) = canonical_sha256(&(
                 "tracedecay.retained.effect.committed-state.v1",
-                RetainedSurfaceOperation::AutomationRun.as_str(),
+                RetainedSurfaceOperation::FactStoreCurate.as_str(),
                 self.run_id.as_str(),
                 result,
             )) else {

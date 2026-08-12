@@ -70,22 +70,6 @@ mod tests {
             serde_json::json!({ "action": "automatic_fact_receipt_view", "id": "fact_7" })
         );
 
-        let (path, request) = automation_run_rpc_request(AutomationRunAction::MemoryCuration {
-            fact_review_limit: 9,
-            min_confidence: 0.7,
-            path: Some("/repo".to_string()),
-        })
-        .unwrap();
-        assert_eq!(path.as_deref(), Some("/repo"));
-        assert_eq!(
-            request,
-            serde_json::json!({
-                "action": "automation_run",
-                "task": "memory_curation",
-                "options": { "fact_review_limit": 9, "min_confidence": 0.7 },
-            })
-        );
-
         let (path, request) = automation_run_rpc_request(AutomationRunAction::SessionReflection {
             provider: "claude".to_string(),
             query: "decisions".to_string(),

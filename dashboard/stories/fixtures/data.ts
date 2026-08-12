@@ -1552,19 +1552,41 @@ function automationOutcomesPayload(): Record<string, unknown> {
 
 function automaticCuratorRunPayload(): Record<string, unknown> {
   return {
-    run: {
-      run_id: 'run-story-memory-curator',
-      task: 'memory_curator',
-      terminal: {
-        status: 'completed',
-        summary: {
-          reviewed_count: 0,
-          accepted_count: 0,
-          rejected_count: 0,
-          skipped_count: 0,
+    kind: 'success',
+    value: {
+      binding_id: 'binding.application.retained.fact-store-curate.http',
+      contract: {
+        schema_id: 'schema.application.retained.fact-store-curate.result',
+        schema_revision: 1,
+      },
+      request_id: 'request.story.fact-store-curate',
+      scope: {
+        project_id: 'project.story',
+        repository_id: 'repository.story',
+        worktree_id: 'worktree.story',
+        reference: null,
+        scope_digest: `sha256:${'9'.repeat(64)}`,
+      },
+      outcome: {
+        outcome: 'effect',
+        value: {
+          payload: {
+            run_id: 'run-story-memory-curator',
+            task: 'memory_curator',
+            request_digest: `sha256:${'8'.repeat(64)}`,
+            terminal: {
+              status: 'completed',
+              summary: {
+                reviewed_count: 0,
+                accepted_count: 0,
+                rejected_count: 0,
+                skipped_count: 0,
+              },
+            },
+            committed_receipts: [],
+          },
         },
       },
-      committed_receipts: [],
     },
   };
 }
@@ -2557,7 +2579,7 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/automation/automatic-fact-receipts': automaticFactReceiptsPayload(),
   '/api/automation/runs': automationRunsPayload(),
   '/api/automation/outcomes': automationOutcomesPayload(),
-  '/api/automation/run/memory-curator': automaticCuratorRunPayload(),
+  '/api/application/retained/fact_store_curate': automaticCuratorRunPayload(),
   // Plan 26 canonical read models. These are the projections the CLI and MCP
   // also serve, so their fixtures carry the mixed available/unavailable metric
   // set the real projector emits rather than a fully-populated one.

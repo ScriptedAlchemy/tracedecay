@@ -122,10 +122,6 @@ pub(crate) fn exact_automation_authority(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DashboardAutomationRunRequestV1 {
-    MemoryCurator {
-        fact_review_limit: usize,
-        min_confidence: f64,
-    },
     SessionReflection {
         provider: Option<String>,
         query: Option<String>,
@@ -497,9 +493,18 @@ mod tests {
         authority
             .run(
                 &project_root,
-                DashboardAutomationRunRequestV1::MemoryCurator {
-                    fact_review_limit: 7,
-                    min_confidence: 0.8,
+                DashboardAutomationRunRequestV1::SessionReflection {
+                    provider: None,
+                    query: None,
+                    evidence_limit: None,
+                    scope: None,
+                    session_id: None,
+                    include_summaries: None,
+                    sort: None,
+                    source: None,
+                    role: None,
+                    start_time: None,
+                    end_time: None,
                 },
                 control.clone(),
             )

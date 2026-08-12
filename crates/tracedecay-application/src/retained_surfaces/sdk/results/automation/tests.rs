@@ -580,8 +580,9 @@ fn partial_curator_problem_rejects_two_distinct_valid_receipts() {
 #[test]
 fn zero_effect_problem_is_bound_to_exact_run_and_task() {
     let request_id = RequestId::new("request.automation.reset-bound").expect("request id");
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("automation operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("automation operation");
     let problem = ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         request_id.clone(),
@@ -611,8 +612,9 @@ fn zero_effect_problem_is_bound_to_exact_run_and_task() {
 
 #[test]
 fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("automation operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("automation operation");
     let request = automation_request("run.memory.failure-bound", AutomationTaskV1::MemoryCurator);
     let request_id = RequestId::new("request.memory.failure-bound").expect("request id");
     let terminal = |problem| {
@@ -688,8 +690,9 @@ fn non_partial_problem_rejects_committed_memory_receipts() {
         .expect("automatic terminal");
     let request_id = RequestId::new("request.automation.reset").expect("request id");
     let scope = memory_scope();
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("automation operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("automation operation");
     let problem = ApplicationProblem::ResetRequired {
         diagnostic: SafeDiagnostic::new(
             "application.automation-run.reset-required",
@@ -852,8 +855,9 @@ fn partial_problem_result(
         ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
             .expect("fixture digest")
     };
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .expect("automation operation");
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .expect("automation operation");
     let receipt = EffectReceipt {
         operation: operation.use_case_id().clone(),
         request_id: request_id.clone(),

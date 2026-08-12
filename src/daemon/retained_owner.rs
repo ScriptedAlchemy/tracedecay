@@ -14,6 +14,7 @@ use tracedecay_domain::ManifestDigest;
 use crate::errors::TraceDecayError;
 use crate::tracedecay::TraceDecay;
 
+mod automation;
 mod lcm;
 mod memory;
 mod memory_mapping;
@@ -52,6 +53,8 @@ pub(crate) struct ProductionRetainedAuthoritiesV1 {
     pub(crate) project_workflow_index: Option<Arc<dyn tracedecay_sessions::WorkflowIndexReadPort>>,
     pub(crate) project_lcm: Option<Arc<dyn crate::daemon::lcm_authority::MountedLcmAuthorityPort>>,
     pub(crate) configuration_digest: ManifestDigest,
+    pub(crate) invocation_service:
+        Option<crate::daemon::service::invocation::DaemonInvocationService>,
 }
 
 pub(crate) fn retained_surface_ports(
@@ -64,6 +67,12 @@ pub(crate) fn retained_surface_ports(
             authorities.configuration_digest.clone(),
         ),
     ));
+    if let Some(invocation_service) = authorities.invocation_service.clone() {
+        ports = ports.with_automation(Arc::new(automation::DirectRetainedAutomationPortV1::new(
+            Arc::clone(&authorities.cg),
+            invocation_service,
+        )));
+    }
     if let (
         Some(profile_id),
         Some(session_store_id),

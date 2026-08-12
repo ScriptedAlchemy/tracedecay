@@ -42,8 +42,8 @@ soon-stale session outcomes — those belong to session transcripts.
 ## Curation (agent-managed mutation)
 
 Read [references/curation.md](references/curation.md) for the full protocol:
-read-only inventory → `tracedecay_memory_automation_run` (or `tracedecay
-automation run memory-curation`) → `tracedecay_automation_run_list` →
+read-only inventory → `tracedecay_fact_store_curate` (or `tracedecay tool
+fact_store_curate`) → `tracedecay_automation_run_list` →
 `tracedecay_automation_run_view` → advertised artifact inspection →
 read-only fact verification. The curator validates and applies supported
 operations during that one run. Its public trigger accepts only review bounds,
@@ -62,7 +62,7 @@ apply:
 ## If tools are deferred or MCP fails
 
 - Deferred: one ToolSearch call —
-  `select:tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_message_search,tracedecay_fact_feedback,tracedecay_memory_automation_run,tracedecay_automation_run_list,tracedecay_automation_run_view,tracedecay_automation_run_artifact_view`.
+  `select:tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_message_search,tracedecay_fact_feedback,tracedecay_fact_store_curate,tracedecay_automation_run_list,tracedecay_automation_run_view,tracedecay_automation_run_artifact_view`.
 - MCP error: `tracedecay tool tracedecay_fact_store_search --query …` (see
   `tracedecay:using-the-cli`). An MCP failure is not a reason to write
   MEMORY.md — the CLI reaches the same store.

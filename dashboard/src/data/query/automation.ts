@@ -29,10 +29,10 @@ import {
 } from "../scope/store.ts";
 import {
   AutomationSchedulerStatusV1Schema,
-  MemoryAutomationRunProblemV1Schema,
+  ApplicationProblemEnvelopeSchema,
   MemoryAutomationRunResultV1Schema,
+  type ApplicationProblemEnvelope,
   type AutomationSchedulerStatusV1,
-  type MemoryAutomationRunProblemV1,
   type MemoryAutomationRunResultV1,
 } from "../../contracts/generated.ts";
 
@@ -513,24 +513,27 @@ export type SkillOutcome = AutomationOutcomesPayload["skills"][number];
 export type FactOutcome = AutomationOutcomesPayload["facts"][number];
 
 const AutomaticCuratorResponseSchema = z
-  .object({ run: MemoryAutomationRunResultV1Schema })
+  .object({
+    kind: z.literal("success"),
+    value: z.object({
+      outcome: z.object({
+        outcome: z.literal("effect"),
+        value: z.object({ payload: MemoryAutomationRunResultV1Schema }),
+      }),
+    }),
+  })
   .strict();
 
 const ApplicationProblemResponseSchema = z
-  .object({ kind: z.literal("problem"), value: z.unknown() })
+  .object({
+    kind: z.literal("problem"),
+    value: ApplicationProblemEnvelopeSchema.extend({ binding_id: z.string().optional() }),
+  })
   .strict();
 
-const ApplicationProblemKindSchema = z
-  .object({
-    problem: z
-      .object({ problem: z.object({ kind: z.string() }).passthrough() })
-      .passthrough(),
-  })
-  .passthrough();
-
 export type AutomaticCuratorRun = MemoryAutomationRunResultV1;
-export type AutomaticCuratorPartialEffect = MemoryAutomationRunProblemV1;
-export type AutomaticCuratorResetRequired = MemoryAutomationRunProblemV1;
+export type AutomaticCuratorPartialEffect = ApplicationProblemEnvelope;
+export type AutomaticCuratorResetRequired = ApplicationProblemEnvelope;
 
 export type AutomaticCuratorResult =
   | { outcome: "ok"; run: AutomaticCuratorRun }
@@ -553,14 +556,17 @@ export type AutomaticCuratorResult =
     };
 
 export async function runAutomaticCurator(
-  url = "/api/automation/run/memory-curator",
+  url = "/api/application/retained/fact_store_curate",
 ): Promise<AutomaticCuratorResult> {
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        fact_review_limit: 24,
+        min_confidence_millionths: 720_000,
+      }),
     });
   } catch {
     return { outcome: "offline", detail: "the daemon could not be reached" };
@@ -578,8 +584,9 @@ export async function runAutomaticCurator(
 
   if (response.ok) {
     const result = AutomaticCuratorResponseSchema.safeParse(body);
-    return result.success && await automaticCuratorRunMatchesEndpoint(result.data.run)
-      ? { outcome: "ok", run: result.data.run }
+    const run = result.success ? result.data.value.outcome.value.payload : undefined;
+    return run !== undefined && await automaticCuratorRunMatchesEndpoint(run)
+      ? { outcome: "ok", run }
       : {
           outcome: "unsupported_schema",
           detail: "the automatic curator result does not match this build",
@@ -588,37 +595,26 @@ export async function runAutomaticCurator(
 
   const problemResponse = ApplicationProblemResponseSchema.safeParse(body);
   if (problemResponse.success) {
-    const terminal = MemoryAutomationRunProblemV1Schema.safeParse(
-      problemResponse.data.value,
-    );
+    const problem = problemResponse.data.value;
     if (
       response.status === 409 &&
-      terminal.success &&
-      await automaticCuratorProblemMatchesEndpoint(terminal.data, "partial_effect", url)
+      automaticCuratorProblemMatchesEndpoint(problem, "partial_effect")
     ) {
-      return { outcome: "partial_effect", problem: terminal.data };
+      return { outcome: "partial_effect", problem };
     }
     if (
       response.status === 503 &&
-      terminal.success &&
-      await automaticCuratorProblemMatchesEndpoint(terminal.data, "reset_required", url)
+      automaticCuratorProblemMatchesEndpoint(problem, "reset_required")
     ) {
-      return { outcome: "reset_required", problem: terminal.data };
+      return { outcome: "reset_required", problem };
     }
-    const problemKind = ApplicationProblemKindSchema.safeParse(
-      problemResponse.data.value,
-    );
     if (
-      (response.status === 409 &&
-        problemKind.success &&
-        problemKind.data.problem.problem.kind === "partial_effect") ||
-      (response.status === 503 &&
-        problemKind.success &&
-        problemKind.data.problem.problem.kind === "reset_required")
+      problem.problem.kind === "partial_effect" ||
+      problem.problem.kind === "reset_required"
     ) {
       return {
         outcome: "unsupported_schema",
-        detail: "the application terminal does not match its canonical contract",
+        detail: "the application terminal does not match fact_store_curate",
       };
     }
   }
@@ -702,63 +698,32 @@ function memoryCuratorSkipReason(reason: string): boolean {
   ].includes(reason);
 }
 
-const MEMORY_AUTOMATION_RESULT_SCHEMA_ID =
-  "schema.application.retained.memory-automation-run.result";
-const MEMORY_AUTOMATION_USE_CASE_ID =
-  "use-case.application.retained.memory-automation-run";
+const FACT_STORE_CURATE_RESULT_SCHEMA_ID =
+  "schema.application.retained.fact-store-curate.result";
+const FACT_STORE_CURATE_USE_CASE_ID =
+  "use-case.application.retained.fact-store-curate";
 
-async function automaticCuratorProblemMatchesEndpoint(
-  terminal: MemoryAutomationRunProblemV1,
+function automaticCuratorProblemMatchesEndpoint(
+  terminal: ApplicationProblemEnvelope,
   kind: "partial_effect" | "reset_required",
-  requestUrl: string,
-): Promise<boolean> {
-  const envelope = terminal.problem;
-  const problem = envelope.problem;
+): boolean {
   if (
-    terminal.task !== "memory_curator" ||
-    envelope.contract.schema_id !== MEMORY_AUTOMATION_RESULT_SCHEMA_ID ||
-    envelope.contract.schema_revision !== 1 ||
-    envelope.request_id !== problem.request_id ||
-    problem.kind !== kind ||
-    !urlProjectMatchesScope(requestUrl, terminal.scope.project_id) ||
-    !await resolvedScopeDigestMatches(terminal.scope)
+    terminal.contract.schema_id !== FACT_STORE_CURATE_RESULT_SCHEMA_ID ||
+    terminal.contract.schema_revision !== 1 ||
+    terminal.request_id !== terminal.problem.request_id ||
+    terminal.problem.kind !== kind
   ) {
     return false;
   }
-  const receipt = problem.committed_receipt;
-  if (kind === "reset_required") {
-    return receipt === null && terminal.committed_receipts.length === 0;
-  }
-  if (
-    receipt === null ||
-    receipt.operation !== MEMORY_AUTOMATION_USE_CASE_ID ||
-    receipt.request_id !== envelope.request_id ||
-    receipt.outcome !== "partial" ||
-    receipt.committed_state === null ||
-    !sameResolvedScope(receipt.scope, terminal.scope) ||
-    terminal.committed_receipts.length === 0
-  ) {
-    return false;
-  }
-  const receiptIdentities = new Set<string>();
-  for (const committed of terminal.committed_receipts) {
-    if (committed.kind !== "curation") return false;
-    const identity = canonicalJson([
-      committed.receipt.receipt.owner,
-      committed.receipt.receipt.operation_id,
-    ]);
-    if (receiptIdentities.has(identity)) return false;
-    receiptIdentities.add(identity);
-  }
-  const receiptsMatch = (await Promise.all(terminal.committed_receipts.map(
-    (committed) => committed.kind === "curation" &&
-      automaticCurationReceiptMatches(terminal.run_id, committed.receipt),
-  ))).every(Boolean);
-  return receiptsMatch && receipt.committed_state === await canonicalSha256([
-    "tracedecay.memory-automation-run.partial-state.v1",
-    terminal.run_id,
-    terminal.committed_receipts,
-  ]);
+  const receipt = terminal.problem.committed_receipt;
+  if (kind === "reset_required") return receipt === null;
+  return (
+    receipt !== null &&
+    receipt.operation === FACT_STORE_CURATE_USE_CASE_ID &&
+    receipt.request_id === terminal.request_id &&
+    receipt.outcome === "partial" &&
+    receipt.committed_state !== null
+  );
 }
 
 type CurationReceipt = Extract<
@@ -1037,46 +1002,6 @@ function factIdMatchesOwner(
   return match !== null && match[1] === ownerBinding;
 }
 
-function urlProjectMatchesScope(requestUrl: string, projectId: string): boolean {
-  // The unprefixed gateway is the active project's authority. Its terminal is
-  // therefore self-identifying through the canonical resolved scope carried
-  // in the response; requiring a project segment here rejected every truthful
-  // partial/reset terminal issued from the dashboard's default scope.
-  if (requestUrl === "/api/automation/run/memory-curator") return true;
-  const match = /^\/api\/projects\/([^/]+)\//.exec(requestUrl);
-  if (match === null) return false;
-  try {
-    return decodeURIComponent(match[1]!) === projectId;
-  } catch {
-    return false;
-  }
-}
-
-async function resolvedScopeDigestMatches(
-  scope: MemoryAutomationRunProblemV1["scope"],
-): Promise<boolean> {
-  return scope.scope_digest === await canonicalSha256([
-    "tracedecay.application.scope.v1",
-    scope.project_id,
-    scope.repository_id,
-    scope.worktree_id,
-    scope.reference,
-  ]);
-}
-
-function sameResolvedScope(
-  left: MemoryAutomationRunProblemV1["scope"],
-  right: MemoryAutomationRunProblemV1["scope"],
-): boolean {
-  return (
-    left.project_id === right.project_id &&
-    left.repository_id === right.repository_id &&
-    left.worktree_id === right.worktree_id &&
-    left.reference === right.reference &&
-    left.scope_digest === right.scope_digest
-  );
-}
-
 export function useAutomaticCurator() {
   const scope = useScope((state) => state.scope);
   const writability = scopeWritable(scope);
@@ -1084,7 +1009,7 @@ export function useAutomaticCurator() {
   const client = useQueryClient();
   const dispatch = {
     scopeKey: currentScopeKey,
-    url: scopedUrl(scope, "/api/automation/run/memory-curator"),
+    url: scopedUrl(scope, "/api/application/retained/fact_store_curate"),
     writability,
   };
   const mutation = useMutation<

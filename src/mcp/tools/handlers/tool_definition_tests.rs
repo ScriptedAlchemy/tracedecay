@@ -89,6 +89,7 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_derives"));
     for tool_name in [
         "tracedecay_fact_store_add",
+        "tracedecay_fact_store_curate",
         "tracedecay_fact_store_search",
         "tracedecay_fact_store_probe",
         "tracedecay_fact_store_related",
@@ -110,6 +111,7 @@ fn test_tool_definitions_complete() {
     );
     assert!(tool_names.contains(&"tracedecay_fact_feedback"));
     assert!(tool_names.contains(&"tracedecay_memory_status"));
+    assert!(!tool_names.contains(&"tracedecay_memory_automation_run"));
     assert!(tool_names.contains(&"tracedecay_session_refresh"));
     assert!(tool_names.contains(&"tracedecay_message_search"));
     assert!(tool_names.contains(&"tracedecay_impact"));
@@ -222,6 +224,38 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_source_edit_reconcile"));
     assert!(tool_names.contains(&"tracedecay_source_edit_rollback"));
     assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
+}
+
+#[test]
+fn fact_store_curate_exposes_only_caller_owned_bounds() {
+    let tools = get_tool_definitions().expect("tool definitions");
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_fact_store_curate")
+        .expect("fact_store_curate must be advertised");
+    let properties = tool.input_schema["properties"]
+        .as_object()
+        .expect("fact_store_curate request properties");
+    assert_eq!(properties.len(), 3);
+    for bound in ["fact_review_limit", "min_confidence_millionths", "format"] {
+        assert!(properties.contains_key(bound));
+    }
+    assert_eq!(properties["fact_review_limit"]["minimum"], 1);
+    assert_eq!(properties["fact_review_limit"]["maximum"], 1_000);
+    assert_eq!(
+        properties["min_confidence_millionths"]["maximum"],
+        1_000_000
+    );
+    for forbidden in [
+        "operations",
+        "proposal",
+        "approve",
+        "apply",
+        "run_id",
+        "task",
+    ] {
+        assert!(!properties.contains_key(forbidden));
+    }
 }
 
 /// Removing a canonical Work operation from MCP discovery would leave the

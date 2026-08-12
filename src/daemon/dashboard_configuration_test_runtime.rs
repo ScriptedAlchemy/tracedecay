@@ -321,6 +321,7 @@ pub(crate) async fn dashboard_configuration_runtime_for_test(
             project_retrieval: None,
             project_workflow_index: None,
             project_lcm: None,
+            invocation_service: Some(service.clone()),
             configuration_digest: retained_access.configuration_digest.clone(),
         },
     );

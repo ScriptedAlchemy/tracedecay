@@ -951,7 +951,7 @@ fn automation_config_set_writes_complete_canonical_project_setting_noninteractiv
 }
 
 #[test]
-fn automation_run_memory_curation_records_backend_disabled_skip() {
+fn fact_store_curate_records_backend_disabled_skip_and_preserves_read_only_inspection() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     std::fs::create_dir_all(project.path().join("src")).unwrap();
@@ -960,7 +960,7 @@ fn automation_run_memory_curation_records_backend_disabled_skip() {
     init_project_fixture(home.path(), project.path());
 
     let mut run = tracedecay_command(home.path(), project.path());
-    run.args(["automation", "run", "memory-curation"]);
+    run.args(["tool", "fact_store_curate", "--json", "--args", "{}"]);
     let run_output = run_with_timeout(run, cli_timeout());
     assert!(
         run_output.status.success(),
@@ -969,12 +969,11 @@ fn automation_run_memory_curation_records_backend_disabled_skip() {
         String::from_utf8_lossy(&run_output.stderr)
     );
     let payload: serde_json::Value =
-        serde_json::from_slice(&run_output.stdout).expect("automation run should print JSON");
-    assert_eq!(payload["ledger_record"]["status"], "skipped");
-    assert_eq!(payload["ledger_record"]["trigger"], "manual_cli");
-    assert_eq!(payload["ledger_record"]["error"], "backend_disabled");
-    assert_eq!(payload["report"]["reason"], "backend_disabled");
-    assert!(payload.get("backend_response").is_none());
+        serde_json::from_slice(&run_output.stdout).expect("fact_store_curate should print JSON");
+    let run = &payload["outcome"]["value"]["payload"];
+    assert_eq!(run["task"], "memory_curator");
+    assert_eq!(run["terminal"]["status"], "skipped");
+    assert_eq!(run["terminal"]["reason"], "backend_disabled");
 
     let ledger_paths = std::fs::read_dir(profile_root(home.path()).join("projects"))
         .unwrap()
@@ -994,11 +993,12 @@ fn automation_run_memory_curation_records_backend_disabled_skip() {
     let ledger = std::fs::read_to_string(&ledger_paths[0]).unwrap();
     let record: serde_json::Value =
         serde_json::from_str(ledger.trim()).expect("ledger should contain one JSON record");
-    assert_eq!(record["run_id"], payload["run_id"]);
+    assert_eq!(record["run_id"], run["run_id"]);
     assert_eq!(record["status"], "skipped");
     assert_eq!(record["error"], "backend_disabled");
+    assert_eq!(record["trigger"], "application");
 
-    let run_id = payload["run_id"]
+    let run_id = run["run_id"]
         .as_str()
         .expect("automation run payload should include a run_id");
     let mut list = tracedecay_command(home.path(), project.path());

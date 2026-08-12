@@ -14,11 +14,20 @@ its terminal state; they do not select its operations or settle its effects.
 
 ## Current Curation Surfaces
 
-Memory curation is automation-owned and non-destructive. Subagents may inspect
-and classify evidence within their assigned scope, but the curator validates
-and commits only supported policy-valid operations through the configured
-curation contract. Each run produces a ledger record, activity events,
-post-action telemetry, and, when present, advertised artifacts.
+Memory curation is automation-owned and policy-governed. Subagents may inspect
+and classify evidence within their assigned scope, but the curator alone may
+select, validate, and commit supported policy-valid operations through the
+configured curation contract. Those operations include destructive merge and
+remove effects only when their reviewed-event CAS and policy checks succeed;
+callers cannot request or approve them individually. Each run produces a
+ledger record, activity events, post-action telemetry, and, when present,
+advertised artifacts.
+
+This is a breaking public-surface cutover. The duplicate launchers
+`POST /api/automation/run/memory-curator`, `tracedecay_memory_automation_run`,
+and `tracedecay automation run memory-curation` were removed. They are not
+aliases: every caller must use `fact_store_curate`, while the existing
+automation run list, view, and artifact reads remain unchanged.
 
 Use existing TraceDecay surfaces before inventing a new plan format:
 
@@ -32,15 +41,16 @@ Use existing TraceDecay surfaces before inventing a new plan format:
   use only when health/counts are part of the task. Similarity and dedupe
   evidence comes from the bounded verified Grafeo projection, not an alternate
   derived structure.
-- Dashboard automation:
-  `POST /api/automation/run/memory-curator` runs the autonomous app-server
+- Canonical application launch:
+  `POST /api/application/retained/fact_store_curate` runs the autonomous app-server
   memory curator. Accepted operations are committed according to automation
   policy and every phase is logged to the run ledger and curation activity
   stream.
-- CLI launch: `tracedecay automation run memory-curation` invokes the same
-  daemon-owned runner as the dashboard.
-- MCP launch: `tracedecay_memory_automation_run` accepts only optional
-  `fact_review_limit` and `min_confidence` bounds. The daemon owns run identity,
+- CLI launch: `tracedecay tool fact_store_curate --args
+  '{"fact_review_limit":24,"min_confidence_millionths":720000}'` invokes the
+  same retained application operation as HTTP and MCP.
+- MCP launch: `tracedecay_fact_store_curate` accepts only
+  `fact_review_limit` and `min_confidence_millionths` bounds. The daemon owns run identity,
   task selection, operations, validation, and effect settlement.
 - Read-only inspection: `tracedecay_automation_run_list`,
   `tracedecay_automation_run_view`, and
@@ -67,9 +77,15 @@ The backend sees a bounded canonical-fact context and returns strict JSON:
   "ops": [
     {
       "op": "normalize_tags",
-      "fact_id": "fact...",
+      "target": {
+        "fact_id": "fact...",
+        "expected_last_event_id": "event..."
+      },
       "tags": ["memory"],
-      "evidence_fact_ids": ["fact..."],
+      "evidence_facts": [{
+        "fact_id": "fact...",
+        "expected_last_event_id": "event..."
+      }],
       "confidence": 0.92
     }
   ]
@@ -78,8 +94,11 @@ The backend sees a bounded canonical-fact context and returns strict JSON:
 
 Operator notes:
 
-- Supported automatic operations are canonical, non-destructive normalization
-  and linking operations. Unsupported operation shapes are rejected.
+- Supported automatic operations are canonical add, update, merge, remove,
+  normalize-tags, and link-facts effects. Every operation is bound to the
+  reviewed fact event snapshots and passes policy/privacy validation before
+  the atomic curation batch is committed; unsupported or stale shapes are
+  rejected without exposing an approval/apply lane.
 - Every fact id must come from the bounded canonical context, every confidence
   must meet the configured floor, and timestamps are not truth evidence.
 - The runner owns validation repair and commits accepted operations within the
@@ -100,8 +119,8 @@ daemon restart boundaries unchanged.
 2. **Start read-mostly.** Prefer TraceDecay MCP graph/context tools, then
    fact-store `get`, `contradict`, `search`, `list`, `probe`, `related`, or
    `reason`. Note that some recall-style tools may update access metadata.
-3. **Run the canonical curator.** Use `tracedecay_memory_automation_run`,
-   `tracedecay automation run memory-curation`, or the dashboard automation
+3. **Run the canonical curator.** Use `tracedecay_fact_store_curate`,
+   `tracedecay tool fact_store_curate`, or the retained application HTTP
    endpoint. The runner validates and commits supported backend output in one
    bounded operation.
 4. **Use subagents for evidence only.** Assign disjoint read-only research
@@ -142,11 +161,13 @@ For each completed run, produce this compact report:
 | Tier | Operations | Default |
 | --- | --- | --- |
 | Read-mostly | MCP context/search and canonical fact reads | allowed |
-| Automatic curation | canonical tag normalization and fact linking | the runner validates, commits, and records a durable receipt |
+| Automatic curation | add, update, merge, remove, normalize-tags, and link-facts selected from reviewed evidence | the runner validates exact reviewed-event CAS and policy, commits atomically, and records a durable receipt |
 | Exact administration | direct fact add, update, or remove | requires an exact caller instruction and its own retained-operation receipt |
 
-Direct deletion remains high risk because it permanently removes canonical
-memory. It is not an automatic curator operation.
+Deletion remains high risk because it permanently removes canonical memory.
+The automatic curator may select remove or merge only inside its closed,
+policy-validated batch; a caller cannot force that choice. A direct removal is
+a separate exact-administration request and requires an exact user instruction.
 
 ## Subagent Roles
 

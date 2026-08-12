@@ -129,7 +129,7 @@ pub(crate) fn prepare_retained_effect<T: Serialize>(
 ) -> Result<PreparedRetainedEffect, RetainedSurfaceExecutionErrorV1> {
     let admitted_operation = matches!(
         operation,
-        RetainedSurfaceOperation::AutomationRun
+        RetainedSurfaceOperation::FactStoreCurate
             | RetainedSurfaceOperation::SessionRefreshBegin
             | RetainedSurfaceOperation::SessionRefreshCancel
             | RetainedSurfaceOperation::FactStoreAdd
@@ -233,7 +233,7 @@ impl PreparedRetainedEffect {
         authority: AuthorityReceipt,
         receipt_template: EffectReceipt,
     ) -> Result<Self, RetainedSurfaceExecutionErrorV1> {
-        if operation != RetainedSurfaceOperation::AutomationRun
+        if operation != RetainedSurfaceOperation::FactStoreCurate
             || durable_operation_id.trim().is_empty()
             || receipt_template.outcome != EffectTermination::Partial
             || receipt_template.committed_state.is_some()

@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn pre_admission_problem_keeps_the_canonical_application_envelope() {
         let operation =
-            retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+            retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
                 .unwrap();
         let request_id = RequestId::new("run.mcp.pre-admission".to_owned()).unwrap();
         let envelope = ApplicationProblemEnvelope::new(

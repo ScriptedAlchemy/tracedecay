@@ -60,8 +60,9 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             .map_err(|error| {
                 contract_error(format!("automation recovery index reader failed: {error}"))
             })??;
-    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
-        .map_err(contract_error)?;
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .map_err(contract_error)?;
     let mut report = AutomationEffectRecoveryReport::default();
     for indexed in indexed {
         if cancellation.is_cancelled() {

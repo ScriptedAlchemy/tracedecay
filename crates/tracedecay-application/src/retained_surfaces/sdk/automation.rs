@@ -6,9 +6,50 @@ use super::{LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1};
 use crate::ApplicationContractError;
 
 const MAX_AUTOMATION_REVIEW_LIMIT: u32 = 1_000;
+pub const DEFAULT_FACT_STORE_CURATE_REVIEW_LIMIT: u32 = 24;
+pub const DEFAULT_FACT_STORE_CURATE_MIN_CONFIDENCE_MILLIONTHS: u32 = 720_000;
 const MAX_AUTOMATION_EVIDENCE_LIMIT: u32 = 50;
 const MAX_AUTOMATION_RECENT_SESSION_LIMIT: u32 = 10;
 const AUTOMATION_RUN_REQUEST_DIGEST_DOMAIN: &str = "tracedecay.automation-run.request-identity.v1";
+
+/// Closed public launcher for the automatic Memory Curator.
+///
+/// Run identity, task selection, operations, proposals, approval, and apply
+/// authority are deliberately absent and rejected by `deny_unknown_fields`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FactStoreCurateRequestV1 {
+    #[serde(default = "default_fact_store_curate_review_limit")]
+    #[schemars(range(min = 1, max = 1_000))]
+    pub fact_review_limit: u32,
+    #[serde(default = "default_fact_store_curate_min_confidence_millionths")]
+    #[schemars(range(min = 0, max = 1_000_000))]
+    pub min_confidence_millionths: u32,
+}
+
+impl Default for FactStoreCurateRequestV1 {
+    fn default() -> Self {
+        Self {
+            fact_review_limit: DEFAULT_FACT_STORE_CURATE_REVIEW_LIMIT,
+            min_confidence_millionths: DEFAULT_FACT_STORE_CURATE_MIN_CONFIDENCE_MILLIONTHS,
+        }
+    }
+}
+
+impl FactStoreCurateRequestV1 {
+    pub fn validate(&self) -> bool {
+        (1..=MAX_AUTOMATION_REVIEW_LIMIT).contains(&self.fact_review_limit)
+            && self.min_confidence_millionths <= 1_000_000
+    }
+}
+
+const fn default_fact_store_curate_review_limit() -> u32 {
+    DEFAULT_FACT_STORE_CURATE_REVIEW_LIMIT
+}
+
+const fn default_fact_store_curate_min_confidence_millionths() -> u32 {
+    DEFAULT_FACT_STORE_CURATE_MIN_CONFIDENCE_MILLIONTHS
+}
 
 /// Automation capability selected after one registered application admission.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -183,7 +224,42 @@ fn valid_text(value: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{AutomationRunRequestV1, AutomationTaskV1};
+    use super::{AutomationRunRequestV1, AutomationTaskV1, FactStoreCurateRequestV1};
+
+    #[test]
+    fn public_curator_launcher_accepts_only_bounds() {
+        let request =
+            serde_json::from_value::<FactStoreCurateRequestV1>(json!({})).expect("default bounds");
+        assert!(request.validate());
+        for field in [
+            "run_id",
+            "task",
+            "operations",
+            "proposal_id",
+            "approve",
+            "reject",
+            "apply",
+        ] {
+            let mut value = serde_json::Map::new();
+            value.insert(field.to_owned(), serde_json::Value::Bool(true));
+            assert!(
+                serde_json::from_value::<FactStoreCurateRequestV1>(serde_json::Value::Object(
+                    value
+                ),)
+                .is_err(),
+                "{field} must remain daemon-owned"
+            );
+        }
+        for invalid in [
+            json!({"fact_review_limit": 0}),
+            json!({"fact_review_limit": 1_001}),
+            json!({"min_confidence_millionths": 1_000_001}),
+        ] {
+            let request = serde_json::from_value::<FactStoreCurateRequestV1>(invalid)
+                .expect("structurally valid bounds");
+            assert!(!request.validate());
+        }
+    }
 
     fn reflector_request() -> serde_json::Value {
         json!({

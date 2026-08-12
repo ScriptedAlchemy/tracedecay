@@ -28,7 +28,7 @@ export const handlers = [
     const url = new URL(request.url);
     return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
   }),
-  http.post('*/api/automation/run/memory-curator', ({ request }) => {
+  http.post('*/api/application/retained/fact_store_curate', ({ request }) => {
     const url = new URL(request.url);
     return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
   }),

@@ -1145,37 +1145,11 @@ fn automation_install_rejects_removed_auto_apply_flag() {
 }
 
 #[test]
-fn automation_run_memory_curation_parses_manual_flags() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "automation",
-        "run",
-        "memory-curation",
-        "--fact-review-limit",
-        "8",
-        "--min-confidence",
-        "0.7",
-        "--path",
-        "/tmp/project",
-    ])
-    .expect("automation memory-curation run should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Automation {
-            action:
-                AutomationAction::Run {
-                    action:
-                        AutomationRunAction::MemoryCuration {
-                            fact_review_limit,
-                            min_confidence,
-                            path,
-                        }
-                }
-        }) if fact_review_limit == 8
-            && (min_confidence - 0.7).abs() < f64::EPSILON
-            && path.as_deref() == Some("/tmp/project")
-    ));
+fn automation_run_memory_curation_is_replaced_by_fact_store_curate() {
+    let error = Cli::try_parse_from(["tracedecay", "automation", "run", "memory-curation"])
+        .err()
+        .expect("dedicated curation launcher must be removed");
+    assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
 }
 
 #[test]

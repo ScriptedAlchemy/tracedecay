@@ -137,7 +137,7 @@ pub(crate) const LONG_RUNNING_TOOL_DISPATCH_CEILING: std::time::Duration =
 /// bounded without touching this file.
 const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
     "tracedecay_run_affected_tests",
-    "tracedecay_memory_automation_run",
+    "tracedecay_fact_store_curate",
     "tracedecay_admin_cli",
     "tracedecay_admin_project",
     "tracedecay_admin_sync",
@@ -465,33 +465,6 @@ pub(super) async fn dispatch_admin_tools(
             let cancellation = options.application_cancellation.clone().ok_or_else(|| {
                 TraceDecayError::Config {
                     message: "admin project cancellation authority is unavailable".to_owned(),
-                }
-            })?;
-            admin_project::handle_admin_project(
-                cg,
-                args,
-                options.global_db.map(std::sync::Arc::as_ref),
-                options.automation_scheduler_reconciler,
-                options.profile_root,
-                options.daemon_invocation_service,
-                options.application_request_id,
-                deadline,
-                cancellation,
-            )
-            .await
-        }
-        "tracedecay_memory_automation_run" => {
-            let args = admin_project::public_memory_automation_args(args)?;
-            let deadline =
-                options
-                    .application_deadline
-                    .clone()
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message: "memory automation request deadline is unavailable".to_owned(),
-                    })?;
-            let cancellation = options.application_cancellation.clone().ok_or_else(|| {
-                TraceDecayError::Config {
-                    message: "memory automation cancellation authority is unavailable".to_owned(),
                 }
             })?;
             admin_project::handle_admin_project(

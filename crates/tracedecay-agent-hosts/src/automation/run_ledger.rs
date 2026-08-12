@@ -36,6 +36,7 @@ pub enum AutomationTrigger {
     ManualCli,
     ManualMcp,
     Dashboard,
+    Application,
     Scheduler,
     HostReceipt,
 }
@@ -45,7 +46,10 @@ impl AutomationTrigger {
     /// recurring scheduling is enabled. Backend availability, host mode,
     /// policy, cancellation, and deadline checks still apply.
     pub const fn is_on_demand(self) -> bool {
-        matches!(self, Self::ManualCli | Self::ManualMcp | Self::Dashboard)
+        matches!(
+            self,
+            Self::ManualCli | Self::ManualMcp | Self::Dashboard | Self::Application
+        )
     }
 }
 

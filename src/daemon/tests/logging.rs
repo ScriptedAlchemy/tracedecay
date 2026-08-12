@@ -28,7 +28,7 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
     const SECRET: &str = "sk-scheduler-log-canary-1234567890";
     let request_id = RequestId::new("request.scheduler.log-privacy").unwrap();
     let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun).unwrap();
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate).unwrap();
     let envelope = ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         request_id.clone(),

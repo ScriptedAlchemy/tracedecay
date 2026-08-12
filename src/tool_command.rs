@@ -33,7 +33,7 @@
 //! can be referenced by more than one field in a single invocation.
 //!
 //! Memory curation uses the same public MCP interfaces through this dynamic
-//! command: `tracedecay tool memory_automation_run` launches the daemon-owned
+//! command: `tracedecay tool fact_store_curate` launches the daemon-owned
 //! curator, while `automation_run_list`, `automation_run_view`, and
 //! `automation_run_artifact_view` inspect its durable result. The launch tool
 //! accepts only review bounds; direct fact add, update, and remove remain
@@ -80,6 +80,7 @@ use serde_json::Map;
 /// "run tracedecay init" guidance rather than a silent store.
 const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_fact_store_add",
+    "tracedecay_fact_store_curate",
     "tracedecay_fact_store_search",
     "tracedecay_fact_store_probe",
     "tracedecay_fact_store_related",

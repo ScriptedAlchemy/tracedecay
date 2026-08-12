@@ -8,13 +8,14 @@ use tracedecay_domain::UtcMicros;
 
 use super::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
-    FactStoreGetRequestV1, FactStoreListRequestV1, FactStoreProbeRequestV1,
-    FactStoreReasonRequestV1, FactStoreRelatedRequestV1, FactStoreRemoveRequestV1,
-    FactStoreSearchRequestV1, FactStoreUpdateRequestV1, LcmDescribeRequestV1, LcmDoctorRequestV1,
-    LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmGrepRequestV1, LcmLoadSessionRequestV1,
-    LcmStatusRequestV1, MemoryStatusRequestV1, MessageSearchRequestV1, RetainedSurfaceOperation,
-    RetainedSurfaceRequestV1, RetainedSurfaceResultV1, SessionRefreshRequestV1,
-    SessionsForRequestV1, WorkflowsRequestV1, retained_surface_application_operation,
+    FactStoreCurateRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
+    FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
+    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreUpdateRequestV1,
+    LcmDescribeRequestV1, LcmDoctorRequestV1, LcmExpandQueryRequestV1, LcmExpandRequestV1,
+    LcmGrepRequestV1, LcmLoadSessionRequestV1, LcmStatusRequestV1, MemoryStatusRequestV1,
+    MessageSearchRequestV1, RetainedSurfaceOperation, RetainedSurfaceRequestV1,
+    RetainedSurfaceResultV1, SessionRefreshRequestV1, SessionsForRequestV1, WorkflowsRequestV1,
+    retained_surface_application_operation,
 };
 use crate::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, CancellationSignal,
@@ -37,6 +38,7 @@ pub type RetainedSurfaceExecutionFutureV1<'a> = Pin<
 /// Bounded error classes a retained runtime may return to the application owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RetainedSurfaceExecutionErrorV1 {
+    ApplicationProblem(ApplicationProblem),
     InvalidRequest,
     NotFoundOrNotAuthorized,
     Conflict,
@@ -77,6 +79,15 @@ pub enum RetainedMemoryRequestV1<'a> {
     FactStoreList(&'a FactStoreListRequestV1),
     FactFeedback(&'a FactFeedbackRequestV1),
     MemoryStatus(&'a MemoryStatusRequestV1),
+}
+
+/// Automatic curation authority mounted independently from direct fact CRUD.
+pub trait RetainedAutomationExecutionPortV1: Send + Sync {
+    fn execute_fact_store_curate<'a>(
+        &'a self,
+        context: RetainedSurfaceExecutionContextV1<'a>,
+        request: &'a FactStoreCurateRequestV1,
+    ) -> RetainedSurfaceExecutionFutureV1<'a>;
 }
 
 /// Typed session operation selected after application admission.
@@ -129,12 +140,21 @@ pub trait RetainedLcmExecutionPortV1: Send + Sync {
 /// typed unavailable result for that request, never a mount failure for peers.
 #[derive(Clone, Default)]
 pub struct RetainedSurfacePortsV1<'a> {
+    automation: Option<Arc<dyn RetainedAutomationExecutionPortV1 + 'a>>,
     memory: Option<Arc<dyn RetainedMemoryExecutionPortV1 + 'a>>,
     session: Option<Arc<dyn RetainedSessionExecutionPortV1 + 'a>>,
     lcm: Option<Arc<dyn RetainedLcmExecutionPortV1 + 'a>>,
 }
 
 impl<'a> RetainedSurfacePortsV1<'a> {
+    pub fn with_automation(
+        mut self,
+        port: Arc<dyn RetainedAutomationExecutionPortV1 + 'a>,
+    ) -> Self {
+        self.automation = Some(port);
+        self
+    }
+
     pub fn with_memory(mut self, port: Arc<dyn RetainedMemoryExecutionPortV1 + 'a>) -> Self {
         self.memory = Some(port);
         self
@@ -198,6 +218,18 @@ impl<'a> RetainedSurfaceServiceV1<'a> {
         };
         let outcome = async {
             match request {
+                RetainedSurfaceRequestV1::FactStoreCurate(request) => {
+                    if !request.validate() {
+                        Err(RetainedSurfaceExecutionErrorV1::InvalidRequest)
+                    } else {
+                        self.ports
+                            .automation
+                            .as_ref()
+                            .ok_or(RetainedSurfaceExecutionErrorV1::Unavailable)?
+                            .execute_fact_store_curate(execution_context(), request)
+                            .await
+                    }
+                }
                 RetainedSurfaceRequestV1::FactStoreAdd(request) => {
                     self.ports
                         .memory
@@ -479,8 +511,8 @@ pub(super) fn outcome_matches_operation(
         ApplicationOutcome::Effect(effect) => effect.payload.as_ref(),
         ApplicationOutcome::Preview(_) => None,
     };
-    if let Some(RetainedSurfaceResultV1::AutomationRun(result)) = result {
-        return operation == RetainedSurfaceOperation::AutomationRun
+    if let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = result {
+        return operation == RetainedSurfaceOperation::FactStoreCurate
             && class_matches
             && result.matches_terminal();
     }
@@ -570,7 +602,7 @@ pub(super) fn outcome_matches_operation(
 pub const fn retained_surface_operation_is_effect(operation: RetainedSurfaceOperation) -> bool {
     matches!(
         operation,
-        RetainedSurfaceOperation::AutomationRun
+        RetainedSurfaceOperation::FactStoreCurate
             | RetainedSurfaceOperation::FactStoreAdd
             | RetainedSurfaceOperation::FactStoreUpdate
             | RetainedSurfaceOperation::FactStoreRemove
@@ -593,6 +625,7 @@ pub fn retained_surface_execution_problem(
     error: RetainedSurfaceExecutionErrorV1,
 ) -> ApplicationProblem {
     match error {
+        RetainedSurfaceExecutionErrorV1::ApplicationProblem(problem) => problem,
         RetainedSurfaceExecutionErrorV1::InvalidRequest => ApplicationProblem::InvalidRequest {
             diagnostic: diagnostic(
                 "application.retained.invalid-request",

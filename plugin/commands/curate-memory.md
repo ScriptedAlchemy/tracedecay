@@ -10,8 +10,8 @@ resolve the active project and run the canonical agent-managed curator.
 
 1. Resolve scope: confirm the active project root/store with `tracedecay_active_project` before touching memory.
 2. Start read-only with `tracedecay_fact_store_search`, `tracedecay_fact_store_list`, `tracedecay_fact_store_get`, `tracedecay_fact_store_probe`, `tracedecay_fact_store_related`, `tracedecay_fact_store_reason`, or `tracedecay_fact_store_contradict`. Use `tracedecay_memory_status` only when the user asks for its read-only canonical fact/entity/trust/feedback/holographic-algebra status snapshot. Open `tracedecay_dashboard` (`action: "start"`) only when the user wants visual curation.
-3. Run `tracedecay_memory_automation_run` with optional `fact_review_limit` and
-   `min_confidence`, or use `tracedecay automation run memory-curation`.
+3. Run `tracedecay_fact_store_curate` with `fact_review_limit` and
+   `min_confidence_millionths`, or use `tracedecay tool fact_store_curate`.
    Capture the returned run id. The trigger accepts no caller-selected task,
    operations, run identity, or effect authority; validation and supported
    canonical mutations finish inside the daemon-owned run.
@@ -24,7 +24,7 @@ resolve the active project and run the canonical agent-managed curator.
    `tracedecay_automation_run_artifact_view` (`run_id`, `kind`) or `tracedecay
    automation runs artifact <run_id> <kind> --json`. Do not invent an artifact
    kind.
-6. HTTP equivalents are `POST /api/automation/run/memory-curator`, `GET
+6. HTTP equivalents are `POST /api/application/retained/fact_store_curate`, `GET
    /api/automation/runs`, `GET /api/automation/runs/{run_id}/artifacts`, and
    `GET /api/automation/runs/{run_id}/artifacts/{kind}`.
 7. Use direct `tracedecay_fact_store_add`, `tracedecay_fact_store_update`,

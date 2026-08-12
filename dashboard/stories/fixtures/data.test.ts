@@ -103,9 +103,15 @@ const CONTRACTS: Readonly<Record<string, ZodType<unknown>>> = {
   '/api/plugins/analytics/usage': DashboardEnvelopeV1Schema(AnalyticsUsageSummaryV1Schema),
   '/api/plugins/analytics/agents': DashboardEnvelopeV1Schema(AnalyticsAgentsPayloadV1Schema),
   '/api/automation/scheduler/status': AutomationSchedulerStatusV1Schema,
-  '/api/automation/run/memory-curator': z
-    .object({ run: MemoryAutomationRunResultV1Schema })
-    .strict(),
+  '/api/application/retained/fact_store_curate': z.object({
+    kind: z.literal('success'),
+    value: z.object({
+      outcome: z.object({
+        outcome: z.literal('effect'),
+        value: z.object({ payload: MemoryAutomationRunResultV1Schema }),
+      }),
+    }).passthrough(),
+  }).strict(),
   '/api/observatory': DashboardEnvelopeV1Schema(ObservatoryReadModelV1Schema),
   '/api/costs': DashboardEnvelopeV1Schema(CostsReadModelV1Schema),
   '/api/code-index/freshness': DashboardEnvelopeV1Schema(CodeIndexFreshnessPayloadV1Schema),

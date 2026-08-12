@@ -1,7 +1,7 @@
 pub(super) fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
     if matches!(
         path,
-        "/api/automation/run/memory-curator"
+        "/api/application/retained/fact_store_curate"
             | "/api/automation/run/session-reflection"
             | "/api/automation/run/skill-writing"
     ) || is_project_scoped_automation_run_path(path)
@@ -33,7 +33,7 @@ fn is_project_scoped_automation_run_path(path: &str) -> bool {
     !project_id.is_empty()
         && matches!(
             tail,
-            "automation/run/memory-curator"
+            "application/retained/fact_store_curate"
                 | "automation/run/session-reflection"
                 | "automation/run/skill-writing"
         )

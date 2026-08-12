@@ -1,9 +1,6 @@
 //! Project registry, runtime, and automation admin tool definitions.
 
 use serde_json::json;
-use tracedecay_agent_hosts::automation::runner::{
-    CURATION_DEFAULT_FACT_REVIEW_LIMIT, CURATION_DEFAULT_MIN_CONFIDENCE,
-};
 
 use super::{def, def_always_load, def_rw, project_selector_object};
 use crate::mcp::tools::ToolDefinition;
@@ -204,34 +201,6 @@ pub(super) fn def_automation_run_artifact_view() -> ToolDefinition {
     )
 }
 
-pub(super) fn def_memory_automation_run() -> ToolDefinition {
-    def_rw(
-        "tracedecay_memory_automation_run",
-        "Run Memory Curator",
-        "Run the daemon-owned automatic Memory Curator for the active project. The daemon derives the run identity, task, operations, validation, and apply authority; callers may only bound the fact review and confidence floor. The terminal is recorded through the canonical durable MemoryAutomationRun authority and can be inspected with automation run list, view, and artifact view.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "fact_review_limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000,
-                    "default": CURATION_DEFAULT_FACT_REVIEW_LIMIT,
-                    "description": "Maximum canonical facts included in the automatic review."
-                },
-                "min_confidence": {
-                    "type": "number",
-                    "minimum": 0,
-                    "maximum": 1,
-                    "default": CURATION_DEFAULT_MIN_CONFIDENCE,
-                    "description": "Confidence floor below which proposed curator operations are rejected."
-                }
-            }
-        }),
-    )
-}
-
 pub(super) fn def_automation_run_list() -> ToolDefinition {
     def(
         "tracedecay_automation_run_list",
@@ -270,34 +239,4 @@ pub(super) fn def_automation_run_view() -> ToolDefinition {
             "required": ["run_id"]
         }),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn public_memory_automation_schema_exposes_no_manual_effect_authority() {
-        let definition = def_memory_automation_run();
-        assert_eq!(definition.annotations.unwrap()["readOnlyHint"], false);
-        assert_eq!(definition.input_schema["additionalProperties"], false);
-        let properties = definition.input_schema["properties"]
-            .as_object()
-            .expect("closed object properties");
-        assert_eq!(
-            properties.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["fact_review_limit", "min_confidence"]
-        );
-        for forbidden in [
-            "run_id",
-            "task",
-            "operations",
-            "proposal_id",
-            "approve",
-            "reject",
-            "apply",
-        ] {
-            assert!(!properties.contains_key(forbidden));
-        }
-    }
 }

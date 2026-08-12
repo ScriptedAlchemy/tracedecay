@@ -14,6 +14,15 @@ pub(super) fn def_fact_store_add(input_schema: Value) -> ToolDefinition {
     )
 }
 
+pub(super) fn def_fact_store_curate(input_schema: Value) -> ToolDefinition {
+    def_rw(
+        "tracedecay_fact_store_curate",
+        "Fact Store Curate",
+        "Run the daemon-owned automatic Memory Curator. Callers may bound review size and confidence only; TraceDecay derives the run, operations, validation, policy, and apply authority. Inspect the durable terminal with the read-only automation run tools.",
+        input_schema,
+    )
+}
+
 pub(super) fn def_fact_store_search(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_fact_store_search",

@@ -11,7 +11,9 @@ mod results;
 pub use crate::memory::{FactCategoryV1, FactMetadataV1};
 pub use automation::{
     AutomationRunRequestV1, AutomationTaskRequestV1, AutomationTaskV1, CombinedReviewRunInputV1,
-    MemoryCuratorRunInputV1, SessionReflectorRunInputV1, SkillWriterRunInputV1, UserJobRunInputV1,
+    DEFAULT_FACT_STORE_CURATE_MIN_CONFIDENCE_MILLIONTHS, DEFAULT_FACT_STORE_CURATE_REVIEW_LIMIT,
+    FactStoreCurateRequestV1, MemoryCuratorRunInputV1, SessionReflectorRunInputV1,
+    SkillWriterRunInputV1, UserJobRunInputV1,
 };
 pub use fact_store::{
     FactSourceLabelPatchV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
@@ -629,6 +631,7 @@ mod session_refresh_request_tests {
     rename_all = "snake_case"
 )]
 pub enum RetainedSurfaceRequestV1 {
+    FactStoreCurate(FactStoreCurateRequestV1),
     FactStoreAdd(FactStoreAddRequestV1),
     FactStoreSearch(FactStoreSearchRequestV1),
     FactStoreProbe(FactStoreProbeRequestV1),
@@ -657,6 +660,7 @@ pub enum RetainedSurfaceRequestV1 {
 impl RetainedSurfaceRequestV1 {
     pub const fn operation(&self) -> RetainedSurfaceOperation {
         match self {
+            Self::FactStoreCurate(_) => RetainedSurfaceOperation::FactStoreCurate,
             Self::FactStoreAdd(_) => RetainedSurfaceOperation::FactStoreAdd,
             Self::FactStoreSearch(_) => RetainedSurfaceOperation::FactStoreSearch,
             Self::FactStoreProbe(_) => RetainedSurfaceOperation::FactStoreProbe,

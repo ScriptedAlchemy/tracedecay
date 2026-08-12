@@ -5,13 +5,14 @@ use std::sync::Arc;
 use axum::response::Response;
 use tracedecay_application::retained_surfaces::{
     FactFeedbackRequestV1, FactStoreAddRequestV1, FactStoreContradictRequestV1,
-    FactStoreGetRequestV1, FactStoreListRequestV1, FactStoreProbeRequestV1,
-    FactStoreReasonRequestV1, FactStoreRelatedRequestV1, FactStoreRemoveRequestV1,
-    FactStoreSearchRequestV1, FactStoreUpdateRequestV1, LcmDescribeRequestV1, LcmDoctorRequestV1,
-    LcmExpandQueryRequestV1, LcmExpandRequestV1, LcmGrepRequestV1, LcmLoadSessionRequestV1,
-    LcmStatusRequestV1, MemoryStatusRequestV1, MessageSearchRequestV1, RetainedSurfaceOperation,
-    RetainedSurfaceRequestV1, RetainedSurfaceResultV1, SessionRefreshActionRequestV1,
-    SessionRefreshActionV1, SessionRefreshRequestV1, SessionsForRequestV1, WorkflowsRequestV1,
+    FactStoreCurateRequestV1, FactStoreGetRequestV1, FactStoreListRequestV1,
+    FactStoreProbeRequestV1, FactStoreReasonRequestV1, FactStoreRelatedRequestV1,
+    FactStoreRemoveRequestV1, FactStoreSearchRequestV1, FactStoreUpdateRequestV1,
+    LcmDescribeRequestV1, LcmDoctorRequestV1, LcmExpandQueryRequestV1, LcmExpandRequestV1,
+    LcmGrepRequestV1, LcmLoadSessionRequestV1, LcmStatusRequestV1, MemoryStatusRequestV1,
+    MessageSearchRequestV1, RetainedSurfaceOperation, RetainedSurfaceRequestV1,
+    RetainedSurfaceResultV1, SessionRefreshActionRequestV1, SessionRefreshActionV1,
+    SessionRefreshRequestV1, SessionsForRequestV1, WorkflowsRequestV1,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -165,6 +166,9 @@ pub(crate) fn decode_request(
         };
     }
     match operation {
+        RetainedSurfaceOperation::FactStoreCurate => {
+            decode!(FactStoreCurateRequestV1, FactStoreCurate)
+        }
         RetainedSurfaceOperation::FactStoreAdd => {
             decode_fact!(FactStoreAddRequestV1, FactStoreAdd)
         }
@@ -220,7 +224,7 @@ pub(crate) fn decode_request(
         RetainedSurfaceOperation::LcmExpandQuery => {
             decode!(LcmExpandQueryRequestV1, LcmExpandQuery)
         }
-        RetainedSurfaceOperation::SessionRefresh | RetainedSurfaceOperation::AutomationRun => None,
+        RetainedSurfaceOperation::SessionRefresh => None,
     }
 }
 
@@ -325,5 +329,27 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn fact_store_curate_rejects_caller_owned_authority() {
+        for forbidden in [
+            "operations",
+            "proposal_id",
+            "approve",
+            "apply",
+            "run_id",
+            "task",
+        ] {
+            let mut value = serde_json::Map::new();
+            value.insert(forbidden.to_owned(), serde_json::Value::Bool(true));
+            assert!(
+                decode_request(
+                    RetainedSurfaceOperation::FactStoreCurate,
+                    serde_json::Value::Object(value),
+                )
+                .is_none()
+            );
+        }
     }
 }

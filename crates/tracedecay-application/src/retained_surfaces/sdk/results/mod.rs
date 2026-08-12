@@ -117,7 +117,7 @@ pub struct RetainedErrorV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(untagged)]
 pub enum RetainedSurfaceResultV1 {
-    AutomationRun(AutomationRunResultV1),
+    FactStoreCurate(AutomationRunResultV1),
     FactStoreAdd(FactStoreAddResultV1),
     FactStoreSearch(FactStoreSearchResultV1),
     FactStoreProbe(FactStoreProbeResultV1),
@@ -169,6 +169,9 @@ mod tests {
         }))
         .expect("canonical automation terminal");
 
-        assert!(matches!(result, RetainedSurfaceResultV1::AutomationRun(_)));
+        assert!(matches!(
+            result,
+            RetainedSurfaceResultV1::FactStoreCurate(_)
+        ));
     }
 }

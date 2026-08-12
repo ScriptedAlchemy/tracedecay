@@ -6,21 +6,6 @@ pub(super) fn automation_run_rpc_request(
     action: AutomationRunAction,
 ) -> tracedecay::errors::Result<(Option<String>, serde_json::Value)> {
     let request = match action {
-        AutomationRunAction::MemoryCuration {
-            fact_review_limit,
-            min_confidence,
-            path,
-        } => (
-            path,
-            serde_json::json!({
-                "action": "automation_run",
-                "task": "memory_curation",
-                "options": {
-                    "fact_review_limit": fact_review_limit,
-                    "min_confidence": min_confidence,
-                },
-            }),
-        ),
         AutomationRunAction::SessionReflection {
             provider,
             query,

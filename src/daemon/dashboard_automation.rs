@@ -14,8 +14,7 @@ use tracedecay_agent_hosts::automation::managed_skills::{
 };
 use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
 use tracedecay_agent_hosts::automation::runner::{
-    MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
-    SkillWriterAutomationOptions, run_memory_curator_with_backend,
+    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
     run_session_reflector_with_backend, run_skill_writer_with_backend,
 };
 use tracedecay_agent_hosts::automation::skill_writer::deploy_managed_skills_to_project;
@@ -35,6 +34,9 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::server::{RetainedProjectGraphRequest, RetainedProjectServerResolver};
 use crate::tracedecay::TraceDecay;
 
+mod retained_curator;
+pub(crate) use retained_curator::execute_retained_memory_curator;
+
 type DashboardAutomationResult<T> = std::result::Result<T, DashboardAutomationAuthorityErrorV1>;
 type DashboardAutomationProjectFuture = std::pin::Pin<
     Box<dyn Future<Output = DashboardAutomationResult<Arc<TraceDecay>>> + Send + 'static>,
@@ -42,7 +44,6 @@ type DashboardAutomationProjectFuture = std::pin::Pin<
 type DashboardAutomationProjectResolver =
     Arc<dyn Fn(PathBuf) -> DashboardAutomationProjectFuture + Send + Sync + 'static>;
 
-const MEMORY_CURATOR_REQUEST_TIMEOUT_SECS: u64 = 80;
 const SESSION_REFLECTOR_REQUEST_TIMEOUT_SECS: u64 = 120;
 const SKILL_WRITER_REQUEST_TIMEOUT_SECS: u64 = 120;
 
@@ -54,9 +55,6 @@ struct DashboardAutomationRequestRuntime {
 impl DashboardAutomationRequestRuntime {
     fn new(configured: &AutomationConfig, request: &DashboardAutomationRunRequestV1) -> Self {
         let timeout_cap = match request {
-            DashboardAutomationRunRequestV1::MemoryCurator { .. } => {
-                MEMORY_CURATOR_REQUEST_TIMEOUT_SECS
-            }
             DashboardAutomationRunRequestV1::SessionReflection { .. } => {
                 SESSION_REFLECTOR_REQUEST_TIMEOUT_SECS
             }
@@ -382,76 +380,6 @@ async fn execute_dashboard_automation_run(
     let runtime = DashboardAutomationRequestRuntime::new(&config, &request);
     let (config, backend) = runtime.execution();
     let run = match request {
-        DashboardAutomationRunRequestV1::MemoryCurator {
-            fact_review_limit,
-            min_confidence,
-        } => {
-            let run_id = request_control.request_id().as_str().to_owned();
-            let options = MemoryCuratorAutomationOptions {
-                trigger: AutomationTrigger::Dashboard,
-                run_id: Some(run_id.clone()),
-                fact_review_limit,
-                min_confidence,
-            };
-            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
-                invocation_service,
-                cg,
-                cg.project_root(),
-                &cg.store_layout().dashboard_root,
-                request_control.request_id(),
-                request_control.deadline(),
-                request_control.cancellation(),
-                request_control.observed_at(),
-                configuration_digest.clone(),
-                crate::daemon::automation_effect::memory_curator_run_request(
-                    &run_id,
-                    fact_review_limit,
-                    min_confidence,
-                )
-                .map_err(automation_failed)?,
-            )
-            .await
-            .map_err(automation_failed)?;
-            let effect = match admission {
-                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => {
-                    effect
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
-                    envelope,
-                ) => {
-                    return Err(DashboardAutomationAuthorityErrorV1::ApplicationProblem(envelope));
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
-                    let run = automation_terminal_run(&terminal)?;
-                    return Ok(run);
-                }
-            };
-            let run = match run_memory_curator_with_backend(
-                cg,
-                config,
-                &pinned.revision_id,
-                backend,
-                options,
-                run_control,
-            )
-            .await
-            {
-                Ok(run) => run,
-                Err(error) => return Err(automation_run_failed(error, effect).await),
-            };
-            let terminal = effect
-                .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
-                .await
-                .map_err(automation_failed)?;
-            let settled_run = automation_terminal_run(&terminal)?;
-            crate::daemon::record_project_automation_run(
-                producer.as_ref(),
-                cg.project_root(),
-                &run.ledger_record,
-                "dashboard",
-            );
-            settled_run
-        }
         DashboardAutomationRunRequestV1::SessionReflection {
             provider,
             query,
@@ -866,26 +794,6 @@ mod tests {
             start_time: None,
             end_time: None,
         }
-    }
-
-    #[test]
-    fn dashboard_memory_curator_caps_each_backend_call_for_the_wall_budget() {
-        let configured = AutomationConfig {
-            timeout_secs: 300,
-            ..AutomationConfig::default()
-        };
-        let request = DashboardAutomationRunRequestV1::MemoryCurator {
-            fact_review_limit: 25,
-            min_confidence: 0.85,
-        };
-
-        let runtime = DashboardAutomationRequestRuntime::new(&configured, &request);
-        let (effective, _backend) = runtime.execution();
-
-        assert_eq!(effective.timeout_secs, 80);
-        assert_eq!(configured.timeout_secs, 300);
-        assert_eq!(effective.model_id, configured.model_id);
-        assert_eq!(effective.tasks, configured.tasks);
     }
 
     #[test]

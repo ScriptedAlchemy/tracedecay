@@ -2,7 +2,7 @@ use crate::dashboard_api_support::*;
 use tracedecay_agent_hosts::automation::backend::AgentTaskRetryAttempt;
 
 #[test]
-fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
+fn dashboard_automation_runs_skip_when_backend_disabled_and_record_history() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -38,37 +38,48 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
             &config_url,
             &serde_json::json!({
                 "enabled": false,
-                "backend": "codex_app_server"
+                "backend": "disabled"
             }),
         );
         assert_eq!(status, 200, "config patch should succeed: {saved_config}");
-        assert_eq!(saved_config["effective"]["backend"], "codex_app_server");
+        assert_eq!(saved_config["effective"]["backend"], "disabled");
         assert_eq!(saved_config["effective"]["host_mode"], "standalone");
         assert!(saved_config["effective"]["model"].is_null());
 
         let (status, memory_payload) = post_json_body(
             &agent,
+            &format!("{base_url}/api/application/retained/fact_store_curate"),
+            &serde_json::json!({
+                "fact_review_limit": 24,
+                "min_confidence_millionths": 720_000
+            }),
+        );
+        assert_eq!(status, 200);
+        let memory_run = &memory_payload["value"]["outcome"]["value"]["payload"];
+        assert_eq!(memory_run["terminal"]["status"], "skipped");
+        assert_eq!(memory_run["task"], "memory_curator");
+        assert_eq!(memory_run["terminal"]["reason"], "backend_disabled");
+
+        let (status, rejected_manual_surface) = post_json_body(
+            &agent,
+            &format!("{base_url}/api/application/retained/fact_store_curate"),
+            &serde_json::json!({
+                "fact_review_limit": 24,
+                "operations": []
+            }),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(rejected_manual_surface["kind"], "problem");
+
+        let (status, _) = post_json_body(
+            &agent,
             &format!("{base_url}/api/automation/run/memory-curator"),
             &serde_json::json!({}),
         );
-        assert_eq!(status, 200);
         assert_eq!(
-            memory_payload["run"]["ledger_record"]["trigger"],
-            "dashboard"
+            status, 404,
+            "retired duplicate curator route must stay absent"
         );
-        assert_eq!(
-            memory_payload["run"]["ledger_record"]["task"],
-            "memory_curator"
-        );
-        assert_eq!(
-            memory_payload["run"]["ledger_record"]["backend"],
-            "codex_app_server"
-        );
-        assert_eq!(
-            memory_payload["run"]["ledger_record"]["host_mode"],
-            "standalone"
-        );
-        assert!(memory_payload["run"]["ledger_record"]["model"].is_null());
 
         let (status, session_payload) = post_json_body(
             &agent,
@@ -86,7 +97,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
         );
         assert_eq!(
             session_payload["run"]["ledger_record"]["backend"],
-            "codex_app_server"
+            "disabled"
         );
         assert_eq!(
             session_payload["run"]["ledger_record"]["host_mode"],
@@ -112,10 +123,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
             skill_payload["run"]["ledger_record"]["task"],
             "skill_writer"
         );
-        assert_eq!(
-            skill_payload["run"]["ledger_record"]["backend"],
-            "codex_app_server"
-        );
+        assert_eq!(skill_payload["run"]["ledger_record"]["backend"], "disabled");
         assert_eq!(
             skill_payload["run"]["ledger_record"]["host_mode"],
             "standalone"
@@ -161,10 +169,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
         }
 
         let run_ids = [
-            memory_payload["run"]["run_id"]
-                .as_str()
-                .unwrap()
-                .to_string(),
+            memory_run["run_id"].as_str().unwrap().to_string(),
             session_payload["run"]["run_id"]
                 .as_str()
                 .unwrap()
@@ -180,7 +185,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
             .filter(|record| {
                 run_ids.contains(&record.run_id)
                     && record.status.is_terminal()
-                    && record.error.as_deref() == Some("automation_disabled")
+                    && record.error.as_deref() == Some("backend_disabled")
             })
             .count();
         assert_eq!(
@@ -199,16 +204,20 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
             ]
         );
         for record in &records {
-            assert_eq!(
-                record.trigger,
+            let expected_trigger = if record.task
+                == tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator
+            {
+                tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Application
+            } else {
                 tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Dashboard
-            );
+            };
+            assert_eq!(record.trigger, expected_trigger);
             assert_eq!(
                 record.status,
                 tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
             );
-            assert_eq!(record.error.as_deref(), Some("automation_disabled"));
-            assert_eq!(record.backend, "codex_app_server");
+            assert_eq!(record.error.as_deref(), Some("backend_disabled"));
+            assert_eq!(record.backend, "disabled");
             assert_eq!(record.host_mode.as_deref(), Some("standalone"));
             assert_eq!(record.model.as_deref(), None);
         }
@@ -219,7 +228,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
         assert_eq!(runs["limit"], 5);
         assert_eq!(runs["runs"][0]["trigger"], "dashboard");
         assert_eq!(runs["runs"][0]["status"], "skipped");
-        assert_eq!(runs["runs"][0]["error"], "automation_disabled");
+        assert_eq!(runs["runs"][0]["error"], "backend_disabled");
 
         let (status, runs) = get_json(&agent, &format!("{base_url}/api/automation/runs"));
         assert_eq!(status, 200);
@@ -227,7 +236,7 @@ fn dashboard_automation_runs_skip_when_disabled_and_record_history() {
         assert!(
             runs["runs"].as_array().is_some_and(|records| records
                 .iter()
-                .any(|record| record["run_id"] == memory_payload["run"]["run_id"]
+                .any(|record| record["run_id"] == memory_run["run_id"]
                     && record["status"] == "skipped")),
             "memory-curator run should remain visible in newest-first history: {runs}"
         );
@@ -388,31 +397,34 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
 
         let (status, completed) = post_json_body(
             &agent,
-            &format!("{base_url}/api/automation/run/memory-curator"),
+            &format!("{base_url}/api/application/retained/fact_store_curate"),
             &serde_json::json!({
                 "fact_review_limit": 4,
-                "min_confidence": 0.5
+                "min_confidence_millionths": 500_000
             }),
         );
         assert_eq!(
             status, 200,
             "dashboard automation run failed: {completed}"
         );
-        let run_id = completed["run"]["run_id"]
+        let run = &completed["value"]["outcome"]["value"]["payload"];
+        let run_id = run["run_id"]
             .as_str()
             .unwrap_or_else(|| panic!("completed response should include run_id: {completed}"))
             .to_string();
-        let record = serde_json::from_value::<
-            tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
-        >(completed["run"]["ledger_record"].clone())
-        .unwrap_or_else(|error| panic!("invalid completed run ledger: {error}"));
-        assert_eq!(
-            record.status,
-            tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
-        );
-        assert_eq!(record.accepted_count, 1);
-        assert_eq!(record.rejected_count, 0);
-        assert_eq!(record.artifacts.len(), 6);
+        assert_eq!(run["terminal"]["status"], "completed");
+        assert_eq!(run["terminal"]["summary"]["accepted_count"], 1);
+        assert_eq!(run["terminal"]["summary"]["rejected_count"], 0);
+        let records = tracedecay_agent_hosts::automation::run_ledger::load_run_records(
+            &dashboard_root,
+            10,
+        )
+        .await
+        .unwrap();
+        let record = records
+            .iter()
+            .find(|record| record.run_id == run_id)
+            .unwrap_or_else(|| panic!("returned run must be durably visible: {records:#?}"));
         let proposed = record
             .proposed_ops
             .as_ref()
@@ -452,17 +464,6 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         assert!(applied[0]["receipt"]["replay_fact_id"]
             .as_str()
             .is_some_and(|raw| FactId::new(raw.to_owned()).is_ok()));
-        let records = tracedecay_agent_hosts::automation::run_ledger::load_run_records(
-            &dashboard_root,
-            10,
-        )
-        .await
-        .unwrap();
-        assert!(
-            records.iter().any(|stored| stored == &record),
-            "returned terminal ledger must be durably visible: {records:#?}"
-        );
-
         let (status, curated_fact) = get_json(
             &agent,
             &format!(

@@ -82,6 +82,16 @@ pub(crate) enum AutomationSettledTerminal {
 }
 
 impl AutomationSettledTerminal {
+    pub(crate) fn into_outcome(
+        self,
+    ) -> std::result::Result<ApplicationOutcome<RetainedSurfaceResultV1>, AutomationSettledProblem>
+    {
+        match self {
+            Self::Outcome { outcome, .. } => Ok(outcome),
+            Self::Problem(problem) => Err(problem),
+        }
+    }
+
     fn matches_admission(&self, admission: &DurableAutomationAdmission) -> bool {
         match self {
             Self::Outcome {
@@ -90,7 +100,7 @@ impl AutomationSettledTerminal {
             } => {
                 terminal_scope == &admission.scope
                     && retained_surface_outcome_matches_terminal(
-                        RetainedSurfaceOperation::AutomationRun,
+                        RetainedSurfaceOperation::FactStoreCurate,
                         &admission.request_id,
                         &admission.scope,
                         outcome,
@@ -100,7 +110,7 @@ impl AutomationSettledTerminal {
                         ApplicationOutcome::Effect(effect)
                             if matches!(
                                 effect.payload.as_ref(),
-                                Some(RetainedSurfaceResultV1::AutomationRun(result))
+                                Some(RetainedSurfaceResultV1::FactStoreCurate(result))
                                     if result.matches_admission(&admission.request)
                             )
                     )
@@ -120,7 +130,7 @@ impl AutomationSettledTerminal {
         let ApplicationOutcome::Effect(effect) = outcome else {
             return None;
         };
-        let Some(RetainedSurfaceResultV1::AutomationRun(result)) = effect.payload.as_ref() else {
+        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
             return None;
         };
         Some(result)
@@ -140,7 +150,7 @@ impl AutomationSettledTerminal {
         let ApplicationOutcome::Effect(effect) = outcome else {
             return false;
         };
-        let Some(RetainedSurfaceResultV1::AutomationRun(result)) = effect.payload.as_ref() else {
+        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
             return false;
         };
         matches!(result.terminal, AutomationRunTerminalV1::Completed { .. })
@@ -153,7 +163,7 @@ impl AutomationSettledTerminal {
         let ApplicationOutcome::Effect(effect) = outcome else {
             return false;
         };
-        let Some(RetainedSurfaceResultV1::AutomationRun(result)) = effect.payload.as_ref() else {
+        let Some(RetainedSurfaceResultV1::FactStoreCurate(result)) = effect.payload.as_ref() else {
             return false;
         };
         matches!(
@@ -257,7 +267,7 @@ impl AutomationEffectAuthority {
             (None, Some((live, _))) => Some(live.clone()),
             (None, None) => None,
         };
-        let retained_operation = RetainedSurfaceOperation::AutomationRun;
+        let retained_operation = RetainedSurfaceOperation::FactStoreCurate;
         let operation =
             retained_surface_application_operation(retained_operation).map_err(contract_error)?;
         let context = match invocation
@@ -667,7 +677,7 @@ impl AutomationEffectAuthority {
             &execution,
             &committed_state,
             tracedecay_application::ReconciliationState::Reconciled,
-            RetainedSurfaceResultV1::AutomationRun(result),
+            RetainedSurfaceResultV1::FactStoreCurate(result),
             None,
         );
         let outcome = match outcome {
@@ -698,7 +708,7 @@ impl AutomationEffectAuthority {
             }
         };
         if !retained_surface_outcome_matches_terminal(
-            RetainedSurfaceOperation::AutomationRun,
+            RetainedSurfaceOperation::FactStoreCurate,
             self.context.request_id(),
             self.context.scope(),
             &outcome,
@@ -822,7 +832,7 @@ impl AutomationEffectAuthority {
             detail,
         ));
         if !retained_surface_problem_matches_terminal(
-            RetainedSurfaceOperation::AutomationRun,
+            RetainedSurfaceOperation::FactStoreCurate,
             self.context.request_id(),
             Some(self.context.scope()),
             &problem,

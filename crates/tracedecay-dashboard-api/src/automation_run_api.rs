@@ -5,7 +5,6 @@ use axum::response::Json;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::memory_api::default_agent_plan_min_confidence;
 use super::util::http_detail;
 use super::{
     DashboardAutomationRunRequestV1, DashboardHttpRequestControlV1, DashboardState,
@@ -15,39 +14,7 @@ use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord, find_run_record,
     read_published_artifact_chain, read_run_artifact_payload,
 };
-use tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_FACT_REVIEW_LIMIT;
 use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
-
-fn default_fact_review_limit() -> usize {
-    CURATION_DEFAULT_FACT_REVIEW_LIMIT
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryCuratorRunBody {
-    #[serde(default = "default_fact_review_limit")]
-    fact_review_limit: usize,
-    #[serde(default = "default_agent_plan_min_confidence")]
-    min_confidence: f64,
-}
-
-impl Default for MemoryCuratorRunBody {
-    fn default() -> Self {
-        Self {
-            fact_review_limit: default_fact_review_limit(),
-            min_confidence: default_agent_plan_min_confidence(),
-        }
-    }
-}
-
-impl From<MemoryCuratorRunBody> for DashboardAutomationRunRequestV1 {
-    fn from(body: MemoryCuratorRunBody) -> Self {
-        Self::MemoryCurator {
-            fact_review_limit: body.fact_review_limit,
-            min_confidence: body.min_confidence,
-        }
-    }
-}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,15 +66,6 @@ impl From<SkillWritingRunBody> for DashboardAutomationRunRequestV1 {
             evidence_limit: body.evidence_limit,
         }
     }
-}
-
-pub async fn memory_curator(
-    State(state): State<DashboardState>,
-    Extension(control): Extension<DashboardHttpRequestControlV1>,
-    body: Option<axum::extract::Json<MemoryCuratorRunBody>>,
-) -> (StatusCode, Json<Value>) {
-    let body = body.map(|body| body.0).unwrap_or_default();
-    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body), control).await
 }
 
 pub async fn session_reflection(
@@ -387,134 +345,6 @@ mod run_list_tests {
         ));
     }
 
-    #[test]
-    fn empty_memory_curator_body_uses_daemon_run_defaults() {
-        let body = serde_json::from_value::<MemoryCuratorRunBody>(json!({}))
-            .expect("empty memory-curator request body");
-
-        assert_eq!(
-            DashboardAutomationRunRequestV1::from(body),
-            DashboardAutomationRunRequestV1::MemoryCurator {
-                fact_review_limit: CURATION_DEFAULT_FACT_REVIEW_LIMIT,
-                min_confidence:
-                    tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_MIN_CONFIDENCE,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn dashboard_run_delegates_exact_project_scope_to_daemon_authority() {
-        let observed = Arc::new(Mutex::new(None));
-        let observed_run = Arc::clone(&observed);
-        let run: super::super::DashboardAutomationRunPortV1 = Arc::new(move |invocation| {
-            *observed_run
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invocation);
-            Box::pin(async {
-                serde_json::from_value(json!({
-                    "run_id": "daemon-run-1",
-                    "task": "memory_curator",
-                    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "terminal": {
-                        "status": "completed",
-                        "summary": {
-                            "reviewed_count": 0,
-                            "accepted_count": 0,
-                            "rejected_count": 0,
-                            "skipped_count": 0
-                        }
-                    },
-                    "committed_receipts": []
-                }))
-                .map_err(|error| DashboardAutomationAuthorityErrorV1::Failed {
-                    detail: error.to_string(),
-                })
-            })
-        });
-        let skills: super::super::DashboardManagedSkillCommandPortV1 = Arc::new(|_| {
-            Box::pin(async {
-                Err(DashboardAutomationAuthorityErrorV1::unavailable(
-                    "managed skill authority is not exercised",
-                ))
-            })
-        });
-        let profile_root = if cfg!(windows) {
-            std::path::PathBuf::from(r"C:\profiles\selected")
-        } else {
-            std::path::PathBuf::from("/profiles/selected")
-        };
-        let project_root = if cfg!(windows) {
-            std::path::PathBuf::from(r"C:\projects\selected")
-        } else {
-            std::path::PathBuf::from("/projects/selected")
-        };
-        let authority =
-            super::super::DashboardAutomationAuthorityV1::new(profile_root, run, skills)
-                .expect("absolute automation profile root");
-        let control = super::super::DashboardHttpRequestControlV1 {
-            request_id: tracedecay_application::RequestId::new(
-                "request.dashboard-automation-endpoint-test",
-            )
-            .expect("request identity"),
-            deadline: tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                2_000_000,
-            ))
-            .expect("request deadline"),
-            cancellation: tracedecay_application::CancellationSignal::active(
-                "cancel.dashboard-automation-endpoint-test",
-            )
-            .expect("request cancellation"),
-            observed_at: tracedecay_domain::UtcMicros(1_000_000),
-        };
-
-        let (status, Json(payload)) = execute_dashboard_task(
-            &authority,
-            &project_root,
-            DashboardAutomationRunRequestV1::MemoryCurator {
-                fact_review_limit: 9,
-                min_confidence: 0.75,
-            },
-            control,
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            payload,
-            json!({
-                "run": {
-                    "run_id": "daemon-run-1",
-                    "task": "memory_curator",
-                    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "terminal": {
-                        "status": "completed",
-                        "summary": {
-                            "reviewed_count": 0,
-                            "accepted_count": 0,
-                            "rejected_count": 0,
-                            "skipped_count": 0
-                        }
-                    },
-                    "committed_receipts": []
-                }
-            })
-        );
-        let invocation = observed
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .expect("daemon run port invocation");
-        assert_eq!(invocation.project_root, project_root);
-        assert_eq!(
-            invocation.request,
-            DashboardAutomationRunRequestV1::MemoryCurator {
-                fact_review_limit: 9,
-                min_confidence: 0.75,
-            }
-        );
-    }
-
-    #[test]
     fn run_history_row_projects_identity_outcome_and_artifact_kinds() {
         let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
             "schema_version": 1,

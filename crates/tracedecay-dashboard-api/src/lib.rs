@@ -1387,10 +1387,6 @@ fn project_api_router() -> Router<DashboardState> {
             get(automation_fact_receipts_api::view),
         )
         .route(
-            "/api/automation/run/memory-curator",
-            post(automation_run_api::memory_curator),
-        )
-        .route(
             "/api/automation/run/session-reflection",
             post(automation_run_api::session_reflection),
         )
@@ -1875,7 +1871,7 @@ mod authority_tests {
     #[test]
     fn automation_run_routes_receive_the_backend_sized_deadline_budget() {
         assert_eq!(
-            dashboard_http_request_deadline_micros("/api/automation/run/memory-curator"),
+            dashboard_http_request_deadline_micros("/api/application/retained/fact_store_curate"),
             DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
         );
         assert_eq!(
@@ -1892,7 +1888,7 @@ mod authority_tests {
         );
         assert_eq!(
             dashboard_http_request_deadline_micros(
-                "/api/projects/project-7/automation/run/memory-curator"
+                "/api/projects/project-7/application/retained/fact_store_curate"
             ),
             DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
         );
@@ -1917,9 +1913,10 @@ mod authority_tests {
             DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS,
         );
         for near_match in [
-            "/api/projects//automation/run/memory-curator",
-            "/api/projects/project-7/automation/run/memory-curator/extra",
-            "/api/projects/project-7/automation/run/memory-curatorish",
+            "/api/application/retained/fact_store_curate/extra",
+            "/api/application/retained/fact_store_curateish",
+            "/api/projects//application/retained/fact_store_curate",
+            "/api/projects/project-7/application/retained/fact_store_curate/extra",
             "/api/projects/project-7/automation/run/skill-writer",
             "/api/projects/project-7/automation/runs",
         ] {
@@ -1944,9 +1941,8 @@ mod authority_tests {
         let port = 47_123;
         let app = with_dashboard_http_admission(
             Router::new()
-                .route("/api/automation/run/memory-curator", post(deadline_budget))
                 .route(
-                    "/api/projects/{project_id}/automation/run/memory-curator",
+                    "/api/application/retained/fact_store_curate",
                     post(deadline_budget),
                 )
                 .route("/api/automation/runs", get(deadline_budget)),
@@ -1955,18 +1951,13 @@ mod authority_tests {
         for (method, path, expected) in [
             (
                 Method::POST,
-                "/api/automation/run/memory-curator",
+                "/api/application/retained/fact_store_curate",
                 DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
             ),
             (
                 Method::GET,
                 "/api/automation/runs",
                 DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS,
-            ),
-            (
-                Method::POST,
-                "/api/projects/project-7/automation/run/memory-curator",
-                DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
             ),
         ] {
             let response = app
