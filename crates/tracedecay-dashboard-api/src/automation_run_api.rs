@@ -343,6 +343,7 @@ mod run_list_tests {
         ));
     }
 
+    #[test]
     fn run_history_row_projects_identity_outcome_and_artifact_kinds() {
         let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
             "schema_version": 1,

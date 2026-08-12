@@ -116,10 +116,6 @@ pub(super) struct MemoryFactDetailPayloadV1 {
     error: String,
 }
 
-pub fn default_agent_plan_min_confidence() -> f64 {
-    tracedecay_agent_hosts::automation::runner::CURATION_DEFAULT_MIN_CONFIDENCE
-}
-
 fn owned_fact_id(state: &DashboardState, raw: String) -> Result<FactId, String> {
     let fact_id = FactId::new(raw).map_err(|error| error.to_string())?;
     fact_id
