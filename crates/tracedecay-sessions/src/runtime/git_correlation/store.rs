@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest as _, Sha256};
 use tracedecay_graph_db::{
@@ -26,6 +26,7 @@ use super::{
 };
 
 const GRAPH_READ_PAGE_ITEMS: usize = 10_000;
+const GIT_EVIDENCE_NAMESPACE: &str = "project";
 const GIT_EVIDENCE_PROJECTION: &str = "session-git-evidence";
 const SESSION_LABEL: &str = "GitEvidenceSession";
 const SPAN_LABEL: &str = "GitEvidenceSpan";
@@ -86,9 +87,11 @@ pub fn build_git_evidence_manifest_checked(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<GraphGenerationManifest, GitCorrelationError> {
     check()?;
-    if identity.projection.as_str() != GIT_EVIDENCE_PROJECTION {
+    if identity.namespace.as_str() != GIT_EVIDENCE_NAMESPACE
+        || identity.projection.as_str() != GIT_EVIDENCE_PROJECTION
+    {
         return Err(GitCorrelationError::Contract(
-            "Git evidence projection identity uses a foreign projector".to_owned(),
+            "Git evidence projection identity uses a foreign namespace or projector".to_owned(),
         ));
     }
     let generation = git_evidence_generation_id(projection, projector_revision)?;
@@ -146,6 +149,13 @@ pub trait GitCorrelationSessionStore: Sync {
         &self,
     ) -> impl Future<Output = Result<Self::WriteTxn<'_>, GitCorrelationError>> + Send;
 
+    /// Serializes recovery, merge, and publication for this exact retained
+    /// Git-evidence projection. The graph runtime's own publication gate
+    /// starts after the caller has recovered its base generation, so it cannot
+    /// by itself prevent two callers from replacing one another with sibling
+    /// generations derived from the same head.
+    fn git_evidence_publication_lock(&self) -> Result<&Mutex<()>, GitCorrelationError>;
+
     fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError>;
 }
 
@@ -173,6 +183,7 @@ impl GitEvidenceProjectionStore {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Self, GitCorrelationError> {
         let identity = snapshot.projection().clone();
+        require_git_evidence_projection_identity(&identity)?;
         let projection_property = GraphPropertyName::new(PROJECTION_RECORD_PROPERTY)?;
         let span_property = GraphPropertyName::new(SPAN_RECORD_PROPERTY)?;
         let commit_property = GraphPropertyName::new(COMMIT_RECORD_PROPERTY)?;
@@ -232,6 +243,13 @@ impl GitEvidenceProjectionStore {
             )
         })?;
         let projection = GitEvidenceProjectionV1::new(source_watermark, spans, commit_sessions)?;
+        require_git_evidence_generation(
+            &snapshot,
+            &projection,
+            &GraphProjectorRevision::try_from(
+                super::GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned(),
+            )?,
+        )?;
         Ok(Self {
             snapshot,
             projection,
@@ -284,8 +302,6 @@ pub fn publish_git_evidence_projection(
     idempotency_key: GraphIdempotencyKey,
     cancelled: Arc<AtomicBool>,
 ) -> Result<GitEvidenceProjectionStore, GitCorrelationError> {
-    let cancellation: Arc<dyn GraphCancellation> =
-        Arc::new(AtomicGraphCancellation(Arc::clone(&cancelled)));
     let check = || {
         if cancelled.load(Ordering::Acquire) {
             Err(GraphDbError::Cancelled)
@@ -296,7 +312,15 @@ pub fn publish_git_evidence_projection(
     let manifest =
         build_git_evidence_manifest_checked(identity, projection, projector_revision, &check)?;
     let snapshot = runtime.publish_verified_manifest(&manifest, idempotency_key, cancelled)?;
-    GitEvidenceProjectionStore::from_verified_snapshot(snapshot, cancellation)
+    require_git_evidence_generation(&snapshot, projection, projector_revision)?;
+    // Publication's verified-head CAS is the irreversible commit point. The
+    // caller-supplied projection is the exact canonical manifest input, so do
+    // not re-read the committed snapshot under a request cancellation token
+    // and risk reporting `Cancelled` after durable success.
+    Ok(GitEvidenceProjectionStore {
+        snapshot,
+        projection: projection.clone(),
+    })
 }
 
 /// Recovers the published Git evidence projection, answering `Ok(None)` when
@@ -320,6 +344,35 @@ pub fn recover_git_evidence_projection(
         Arc::new(AtomicGraphCancellation(cancelled)),
     )
     .map(Some)
+}
+
+fn require_git_evidence_projection_identity(
+    identity: &GraphProjectionIdentity,
+) -> Result<(), GitCorrelationError> {
+    if identity.namespace.as_str() != GIT_EVIDENCE_NAMESPACE
+        || identity.projection.as_str() != GIT_EVIDENCE_PROJECTION
+    {
+        return Err(GitCorrelationError::Corrupt(
+            "verified Git evidence uses a foreign projection identity".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_git_evidence_generation(
+    snapshot: &VerifiedGraphSnapshot,
+    projection: &GitEvidenceProjectionV1,
+    projector_revision: &GraphProjectorRevision,
+) -> Result<(), GitCorrelationError> {
+    require_git_evidence_projection_identity(snapshot.projection())?;
+    let expected = git_evidence_generation_id(projection, projector_revision)?;
+    if snapshot.generation() != &expected {
+        return Err(GitCorrelationError::Corrupt(format!(
+            "verified Git evidence generation mismatch: expected `{expected}`, observed `{}`",
+            snapshot.generation()
+        )));
+    }
+    Ok(())
 }
 
 fn projection_entity(source_watermark: &str) -> Result<GraphEntity, GitCorrelationError> {

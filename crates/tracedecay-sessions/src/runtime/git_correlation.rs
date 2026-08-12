@@ -960,10 +960,11 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 mod attribution;
 mod backfill;
 mod store;
+pub(crate) use attribution::publish_graph_evidence_controlled;
 pub use attribution::{
     ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
     graph_evidence_publication_key, match_commit_to_spans, publish_graph_evidence,
-    run_commit_attribution_sweep,
+    publish_transcript_graph_evidence, run_commit_attribution_sweep,
 };
 pub use backfill::{
     BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,

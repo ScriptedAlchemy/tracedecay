@@ -611,13 +611,20 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
         progress.key.source_rowid, progress.generation
     );
     control.check()?;
-    let (published_spans, published_commits) = publish_graph_evidence(
+    let (published_spans, published_commits) = publish_graph_evidence_controlled(
         session_store,
         &publication_prefix,
         &graph_spans,
         &graph_commits,
+        control.verified_graph_cancellation(),
     )
-    .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+    .map_err(|error| match error {
+        GitCorrelationError::Cancelled => BoundedBackfillInterruption::Cancelled,
+        _ => BoundedBackfillInterruption::SourceUnavailable,
+    })?;
+    stats.spans_written = stats.spans_written.saturating_add(published_spans);
+    stats.commits_attributed = stats.commits_attributed.saturating_add(published_commits);
+    *committed = true;
     control.check()?;
 
     // Publication precedes receipt advancement deliberately. If the process
@@ -659,9 +666,6 @@ pub(super) async fn advance_publish<S: GitCorrelationSessionStore>(
     GitCorrelationWriteTxn::commit(transaction)
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    stats.spans_written = stats.spans_written.saturating_add(published_spans);
-    stats.commits_attributed = stats.commits_attributed.saturating_add(published_commits);
-    *committed = true;
     Ok(StreamGitEvidenceOutcome::Progressed)
 }
 

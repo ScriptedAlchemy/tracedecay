@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use super::history_failures;
@@ -50,6 +52,10 @@ impl BoundedGitControl {
             return Err(BoundedBackfillInterruption::CommandTimedOut);
         }
         Ok(())
+    }
+
+    pub(super) fn verified_graph_cancellation(&self) -> Arc<AtomicBool> {
+        self.cancellation.verified_graph_cancellation()
     }
 
     fn should_soft_stop(&self, reserve: Duration) -> Result<bool, BoundedBackfillInterruption> {

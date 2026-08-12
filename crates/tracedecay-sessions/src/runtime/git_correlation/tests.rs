@@ -1,8 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
+use tracedecay_graph_db::{
+    GraphDbError, GraphGenerationId, GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision,
+    NeverCancelled, VerifiedGraphSnapshot,
+};
 
+use super::test_support::MemoryEvidenceGraphRuntime;
 use super::*;
 
 fn span(
@@ -267,4 +271,134 @@ fn cancellation_check_is_observed_while_building_manifest() {
         }
     });
     assert_eq!(result.unwrap_err(), GitCorrelationError::Cancelled);
+}
+
+#[test]
+fn publication_returns_committed_projection_after_commit_point_cancellation() {
+    let runtime = MemoryEvidenceGraphRuntime::default();
+    runtime.cancel_request_after_next_publish();
+    let projection = projection();
+    let revision =
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let published = publish_git_evidence_projection(
+        &runtime,
+        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap(),
+        &projection,
+        &revision,
+        GraphIdempotencyKey::new("git-evidence-post-commit-cancellation").unwrap(),
+        Arc::clone(&cancelled),
+    )
+    .expect("verified-head publication already committed");
+
+    assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(published.projection(), &projection);
+}
+
+#[test]
+fn recovery_rejects_a_generation_not_bound_to_canonical_projection_bytes() {
+    let projection = projection();
+    let identity =
+        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
+    let revision =
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+    let mut manifest =
+        build_git_evidence_manifest_checked(identity, &projection, &revision, &|| Ok(())).unwrap();
+    manifest.generation = GraphGenerationId::new("foreign-git-evidence-generation").unwrap();
+    let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled)).unwrap();
+
+    let error =
+        GitEvidenceProjectionStore::from_verified_snapshot(snapshot, Arc::new(NeverCancelled))
+            .unwrap_err();
+    assert!(
+        matches!(error, GitCorrelationError::Corrupt(detail) if detail.contains("generation mismatch"))
+    );
+}
+
+#[test]
+fn recovery_rejects_a_foreign_namespace_with_canonical_projection_bytes() {
+    let projection = projection();
+    let identity =
+        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
+    let revision =
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+    let mut manifest =
+        build_git_evidence_manifest_checked(identity, &projection, &revision, &|| Ok(())).unwrap();
+    let foreign_identity =
+        git_evidence_projection_identity(GraphNamespace::new("foreign").unwrap()).unwrap();
+    manifest.projection.clone_from(&foreign_identity);
+    for relation in &mut manifest.relations {
+        relation.from.projection.clone_from(&foreign_identity);
+        relation.to.projection.clone_from(&foreign_identity);
+    }
+    let snapshot = VerifiedGraphSnapshot::memory(manifest, Arc::new(NeverCancelled)).unwrap();
+
+    let error =
+        GitEvidenceProjectionStore::from_verified_snapshot(snapshot, Arc::new(NeverCancelled))
+            .unwrap_err();
+    assert!(
+        matches!(error, GitCorrelationError::Corrupt(detail) if detail.contains("foreign projection identity"))
+    );
+}
+
+#[test]
+fn publication_rejects_a_foreign_namespace_before_verified_head_cas() {
+    let runtime = MemoryEvidenceGraphRuntime::default();
+    let projection = projection();
+    let foreign_identity =
+        git_evidence_projection_identity(GraphNamespace::new("foreign").unwrap()).unwrap();
+    let revision =
+        GraphProjectorRevision::try_from(GIT_EVIDENCE_PROJECTOR_REVISION_V1.to_owned()).unwrap();
+
+    let error = publish_git_evidence_projection(
+        &runtime,
+        foreign_identity.clone(),
+        &projection,
+        &revision,
+        GraphIdempotencyKey::new("foreign-git-evidence-publication").unwrap(),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .unwrap_err();
+    assert!(matches!(error, GitCorrelationError::Contract(_)));
+    assert!(
+        recover_git_evidence_projection(
+            &runtime,
+            &foreign_identity,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap()
+        .is_none(),
+        "foreign verified head must not be published"
+    );
+}
+
+#[test]
+fn recovery_observes_request_cancellation_before_reading_a_snapshot() {
+    let runtime = MemoryEvidenceGraphRuntime::default();
+    let identity =
+        git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
+    let result =
+        recover_git_evidence_projection(&runtime, &identity, Arc::new(AtomicBool::new(true)));
+    assert_eq!(result.unwrap_err(), GitCorrelationError::Cancelled);
+}
+
+#[test]
+fn recovery_observes_request_cancellation_while_reading_a_snapshot() {
+    let runtime = Arc::new(MemoryEvidenceGraphRuntime::default());
+    runtime.set_snapshot_read_delay(std::time::Duration::from_millis(50));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let reader_runtime = Arc::clone(&runtime);
+    let reader_cancelled = Arc::clone(&cancelled);
+    let reader = std::thread::spawn(move || {
+        let identity =
+            git_evidence_projection_identity(GraphNamespace::new("project").unwrap()).unwrap();
+        recover_git_evidence_projection(reader_runtime.as_ref(), &identity, reader_cancelled)
+    });
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    cancelled.store(true, std::sync::atomic::Ordering::Release);
+
+    assert_eq!(
+        reader.join().unwrap().unwrap_err(),
+        GitCorrelationError::Cancelled
+    );
 }

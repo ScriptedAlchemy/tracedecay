@@ -64,6 +64,10 @@ impl GitCorrelationSessionStore for TestStore {
             .map_err(GitCorrelationError::from)
     }
 
+    fn git_evidence_publication_lock(&self) -> Result<&std::sync::Mutex<()>, GitCorrelationError> {
+        Ok(self.graph.git_evidence_publication_lock())
+    }
+
     fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
         Ok(self.graph.as_ref())
     }

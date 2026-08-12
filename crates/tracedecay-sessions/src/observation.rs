@@ -39,6 +39,13 @@ impl ObservationCancellation {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
+
+    /// Carries this exact operation cancellation into verified graph
+    /// publication, whose runtime contract settles cancellation around its
+    /// durable head-CAS commit point.
+    pub(crate) fn verified_graph_cancellation(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

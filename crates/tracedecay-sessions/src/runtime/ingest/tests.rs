@@ -363,6 +363,12 @@ impl git_correlation::GitCorrelationSessionStore for GraphBackedTestStore {
             .map_err(git_correlation::GitCorrelationError::from)
     }
 
+    fn git_evidence_publication_lock(
+        &self,
+    ) -> Result<&std::sync::Mutex<()>, git_correlation::GitCorrelationError> {
+        Ok(self.graph.git_evidence_publication_lock())
+    }
+
     fn graph_runtime(
         &self,
     ) -> Result<&dyn VerifiedGraphRuntimePortV1, git_correlation::GitCorrelationError> {
@@ -500,6 +506,123 @@ async fn attribution_sweep_over_a_never_published_projection_is_a_typed_no_op() 
     .await
     .expect("the empty start is not an error");
     assert_eq!(inserted, 0, "nothing to attribute on the empty start");
+}
+
+#[test]
+fn concurrent_same_session_observations_merge_under_the_publication_lock() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let graph = MemoryEvidenceGraphRuntime::default();
+    graph.set_snapshot_read_delay(std::time::Duration::from_millis(50));
+    let store = std::sync::Arc::new(GraphBackedTestStore {
+        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
+            &store_dir.path().join("sessions.db"),
+        ),
+        graph,
+    });
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let make_observation = |ts| git_correlation::SpanObservation {
+        provider: "codex".to_owned(),
+        session_id: "session-concurrent".to_owned(),
+        thread_id: None,
+        branch: Some("main".to_owned()),
+        worktree: "/repo".to_owned(),
+        ts,
+        source: git_correlation::SpanSource::Ingest,
+    };
+    let first = make_observation(10);
+    let second = make_observation(20);
+
+    std::thread::scope(|scope| {
+        for observation in [first, second] {
+            let store = std::sync::Arc::clone(&store);
+            let barrier = std::sync::Arc::clone(&barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                git_correlation::publish_transcript_graph_evidence(
+                    store.as_ref(),
+                    "concurrent-observation",
+                    std::slice::from_ref(&observation),
+                    &[],
+                    git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS,
+                )
+                .unwrap();
+            });
+        }
+    });
+
+    let identity = git_correlation::git_evidence_projection_identity(
+        tracedecay_graph_db::GraphNamespace::new("project").unwrap(),
+    )
+    .unwrap();
+    let evidence = git_correlation::recover_git_evidence_projection(
+        git_correlation::GitCorrelationSessionStore::graph_runtime(store.as_ref()).unwrap(),
+        &identity,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .unwrap()
+    .expect("concurrent publications produced a verified head");
+    let spans = evidence.projection().spans();
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].first_ts, 10);
+    assert_eq!(spans[0].last_ts, 20);
+    assert_eq!(spans[0].event_count, 2);
+}
+
+#[test]
+fn admitted_bounded_publication_observes_live_operation_cancellation() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let graph = MemoryEvidenceGraphRuntime::default();
+    graph.set_snapshot_read_delay(std::time::Duration::from_millis(50));
+    let store = std::sync::Arc::new(GraphBackedTestStore {
+        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
+            &store_dir.path().join("sessions.db"),
+        ),
+        graph,
+    });
+    let cancellation = ObservationCancellation::default();
+    let publication_cancellation = cancellation.verified_graph_cancellation();
+    let publisher_store = std::sync::Arc::clone(&store);
+    let publisher = std::thread::spawn(move || {
+        git_correlation::publish_graph_evidence_controlled(
+            publisher_store.as_ref(),
+            "cancelled-bounded-publication",
+            &[],
+            &[],
+            publication_cancellation,
+        )
+    });
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    cancellation.cancel();
+
+    assert_eq!(
+        publisher.join().unwrap().unwrap_err(),
+        git_correlation::GitCorrelationError::Cancelled
+    );
+}
+
+#[test]
+fn admitted_bounded_publication_settles_durable_success_before_late_cancellation() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let graph = MemoryEvidenceGraphRuntime::default();
+    graph.cancel_request_after_next_publish();
+    let store = GraphBackedTestStore {
+        connection: tracedecay_runtime_core::db::engine::TestConnection::open(
+            &store_dir.path().join("sessions.db"),
+        ),
+        graph,
+    };
+    let cancellation = ObservationCancellation::default();
+
+    let published = git_correlation::publish_graph_evidence_controlled(
+        &store,
+        "late-cancelled-bounded-publication",
+        &[],
+        &[],
+        cancellation.verified_graph_cancellation(),
+    );
+
+    assert!(published.is_ok(), "verified-head CAS already committed");
+    assert!(cancellation.is_cancelled());
 }
 
 #[test]

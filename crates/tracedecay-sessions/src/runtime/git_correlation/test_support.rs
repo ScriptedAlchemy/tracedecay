@@ -6,8 +6,9 @@
 //! typed `Ok(None)` empty start as the production registry so recovery paths
 //! exercise their real fallback.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId};
 use tracedecay_graph_db::{
@@ -24,7 +25,10 @@ pub(crate) struct MemoryEvidenceGraphRuntime {
     binding: StoreRuntimeBindingV1,
     locator: VerifiedStoreLocatorV1,
     snapshot: Mutex<Option<VerifiedGraphSnapshot>>,
+    publication_lock: Mutex<()>,
     cancelled: AtomicBool,
+    cancel_after_publish: AtomicBool,
+    snapshot_delay_millis: AtomicU64,
 }
 
 impl Default for MemoryEvidenceGraphRuntime {
@@ -47,8 +51,26 @@ impl Default for MemoryEvidenceGraphRuntime {
                 LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
             ),
             snapshot: Mutex::new(None),
+            publication_lock: Mutex::new(()),
             cancelled: AtomicBool::new(false),
+            cancel_after_publish: AtomicBool::new(false),
+            snapshot_delay_millis: AtomicU64::new(0),
         }
+    }
+}
+
+impl MemoryEvidenceGraphRuntime {
+    pub(crate) fn git_evidence_publication_lock(&self) -> &Mutex<()> {
+        &self.publication_lock
+    }
+
+    pub(crate) fn cancel_request_after_next_publish(&self) {
+        self.cancel_after_publish.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn set_snapshot_read_delay(&self, delay: Duration) {
+        self.snapshot_delay_millis
+            .store(u64::try_from(delay.as_millis()).unwrap(), Ordering::Release);
     }
 }
 
@@ -80,6 +102,9 @@ impl VerifiedGraphRuntimePortV1 for MemoryEvidenceGraphRuntime {
         }
         let snapshot = VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))?;
         *self.snapshot.lock().unwrap() = Some(snapshot.clone());
+        if self.cancel_after_publish.swap(false, Ordering::AcqRel) {
+            cancelled.store(true, Ordering::Release);
+        }
         Ok(snapshot)
     }
 
@@ -101,6 +126,12 @@ impl VerifiedGraphRuntimePortV1 for MemoryEvidenceGraphRuntime {
         projection: &GraphProjectionIdentity,
         read_control: FactReadControl,
     ) -> Result<Option<VerifiedGraphSnapshot>, GraphDbError> {
+        if read_control.interrupted() || self.cancelled.load(Ordering::Acquire) {
+            return Err(GraphDbError::Cancelled);
+        }
+        std::thread::sleep(Duration::from_millis(
+            self.snapshot_delay_millis.load(Ordering::Acquire),
+        ));
         if read_control.interrupted() || self.cancelled.load(Ordering::Acquire) {
             return Err(GraphDbError::Cancelled);
         }

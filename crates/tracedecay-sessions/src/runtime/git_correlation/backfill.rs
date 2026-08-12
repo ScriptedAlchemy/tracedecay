@@ -1,6 +1,8 @@
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
-use super::attribution::{publish_graph_evidence, stable_backfill_span};
+use super::attribution::{
+    publish_graph_evidence, publish_graph_evidence_controlled, stable_backfill_span,
+};
 use super::store::GitCorrelationSessionStore;
 
 use super::{

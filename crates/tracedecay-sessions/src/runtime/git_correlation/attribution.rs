@@ -3,12 +3,14 @@ use std::sync::atomic::AtomicBool;
 
 use sha2::{Digest as _, Sha256};
 use tracedecay_graph_db::{GraphIdempotencyKey, GraphNamespace, GraphProjectorRevision};
+use tracedecay_runtime_core::store_runtime::VerifiedGraphRuntimePortV1;
 
 use super::{
     CommitEvidence, CommitRelation, CommitSessionRecord, GIT_EVIDENCE_PROJECTOR_REVISION_V1,
     GitCorrelationError, GitCorrelationSessionStore, GitEvidenceProjectionV1, SessionGitSpan,
-    SpanOverlapKind, git_evidence_projection_identity, normalize_worktree, providers_compatible,
-    publish_git_evidence_projection, recover_git_evidence_projection,
+    SpanObservation, SpanOverlapKind, git_evidence_projection_identity, normalize_worktree,
+    observation_extends_span, providers_compatible, publish_git_evidence_projection,
+    recover_git_evidence_projection,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
@@ -195,12 +197,97 @@ pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
     new_spans: &[SessionGitSpan],
     new_commits: &[CommitSessionRecord],
 ) -> Result<(usize, usize), GitCorrelationError> {
+    publish_graph_evidence_controlled(
+        session_store,
+        publication_prefix,
+        new_spans,
+        new_commits,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+pub(crate) fn publish_graph_evidence_controlled<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    publication_prefix: &str,
+    new_spans: &[SessionGitSpan],
+    new_commits: &[CommitSessionRecord],
+    cancelled: Arc<AtomicBool>,
+) -> Result<(usize, usize), GitCorrelationError> {
+    session_store.require_project_sessions_authority()?;
+    let publication_lock = session_store.git_evidence_publication_lock()?;
+    let _publication = publication_lock.lock().map_err(|_| {
+        GitCorrelationError::Unavailable(
+            "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
+        )
+    })?;
+    publish_graph_evidence_locked(
+        session_store,
+        publication_prefix,
+        new_spans,
+        new_commits,
+        cancelled,
+    )
+}
+
+/// Shapes raw transcript observations and publishes them while holding the
+/// same projection lock across recovery, merge, and verified-head CAS.
+pub fn publish_transcript_graph_evidence<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    publication_prefix: &str,
+    observations: &[SpanObservation],
+    new_commits: &[CommitSessionRecord],
+    merge_gap_secs: i64,
+) -> Result<(usize, usize), GitCorrelationError> {
+    session_store.require_project_sessions_authority()?;
+    let publication_lock = session_store.git_evidence_publication_lock()?;
+    let _publication = publication_lock.lock().map_err(|_| {
+        GitCorrelationError::Unavailable(
+            "Git evidence publication lock is poisoned; refusing a non-atomic merge".to_owned(),
+        )
+    })?;
     let runtime = session_store.graph_runtime()?;
     let identity =
         git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     let cancelled = Arc::new(AtomicBool::new(false));
+    let (mut spans, commits) =
+        match recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled))? {
+            Some(store) => (
+                store.projection().spans().to_vec(),
+                store.projection().commit_sessions().to_vec(),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+    let candidates = transcript_spans_from_observations(&spans, observations, merge_gap_secs);
+    let mut spans_changed = 0;
+    for incoming in &candidates {
+        if merge_span(&mut spans, incoming) {
+            spans_changed += 1;
+        }
+    }
+    publish_merged_graph_evidence(
+        runtime,
+        identity,
+        publication_prefix,
+        spans,
+        commits,
+        spans_changed,
+        new_commits,
+        cancelled,
+    )
+}
+
+fn publish_graph_evidence_locked<S: GitCorrelationSessionStore>(
+    session_store: &S,
+    publication_prefix: &str,
+    new_spans: &[SessionGitSpan],
+    new_commits: &[CommitSessionRecord],
+    cancelled: Arc<AtomicBool>,
+) -> Result<(usize, usize), GitCorrelationError> {
+    let runtime = session_store.graph_runtime()?;
+    let identity =
+        git_evidence_projection_identity(GraphNamespace::new(GIT_EVIDENCE_GRAPH_NAMESPACE)?)?;
     // A never-published projection is the typed empty start.
-    let (mut spans, mut commits) =
+    let (mut spans, commits) =
         match recover_git_evidence_projection(runtime, &identity, Arc::clone(&cancelled))? {
             Some(store) => (
                 store.projection().spans().to_vec(),
@@ -214,6 +301,29 @@ pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
             spans_changed += 1;
         }
     }
+    publish_merged_graph_evidence(
+        runtime,
+        identity,
+        publication_prefix,
+        spans,
+        commits,
+        spans_changed,
+        new_commits,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_merged_graph_evidence(
+    runtime: &dyn VerifiedGraphRuntimePortV1,
+    identity: tracedecay_graph_db::GraphProjectionIdentity,
+    publication_prefix: &str,
+    spans: Vec<SessionGitSpan>,
+    mut commits: Vec<CommitSessionRecord>,
+    spans_changed: usize,
+    new_commits: &[CommitSessionRecord],
+    cancelled: Arc<AtomicBool>,
+) -> Result<(usize, usize), GitCorrelationError> {
     let mut commits_changed = 0;
     for incoming in new_commits {
         if merge_commit(&mut commits, incoming) {
@@ -232,6 +342,80 @@ pub fn publish_graph_evidence<S: GitCorrelationSessionStore>(
         cancelled,
     )?;
     Ok((spans_changed, commits_changed))
+}
+
+fn transcript_spans_from_observations(
+    current: &[SessionGitSpan],
+    observations: &[SpanObservation],
+    merge_gap_secs: i64,
+) -> Vec<SessionGitSpan> {
+    let mut candidates: Vec<SessionGitSpan> = Vec::new();
+    for observation in observations {
+        let worktree = normalize_worktree(&observation.worktree);
+        let existing = candidates.iter().chain(current.iter()).find(|span| {
+            providers_compatible(&span.provider, &observation.provider)
+                && span.session_id == observation.session_id
+                && span.thread_id == observation.thread_id
+                && span.branch == observation.branch
+                && span.worktree == worktree
+                && span.source == observation.source
+                && observation_extends_span(
+                    span.first_ts,
+                    span.last_ts,
+                    observation.ts,
+                    merge_gap_secs,
+                )
+        });
+        let span = match existing {
+            Some(existing) => {
+                let mut span = existing.clone();
+                if span.provider.is_empty() && !observation.provider.is_empty() {
+                    span.provider.clone_from(&observation.provider);
+                }
+                let extends = observation.ts < span.first_ts || observation.ts > span.last_ts;
+                span.first_ts = span.first_ts.min(observation.ts);
+                span.last_ts = span.last_ts.max(observation.ts);
+                if extends {
+                    span.event_count = span.event_count.saturating_add(1);
+                }
+                span
+            }
+            None => SessionGitSpan {
+                span_id: transcript_span_id(observation, &worktree),
+                provider: observation.provider.clone(),
+                session_id: observation.session_id.clone(),
+                thread_id: observation.thread_id.clone(),
+                branch: observation.branch.clone(),
+                worktree,
+                first_ts: observation.ts,
+                last_ts: observation.ts,
+                event_count: 1,
+                source: observation.source,
+            },
+        };
+        if let Some(candidate) = candidates
+            .iter_mut()
+            .find(|candidate| candidate.span_id == span.span_id)
+        {
+            *candidate = span;
+        } else {
+            candidates.push(span);
+        }
+    }
+    candidates
+}
+
+fn transcript_span_id(observation: &SpanObservation, worktree: &str) -> String {
+    let thread_id = observation.thread_id.as_deref().unwrap_or_default();
+    let branch = observation.branch.as_deref().unwrap_or_default();
+    let material = format!(
+        "{}\0{}\0{thread_id}\0{branch}\0{}\0{}\0{:?}",
+        observation.provider, observation.session_id, worktree, observation.ts, observation.source,
+    );
+    format!(
+        "transcript:{}",
+        hex::encode(Sha256::digest(material.as_bytes()))
+    )
 }
 
 pub fn graph_evidence_publication_key(

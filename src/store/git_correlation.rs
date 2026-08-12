@@ -5,10 +5,10 @@
 //! façade methods.
 
 use std::borrow::Borrow;
-use std::sync::Arc;
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use sha2::{Digest as _, Sha256};
 use tracedecay_graph_db::GraphNamespace;
 use tracedecay_store::StoreShardScopeV1;
 
@@ -21,14 +21,45 @@ use tracedecay_sessions::runtime::git_correlation::{
     BoundedBackfillOutcome, BoundedGitControl, CommitRelationFilter, CommitSessionRecord,
     CorrelationIndexHealth, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError,
     GitCorrelationSessionStore, GitEvidenceProjectionStore, GitReflogSource,
-    SessionGitCorrelationHit, SessionGitSpan, SessionsForQuery, SpanObservation,
-    git_evidence_projection_identity, graph_evidence_publication_key, normalize_worktree,
-    observation_extends_span, providers_compatible, publish_graph_evidence, read_meta_value,
-    recover_git_evidence_projection, run_backfill, run_bounded_history_index_page,
-    run_incremental_backfill,
+    SessionGitCorrelationHit, SessionsForQuery, SpanObservation, git_evidence_projection_identity,
+    publish_transcript_graph_evidence, read_meta_value, recover_git_evidence_projection,
+    run_backfill, run_bounded_history_index_page, run_incremental_backfill,
 };
 
 const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
+
+type GitEvidencePublicationLock = Mutex<()>;
+
+static GIT_EVIDENCE_PUBLICATION_LOCKS: OnceLock<
+    Mutex<BTreeMap<String, Weak<GitEvidencePublicationLock>>>,
+> = OnceLock::new();
+
+fn shared_git_evidence_publication_lock(
+    runtime: &Arc<dyn VerifiedGraphRuntimePortV1>,
+) -> Result<Arc<GitEvidencePublicationLock>, String> {
+    let identity = serde_json::to_string(&(
+        runtime.relational_binding(),
+        runtime.relational_verified_locator(),
+    ))
+    .map_err(|error| format!("encode Git evidence graph runtime identity: {error}"))?;
+    shared_git_evidence_publication_lock_for_identity(identity)
+}
+
+fn shared_git_evidence_publication_lock_for_identity(
+    identity: String,
+) -> Result<Arc<GitEvidencePublicationLock>, String> {
+    let registry = GIT_EVIDENCE_PUBLICATION_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut locks = registry
+        .lock()
+        .map_err(|_| "Git evidence publication lock registry is poisoned".to_owned())?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&identity).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(identity, Arc::downgrade(&lock));
+    Ok(lock)
+}
 
 /// Adapter over an already-open project-sessions database.
 ///
@@ -43,6 +74,7 @@ const GIT_EVIDENCE_GRAPH_NAMESPACE: &str = "project";
 pub struct GlobalDbGitCorrelationStore<D> {
     db: D,
     graph_runtime: Option<Arc<dyn VerifiedGraphRuntimePortV1>>,
+    graph_publication_lock: Option<Result<Arc<GitEvidencePublicationLock>, String>>,
 }
 
 impl<D> GlobalDbGitCorrelationStore<D>
@@ -51,7 +83,14 @@ where
 {
     pub(crate) fn new(db: D) -> Self {
         let graph_runtime = db.borrow().project_graph_runtime().cloned();
-        Self { db, graph_runtime }
+        let graph_publication_lock = graph_runtime
+            .as_ref()
+            .map(shared_git_evidence_publication_lock);
+        Self {
+            db,
+            graph_runtime,
+            graph_publication_lock,
+        }
     }
 
     fn db(&self) -> &RegisteredGlobalDb {
@@ -92,9 +131,13 @@ where
         observation: &SpanObservation,
         merge_gap_secs: i64,
     ) -> Result<i64, GitCorrelationError> {
-        let spans = self.transcript_spans(std::slice::from_ref(observation), merge_gap_secs)?;
-        let publication_key = graph_evidence_publication_key("hook-route-span", &spans, &[])?;
-        let (changed, _) = publish_graph_evidence(self, &publication_key, &spans, &[])?;
+        let (changed, _) = publish_transcript_graph_evidence(
+            self,
+            "hook-route-span",
+            std::slice::from_ref(observation),
+            &[],
+            merge_gap_secs,
+        )?;
         i64::try_from(changed).map_err(|_| {
             GitCorrelationError::Contract(
                 "Git evidence span publication count exceeds i64".to_owned(),
@@ -111,77 +154,14 @@ where
         if commit_records.is_empty() && span_observations.is_empty() {
             return Ok(());
         }
-        let spans = self.transcript_spans(span_observations, DEFAULT_SPAN_MERGE_GAP_SECS)?;
-        let publication_key =
-            graph_evidence_publication_key(publication_prefix, &spans, commit_records)?;
-        publish_graph_evidence(self, &publication_key, &spans, commit_records)?;
+        publish_transcript_graph_evidence(
+            self,
+            publication_prefix,
+            span_observations,
+            commit_records,
+            DEFAULT_SPAN_MERGE_GAP_SECS,
+        )?;
         Ok(())
-    }
-
-    fn transcript_spans(
-        &self,
-        observations: &[SpanObservation],
-        merge_gap_secs: i64,
-    ) -> Result<Vec<SessionGitSpan>, GitCorrelationError> {
-        // A never-published projection is the typed empty start.
-        let current = match self.git_evidence_projection()? {
-            Some(store) => store.projection().spans().to_vec(),
-            None => Vec::new(),
-        };
-        let mut candidates: Vec<SessionGitSpan> = Vec::new();
-        for observation in observations {
-            let worktree = normalize_worktree(&observation.worktree);
-            let existing = candidates.iter().chain(current.iter()).find(|span| {
-                providers_compatible(&span.provider, &observation.provider)
-                    && span.session_id == observation.session_id
-                    && span.thread_id == observation.thread_id
-                    && span.branch == observation.branch
-                    && span.worktree == worktree
-                    && span.source == observation.source
-                    && observation_extends_span(
-                        span.first_ts,
-                        span.last_ts,
-                        observation.ts,
-                        merge_gap_secs,
-                    )
-            });
-            let span = match existing {
-                Some(existing) => {
-                    let mut span = existing.clone();
-                    if span.provider.is_empty() && !observation.provider.is_empty() {
-                        span.provider.clone_from(&observation.provider);
-                    }
-                    let extends = observation.ts < span.first_ts || observation.ts > span.last_ts;
-                    span.first_ts = span.first_ts.min(observation.ts);
-                    span.last_ts = span.last_ts.max(observation.ts);
-                    if extends {
-                        span.event_count = span.event_count.saturating_add(1);
-                    }
-                    span
-                }
-                None => SessionGitSpan {
-                    span_id: transcript_span_id(observation, &worktree),
-                    provider: observation.provider.clone(),
-                    session_id: observation.session_id.clone(),
-                    thread_id: observation.thread_id.clone(),
-                    branch: observation.branch.clone(),
-                    worktree,
-                    first_ts: observation.ts,
-                    last_ts: observation.ts,
-                    event_count: 1,
-                    source: observation.source,
-                },
-            };
-            if let Some(candidate) = candidates
-                .iter_mut()
-                .find(|candidate| candidate.span_id == span.span_id)
-            {
-                *candidate = span;
-            } else {
-                candidates.push(span);
-            }
-        }
-        Ok(candidates)
     }
 
     /// `Ok(None)` means the projection has never published a verified head:
@@ -278,17 +258,29 @@ where
     }
 }
 
-fn transcript_span_id(observation: &SpanObservation, worktree: &str) -> String {
-    let thread_id = observation.thread_id.as_deref().unwrap_or_default();
-    let branch = observation.branch.as_deref().unwrap_or_default();
-    let material = format!(
-        "{}\0{}\0{thread_id}\0{branch}\0{}\0{}\0{:?}",
-        observation.provider, observation.session_id, worktree, observation.ts, observation.source,
-    );
-    format!(
-        "transcript:{}",
-        hex::encode(Sha256::digest(material.as_bytes()))
-    )
+#[cfg(test)]
+mod tests {
+    use super::shared_git_evidence_publication_lock_for_identity;
+    use std::sync::Arc;
+
+    #[test]
+    fn publication_lock_registry_is_exact_identity_scoped() {
+        let first = shared_git_evidence_publication_lock_for_identity(
+            "git-evidence-lock-test:shared".to_owned(),
+        )
+        .unwrap();
+        let same = shared_git_evidence_publication_lock_for_identity(
+            "git-evidence-lock-test:shared".to_owned(),
+        )
+        .unwrap();
+        let foreign = shared_git_evidence_publication_lock_for_identity(
+            "git-evidence-lock-test:foreign".to_owned(),
+        )
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &foreign));
+    }
 }
 
 impl<D> GitCorrelationSessionStore for GlobalDbGitCorrelationStore<D>
@@ -310,6 +302,16 @@ where
 
     async fn open_write_transaction(&self) -> Result<Self::WriteTxn<'_>, GitCorrelationError> {
         GlobalDbGitCorrelationStore::open_write_transaction(self).await
+    }
+
+    fn git_evidence_publication_lock(&self) -> Result<&Mutex<()>, GitCorrelationError> {
+        match &self.graph_publication_lock {
+            Some(Ok(lock)) => Ok(lock.as_ref()),
+            Some(Err(detail)) => Err(GitCorrelationError::Unavailable(detail.clone())),
+            None => Err(GitCorrelationError::Unavailable(
+                "registered project graph runtime is not mounted".to_owned(),
+            )),
+        }
     }
 
     fn graph_runtime(&self) -> Result<&dyn VerifiedGraphRuntimePortV1, GitCorrelationError> {
