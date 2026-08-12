@@ -1059,7 +1059,10 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 == HostBundleComponentDoctorStateV1::OrphanedRegistration)
         );
     }
-    assert_eq!(covered_hosts, RECEIPT_BACKED_HOST_KINDS);
+    covered_hosts.sort_unstable();
+    let mut receipt_backed_hosts = RECEIPT_BACKED_HOST_KINDS.to_vec();
+    receipt_backed_hosts.sort_unstable();
+    assert_eq!(covered_hosts, receipt_backed_hosts);
 }
 
 /// Cursor Core is the host that provoked this: its receipt-owned plugin bundle
