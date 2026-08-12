@@ -270,6 +270,7 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
                  DROP TABLE workflow_definition_source_journal;
                  DROP TABLE workflow_definition_transition_journal;
                  DROP TABLE workflow_effect_journal;
+                 DROP TABLE workflow_fan_out_census_journal;
                  DROP TABLE workflow_run_journal;
                  DROP TABLE workflow_schema;",
                 )
