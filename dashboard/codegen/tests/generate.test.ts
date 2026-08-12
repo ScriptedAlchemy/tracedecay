@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { z, type ZodTypeAny } from "zod";
 import { generateContracts, type JsonSchema, OUTPUT_FILES } from "../src/generate.ts";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -12,6 +13,15 @@ function loadBundles(): JsonSchema[] {
     .filter((f) => f.endsWith(".schema.json"))
     .sort()
     .map((f) => JSON.parse(readFileSync(join(SCHEMA_DIR, f), "utf8")) as JsonSchema);
+}
+
+function emittedPropertyDecoder(generated: string, property: string): ZodTypeAny {
+  const match = generated.match(new RegExp(`^  ${property}: (.+),$`, "m"));
+  if (!match?.[1]) {
+    throw new Error(`generated decoder is missing property ${property}`);
+  }
+  const build = new Function("z", `return (${match[1]});`) as (zod: typeof z) => ZodTypeAny;
+  return build(z);
 }
 
 describe("contracts generator", () => {
@@ -200,5 +210,118 @@ describe("contracts generator", () => {
     expect(generated).toContain(
       "export const OpenReadingSchema = z.object({\n  status: z.string(),\n});",
     );
+  });
+
+  it("emits declared integer bounds without constraining unbounded integers", () => {
+    const bundle = {
+      schemaRevision: "test.1",
+      $defs: {
+        IntegerBounds: {
+          type: "object",
+          properties: {
+            bounded: { type: "integer", minimum: 0, maximum: 10 },
+            lower_only: { type: "integer", minimum: 1 },
+            unbounded: { type: "integer" },
+            upper_only: { type: "integer", maximum: 99 },
+          },
+          required: ["bounded", "lower_only", "unbounded", "upper_only"],
+        },
+      },
+    } as JsonSchema;
+
+    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    expect(generated).toContain("bounded: z.number().int().min(0).max(10),");
+    expect(generated).toContain("lower_only: z.number().int().min(1),");
+    expect(generated).toContain("unbounded: z.number().int(),");
+    expect(generated).toContain("upper_only: z.number().int().max(99),");
+  });
+
+  it("preserves exclusive numeric bounds as strict decoder limits", () => {
+    const bundle = {
+      schemaRevision: "test.1",
+      $defs: {
+        ExclusiveBounds: {
+          type: "object",
+          properties: {
+            integer: { type: "integer", exclusiveMinimum: 0, exclusiveMaximum: 10 },
+            number: { type: "number", exclusiveMinimum: -1.5, exclusiveMaximum: 1.5 },
+          },
+          required: ["integer", "number"],
+        },
+      },
+    } as JsonSchema;
+
+    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    const integer = emittedPropertyDecoder(generated, "integer");
+    const number = emittedPropertyDecoder(generated, "number");
+
+    expect(generated).toContain("integer: z.number().int().gt(0).lt(10),");
+    expect(generated).toContain("number: z.number().gt(-1.5).lt(1.5),");
+    expect(integer.safeParse(0).success).toBe(false);
+    expect(integer.safeParse(1).success).toBe(true);
+    expect(integer.safeParse(9).success).toBe(true);
+    expect(integer.safeParse(10).success).toBe(false);
+    expect(number.safeParse(-1.5).success).toBe(false);
+    expect(number.safeParse(0).success).toBe(true);
+    expect(number.safeParse(1.5).success).toBe(false);
+  });
+
+  it("enforces safe JavaScript integers for wide Rust formats only", () => {
+    const bundle = {
+      schemaRevision: "test.1",
+      $defs: {
+        IntegerFormats: {
+          type: "object",
+          properties: {
+            nullable_optional: { type: ["integer", "null"], format: "int64" },
+            plain: { type: "integer" },
+            platform: { type: "integer", format: "uint", minimum: 1, maximum: 100 },
+            signed: { type: "integer", format: "int64" },
+            uint32: { type: "integer", format: "uint32", minimum: 0, maximum: 4_294_967_295 },
+            unsigned: { type: "integer", format: "uint64", minimum: 0 },
+          },
+          required: ["plain", "platform", "signed", "uint32", "unsigned"],
+        },
+      },
+    } as JsonSchema;
+
+    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    const nullableOptional = emittedPropertyDecoder(generated, "nullable_optional");
+    const plain = emittedPropertyDecoder(generated, "plain");
+    const platform = emittedPropertyDecoder(generated, "platform");
+    const signed = emittedPropertyDecoder(generated, "signed");
+    const uint32 = emittedPropertyDecoder(generated, "uint32");
+    const unsigned = emittedPropertyDecoder(generated, "unsigned");
+    const unsafeInteger = 9_007_199_254_740_992;
+
+    expect(generated).toContain("signed: z.number().int().safe(),");
+    expect(generated).toContain("unsigned: z.number().int().safe().min(0),");
+    expect(generated).toContain("platform: z.number().int().safe().min(1).max(100),");
+    expect(generated).toContain(
+      "nullable_optional: z.number().int().safe().nullable().optional(),",
+    );
+    expect(generated).toContain("uint32: z.number().int().min(0).max(4294967295),");
+    expect(generated).toContain("plain: z.number().int(),");
+
+    expect(signed.safeParse(Number.MAX_SAFE_INTEGER).success).toBe(true);
+    expect(signed.safeParse(Number.MIN_SAFE_INTEGER).success).toBe(true);
+    expect(signed.safeParse(unsafeInteger).success).toBe(false);
+    expect(signed.safeParse(-unsafeInteger).success).toBe(false);
+
+    expect(unsigned.safeParse(Number.MAX_SAFE_INTEGER).success).toBe(true);
+    expect(unsigned.safeParse(-1).success).toBe(false);
+    expect(unsigned.safeParse(unsafeInteger).success).toBe(false);
+
+    expect(platform.safeParse(1).success).toBe(true);
+    expect(platform.safeParse(100).success).toBe(true);
+    expect(platform.safeParse(0).success).toBe(false);
+    expect(platform.safeParse(101).success).toBe(false);
+
+    expect(nullableOptional.safeParse(undefined).success).toBe(true);
+    expect(nullableOptional.safeParse(null).success).toBe(true);
+    expect(nullableOptional.safeParse(unsafeInteger).success).toBe(false);
+
+    expect(uint32.safeParse(4_294_967_295).success).toBe(true);
+    expect(plain.safeParse(unsafeInteger).success).toBe(true);
   });
 });

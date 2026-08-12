@@ -34,6 +34,11 @@ export interface JsonSchema {
   additionalProperties?: JsonSchema | boolean;
   enum?: unknown[];
   const?: unknown;
+  format?: string;
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
   oneOf?: JsonSchema[];
   anyOf?: JsonSchema[];
   $defs?: Record<string, JsonSchema>;
@@ -218,10 +223,19 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: st
     return applyNullable({ ts: "string", zod: "z.string()" }, nullable);
   }
   if (primary === "integer") {
-    return applyNullable({ ts: "number", zod: "z.number().int()" }, nullable);
+    return applyNullable(
+      {
+        ts: "number",
+        zod: applyNumericBounds(applySafeIntegerFormat("z.number().int()", schema), schema),
+      },
+      nullable,
+    );
   }
   if (primary === "number") {
-    return applyNullable({ ts: "number", zod: "z.number()" }, nullable);
+    return applyNullable(
+      { ts: "number", zod: applyNumericBounds("z.number()", schema) },
+      nullable,
+    );
   }
   if (primary === "boolean") {
     return applyNullable({ ts: "boolean", zod: "z.boolean()" }, nullable);
@@ -232,6 +246,27 @@ function resolveType(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: st
   }
 
   return { ts: "unknown", zod: "z.unknown()" };
+}
+
+function applySafeIntegerFormat(zod: string, schema: JsonSchema): string {
+  switch (schema.format) {
+    case "int64":
+    case "uint64":
+    case "uint":
+      return `${zod}.safe()`;
+    default:
+      return zod;
+  }
+}
+
+function applyNumericBounds(zod: string, schema: JsonSchema): string {
+  const minimum = schema.minimum === undefined ? "" : `.min(${literal(schema.minimum)})`;
+  const maximum = schema.maximum === undefined ? "" : `.max(${literal(schema.maximum)})`;
+  const exclusiveMinimum =
+    schema.exclusiveMinimum === undefined ? "" : `.gt(${literal(schema.exclusiveMinimum)})`;
+  const exclusiveMaximum =
+    schema.exclusiveMaximum === undefined ? "" : `.lt(${literal(schema.exclusiveMaximum)})`;
+  return `${zod}${minimum}${maximum}${exclusiveMinimum}${exclusiveMaximum}`;
 }
 
 function applyNullable(t: { ts: string; zod: string }, nullable: boolean): { ts: string; zod: string } {
