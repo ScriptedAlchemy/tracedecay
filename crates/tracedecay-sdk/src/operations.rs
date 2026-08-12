@@ -1837,6 +1837,45 @@ typed_operation!(
     1
 );
 
+pub mod application_fact_store_curate {
+    pub type Request = tracedecay_application::retained_surfaces::FactStoreCurateRequestV1;
+    pub type Result = tracedecay_application::retained_surfaces::AutomationRunResultV1;
+}
+typed_operation!(
+    ApplicationFactStoreCurate,
+    application_fact_store_curate,
+    "operation.application.fact_store_curate",
+    OperationTransport::Http {
+        route: "/application/retained/fact_store_curate"
+    },
+    "binding.http.fact_store_curate.v1",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    true,
+    &[
+        CancellationPoint::BeforeAdmission,
+        CancellationPoint::BeforeEffect,
+        CancellationPoint::EffectInFlight,
+        CancellationPoint::Reconciling,
+        CancellationPoint::AfterCommit
+    ],
+    30000,
+    DeadlineBehavior::ReturnEffectReceipt,
+    ReconciliationContract::Required,
+    ReceiptContract::DurableEffect,
+    &[
+        TerminalState::Completed,
+        TerminalState::Cancelled,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::Unavailable,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial
+    ],
+    "schema.application.retained.fact-store-curate.result",
+    1
+);
+
 pub mod application_fact_store_get {
     pub type Request = tracedecay_application::retained_surfaces::FactStoreGetRequestV1;
     pub type Result = tracedecay_application::retained_surfaces::FactStoreGetResultV1;
