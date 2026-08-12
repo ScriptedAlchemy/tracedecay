@@ -1167,7 +1167,7 @@ async fn read_new_rows_returns_none_for_invalid_query() {
 
 #[test]
 fn parsed_transcript_structural_ids_are_protected_before_store_writes() {
-    let raw = ["AKIA", "PARSEDID", "00000000"].concat();
+    let raw = ["AKIA", "STRUCTURAL", "234567"].concat();
     let mut parsed = ParsedTranscript {
         draft: SessionDraft {
             session_id: raw.clone(),
