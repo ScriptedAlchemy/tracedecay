@@ -1,6 +1,6 @@
 use super::{
-    AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunResultV1, AutomationTaskV1,
-    MemoryAutomationCurationRelationV1,
+    AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunResultV1,
+    AutomationSkipReasonV1, AutomationTaskV1, MemoryAutomationCurationRelationV1,
 };
 use serde_json::{Value, json};
 use tracedecay_domain::{
@@ -729,7 +729,7 @@ fn automatic_fact_terminal() -> Value {
                     "content":"Remember the exact canonical fact","category":"general","source_label":"automation:session-reflector","tags":["canonical"],"entities":[],"default_trust_millionths":750000,"metadata":{}},
                 "evidence":{"evidence_hash":"evidence-memory-fact","item":{"content":"Remember the exact canonical fact","category":"general","tags":["canonical"],"entities":[],"trust":0.75,"source_span":{"session_id":"session.memory.fact","message_id":"message.memory.fact"},"reason":"The bounded session evidence supports this fact"},"validation":{"status":"accepted","dedupe":{"nearest":null,"near_duplicate_threshold":0.9},"conflict":{"source":"apply_time_add_fact_diff","note":"Apply-time add authority resolves any final conflict"}}},
                 "effect":{"state":"applied","fact_id":"fact.profile.memory-fact","target":{"owner":{"kind":"profile"},"fact_id":"fact.profile.memory-fact"},"assertion_id":"assertion.memory.fact","event_id":"event.memory.fact"},
-                "recorded_at_micros":1700000000000000,"canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
+                "recorded_at_micros":1700000000000000i64,"canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
         }),
         &automation_request("run.memory.fact", AutomationTaskV1::SessionReflector),
     );
