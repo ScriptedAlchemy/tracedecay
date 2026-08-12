@@ -568,6 +568,14 @@ fn graph_degradation_and_cancellation_remain_typed() {
         project_memory_graph_degradation(&FactStoreError::GraphCancelled),
         None
     );
+    assert_eq!(
+        project_memory_graph_degradation(&FactStoreError::GraphResetRequired {
+            owner: FactOwnerV1::Profile,
+            reason: "verified graph reset".to_owned(),
+        }),
+        None,
+        "reset-required must reach the application boundary instead of degrading"
+    );
     let (interrupted, read_control) = live_read_control(true);
     assert!(matches!(
         ensure_project_memory_search_not_cancelled(&read_control),

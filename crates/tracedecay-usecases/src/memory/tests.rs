@@ -1,4 +1,7 @@
-use std::sync::Mutex;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use tracedecay_domain::{
     AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId, Confidence,
@@ -6,16 +9,20 @@ use tracedecay_domain::{
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, ObservationScopeV1,
     PayloadAccessState, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
     ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorId,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, SourceStoreId,
-    UtcMicros, VectorWatermark,
+    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, UtcMicros,
+    VectorWatermark,
 };
 use tracedecay_store::{
     FactAsOfResponseV1, FactCommitReceipt, FactContradictionStateV1, FactCurrentResponseV1,
     FactLineageCursor, FactLineageResponseV1, FactQueryCoverageV1, FactStoreResult,
+    ProjectMemoryFactIdV1,
 };
 
 use super::*;
-use tracedecay_runtime_core::memory::types::{AddFactRequest, MemoryCategory};
+
+mod project_memory_contracts;
+mod read_control;
+mod retrieval;
 
 #[derive(Default)]
 struct FakeAuthority {
@@ -29,12 +36,12 @@ struct FakeAuthority {
     as_of_result: Mutex<Option<StoredFactV1>>,
     lineage_queries: Mutex<Vec<FactLineageQuery>>,
     lineage_results: Mutex<Vec<FactLineageEventV1>>,
-    legacy_queries: Mutex<Vec<LegacyFactQuery>>,
-    legacy_result: Mutex<Option<FactId>>,
     anchor_queries: Mutex<Vec<RetrievalAnchorId>>,
-    feedback_history: Mutex<Option<ProjectMemoryFactFeedbackHistoryV1>>,
-    feedback_requests: Mutex<Vec<ProjectMemoryFactFeedbackCommandV1>>,
     authority_calls: Mutex<Vec<&'static str>>,
+    search_read_controls: Mutex<Vec<usize>>,
+    retrieval_outcome: Mutex<Option<ProjectMemoryFactRetrievalOutcomeV1>>,
+    automatic_fact_apply_result: Mutex<Option<ProjectMemoryAutomaticFactApplyResultV1>>,
+    merge_outcome: Mutex<Option<ProjectMemoryFactMergeOutcomeV1>>,
 }
 
 #[derive(Default)]
@@ -81,7 +88,11 @@ fn unmeasured_response_metadata(returned: bool) -> (FactQueryCoverageV1, FactCon
 }
 
 impl FactStore for FakeAuthority {
-    async fn commit_fact(&self, batch: FactWriteBatch) -> FactStoreResult<FactCommitOutcome> {
+    async fn commit_fact(
+        &self,
+        batch: FactWriteBatch,
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<FactCommitOutcome> {
         let outcome = self
             .next_commit_outcome
             .lock()
@@ -151,11 +162,6 @@ impl FactStore for FakeAuthority {
         Ok(FactLineageResponseV1::new(events, coverage, contradiction))
     }
 
-    async fn resolve_legacy_fact(&self, query: LegacyFactQuery) -> FactStoreResult<Option<FactId>> {
-        self.legacy_queries.lock().unwrap().push(query);
-        Ok(self.legacy_result.lock().unwrap().clone())
-    }
-
     async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
@@ -172,7 +178,8 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
-    ) -> Result<ProjectMemoryFactPageV1, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactPageV1> {
         self.authority_calls.lock().unwrap().push("list");
         Ok(ProjectMemoryFactPageV1::new(
             query.owner().clone(),
@@ -184,55 +191,68 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn search_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
+        read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
+        self.search_read_controls
+            .lock()
+            .unwrap()
+            .push(std::ptr::from_ref(read_control).addr());
         self.authority_calls.lock().unwrap().push("search");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
             None,
+            ProjectMemoryFactSearchGraphCoverageV1::NotMounted,
         )?)
     }
 
     async fn probe_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
         self.authority_calls.lock().unwrap().push("probe");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
             None,
+            ProjectMemoryFactSearchGraphCoverageV1::NotApplicable,
         )?)
     }
 
     async fn related_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
         self.authority_calls.lock().unwrap().push("related");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
             None,
+            ProjectMemoryFactSearchGraphCoverageV1::NotMounted,
         )?)
     }
 
     async fn reason_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
-    ) -> Result<ProjectMemoryFactSearchPageV1, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactSearchPageV1> {
         self.authority_calls.lock().unwrap().push("reason");
         Ok(ProjectMemoryFactSearchPageV1::new(
             query.owner().clone(),
             vec![],
             None,
+            ProjectMemoryFactSearchGraphCoverageV1::NotApplicable,
         )?)
     }
 
     async fn find_project_memory_contradictions(
         &self,
         query: ProjectMemoryFactContradictionQueryV1,
-    ) -> Result<ProjectMemoryFactContradictionPageV1, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactContradictionPageV1> {
         self.authority_calls.lock().unwrap().push("contradictions");
         Ok(ProjectMemoryFactContradictionPageV1::new(
             query.owner().clone(),
@@ -242,8 +262,9 @@ impl ProjectMemoryFactStore for FakeAuthority {
 
     async fn get_project_memory_fact(
         &self,
-        _target: ProjectMemoryFactTargetV1,
-    ) -> Result<Option<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
+        _target: ProjectMemoryFactIdV1,
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>> {
         self.authority_calls.lock().unwrap().push("get");
         Ok(None)
     }
@@ -251,14 +272,12 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn project_memory_fact_history(
         &self,
         query: ProjectMemoryFactHistoryQueryV1,
-    ) -> Result<ProjectMemoryFactHistoryV1, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactHistoryV1> {
         self.authority_calls.lock().unwrap().push("history");
-        let Some(fact_id) = query.target().canonical_fact_id() else {
-            return Err(authority_fixture_error());
-        };
         Ok(ProjectMemoryFactHistoryV1::new(
             query.target().owner().clone(),
-            fact_id.clone(),
+            query.target().fact_id().clone(),
             vec![],
             None,
         )?)
@@ -267,15 +286,17 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn project_memory_status(
         &self,
         owner: FactOwnerV1,
-    ) -> Result<ProjectMemoryMemoryStatusV1, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryMemoryStatusV1> {
         self.authority_calls.lock().unwrap().push("status");
         project_memory_status(owner)
     }
 
     async fn inspect_project_memory_fact(
         &self,
-        _target: ProjectMemoryFactTargetV1,
-    ) -> Result<Option<ProjectMemoryFactInspectionV1>, ProjectMemoryStoreError> {
+        _target: ProjectMemoryFactIdV1,
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryFactInspectionV1>> {
         self.authority_calls.lock().unwrap().push("inspect");
         Ok(None)
     }
@@ -283,21 +304,17 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn add_project_memory_fact(
         &self,
         _request: ProjectMemoryFactAddCommandV1,
-    ) -> Result<ProjectMemoryFactAddOutcomeV1, ProjectMemoryStoreError> {
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactAddOutcomeV1> {
         self.authority_calls.lock().unwrap().push("add");
-        Ok(ProjectMemoryFactAddOutcomeV1::new(
-            None,
-            tracedecay_store::ProjectMemoryFactAddDispositionV1::RejectedSecretLike,
-            None,
-            None,
-            Some("fixture rejection".to_owned()),
-        )?)
+        Err(authority_fixture_error())
     }
 
     async fn update_project_memory_fact(
         &self,
         _request: ProjectMemoryFactUpdateCommandV1,
-    ) -> Result<ProjectMemoryFactUpdateOutcomeV1, ProjectMemoryStoreError> {
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
         self.authority_calls.lock().unwrap().push("update");
         Err(authority_fixture_error())
     }
@@ -305,39 +322,38 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn remove_project_memory_fact(
         &self,
         _request: ProjectMemoryFactRemoveCommandV1,
-    ) -> Result<ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryStoreError> {
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
         self.authority_calls.lock().unwrap().push("remove");
         Err(authority_fixture_error())
     }
 
     async fn record_project_memory_fact_feedback(
         &self,
-        request: ProjectMemoryFactFeedbackCommandV1,
-    ) -> Result<ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryStoreError> {
+        _request: ProjectMemoryFactFeedbackCommandV1,
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactFeedbackOutcomeV1> {
         self.authority_calls.lock().unwrap().push("feedback");
-        self.feedback_requests.lock().unwrap().push(request);
         Err(authority_fixture_error())
     }
 
     async fn project_memory_fact_feedback_history(
         &self,
-        _query: ProjectMemoryFactFeedbackHistoryQueryV1,
-    ) -> Result<ProjectMemoryFactFeedbackHistoryV1, ProjectMemoryStoreError> {
+        query: ProjectMemoryFactFeedbackHistoryQueryV1,
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryFactFeedbackHistoryV1> {
         self.authority_calls
             .lock()
             .unwrap()
             .push("feedback-history");
-        self.feedback_history
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(authority_fixture_error)
+        ProjectMemoryFactFeedbackHistoryV1::new(query.target().owner().clone(), vec![], None)
     }
 
     async fn find_project_memory_fact_by_content_digest(
         &self,
         _query: ProjectMemoryFactContentDigestQueryV1,
-    ) -> Result<Option<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryFactProjectionV1>> {
         self.authority_calls.lock().unwrap().push("exact-content");
         Ok(None)
     }
@@ -345,7 +361,8 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn apply_project_memory_fact_curation(
         &self,
         _request: ProjectMemoryFactCurationBatchV1,
-    ) -> Result<ProjectMemoryFactCurationReceiptV1, ProjectMemoryStoreError> {
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
         self.authority_calls.lock().unwrap().push("curation");
         Err(authority_fixture_error())
     }
@@ -353,45 +370,37 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn merge_project_memory_facts(
         &self,
         _request: ProjectMemoryFactMergeCommandV1,
-    ) -> Result<ProjectMemoryFactMergeOutcomeV1, ProjectMemoryStoreError> {
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
         self.authority_calls.lock().unwrap().push("merge");
-        Err(authority_fixture_error())
-    }
-
-    async fn repair_project_memory(
-        &self,
-        _request: ProjectMemoryMemoryRepairCommandV1,
-    ) -> Result<ProjectMemoryMemoryRepairStatsV1, ProjectMemoryStoreError> {
-        self.authority_calls.lock().unwrap().push("repair");
-        Ok(ProjectMemoryMemoryRepairStatsV1::default())
+        self.merge_outcome
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(authority_fixture_error)
     }
 
     async fn dashboard_project_memory_overview(
         &self,
         _query: ProjectMemoryDashboardMemoryOverviewQueryV1,
-    ) -> Result<ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryStoreError> {
-        self.authority_calls
-            .lock()
-            .unwrap()
-            .push("dashboard-overview");
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryDashboardMemoryOverviewV1> {
         Err(authority_fixture_error())
     }
 
     async fn dashboard_project_memory_fact_detail(
         &self,
         _query: ProjectMemoryDashboardFactDetailQueryV1,
-    ) -> Result<Option<ProjectMemoryDashboardFactDetailV1>, ProjectMemoryStoreError> {
-        self.authority_calls
-            .lock()
-            .unwrap()
-            .push("dashboard-detail");
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryDashboardFactDetailV1>> {
         Ok(None)
     }
 
     async fn dashboard_project_memory_vector_points(
         &self,
         _query: ProjectMemoryDashboardVectorPointsQueryV1,
-    ) -> Result<Vec<ProjectMemoryDashboardVectorPointV1>, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<Vec<ProjectMemoryDashboardVectorPointV1>> {
         self.authority_calls
             .lock()
             .unwrap()
@@ -402,7 +411,8 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn dashboard_project_memory_oplog(
         &self,
         _query: ProjectMemoryDashboardOplogQueryV1,
-    ) -> Result<Vec<ProjectMemoryDashboardOplogEntryV1>, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<Vec<ProjectMemoryDashboardOplogEntryV1>> {
         self.authority_calls.lock().unwrap().push("dashboard-oplog");
         Ok(vec![])
     }
@@ -410,9 +420,10 @@ impl ProjectMemoryFactStore for FakeAuthority {
     async fn record_project_memory_fact_retrieval(
         &self,
         _request: ProjectMemoryFactRetrievalCommandV1,
-    ) -> Result<Vec<ProjectMemoryFactProjectionV1>, ProjectMemoryStoreError> {
-        self.authority_calls.lock().unwrap().push("retrieval");
-        Ok(vec![])
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryFactRetrievalOutcomeV1> {
+        let outcome = self.retrieval_outcome.lock().unwrap().take();
+        outcome.ok_or_else(authority_fixture_error)
     }
 
     async fn apply_project_memory_automatic_fact(
@@ -420,19 +431,25 @@ impl ProjectMemoryFactStore for FakeAuthority {
         _apply_id: ProvenanceId,
         _request: ProjectMemoryFactAddCommandV1,
         _evidence: ProjectMemoryAutomaticFactEvidenceV1,
-    ) -> Result<ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryStoreError> {
+        _write_control: &FactWriteControl,
+    ) -> FactStoreResult<ProjectMemoryAutomaticFactApplyResultV1> {
         self.authority_calls
             .lock()
             .unwrap()
             .push("automatic-fact-apply");
-        Err(authority_fixture_error())
+        self.automatic_fact_apply_result
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(authority_fixture_error)
     }
 
     async fn get_project_memory_automatic_fact_receipt(
         &self,
         _owner: FactOwnerV1,
         _apply_id: ProvenanceId,
-    ) -> Result<Option<ProjectMemoryAutomaticFactReceiptV1>, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<Option<ProjectMemoryAutomaticFactReceiptV1>> {
         self.authority_calls
             .lock()
             .unwrap()
@@ -442,31 +459,29 @@ impl ProjectMemoryFactStore for FakeAuthority {
 
     async fn list_project_memory_automatic_fact_receipts(
         &self,
-        _owner: FactOwnerV1,
+        owner: FactOwnerV1,
         _state: Option<ProjectMemoryAutomaticFactStateV1>,
         _after_apply_id: Option<ProvenanceId>,
         _limit: usize,
-    ) -> Result<ProjectMemoryAutomaticFactReceiptPageV1, ProjectMemoryStoreError> {
+        _read_control: &FactReadControl,
+    ) -> FactStoreResult<ProjectMemoryAutomaticFactReceiptPageV1> {
         self.authority_calls
             .lock()
             .unwrap()
             .push("automatic-fact-list");
-        Err(authority_fixture_error())
+        ProjectMemoryAutomaticFactReceiptPageV1::new(owner, vec![], None)
     }
 }
 
-fn authority_fixture_error() -> ProjectMemoryStoreError {
-    ProjectMemoryStoreError::Store(FactStoreError::Contract(DomainError::NonCanonical {
+fn authority_fixture_error() -> FactStoreError {
+    FactStoreError::Contract(DomainError::NonCanonical {
         field: "fake project-memory authority",
-    }))
+    })
 }
 
-fn project_memory_status(
-    owner: FactOwnerV1,
-) -> Result<ProjectMemoryMemoryStatusV1, ProjectMemoryStoreError> {
+fn project_memory_status(owner: FactOwnerV1) -> FactStoreResult<ProjectMemoryMemoryStatusV1> {
     Ok(ProjectMemoryMemoryStatusV1::new(
         owner,
-        0,
         0,
         0,
         tracedecay_store::ProjectMemoryMemoryAlgebraV1::new("fixture".to_owned(), 1, 1)?,
@@ -477,9 +492,6 @@ fn project_memory_status(
         0,
         0,
         0,
-        0,
-        tracedecay_store::ProjectMemoryProjectionStateV1::Ready,
-        tracedecay_store::ProjectMemoryMemoryRepairStatsV1::default(),
         tracedecay_store::ProjectMemoryMemoryFeedbackFunnelV1::new(0, 0, 0, 0, 0),
     )?)
 }
@@ -523,17 +535,7 @@ fn batch(owner: FactOwnerV1, operation: &str) -> FactWriteBatch {
         None,
     )
     .unwrap();
-    FactWriteBatch::new(
-        fact_id,
-        owner,
-        None,
-        vec![event],
-        vec![],
-        vec![],
-        None,
-        None,
-    )
-    .unwrap()
+    FactWriteBatch::new(fact_id, owner, None, vec![event], vec![], vec![], None).unwrap()
 }
 
 fn committed_outcome(batch: &FactWriteBatch) -> FactCommitOutcome {
@@ -568,7 +570,6 @@ fn stored_fact(owner: FactOwnerV1, operation: &str, projected_as_of: UtcMicros) 
         Confidence::new(0.5).unwrap(),
         id(&format!("assertion.{operation}")),
         id(&format!("event.{operation}")),
-        None,
         projected_as_of,
     )
     .unwrap()
@@ -609,16 +610,32 @@ fn profile_anchor() -> RetrievalAnchorRecordV2 {
     .unwrap()
 }
 
-fn legacy_add_request() -> AddFactRequest {
-    AddFactRequest {
-        content: "legacy conversion fixture".to_owned(),
-        category: MemoryCategory::Project,
-        source: None,
+fn fact_add_request() -> ProjectMemoryFactAddRequest {
+    ProjectMemoryFactAddRequest {
+        content: "canonical add fixture".to_owned(),
+        category: tracedecay_domain::FactCategoryV1::Project,
+        source_label: None,
         tags: vec![],
         entities: vec![],
         trust: None,
         metadata: serde_json::json!({}),
     }
+}
+
+fn write_control() -> FactWriteControl {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let commit_started = Arc::new(AtomicBool::new(false));
+    FactWriteControl::new(
+        {
+            let interrupted = interrupted.clone();
+            Arc::new(move || interrupted.load(Ordering::Acquire))
+        },
+        Arc::new(move || {
+            commit_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        }),
+    )
 }
 
 #[tokio::test]
@@ -627,7 +644,10 @@ async fn canonical_batch_is_the_single_write_boundary() {
     let write = batch(owner(), "operation.memory.commit");
     let expected_fact_id = write.fact_id().clone();
 
-    let outcome = application.commit_fact(write).await.unwrap();
+    let outcome = application
+        .commit_fact(write, &write_control())
+        .await
+        .unwrap();
 
     assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
     let committed = application.authority.committed.lock().unwrap();
@@ -645,7 +665,10 @@ async fn idempotent_replay_preserves_the_canonical_commit_identity() {
     };
     *application.authority.next_commit_outcome.lock().unwrap() = Some(replay);
 
-    let outcome = application.commit_fact(write).await.unwrap();
+    let outcome = application
+        .commit_fact(write, &write_control())
+        .await
+        .unwrap();
 
     assert!(matches!(outcome, FactCommitOutcome::IdempotentReplay(_)));
     assert_eq!(application.authority.committed.lock().unwrap().len(), 1);
@@ -700,7 +723,10 @@ async fn evidence_resolution_rejects_a_cross_owner_daemon_reply() {
 async fn owner_mismatch_is_rejected_before_authority_access() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     let error = application
-        .commit_fact(batch(FactOwnerV1::Profile, "operation.profile.commit"))
+        .commit_fact(
+            batch(FactOwnerV1::Profile, "operation.profile.commit"),
+            &write_control(),
+        )
         .await
         .unwrap_err();
 
@@ -712,124 +738,6 @@ async fn owner_mismatch_is_rejected_before_authority_access() {
 }
 
 #[tokio::test]
-async fn query_owner_mismatch_is_rejected_before_authority_access() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    let query = CurrentFactsQuery::new(FactOwnerV1::Profile, None, 10).unwrap();
-
-    let error = application.query_current_facts(query).await.unwrap_err();
-
-    assert!(matches!(
-        error,
-        MemoryApplicationError::OwnerMismatch { .. }
-    ));
-    assert!(
-        application
-            .authority
-            .current_queries
-            .lock()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn reads_use_finite_owner_bound_authority_methods() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    let fact_id = fact_id(owner(), "operation.project-memory.read");
-    let target = ProjectMemoryFactTargetV1::Canonical(
-        tracedecay_store::ProjectMemoryFactIdV1::new(owner(), fact_id).unwrap(),
-    );
-    let search = ProjectMemoryFactSearchQuery::new(
-        owner(),
-        tracedecay_store::ProjectMemoryFactSearchKindV1::Search,
-        Some("project-memory fixture".to_owned()),
-        None,
-        10,
-    )
-    .unwrap();
-
-    assert!(
-        application
-            .list_project_memory_facts(
-                ProjectMemoryFactListQueryV1::new(owner(), None, None, None, 10).unwrap(),
-            )
-            .await
-            .unwrap()
-            .facts()
-            .is_empty()
-    );
-    assert!(
-        application
-            .search_project_memory_facts(search)
-            .await
-            .unwrap()
-            .hits()
-            .is_empty()
-    );
-    assert!(
-        application
-            .get_project_memory_fact(target.clone())
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        application
-            .get_project_memory_history(
-                ProjectMemoryFactHistoryQueryV1::new(target.clone(), None, 10).unwrap(),
-            )
-            .await
-            .unwrap()
-            .events()
-            .is_empty()
-    );
-    assert_eq!(
-        application.project_memory_status().await.unwrap().owner(),
-        &owner()
-    );
-    assert!(
-        application
-            .inspect_project_memory_fact(target)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(
-        application
-            .authority
-            .authority_calls
-            .lock()
-            .unwrap()
-            .as_slice(),
-        ["list", "search", "get", "history", "status", "inspect"]
-    );
-}
-
-#[tokio::test]
-async fn read_owner_mismatch_never_reaches_authority() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    let error = application
-        .list_project_memory_facts(
-            ProjectMemoryFactListQueryV1::new(FactOwnerV1::Profile, None, None, None, 10).unwrap(),
-        )
-        .await
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        MemoryApplicationError::OwnerMismatch { .. }
-    ));
-    assert!(
-        application
-            .authority
-            .authority_calls
-            .lock()
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
 async fn typed_queries_propagate_without_identity_loss() {
     let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
     let fact_id = fact_id(owner(), "operation.memory.query");
@@ -837,7 +745,6 @@ async fn typed_queries_propagate_without_identity_loss() {
     let current_fact = FactCurrentQuery::new(owner(), fact_id.clone()).unwrap();
     let as_of = FactAsOfQuery::new(owner(), fact_id.clone(), UtcMicros(5)).unwrap();
     let lineage = FactLineageQuery::new(owner(), fact_id, None, 10).unwrap();
-    let legacy = LegacyFactQuery::new(owner(), id::<SourceStoreId>("store.legacy"), 7).unwrap();
     let anchor_id = id::<RetrievalAnchorId>("anchor.memory.query");
     let anchor_query = RetrievalAnchorQuery::new(owner(), anchor_id.clone()).unwrap();
 
@@ -863,13 +770,6 @@ async fn typed_queries_propagate_without_identity_loss() {
             .unwrap()
             .is_empty()
     );
-    assert!(
-        application
-            .resolve_legacy_fact(legacy)
-            .await
-            .unwrap()
-            .is_none()
-    );
     let anchor: Option<RetrievalAnchorRecordV2> = application
         .get_retrieval_anchor(anchor_query)
         .await
@@ -892,10 +792,6 @@ async fn typed_queries_propagate_without_identity_loss() {
     assert_eq!(application.authority.as_of_queries.lock().unwrap().len(), 1);
     assert_eq!(
         application.authority.lineage_queries.lock().unwrap().len(),
-        1
-    );
-    assert_eq!(
-        application.authority.legacy_queries.lock().unwrap().len(),
         1
     );
     assert_eq!(
@@ -989,179 +885,31 @@ async fn lineage_page_must_advance_cursor_and_stay_bounded() {
     ));
 }
 
-#[tokio::test]
-async fn legacy_resolution_cannot_cross_owner_boundary() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    *application.authority.legacy_result.lock().unwrap() = Some(fact_id(
-        FactOwnerV1::Profile,
-        "operation.legacy.cross-owner",
+#[test]
+fn graph_reset_required_keeps_profile_and_project_authority_in_root_errors() {
+    let profile = memory_application_error(MemoryApplicationError::Store(
+        FactStoreError::GraphResetRequired {
+            owner: FactOwnerV1::Profile,
+            reason: "profile graph generation mismatch".to_owned(),
+        },
     ));
-
-    let error = application
-        .resolve_legacy_fact(
-            LegacyFactQuery::new(owner(), id::<SourceStoreId>("store.legacy"), 7).unwrap(),
-        )
-        .await
-        .unwrap_err();
-
     assert!(matches!(
-        error,
-        MemoryApplicationError::InvalidAuthorityResult { .. }
+        profile,
+        TraceDecayError::ResetRequired { authority, reason }
+            if authority == "profile memory graph"
+                && reason == "profile graph generation mismatch"
     ));
-}
 
-#[tokio::test]
-async fn feedback_defaults_an_omitted_source_to_mcp() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    let context =
-        MemoryOperationContext::from_request_id(&owner(), "feedback", "fixture-feedback-mcp", None)
-            .unwrap();
-
-    let _ = application
-        .record_fact_feedback(
-            FeedbackRequest {
-                fact_id: 1,
-                action: FeedbackAction::Helpful,
-                source: None,
-                note: None,
-            },
-            context,
-        )
-        .await;
-
-    let requests = application.authority.feedback_requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].source(), Some("mcp"));
-}
-
-#[tokio::test]
-async fn trust_history_never_claims_incomplete_repair_is_complete() {
-    let application = MemoryApplication::new(owner(), FakeAuthority::default()).unwrap();
-    *application.authority.feedback_history.lock().unwrap() = Some(
-        ProjectMemoryFactFeedbackHistoryV1::new_with_repair_progress(
-            owner(),
-            vec![],
-            None,
-            ProjectMemoryFeedbackRepairProgressV1::Incomplete {
-                processed: 1,
-                remaining: Some(2),
-            },
-        )
-        .unwrap(),
-    );
-
-    let typed = application
-        .fact_trust_history_with_progress(1, 10)
-        .await
-        .unwrap();
-    assert!(typed.entries.is_empty());
+    let project = memory_application_error(MemoryApplicationError::Store(
+        FactStoreError::GraphResetRequired {
+            owner: owner(),
+            reason: "project graph generation mismatch".to_owned(),
+        },
+    ));
     assert!(matches!(
-        typed.repair_progress,
-        ProjectMemoryFeedbackRepairProgressV1::Incomplete {
-            processed: 1,
-            remaining: Some(2)
-        }
+        project,
+        TraceDecayError::ResetRequired { authority, reason }
+            if authority == "project memory graph"
+                && reason == "project graph generation mismatch"
     ));
-
-    let error = application.fact_trust_history(1, 10).await.unwrap_err();
-    assert!(matches!(
-        error,
-        MemoryApplicationError::FeedbackHistoryUnavailable {
-            progress: ProjectMemoryFeedbackRepairProgressV1::Incomplete { .. }
-        }
-    ));
-    assert_eq!(
-        application
-            .authority
-            .authority_calls
-            .lock()
-            .unwrap()
-            .as_slice(),
-        ["feedback-history", "feedback-history"]
-    );
-}
-
-#[test]
-fn automation_run_identity_is_typed_not_fact_payload_metadata() {
-    let mut request = legacy_add_request();
-    request.metadata = serde_json::json!({
-        "automation_run_id": "caller-controlled-run-id",
-        "fixture": "retained",
-    });
-
-    let command = automatic_fact_add_command(
-        owner(),
-        request,
-        "run_01J4A7P5MQ1X9DX2P9BQNQW75T",
-        "automatic-fact-typed-run-id",
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(
-        command.automation_run_id(),
-        Some("run_01J4A7P5MQ1X9DX2P9BQNQW75T")
-    );
-    assert_eq!(
-        command.metadata().get("fixture"),
-        Some(&serde_json::Value::String("retained".to_owned()))
-    );
-    assert!(command.metadata().get("automation_run_id").is_none());
-}
-
-#[test]
-fn fact_add_preserves_the_authoritative_sanitizer_receipt() {
-    let mut request = legacy_add_request();
-    request.metadata = serde_json::json!({
-        "api_key": "fixture-secret-value-that-must-be-redacted",
-        "fixture": "retained",
-    });
-    let (_, expected_receipt) = super::sanitize::sanitize_add_fact_request(request.clone())
-        .unwrap()
-        .unwrap()
-        .into_parts();
-
-    let command = automatic_fact_add_command(
-        owner(),
-        request,
-        "run_01J4A7P5MQ1X9DX2P9BQNQW75T",
-        "automatic-fact-receipt-provenance",
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(command.sanitization_receipt(), &expected_receipt);
-    assert_eq!(
-        command.metadata().get("api_key"),
-        Some(&serde_json::Value::String(
-            "[TraceDecay redacted: sensitive field]".to_owned()
-        ))
-    );
-}
-
-#[test]
-fn relation_provenance_keeps_metadata_bound_to_its_receipt() {
-    let provenance = super::sanitize::sanitize_curation_metadata(serde_json::json!({
-        "token": "secret-fixture-value",
-        "reason": "fixture",
-    }))
-    .unwrap();
-
-    assert_eq!(
-        provenance.sanitization_receipt().payload(),
-        Some(&tracedecay_domain::PayloadReferenceV1::for_payload(provenance.metadata()).unwrap())
-    );
-    assert_eq!(
-        provenance.metadata().get("token"),
-        Some(&serde_json::Value::String(
-            "[TraceDecay redacted: sensitive field]".to_owned()
-        ))
-    );
-}
-
-#[test]
-fn stored_fact_fixture_remains_canonical() {
-    let stored = stored_fact(owner(), "operation.memory.fixture", UtcMicros(2));
-    let fact_id = stored.fact_id().clone();
-    assert_eq!(stored.fact_id(), &fact_id);
 }

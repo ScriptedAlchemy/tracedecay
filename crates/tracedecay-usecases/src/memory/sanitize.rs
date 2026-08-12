@@ -1,24 +1,23 @@
-//! Request sanitizers for persisted numeric memory payloads.
+//! Request sanitizers for canonical project-memory payloads.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracedecay_domain::{FactCategoryV1, SanitizationReceiptV1};
+use tracedecay_domain::{FactCategoryV1, FactRelationProvenanceV1, SanitizationReceiptV1};
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
-use tracedecay_runtime_core::memory::types::{AddFactRequest, UpdateFactRequest};
 use tracedecay_runtime_core::privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
-use tracedecay_store::ProjectMemoryRelationProvenanceV1;
 
 use super::error::MemoryApplicationError;
+use super::project_memory::ProjectMemoryFactAddRequest;
 
 pub(super) struct SanitizedAddFactRequest {
-    request: AddFactRequest,
+    request: ProjectMemoryFactAddRequest,
     receipt: SanitizationReceiptV1,
 }
 
 impl SanitizedAddFactRequest {
-    pub(super) fn into_parts(self) -> (AddFactRequest, SanitizationReceiptV1) {
+    pub(super) fn into_parts(self) -> (ProjectMemoryFactAddRequest, SanitizationReceiptV1) {
         (self.request, self.receipt)
     }
 }
@@ -31,10 +30,12 @@ struct SanitizedFactPayloadWire {
     tags: Vec<String>,
     entities: Vec<String>,
     metadata: Value,
+    #[serde(default)]
+    source_label: Option<String>,
 }
 
 pub(super) fn sanitize_add_fact_request(
-    mut request: AddFactRequest,
+    mut request: ProjectMemoryFactAddRequest,
 ) -> Result<Option<SanitizedAddFactRequest>, MemoryApplicationError> {
     strip_reserved_automation_run_id(&mut request.metadata);
     // The canonical payload sorts labels before hashing; the sanitizer receipt
@@ -44,68 +45,43 @@ pub(super) fn sanitize_add_fact_request(
     if detect_secret_like(request.content.trim()).is_some() {
         return Ok(None);
     }
-    let Some(source) = sanitize_optional_memory_text(request.source.clone()) else {
+    let Some(source_label) = sanitize_optional_memory_text(request.source_label.clone()) else {
         return Ok(None);
     };
-    let wire = json!({
+    let mut wire = json!({
         "content": &request.content,
-        "category": FactCategoryV1::from(request.category),
+        "category": request.category,
         "tags": &request.tags,
         "entities": &request.entities,
         "metadata": &request.metadata,
     });
+    if let Some(source_label) = &source_label
+        && let Value::Object(wire) = &mut wire
+    {
+        wire.insert(
+            "source_label".to_owned(),
+            Value::String(source_label.clone()),
+        );
+    }
     let MemoryFactSanitizationV1::Durable { payload, receipt } = sanitize_memory_fact_payload(wire)
         .map_err(|_| MemoryApplicationError::InvalidInput {
-            invariant: "legacy add request privacy sanitizer",
+            invariant: "project-memory add request privacy sanitizer",
         })?
     else {
         return Ok(None);
     };
     let sanitized = serde_json::from_value::<SanitizedFactPayloadWire>(payload).map_err(|_| {
         MemoryApplicationError::InvalidInput {
-            invariant: "sanitized legacy fact payload",
+            invariant: "sanitized project-memory fact payload",
         }
     })?;
     request.content = sanitized.content;
-    request.category = sanitized.category.into();
+    request.category = sanitized.category;
     request.tags = sanitized.tags;
     request.entities = sanitized.entities;
     request.metadata = sanitized.metadata;
-    request.source = source;
+    request.source_label = sanitized.source_label;
     Ok(Some(SanitizedAddFactRequest { request, receipt }))
-}
-
-/// Prepares a typed persisted-fact patch without claiming it is durable-safe.
-///
-/// The exact durable fact payload does not exist until the authority merges
-/// this patch with the current assertion. The authority therefore sanitizes
-/// that merged value once and persists the resulting receipt; pre-sanitizing
-/// this partial patch would create an unrelated receipt and then discard it.
-pub(super) fn prepare_tainted_update_fact_request(
-    mut request: UpdateFactRequest,
-) -> Result<Option<UpdateFactRequest>, MemoryApplicationError> {
-    if let Some(metadata) = request.metadata.as_mut() {
-        strip_reserved_automation_run_id(metadata);
-    }
-    // Match the canonical payload's sorted label order (see the add path).
-    if let Some(tags) = request.tags.as_mut() {
-        tags.sort_unstable();
-    }
-    if let Some(entities) = request.entities.as_mut() {
-        entities.sort_unstable();
-    }
-    if request
-        .content
-        .as_deref()
-        .is_some_and(|content| detect_secret_like(content.trim()).is_some())
-    {
-        return Ok(None);
-    }
-    let Some(source) = sanitize_optional_memory_text(request.source.clone()) else {
-        return Ok(None);
-    };
-    request.source = source;
-    Ok(Some(request))
 }
 
 /// `automation_run_id` is typed command metadata. Never permit a caller to
@@ -142,18 +118,44 @@ pub(super) fn sanitize_curation_texts(
         .collect()
 }
 
-pub(super) fn sanitize_curation_metadata(
-    value: serde_json::Value,
-) -> Result<ProjectMemoryRelationProvenanceV1, MemoryApplicationError> {
-    match sanitize_memory_fact_payload(value).map_err(|_| MemoryApplicationError::InvalidInput {
-        invariant: "dashboard curation metadata privacy sanitizer",
-    })? {
-        MemoryFactSanitizationV1::Durable { payload, receipt } => {
-            ProjectMemoryRelationProvenanceV1::new(payload, receipt)
-                .map_err(MemoryApplicationError::Store)
-        }
-        MemoryFactSanitizationV1::Quarantined => Err(MemoryApplicationError::InvalidInput {
-            invariant: "dashboard curation metadata rejected by privacy sanitizer",
-        }),
-    }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SanitizedRelationProvenanceWire {
+    source_label: String,
+    metadata: Value,
+}
+
+pub(super) fn sanitize_curation_provenance(
+    source_label: String,
+    metadata: Value,
+) -> Result<FactRelationProvenanceV1, MemoryApplicationError> {
+    let Some(source_label) = sanitize_provider_metadata_text(&source_label) else {
+        return Err(MemoryApplicationError::InvalidInput {
+            invariant: "canonical relation source rejected by privacy sanitizer",
+        });
+    };
+    let wire = json!({
+        "source_label": source_label,
+        "metadata": metadata,
+    });
+    let MemoryFactSanitizationV1::Durable { payload, receipt } = sanitize_memory_fact_payload(wire)
+        .map_err(|_| MemoryApplicationError::InvalidInput {
+            invariant: "canonical relation provenance privacy sanitizer",
+        })?
+    else {
+        return Err(MemoryApplicationError::InvalidInput {
+            invariant: "canonical relation provenance rejected by privacy sanitizer",
+        });
+    };
+    let sanitized =
+        serde_json::from_value::<SanitizedRelationProvenanceWire>(payload).map_err(|_| {
+            MemoryApplicationError::InvalidInput {
+                invariant: "sanitized canonical relation provenance",
+            }
+        })?;
+    FactRelationProvenanceV1::new(sanitized.source_label, sanitized.metadata, receipt).map_err(
+        |_| MemoryApplicationError::InvalidInput {
+            invariant: "canonical relation provenance",
+        },
+    )
 }

@@ -1,5 +1,5 @@
 use tracedecay_store::{
-    ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore,
+    FactReadControl, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore,
 };
 
 use super::{MemoryApplication, MemoryApplicationError};
@@ -11,10 +11,14 @@ impl<A: ProjectMemoryGraphStore> MemoryApplication<A> {
     pub async fn project_memory_graph(
         &self,
         query: ProjectMemoryGraphQueryV1,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryGraphPageV1, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let max_relations = query.max_relations();
-        let page = self.authority.project_memory_graph(query).await?;
+        let page = self
+            .authority
+            .project_memory_graph(query, read_control)
+            .await?;
         if page.owner() != &self.owner
             || page.relations().len() > max_relations
             || page.facts().iter().any(|fact| fact.owner() != &self.owner)

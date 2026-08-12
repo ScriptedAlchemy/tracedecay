@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
+use tracedecay_domain::FactOwnerV1;
 use tracedecay_graph_db::{
     GraphEntity, GraphEntityId, GraphEntityRef, GraphGenerationId, GraphGenerationManifest,
     GraphGenerationRelation, GraphLabel, GraphProjectionIdentity, GraphRelationId,
@@ -28,6 +29,7 @@ pub(super) struct MemoryGraphSource {
 }
 
 pub(super) fn build_manifest(
+    owner: &FactOwnerV1,
     projection: GraphProjectionIdentity,
     source: &MemoryGraphSource,
     watermark: GraphWatermark,
@@ -37,14 +39,18 @@ pub(super) fn build_manifest(
     let mut entity_ids = BTreeSet::new();
     for identity in &source.entities {
         ensure_source_read_active(read_control)?;
-        entity_ids.insert(GraphEntityId::new(identity.clone()).map_err(graph_error)?);
+        entity_ids.insert(
+            GraphEntityId::new(identity.clone()).map_err(|error| graph_error(owner, error))?,
+        );
     }
     ensure_source_read_active(read_control)?;
     let mut relations = Vec::new();
     for relation in &source.relations {
         ensure_source_read_active(read_control)?;
-        let from = GraphEntityId::new(relation.source.clone()).map_err(graph_error)?;
-        let to = GraphEntityId::new(relation.target.clone()).map_err(graph_error)?;
+        let from = GraphEntityId::new(relation.source.clone())
+            .map_err(|error| graph_error(owner, error))?;
+        let to = GraphEntityId::new(relation.target.clone())
+            .map_err(|error| graph_error(owner, error))?;
         insert_projection_entity(&mut entity_ids, from.clone())?;
         insert_projection_entity(&mut entity_ids, to.clone())?;
         let relation_digest = hex::encode(Sha256::digest(
@@ -57,31 +63,33 @@ pub(super) fn build_manifest(
         relations.push(
             GraphGenerationRelation::new(
                 GraphRelationId::new(format!("memory-relation:{relation_digest}"))
-                    .map_err(graph_error)?,
+                    .map_err(|error| graph_error(owner, error))?,
                 GraphEntityRef::new(projection.clone(), from),
                 GraphEntityRef::new(projection.clone(), to),
-                GraphRelationKind::new(relation.kind.clone()).map_err(graph_error)?,
+                GraphRelationKind::new(relation.kind.clone())
+                    .map_err(|error| graph_error(owner, error))?,
                 BTreeMap::new(),
             )
-            .map_err(graph_error)?,
+            .map_err(|error| graph_error(owner, error))?,
         );
     }
     ensure_source_read_active(read_control)?;
     let mut entities = Vec::new();
     for identity in entity_ids {
         ensure_source_read_active(read_control)?;
-        let label = label_for_entity(identity.as_str()).map_err(graph_error)?;
-        let label = GraphLabel::new(label).map_err(graph_error)?;
+        let label =
+            label_for_entity(identity.as_str()).map_err(|error| graph_error(owner, error))?;
+        let label = GraphLabel::new(label).map_err(|error| graph_error(owner, error))?;
         entities.push(
             GraphEntity::new(identity.clone(), BTreeSet::from([label]), BTreeMap::new())
-                .map_err(graph_error)?,
+                .map_err(|error| graph_error(owner, error))?,
         );
     }
     ensure_source_read_active(read_control)?;
     let generation = GraphGenerationId::new(format!("project-memory:{}", watermark.as_str()))
-        .map_err(graph_error)?;
-    let source_generation =
-        SourceGeneration::new(watermark.as_str().to_owned()).map_err(graph_error)?;
+        .map_err(|error| graph_error(owner, error))?;
+    let source_generation = SourceGeneration::new(watermark.as_str().to_owned())
+        .map_err(|error| graph_error(owner, error))?;
     let check = || {
         if read_control.is_some_and(FactReadControl::interrupted) {
             Err(tracedecay_graph_db::GraphDbError::Cancelled)
@@ -101,11 +109,12 @@ pub(super) fn build_manifest(
     )
     .map_err(|error| match error {
         tracedecay_graph_db::GraphDbError::Cancelled => FactStoreError::ReadCancelled,
-        error => graph_error(error),
+        error => graph_error(owner, error),
     })
 }
 
 pub(super) fn source_watermark(
+    owner: &FactOwnerV1,
     source: &MemoryGraphSource,
     read_control: Option<&FactReadControl>,
 ) -> FactStoreResult<GraphWatermark> {
@@ -126,7 +135,7 @@ pub(super) fn source_watermark(
         "memory-relations:{}",
         hex::encode(hasher.finalize())
     ))
-    .map_err(graph_error)
+    .map_err(|error| graph_error(owner, error))
 }
 
 fn ensure_source_read_active(read_control: Option<&FactReadControl>) -> FactStoreResult<()> {

@@ -1,7 +1,8 @@
 use std::error::Error;
 
 use tracedecay_domain::{
-    DomainError, FactAssertionId, FactEventId, FactId, FactRelationKindV1, RetrievalAnchorId,
+    DomainError, FactAssertionId, FactEventId, FactId, FactOwnerV1, FactRelationKindV1,
+    RetrievalAnchorId,
 };
 
 use super::write::FactCommitConflict;
@@ -62,6 +63,8 @@ pub enum FactStoreError {
     GraphConflict,
     #[error("verified memory graph authority is unavailable")]
     GraphUnavailable,
+    #[error("verified memory graph for {owner:?} requires reset: {reason}")]
+    GraphResetRequired { owner: FactOwnerV1, reason: String },
     #[error("verified memory graph operation was cancelled")]
     GraphCancelled,
     #[error("verified memory graph operation exceeded its budget")]

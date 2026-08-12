@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_graph_db::{GraphDbError, GraphEntityId, GraphRelationKind};
 use tracedecay_store::{FactReadControl, FactStoreError};
 
-use super::graph::{ProjectedRelation, validate_rooted_relations};
+use super::graph::{ProjectedRelation, graph_error, validate_rooted_relations};
 use super::graph_manifest::{MemoryGraphSource, build_manifest, source_watermark};
 
 fn entity(value: &str) -> GraphEntityId {
@@ -18,6 +19,26 @@ fn relation(source: &str, target: &str, kind: &str) -> ProjectedRelation {
         target: entity(target),
         kind: GraphRelationKind::new(kind).expect("graph relation fixture"),
     }
+}
+
+#[test]
+fn graph_reset_required_preserves_the_exact_memory_owner() {
+    let owner = FactOwnerV1::Project {
+        project_id: ProjectId::new("project.graph-reset-owner").expect("project id"),
+    };
+
+    assert!(matches!(
+        graph_error(
+            &owner,
+            GraphDbError::ResetRequired {
+                message: "verified graph generation is incompatible".to_owned(),
+            },
+        ),
+        FactStoreError::GraphResetRequired {
+            owner: mapped_owner,
+            reason,
+        } if mapped_owner == owner && reason == "verified graph generation is incompatible"
+    ));
 }
 
 #[test]
@@ -80,7 +101,7 @@ fn source_watermark_observes_live_cancellation_inside_the_entity_loop() {
     };
 
     assert!(matches!(
-        source_watermark(&source, Some(&control)),
+        source_watermark(&FactOwnerV1::Profile, &source, Some(&control)),
         Err(FactStoreError::ReadCancelled)
     ));
     assert!(checks.load(Ordering::Acquire) > 4);
@@ -110,7 +131,13 @@ fn manifest_construction_observes_live_cancellation_inside_entity_allocation() {
         .expect("graph watermark fixture");
 
     assert!(matches!(
-        build_manifest(projection, &source, watermark, Some(&control)),
+        build_manifest(
+            &FactOwnerV1::Profile,
+            projection,
+            &source,
+            watermark,
+            Some(&control),
+        ),
         Err(FactStoreError::ReadCancelled)
     ));
     assert!(checks.load(Ordering::Acquire) > 12_000);
@@ -140,7 +167,13 @@ fn manifest_validation_observes_live_cancellation_after_local_construction() {
         .expect("graph watermark fixture");
 
     assert!(matches!(
-        build_manifest(projection, &source, watermark, Some(&control)),
+        build_manifest(
+            &FactOwnerV1::Profile,
+            projection,
+            &source,
+            watermark,
+            Some(&control),
+        ),
         Err(FactStoreError::ReadCancelled)
     ));
     assert!(checks.load(Ordering::Acquire) > 25_000);
@@ -166,7 +199,13 @@ fn manifest_construction_rejects_an_already_cancelled_read_before_allocation() {
     let control = FactReadControl::new(Arc::new(|| true));
 
     assert!(matches!(
-        build_manifest(projection, &source, watermark, Some(&control)),
+        build_manifest(
+            &FactOwnerV1::Profile,
+            projection,
+            &source,
+            watermark,
+            Some(&control),
+        ),
         Err(FactStoreError::ReadCancelled)
     ));
 }

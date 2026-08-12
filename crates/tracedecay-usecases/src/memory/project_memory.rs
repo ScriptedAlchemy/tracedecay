@@ -1,314 +1,52 @@
-//! Typed project-memory use cases and persisted fact-id projections.
+//! Typed use cases over the canonical project-memory authority.
 
 use sha2::{Digest, Sha256};
 
-use tracedecay_domain::{
-    ActorId, Confidence, FactCategoryV1, FactId, FactLineageEventV1, FactOwnerV1, LocatorDigest,
-    ProvenanceId,
-};
+use tracedecay_domain::{FactId, FactLineageEventV1, FactOwnerV1, LocatorDigest, ProvenanceId};
+use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_store::{
-    ProjectMemoryAutomaticFactApplyDispositionV1, ProjectMemoryAutomaticFactApplyResultV1,
-    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptPageV1,
-    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddOutcomeV1,
+    FactReadControl, FactWriteControl, ProjectMemoryAutomaticFactApplyDispositionV1,
+    ProjectMemoryAutomaticFactApplyResultV1, ProjectMemoryAutomaticFactEvidenceV1,
+    ProjectMemoryAutomaticFactReceiptPageV1, ProjectMemoryAutomaticFactReceiptV1,
+    ProjectMemoryAutomaticFactStateV1, ProjectMemoryFactAddCommandV1,
+    ProjectMemoryFactAddDispositionV1, ProjectMemoryFactAddOutcomeV1,
     ProjectMemoryFactContentDigestQueryV1, ProjectMemoryFactContradictionPageV1,
     ProjectMemoryFactContradictionQueryV1, ProjectMemoryFactFeedbackCommandV1,
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
     ProjectMemoryFactFeedbackOutcomeV1, ProjectMemoryFactHistoryQueryV1,
-    ProjectMemoryFactHistoryV1, ProjectMemoryFactInspectionV1, ProjectMemoryFactListQueryV1,
-    ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactRelationV1,
+    ProjectMemoryFactHistoryV1, ProjectMemoryFactIdV1, ProjectMemoryFactInspectionV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
     ProjectMemoryFactRemoveCommandV1, ProjectMemoryFactRemoveOutcomeV1,
-    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactSearchCursorV1,
-    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery, ProjectMemoryFactStore,
-    ProjectMemoryFactTargetV1, ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactRetrievalOutcomeV1,
+    ProjectMemoryFactSearchCursorV1, ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery,
+    ProjectMemoryFactStore, ProjectMemoryFactUpdateCommandV1, ProjectMemoryFactUpdateOutcomeV1,
     ProjectMemoryMemoryStatusV1,
 };
 
-use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
-use tracedecay_runtime_core::memory::trust::DEFAULT_TRUST;
-use tracedecay_runtime_core::memory::types::{
-    AddFactRequest, FactRecord, FactRelationKind, MemoryCategory, MemoryFeedbackFunnel,
-    MemoryRepairStats, MemoryStatus,
+use super::MemoryApplication;
+use super::error::{MemoryApplicationError, MemoryMutationError, settle_authority_result};
+
+mod add;
+pub use add::{
+    ProjectMemoryFactAddEffectMaterialV1, ProjectMemoryFactAddPreflight,
+    ProjectMemoryFactAddRequest, ProjectMemoryFactAddRequestOutcome, automatic_fact_add_command,
 };
 
-use super::MemoryApplication;
-use super::context::{MemoryOperationContext, validate_operation_component};
-use super::error::{MemoryApplicationError, PersistedFactIdScope};
-use super::sanitize::{SanitizedAddFactRequest, sanitize_add_fact_request};
-
-/// Converts an automation item without manufacturing a legacy numeric
-/// identity. The deterministic operation identity makes repeated processing of
-/// the same run/apply identity idempotent at the authority boundary.
-pub fn automatic_fact_add_command(
-    owner: FactOwnerV1,
-    request: AddFactRequest,
-    run_id: &str,
-    apply_id: &str,
-    actor: Option<ActorId>,
-) -> Result<ProjectMemoryFactAddCommandV1, MemoryApplicationError> {
-    owner.validate()?;
-    validate_operation_component(run_id, "automatic fact run identity")?;
-    validate_operation_component(apply_id, "automatic fact apply identity")?;
-    let context = MemoryOperationContext::from_request_id(
-        &owner,
-        "automatic-fact",
-        &format!("{run_id}:{apply_id}"),
-        actor,
-    )?;
-    let Some(request) = sanitize_add_fact_request(request)? else {
-        return Err(MemoryApplicationError::InvalidInput {
-            invariant: "automatic fact declined by memory privacy sanitizer",
-        });
-    };
-    with_automation_run_id(fact_add_command(owner, request, &context)?, run_id)
-}
-
-/// Binds the trusted run identity to command metadata after the payload has
-/// been sanitized. It is never serialized into fact payload metadata.
-pub fn with_automation_run_id(
-    command: ProjectMemoryFactAddCommandV1,
-    run_id: &str,
-) -> Result<ProjectMemoryFactAddCommandV1, MemoryApplicationError> {
-    validate_operation_component(run_id, "automatic fact run identity")?;
-    command
-        .with_automation_run_id(run_id.to_owned())
-        .map_err(MemoryApplicationError::Store)
-}
-
-pub(super) fn fact_add_command(
-    owner: FactOwnerV1,
-    request: SanitizedAddFactRequest,
-    context: &MemoryOperationContext,
-) -> Result<ProjectMemoryFactAddCommandV1, MemoryApplicationError> {
-    let (request, sanitization_receipt) = request.into_parts();
-    let trust = Confidence::new(request.trust.unwrap_or(DEFAULT_TRUST)).map_err(|_| {
-        MemoryApplicationError::InvalidInput {
-            invariant: "trust must be between 0.0 and 1.0",
-        }
-    })?;
-    ProjectMemoryFactAddCommandV1::new(
-        owner,
-        context.operation_id().clone(),
-        request.content,
-        fact_category(request.category),
-        request.source,
-        request.tags,
-        request.entities,
-        request.metadata,
-        sanitization_receipt,
-        trust,
-        context.actor().cloned(),
-    )
-    .map_err(MemoryApplicationError::Store)
-}
-
-pub(super) const fn fact_category(category: MemoryCategory) -> FactCategoryV1 {
-    match category {
-        MemoryCategory::General => FactCategoryV1::General,
-        MemoryCategory::UserPref => FactCategoryV1::UserPref,
-        MemoryCategory::Project => FactCategoryV1::Project,
-        MemoryCategory::Tool => FactCategoryV1::Tool,
-        MemoryCategory::Decision => FactCategoryV1::Decision,
-        MemoryCategory::CodeArea => FactCategoryV1::CodeArea,
-    }
-}
-
-pub(super) const fn memory_relation(relation: FactRelationKind) -> ProjectMemoryFactRelationV1 {
-    match relation {
-        FactRelationKind::Supports => ProjectMemoryFactRelationV1::Supports,
-        FactRelationKind::Contradicts => ProjectMemoryFactRelationV1::Contradicts,
-        FactRelationKind::Supersedes => ProjectMemoryFactRelationV1::Supersedes,
-        FactRelationKind::DerivedFrom => ProjectMemoryFactRelationV1::DerivedFrom,
-    }
-}
-
-const fn memory_category(category: FactCategoryV1) -> MemoryCategory {
-    match category {
-        FactCategoryV1::General => MemoryCategory::General,
-        FactCategoryV1::UserPref => MemoryCategory::UserPref,
-        FactCategoryV1::Project => MemoryCategory::Project,
-        FactCategoryV1::Tool => MemoryCategory::Tool,
-        FactCategoryV1::Decision => MemoryCategory::Decision,
-        FactCategoryV1::CodeArea => MemoryCategory::CodeArea,
-    }
-}
-
-pub(super) fn memory_confidence(
-    value: Option<f64>,
-) -> Result<Option<Confidence>, MemoryApplicationError> {
-    value
-        .map(Confidence::new)
-        .transpose()
-        .map_err(|_| MemoryApplicationError::InvalidInput {
-            invariant: "confidence (trust/min_trust) must be between 0.0 and 1.0",
-        })
-}
-
-pub(super) fn legacy_i64(
-    value: u64,
-    invariant: &'static str,
-) -> Result<i64, MemoryApplicationError> {
-    i64::try_from(value)
-        .map_err(|_| MemoryApplicationError::UnrepresentablePersistedFact { invariant })
-}
-
-pub(super) fn legacy_usize(
-    value: u64,
-    invariant: &'static str,
-) -> Result<usize, MemoryApplicationError> {
-    usize::try_from(value)
-        .map_err(|_| MemoryApplicationError::UnrepresentablePersistedFact { invariant })
-}
-
-/// Projects one authoritative snapshot into the persisted numeric status
-/// shape. Keep this pure so callers cannot accidentally split status and
-/// feedback-history repair across separate reads.
-pub(super) fn project_memory_status(
-    status: &ProjectMemoryMemoryStatusV1,
-) -> Result<MemoryStatus, MemoryApplicationError> {
-    let funnel = status.feedback_funnel();
-    let repair = status.repair();
-    Ok(MemoryStatus {
-        fact_count: legacy_usize(status.fact_count(), "legacy memory fact count")?,
-        entity_count: legacy_usize(status.entity_count(), "legacy memory entity count")?,
-        bank_count: legacy_usize(status.bank_count(), "legacy memory bank count")?,
-        algebra_name: status.algebra().name().to_owned(),
-        hrr_dim: legacy_usize(status.algebra().hrr_dim(), "legacy memory hrr dimension")?,
-        estimated_capacity: legacy_usize(
-            status.algebra().estimated_capacity(),
-            "legacy memory estimated capacity",
-        )?,
-        trust_0_025_count: legacy_usize(
-            status.trust_0_025_count(),
-            "legacy memory trust bucket 0-025",
-        )?,
-        trust_025_050_count: legacy_usize(
-            status.trust_025_050_count(),
-            "legacy memory trust bucket 025-050",
-        )?,
-        trust_050_075_count: legacy_usize(
-            status.trust_050_075_count(),
-            "legacy memory trust bucket 050-075",
-        )?,
-        trust_075_100_count: legacy_usize(
-            status.trust_075_100_count(),
-            "legacy memory trust bucket 075-100",
-        )?,
-        below_default_recall_threshold_count: legacy_usize(
-            status.below_default_recall_threshold_count(),
-            "legacy memory below recall threshold count",
-        )?,
-        helpful_count: legacy_usize(status.helpful_count(), "legacy memory helpful count")?,
-        unhelpful_count: legacy_usize(status.unhelpful_count(), "legacy memory unhelpful count")?,
-        missing_vector_count: legacy_usize(
-            status.missing_vector_count(),
-            "legacy memory missing vector count",
-        )?,
-        repair: MemoryRepairStats {
-            missing_vectors_repaired: legacy_usize(
-                repair.missing_vectors_repaired(),
-                "legacy memory repaired vectors",
-            )?,
-            banks_rebuilt: legacy_usize(repair.banks_rebuilt(), "legacy memory rebuilt banks")?,
-        },
-        feedback_funnel: MemoryFeedbackFunnel {
-            retrieval_count_total: legacy_i64(
-                funnel.retrieval_count_total(),
-                "legacy memory retrieval count total",
-            )?,
-            access_count_total: legacy_i64(
-                funnel.access_count_total(),
-                "legacy memory access count total",
-            )?,
-            retrieved_fact_count: legacy_usize(
-                funnel.retrieved_fact_count(),
-                "legacy memory retrieved fact count",
-            )?,
-            rated_fact_count: legacy_usize(
-                funnel.rated_fact_count(),
-                "legacy memory rated fact count",
-            )?,
-            feedback_total: legacy_usize(funnel.feedback_total(), "legacy memory feedback total")?,
-            seen_to_feedback_ratio: funnel
-                .seen_to_feedback_ratio()
-                .map(|value| legacy_i64(value, "legacy memory seen-to-feedback ratio"))
-                .transpose()?,
-        },
-    })
-}
-
-pub(super) fn project_memory_fact_record(
-    scope: &PersistedFactIdScope,
-    fact: &tracedecay_store::ProjectMemoryFactV1,
-) -> Result<FactRecord, MemoryApplicationError> {
-    if fact.owner() != scope.owner() {
-        return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "legacy fact projection owner",
-        });
-    }
-    let mapping = fact.mapping().legacy_mapping().ok_or(
-        MemoryApplicationError::UnrepresentablePersistedFact {
-            invariant: "legacy numeric fact mapping",
-        },
-    )?;
-    if mapping.owner() != scope.owner() || mapping.source_store_id() != scope.source_store_id() {
-        return Err(MemoryApplicationError::UnrepresentablePersistedFact {
-            invariant: "legacy fact mapping source",
-        });
-    }
-    let payload = fact
-        .payload()
-        .ok_or(MemoryApplicationError::UnrepresentablePersistedFact {
-            invariant: "available legacy fact payload",
-        })?;
-    let telemetry = fact.telemetry();
-    Ok(FactRecord {
-        fact_id: mapping.legacy_fact_id(),
-        content: payload.content().to_owned(),
-        category: memory_category(payload.category()),
-        tags: payload.tags().to_vec(),
-        entities: payload.entities().to_vec(),
-        trust_score: fact.fact().trust().as_f64(),
-        source: fact.source_label().map(ToOwned::to_owned),
-        retrieval_count: legacy_i64(telemetry.retrieval_count(), "legacy retrieval count")?,
-        access_count: legacy_i64(telemetry.access_count(), "legacy access count")?,
-        helpful_count: legacy_i64(telemetry.helpful_count(), "legacy helpful count")?,
-        unhelpful_count: legacy_i64(telemetry.unhelpful_count(), "legacy unhelpful count")?,
-        created_at: telemetry.created_at().0,
-        updated_at: telemetry.updated_at().0,
-        last_retrieved_at: telemetry.last_retrieved_at().map(|value| value.0),
-        last_recalled_at: telemetry.last_recalled_at().map(|value| value.0),
-        last_feedback_at: telemetry.last_feedback_at().map(|value| value.0),
-        metadata: payload.metadata().clone(),
-    })
-}
-
-pub(super) fn project_memory_projection_record(
-    scope: &PersistedFactIdScope,
-    projection: &ProjectMemoryFactProjectionV1,
-) -> Result<FactRecord, MemoryApplicationError> {
-    match projection {
-        ProjectMemoryFactProjectionV1::Available(fact) => project_memory_fact_record(scope, fact),
-        ProjectMemoryFactProjectionV1::Unavailable(_) => {
-            Err(MemoryApplicationError::UnrepresentablePersistedFact {
-                invariant: "available legacy fact projection",
-            })
-        }
-    }
-}
-
-/// Typed project-memory use cases. Transport adapters translate persisted
-/// numeric inputs before this boundary; only the authority owns the
-/// corresponding mutation transaction and projection.
+/// Typed project-memory use cases. Only the authority owns each mutation
+/// transaction and its durable projection.
 impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn list_project_memory_facts(
         &self,
         query: ProjectMemoryFactListQueryV1,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryFactPageV1, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after_fact_id = query.after_fact_id().cloned();
         let limit = query.limit();
-        let page = self.authority.list_project_memory_facts(query).await?;
+        let page = self
+            .authority
+            .list_project_memory_facts(query, read_control)
+            .await?;
         validate_project_memory_page(&self.owner, after_fact_id.as_ref(), limit, &page)?;
         Ok(page)
     }
@@ -316,11 +54,15 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn search_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryFactSearchPageV1, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after = query.after().cloned();
         let limit = query.limit();
-        let page = self.authority.search_project_memory_facts(query).await?;
+        let page = self
+            .authority
+            .search_project_memory_facts(query, read_control)
+            .await?;
         validate_project_memory_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
@@ -328,11 +70,15 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn probe_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryFactSearchPageV1, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after = query.after().cloned();
         let limit = query.limit();
-        let page = self.authority.probe_project_memory_facts(query).await?;
+        let page = self
+            .authority
+            .probe_project_memory_facts(query, read_control)
+            .await?;
         validate_project_memory_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
@@ -340,11 +86,15 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn related_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryFactSearchPageV1, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after = query.after().cloned();
         let limit = query.limit();
-        let page = self.authority.related_project_memory_facts(query).await?;
+        let page = self
+            .authority
+            .related_project_memory_facts(query, read_control)
+            .await?;
         validate_project_memory_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
@@ -352,11 +102,15 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn reason_project_memory_facts(
         &self,
         query: ProjectMemoryFactSearchQuery,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryFactSearchPageV1, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let after = query.after().cloned();
         let limit = query.limit();
-        let page = self.authority.reason_project_memory_facts(query).await?;
+        let page = self
+            .authority
+            .reason_project_memory_facts(query, read_control)
+            .await?;
         validate_project_memory_search_page(&self.owner, after.as_ref(), limit, &page)?;
         Ok(page)
     }
@@ -364,12 +118,13 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn find_project_memory_contradictions(
         &self,
         query: ProjectMemoryFactContradictionQueryV1,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryFactContradictionPageV1, MemoryApplicationError> {
         self.ensure_owner(query.owner())?;
         let limit = query.limit();
         let page = self
             .authority
-            .find_project_memory_contradictions(query)
+            .find_project_memory_contradictions(query, read_control)
             .await?;
         if page.owner() != &self.owner
             || page.contradictions().len() > limit
@@ -387,12 +142,13 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     pub async fn get_project_memory_fact(
         &self,
-        target: ProjectMemoryFactTargetV1,
+        target: ProjectMemoryFactIdV1,
+        read_control: &FactReadControl,
     ) -> Result<Option<ProjectMemoryFactProjectionV1>, MemoryApplicationError> {
         self.ensure_owner(target.owner())?;
         let result = self
             .authority
-            .get_project_memory_fact(target.clone())
+            .get_project_memory_fact(target.clone(), read_control)
             .await?;
         if let Some(projection) = &result {
             validate_project_memory_projection(&self.owner, &target, projection)?;
@@ -402,11 +158,11 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     /// Owner-bound exact-content lookup for automation deduplication. The raw
     /// content is never forwarded to the authority: only its canonical SHA-256
-    /// locator digest crosses this boundary. Legacy mappings remain part of an
-    /// available projection, so callers can preserve the historical numeric id.
+    /// locator digest crosses this boundary.
     pub async fn find_exact_fact_by_content(
         &self,
         content: &str,
+        read_control: &FactReadControl,
     ) -> Result<Option<ProjectMemoryFactProjectionV1>, MemoryApplicationError> {
         if content.trim().is_empty() || detect_secret_like(content.trim()).is_some() {
             return Ok(None);
@@ -418,12 +174,13 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         .map_err(|_| MemoryApplicationError::InvalidInput {
             invariant: "exact fact content digest",
         })?;
-        let result =
-            self.authority
-                .find_project_memory_fact_by_content_digest(
-                    ProjectMemoryFactContentDigestQueryV1::new(self.owner.clone(), digest)?,
-                )
-                .await?;
+        let result = self
+            .authority
+            .find_project_memory_fact_by_content_digest(
+                ProjectMemoryFactContentDigestQueryV1::new(self.owner.clone(), digest)?,
+                read_control,
+            )
+            .await?;
         if let Some(projection) = &result
             && projection.owner() != &self.owner
         {
@@ -437,20 +194,22 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
     pub async fn get_project_memory_history(
         &self,
         query: ProjectMemoryFactHistoryQueryV1,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryFactHistoryV1, MemoryApplicationError> {
         self.ensure_owner(query.target().owner())?;
         let target = query.target().clone();
         let after = query.after().cloned();
         let limit = query.limit();
-        let history = self.authority.project_memory_fact_history(query).await?;
+        let history = self
+            .authority
+            .project_memory_fact_history(query, read_control)
+            .await?;
         if history.owner() != &self.owner {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "project-memory history owner",
             });
         }
-        if let Some(fact_id) = target.canonical_fact_id()
-            && history.fact_id() != fact_id
-        {
+        if history.fact_id() != target.fact_id() {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
                 invariant: "project-memory history canonical identity",
             });
@@ -465,17 +224,17 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(history)
     }
 
-    /// Pure history snapshot. Incomplete repair is surfaced in the returned
-    /// progress; callers must use an explicit repair command to advance it.
+    /// Pure owner-bound feedback history snapshot.
     pub async fn get_project_memory_feedback_history(
         &self,
         query: ProjectMemoryFactFeedbackHistoryQueryV1,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryFactFeedbackHistoryV1, MemoryApplicationError> {
         self.ensure_owner(query.target().owner())?;
         let limit = query.limit();
         let history = self
             .authority
-            .project_memory_fact_feedback_history(query)
+            .project_memory_fact_feedback_history(query, read_control)
             .await?;
         if history.owner() != &self.owner || history.events().len() > limit {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
@@ -485,13 +244,14 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(history)
     }
 
-    /// Pure status snapshot. It reports, but never advances, feedback repair.
+    /// Pure status snapshot over canonical counters and memory algebra.
     pub async fn project_memory_status(
         &self,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryMemoryStatusV1, MemoryApplicationError> {
         let status = self
             .authority
-            .project_memory_status(self.owner.clone())
+            .project_memory_status(self.owner.clone(), read_control)
             .await?;
         if status.owner() != &self.owner {
             return Err(MemoryApplicationError::InvalidAuthorityResult {
@@ -503,12 +263,13 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
 
     pub async fn inspect_project_memory_fact(
         &self,
-        target: ProjectMemoryFactTargetV1,
+        target: ProjectMemoryFactIdV1,
+        read_control: &FactReadControl,
     ) -> Result<Option<ProjectMemoryFactInspectionV1>, MemoryApplicationError> {
         self.ensure_owner(target.owner())?;
         let inspection = self
             .authority
-            .inspect_project_memory_fact(target.clone())
+            .inspect_project_memory_fact(target.clone(), read_control)
             .await?;
         if let Some(inspection) = &inspection {
             validate_project_memory_inspection(&self.owner, &target, inspection)?;
@@ -516,89 +277,134 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         Ok(inspection)
     }
 
-    pub async fn add_project_memory_fact(
-        &self,
-        request: ProjectMemoryFactAddCommandV1,
-    ) -> Result<ProjectMemoryFactAddOutcomeV1, MemoryApplicationError> {
-        self.ensure_owner(request.owner())?;
-        let outcome = self.authority.add_project_memory_fact(request).await?;
-        validate_project_memory_add_outcome(&self.owner, &outcome)?;
-        Ok(outcome)
-    }
-
     pub async fn update_project_memory_fact(
         &self,
         request: ProjectMemoryFactUpdateCommandV1,
-    ) -> Result<ProjectMemoryFactUpdateOutcomeV1, MemoryApplicationError> {
+        write_control: &FactWriteControl,
+    ) -> Result<
+        ProjectMemoryFactUpdateOutcomeV1,
+        MemoryMutationError<ProjectMemoryFactUpdateOutcomeV1>,
+    > {
         self.ensure_owner(request.target().owner())?;
         let target = request.target().clone();
-        let outcome = self.authority.update_project_memory_fact(request).await?;
-        validate_project_memory_projection(&self.owner, &target, outcome.fact())?;
-        Ok(outcome)
+        let outcome = self
+            .authority
+            .update_project_memory_fact(request, write_control)
+            .await
+            .map_err(MemoryApplicationError::from)?;
+        settle_authority_result(outcome, |outcome| {
+            validate_project_memory_projection(&self.owner, &target, outcome.fact())?;
+            validate_commit_receipt(
+                &self.owner,
+                outcome.fact().fact_id(),
+                Some(outcome.commit_receipt()),
+                outcome.commit_replayed(),
+                "project-memory update commit receipt",
+            )
+        })
     }
 
     pub async fn remove_project_memory_fact(
         &self,
         request: ProjectMemoryFactRemoveCommandV1,
-    ) -> Result<ProjectMemoryFactRemoveOutcomeV1, MemoryApplicationError> {
+        write_control: &FactWriteControl,
+    ) -> Result<
+        ProjectMemoryFactRemoveOutcomeV1,
+        MemoryMutationError<ProjectMemoryFactRemoveOutcomeV1>,
+    > {
         self.ensure_owner(request.target().owner())?;
         let target = request.target().clone();
-        let outcome = self.authority.remove_project_memory_fact(request).await?;
-        // A `None` fact is the idempotent no-op disposition for a target that
-        // never resolved within the authority's single remove transaction;
-        // there is no projection to validate in that case.
-        if let Some(fact) = outcome.fact() {
-            validate_project_memory_projection(&self.owner, &target, fact)?;
-        }
-        Ok(outcome)
+        let outcome = self
+            .authority
+            .remove_project_memory_fact(request, write_control)
+            .await
+            .map_err(MemoryApplicationError::from)?;
+        settle_authority_result(outcome, |outcome| {
+            // A `None` fact is the idempotent no-op disposition for a target
+            // that never resolved inside the authority transaction.
+            if let Some(fact) = outcome.fact() {
+                validate_project_memory_projection(&self.owner, &target, fact)?;
+            }
+            if let Some(receipt) = outcome.commit_receipt() {
+                validate_commit_receipt(
+                    &self.owner,
+                    target.fact_id(),
+                    Some(receipt),
+                    outcome.commit_replayed(),
+                    "project-memory remove commit receipt",
+                )?;
+            } else if outcome.commit_replayed() {
+                return Err(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "project-memory remove replay without commit receipt",
+                });
+            }
+            Ok(())
+        })
     }
 
     pub async fn record_project_memory_fact_feedback(
         &self,
         request: ProjectMemoryFactFeedbackCommandV1,
-    ) -> Result<ProjectMemoryFactFeedbackOutcomeV1, MemoryApplicationError> {
+        write_control: &FactWriteControl,
+    ) -> Result<
+        ProjectMemoryFactFeedbackOutcomeV1,
+        MemoryMutationError<ProjectMemoryFactFeedbackOutcomeV1>,
+    > {
         self.ensure_owner(request.target().owner())?;
         let target = request.target().clone();
         let outcome = self
             .authority
-            .record_project_memory_fact_feedback(request)
-            .await?;
-        validate_project_memory_projection(&self.owner, &target, outcome.fact())?;
-        Ok(outcome)
+            .record_project_memory_fact_feedback(request, write_control)
+            .await
+            .map_err(MemoryApplicationError::from)?;
+        settle_authority_result(outcome, |outcome| {
+            validate_project_memory_projection(&self.owner, &target, outcome.fact())?;
+            validate_commit_receipt(
+                &self.owner,
+                outcome.fact().fact_id(),
+                Some(outcome.commit_receipt()),
+                outcome.commit_replayed(),
+                "project-memory feedback commit receipt",
+            )?;
+            if outcome.commit_receipt().last_event_id() != outcome.event_id() {
+                return Err(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "project-memory feedback event receipt",
+                });
+            }
+            Ok(())
+        })
     }
 
     pub async fn record_project_memory_fact_retrieval(
         &self,
         request: ProjectMemoryFactRetrievalCommandV1,
-    ) -> Result<Vec<ProjectMemoryFactProjectionV1>, MemoryApplicationError> {
+        write_control: &FactWriteControl,
+    ) -> Result<
+        ProjectMemoryFactRetrievalOutcomeV1,
+        MemoryMutationError<ProjectMemoryFactRetrievalOutcomeV1>,
+    > {
         self.ensure_owner(request.owner())?;
+        let operation_id = request.operation_id().clone();
         let targets = request.targets().to_vec();
-        let projections = self
+        let recall = request.recall();
+        let input_digest = request
+            .input_digest()
+            .map_err(MemoryApplicationError::from)?;
+        let outcome = self
             .authority
-            .record_project_memory_fact_retrieval(request)
-            .await?;
-        if projections
-            .iter()
-            .any(|projection| projection.owner() != &self.owner)
-        {
-            return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "project-memory retrieval projection owner",
-            });
-        }
-        if targets
-            .iter()
-            .all(|target| target.canonical_fact_id().is_some())
-            && projections.iter().any(|projection| {
-                !targets
-                    .iter()
-                    .any(|target| target.canonical_fact_id() == Some(projection.fact_id()))
-            })
-        {
-            return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "project-memory retrieval canonical target",
-            });
-        }
-        Ok(projections)
+            .record_project_memory_fact_retrieval(request, write_control)
+            .await
+            .map_err(MemoryApplicationError::from)?;
+        settle_authority_result(outcome, |outcome| {
+            validate_project_memory_retrieval_outcome(
+                &self.owner,
+                &operation_id,
+                &input_digest,
+                &targets,
+                recall,
+                outcome,
+            )
+        })
     }
 
     pub async fn apply_project_memory_automatic_fact(
@@ -606,39 +412,59 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         apply_id: ProvenanceId,
         request: ProjectMemoryFactAddCommandV1,
         evidence: ProjectMemoryAutomaticFactEvidenceV1,
-    ) -> Result<ProjectMemoryAutomaticFactApplyResultV1, MemoryApplicationError> {
+        write_control: &FactWriteControl,
+    ) -> Result<
+        ProjectMemoryAutomaticFactApplyResultV1,
+        MemoryMutationError<ProjectMemoryAutomaticFactApplyResultV1>,
+    > {
         self.ensure_owner(request.owner())?;
+        let expected_request = request.clone();
+        let expected_evidence = evidence.clone();
         let result = self
             .authority
-            .apply_project_memory_automatic_fact(apply_id.clone(), request, evidence)
-            .await?;
-        validate_project_memory_automatic_fact_receipt(&self.owner, &apply_id, result.receipt())?;
-        let valid_disposition = matches!(
-            (result.receipt().state(), result.disposition()),
-            (
-                ProjectMemoryAutomaticFactStateV1::Applied,
-                ProjectMemoryAutomaticFactApplyDispositionV1::Applied
-                    | ProjectMemoryAutomaticFactApplyDispositionV1::AlreadyApplied,
-            ) | (
-                ProjectMemoryAutomaticFactStateV1::Quarantined,
-                ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined,
-            )
-        );
-        if !valid_disposition {
-            return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "automatic fact receipt disposition",
-            });
-        }
-        Ok(result)
+            .apply_project_memory_automatic_fact(apply_id.clone(), request, evidence, write_control)
+            .await
+            .map_err(MemoryApplicationError::from)?;
+        settle_authority_result(result, |result| {
+            validate_project_memory_automatic_fact_apply_receipt(
+                &self.owner,
+                &apply_id,
+                &expected_request,
+                &expected_evidence,
+                result.receipt(),
+            )?;
+            let valid_disposition = matches!(
+                (result.receipt().state(), result.disposition()),
+                (
+                    ProjectMemoryAutomaticFactStateV1::Applied,
+                    ProjectMemoryAutomaticFactApplyDispositionV1::Applied
+                        | ProjectMemoryAutomaticFactApplyDispositionV1::AlreadyApplied,
+                ) | (
+                    ProjectMemoryAutomaticFactStateV1::Quarantined,
+                    ProjectMemoryAutomaticFactApplyDispositionV1::Quarantined,
+                )
+            );
+            if !valid_disposition {
+                return Err(MemoryApplicationError::InvalidAuthorityResult {
+                    invariant: "automatic fact receipt disposition",
+                });
+            }
+            Ok(())
+        })
     }
 
     pub async fn get_project_memory_automatic_fact_receipt(
         &self,
         apply_id: ProvenanceId,
+        read_control: &FactReadControl,
     ) -> Result<Option<ProjectMemoryAutomaticFactReceiptV1>, MemoryApplicationError> {
         let receipt = self
             .authority
-            .get_project_memory_automatic_fact_receipt(self.owner.clone(), apply_id.clone())
+            .get_project_memory_automatic_fact_receipt(
+                self.owner.clone(),
+                apply_id.clone(),
+                read_control,
+            )
             .await?;
         if let Some(receipt) = &receipt {
             validate_project_memory_automatic_fact_receipt(&self.owner, &apply_id, receipt)?;
@@ -651,6 +477,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         state: Option<ProjectMemoryAutomaticFactStateV1>,
         after_apply_id: Option<ProvenanceId>,
         limit: usize,
+        read_control: &FactReadControl,
     ) -> Result<ProjectMemoryAutomaticFactReceiptPageV1, MemoryApplicationError> {
         let page = self
             .authority
@@ -659,6 +486,7 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
                 state,
                 after_apply_id.clone(),
                 limit,
+                read_control,
             )
             .await?;
         validate_project_memory_automatic_fact_receipt_page(
@@ -669,20 +497,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
         )?;
         Ok(page)
     }
-}
-
-pub(super) fn projection_targets(
-    projections: &[ProjectMemoryFactProjectionV1],
-) -> Vec<ProjectMemoryFactTargetV1> {
-    projections
-        .iter()
-        .filter_map(|projection| match projection {
-            ProjectMemoryFactProjectionV1::Available(fact) => Some(
-                ProjectMemoryFactTargetV1::Canonical(fact.mapping().compatibility_id().clone()),
-            ),
-            ProjectMemoryFactProjectionV1::Unavailable(_) => None,
-        })
-        .collect()
 }
 
 fn validate_project_memory_page(
@@ -797,7 +611,7 @@ pub(super) fn validate_lineage(
 
 fn validate_project_memory_projection(
     owner: &FactOwnerV1,
-    target: &ProjectMemoryFactTargetV1,
+    target: &ProjectMemoryFactIdV1,
     projection: &ProjectMemoryFactProjectionV1,
 ) -> Result<(), MemoryApplicationError> {
     if projection.owner() != owner {
@@ -805,42 +619,24 @@ fn validate_project_memory_projection(
             invariant: "project-memory projection owner",
         });
     }
-    if let Some(fact_id) = target.canonical_fact_id() {
-        if projection.fact_id() != fact_id {
-            return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "project-memory projection canonical identity",
-            });
-        }
-    } else if let (Some(query), ProjectMemoryFactProjectionV1::Available(fact)) =
-        (target.legacy_query(), projection)
-    {
-        let mapping = fact.mapping().legacy_mapping();
-        if mapping.is_none_or(|mapping| {
-            mapping.owner() != owner
-                || mapping.source_store_id() != query.source_store_id()
-                || mapping.legacy_fact_id() != query.legacy_fact_id()
-        }) {
-            return Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "persisted fact-id projection mapping",
-            });
-        }
+    if projection.fact_id() != target.fact_id() {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "project-memory projection canonical identity",
+        });
     }
     Ok(())
 }
 
 fn validate_project_memory_inspection(
     owner: &FactOwnerV1,
-    target: &ProjectMemoryFactTargetV1,
+    target: &ProjectMemoryFactIdV1,
     inspection: &ProjectMemoryFactInspectionV1,
 ) -> Result<(), MemoryApplicationError> {
     if inspection.owner() != owner
         || inspection.history().owner() != owner
         || inspection.status().owner() != owner
         || inspection.history().fact_id() != inspection.fact().fact_id()
-        || inspection
-            .status()
-            .fact_id()
-            .is_some_and(|fact_id| fact_id != inspection.fact().fact_id())
+        || inspection.status().fact_id() != inspection.fact().fact_id()
         || inspection
             .anchors()
             .iter()
@@ -854,44 +650,101 @@ fn validate_project_memory_inspection(
             invariant: "project-memory inspection owner and identity",
         });
     }
-    match target {
-        ProjectMemoryFactTargetV1::Canonical(target)
-            if inspection.fact().fact_id() != target.fact_id() =>
-        {
-            Err(MemoryApplicationError::InvalidAuthorityResult {
-                invariant: "project-memory inspection canonical identity",
-            })
-        }
-        ProjectMemoryFactTargetV1::Legacy(query) => {
-            let mapping = inspection.fact().mapping().legacy_mapping();
-            if mapping.is_none_or(|mapping| {
-                mapping.owner() != owner
-                    || mapping.source_store_id() != query.source_store_id()
-                    || mapping.legacy_fact_id() != query.legacy_fact_id()
-            }) {
-                return Err(MemoryApplicationError::InvalidAuthorityResult {
-                    invariant: "persisted fact-id inspection mapping",
-                });
-            }
-            Ok(())
-        }
-        ProjectMemoryFactTargetV1::Canonical(_) => Ok(()),
+    if inspection.fact().fact_id() != target.fact_id() {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "project-memory inspection canonical identity",
+        });
     }
+    Ok(())
 }
 
-fn validate_project_memory_add_outcome(
+pub(super) fn validate_project_memory_add_outcome(
     owner: &FactOwnerV1,
     outcome: &ProjectMemoryFactAddOutcomeV1,
 ) -> Result<(), MemoryApplicationError> {
-    if outcome
-        .fact()
-        .is_some_and(|projection| projection.owner() != owner)
+    let invalid_owner = outcome.fact().owner() != owner
         || outcome
             .closest_fact_id()
-            .is_some_and(|fact_id| fact_id.owner() != owner)
+            .is_some_and(|fact_id| fact_id.owner() != owner);
+    let invalid_receipt = outcome.commit_receipt().is_some_and(|receipt| {
+        receipt.owner() != owner || outcome.fact().fact_id() != receipt.fact_id()
+    });
+    let comparison_matches_fact = outcome
+        .closest_fact_id()
+        .is_some_and(|closest| closest.fact_id() == outcome.fact().fact_id());
+    let invalid_disposition = match outcome.disposition() {
+        ProjectMemoryFactAddDispositionV1::Added
+        | ProjectMemoryFactAddDispositionV1::PossibleConflict => outcome.commit_receipt().is_none(),
+        ProjectMemoryFactAddDispositionV1::NearDuplicate if comparison_matches_fact => {
+            outcome.commit_receipt().is_some() || outcome.commit_replayed()
+        }
+        ProjectMemoryFactAddDispositionV1::NearDuplicate => outcome.commit_receipt().is_none(),
+    };
+    if invalid_owner || invalid_receipt || invalid_disposition {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "project-memory add outcome identity and commit receipt",
+        });
+    }
+    Ok(())
+}
+
+fn validate_commit_receipt(
+    owner: &FactOwnerV1,
+    fact_id: &FactId,
+    receipt: Option<&tracedecay_store::FactCommitReceipt>,
+    replayed: bool,
+    invariant: &'static str,
+) -> Result<(), MemoryApplicationError> {
+    if receipt.is_some_and(|receipt| receipt.owner() != owner || receipt.fact_id() != fact_id)
+        || replayed && receipt.is_none()
+    {
+        return Err(MemoryApplicationError::InvalidAuthorityResult { invariant });
+    }
+    Ok(())
+}
+
+fn validate_project_memory_retrieval_outcome(
+    owner: &FactOwnerV1,
+    operation_id: &ProvenanceId,
+    input_digest: &str,
+    targets: &[ProjectMemoryFactIdV1],
+    recall: bool,
+    outcome: &ProjectMemoryFactRetrievalOutcomeV1,
+) -> Result<(), MemoryApplicationError> {
+    let receipt = outcome.receipt();
+    if receipt.owner() != owner {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "project-memory retrieval receipt owner",
+        });
+    }
+    if receipt.operation_id() != operation_id {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "project-memory retrieval receipt operation",
+        });
+    }
+    if receipt.input_digest() != input_digest {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "project-memory retrieval receipt input",
+        });
+    }
+    if receipt.fact_ids() != targets || receipt.recall() != recall {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "project-memory retrieval receipt targets",
+        });
+    }
+    if outcome.projections().len() != targets.len()
+        || outcome
+            .projections()
+            .iter()
+            .zip(targets)
+            .any(|(projection, target)| {
+                projection.owner() != owner
+                    || projection.owner() != target.owner()
+                    || projection.fact_id() != target.fact_id()
+            })
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
-            invariant: "project-memory add outcome owner",
+            invariant: "project-memory retrieval projection correspondence",
         });
     }
     Ok(())
@@ -908,6 +761,22 @@ fn validate_project_memory_automatic_fact_receipt(
     {
         return Err(MemoryApplicationError::InvalidAuthorityResult {
             invariant: "automatic fact receipt owner and identity",
+        });
+    }
+    Ok(())
+}
+
+fn validate_project_memory_automatic_fact_apply_receipt(
+    owner: &FactOwnerV1,
+    apply_id: &ProvenanceId,
+    request: &ProjectMemoryFactAddCommandV1,
+    evidence: &ProjectMemoryAutomaticFactEvidenceV1,
+    receipt: &ProjectMemoryAutomaticFactReceiptV1,
+) -> Result<(), MemoryApplicationError> {
+    validate_project_memory_automatic_fact_receipt(owner, apply_id, receipt)?;
+    if receipt.request() != request || receipt.evidence() != evidence {
+        return Err(MemoryApplicationError::InvalidAuthorityResult {
+            invariant: "automatic fact receipt exact request and evidence identity",
         });
     }
     Ok(())

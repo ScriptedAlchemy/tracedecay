@@ -65,12 +65,14 @@ pub(super) async fn project_memory_graph(
         .memory_graph_runtime()
         .ok_or(FactStoreError::GraphUnavailable)?;
     let namespace = namespace(&owner)?;
-    let projection = GraphProjectionId::new(PROJECTION).map_err(graph_error)?;
+    let projection =
+        GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?;
     let projection_identity = GraphProjectionIdentity::new(namespace.clone(), projection.clone());
     ensure_not_cancelled(read_control)?;
     let source = load_source(db, &owner, Some(read_control)).await?;
-    let expected_watermark = source_watermark(&source, Some(read_control))?;
+    let expected_watermark = source_watermark(&owner, &source, Some(read_control))?;
     let expected_manifest = build_manifest(
+        &owner,
         projection_identity.clone(),
         &source,
         expected_watermark.clone(),
@@ -86,7 +88,7 @@ pub(super) async fn project_memory_graph(
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
-    .map_err(graph_error)?
+    .map_err(|error| graph_error(&owner, error))?
     .ok_or(FactStoreError::GraphUnavailable)?;
     if verified_snapshot.projection() != &projection_identity
         || verified_snapshot.generation() != &expected_generation
@@ -188,16 +190,17 @@ pub(super) async fn project_memory_graph(
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
-    .map_err(graph_error)?;
+    .map_err(|error| graph_error(&owner, error))?;
 
     ensure_not_cancelled(read_control)?;
     let hydrated = hydrate_page(db, owner.clone(), &hydration_roots, page, read_control).await?;
     if source_watermark(
+        &owner,
         &load_source(db, &owner, Some(read_control)).await?,
         Some(read_control),
     )? != expected_watermark
     {
-        return Err(graph_error(tracedecay_graph_db::GraphDbError::Conflict));
+        return Err(FactStoreError::GraphConflict);
     }
     Ok(hydrated)
 }
@@ -245,26 +248,26 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
     super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
     let projection = GraphProjectionIdentity::new(
         namespace(&owner)?,
-        GraphProjectionId::new(PROJECTION).map_err(graph_error)?,
+        GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
     );
     let source = load_source(db, &owner, None).await?;
-    let watermark = source_watermark(&source, None)?;
-    let manifest = build_manifest(projection.clone(), &source, watermark.clone(), None)?;
+    let watermark = source_watermark(&owner, &source, None)?;
+    let manifest = build_manifest(&owner, projection.clone(), &source, watermark.clone(), None)?;
     let expected_generation = manifest.generation.clone();
     let idempotency_key =
         GraphIdempotencyKey::new(format!("publish:{}", expected_generation.as_str()))
-            .map_err(graph_error)?;
+            .map_err(|error| graph_error(&owner, error))?;
     let runtime_for_reconciliation = Arc::clone(&runtime);
     let snapshot = tokio::task::spawn_blocking(move || {
         runtime_for_reconciliation.reconcile_verified_manifest(&manifest, idempotency_key)
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
-    .map_err(graph_error)?;
+    .map_err(|error| graph_error(&owner, error))?;
     if snapshot.projection() != &projection || snapshot.generation() != &expected_generation {
         return Err(FactStoreError::GraphConflict);
     }
-    if source_watermark(&load_source(db, &owner, None).await?, None)? != watermark
+    if source_watermark(&owner, &load_source(db, &owner, None).await?, None)? != watermark
         && !db.memory_graph_reconciliation_pending()
     {
         return Err(FactStoreError::GraphConflict);
@@ -289,6 +292,7 @@ const fn reconciliation_error_kind(error: &FactStoreError) -> &'static str {
         FactStoreError::GraphCancelled => "cancelled",
         FactStoreError::GraphBudgetExhausted => "budget_exhausted",
         FactStoreError::GraphDeadlineExceeded => "deadline_exceeded",
+        FactStoreError::GraphResetRequired { .. } => "reset_required",
         FactStoreError::OwnerMismatch => "owner_mismatch",
         FactStoreError::Storage { .. } => "storage",
         _ => "canonical_source",
@@ -314,7 +318,7 @@ pub(super) fn validate_rooted_relations(
 
 fn ensure_not_cancelled(read_control: &FactReadControl) -> FactStoreResult<()> {
     if read_control.interrupted() {
-        return Err(graph_error(tracedecay_graph_db::GraphDbError::Cancelled));
+        return Err(FactStoreError::GraphCancelled);
     }
     Ok(())
 }
@@ -741,7 +745,7 @@ fn namespace(owner: &FactOwnerV1) -> FactStoreResult<GraphNamespace> {
         "project-memory:{}",
         hex::encode(Sha256::digest(encoded))
     ))
-    .map_err(graph_error)
+    .map_err(|error| graph_error(owner, error))
 }
 
 fn relation_kinds() -> Result<BTreeSet<GraphRelationKind>, tracedecay_graph_db::GraphDbError> {
@@ -848,7 +852,10 @@ fn decode_identity(value: &str) -> FactStoreResult<String> {
     String::from_utf8(bytes).map_err(|error| storage_error(OPERATION, error))
 }
 
-pub(super) fn graph_error(error: tracedecay_graph_db::GraphDbError) -> FactStoreError {
+pub(super) fn graph_error(
+    owner: &FactOwnerV1,
+    error: tracedecay_graph_db::GraphDbError,
+) -> FactStoreError {
     match error {
         tracedecay_graph_db::GraphDbError::Conflict => FactStoreError::GraphConflict,
         tracedecay_graph_db::GraphDbError::Cancelled => FactStoreError::GraphCancelled,
@@ -858,6 +865,12 @@ pub(super) fn graph_error(error: tracedecay_graph_db::GraphDbError) -> FactStore
         }
         tracedecay_graph_db::GraphDbError::Unavailable { .. }
         | tracedecay_graph_db::GraphDbError::Closed => FactStoreError::GraphUnavailable,
+        tracedecay_graph_db::GraphDbError::ResetRequired { message } => {
+            FactStoreError::GraphResetRequired {
+                owner: owner.clone(),
+                reason: message,
+            }
+        }
         other => storage_error(OPERATION, other),
     }
 }

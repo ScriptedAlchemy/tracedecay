@@ -24,6 +24,7 @@ struct RecordingGraphRuntime {
     binding: StoreRuntimeBindingV1,
     locator: VerifiedStoreLocatorV1,
     block_reconciliation: bool,
+    snapshot_error: Option<GraphDbError>,
     reconciliation_cancelled: AtomicBool,
     reconciliation_closed: AtomicBool,
     reconciliation_started: AtomicBool,
@@ -39,6 +40,7 @@ impl RecordingGraphRuntime {
             binding: database.retained_runtime().binding().clone(),
             locator: database.retained_runtime().locator().verified().clone(),
             block_reconciliation: false,
+            snapshot_error: None,
             reconciliation_cancelled: AtomicBool::new(false),
             reconciliation_closed: AtomicBool::new(false),
             reconciliation_started: AtomicBool::new(false),
@@ -52,6 +54,15 @@ impl RecordingGraphRuntime {
     fn blocking(database: &Database) -> Self {
         Self {
             block_reconciliation: true,
+            ..Self::new(database)
+        }
+    }
+
+    fn reset_required(database: &Database) -> Self {
+        Self {
+            snapshot_error: Some(GraphDbError::ResetRequired {
+                message: "verified profile-memory graph generation mismatch".to_owned(),
+            }),
             ..Self::new(database)
         }
     }
@@ -115,6 +126,9 @@ impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
             return Err(GraphDbError::Cancelled);
         }
         self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = &self.snapshot_error {
+            return Err(error.clone());
+        }
         Ok(None)
     }
 }
@@ -146,6 +160,15 @@ fn bind_blocking_runtime(database: &Database) -> Arc<RecordingGraphRuntime> {
     database
         .bind_memory_graph_runtime(port)
         .expect("bind blocking graph runtime");
+    runtime
+}
+
+fn bind_reset_required_runtime(database: &Database) -> Arc<RecordingGraphRuntime> {
+    let runtime = Arc::new(RecordingGraphRuntime::reset_required(database));
+    let port: Arc<dyn VerifiedGraphRuntimePortV1> = runtime.clone();
+    database
+        .bind_memory_graph_runtime(port)
+        .expect("bind reset-required graph runtime");
     runtime
 }
 
@@ -198,6 +221,31 @@ async fn graph_read_observes_live_cancellation_before_snapshot_access() {
 
     assert!(matches!(result, Err(FactStoreError::GraphCancelled)));
     assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn graph_read_preserves_reset_required_from_the_verified_snapshot() {
+    let (_directory, database) = database("reset-required-read").await;
+    let runtime = bind_reset_required_runtime(&database);
+    let query =
+        ProjectMemoryGraphQueryV1::new(FactOwnerV1::Profile, Vec::new(), 8).expect("graph query");
+
+    let result = super::graph::project_memory_graph(
+        &database,
+        query,
+        &FactReadControl::new(Arc::new(|| false)),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(FactStoreError::GraphResetRequired {
+            owner: FactOwnerV1::Profile,
+            reason,
+        }) if reason == "verified profile-memory graph generation mismatch"
+    ));
+    assert_eq!(runtime.snapshot_calls.load(Ordering::SeqCst), 1);
     assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
 }
 

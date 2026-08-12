@@ -2,11 +2,11 @@
 
 use tracedecay_application::memory::{
     CommitFactPort, CurrentFactsPort, FactAsOfPort, FactCurrentPort, FactLineagePort,
-    LegacyFactPort, MemoryApplication as CanonicalMemoryApplication,
-    MemoryApplicationInvariantError, MemoryCommitFactCommand, MemoryCommitFactDisposition,
-    MemoryCommitFactPortResult, MemoryContradictionState, MemoryCurrentFactsPortResult,
-    MemoryCurrentFactsQuery, MemoryFactAsOfQuery, MemoryFactCurrentQuery, MemoryFactLineageCursor,
-    MemoryFactLineagePortResult, MemoryFactLineageQuery, MemoryFactSnapshot, MemoryLegacyFactQuery,
+    MemoryApplication as CanonicalMemoryApplication, MemoryApplicationInvariantError,
+    MemoryCommitFactCommand, MemoryCommitFactDisposition, MemoryCommitFactPortResult,
+    MemoryContradictionState, MemoryCurrentFactsPortResult, MemoryCurrentFactsQuery,
+    MemoryFactAsOfQuery, MemoryFactCurrentQuery, MemoryFactLineageCursor,
+    MemoryFactLineagePortResult, MemoryFactLineageQuery, MemoryFactSnapshot,
     MemoryOptionalFactPortResult, MemoryReadCoverage, MemoryReadResult, MemoryRetrievalAnchorQuery,
     MemoryUseCaseError, RetrievalAnchorPort,
 };
@@ -15,14 +15,19 @@ use tracedecay_store::{
     CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome,
     FactContradictionStateV1 as StoreFactContradictionStateV1, FactCurrentQuery,
     FactCurrentResponseV1, FactLineageQuery, FactQueryCoverageV1, FactStore, FactStoreError,
-    FactWriteBatch, LegacyFactQuery, RetrievalAnchorQuery, StoredFactV1,
+    FactWriteBatch, FactWriteControl, RetrievalAnchorQuery, StoredFactV1,
 };
 
 use super::{MemoryApplication, MemoryApplicationError};
 
 struct FactStoreAdapter<'a, A>(&'a A);
 
-impl<A: FactStore> CommitFactPort for FactStoreAdapter<'_, A> {
+struct FactStoreWriteAdapter<'a, A> {
+    authority: &'a A,
+    write_control: &'a FactWriteControl,
+}
+
+impl<A: FactStore> CommitFactPort for FactStoreWriteAdapter<'_, A> {
     type Command = FactWriteBatch;
     type Error = FactStoreError;
     type Output = FactCommitOutcome;
@@ -31,7 +36,10 @@ impl<A: FactStore> CommitFactPort for FactStoreAdapter<'_, A> {
         &self,
         command: Self::Command,
     ) -> Result<MemoryCommitFactPortResult<Self::Output>, Self::Error> {
-        let outcome = self.0.commit_fact(command).await?;
+        let outcome = self
+            .authority
+            .commit_fact(command, self.write_control)
+            .await?;
         let (disposition, owner, fact_id) = commit_proof(&outcome);
         Ok(MemoryCommitFactPortResult::new(
             outcome,
@@ -115,15 +123,6 @@ impl<A: FactStore> FactLineagePort for FactStoreAdapter<'_, A> {
     }
 }
 
-impl<A: FactStore> LegacyFactPort for FactStoreAdapter<'_, A> {
-    type Error = FactStoreError;
-    type Query = LegacyFactQuery;
-
-    async fn resolve_legacy_fact(&self, query: Self::Query) -> Result<Option<FactId>, Self::Error> {
-        self.0.resolve_legacy_fact(query).await
-    }
-}
-
 impl<A: FactStore> RetrievalAnchorPort for FactStoreAdapter<'_, A> {
     type Error = FactStoreError;
     type Query = RetrievalAnchorQuery;
@@ -140,10 +139,11 @@ impl<A: FactStore> MemoryApplication<A> {
     pub async fn commit_fact(
         &self,
         batch: FactWriteBatch,
+        write_control: &FactWriteControl,
     ) -> Result<FactCommitOutcome, MemoryApplicationError> {
         let owner = batch.owner().clone();
         let fact_id = batch.fact_id().clone();
-        canonical_application(&self.owner, &self.authority)?
+        canonical_write_application(&self.owner, &self.authority, write_control)?
             .commit_fact(MemoryCommitFactCommand::new(owner, fact_id, batch))
             .await
             .map_err(store_error)
@@ -213,17 +213,6 @@ impl<A: FactStore> MemoryApplication<A> {
         Ok(result.into_payload())
     }
 
-    pub async fn resolve_legacy_fact(
-        &self,
-        query: LegacyFactQuery,
-    ) -> Result<Option<FactId>, MemoryApplicationError> {
-        let owner = query.owner().clone();
-        canonical_application(&self.owner, &self.authority)?
-            .resolve_legacy_fact(MemoryLegacyFactQuery::new(owner, query))
-            .await
-            .map_err(store_error)
-    }
-
     pub async fn get_retrieval_anchor(
         &self,
         query: RetrievalAnchorQuery,
@@ -243,6 +232,21 @@ fn canonical_application<'a, A>(
 ) -> Result<CanonicalMemoryApplication<FactStoreAdapter<'a, A>>, MemoryApplicationError> {
     CanonicalMemoryApplication::new(owner.clone(), FactStoreAdapter(authority))
         .map_err(invariant_error)
+}
+
+fn canonical_write_application<'a, A>(
+    owner: &FactOwnerV1,
+    authority: &'a A,
+    write_control: &'a FactWriteControl,
+) -> Result<CanonicalMemoryApplication<FactStoreWriteAdapter<'a, A>>, MemoryApplicationError> {
+    CanonicalMemoryApplication::new(
+        owner.clone(),
+        FactStoreWriteAdapter {
+            authority,
+            write_control,
+        },
+    )
+    .map_err(invariant_error)
 }
 
 fn fact_snapshot(fact: &StoredFactV1) -> MemoryFactSnapshot {

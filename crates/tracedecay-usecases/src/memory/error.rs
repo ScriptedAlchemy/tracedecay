@@ -1,11 +1,11 @@
-//! Memory application errors and the persisted numeric fact-id boundary.
+//! Memory application errors.
+
+use std::fmt::Debug;
 
 use thiserror::Error;
 
-use tracedecay_domain::{DomainError, FactOwnerV1, SourceStoreId};
-use tracedecay_store::{
-    FactStoreError, ProjectMemoryFeedbackRepairProgressV1, ProjectMemoryStoreError,
-};
+use tracedecay_domain::{DomainError, FactOwnerV1};
+use tracedecay_store::FactStoreError;
 
 use super::anchors::EvidenceAnchorResolutionError;
 
@@ -22,72 +22,69 @@ pub enum MemoryApplicationError {
     },
     #[error("fact store operation failed")]
     Store(#[from] FactStoreError),
-    #[error("project-memory authority operation failed: {0}")]
-    ProjectMemoryAuthority(#[from] ProjectMemoryStoreError),
     #[error("memory input is invalid: {invariant}")]
     InvalidInput { invariant: &'static str },
-    #[error("persisted numeric fact cannot be represented: {invariant}")]
-    UnrepresentablePersistedFact { invariant: &'static str },
     #[error("memory authority returned a result violating {invariant}")]
     InvalidAuthorityResult { invariant: &'static str },
-    #[error("memory feedback history is unavailable while repair is {progress:?}")]
-    FeedbackHistoryUnavailable {
-        progress: ProjectMemoryFeedbackRepairProgressV1,
-    },
     #[error("evidence anchor resolution failed")]
     EvidenceAnchor(#[from] EvidenceAnchorResolutionError),
 }
 
-/// Stable source identity for shipped numeric fact identifiers. It is product-owned, not
-/// derived from a path, database name, or caller input.
-pub const PERSISTED_FACT_ID_SOURCE_STORE: &str = "persisted-numeric-fact-id";
-
-/// Immutable identity boundary for persisted numeric fact IDs. The authority remains
-/// the sole resolver of the numeric mapping inside its transaction.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PersistedFactIdScope {
-    owner: FactOwnerV1,
-    source_store_id: SourceStoreId,
+/// Mutation failure that preserves any canonical authority result returned
+/// after the durable transaction settled.
+///
+/// Callers with an effect boundary can emit a truthful partial effect from the
+/// embedded result. Callers without one may convert this error back to
+/// [`MemoryApplicationError`], deliberately discarding only their own ability
+/// to settle that external effect.
+#[derive(Debug, Error)]
+pub enum MemoryMutationError<T: Debug> {
+    #[error(transparent)]
+    Application(#[from] MemoryApplicationError),
+    #[error("memory authority returned a settled result that failed validation: {error}")]
+    InvalidAuthorityResult {
+        #[source]
+        error: MemoryApplicationError,
+        authority_result: T,
+    },
 }
 
-impl PersistedFactIdScope {
-    pub fn runtime(owner: FactOwnerV1) -> Result<Self, MemoryApplicationError> {
-        Self::new(
-            owner,
-            SourceStoreId::new(PERSISTED_FACT_ID_SOURCE_STORE).map_err(|_| {
-                MemoryApplicationError::InvalidInput {
-                    invariant: "persisted fact-id source store identity",
-                }
-            })?,
-        )
-    }
-
-    pub fn new(
-        owner: FactOwnerV1,
-        source_store_id: SourceStoreId,
-    ) -> Result<Self, MemoryApplicationError> {
-        owner.validate()?;
-        source_store_id
-            .validate()
-            .map_err(|_| MemoryApplicationError::InvalidInput {
-                invariant: "persisted fact-id source store identity",
-            })?;
-        if source_store_id.as_str() != PERSISTED_FACT_ID_SOURCE_STORE {
-            return Err(MemoryApplicationError::InvalidInput {
-                invariant: "fixed persisted fact-id source store identity",
-            });
+impl<T: Debug> MemoryMutationError<T> {
+    pub fn map_authority_result<U: Debug>(
+        self,
+        map: impl FnOnce(T) -> U,
+    ) -> MemoryMutationError<U> {
+        match self {
+            Self::Application(error) => MemoryMutationError::Application(error),
+            Self::InvalidAuthorityResult {
+                error,
+                authority_result,
+            } => MemoryMutationError::InvalidAuthorityResult {
+                error,
+                authority_result: map(authority_result),
+            },
         }
-        Ok(Self {
-            owner,
-            source_store_id,
-        })
     }
+}
 
-    pub fn owner(&self) -> &FactOwnerV1 {
-        &self.owner
+impl<T: Debug> From<MemoryMutationError<T>> for MemoryApplicationError {
+    fn from(error: MemoryMutationError<T>) -> Self {
+        match error {
+            MemoryMutationError::Application(error) => error,
+            MemoryMutationError::InvalidAuthorityResult { error, .. } => error,
+        }
     }
+}
 
-    pub fn source_store_id(&self) -> &SourceStoreId {
-        &self.source_store_id
+pub(super) fn settle_authority_result<T: Debug>(
+    authority_result: T,
+    validate: impl FnOnce(&T) -> Result<(), MemoryApplicationError>,
+) -> Result<T, MemoryMutationError<T>> {
+    match validate(&authority_result) {
+        Ok(()) => Ok(authority_result),
+        Err(error) => Err(MemoryMutationError::InvalidAuthorityResult {
+            error,
+            authority_result,
+        }),
     }
 }
