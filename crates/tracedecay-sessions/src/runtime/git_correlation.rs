@@ -960,6 +960,7 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 mod attribution;
 mod backfill;
 mod store;
+#[cfg(test)]
 pub(crate) use attribution::publish_graph_evidence_controlled;
 pub use attribution::{
     ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
