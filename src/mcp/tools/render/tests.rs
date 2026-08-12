@@ -1,7 +1,7 @@
 use super::*;
 use crate::daemon_client::RequestedOutputFormat;
 use crate::mcp::response_handles::{
-    ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle_from_root,
+    ResponseHandleLookup, lock_response_handle_store, retrieve_response_handle,
 };
 use crate::tracedecay::current_timestamp;
 use serde_json::json;
@@ -72,19 +72,23 @@ fn truncated_json_envelope_includes_handle() {
     let handle = parsed["handle"].as_str().unwrap();
     assert!(handle.starts_with("rh_"));
 
-    let prepared = prepare_truncated_response_handle(Some(dir.path()), &long);
-    let record = prepared.record.as_ref().unwrap();
-    assert_eq!(record.handle, handle);
-    let stored = retrieve_response_handle_from_root(
-        &record.response_handle_root,
-        handle,
-        current_timestamp(),
-    )
-    .unwrap();
+    let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
     match stored {
         ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
         other => panic!("stored response should be retrievable, got {other:?}"),
     }
+}
+
+#[test]
+fn truncated_json_envelope_reports_character_counts_for_utf8() {
+    let long = "🦀".repeat(MAX_RESPONSE_CHARS);
+
+    let result = truncated_json_envelope_with_handle(None, &long);
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+
+    assert_eq!(parsed["original_chars"], MAX_RESPONSE_CHARS);
+    let preview = parsed["preview"].as_str().unwrap();
+    assert_eq!(parsed["preview_chars"], preview.chars().count());
 }
 
 #[test]
@@ -112,15 +116,7 @@ fn truncated_markdown_includes_readable_handle_guidance() {
     };
     assert!(handle.starts_with("rh_"));
 
-    let prepared = prepare_truncated_response_handle(Some(dir.path()), &long);
-    let record = prepared.record.as_ref().unwrap();
-    assert_eq!(record.handle, handle);
-    let stored = retrieve_response_handle_from_root(
-        &record.response_handle_root,
-        handle,
-        current_timestamp(),
-    )
-    .unwrap();
+    let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
     match stored {
         ResponseHandleLookup::Found(record) => assert_eq!(record.content, long),
         other => panic!("stored markdown response should be retrievable, got {other:?}"),
@@ -132,7 +128,7 @@ fn truncated_markdown_preserves_late_priority_sections() {
     let _store_guard = lock_response_handle_store();
     let dir = tempfile::TempDir::new().unwrap();
     let long = format!(
-        "## Code Context\n{}\n### Memory Matches\n- fact_id=42 category=project trust=0.90 score=0.500: remembered context\n\n### Entry Points\n- **late_symbol** (function) - src/lib.rs:10\n",
+        "## Code Context\n{}\n### Memory Matches\n- fact_id=fact.v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb category=project trust=0.90 score=0.500: remembered context\n\n### Entry Points\n- **late_symbol** (function) - src/lib.rs:10\n",
         "padding\n".repeat(5_000)
     );
 
@@ -141,7 +137,7 @@ fn truncated_markdown_preserves_late_priority_sections() {
     assert!(result.len() <= MAX_RESPONSE_CHARS);
     assert!(result.contains("## Preserved Priority Sections"));
     assert!(result.contains("### Memory Matches"));
-    assert!(result.contains("fact_id=42"));
+    assert!(result.contains("fact_id=fact.v1."));
     assert!(result.contains("### Entry Points"));
     assert!(result.contains("late_symbol"));
 }
@@ -158,7 +154,7 @@ fn markdown_truncation_preview_closes_open_code_fence() {
 #[test]
 fn markdown_truncation_preview_closes_prefix_fence_before_preserved_sections() {
     let markdown = format!(
-        "## Code Context\n```rust\n{}\n### Memory Matches\n- fact_id=42 category=project trust=0.90 score=0.500: remembered context\n",
+        "## Code Context\n```rust\n{}\n### Memory Matches\n- fact_id=fact.v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb category=project trust=0.90 score=0.500: remembered context\n",
         "fn demo() {}\n".repeat(5_000)
     );
 
@@ -198,15 +194,7 @@ fn markdown_preview_with_handle_stores_full_text_when_preview_differs() {
         panic!("markdown preview envelope should include handle");
     };
 
-    let prepared = prepare_truncated_response_handle(Some(dir.path()), &full);
-    let record = prepared.record.as_ref().unwrap();
-    assert_eq!(record.handle, handle);
-    let stored = retrieve_response_handle_from_root(
-        &record.response_handle_root,
-        handle,
-        current_timestamp(),
-    )
-    .unwrap();
+    let stored = retrieve_response_handle(dir.path(), handle, current_timestamp()).unwrap();
     match stored {
         ResponseHandleLookup::Found(record) => assert_eq!(record.content, full),
         other => panic!("stored markdown preview should be retrievable, got {other:?}"),
@@ -256,12 +244,12 @@ fn truncated_json_envelope_reports_store_failure() {
         parsed["handle_status"]["reason_code"],
         "handle_store_failed"
     );
-    assert!(
-        parsed["handle_status"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("could not be cached locally")
+    let message = parsed["handle_status"]["message"].as_str().unwrap();
+    assert_eq!(
+        message,
+        "The full response could not be cached locally, so no retrieval handle is available."
     );
+    assert!(!message.contains(dir.path().to_string_lossy().as_ref()));
 }
 
 #[test]

@@ -4,7 +4,9 @@ use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
-use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
+use crate::mcp::response_handles::{
+    ResponseHandleLookup, public_retrieve_error, retrieve_response_handle,
+};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 
@@ -84,6 +86,17 @@ pub(crate) async fn resolve_registered_project_route_for_tool(
 }
 
 pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
+    let object = args.as_object().ok_or_else(|| TraceDecayError::Config {
+        message: "tracedecay_retrieve arguments must be an object".to_string(),
+    })?;
+    if let Some(field) = object
+        .keys()
+        .find(|field| !matches!(field.as_str(), "handle" | "format" | "project_selector"))
+    {
+        return Err(TraceDecayError::Config {
+            message: format!("unknown tracedecay_retrieve argument `{field}`"),
+        });
+    }
     let handle =
         args.get("handle")
             .and_then(Value::as_str)
@@ -92,7 +105,9 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
                     "missing required parameter: handle (copy the exact `handle` value from a truncated MCP response envelope)"
                         .to_string(),
             })?;
-    let payload = match retrieve_response_handle(cg.project_root(), handle, current_timestamp())? {
+    let payload = match retrieve_response_handle(cg.project_root(), handle, current_timestamp())
+        .map_err(public_retrieve_error)?
+    {
         ResponseHandleLookup::Found(record) => {
             // Retrieval never truncates: the stored content is by definition
             // larger than the response cap, so neither output path may route
@@ -100,15 +115,15 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
             // returns the stored text verbatim under a small header; JSON
             // serializes the payload directly.
             let text = if render::wants_json(args) {
-                serde_json::to_string(&json!({
+                json!({
                     "handle": record.handle,
                     "expired": false,
                     "original_chars": record.original_chars(),
                     "created_at": record.created_at,
                     "expires_at": record.expires_at,
                     "content": record.content,
-                }))
-                .unwrap_or_default()
+                })
+                .to_string()
             } else {
                 format!(
                     "## Retrieved Response\n**handle:** `{}` ({} chars, expires at {})\n\n{}",
@@ -122,7 +137,7 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
         }
         ResponseHandleLookup::Missing => json!({
             "handle": handle,
-            "expired": true,
+            "expired": null,
             "content": null,
             "reason_code": "handle_not_found",
             "message": "Response handle was not found in this project's local cache.",

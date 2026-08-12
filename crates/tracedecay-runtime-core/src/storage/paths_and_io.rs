@@ -9,11 +9,13 @@ use tracedecay_domain::framed_log::DirectorySyncPolicy;
 use crate::config;
 use crate::errors::{Result, TraceDecayError};
 
+#[cfg(windows)]
+use super::DURABLE_REMOVAL_TOMBSTONE_PREFIX;
 use super::{
     ActiveProjectContext, BRANCH_META_FILENAME, DurableAtomicWritePhase, EnrollmentMarker,
     GraphScopeId, PrivateStoreIo, ProjectIdentity, ProjectPath, QueryTarget, SESSIONS_DB_FILENAME,
     STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind, StoreLayout,
-    StoreManifest, inject_durable_atomic_write_fault,
+    StoreManifest, inject_durable_atomic_write_fault, inject_durable_namespace_sync_fault,
 };
 
 impl StoreManifest {
@@ -178,6 +180,24 @@ impl PrivateStoreIo {
         set_private_dir_permissions(path)
     }
 
+    /// Creates an absolute private directory hierarchy and durably publishes
+    /// every new namespace entry before returning.
+    pub fn create_dir_all_durable(path: &Path) -> io::Result<()> {
+        if !path.is_absolute() {
+            return Err(invalid_input(
+                "durable private store directory path must be absolute",
+            ));
+        }
+        platform_create_dir_all_durable(path)
+    }
+
+    /// Removes one private-store file and establishes the platform namespace
+    /// durability barrier before reporting success.
+    pub fn remove_file_durable(path: &Path) -> io::Result<bool> {
+        reject_symlink_components(path, "private store durable removal")?;
+        platform_remove_file_durable(path)
+    }
+
     pub fn write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             Self::create_dir_all(parent)?;
@@ -253,6 +273,11 @@ impl PrivateStoreIo {
 
     /// Atomically replaces a private-store file and establishes the durability
     /// barrier required before a destructive operation may trust it.
+    ///
+    /// A failure after the atomic rename can leave the complete replacement at
+    /// `path`. Callers that require rollback must retain and restore their prior
+    /// value under their own stable serialization authority; this primitive
+    /// never unlinks a destination it cannot prove it still owns.
     pub fn write_file_atomically_durable(
         path: &Path,
         temp_path: &Path,
@@ -264,7 +289,7 @@ impl PrivateStoreIo {
             ));
         }
         if let Some(parent) = path.parent() {
-            Self::create_dir_all(parent)?;
+            Self::create_dir_all_durable(parent)?;
         }
         reject_symlink_components(path, "private store file")?;
         reject_symlink_components(temp_path, "private store temp file")?;
@@ -275,6 +300,7 @@ impl PrivateStoreIo {
             temp.write_all(contents)?;
             temp.sync_all()?;
         }
+        set_private_file_permissions(temp_path)?;
         inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterTempSync)?;
         crate::db::DatabaseAuthority::replace_file_atomically(
             temp_path,
@@ -282,7 +308,6 @@ impl PrivateStoreIo {
             "private store durable file",
         )
         .map_err(io::Error::other)?;
-        set_private_file_permissions(path)?;
         if let Err(error) = fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -291,8 +316,6 @@ impl PrivateStoreIo {
             .and_then(|()| inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterRename))
             .and_then(|()| sync_parent_directory(path))
         {
-            let _ = fs::remove_file(path);
-            let _ = sync_parent_directory(path);
             return Err(error);
         }
         Ok(())
@@ -362,7 +385,240 @@ fn sync_parent_directory(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid_input("private store durable file has no parent directory"))?;
+    inject_durable_namespace_sync_fault()?;
     tracedecay_domain::framed_log::sync_directory(parent, DirectorySyncPolicy::Strict)
+}
+
+fn missing_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
+    if path.as_os_str().is_empty() {
+        return Err(invalid_input(
+            "durable private store directory path must not be empty",
+        ));
+    }
+    let mut missing = Vec::new();
+    let mut cursor = Some(path);
+    while let Some(current) = cursor {
+        if current.as_os_str().is_empty() {
+            break;
+        }
+        match current.try_exists() {
+            Ok(true) => break,
+            Ok(false) => missing.push(current.to_path_buf()),
+            Err(error) => return Err(error),
+        }
+        cursor = current.parent();
+    }
+    Ok(missing)
+}
+
+#[cfg(unix)]
+fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
+    let missing = missing_directories(path)?;
+    let Some(highest_missing) = missing.last() else {
+        PrivateStoreIo::create_dir_all(path)?;
+        return sync_parent_directory(path);
+    };
+    let existing_parent = highest_missing
+        .parent()
+        .ok_or_else(|| invalid_input("durable private store directory has no parent directory"))?;
+    if existing_parent.parent().is_some() {
+        sync_parent_directory(existing_parent)?;
+    }
+    for destination in missing.iter().rev() {
+        PrivateStoreIo::create_private_directory(destination)?;
+        sync_parent_directory(destination)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+
+    reject_symlink_components(path, "durable private store directory")?;
+    let missing = missing_directories(path)?;
+    if missing.is_empty() {
+        return PrivateStoreIo::create_dir_all(path);
+    }
+    for destination in missing.iter().rev() {
+        let parent = destination.parent().ok_or_else(|| {
+            invalid_input("durable private store directory has no parent directory")
+        })?;
+        let destination_name = destination
+            .file_name()
+            .ok_or_else(|| invalid_input("durable private store directory has no file name"))?;
+        let mut lock_name = OsString::from(".");
+        lock_name.push(destination_name);
+        lock_name.push(".durable-directory.lock");
+        let lock_path = parent.join(lock_name);
+        reject_symlink_components(&lock_path, "durable private store directory lock")?;
+        let _lock = acquire_lock_file_blocking(&lock_path, true)?;
+        if destination.try_exists()? {
+            tracedecay_private_fs::validate_private_directory(destination)?;
+            continue;
+        }
+        let staging = unique_private_staging_directory(parent)?;
+        let encode = |value: &Path| {
+            value
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        };
+        let existing = encode(&staging);
+        let replacement = encode(destination);
+        let moved = unsafe {
+            MoveFileExW(
+                existing.as_ptr(),
+                replacement.as_ptr(),
+                MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved != 0 {
+            continue;
+        }
+        let error = io::Error::last_os_error();
+        let cleanup = fs::remove_dir(&staging);
+        if error.kind() == io::ErrorKind::AlreadyExists && cleanup.is_ok() {
+            tracedecay_private_fs::validate_private_directory(destination)?;
+            continue;
+        }
+        return match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; additionally failed to remove private directory staging: {cleanup_error}"
+                ),
+            )),
+        };
+    }
+    PrivateStoreIo::create_dir_all(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
+    let missing = missing_directories(path)?;
+    if missing.is_empty() {
+        return PrivateStoreIo::create_dir_all(path);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable private-directory publication is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn unique_private_staging_directory(parent: &Path) -> io::Result<PathBuf> {
+    for _ in 0..16 {
+        let mut entropy = [0_u8; 16];
+        getrandom::getrandom(&mut entropy).map_err(io::Error::from)?;
+        let path = parent.join(format!(
+            ".tracedecay-directory-staging-{}",
+            hex::encode(entropy)
+        ));
+        match tracedecay_private_fs::create_private_directory(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve a unique private directory staging path",
+    ))
+}
+
+#[cfg(unix)]
+fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            sync_parent_directory(path)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            sync_parent_directory(path)?;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_input("private store durable removal has no parent directory"))?;
+    let tombstone = tempfile::Builder::new()
+        .prefix(DURABLE_REMOVAL_TOMBSTONE_PREFIX)
+        .tempfile_in(parent)?;
+    let (tombstone_file, tombstone_path) = tombstone.keep()?;
+    drop(tombstone_file);
+    let encode = |value: &Path| {
+        value
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let existing = encode(path);
+    let replacement = encode(&tombstone_path);
+    let retired = retry_transient_file_op(|| {
+        let moved = unsafe {
+            MoveFileExW(
+                existing.as_ptr(),
+                replacement.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if moved == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    });
+    if let Err(error) = retired {
+        let cleanup = fs::remove_file(&tombstone_path);
+        if error.kind() == io::ErrorKind::NotFound && cleanup.is_ok() {
+            return Ok(false);
+        }
+        return match cleanup {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "{error}; additionally failed to remove durable-removal tombstone: {cleanup_error}"
+                ),
+            )),
+        };
+    }
+    fs::remove_file(&tombstone_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "target was durably retired but its deletion tombstone could not be removed: {error}"
+            ),
+        )
+    })?;
+    Ok(true)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_remove_file_durable(path: &Path) -> io::Result<bool> {
+    if !path.try_exists()? {
+        return Ok(false);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "durable private-file removal is unsupported on this platform",
+    ))
 }
 
 pub fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {

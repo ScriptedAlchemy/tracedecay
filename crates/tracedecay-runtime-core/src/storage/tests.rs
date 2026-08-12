@@ -45,6 +45,230 @@ mod tests {
     }
 
     #[test]
+    fn durable_private_directory_publish_and_remove_close_the_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("private").join("response-handles");
+        PrivateStoreIo::create_dir_all_durable(&nested).unwrap();
+        let record = nested.join("record.json");
+        let temporary = nested.join("record.tmp");
+
+        PrivateStoreIo::write_file_atomically_durable(&record, &temporary, b"payload").unwrap();
+        assert_eq!(fs::read(&record).unwrap(), b"payload");
+        assert!(PrivateStoreIo::remove_file_durable(&record).unwrap());
+        assert!(!record.exists());
+        assert!(!PrivateStoreIo::remove_file_durable(&record).unwrap());
+    }
+
+    #[test]
+    fn durable_private_directory_rejects_relative_paths() {
+        let error =
+            PrivateStoreIo::create_dir_all_durable(std::path::Path::new("relative/private-store"))
+                .expect_err("durable directory publication must require an absolute path");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_private_directory_retry_reestablishes_a_failed_parent_barrier() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("response-handles");
+        with_durable_namespace_sync_fault_for_test(2, || {
+            PrivateStoreIo::create_dir_all_durable(&target)
+        })
+        .expect_err("the injected post-create parent sync must fail");
+        assert!(target.is_dir());
+
+        with_durable_namespace_sync_fault_for_test(1, || {
+            PrivateStoreIo::create_dir_all_durable(&target)
+        })
+        .expect_err("an existing retry must still establish the parent barrier");
+        PrivateStoreIo::create_dir_all_durable(&target).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_remove_retry_reestablishes_a_failed_parent_barrier() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("response.json");
+        fs::write(&target, b"payload").unwrap();
+        with_durable_namespace_sync_fault_for_test(1, || {
+            PrivateStoreIo::remove_file_durable(&target)
+        })
+        .expect_err("the injected post-remove parent sync must fail");
+        assert!(!target.exists());
+
+        with_durable_namespace_sync_fault_for_test(1, || {
+            PrivateStoreIo::remove_file_durable(&target)
+        })
+        .expect_err("a missing retry must still establish the parent barrier");
+        assert!(!PrivateStoreIo::remove_file_durable(&target).unwrap());
+    }
+
+    #[test]
+    fn concurrent_durable_first_create_converges_on_one_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("private").join("response-handles");
+        let barrier = Arc::new(Barrier::new(2));
+        let workers = [(), ()].map(|()| {
+            let target = target.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                PrivateStoreIo::create_dir_all_durable(&target)
+            })
+        });
+
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn post_rename_error_retains_the_complete_replacement_for_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("record.json");
+        let temporary = root.path().join("record.tmp");
+        fs::write(&target, b"prior").unwrap();
+
+        with_durable_atomic_write_fault_for_test(
+            DurableAtomicWriteFaultForTest::AfterRename,
+            || PrivateStoreIo::write_file_atomically_durable(&target, &temporary, b"replacement"),
+        )
+        .expect_err("post-rename durability fault must surface");
+
+        assert_eq!(fs::read(&target).unwrap(), b"replacement");
+        assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn durable_atomic_write_fault_is_scoped_to_one_write_attempt() {
+        let root = tempfile::tempdir().unwrap();
+
+        for (index, phase) in [
+            DurableAtomicWriteFaultForTest::AfterTempSync,
+            DurableAtomicWriteFaultForTest::AfterRename,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let target = root.path().join(format!("phase-{index}.json"));
+            let temporary = root.path().join(format!("phase-{index}.tmp"));
+            with_durable_atomic_write_fault_for_test(phase, || {
+                PrivateStoreIo::write_file_atomically_durable(&target, &temporary, b"first")
+            })
+            .expect_err("the injected write must fail at its requested phase");
+
+            let retry_target = root.path().join(format!("phase-{index}-retry.json"));
+            let retry_temporary = root.path().join(format!("phase-{index}-retry.tmp"));
+            PrivateStoreIo::write_file_atomically_durable(
+                &retry_target,
+                &retry_temporary,
+                b"retry",
+            )
+            .expect("the next write must not inherit the consumed fault");
+        }
+
+        let invalid_target = root.path().join("invalid-target").join("record.json");
+        let invalid_temporary = root.path().join("different-parent").join("record.tmp");
+        with_durable_atomic_write_fault_for_test(
+            DurableAtomicWriteFaultForTest::AfterRename,
+            || {
+                PrivateStoreIo::write_file_atomically_durable(
+                    &invalid_target,
+                    &invalid_temporary,
+                    b"invalid",
+                )
+            },
+        )
+        .expect_err("an ordinary pre-injection validation error must surface");
+
+        let after_error_target = root.path().join("after-error.json");
+        let after_error_temporary = root.path().join("after-error.tmp");
+        PrivateStoreIo::write_file_atomically_durable(
+            &after_error_target,
+            &after_error_temporary,
+            b"after-error",
+        )
+        .expect("an ordinary error must not leak the injected fault to the next write");
+
+        let unwind = std::panic::catch_unwind(|| {
+            with_durable_atomic_write_fault_for_test(
+                DurableAtomicWriteFaultForTest::AfterRename,
+                || panic!("pre-consumption panic"),
+            );
+        });
+        assert!(unwind.is_err());
+
+        let after_panic_target = root.path().join("after-panic.json");
+        let after_panic_temporary = root.path().join("after-panic.tmp");
+        PrivateStoreIo::write_file_atomically_durable(
+            &after_panic_target,
+            &after_panic_temporary,
+            b"after-panic",
+        )
+        .expect("a panic must not leak the injected fault to the next write");
+    }
+
+    #[test]
+    fn durable_atomic_write_fault_is_isolated_to_the_injecting_thread() {
+        for injecting_name in ["first", "second"] {
+            let root = tempfile::tempdir().unwrap();
+            let root = Arc::new(root.path().to_path_buf());
+            let start = Arc::new(Barrier::new(2));
+            let non_injecting_done = Arc::new(Barrier::new(2));
+            let workers = ["first", "second"].map(|name| {
+                let root = Arc::clone(&root);
+                let start = Arc::clone(&start);
+                let non_injecting_done = Arc::clone(&non_injecting_done);
+                std::thread::spawn(move || {
+                    let write = |suffix: &str| {
+                        let target = root.join(format!("{name}-{suffix}.json"));
+                        let temporary = root.join(format!("{name}-{suffix}.tmp"));
+                        PrivateStoreIo::write_file_atomically_durable(
+                            &target,
+                            &temporary,
+                            name.as_bytes(),
+                        )
+                    };
+                    if name == injecting_name {
+                        with_durable_atomic_write_fault_for_test(
+                            DurableAtomicWriteFaultForTest::AfterRename,
+                            || {
+                                start.wait();
+                                non_injecting_done.wait();
+                                write("injected")
+                            },
+                        )
+                        .expect_err("the injecting thread must receive its fault");
+                    } else {
+                        start.wait();
+                        write("clean").expect("the non-injecting thread must succeed");
+                        non_injecting_done.wait();
+                    }
+                    write("retry").expect("both subsequent writes must succeed");
+                })
+            });
+
+            for worker in workers {
+                worker.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn durable_namespace_sync_fault_scope_clears_on_unwind() {
+        let unwind = std::panic::catch_unwind(|| {
+            with_durable_namespace_sync_fault_for_test(1, || panic!("before sync"));
+        });
+        assert!(unwind.is_err());
+
+        let root = tempfile::tempdir().unwrap();
+        PrivateStoreIo::create_dir_all_durable(&root.path().join("after-panic")).unwrap();
+    }
+
+    #[test]
     fn linked_worktree_repository_identity_outranks_stale_local_enrollment() {
         let dir = tempfile::tempdir().unwrap();
         let primary = dir.path().join("primary");

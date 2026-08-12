@@ -48,7 +48,7 @@ where
 {
     match format {
         RequestedOutputFormat::Json => {
-            let json = serde_json::to_string(value).unwrap_or_default();
+            let json = value.to_string();
             truncated_json_envelope_with_handle(project_root, &json)
         }
         RequestedOutputFormat::Markdown => {
@@ -61,9 +61,8 @@ where
     }
 }
 
-/// Wraps oversized JSON text in a valid preview envelope. When a project root
-/// is available, stores the full original locally and includes a retrieval
-/// handle.
+/// Wraps oversized JSON text in a valid preview envelope. With a project root,
+/// stores the full original locally and includes a retrieval handle.
 ///
 /// If local handle storage is unavailable or fails, the envelope still carries
 /// a preview but also includes explicit recovery metadata so clients can tell
@@ -78,6 +77,7 @@ pub(super) fn truncated_json_envelope_with_handle(
     let started = std::time::Instant::now();
     let now = current_timestamp();
     let handle = prepare_truncated_response_handle(project_root, formatted);
+    let original_chars = formatted.chars().count();
     let mut end = formatted.len().min(MAX_RESPONSE_CHARS.saturating_sub(1024));
     loop {
         while end > 0 && !formatted.is_char_boundary(end) {
@@ -86,8 +86,8 @@ pub(super) fn truncated_json_envelope_with_handle(
         let preview = &formatted[..end];
         let mut envelope = serde_json::json!({
             "truncated": true,
-            "original_chars": formatted.len(),
-            "preview_chars": preview.len(),
+            "original_chars": original_chars,
+            "preview_chars": preview.chars().count(),
             "preview": preview,
         });
         if let Some(object) = envelope.as_object_mut() {
@@ -108,9 +108,9 @@ pub(super) fn truncated_json_envelope_with_handle(
                 object.insert(
                     "retrieve_instruction".to_string(),
                     serde_json::json!(format!(
-                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. If the original tool call used a project selector (`project_id`, `project_path`, or `project_selector`), pass the same selector to `{RESPONSE_RETRIEVE_TOOL}` so the handle is looked up in the same project cache. Only call it if the missing details are needed to answer the user's request.",
-                        preview.len(),
-                        formatted.len(),
+                        "This response was truncated: `preview` contains only the first {} of {} characters. The full original response is stored locally in this project and expires at {} (TTL {} seconds). To recover it, call `{RESPONSE_RETRIEVE_TOOL}` with required argument `handle` set to `{}`. If the original call used `project_selector.project_id`, pass the same selector so the handle is read from that project cache. Only call it if the missing details are needed.",
+                        preview.chars().count(),
+                        original_chars,
                         record.expires_at,
                         RESPONSE_HANDLE_TTL_SECS,
                         record.handle
@@ -121,7 +121,7 @@ pub(super) fn truncated_json_envelope_with_handle(
                 object.insert("handle_status".to_string(), status.clone());
             }
         }
-        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+        let text = envelope.to_string();
         if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
             observe_response_truncation(
                 formatted.len(),
@@ -165,8 +165,8 @@ fn truncated_markdown_with_handle(project_root: Option<&Path>, text: &str) -> St
         |preview| {
             format!(
                 "Showing the first {} of {} characters.",
-                preview.len(),
-                text.len()
+                preview.chars().count(),
+                text.chars().count()
             )
         },
     )
@@ -191,8 +191,8 @@ fn markdown_preview_truncation_with_handle(
         |compact_preview| {
             format!(
                 "Showing a lane-budgeted preview of {} characters from {} original characters.",
-                compact_preview.len(),
-                full_text.len()
+                compact_preview.chars().count(),
+                full_text.chars().count()
             )
         },
     )
@@ -345,13 +345,13 @@ fn prepare_truncated_response_handle(
                 record: Some(record),
                 unavailable: None,
             },
-            Err(err) => TruncatedResponseHandle {
+            // The adapter records the full typed error in internal telemetry.
+            // Public output must not disclose project-local filesystem paths.
+            Err(_) => TruncatedResponseHandle {
                 record: None,
                 unavailable: Some(serde_json::json!({
                     "reason_code": "handle_store_failed",
-                    "message": format!(
-                        "The full response could not be cached locally, so no retrieval handle is available: {err}"
-                    ),
+                    "message": "The full response could not be cached locally, so no retrieval handle is available.",
                     "retryable": true,
                     "retry_instruction": "Fix the local project cache path or filesystem error, then re-run the original MCP tool to regenerate the full response and a fresh handle."
                 })),

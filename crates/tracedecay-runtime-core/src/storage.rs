@@ -1,8 +1,8 @@
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+use std::cell::Cell;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -17,10 +17,14 @@ pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 /// Legacy filename prefix used to recognize already-quarantined branch
 /// metadata as non-authoritative debris.
 pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
+pub const DURABLE_REMOVAL_TOMBSTONE_PREFIX: &str = ".tracedecay-deleted-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-static DURABLE_ATOMIC_WRITE_FAULT: AtomicU8 = AtomicU8::new(0);
+thread_local! {
+    static DURABLE_ATOMIC_WRITE_FAULT: Cell<u8> = const { Cell::new(0) };
+    static DURABLE_NAMESPACE_SYNC_FAULT: Cell<u8> = const { Cell::new(0) };
+}
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 #[derive(Clone, Copy)]
@@ -30,8 +34,48 @@ pub enum DurableAtomicWriteFaultForTest {
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub fn set_durable_atomic_write_fault_for_test(fault: DurableAtomicWriteFaultForTest) {
-    DURABLE_ATOMIC_WRITE_FAULT.store(fault as u8, Ordering::SeqCst);
+struct DurableAtomicWriteFaultScope {
+    previous: u8,
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+impl Drop for DurableAtomicWriteFaultScope {
+    fn drop(&mut self) {
+        DURABLE_ATOMIC_WRITE_FAULT.with(|state| state.set(self.previous));
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+struct DurableNamespaceSyncFaultScope {
+    previous: u8,
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+impl Drop for DurableNamespaceSyncFaultScope {
+    fn drop(&mut self) {
+        DURABLE_NAMESPACE_SYNC_FAULT.with(|state| state.set(self.previous));
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub fn with_durable_atomic_write_fault_for_test<T>(
+    fault: DurableAtomicWriteFaultForTest,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let previous = DURABLE_ATOMIC_WRITE_FAULT.with(|state| state.replace(fault as u8));
+    let _scope = DurableAtomicWriteFaultScope { previous };
+    operation()
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub fn with_durable_namespace_sync_fault_for_test<T>(
+    sync_ordinal: u8,
+    operation: impl FnOnce() -> T,
+) -> T {
+    assert!(sync_ordinal > 0, "sync fault ordinal must be one-based");
+    let previous = DURABLE_NAMESPACE_SYNC_FAULT.with(|state| state.replace(sync_ordinal));
+    let _scope = DurableNamespaceSyncFaultScope { previous };
+    operation()
 }
 
 #[derive(Clone, Copy)]
@@ -42,10 +86,13 @@ enum DurableAtomicWritePhase {
 
 fn inject_durable_atomic_write_fault(_phase: DurableAtomicWritePhase) -> io::Result<()> {
     #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-    if DURABLE_ATOMIC_WRITE_FAULT
-        .compare_exchange(_phase as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
+    if DURABLE_ATOMIC_WRITE_FAULT.with(|fault| {
+        if fault.get() != _phase as u8 {
+            return false;
+        }
+        fault.set(0);
+        true
+    }) {
         return Err(io::Error::other(match _phase {
             DurableAtomicWritePhase::AfterTempSync => {
                 "injected durable atomic write failure after temp sync"
@@ -54,6 +101,26 @@ fn inject_durable_atomic_write_fault(_phase: DurableAtomicWritePhase) -> io::Res
                 "injected durable atomic write failure after rename"
             }
         }));
+    }
+    Ok(())
+}
+
+fn inject_durable_namespace_sync_fault() -> io::Result<()> {
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    if DURABLE_NAMESPACE_SYNC_FAULT.with(|fault| match fault.get() {
+        0 => false,
+        1 => {
+            fault.set(0);
+            true
+        }
+        remaining => {
+            fault.set(remaining - 1);
+            false
+        }
+    }) {
+        return Err(io::Error::other(
+            "injected durable namespace synchronization failure",
+        ));
     }
     Ok(())
 }
