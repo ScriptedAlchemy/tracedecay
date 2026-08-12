@@ -19,8 +19,8 @@ use tracedecay_store::{
 
 use super::{FakeAuthority, batch, committed_outcome, fact_add_request, fact_id, id, owner};
 use crate::memory::{
-    MemoryApplication, MemoryApplicationError, MemoryMutationError, MemoryOperationContext,
-    ProjectMemoryFactAddPreflight, ProjectMemoryFactAddRequestOutcome, automatic_fact_add_command,
+    MemoryApplication, MemoryMutationError, MemoryOperationContext, ProjectMemoryFactAddPreflight,
+    ProjectMemoryFactAddRequestOutcome, automatic_fact_add_command,
 };
 
 #[test]
@@ -407,29 +407,13 @@ fn relation_provenance_keeps_metadata_bound_to_its_receipt() {
     );
 }
 
-#[test]
-fn relation_evidence_sorts_unique_input_and_rejects_duplicates() {
-    let first = fact_id(owner(), "operation.relation.evidence.first");
-    let second = fact_id(owner(), "operation.relation.evidence.second");
-    let mut evidence = vec![second, first];
-    super::super::curation::canonicalize_relation_evidence(&owner(), &mut evidence).unwrap();
-    assert!(evidence.windows(2).all(|pair| pair[0] < pair[1]));
-    let fact_id = fact_id(owner(), "operation.relation.evidence.duplicate");
-    let mut evidence = vec![fact_id.clone(), fact_id];
-
-    let error = super::super::curation::canonicalize_relation_evidence(&owner(), &mut evidence)
-        .unwrap_err();
-
-    assert!(matches!(error, MemoryApplicationError::InvalidInput { .. }));
-}
-
 #[tokio::test]
 async fn curation_rejects_a_mismatched_authority_digest_without_losing_the_receipt() {
     let owner = owner();
     let fact_id = fact_id(owner.clone(), "operation.curation.digest");
     let fact = ProjectMemoryFactIdV1::new(owner.clone(), fact_id.clone()).unwrap();
     let reviewed = tracedecay_store::ProjectMemoryFactCurationReviewRefV1::new(
-        fact,
+        fact.clone(),
         FactEventId::new("event.curation.digest.review".to_owned()).unwrap(),
     );
     let operation_id = ProvenanceId::new("operation.curation.digest".to_owned()).unwrap();

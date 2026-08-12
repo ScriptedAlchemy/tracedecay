@@ -7,10 +7,10 @@ use tracedecay_store::{
     ProjectMemoryFactAddOutcomeV1, ProjectMemoryFactCurationBatchV1,
     ProjectMemoryFactCurationEvidenceV1, ProjectMemoryFactCurationMutationKindV1,
     ProjectMemoryFactCurationOperationEffectV1, ProjectMemoryFactCurationOperationV1,
-    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactCurationRemoveV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactProjectionV1, ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactStatusV1,
-    ProjectMemoryFactUnavailableV1, ProjectMemoryFactUpdatePatchV1,
-    derive_project_memory_fact_curation_child_operation_id,
+    ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactCurationRemoveV1,
+    ProjectMemoryFactCurationReviewRefV1, ProjectMemoryFactIdV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactRemoveOutcomeV1, ProjectMemoryFactStatusV1, ProjectMemoryFactUnavailableV1,
+    ProjectMemoryFactUpdatePatchV1, derive_project_memory_fact_curation_child_operation_id,
 };
 
 use super::*;
@@ -104,7 +104,7 @@ async fn curation_add_reuses_privacy_preflight_and_binds_canonical_child_identit
         .unwrap()
     );
     assert_eq!(
-        add.evidence().facts()[0].fact_id(),
+        add.evidence().facts()[0].fact().fact_id(),
         &fact_id(owner, "operation.curation-add-evidence")
     );
     assert!(request.input_digest().is_ok());
@@ -656,7 +656,7 @@ async fn mixed_curation_builds_one_owner_bound_cas_batch_without_partial_writes(
             .evidence()
             .facts()
             .iter()
-            .map(ProjectMemoryFactIdV1::fact_id)
+            .map(|review| review.fact().fact_id())
             .collect::<Vec<_>>(),
         vec![&evidence_a, &evidence_b]
     );
@@ -746,13 +746,14 @@ async fn remove_receipt_target_mismatch_retains_the_settled_authority_receipt() 
     .unwrap();
     let evidence = ProjectMemoryFactCurationEvidenceV1::new(
         &owner,
-        vec![
+        vec![ProjectMemoryFactCurationReviewRefV1::new(
             ProjectMemoryFactIdV1::new(
                 owner.clone(),
                 fact_id(owner.clone(), "operation.curation-receipt-evidence"),
             )
             .unwrap(),
-        ],
+            FactEventId::new("event.curation-receipt-evidence".to_owned()).unwrap(),
+        )],
         Confidence::new(1.0).unwrap(),
         "reviewed removal evidence".to_owned(),
     )
