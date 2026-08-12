@@ -227,7 +227,11 @@ impl TraceDecay {
         // stay behind the rare paths that actually compare stores. Resolving a
         // layout is on every open, including fail-closed clients that must not
         // touch the store at all.
-        let (candidates, selected_manifest_matches_exact_root) =
+        let (
+            candidates,
+            selected_manifest_matches_exact_root,
+            candidates_match_exact_root,
+        ) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
         Self::choose_identity_layout(
             project_root,
@@ -235,6 +239,7 @@ impl TraceDecay {
             candidates,
             selected_manifest_matches_exact_root,
             selected_via_exact_registry_alias,
+            candidates_match_exact_root,
             allow_repair,
         )
         .await?
@@ -250,6 +255,7 @@ impl TraceDecay {
         candidates: Vec<StoreLayout>,
         selected_manifest_matches_exact_root: bool,
         selected_via_exact_registry_alias: bool,
+        candidates_match_exact_root: bool,
         allow_repair: bool,
     ) -> Result<Option<StoreLayout>> {
         // A populated store remains authoritative when its own manifest names
@@ -259,7 +265,8 @@ impl TraceDecay {
         // serving open performs full integrity validation and fails closed.
         // Legacy duplicates stay untouched, while an empty or unreadable
         // selected store still reaches the fail-closed diagnostics.
-        if (selected_manifest_matches_exact_root || selected_via_exact_registry_alias)
+        if (selected_manifest_matches_exact_root
+            || (selected_via_exact_registry_alias && !candidates_match_exact_root))
             && !candidates.is_empty()
             && let Some(selected) = selected.as_ref()
         {
