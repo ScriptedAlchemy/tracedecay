@@ -197,7 +197,8 @@ mod tests {
 
     #[test]
     fn unavailable_compare_degrades_decoded_stack_without_enabling_snapshot() {
-        let scope = scope("stack-compare-unavailable");
+        let mut scope = scope("stack-compare-unavailable");
+        scope.head_commit_id = CommitId::new("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
         let context = context(&scope);
         let request = request(scope.clone());
         let provider = ProviderId::new("provider.github").unwrap();
@@ -233,7 +234,7 @@ mod tests {
                                         "number": 421,
                                         "baseRefName": "main",
                                         "headRefName": "github-stack-compare-unavailable",
-                                        "baseRefOid": "commit.github.stack-compare-unavailable.base",
+                                        "baseRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                                         "headRefOid": head_commit,
                                         "baseRef": null,
                                         "statusCheckRollup": { "state": "SUCCESS" },
