@@ -118,24 +118,7 @@ impl SanitizedCodeFileV1 {
         if let Some(language) = &self.language {
             language.validate()?;
         }
-        if self.logical_path.is_empty() {
-            return Err(DomainError::Empty {
-                field: "snapshot logical path",
-            });
-        }
-        if self.logical_path.trim() != self.logical_path
-            || self.logical_path.starts_with('/')
-            || self.logical_path.contains('\\')
-            || self.logical_path.chars().any(char::is_control)
-            || self
-                .logical_path
-                .split('/')
-                .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
-        {
-            return Err(DomainError::NonCanonical {
-                field: "snapshot logical path",
-            });
-        }
+        validate_code_logical_path(&self.logical_path)?;
         if self.disposition == SnapshotFileDispositionV1::Present && self.language.is_none() {
             return Err(DomainError::UnknownReference {
                 field: "present snapshot file language",
@@ -143,6 +126,29 @@ impl SanitizedCodeFileV1 {
         }
         Ok(())
     }
+}
+
+/// Validate the canonical repository-relative logical-path grammar shared by
+/// sanitized snapshot files and production admission evidence.
+pub fn validate_code_logical_path(logical_path: &str) -> Result<(), DomainError> {
+    if logical_path.is_empty() {
+        return Err(DomainError::Empty {
+            field: "snapshot logical path",
+        });
+    }
+    if logical_path.trim() != logical_path
+        || logical_path.starts_with('/')
+        || logical_path.contains('\\')
+        || logical_path.chars().any(char::is_control)
+        || logical_path
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(DomainError::NonCanonical {
+            field: "snapshot logical path",
+        });
+    }
+    Ok(())
 }
 
 /// Explicit handling of deletions, renames, ignored, binary, generated, and
