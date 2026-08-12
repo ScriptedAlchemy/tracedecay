@@ -299,8 +299,6 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod run_list_tests {
-    use std::sync::{Arc, Mutex};
-
     use super::super::DashboardAutomationAuthorityErrorV1;
     use super::*;
 
