@@ -615,7 +615,7 @@ fn projection_manifest(
         "external-widget",
         "ExternalWidget",
         "type",
-        "external",
+        "bare_module",
         10,
     );
     let imports = vec![
@@ -625,7 +625,7 @@ fn projection_manifest(
             "external-widget-secondary",
             "ExternalWidget",
             "type",
-            "external",
+            "bare_module",
             15,
         ),
         import(
@@ -633,7 +633,7 @@ fn projection_manifest(
             "external-widget",
             "ExternalWidget",
             "value",
-            "external",
+            "bare_module",
             20,
         ),
         import(
@@ -649,7 +649,7 @@ fn projection_manifest(
             "external-widget",
             "ExternalWidget",
             "type",
-            "external",
+            "bare_module",
             40,
         ),
     ];
