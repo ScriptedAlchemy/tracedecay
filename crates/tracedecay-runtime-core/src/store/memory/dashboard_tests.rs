@@ -5,7 +5,10 @@ use std::sync::{
 
 use serde_json::json;
 use tempfile::{TempDir, tempdir};
-use tracedecay_domain::{Confidence, FactCategoryV1, FactId, FactOwnerV1, ProvenanceId, UtcMicros};
+use tracedecay_domain::{
+    Confidence, FactCategoryV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1,
+    ProvenanceId, UtcMicros,
+};
 use tracedecay_store::{
     FactReadControl, FactStore, FactStoreError, FactWriteControl,
     ProjectMemoryDashboardFactDetailQueryV1, ProjectMemoryDashboardMemoryOverviewQueryV1,
@@ -107,7 +110,17 @@ async fn status_detail_feedback_and_oplog_observe_live_read_control() {
     let store = DatabaseFactStore::new(&database);
     let target = ProjectMemoryFactIdV1::new(
         FactOwnerV1::Profile,
-        FactId::new("fact.dashboard.missing".to_owned()).expect("dashboard fixture fact id"),
+        FactId::derive(
+            &FactIdentityMaterialV1::new(
+                FactOwnerV1::Profile,
+                FactIdentitySourceV1::Application {
+                    operation_id: ProvenanceId::new("dashboard.read-control.missing".to_owned())
+                        .expect("dashboard fixture operation id"),
+                },
+            )
+            .expect("dashboard fixture identity material"),
+        )
+        .expect("dashboard fixture fact id"),
     )
     .expect("dashboard fixture fact target");
 

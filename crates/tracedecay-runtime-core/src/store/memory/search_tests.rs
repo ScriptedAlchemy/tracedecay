@@ -70,8 +70,9 @@ fn read_control_interrupted_on_poll(
 fn add_command(
     operation: &str,
     content: &str,
-    entities: Vec<String>,
+    mut entities: Vec<String>,
 ) -> ProjectMemoryFactAddCommandV1 {
+    entities.sort_unstable();
     let material = json!({
         "content": content,
         "category": "project",
@@ -96,17 +97,7 @@ fn add_command(
         FactCategoryV1::Project,
         None,
         vec!["search-fixture".to_owned()],
-        material["entities"]
-            .as_array()
-            .expect("search fixture entities")
-            .iter()
-            .map(|entity| {
-                entity
-                    .as_str()
-                    .expect("search fixture entity string")
-                    .to_owned()
-            })
-            .collect(),
+        entities,
         json!({"fixture": "canonical-search"}),
         receipt,
         None,
@@ -147,11 +138,27 @@ async fn collect_search_ids(
     let mut cursors = Vec::new();
     let mut after = None;
     for _ in 0..64 {
+        // A previous page's wall-clock score can exceed the same fact's score
+        // on resume. Force that drift deterministically so the continuation
+        // must anchor on fact identity rather than re-admitting the cursor.
+        let stale_after = after
+            .as_ref()
+            .map(|cursor: &ProjectMemoryFactSearchCursorV1| {
+                ProjectMemoryFactSearchCursorV1::new(
+                    cursor
+                        .score_millionths()
+                        .checked_add(1)
+                        .expect("search fixture score has drift headroom"),
+                    cursor.updated_at(),
+                    cursor.fact_id().clone(),
+                )
+                .expect("stale search fixture cursor")
+            });
         let query = ProjectMemoryFactSearchQuery::new(
             FactOwnerV1::Profile,
             ProjectMemoryFactSearchKindV1::Search,
             Some("recalltoken".to_owned()),
-            after.clone(),
+            stale_after,
             1,
         )
         .expect("search fixture query");
@@ -237,8 +244,25 @@ async fn eligible_low_limit_search_reaches_older_facts_across_stable_pages() {
     let (first_ids, first_cursors) = collect_search_ids(&store, &read_control).await;
     let (second_ids, second_cursors) = collect_search_ids(&store, &read_control).await;
     assert_eq!(first_ids, second_ids);
-    assert_eq!(first_cursors, second_cursors);
+    assert_eq!(first_ids.len(), expected.len());
+    assert_eq!(second_ids.len(), expected.len());
+    assert_eq!(first_cursors.len(), expected.len() - 1);
+    assert_eq!(second_cursors.len(), expected.len() - 1);
+    let cursor_positions = |cursors: &[ProjectMemoryFactSearchCursorV1]| {
+        cursors
+            .iter()
+            .map(|cursor| (cursor.updated_at(), cursor.fact_id().clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        cursor_positions(&first_cursors),
+        cursor_positions(&second_cursors)
+    );
     assert_eq!(first_ids.iter().cloned().collect::<BTreeSet<_>>(), expected);
+    assert_eq!(
+        second_ids.iter().cloned().collect::<BTreeSet<_>>(),
+        expected
+    );
     assert!(!first_ids.contains(&removed));
 
     let tracked_id = expected.iter().next().expect("tracked fixture id").clone();

@@ -4,19 +4,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
 use tempfile::{TempDir, tempdir};
-use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1, ProjectId, ProvenanceId, RunId};
+use tracedecay_domain::{
+    Confidence, FactCategoryV1, FactOwnerV1, ProjectId, ProvenanceId, RunId, UtcMicros,
+};
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactWriteControl, MAX_PROJECT_MEMORY_AUTOMATIC_FACT_RECEIPTS,
-    ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryAutomaticFactReceiptV1,
-    ProjectMemoryFactAddCommandV1, ProjectMemoryFactAddMaterialV1,
-    ProjectMemoryFactCurationBatchV1, ProjectMemoryFactCurationOperationV1, ProjectMemoryFactIdV1,
-    ProjectMemoryFactNormalizeTagsV1, ProjectMemoryFactStore,
+    ProjectMemoryAutomaticFactEffectV1, ProjectMemoryAutomaticFactEvidenceV1,
+    ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryFactAddCommandV1,
+    ProjectMemoryFactAddMaterialV1, ProjectMemoryFactCurationBatchV1,
+    ProjectMemoryFactCurationOperationV1, ProjectMemoryFactIdV1, ProjectMemoryFactNormalizeTagsV1,
+    ProjectMemoryFactStore,
 };
 
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
 use crate::store::memory::DatabaseFactStore;
-use crate::store::memory::automatic_facts::project_memory_automatic_fact_request_value;
+use crate::store::memory::automatic_facts::{
+    project_memory_record_automatic_fact_operation_tx,
+    project_memory_record_automatic_fact_receipt_tx,
+};
 
 use super::*;
 
@@ -150,9 +156,10 @@ async fn seed_quarantined_receipt(
     run_id: &RunId,
     apply_id: &str,
 ) -> ProjectMemoryAutomaticFactReceiptV1 {
+    let apply_id = ProvenanceId::new(apply_id.to_owned()).expect("quarantined apply identity");
     let command = fact_command(
         owner.clone(),
-        &format!("{apply_id}.operation"),
+        &format!("{}.operation", apply_id.as_str()),
         Some(run_id),
     );
     let evidence = ProjectMemoryAutomaticFactEvidenceV1::new(
@@ -161,45 +168,41 @@ async fn seed_quarantined_receipt(
         Some(json!({"validated": false})),
     )
     .expect("quarantined automatic receipt evidence");
-    let key = OwnerKey::new(&owner).expect("quarantined receipt owner key");
+    let effect = ProjectMemoryAutomaticFactEffectV1::Quarantined {
+        reason: "canonical fixture quarantine".to_owned(),
+    };
+    let occurred_at = UtcMicros(0);
     let transaction = database
         .begin_memory_write_transaction(PROJECT_MEMORY_READ_OPERATION)
         .await
         .expect("begin quarantined receipt fixture transaction");
-    transaction
-        .execute(
-            "INSERT INTO memory_v2_automatic_fact_receipts(
-                apply_id, owner_kind, project_id, owner_json, idempotency_key,
-                request_digest, request_json, evidence_json, state, quarantine_reason,
-                applied_fact_id, applied_assertion_id, applied_event_id, recorded_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'quarantined',
-                      'canonical fixture quarantine', NULL, NULL, NULL, 0)",
-            params![
-                apply_id,
-                key.kind,
-                key.project_id.as_str(),
-                key.json.as_str(),
-                command.operation_id().as_str(),
-                command.input_digest(),
-                project_memory_automatic_fact_request_value(&command).to_string(),
-                serde_json::to_string(&evidence).expect("serialize quarantined evidence"),
-            ],
-        )
+    project_memory_record_automatic_fact_receipt_tx(
+        &transaction,
+        &apply_id,
+        &command,
+        command.input_digest(),
+        &evidence,
+        &effect,
+        occurred_at,
+    )
+    .await
+    .expect("record quarantined automatic receipt");
+    let receipt = project_memory_automatic_fact_receipt_record_tx(&transaction, &owner, &apply_id)
         .await
-        .expect("insert quarantined receipt fixture");
+        .expect("read quarantined automatic receipt")
+        .expect("quarantined automatic receipt exists");
+    project_memory_record_automatic_fact_operation_tx(
+        &transaction,
+        &receipt,
+        command.input_digest(),
+    )
+    .await
+    .expect("record quarantined operation envelope");
     transaction
         .commit()
         .await
         .expect("commit quarantined receipt fixture");
-    DatabaseFactStore::new(database)
-        .get_project_memory_automatic_fact_receipt(
-            owner,
-            ProvenanceId::new(apply_id.to_owned()).expect("quarantined apply identity"),
-            &read_control(),
-        )
-        .await
-        .expect("read quarantined receipt fixture")
-        .expect("quarantined receipt exists")
+    receipt
 }
 
 async fn seed_curation_receipt(

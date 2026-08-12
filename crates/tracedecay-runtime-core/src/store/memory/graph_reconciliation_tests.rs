@@ -2,13 +2,15 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use std::time::Duration;
 
 use serde_json::json;
 use tempfile::{TempDir, tempdir};
+use tokio::sync::Notify;
 use tracedecay_domain::{Confidence, FactCategoryV1, FactOwnerV1, ProvenanceId, UtcMicros};
 use tracedecay_graph_db::{
     GraphDbError, GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity,
-    VerifiedGraphSnapshot,
+    NeverCancelled, VerifiedGraphSnapshot,
 };
 use tracedecay_store::{
     FactCommitOutcome, FactCurrentQuery, FactReadControl, FactStore, FactStoreError,
@@ -29,6 +31,8 @@ struct RecordingGraphRuntime {
     reconciliation_closed: AtomicBool,
     reconciliation_started: AtomicBool,
     reconciliation_finished: AtomicBool,
+    reconciliation_observed: AtomicBool,
+    reconciliation_notify: Notify,
     publish_calls: AtomicUsize,
     reconcile_calls: AtomicUsize,
     snapshot_calls: AtomicUsize,
@@ -45,6 +49,8 @@ impl RecordingGraphRuntime {
             reconciliation_closed: AtomicBool::new(false),
             reconciliation_started: AtomicBool::new(false),
             reconciliation_finished: AtomicBool::new(false),
+            reconciliation_observed: AtomicBool::new(false),
+            reconciliation_notify: Notify::new(),
             publish_calls: AtomicUsize::new(0),
             reconcile_calls: AtomicUsize::new(0),
             snapshot_calls: AtomicUsize::new(0),
@@ -100,21 +106,24 @@ impl VerifiedGraphRuntimePortV1 for RecordingGraphRuntime {
 
     fn reconcile_verified_manifest(
         &self,
-        _manifest: &GraphGenerationManifest,
+        manifest: &GraphGenerationManifest,
         _idempotency_key: GraphIdempotencyKey,
     ) -> Result<VerifiedGraphSnapshot, GraphDbError> {
         self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
         if self.block_reconciliation {
             self.reconciliation_started.store(true, Ordering::Release);
+            self.reconciliation_observed.store(true, Ordering::Release);
+            self.reconciliation_notify.notify_one();
             while !self.reconciliation_cancelled.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
             self.reconciliation_finished.store(true, Ordering::Release);
             return Err(GraphDbError::Cancelled);
         }
-        Err(GraphDbError::unavailable(
-            "recording runtime has no physical graph",
-        ))
+        let snapshot = VerifiedGraphSnapshot::memory(manifest.clone(), Arc::new(NeverCancelled))?;
+        self.reconciliation_observed.store(true, Ordering::Release);
+        self.reconciliation_notify.notify_one();
+        Ok(snapshot)
     }
 
     fn verified_snapshot(
@@ -138,10 +147,13 @@ async fn database(label: &str) -> (TempDir, Database) {
     let path = directory.path().join(format!("{label}.db"));
     let authority = DatabaseAuthority::acquire_test(&path, "graph reconciliation test authority")
         .expect("acquire graph reconciliation fixture authority");
-    let (database, _) =
-        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
-            .await
-            .expect("publish graph reconciliation fixture runtime");
+    let (database, _) = Database::publish_profile_memory_test_runtime(
+        &path,
+        &authority,
+        TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .expect("publish graph reconciliation fixture runtime");
     (directory, database)
 }
 
@@ -177,13 +189,18 @@ fn write_control() -> FactWriteControl {
 }
 
 async fn wait_for_reconciliation(runtime: &RecordingGraphRuntime) {
-    for _ in 0..256 {
-        if runtime.reconcile_calls.load(Ordering::SeqCst) != 0 {
-            return;
-        }
-        tokio::task::yield_now().await;
+    if !runtime.reconciliation_observed.load(Ordering::Acquire) {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.reconciliation_notify.notified(),
+        )
+        .await
+        .expect("scheduled graph reconciliation did not reach the mounted runtime");
     }
-    panic!("scheduled graph reconciliation did not reach the mounted runtime");
+    assert!(
+        runtime.reconciliation_observed.load(Ordering::Acquire),
+        "scheduled graph reconciliation did not reach the mounted runtime"
+    );
 }
 
 #[tokio::test]
@@ -332,13 +349,16 @@ async fn caller_drop_after_commit_start_cannot_lose_reconciliation() {
     .expect("dropped-caller fact batch");
     let fact_id = batch.fact_id().clone();
     let commit_started = Arc::new(AtomicBool::new(false));
+    let commit_observed = Arc::new(Notify::new());
     let release_commit = Arc::new(AtomicBool::new(false));
     let observed_start = Arc::clone(&commit_started);
+    let observed_commit = Arc::clone(&commit_observed);
     let observed_release = Arc::clone(&release_commit);
     let control = FactWriteControl::new(
         Arc::new(|| false),
         Arc::new(move || {
             observed_start.store(true, Ordering::Release);
+            observed_commit.notify_one();
             while !observed_release.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
@@ -351,11 +371,10 @@ async fn caller_drop_after_commit_start_cannot_lose_reconciliation() {
             .commit_fact(batch, &control)
             .await
     });
-    for _ in 0..256 {
-        if commit_started.load(Ordering::Acquire) {
-            break;
-        }
-        tokio::task::yield_now().await;
+    if !commit_started.load(Ordering::Acquire) {
+        tokio::time::timeout(Duration::from_secs(1), commit_observed.notified())
+            .await
+            .expect("fact commit never reached the caller-owned commit-start gate");
     }
     assert!(
         commit_started.load(Ordering::Acquire),
@@ -395,7 +414,7 @@ async fn concurrent_schedule_triggers_coalesce_before_spawning_more_work() {
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
     );
     assert_eq!(
-        super::schedule_project_memory_graph_reconciliation(database),
+        super::schedule_project_memory_graph_reconciliation(database.clone()),
         ProjectMemoryGraphReconciliationScheduleV1::AlreadyScheduled
     );
     wait_for_reconciliation(&runtime).await;
@@ -441,12 +460,7 @@ async fn shutdown_waits_for_blocking_graph_publication_to_observe_cancellation()
         super::schedule_project_memory_graph_reconciliation(database.clone()),
         ProjectMemoryGraphReconciliationScheduleV1::Scheduled
     );
-    for _ in 0..256 {
-        if runtime.reconciliation_started.load(Ordering::Acquire) {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    wait_for_reconciliation(&runtime).await;
     assert!(
         runtime.reconciliation_started.load(Ordering::Acquire),
         "blocking publication never started"

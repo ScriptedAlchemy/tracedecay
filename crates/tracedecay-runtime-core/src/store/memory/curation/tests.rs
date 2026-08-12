@@ -708,6 +708,11 @@ async fn replay_rejects_receipt_rebound_to_different_normalized_tags() {
         0.9,
     )
     .await;
+    let store = DatabaseFactStore::new(&fixture.db);
+    let first = store
+        .apply_project_memory_fact_curation(first_request.clone(), &fixture.control)
+        .await
+        .expect("commit first normalized tags");
     let second_request = normalize_request(
         &fixture.db,
         &fixture.owner,
@@ -719,11 +724,6 @@ async fn replay_rejects_receipt_rebound_to_different_normalized_tags() {
         0.9,
     )
     .await;
-    let store = DatabaseFactStore::new(&fixture.db);
-    let first = store
-        .apply_project_memory_fact_curation(first_request.clone(), &fixture.control)
-        .await
-        .expect("commit first normalized tags");
     let second = store
         .apply_project_memory_fact_curation(second_request, &fixture.control)
         .await
@@ -868,6 +868,11 @@ async fn replay_rejects_a_valid_relation_effect_rebound_to_another_target() {
         ),
     )
     .await;
+    let store = DatabaseFactStore::new(&fixture.db);
+    let original = store
+        .apply_project_memory_fact_curation(original_request.clone(), &fixture.control)
+        .await
+        .unwrap();
     let substitute_request = request(
         &fixture.db,
         &fixture.owner,
@@ -881,11 +886,6 @@ async fn replay_rejects_a_valid_relation_effect_rebound_to_another_target() {
         ),
     )
     .await;
-    let store = DatabaseFactStore::new(&fixture.db);
-    let original = store
-        .apply_project_memory_fact_curation(original_request.clone(), &fixture.control)
-        .await
-        .unwrap();
     let substitute = store
         .apply_project_memory_fact_curation(substitute_request, &fixture.control)
         .await
@@ -1061,7 +1061,8 @@ async fn exact_operation_replay_reports_replayed_with_stable_canonical_material(
         json!(0);
     assert!(curation_receipt_from_value(&invalid_reference).is_err());
     let mut foreign_owner = first_receipts[0].receipt.clone();
-    foreign_owner["operation_effects"][0]["relation"]["owner"] = json!({"kind":"profile"});
+    foreign_owner["operation_effects"][0]["relation"]["owner"] =
+        json!({"kind":"project", "project_id":"fixture.foreign-owner"});
     assert!(curation_receipt_from_value(&foreign_owner).is_err());
     let mut duplicated_effect = first_receipts[0].receipt.clone();
     let duplicate = duplicated_effect["operation_effects"][0].clone();
@@ -1376,6 +1377,11 @@ async fn conflicting_relation_kind_is_rejected_without_event_or_receipt_mutation
         ),
     )
     .await;
+    let store = DatabaseFactStore::new(&fixture.db);
+    let accepted_receipt = store
+        .apply_project_memory_fact_curation(accepted.clone(), &fixture.control)
+        .await
+        .expect("commit accepted relation");
     let rejected = request(
         &fixture.db,
         &fixture.owner,
@@ -1389,11 +1395,6 @@ async fn conflicting_relation_kind_is_rejected_without_event_or_receipt_mutation
         ),
     )
     .await;
-    let store = DatabaseFactStore::new(&fixture.db);
-    let accepted_receipt = store
-        .apply_project_memory_fact_curation(accepted.clone(), &fixture.control)
-        .await
-        .expect("commit accepted relation");
     let before_events = linked_events(&fixture.db, &fixture.owner).await;
 
     let error = store
@@ -1623,12 +1624,20 @@ async fn cross_owner_and_invalid_evidence_are_rejected_without_mutation() {
 
     let missing_evidence = fact_id_for(&fixture.owner, "fixture.seed.missing-evidence");
     let operation_id = provenance_id("fixture.link.missing-evidence");
-    let result = DatabaseFactStore::new(&fixture.db)
-        .apply_project_memory_fact_curation(
-            request(
-                &fixture.db,
-                &fixture.owner,
-                operation_id.as_str(),
+    let missing_event = FactEventId::new("event.fixture.missing-evidence".to_owned())
+        .expect("missing evidence event id");
+    let missing_evidence_ref = ProjectMemoryFactCurationReviewRefV1::new(
+        ProjectMemoryFactIdV1::new(fixture.owner.clone(), missing_evidence.clone())
+            .expect("owner-bound missing evidence"),
+        missing_event.clone(),
+    );
+    let invalid_request = ProjectMemoryFactCurationBatchV1::new(
+        fixture.owner.clone(),
+        operation_id.clone(),
+        None,
+        Confidence::new(0.5).expect("minimum confidence"),
+        vec![ProjectMemoryFactCurationOperationV1::LinkFacts(
+            ProjectMemoryFactLinkV1::new(
                 relation(
                     &fixture.owner,
                     &source,
@@ -1636,12 +1645,26 @@ async fn cross_owner_and_invalid_evidence_are_rejected_without_mutation() {
                     vec![missing_evidence],
                     FactRelationKindV1::Supports,
                 ),
+                reviewed_ref(&fixture.db, &fixture.owner, &source).await,
+                reviewed_ref(&fixture.db, &fixture.owner, &target).await,
+                vec![missing_evidence_ref],
             )
-            .await,
-            &fixture.control,
-        )
+            .expect("link with missing reviewed evidence"),
+        )],
+    )
+    .expect("missing evidence request");
+    let result = DatabaseFactStore::new(&fixture.db)
+        .apply_project_memory_fact_curation(invalid_request, &fixture.control)
         .await;
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(FactStoreError::CommitConflict {
+            conflict: FactCommitConflict::LastEventMismatch {
+                expected: Some(expected),
+                actual: None,
+            },
+        }) if expected == missing_event
+    ));
     assert_no_link_or_receipt(&fixture, &operation_id).await;
 }
 

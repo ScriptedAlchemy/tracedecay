@@ -559,7 +559,7 @@ mod tests {
 
         let proof = registry.close_exact(&binding, &authority).await.unwrap();
         assert_eq!(proof.binding(), &binding);
-        assert_eq!(proof.path(), path);
+        assert_eq!(proof.path(), authority.canonical_database_path());
         assert_eq!(
             proof.opened_file_identity(),
             crate::db::sqlite_generation_identity(proof.path()).unwrap()

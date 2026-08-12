@@ -113,11 +113,22 @@ fn rank_and_seek(
             .then_with(|| left.fact().fact_id().cmp(right.fact().fact_id()))
     });
     if let Some(after) = after {
+        // Search scores include wall-clock decay, so the score carried by a
+        // prior page can be stale even when the fact snapshot is unchanged.
+        // Resume from the cursor fact's position in this ranking when it is
+        // still eligible; its identity is the durable continuation anchor.
+        let (after_score, after_updated_at) = ranked
+            .iter()
+            .find(|(hit, updated_at)| {
+                hit.fact().fact_id() == after.fact_id() && *updated_at == after.updated_at()
+            })
+            .map(|(hit, updated_at)| (hit.score_millionths(), *updated_at))
+            .unwrap_or((after.score_millionths(), after.updated_at()));
         ranked.retain(|(hit, updated_at)| {
-            hit.score_millionths() < after.score_millionths()
-                || (hit.score_millionths() == after.score_millionths()
-                    && (*updated_at < after.updated_at()
-                        || (*updated_at == after.updated_at()
+            hit.score_millionths() < after_score
+                || (hit.score_millionths() == after_score
+                    && (*updated_at < after_updated_at
+                        || (*updated_at == after_updated_at
                             && hit.fact().fact_id() > after.fact_id())))
         });
     }

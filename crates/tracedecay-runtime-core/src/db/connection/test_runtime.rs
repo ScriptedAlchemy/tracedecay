@@ -127,6 +127,33 @@ impl Database {
         Self::publish_fixture_runtime(db_path, authority, mode, test_code_shard()?).await
     }
 
+    /// Publishes an isolated profile-memory fixture through the exact shard
+    /// identity used by the production fact and graph lifecycle.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+    pub async fn publish_profile_memory_test_runtime(
+        db_path: &Path,
+        authority: &DatabaseAuthority,
+        mode: TestDatabaseRuntimeMode,
+    ) -> Result<(Self, bool)> {
+        if authority.role() != super::DatabaseAuthorityRole::Test {
+            return Err(TraceDecayError::Database {
+                message: "profile-memory test runtime requires explicit test authority".to_owned(),
+                operation: "publish profile-memory test database runtime".to_owned(),
+            });
+        }
+        let published =
+            Self::publish_fixture_runtime(db_path, authority, mode, test_profile_memory_shard()?)
+                .await?;
+        match mode {
+            TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing => {
+                crate::db::migrations::ensure_schema_current(&published.0).await?;
+            }
+            TestDatabaseRuntimeMode::ReadOnly => {}
+        }
+        Ok(published)
+    }
+
     /// Publishes an isolated registered-store fixture with the exact typed
     /// shard family consumed by the test.
     #[doc(hidden)]
@@ -256,9 +283,9 @@ impl Database {
         let profile_runtime = match registry.open(profile_request).await {
             StoreRuntimeOpenResult::Published(runtime) => runtime,
             StoreRuntimeOpenResult::Failed(failure) => {
-                return Err(test_runtime_error(
+                return Err(test_runtime_open_failure(
                     "publish test profile runtime",
-                    format!("{failure:?}"),
+                    failure,
                 ));
             }
         };
@@ -299,9 +326,9 @@ impl Database {
             match registry.open(request).await {
                 StoreRuntimeOpenResult::Published(runtime) => runtime,
                 StoreRuntimeOpenResult::Failed(failure) => {
-                    return Err(test_runtime_error(
+                    return Err(test_runtime_open_failure(
                         "publish test database runtime",
-                        format!("{failure:?}"),
+                        failure,
                     ));
                 }
             }
@@ -385,6 +412,12 @@ pub(super) fn test_code_shard() -> Result<StoreShardIdV1> {
 }
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+fn test_profile_memory_shard() -> Result<StoreShardIdV1> {
+    let (brain_id, profile_id) = test_runtime_identity()?;
+    Ok(StoreShardIdV1::profile_memory(brain_id, profile_id))
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 fn test_registered_shard(scope: TestDatabaseRuntimeScope) -> Result<StoreShardIdV1> {
     let (brain_id, profile_id) = test_runtime_identity()?;
     let shard = match scope {
@@ -404,5 +437,57 @@ fn test_runtime_error(operation: &'static str, message: String) -> TraceDecayErr
     TraceDecayError::Database {
         message,
         operation: operation.to_owned(),
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+fn test_runtime_open_failure(
+    operation: &'static str,
+    failure: StoreRuntimeRegistryFailure,
+) -> TraceDecayError {
+    match failure {
+        StoreRuntimeRegistryFailure::ResetRequired { authority, reason } => {
+            TraceDecayError::reset_required(authority, reason)
+        }
+        failure => test_runtime_error(operation, format!("{failure:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_runtime_open_failure_preserves_typed_reset_required() {
+        let error = test_runtime_open_failure(
+            "publish test database runtime",
+            StoreRuntimeRegistryFailure::ResetRequired {
+                authority: "SQLite store".to_owned(),
+                reason: "database schema is missing required index".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            error.reset_required_context(),
+            Some(("SQLite store", "database schema is missing required index"))
+        );
+    }
+
+    #[test]
+    fn test_runtime_open_failure_keeps_other_failures_generic() {
+        let error = test_runtime_open_failure(
+            "publish test database runtime",
+            StoreRuntimeRegistryFailure::ResolverFailed {
+                message: "missing fixture".to_owned(),
+            },
+        );
+
+        assert!(matches!(
+            error,
+            TraceDecayError::Database { operation, message }
+                if operation == "publish test database runtime"
+                    && message.contains("ResolverFailed")
+                    && message.contains("missing fixture")
+        ));
     }
 }

@@ -59,7 +59,12 @@ struct InitializingFileResolver {
 
 impl InitializingFileResolver {
     fn push(&self, path: PathBuf) {
-        self.roots.lock().unwrap().push(path);
+        self.roots
+            .lock()
+            .unwrap()
+            .push(crate::path_safety::canonicalize_path_or_existing_parent(
+                &path,
+            ));
     }
 }
 
