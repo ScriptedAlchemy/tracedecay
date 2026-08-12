@@ -1,5 +1,6 @@
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+
+const GIT_SYNC_COMMAND_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
 pub(super) enum SessionSyncInterruption {
@@ -27,151 +28,6 @@ impl SessionSyncInterruption {
 }
 
 impl DaemonSessionSyncService {
-    pub(super) async fn recover_project(
-        &self,
-        context: &Arc<SessionSyncProjectContext>,
-    ) -> crate::errors::Result<bool> {
-        let scope = SessionSyncScopeV1::new(context.project_id.clone(), context.profile_id.clone());
-        let prefix = journal_prefix(&scope);
-        let journals = context
-            .registry
-            .list_session_sync_journals(&prefix)
-            .await
-            .map_err(store_error)?;
-        let mut recovered_import = false;
-        for (key, encoded) in journals {
-            let mut journal: SessionSyncJournalV1 =
-                serde_json::from_str(&encoded).map_err(journal_decode_error)?;
-            if journal.scope != scope || journal.status == SessionSyncJournalStatusV1::Complete {
-                continue;
-            }
-            journal = self.refresh_source_frontiers(context, &key).await?;
-            if let Some(primary) = journal.coalesced_primary.clone() {
-                recovered_import = true;
-                let primary_key = journal_key(&scope, &primary);
-                if self
-                    .mirror_primary_terminal(context, &key, &primary_key)
-                    .await?
-                    .is_some()
-                {
-                    continue;
-                }
-                if journal.cancel_requested_at.is_some() {
-                    self.persist_terminal(
-                        context,
-                        &key,
-                        OperationTermination::Cancelled,
-                        journal.stats,
-                        journal.coverage,
-                        journal.source_frontiers,
-                        Vec::new(),
-                    )
-                    .await?;
-                    continue;
-                }
-                if journal.deadline.is_elapsed_at(now_micros()) {
-                    self.persist_terminal(
-                        context,
-                        &key,
-                        OperationTermination::TimedOut,
-                        journal.stats,
-                        journal.coverage,
-                        journal.source_frontiers,
-                        Vec::new(),
-                    )
-                    .await?;
-                    continue;
-                }
-                let cancellation = CancellationSignal::active(format!(
-                    "session-sync.recovered-alias.{}",
-                    journal.admission.operation_id.as_str()
-                ))
-                .map_err(contract_error)?;
-                self.coalesce_import(Arc::clone(context), key, journal, primary_key, cancellation);
-                continue;
-            }
-            if journal.cancel_requested_at.is_some() {
-                self.persist_terminal(
-                    context,
-                    &key,
-                    OperationTermination::Cancelled,
-                    journal.stats,
-                    journal.coverage,
-                    journal.source_frontiers,
-                    Vec::new(),
-                )
-                .await?;
-                continue;
-            }
-            if journal.deadline.is_elapsed_at(now_micros()) {
-                self.persist_terminal(
-                    context,
-                    &key,
-                    OperationTermination::TimedOut,
-                    journal.stats,
-                    journal.coverage,
-                    journal.source_frontiers,
-                    Vec::new(),
-                )
-                .await?;
-                continue;
-            }
-            let active_import =
-                matches!(journal.source, SessionSyncCommandV1::ImportTranscripts(_))
-                    .then(|| {
-                        self.active_imports
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .get(&import_scope_key(&journal.scope))
-                            .cloned()
-                    })
-                    .flatten();
-            if let Some(active_import) = active_import {
-                recovered_import = true;
-                journal = self
-                    .update_journal(context, &key, |journal| {
-                        journal.coalesced_primary =
-                            Some(active_import.admission.idempotency_key.clone());
-                        journal.updated_at = now_micros();
-                    })
-                    .await?;
-                let cancellation = CancellationSignal::active(format!(
-                    "session-sync.recovered-coalesced.{}",
-                    journal.admission.operation_id.as_str()
-                ))
-                .map_err(contract_error)?;
-                self.coalesce_import(
-                    Arc::clone(context),
-                    key,
-                    journal,
-                    active_import.journal_key,
-                    cancellation,
-                );
-                continue;
-            }
-            let cancellation = CancellationSignal::active(format!(
-                "session-sync.recovered.{}",
-                journal.admission.operation_id.as_str()
-            ))
-            .map_err(contract_error)?;
-            let admission = journal.admission.clone();
-            let request = SessionSyncRequestV1::new(
-                journal.admission.operation_id,
-                journal.admission.idempotency_key,
-                journal.scope,
-                journal.deadline,
-                cancellation,
-                journal.source,
-            );
-            recovered_import |= matches!(
-                request.command(),
-                SessionSyncCommandV1::ImportTranscripts(_)
-            );
-            let _ = self.enqueue(Arc::clone(context), key, request, admission);
-        }
-        Ok(recovered_import)
-    }
-
     pub(super) async fn mirror_primary_terminal(
         &self,
         context: &SessionSyncProjectContext,
@@ -207,6 +63,7 @@ impl DaemonSessionSyncService {
     pub(super) fn coalesce_import(
         &self,
         context: Arc<SessionSyncProjectContext>,
+        project_sessions: Arc<RegisteredGlobalDb>,
         key: String,
         journal: SessionSyncJournalV1,
         primary_key: String,
@@ -220,6 +77,9 @@ impl DaemonSessionSyncService {
             active.insert(key.clone(), cancellation.clone());
         }
         let service = self.clone();
+        let task_scope = journal.scope.clone();
+        let task_key = key.clone();
+        let task_cancellation = cancellation.clone();
         let key_for_cleanup = key.clone();
         let task = tokio::spawn(async move {
             let worker = async {
@@ -275,7 +135,12 @@ impl DaemonSessionSyncService {
                                 now_micros(),
                             ) {
                                 let _ = service
-                                    .persist_interruption(&context, &key, termination)
+                                    .persist_interruption_with_project_sessions(
+                                        &context,
+                                        &project_sessions,
+                                        &key,
+                                        termination,
+                                    )
                                     .await;
                                 return;
                             }
@@ -321,22 +186,43 @@ impl DaemonSessionSyncService {
                 .remove(&key_for_cleanup);
         });
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(task);
+        tasks.retain(|task| !task.task.is_finished());
+        tasks.push(super::project_lifecycle::SessionSyncTaskV1 {
+            scope: task_scope,
+            key: task_key,
+            cancellation: task_cancellation,
+            task,
+        });
     }
 
     pub(super) async fn cancel_request(
         &self,
         control: SessionSyncControlV1,
     ) -> SessionSyncOutcomeV1 {
+        let project_gate = self.project_gate(control.scope());
+        let _project = project_gate.lock().await;
         let Some(context) = self.context_for(control.scope()) else {
             return SessionSyncOutcomeV1::WrongScope;
         };
         let key = journal_key(control.scope(), control.idempotency_key());
-        let initial = match self.refresh_source_frontiers(&context, &key).await {
-            Ok(journal) => journal,
+        let encoded = match context.registry.read_session_sync_journal(&key).await {
+            Ok(Some(encoded)) => encoded,
+            Ok(None) => {
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_operation_not_found",
+                };
+            }
             Err(error) => {
                 tracing::warn!(%error, "session sync cancellation journal read failed");
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                };
+            }
+        };
+        let mut initial = match serde_json::from_str::<SessionSyncJournalV1>(&encoded) {
+            Ok(initial) => initial,
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation journal decode failed");
                 return SessionSyncOutcomeV1::Unavailable {
                     reason_code: "session_sync_cancel_failed",
                 };
@@ -349,6 +235,23 @@ impl DaemonSessionSyncService {
         }
         if initial.status == SessionSyncJournalStatusV1::Complete {
             return initial.outcome();
+        }
+        let Ok(project_sessions) = context.project_sessions() else {
+            return SessionSyncOutcomeV1::Unavailable {
+                reason_code: "session_sync_project_retired",
+            };
+        };
+        match self
+            .refresh_source_frontiers_with_project_sessions(&context, &project_sessions, &key)
+            .await
+        {
+            Ok(refreshed) => initial = refreshed,
+            Err(error) => {
+                tracing::warn!(%error, "session sync cancellation frontier refresh failed");
+                return SessionSyncOutcomeV1::Unavailable {
+                    reason_code: "session_sync_cancel_failed",
+                };
+            }
         }
         let primary_key = initial
             .coalesced_primary
@@ -429,7 +332,12 @@ impl DaemonSessionSyncService {
             }
         }
         match self
-            .persist_interruption(&context, &key, OperationTermination::Cancelled)
+            .persist_interruption_with_project_sessions(
+                &context,
+                &project_sessions,
+                &key,
+                OperationTermination::Cancelled,
+            )
             .await
         {
             Ok(journal) => journal.outcome(),
@@ -446,21 +354,28 @@ impl DaemonSessionSyncService {
 impl SessionSyncProjectContext {
     pub(super) async fn source_frontiers_for(
         &self,
+        project_sessions: &Arc<RegisteredGlobalDb>,
         source: &SessionSyncCommandV1,
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         match source {
-            SessionSyncCommandV1::ImportTranscripts(_) => self.source_frontiers().await,
-            SessionSyncCommandV1::SynchronizeGit(_) => self.git_history_source_frontiers().await,
+            SessionSyncCommandV1::ImportTranscripts(_) => {
+                self.source_frontiers(project_sessions).await
+            }
+            SessionSyncCommandV1::SynchronizeGit(_) => {
+                self.git_history_source_frontiers(Arc::clone(project_sessions))
+                    .await
+            }
         }
     }
 
     pub(super) async fn source_frontiers(
         &self,
+        project_sessions: &Arc<RegisteredGlobalDb>,
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let mut frontiers = Vec::new();
         for (store_scope, database) in [
-            ("project", &self.project_sessions),
-            ("profile", &self.user_sessions),
+            ("project", project_sessions.as_ref()),
+            ("profile", self.user_sessions.as_ref()),
         ] {
             for (source_json, scope_json, committed_cursor_json) in database
                 .list_session_sync_source_frontiers()
@@ -494,8 +409,9 @@ impl SessionSyncProjectContext {
 
     async fn git_history_source_frontiers(
         &self,
+        project_sessions: Arc<RegisteredGlobalDb>,
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
-        let store = GlobalDbGitCorrelationStore::new(Arc::clone(&self.project_sessions));
+        let store = GlobalDbGitCorrelationStore::new(project_sessions);
         let snapshot = store.read_snapshot().await.map_err(store_error)?;
         let activity_timestamp = tracedecay_sessions::runtime::git_correlation::read_meta_value(
             &snapshot,
@@ -523,12 +439,13 @@ impl SessionSyncProjectContext {
         admitted_at: UtcMicros,
         request: &SessionSyncRequestV1,
         shutdown: &tracedecay_usecases::observation::ObservationCancellation,
+        project_sessions: Arc<RegisteredGlobalDb>,
     ) -> SessionSyncWorkResult {
         let cancellation = tracedecay_usecases::observation::ObservationCancellation::default();
         let pass_cancellation = cancellation.clone();
         let pass = async {
             let project_authority =
-                GlobalDbSessionIngestAuthority::new(Arc::clone(&self.project_sessions));
+                GlobalDbSessionIngestAuthority::new(Arc::clone(&project_sessions));
             let project = tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation(
                 &self.brain_id,
                 &self.profile_id,
@@ -549,6 +466,7 @@ impl SessionSyncProjectContext {
             let project_progress = service
                 .persist_progress(
                     self,
+                    &project_sessions,
                     journal_key,
                     project_stats.clone(),
                     project_coverage.clone(),
@@ -629,7 +547,13 @@ impl SessionSyncProjectContext {
                 |user| source_coverage("profile", user.coverage),
             ));
             let source_frontiers = service
-                .persist_progress(self, journal_key, stats.clone(), coverage.clone())
+                .persist_progress(
+                    self,
+                    &project_sessions,
+                    journal_key,
+                    stats.clone(),
+                    coverage.clone(),
+                )
                 .await;
             (
                 project,
@@ -715,64 +639,12 @@ impl SessionSyncProjectContext {
         }
     }
 
-    async fn publish_git_topology(
-        &self,
-        request: &SessionSyncRequestV1,
-        shutdown: &tracedecay_usecases::observation::ObservationCancellation,
-    ) -> Result<(), super::git_topology::GitTopologySyncFailure> {
-        let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
-            &self.project_root,
-            &self.project_id,
-        )
-        .map_err(|_| super::git_topology::GitTopologySyncFailure::Unavailable)?;
-        let runtime = self
-            .project_sessions
-            .project_graph_runtime()
-            .cloned()
-            .ok_or(super::git_topology::GitTopologySyncFailure::Unavailable)?;
-        let scope_sets = self
-            .project_sessions
-            .authorized_scope_set_storage()
-            .map_err(|_| super::git_topology::GitTopologySyncFailure::Unavailable)?;
-        let project_root = self.project_root.clone();
-        let repository = scope.repository_id;
-        let worktree = scope.worktree_id;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let worker = tokio::task::spawn_blocking(move || {
-            super::git_topology::publish_native_topology(
-                runtime,
-                project_root,
-                repository,
-                worktree,
-                scope_sets,
-                worker_cancelled,
-            )
-        });
-        tokio::pin!(worker);
-        loop {
-            tokio::select! {
-                result = &mut worker => {
-                    return result
-                        .map_err(|_| super::git_topology::GitTopologySyncFailure::Unavailable)?;
-                }
-                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
-                    if shutdown.is_cancelled()
-                        || request.cancellation().is_cancelled()
-                        || request.deadline().is_elapsed_at(now_micros())
-                    {
-                        cancelled.store(true, Ordering::Relaxed);
-                    }
-                }
-            }
-        }
-    }
-
     pub(super) async fn synchronize_git(
         &self,
         request: &SessionSyncRequestV1,
         options: SessionGitSyncV1,
         shutdown: &tracedecay_usecases::observation::ObservationCancellation,
+        project_sessions: Arc<RegisteredGlobalDb>,
     ) -> SessionSyncWorkResult {
         if shutdown.is_cancelled() {
             return SessionSyncWorkResult::Interrupted(SessionSyncInterruption::Shutdown);
@@ -788,7 +660,7 @@ impl SessionSyncProjectContext {
             cancellation.clone(),
             GIT_SYNC_COMMAND_DEADLINE,
         );
-        let store = GlobalDbGitCorrelationStore::new(Arc::clone(&self.project_sessions));
+        let store = GlobalDbGitCorrelationStore::new(Arc::clone(&project_sessions));
         let backfill_options = tracedecay_sessions::runtime::git_correlation::BackfillOptions {
             since: options.since_unix(),
             limit_sessions: options.max_sessions(),
@@ -819,7 +691,16 @@ impl SessionSyncProjectContext {
         };
         let topology_result =
             if result.is_ok() && requested_interruption.is_none() && !options.dry_run() {
-                self.publish_git_topology(request, shutdown).await
+                match self
+                    .publish_git_topology(request, shutdown, project_sessions)
+                    .await
+                {
+                    super::git_topology::GitTopologySyncOutcome::Finished(result) => result,
+                    super::git_topology::GitTopologySyncOutcome::Interrupted(interruption) => {
+                        requested_interruption = Some(interruption);
+                        Ok(())
+                    }
+                }
             } else {
                 Ok(())
             };
@@ -840,7 +721,11 @@ impl SessionSyncProjectContext {
                 }
             }
         };
-        git_sync_with_topology_result(work, topology_result)
+        if requested_interruption.is_some() {
+            work
+        } else {
+            git_sync_with_topology_result(work, topology_result)
+        }
     }
 }
 

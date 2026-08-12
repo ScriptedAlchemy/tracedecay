@@ -17,6 +17,9 @@ use tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage;
 use tracedecay_store::FactReadControl;
 
 use crate::git_intelligence::{GIT_HISTORY_MAX_COUNT_LIMIT, NativeGitIntelligence};
+use crate::global_db::RegisteredGlobalDb;
+
+use super::{SESSION_SYNC_POLL_INTERVAL, SessionSyncProjectContext, work::SessionSyncInterruption};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GitTopologySyncFailure {
@@ -31,6 +34,85 @@ impl GitTopologySyncFailure {
             Self::Stale => "git_topology_declared_state_stale",
             Self::Denied => "git_topology_declared_authority_denied",
             Self::Unavailable => "git_topology_declared_authority_unavailable",
+        }
+    }
+}
+
+pub(super) enum GitTopologySyncOutcome {
+    Finished(Result<(), GitTopologySyncFailure>),
+    Interrupted(SessionSyncInterruption),
+}
+
+impl SessionSyncProjectContext {
+    pub(super) async fn publish_git_topology(
+        &self,
+        request: &tracedecay_application::session_sync::SessionSyncRequestV1,
+        shutdown: &tracedecay_usecases::observation::ObservationCancellation,
+        project_sessions: Arc<RegisteredGlobalDb>,
+    ) -> GitTopologySyncOutcome {
+        let scope = match crate::daemon::project_open_owners::resolved_scope_for_project(
+            &self.project_root,
+            &self.project_id,
+        ) {
+            Ok(scope) => scope,
+            Err(_) => {
+                return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
+            }
+        };
+        let Some(runtime) = project_sessions.project_graph_runtime().cloned() else {
+            return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
+        };
+        let scope_sets = match project_sessions.authorized_scope_set_storage() {
+            Ok(scope_sets) => scope_sets,
+            Err(_) => {
+                return GitTopologySyncOutcome::Finished(Err(GitTopologySyncFailure::Unavailable));
+            }
+        };
+        let project_root = self.project_root.clone();
+        let repository = scope.repository_id;
+        let worktree = scope.worktree_id;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker = tokio::task::spawn_blocking(move || {
+            publish_native_topology(
+                runtime,
+                project_root,
+                repository,
+                worktree,
+                scope_sets,
+                worker_cancelled,
+            )
+        });
+        tokio::pin!(worker);
+        let mut interruption = None;
+        loop {
+            tokio::select! {
+                result = &mut worker => {
+                    return match interruption {
+                        Some(interruption) => GitTopologySyncOutcome::Interrupted(interruption),
+                        None => GitTopologySyncOutcome::Finished(match result {
+                            Ok(result) => result,
+                            Err(_) => Err(GitTopologySyncFailure::Unavailable),
+                        }),
+                    };
+                }
+                () = tokio::time::sleep(SESSION_SYNC_POLL_INTERVAL) => {
+                    if interruption.is_none() {
+                        if shutdown.is_cancelled() {
+                            interruption = Some(SessionSyncInterruption::Shutdown);
+                            cancelled.store(true, Ordering::Release);
+                        } else if request.cancellation().is_cancelled() {
+                            interruption = Some(SessionSyncInterruption::Cancelled);
+                            cancelled.store(true, Ordering::Release);
+                        } else if request.deadline().is_elapsed_at(
+                            tracedecay_application::now_micros(),
+                        ) {
+                            interruption = Some(SessionSyncInterruption::TimedOut);
+                            cancelled.store(true, Ordering::Release);
+                        }
+                    }
+                }
+            }
         }
     }
 }

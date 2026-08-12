@@ -10,10 +10,9 @@ use tracedecay_application::session_sync::{
     SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
     SessionSyncScopeV1, SessionSyncServicePort, SessionSyncShutdownFuture,
     SessionSyncSourceCoverageV1, SessionSyncSourceFrontierV1, SessionSyncStatsV1,
-    SessionTranscriptImportV1,
 };
 use tracedecay_application::{
-    CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId, now_micros,
+    CancellationSignal, IdempotencyKey, OperationTermination, now_micros,
 };
 use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
@@ -24,16 +23,14 @@ const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
 const SESSION_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SESSION_SYNC_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(2);
 const SESSION_SYNC_SHUTDOWN_ABORT_GRACE: Duration = Duration::from_secs(1);
-const SESSION_SYNC_STARTUP_DEADLINE_MICROS: i64 = 60_000_000;
-const GIT_SYNC_COMMAND_DEADLINE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub(crate) struct DaemonSessionSyncService {
     contexts: Arc<RwLock<BTreeMap<String, Arc<SessionSyncProjectContext>>>>,
     active: Arc<Mutex<BTreeMap<String, CancellationSignal>>>,
-    tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    tasks: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
     scan_slots: Arc<tokio::sync::Semaphore>,
-    admission_gate: Arc<tokio::sync::Mutex<()>>,
+    project_gates: Arc<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     active_imports: Arc<Mutex<BTreeMap<String, ActiveSessionImport>>>,
     completed_profile_sweeps: Arc<Mutex<BTreeMap<String, UtcMicros>>>,
     shutdown: tracedecay_usecases::observation::ObservationCancellation,
@@ -61,21 +58,6 @@ pub(crate) struct DaemonSessionSyncConfig {
     pub user_refresh: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
 }
 
-#[derive(Clone)]
-struct SessionSyncProjectContext {
-    brain_id: BrainId,
-    profile_id: UserProfileId,
-    project_id: ProjectId,
-    profile_root: std::path::PathBuf,
-    project_root: std::path::PathBuf,
-    transcript_source_home: Option<std::path::PathBuf>,
-    project_sessions: Arc<RegisteredGlobalDb>,
-    user_sessions: Arc<RegisteredGlobalDb>,
-    registry: Arc<RegisteredGlobalDb>,
-    project_refresh: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
-    user_refresh: crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
-}
-
 enum SessionSyncWorkResult {
     Finished {
         interruption: Option<work::SessionSyncInterruption>,
@@ -95,7 +77,7 @@ impl Default for DaemonSessionSyncService {
             active: Arc::new(Mutex::new(BTreeMap::new())),
             tasks: Arc::new(Mutex::new(Vec::new())),
             scan_slots: Arc::new(tokio::sync::Semaphore::new(1)),
-            admission_gate: Arc::new(tokio::sync::Mutex::new(())),
+            project_gates: Arc::new(Mutex::new(BTreeMap::new())),
             active_imports: Arc::new(Mutex::new(BTreeMap::new())),
             completed_profile_sweeps: Arc::new(Mutex::new(BTreeMap::new())),
             shutdown: tracedecay_usecases::observation::ObservationCancellation::default(),
@@ -104,86 +86,13 @@ impl Default for DaemonSessionSyncService {
 }
 
 impl DaemonSessionSyncService {
-    pub(crate) async fn register_project(
+    async fn execute_request_admitted(
         &self,
-        config: DaemonSessionSyncConfig,
-    ) -> crate::errors::Result<()> {
-        let scope = SessionSyncScopeV1::new(config.project_id.clone(), config.profile_id.clone());
-        let context = Arc::new(SessionSyncProjectContext {
-            brain_id: config.brain_id,
-            profile_id: config.profile_id,
-            project_id: config.project_id,
-            profile_root: config.profile_root,
-            project_root: config.project_root,
-            transcript_source_home: config.transcript_source_home,
-            project_sessions: config.project_sessions,
-            user_sessions: config.user_sessions,
-            registry: config.registry,
-            project_refresh: config.project_refresh,
-            user_refresh: config.user_refresh,
-        });
-        self.contexts
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(scope.project_id().as_str().to_owned(), Arc::clone(&context));
-        let _admission = self.admission_gate.lock().await;
-        let recovered_import = self.recover_project(&context).await?;
-        if config.startup_import && !recovered_import {
-            self.schedule_startup_import(scope).await?;
-        }
-        Ok(())
-    }
-
-    fn context_for(&self, scope: &SessionSyncScopeV1) -> Option<Arc<SessionSyncProjectContext>> {
-        self.contexts
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(scope.project_id().as_str())
-            .filter(|context| &context.profile_id == scope.profile_id())
-            .cloned()
-    }
-
-    async fn schedule_startup_import(
-        &self,
-        scope: SessionSyncScopeV1,
-    ) -> crate::errors::Result<()> {
-        let stable = format!(
-            "session-sync.startup.{}.{}",
-            crate::runtime_identity::process_run_id(),
-            scope.project_id().as_str()
-        );
-        let operation_id = RequestId::new(stable.clone()).map_err(contract_error)?;
-        let idempotency_key = IdempotencyKey::new(stable.clone()).map_err(contract_error)?;
-        let cancellation =
-            CancellationSignal::active(format!("{stable}.cancellation")).map_err(contract_error)?;
-        let deadline = Deadline::new(UtcMicros(
-            now_micros()
-                .0
-                .saturating_add(SESSION_SYNC_STARTUP_DEADLINE_MICROS),
-        ))
-        .map_err(contract_error)?;
-        let request = SessionSyncRequestV1::new(
-            operation_id,
-            idempotency_key,
-            scope,
-            deadline,
-            cancellation,
-            SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
-        );
-        let _ = self.execute_request_locked(request).await;
-        Ok(())
-    }
-
-    async fn execute_request(&self, request: SessionSyncRequestV1) -> SessionSyncOutcomeV1 {
-        let _admission = self.admission_gate.lock().await;
-        self.execute_request_locked(request).await
-    }
-
-    async fn execute_request_locked(&self, request: SessionSyncRequestV1) -> SessionSyncOutcomeV1 {
+        request: SessionSyncRequestV1,
+        context: Arc<SessionSyncProjectContext>,
+        project_sessions: Arc<RegisteredGlobalDb>,
+    ) -> SessionSyncOutcomeV1 {
         let observed_at = now_micros();
-        let Some(context) = self.context_for(request.scope()) else {
-            return SessionSyncOutcomeV1::WrongScope;
-        };
         let key = journal_key(request.scope(), request.idempotency_key());
         match context.registry.read_session_sync_journal(&key).await {
             Ok(Some(encoded)) => {
@@ -212,8 +121,9 @@ impl DaemonSessionSyncService {
                             }
                             if journal.deadline.is_elapsed_at(observed_at) {
                                 return match self
-                                    .persist_interruption(
+                                    .persist_interruption_with_project_sessions(
                                         &context,
+                                        &project_sessions,
                                         &key,
                                         OperationTermination::TimedOut,
                                     )
@@ -228,6 +138,7 @@ impl DaemonSessionSyncService {
                             if !self.active_contains(&key) {
                                 self.coalesce_import(
                                     Arc::clone(&context),
+                                    Arc::clone(&project_sessions),
                                     key,
                                     journal.clone(),
                                     primary_key,
@@ -238,8 +149,9 @@ impl DaemonSessionSyncService {
                             && journal.deadline.is_elapsed_at(observed_at)
                         {
                             return match self
-                                .persist_interruption(
+                                .persist_interruption_with_project_sessions(
                                     &context,
+                                    &project_sessions,
                                     &key,
                                     OperationTermination::TimedOut,
                                 )
@@ -251,7 +163,13 @@ impl DaemonSessionSyncService {
                                 },
                             };
                         } else if journal.status != SessionSyncJournalStatusV1::Complete
-                            && !self.enqueue(context, key, request, admission)
+                            && !self.enqueue(
+                                context,
+                                Arc::clone(&project_sessions),
+                                key,
+                                request,
+                                admission,
+                            )
                         {
                             return SessionSyncOutcomeV1::Unavailable {
                                 reason_code: "session_sync_capacity_reached",
@@ -319,10 +237,14 @@ impl DaemonSessionSyncService {
                 Ok(true) => {}
                 Ok(false) => {
                     return self
-                        .status_request(SessionSyncControlV1::new(
-                            request.scope().clone(),
-                            request.idempotency_key().clone(),
-                        ))
+                        .status_request_admitted(
+                            &context,
+                            Some(&project_sessions),
+                            SessionSyncControlV1::new(
+                                request.scope().clone(),
+                                request.idempotency_key().clone(),
+                            ),
+                        )
                         .await;
                 }
                 Err(error) => {
@@ -335,6 +257,7 @@ impl DaemonSessionSyncService {
             let admission = journal.admission.clone();
             self.coalesce_import(
                 context,
+                project_sessions,
                 key,
                 journal,
                 primary.journal_key,
@@ -371,10 +294,14 @@ impl DaemonSessionSyncService {
             Ok(true) => {}
             Ok(false) => {
                 return self
-                    .status_request(SessionSyncControlV1::new(
-                        request.scope().clone(),
-                        request.idempotency_key().clone(),
-                    ))
+                    .status_request_admitted(
+                        &context,
+                        Some(&project_sessions),
+                        SessionSyncControlV1::new(
+                            request.scope().clone(),
+                            request.idempotency_key().clone(),
+                        ),
+                    )
                     .await;
             }
             Err(error) => {
@@ -385,7 +312,7 @@ impl DaemonSessionSyncService {
             }
         }
         let admission = journal.admission.clone();
-        if !self.enqueue(context, key, request, admission.clone()) {
+        if !self.enqueue(context, project_sessions, key, request, admission.clone()) {
             return SessionSyncOutcomeV1::Unavailable {
                 reason_code: "session_sync_capacity_reached",
             };
@@ -410,6 +337,7 @@ impl DaemonSessionSyncService {
     fn enqueue(
         &self,
         context: Arc<SessionSyncProjectContext>,
+        project_sessions: Arc<RegisteredGlobalDb>,
         key: String,
         request: SessionSyncRequestV1,
         admission: tracedecay_application::session_sync::SessionSyncAdmissionReceiptV1,
@@ -441,8 +369,13 @@ impl DaemonSessionSyncService {
         }
         drop(active);
         let service = self.clone();
+        let task_scope = request.scope().clone();
+        let task_key = key.clone();
+        let task_cancellation = request.cancellation().clone();
         let task = tokio::spawn(async move {
-            service.run_operation(context, key.clone(), request).await;
+            service
+                .run_operation(context, project_sessions, key.clone(), request)
+                .await;
             service
                 .active
                 .lock()
@@ -457,14 +390,20 @@ impl DaemonSessionSyncService {
             }
         });
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(task);
+        tasks.retain(|task| !task.task.is_finished());
+        tasks.push(SessionSyncTaskV1 {
+            scope: task_scope,
+            key: task_key,
+            cancellation: task_cancellation,
+            task,
+        });
         true
     }
 
     async fn run_operation(
         &self,
         context: Arc<SessionSyncProjectContext>,
+        project_sessions: Arc<RegisteredGlobalDb>,
         key: String,
         request: SessionSyncRequestV1,
     ) {
@@ -481,19 +420,25 @@ impl DaemonSessionSyncService {
                         return;
                     }
                     if request.cancellation().is_cancelled() {
-                        let _ = self.persist_interruption(
-                            &context,
-                            &key,
-                            OperationTermination::Cancelled,
-                        ).await;
+                        let _ = self
+                            .persist_interruption_with_project_sessions(
+                                &context,
+                                &project_sessions,
+                                &key,
+                                OperationTermination::Cancelled,
+                            )
+                            .await;
                         return;
                     }
                     if request.deadline().is_elapsed_at(now_micros()) {
-                        let _ = self.persist_interruption(
-                            &context,
-                            &key,
-                            OperationTermination::TimedOut,
-                        ).await;
+                        let _ = self
+                            .persist_interruption_with_project_sessions(
+                                &context,
+                                &project_sessions,
+                                &key,
+                                OperationTermination::TimedOut,
+                            )
+                            .await;
                         return;
                     }
                 }
@@ -506,14 +451,24 @@ impl DaemonSessionSyncService {
         if request.cancellation().is_cancelled() {
             drop(permit);
             let _ = self
-                .persist_interruption(&context, &key, OperationTermination::Cancelled)
+                .persist_interruption_with_project_sessions(
+                    &context,
+                    &project_sessions,
+                    &key,
+                    OperationTermination::Cancelled,
+                )
                 .await;
             return;
         }
         if request.deadline().is_elapsed_at(now_micros()) {
             drop(permit);
             let _ = self
-                .persist_interruption(&context, &key, OperationTermination::TimedOut)
+                .persist_interruption_with_project_sessions(
+                    &context,
+                    &project_sessions,
+                    &key,
+                    OperationTermination::TimedOut,
+                )
                 .await;
             return;
         }
@@ -533,12 +488,18 @@ impl DaemonSessionSyncService {
                         running.admission.accepted_at,
                         &request,
                         &self.shutdown,
+                        Arc::clone(&project_sessions),
                     )
                     .await
             }
             SessionSyncCommandV1::SynchronizeGit(options) => {
                 context
-                    .synchronize_git(&request, options, &self.shutdown)
+                    .synchronize_git(
+                        &request,
+                        options,
+                        &self.shutdown,
+                        Arc::clone(&project_sessions),
+                    )
                     .await
             }
         };
@@ -546,7 +507,14 @@ impl DaemonSessionSyncService {
         match work {
             SessionSyncWorkResult::Interrupted(interruption) => {
                 if let Some(termination) = interruption.termination() {
-                    let _ = self.persist_interruption(&context, &key, termination).await;
+                    let _ = self
+                        .persist_interruption_with_project_sessions(
+                            &context,
+                            &project_sessions,
+                            &key,
+                            termination,
+                        )
+                        .await;
                 }
             }
             SessionSyncWorkResult::Finished {
@@ -557,6 +525,7 @@ impl DaemonSessionSyncService {
                 source_frontiers,
                 failure_codes,
             } => {
+                let interrupted = interruption.is_some();
                 let coverage_complete = !coverage.is_empty()
                     && coverage.iter().all(|entry| entry.coverage.is_complete());
                 let termination = completion_termination(
@@ -579,6 +548,7 @@ impl DaemonSessionSyncService {
                     .await
                     .is_ok()
                     && committed
+                    && !interrupted
                 {
                     context.project_refresh.wake();
                     context.user_refresh.wake();
@@ -601,13 +571,16 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    async fn persist_interruption(
+    async fn persist_interruption_with_project_sessions(
         &self,
         context: &SessionSyncProjectContext,
+        project_sessions: &Arc<RegisteredGlobalDb>,
         key: &str,
         termination: OperationTermination,
     ) -> crate::errors::Result<SessionSyncJournalV1> {
-        let journal = self.refresh_source_frontiers(context, key).await?;
+        let journal = self
+            .refresh_source_frontiers_with_project_sessions(context, project_sessions, key)
+            .await?;
         self.persist_terminal(
             context,
             key,
@@ -688,11 +661,12 @@ impl DaemonSessionSyncService {
     async fn persist_progress(
         &self,
         context: &SessionSyncProjectContext,
+        project_sessions: &Arc<RegisteredGlobalDb>,
         key: &str,
         stats: SessionSyncStatsV1,
         coverage: Vec<SessionSyncSourceCoverageV1>,
     ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
-        let source_frontiers = context.source_frontiers().await?;
+        let source_frontiers = context.source_frontiers(project_sessions).await?;
         self.update_journal(context, key, |journal| {
             if journal.status != SessionSyncJournalStatusV1::Complete {
                 journal.stats = stats.clone();
@@ -705,9 +679,10 @@ impl DaemonSessionSyncService {
         Ok(source_frontiers)
     }
 
-    async fn refresh_source_frontiers(
+    async fn refresh_source_frontiers_with_project_sessions(
         &self,
         context: &SessionSyncProjectContext,
+        project_sessions: &Arc<RegisteredGlobalDb>,
         key: &str,
     ) -> crate::errors::Result<SessionSyncJournalV1> {
         let current = context
@@ -720,7 +695,9 @@ impl DaemonSessionSyncService {
             })?;
         let journal: SessionSyncJournalV1 =
             serde_json::from_str(&current).map_err(journal_decode_error)?;
-        let source_frontiers = context.source_frontiers_for(&journal.source).await?;
+        let source_frontiers = context
+            .source_frontiers_for(project_sessions, &journal.source)
+            .await?;
         self.update_journal(context, key, |journal| {
             if journal.status != SessionSyncJournalStatusV1::Complete
                 && journal.source_frontiers != source_frontiers
@@ -732,12 +709,18 @@ impl DaemonSessionSyncService {
         .await
     }
 
-    async fn status_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
-        let Some(context) = self.context_for(control.scope()) else {
-            return SessionSyncOutcomeV1::WrongScope;
-        };
+    async fn status_request_admitted(
+        &self,
+        context: &SessionSyncProjectContext,
+        project_sessions: Option<&Arc<RegisteredGlobalDb>>,
+        control: SessionSyncControlV1,
+    ) -> SessionSyncOutcomeV1 {
         let key = journal_key(control.scope(), control.idempotency_key());
-        if let Err(error) = self.refresh_source_frontiers(&context, &key).await {
+        if let Some(project_sessions) = project_sessions
+            && let Err(error) = self
+                .refresh_source_frontiers_with_project_sessions(context, project_sessions, &key)
+                .await
+        {
             tracing::warn!(%error, "session sync frontier refresh failed");
         }
         match context.registry.read_session_sync_journal(&key).await {
@@ -767,6 +750,17 @@ impl DaemonSessionSyncService {
             }
         }
     }
+
+    async fn status_request(&self, control: SessionSyncControlV1) -> SessionSyncOutcomeV1 {
+        let project_gate = self.project_gate(control.scope());
+        let _project = project_gate.lock().await;
+        let Some(context) = self.context_for(control.scope()) else {
+            return SessionSyncOutcomeV1::WrongScope;
+        };
+        let project_sessions = context.project_sessions().ok();
+        self.status_request_admitted(&context, project_sessions.as_ref(), control)
+            .await
+    }
 }
 
 impl SessionSyncServicePort for DaemonSessionSyncService {
@@ -793,7 +787,9 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                 let grace_deadline =
                     tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
                 tokio::select! {
-                    results = futures_util::future::join_all(tasks.iter_mut()) => {
+                    results = futures_util::future::join_all(
+                        tasks.iter_mut().map(|task| &mut task.task)
+                    ) => {
                         for result in results {
                             work::log_session_sync_join(result);
                         }
@@ -802,9 +798,11 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                     () = tokio::time::sleep_until(grace_deadline) => {}
                 }
                 for task in &tasks {
-                    task.abort();
+                    task.task.abort();
                 }
-                for result in futures_util::future::join_all(tasks).await {
+                for result in
+                    futures_util::future::join_all(tasks.into_iter().map(|task| task.task)).await
+                {
                     work::log_session_sync_join(result);
                 }
             })
@@ -817,7 +815,10 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
 }
 
 mod git_topology;
+mod project_lifecycle;
 mod work;
+
+use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
     let profile_id = scope.profile_id().as_str();
     let project_id = scope.project_id().as_str();
@@ -938,3 +939,7 @@ fn journal_encode_error(error: impl std::fmt::Display) -> crate::errors::TraceDe
 #[cfg(test)]
 #[path = "session_sync_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "session_sync/project_lifecycle_tests.rs"]
+mod project_lifecycle_tests;
