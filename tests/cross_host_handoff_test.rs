@@ -63,7 +63,7 @@ async fn codex_to_claude_handoff_preserves_identity_lineage_privacy_and_provenan
             None,
         ))
         .await;
-    assert_eq!(parent.status, HostAdmissionStatus::Committed);
+    assert_eq!(parent.status, HostAdmissionStatus::AcceptedForReplay);
 
     let child = facade
         .capture(handoff_request(
@@ -78,7 +78,7 @@ async fn codex_to_claude_handoff_preserves_identity_lineage_privacy_and_provenan
             )),
         ))
         .await;
-    assert_eq!(child.status, HostAdmissionStatus::Committed);
+    assert_eq!(child.status, HostAdmissionStatus::AcceptedForReplay);
 
     drop(facade);
 
