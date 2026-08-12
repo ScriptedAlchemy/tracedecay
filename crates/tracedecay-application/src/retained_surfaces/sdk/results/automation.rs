@@ -10,8 +10,8 @@ use tracedecay_domain::{
 use super::FactCommitOwnerV1;
 use crate::memory::{FactCategoryV1, FactMetadataV1};
 use crate::retained_surfaces::{
-    MemoryAutomationTaskV1, RetainedSurfaceOperation, retained_surface_application_operation,
-    retained_surface_problem_matches_terminal,
+    AutomationRunRequestV1, AutomationTaskRequestV1, AutomationTaskV1, RetainedSurfaceOperation,
+    retained_surface_application_operation, retained_surface_problem_matches_terminal,
 };
 use crate::{
     ApplicationContractError, ApplicationProblemEnvelope, ApplicationProblemKind, RequestId,
@@ -19,6 +19,7 @@ use crate::{
 };
 
 mod curation;
+mod terminal;
 
 use curation::curation_receipt_matches;
 pub use curation::{
@@ -28,8 +29,7 @@ pub use curation::{
     MemoryAutomationCurationRelationProvenanceV1, MemoryAutomationCurationRelationV1,
     MemoryAutomationCurationRemoveDispositionV1, MemoryAutomationCurationResultV1,
 };
-
-const MAX_AUTOMATION_TERMINAL_COUNT: u64 = 1_000_000;
+pub use terminal::{AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1};
 
 #[derive(Serialize)]
 struct AutomaticFactDigestProjection<'a> {
@@ -59,159 +59,6 @@ struct AutomaticFactDigestProjection<'a> {
     quarantine_reason: Option<&'a str>,
     recorded_at_micros: UtcMicros,
     disposition: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryAutomationSkipReasonV1 {
-    AutomationDisabled,
-    MemoryCuratorDisabled,
-    SessionReflectorDisabled,
-    DelegatedHostMode,
-    BackendDisabled,
-    SchedulerLockActive,
-    TaskNotSchedulable,
-    SchedulerScheduleInvalid,
-    SchedulerScheduleManual,
-    SchedulerIdleWindowActive,
-    SchedulerNonRetryableFailure,
-    SchedulerCooldownActive,
-    SchedulerIntervalNotElapsed,
-    SchedulerCronNotDue,
-    NoNewSessionActivity,
-    SimilarityAuthorityUnavailable,
-    PartialCoverageNoCandidates,
-    NothingToReview,
-    SessionEvidenceFilterUnavailable,
-    SessionEvidenceRetrievalUnavailable,
-    SessionEvidenceUnavailable,
-    SessionEvidencePartial,
-    SessionEvidenceStale,
-    SessionEvidenceDenied,
-    SessionEvidenceLocked,
-    SessionEvidenceResetRequired,
-    SessionCursorManifestLimitExceeded,
-    SessionEvidenceBudgetExhausted,
-    SessionEvidenceCancelled,
-    NoSessionEvidence,
-    ShippedFactProposalHistoryRetired,
-}
-
-impl MemoryAutomationSkipReasonV1 {
-    /// Projects the exact agent-host ledger label into the closed application
-    /// terminal. Unknown labels cannot become durable skipped outcomes.
-    pub fn from_ledger_reason(reason: &str) -> Option<Self> {
-        use MemoryAutomationSkipReasonV1 as Reason;
-
-        Some(match reason {
-            "automation_disabled" => Reason::AutomationDisabled,
-            "memory_curator_disabled" => Reason::MemoryCuratorDisabled,
-            "session_reflector_disabled" => Reason::SessionReflectorDisabled,
-            "delegated_host_mode" => Reason::DelegatedHostMode,
-            "backend_disabled" => Reason::BackendDisabled,
-            "scheduler_lock_active" => Reason::SchedulerLockActive,
-            "task_not_schedulable" => Reason::TaskNotSchedulable,
-            "scheduler_schedule_invalid" => Reason::SchedulerScheduleInvalid,
-            "scheduler_schedule_manual" => Reason::SchedulerScheduleManual,
-            "scheduler_idle_window_active" => Reason::SchedulerIdleWindowActive,
-            "scheduler_non_retryable_failure" => Reason::SchedulerNonRetryableFailure,
-            "scheduler_cooldown_active" => Reason::SchedulerCooldownActive,
-            "scheduler_interval_not_elapsed" => Reason::SchedulerIntervalNotElapsed,
-            "scheduler_cron_not_due" => Reason::SchedulerCronNotDue,
-            "no_new_session_activity" => Reason::NoNewSessionActivity,
-            "similarity_authority_unavailable" => Reason::SimilarityAuthorityUnavailable,
-            "partial_coverage_no_candidates" => Reason::PartialCoverageNoCandidates,
-            "nothing_to_review" => Reason::NothingToReview,
-            "session_evidence_filter_unavailable" => Reason::SessionEvidenceFilterUnavailable,
-            "session_evidence_retrieval_unavailable" => Reason::SessionEvidenceRetrievalUnavailable,
-            "session_evidence_unavailable" => Reason::SessionEvidenceUnavailable,
-            "session_evidence_partial" => Reason::SessionEvidencePartial,
-            "session_evidence_stale" => Reason::SessionEvidenceStale,
-            "session_evidence_denied" => Reason::SessionEvidenceDenied,
-            "session_evidence_locked" => Reason::SessionEvidenceLocked,
-            "session_evidence_reset_required" => Reason::SessionEvidenceResetRequired,
-            "session_cursor_manifest_limit_exceeded" => Reason::SessionCursorManifestLimitExceeded,
-            "session_evidence_budget_exhausted" => Reason::SessionEvidenceBudgetExhausted,
-            "session_evidence_cancelled" => Reason::SessionEvidenceCancelled,
-            "no_session_evidence" => Reason::NoSessionEvidence,
-            "shipped_fact_proposal_history_retired" => Reason::ShippedFactProposalHistoryRetired,
-            _ => return None,
-        })
-    }
-
-    fn matches_task(self, task: MemoryAutomationTaskV1) -> bool {
-        use MemoryAutomationSkipReasonV1 as Reason;
-
-        match self {
-            Reason::MemoryCuratorDisabled
-            | Reason::SimilarityAuthorityUnavailable
-            | Reason::PartialCoverageNoCandidates
-            | Reason::NothingToReview => task == MemoryAutomationTaskV1::MemoryCurator,
-            Reason::SessionReflectorDisabled
-            | Reason::NoNewSessionActivity
-            | Reason::SessionEvidenceFilterUnavailable
-            | Reason::SessionEvidenceRetrievalUnavailable
-            | Reason::SessionEvidenceUnavailable
-            | Reason::SessionEvidencePartial
-            | Reason::SessionEvidenceStale
-            | Reason::SessionEvidenceDenied
-            | Reason::SessionEvidenceLocked
-            | Reason::SessionEvidenceResetRequired
-            | Reason::SessionCursorManifestLimitExceeded
-            | Reason::SessionEvidenceBudgetExhausted
-            | Reason::SessionEvidenceCancelled
-            | Reason::NoSessionEvidence
-            | Reason::ShippedFactProposalHistoryRetired => {
-                task == MemoryAutomationTaskV1::SessionReflector
-            }
-            Reason::AutomationDisabled
-            | Reason::DelegatedHostMode
-            | Reason::BackendDisabled
-            | Reason::SchedulerLockActive
-            | Reason::TaskNotSchedulable
-            | Reason::SchedulerScheduleInvalid
-            | Reason::SchedulerScheduleManual
-            | Reason::SchedulerIdleWindowActive
-            | Reason::SchedulerNonRetryableFailure
-            | Reason::SchedulerCooldownActive
-            | Reason::SchedulerIntervalNotElapsed
-            | Reason::SchedulerCronNotDue => true,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryAutomationRunSummaryV1 {
-    pub reviewed_count: u64,
-    pub accepted_count: u64,
-    pub rejected_count: u64,
-    pub skipped_count: u64,
-}
-
-impl MemoryAutomationRunSummaryV1 {
-    fn is_bounded(&self) -> bool {
-        [
-            self.reviewed_count,
-            self.accepted_count,
-            self.rejected_count,
-            self.skipped_count,
-        ]
-        .into_iter()
-        .all(|count| count <= MAX_AUTOMATION_TERMINAL_COUNT)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MemoryAutomationRunTerminalV1 {
-    Completed {
-        summary: MemoryAutomationRunSummaryV1,
-    },
-    Skipped {
-        reason: MemoryAutomationSkipReasonV1,
-        summary: MemoryAutomationRunSummaryV1,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -489,6 +336,42 @@ pub struct MemoryAutomationFactReceiptV1 {
     pub canonical_digest: ManifestDigest,
 }
 
+/// Payload-free identity of one committed non-memory automation effect.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationExternalEffectReceiptV1 {
+    pub run_id: RunId,
+    pub task_key: String,
+    pub manifest_digest: ManifestDigest,
+}
+
+impl AutomationExternalEffectReceiptV1 {
+    pub fn new(
+        run_id: RunId,
+        task_key: String,
+        manifest_digest: ManifestDigest,
+    ) -> Result<Self, ApplicationContractError> {
+        run_id.validate()?;
+        manifest_digest.validate()?;
+        if !valid_text(&task_key, 4_096) {
+            return Err(ApplicationContractError::InvalidIdentifier {
+                field: "automation external effect task key",
+            });
+        }
+        Ok(Self {
+            run_id,
+            task_key,
+            manifest_digest,
+        })
+    }
+
+    fn matches_terminal(&self, run_id: &RunId) -> bool {
+        &self.run_id == run_id
+            && valid_text(&self.task_key, 4_096)
+            && self.manifest_digest.validate().is_ok()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(
     tag = "kind",
@@ -496,50 +379,66 @@ pub struct MemoryAutomationFactReceiptV1 {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-pub enum MemoryAutomationCommittedReceiptV1 {
+pub enum AutomationCommittedReceiptV1 {
     Curation(MemoryAutomationCurationReceiptV1),
     AutomaticFact(MemoryAutomationFactReceiptV1),
+    SkillWriting(AutomationExternalEffectReceiptV1),
+    UserJobDelivery(AutomationExternalEffectReceiptV1),
 }
 
-impl MemoryAutomationCommittedReceiptV1 {
+impl AutomationCommittedReceiptV1 {
     fn matches_terminal(&self, run_id: &RunId) -> bool {
         match self {
             Self::Curation(receipt) => curation_receipt_matches(run_id, receipt),
             Self::AutomaticFact(receipt) => automatic_fact_receipt_matches(run_id, receipt),
+            Self::SkillWriting(receipt) => {
+                receipt.matches_terminal(run_id) && receipt.task_key == "skill_writer"
+            }
+            Self::UserJobDelivery(receipt) => {
+                receipt.matches_terminal(run_id)
+                    && receipt
+                        .task_key
+                        .strip_prefix("user_job:")
+                        .is_some_and(|job_id| valid_text(job_id, 4_087))
+            }
         }
     }
 }
 
-/// Durable terminal payload for one admitted automatic-memory run.
+/// Durable terminal payload for one admitted automation run.
 ///
 /// An empty receipt list is valid for completed or skipped zero-effect runs.
 /// Partial effects are represented only by an application problem carrying a
 /// non-empty committed effect receipt.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct MemoryAutomationRunResultV1 {
+pub struct AutomationRunResultV1 {
     pub run_id: RunId,
-    pub task: MemoryAutomationTaskV1,
-    pub terminal: MemoryAutomationRunTerminalV1,
-    pub committed_receipts: Vec<MemoryAutomationCommittedReceiptV1>,
+    pub task: AutomationTaskV1,
+    pub request_digest: ManifestDigest,
+    pub terminal: AutomationRunTerminalV1,
+    pub committed_receipts: Vec<AutomationCommittedReceiptV1>,
 }
 
-/// Canonical admitted problem for one automatic-memory run.
+/// Canonical admitted problem for one automation run.
 ///
 /// The generic application receipt binds the outer operation. The ordered
 /// receipts retain the exact canonical memory effects needed to reconcile a
 /// partial terminal without inventing an endpoint-specific payload.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct MemoryAutomationRunProblemV1 {
+pub struct AutomationRunProblemV1 {
     pub run_id: RunId,
-    pub task: MemoryAutomationTaskV1,
+    pub task: AutomationTaskV1,
+    pub request_digest: ManifestDigest,
     pub scope: ResolvedScope,
     pub problem: ApplicationProblemEnvelope,
-    pub committed_receipts: Vec<MemoryAutomationCommittedReceiptV1>,
+    pub committed_receipts: Vec<AutomationCommittedReceiptV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_outer_result: Option<Box<AutomationRunResultV1>>,
 }
 
-impl<'de> Deserialize<'de> for MemoryAutomationRunProblemV1 {
+impl<'de> Deserialize<'de> for AutomationRunProblemV1 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -548,67 +447,101 @@ impl<'de> Deserialize<'de> for MemoryAutomationRunProblemV1 {
         #[serde(deny_unknown_fields)]
         struct Wire {
             run_id: RunId,
-            task: MemoryAutomationTaskV1,
+            task: AutomationTaskV1,
+            request_digest: ManifestDigest,
             scope: ResolvedScope,
             problem: ApplicationProblemEnvelope,
-            committed_receipts: Vec<MemoryAutomationCommittedReceiptV1>,
+            committed_receipts: Vec<AutomationCommittedReceiptV1>,
+            #[serde(default)]
+            committed_outer_result: Option<Box<AutomationRunResultV1>>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
         let terminal = Self {
             run_id: wire.run_id,
             task: wire.task,
+            request_digest: wire.request_digest,
             scope: wire.scope,
             problem: wire.problem,
             committed_receipts: wire.committed_receipts,
+            committed_outer_result: wire.committed_outer_result,
         };
         if !terminal.matches_terminal(&terminal.problem.request_id) {
             return Err(serde::de::Error::custom(
-                "memory automation problem does not match its admitted terminal",
+                "automation problem does not match its admitted terminal",
             ));
         }
         Ok(terminal)
     }
 }
 
-impl MemoryAutomationRunProblemV1 {
+impl AutomationRunProblemV1 {
     pub fn new(
-        run_id: RunId,
-        task: MemoryAutomationTaskV1,
+        request: &AutomationRunRequestV1,
         scope: ResolvedScope,
         problem: ApplicationProblemEnvelope,
-        committed_receipts: Vec<MemoryAutomationCommittedReceiptV1>,
+        committed_receipts: Vec<AutomationCommittedReceiptV1>,
         request_id: &RequestId,
     ) -> Result<Self, ApplicationContractError> {
+        let request_digest = request.input_digest()?;
         let terminal = Self {
-            run_id,
-            task,
+            run_id: request.run_id.clone(),
+            task: request.task_kind(),
+            request_digest,
             scope,
             problem,
             committed_receipts,
+            committed_outer_result: None,
         };
-        if terminal.matches_terminal(request_id) {
+        if terminal.matches_admission(request, request_id) {
             Ok(terminal)
         } else {
             Err(ApplicationContractError::Inconsistent {
-                field: "memory automation problem terminal",
+                field: "automation problem terminal",
+            })
+        }
+    }
+
+    pub fn new_outer_effect_partial(
+        request: &AutomationRunRequestV1,
+        scope: ResolvedScope,
+        problem: ApplicationProblemEnvelope,
+        committed_outer_result: AutomationRunResultV1,
+        request_id: &RequestId,
+    ) -> Result<Self, ApplicationContractError> {
+        let request_digest = request.input_digest()?;
+        let terminal = Self {
+            run_id: request.run_id.clone(),
+            task: request.task_kind(),
+            request_digest,
+            scope,
+            problem,
+            committed_receipts: Vec::new(),
+            committed_outer_result: Some(Box::new(committed_outer_result)),
+        };
+        if terminal.matches_admission(request, request_id) {
+            Ok(terminal)
+        } else {
+            Err(ApplicationContractError::Inconsistent {
+                field: "automation outer-effect problem terminal",
             })
         }
     }
 
     pub fn matches_terminal(&self, request_id: &RequestId) -> bool {
         let Ok(operation) =
-            retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
+            retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
         else {
             return false;
         };
         if self.run_id.validate().is_err()
+            || self.request_digest.validate().is_err()
             || self.scope.validate().is_err()
             || self.problem.request_id != *request_id
             || self.problem.contract != *operation.result_contract()
             || !self.problem.problem.source().is_admitted_terminal()
             || !retained_surface_problem_matches_terminal(
-                RetainedSurfaceOperation::MemoryAutomationRun,
+                RetainedSurfaceOperation::AutomationRun,
                 request_id,
                 Some(&self.scope),
                 self.problem.problem.source(),
@@ -618,11 +551,40 @@ impl MemoryAutomationRunProblemV1 {
         }
 
         let is_partial = self.problem.problem.kind() == ApplicationProblemKind::PartialEffect;
-        if is_partial != !self.committed_receipts.is_empty() {
+        let has_inner_effect = !self.committed_receipts.is_empty();
+        let has_outer_effect = self.committed_outer_result.is_some();
+        if is_partial != (has_inner_effect || has_outer_effect)
+            || (has_inner_effect && has_outer_effect)
+        {
             return false;
         }
         if !is_partial {
             return true;
+        }
+
+        if let Some(result) = self.committed_outer_result.as_deref() {
+            if result.run_id != self.run_id
+                || result.task != self.task
+                || result.request_digest != self.request_digest
+                || !result.matches_terminal()
+            {
+                return false;
+            }
+            let Ok(committed_state) = canonical_sha256(&(
+                "tracedecay.retained.effect.committed-state.v1",
+                RetainedSurfaceOperation::AutomationRun.as_str(),
+                self.run_id.as_str(),
+                result,
+            )) else {
+                return false;
+            };
+            return self
+                .problem
+                .problem
+                .source()
+                .committed_receipt()
+                .and_then(|receipt| receipt.committed_state.as_ref())
+                == Some(&committed_state);
         }
 
         if !receipts_match_task_and_identity(self.task, &self.run_id, &self.committed_receipts) {
@@ -630,7 +592,7 @@ impl MemoryAutomationRunProblemV1 {
         }
 
         let Ok(committed_state) = canonical_sha256(&(
-            "tracedecay.memory-automation-run.partial-state.v1",
+            "tracedecay.automation-run.partial-state.v1",
             self.run_id.as_str(),
             &self.committed_receipts,
         )) else {
@@ -645,28 +607,43 @@ impl MemoryAutomationRunProblemV1 {
     }
 
     /// Binds every problem, including zero-effect terminals, to its admitted
-    /// automatic-memory run.
-    pub fn matches_admission(&self, run_id: &RunId, task: MemoryAutomationTaskV1) -> bool {
-        &self.run_id == run_id && self.task == task
+    /// automation run.
+    pub fn matches_admission(
+        &self,
+        request: &AutomationRunRequestV1,
+        request_id: &RequestId,
+    ) -> bool {
+        request.input_digest().is_ok_and(|digest| {
+            self.run_id == request.run_id
+                && self.task == request.task_kind()
+                && self.request_digest == digest
+                && receipts_match_admission(&request.task, &self.committed_receipts)
+        }) && self.matches_terminal(request_id)
     }
 }
 
-impl MemoryAutomationRunResultV1 {
+impl AutomationRunResultV1 {
     /// Verifies the durable terminal against the exact admitted run and task.
     /// This closes the zero-effect case where no inner receipt can carry the
     /// admission identity on its own.
-    pub fn matches_admission(&self, run_id: &RunId, task: MemoryAutomationTaskV1) -> bool {
-        &self.run_id == run_id && self.task == task && self.matches_terminal()
+    pub fn matches_admission(&self, request: &AutomationRunRequestV1) -> bool {
+        request.input_digest().is_ok_and(|digest| {
+            self.run_id == request.run_id
+                && self.task == request.task_kind()
+                && self.request_digest == digest
+                && receipts_match_admission(&request.task, &self.committed_receipts)
+                && self.matches_terminal()
+        })
     }
 
     /// Validates invariants that span the outer run and its ordered inner
     /// authority receipts before a transport may expose the terminal.
     pub fn matches_terminal(&self) -> bool {
-        if self.run_id.validate().is_err() {
+        if self.run_id.validate().is_err() || self.request_digest.validate().is_err() {
             return false;
         }
         let terminal_matches = match &self.terminal {
-            MemoryAutomationRunTerminalV1::Completed { summary } => {
+            AutomationRunTerminalV1::Completed { summary } => {
                 summary.is_bounded()
                     && summary.skipped_count == 0
                     && summary.reviewed_count
@@ -674,7 +651,7 @@ impl MemoryAutomationRunResultV1 {
                             .accepted_count
                             .saturating_add(summary.rejected_count)
             }
-            MemoryAutomationRunTerminalV1::Skipped { reason, summary } => {
+            AutomationRunTerminalV1::Skipped { reason, summary } => {
                 summary.is_bounded()
                     && summary.reviewed_count == 0
                     && summary.accepted_count == 0
@@ -690,15 +667,15 @@ impl MemoryAutomationRunResultV1 {
     }
 
     fn summary_matches_receipts(&self) -> bool {
-        let MemoryAutomationRunTerminalV1::Completed { summary } = &self.terminal else {
+        let AutomationRunTerminalV1::Completed { summary } = &self.terminal else {
             return true;
         };
         match self.task {
-            MemoryAutomationTaskV1::MemoryCurator => {
+            AutomationTaskV1::MemoryCurator => {
                 let mut accepted_count = 0_u64;
                 let mut receipt_count = 0_usize;
                 for receipt in &self.committed_receipts {
-                    let MemoryAutomationCommittedReceiptV1::Curation(receipt) = receipt else {
+                    let AutomationCommittedReceiptV1::Curation(receipt) = receipt else {
                         return false;
                     };
                     receipt_count += 1;
@@ -712,11 +689,11 @@ impl MemoryAutomationRunResultV1 {
                     && summary.accepted_count == accepted_count
                     && summary.rejected_count == 0
             }
-            MemoryAutomationTaskV1::SessionReflector => {
+            AutomationTaskV1::SessionReflector => {
                 let mut applied_count = 0_u64;
                 let mut quarantined_count = 0_u64;
                 for receipt in &self.committed_receipts {
-                    let MemoryAutomationCommittedReceiptV1::AutomaticFact(receipt) = receipt else {
+                    let AutomationCommittedReceiptV1::AutomaticFact(receipt) = receipt else {
                         return false;
                     };
                     match receipt.state {
@@ -727,16 +704,30 @@ impl MemoryAutomationRunResultV1 {
                 summary.accepted_count == applied_count
                     && summary.rejected_count == quarantined_count
             }
+            AutomationTaskV1::SkillWriter => {
+                self.committed_receipts.len() <= 1
+                    && (!self.committed_receipts.is_empty() || summary.accepted_count == 0)
+            }
+            AutomationTaskV1::UserJob => self.committed_receipts.len() == 1,
+            AutomationTaskV1::CombinedReview => {
+                self.committed_receipts
+                    .iter()
+                    .filter(|receipt| {
+                        matches!(receipt, AutomationCommittedReceiptV1::SkillWriting(_))
+                    })
+                    .count()
+                    <= 1
+            }
         }
     }
 }
 
 fn receipts_match_task_and_identity(
-    task: MemoryAutomationTaskV1,
+    task: AutomationTaskV1,
     run_id: &RunId,
-    receipts: &[MemoryAutomationCommittedReceiptV1],
+    receipts: &[AutomationCommittedReceiptV1],
 ) -> bool {
-    if task == MemoryAutomationTaskV1::MemoryCurator && receipts.len() > 1 {
+    if task == AutomationTaskV1::MemoryCurator && receipts.len() > 1 {
         return false;
     }
     let family_matches = receipts.iter().all(|receipt| {
@@ -744,11 +735,23 @@ fn receipts_match_task_and_identity(
             && matches!(
                 (task, receipt),
                 (
-                    MemoryAutomationTaskV1::MemoryCurator,
-                    MemoryAutomationCommittedReceiptV1::Curation(_)
+                    AutomationTaskV1::MemoryCurator,
+                    AutomationCommittedReceiptV1::Curation(_)
                 ) | (
-                    MemoryAutomationTaskV1::SessionReflector,
-                    MemoryAutomationCommittedReceiptV1::AutomaticFact(_)
+                    AutomationTaskV1::SessionReflector,
+                    AutomationCommittedReceiptV1::AutomaticFact(_)
+                ) | (
+                    AutomationTaskV1::SkillWriter,
+                    AutomationCommittedReceiptV1::SkillWriting(_)
+                ) | (
+                    AutomationTaskV1::UserJob,
+                    AutomationCommittedReceiptV1::UserJobDelivery(_)
+                ) | (
+                    AutomationTaskV1::CombinedReview,
+                    AutomationCommittedReceiptV1::AutomaticFact(_)
+                ) | (
+                    AutomationTaskV1::CombinedReview,
+                    AutomationCommittedReceiptV1::SkillWriting(_)
                 )
             )
     });
@@ -759,18 +762,45 @@ fn receipts_match_task_and_identity(
     let mut identities = std::collections::BTreeSet::new();
     receipts.iter().all(|receipt| {
         let identity = match receipt {
-            MemoryAutomationCommittedReceiptV1::Curation(receipt) => canonical_sha256(&(
-                "tracedecay.memory-automation-run.curation-identity.v1",
+            AutomationCommittedReceiptV1::Curation(receipt) => canonical_sha256(&(
+                "tracedecay.automation-run.curation-identity.v1",
                 &receipt.receipt.owner,
                 &receipt.receipt.operation_id,
             )),
-            MemoryAutomationCommittedReceiptV1::AutomaticFact(receipt) => canonical_sha256(&(
-                "tracedecay.memory-automation-run.automatic-fact-identity.v1",
+            AutomationCommittedReceiptV1::AutomaticFact(receipt) => canonical_sha256(&(
+                "tracedecay.automation-run.automatic-fact-identity.v1",
                 &receipt.owner,
                 &receipt.apply_id,
             )),
+            AutomationCommittedReceiptV1::SkillWriting(receipt) => canonical_sha256(&(
+                "tracedecay.automation-run.skill-writing-identity.v1",
+                &receipt.run_id,
+                &receipt.task_key,
+                &receipt.manifest_digest,
+            )),
+            AutomationCommittedReceiptV1::UserJobDelivery(receipt) => canonical_sha256(&(
+                "tracedecay.automation-run.user-job-delivery-identity.v1",
+                &receipt.run_id,
+                &receipt.task_key,
+                &receipt.manifest_digest,
+            )),
         };
         identity.is_ok_and(|identity| identities.insert(identity))
+    })
+}
+
+fn receipts_match_admission(
+    task: &AutomationTaskRequestV1,
+    receipts: &[AutomationCommittedReceiptV1],
+) -> bool {
+    let expected_external_task_key = task.expected_external_task_key();
+    receipts.iter().all(|receipt| match receipt {
+        AutomationCommittedReceiptV1::SkillWriting(receipt)
+        | AutomationCommittedReceiptV1::UserJobDelivery(receipt) => {
+            expected_external_task_key.as_deref() == Some(receipt.task_key.as_str())
+        }
+        AutomationCommittedReceiptV1::Curation(_)
+        | AutomationCommittedReceiptV1::AutomaticFact(_) => true,
     })
 }
 

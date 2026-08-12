@@ -37,6 +37,12 @@ use super::evidence::{
 };
 use super::retrieval::{AutomationSessionRetrieval, production_project_automation_retrieval};
 
+mod privacy;
+use privacy::{
+    fact_collection_summary, session_fact_finalization_failure_summary,
+    session_fact_ledger_summary, validation_repairs_summary,
+};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionReflectorAutomationOptions {
@@ -160,7 +166,6 @@ trait AutomaticFactReceiptSummary {
     fn summary_apply_id(&self) -> &str;
     fn summary_state(&self) -> AutomaticFactState;
     fn summary_applied_fact_id(&self) -> Option<&str>;
-    fn summary_ledger_value(&self) -> Value;
 }
 
 impl AutomaticFactReceiptSummary for AutomaticFactReceipt {
@@ -174,24 +179,6 @@ impl AutomaticFactReceiptSummary for AutomaticFactReceipt {
 
     fn summary_applied_fact_id(&self) -> Option<&str> {
         self.applied_fact_id.as_deref()
-    }
-
-    fn summary_ledger_value(&self) -> Value {
-        json!({
-            "schema_version": self.schema_version,
-            "apply_id": self.apply_id,
-            "run_id": self.run_id,
-            "state": self.state,
-            "request": {
-                "add_fact_request": self.add_fact_request,
-            },
-            "evidence_hash": self.evidence_hash,
-            "item": self.item,
-            "validation": self.validation,
-            "quarantine_reason": self.quarantine_reason,
-            "applied_fact_id": self.applied_fact_id,
-            "recorded_at_micros": self.recorded_at_micros,
-        })
     }
 }
 
@@ -207,10 +194,14 @@ impl AutomaticFactReceiptSummary for SettledAutomaticFactReceipt {
     fn summary_applied_fact_id(&self) -> Option<&str> {
         self.applied_fact_id()
     }
+}
 
-    fn summary_ledger_value(&self) -> Value {
-        self.ledger_value()
-    }
+fn automatic_fact_receipt_summary<T: AutomaticFactReceiptSummary>(receipt: &T) -> Value {
+    json!({
+        "apply_id": receipt.summary_apply_id(),
+        "state": receipt.summary_state(),
+        "applied_fact_id": receipt.summary_applied_fact_id(),
+    })
 }
 
 fn session_fact_curation_receipt<T: AutomaticFactReceiptSummary>(
@@ -466,15 +457,23 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         }
         let settled_values = settled_receipts
             .iter()
-            .map(SettledAutomaticFactReceipt::ledger_value)
+            .map(automatic_fact_receipt_summary)
             .collect::<Vec<_>>();
         let authority_quarantines = settled_receipts
             .iter()
             .filter(|receipt| receipt.state() == AutomaticFactState::Quarantined)
-            .map(SettledAutomaticFactReceipt::ledger_value)
+            .map(automatic_fact_receipt_summary)
             .collect::<Vec<_>>();
         let mut all_rejections = terminal_rejections.clone();
-        all_rejections.extend(authority_quarantines);
+        all_rejections.extend(authority_quarantines.iter().cloned());
+        let proposed_summary = session_fact_ledger_summary(
+            proposals,
+            &accepted_facts,
+            admitted_facts,
+            &terminal_rejections,
+        )?;
+        let rejected_summary = fact_collection_summary(&all_rejections)?;
+        let repairs_summary = validation_repairs_summary(validation_repairs)?;
         let terminal_accepted_count = receipt.applied_count;
         let terminal_rejected_count = receipt.quarantined_count;
         let committed_receipt = NonEmptyAutomaticFactReceipts::from_vec(
@@ -491,23 +490,18 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
             .append_failed_record_with_effects(
                 response.model.clone(),
                 evidence_hash,
-                Some(json!({
-                    "facts": proposed_ops.get("facts").cloned().unwrap_or_else(|| json!([])),
-                    "accepted_facts": accepted_facts,
-                    "admitted_facts": admitted_facts,
-                    "quarantined_facts": terminal_rejections,
-                })),
+                Some(proposed_summary),
                 error.to_string(),
                 retry_report,
                 Some(json!({
                     "automatic_fact_receipts": settled_values,
                     "applied_receipt_ids": applied_receipt_ids,
                 })),
-                Some(json!(all_rejections)),
+                Some(rejected_summary),
                 Some(json!({
                     "status": receipt.outcome,
                     "receipt": receipt,
-                    "validation_repairs": validation_repairs,
+                    "validation_repairs": repairs_summary,
                 })),
                 terminal_accepted_count,
                 terminal_rejected_count,
@@ -528,7 +522,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         automatic_fact_receipts
             .iter()
             .filter(|receipt| receipt.state == AutomaticFactState::Quarantined)
-            .map(AutomaticFactReceiptSummary::summary_ledger_value),
+            .map(automatic_fact_receipt_summary),
     );
     let curation_policy = json!({
         "decision": curation_decision,
@@ -554,29 +548,48 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         "curation_policy": curation_policy,
         "validation_repairs": validation_repairs,
     });
-    let mut record = finalizer.success_record(
+    let committed_receipt = NonEmptyAutomaticFactReceipts::from_vec(
+        settled_receipts
+            .into_iter()
+            .map(SettledAutomaticFactReceipt::into_authority_result)
+            .collect(),
+    )
+    .map(AutomationCommittedReceipt::AutomaticFacts);
+    let mut record = match finalizer.success_record(
         response,
         report
             .get("evidence_hash")
             .and_then(Value::as_str)
             .map(str::to_string),
-        Some(json!({
-            "facts": proposed_ops.get("facts").cloned().unwrap_or_else(|| json!([])),
-            "accepted_facts": report.get("accepted_facts").cloned().unwrap_or_else(|| json!([])),
-            "admitted_facts": report.get("admitted_facts").cloned().unwrap_or_else(|| json!([])),
-            "quarantined_facts": report.get("quarantined_facts").cloned().unwrap_or_else(|| json!([])),
-            "automatic_fact_receipt_ids": report.pointer("/receipt/automatic_fact_receipt_ids").cloned().unwrap_or_else(|| json!([])),
-        })),
+        Some(session_fact_ledger_summary(
+            proposals,
+            &accepted_facts,
+            admitted_facts,
+            &terminal_rejections,
+        )?),
         receipt.applied_count,
         receipt.quarantined_count,
-    );
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            if let Some(committed_receipt) = committed_receipt {
+                return Ok(SessionReflectorFinalization::FailedRecorded {
+                    run_id: run_id.to_owned(),
+                    committed_receipt,
+                    record: None,
+                    detail: "Automatic facts committed, but their exact completion time could not be recorded; reconcile the committed receipt before another run.",
+                });
+            }
+            return Err(error);
+        }
+    };
     record.backend_attempt_count = retry_report.attempt_count();
     record.backend_attempts = retry_report.attempts().to_vec();
     record.applied_ops = report
         .pointer("/curation_policy/effect/applied_receipt_ids")
         .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
         .cloned();
-    record.rejected_ops = report.get("quarantined_facts").cloned();
+    record.rejected_ops = Some(fact_collection_summary(&terminal_rejections)?);
     let applied_receipt_ids = report
         .pointer("/curation_policy/effect/applied_receipt_ids")
         .cloned()
@@ -587,7 +600,7 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
         "admitted_count": admitted_count,
         "quarantined_count": receipt.quarantined_count,
         "receipt": report.get("receipt").cloned().unwrap_or_else(|| json!({})),
-        "validation_repairs": validation_repairs,
+        "validation_repairs": validation_repairs_summary(validation_repairs)?,
         "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
     });
     if let Some(object) = validation_report.as_object_mut() {
@@ -595,18 +608,11 @@ pub(super) async fn finalize_session_reflector_success<A: ProjectMemoryFactStore
             "applied_receipts".to_string(),
             json!({
             "receipt_ids": applied_receipt_ids,
-            "admitted_facts": report.get("admitted_facts").cloned().unwrap_or_else(|| json!([])),
+            "admitted_count": admitted_count,
             }),
         );
     }
     record.validation_report = Some(validation_report);
-    let committed_receipt = NonEmptyAutomaticFactReceipts::from_vec(
-        settled_receipts
-            .into_iter()
-            .map(SettledAutomaticFactReceipt::into_authority_result)
-            .collect(),
-    )
-    .map(AutomationCommittedReceipt::AutomaticFacts);
     Ok(SessionReflectorFinalization::Completed {
         report,
         record,
@@ -679,7 +685,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
         }),
     );
     let input_hash = Some(request.input_hash.clone());
-    let finalizer = run.finalizer(input_hash.clone());
+    let finalizer = run.finalizer(input_hash.clone())?;
     let (mut response, mut retry_report) = match finalizer
         .run_backend_or_fallback(backend, &request, evidence_hash.clone())
         .await?
@@ -763,15 +769,20 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                     .append_failed_record_with_effects(
                         None,
                         evidence_hash,
-                        Some(proposed_ops),
+                        Some(session_fact_ledger_summary(
+                            &proposals,
+                            &initial_accepted_facts,
+                            &[],
+                            &rejected_facts,
+                        )?),
                         error.to_string(),
                         &retry_report,
                         None,
-                        Some(json!(rejected_facts.clone())),
+                        Some(fact_collection_summary(&rejected_facts)?),
                         Some(json!({
                             "status": receipt.outcome,
                             "receipt": receipt,
-                            "validation_repairs": validation_repairs,
+                            "validation_repairs": validation_repairs_summary(&validation_repairs)?,
                         })),
                         initial_accepted_facts.len(),
                         rejected_facts.len(),
@@ -832,7 +843,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                 .append_failed_record(
                     response.model.clone(),
                     evidence_hash,
-                    Some(proposed_ops),
+                    Some(session_fact_finalization_failure_summary(&proposals)?),
                     err.to_string(),
                     &retry_report,
                 )

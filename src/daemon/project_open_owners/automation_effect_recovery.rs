@@ -52,6 +52,7 @@ pub(crate) async fn reconcile_project_open_automation_effects(project: Arc<Trace
                 ("inspected", report.inspected.to_string()),
                 ("partial_effects", report.partial_effects.to_string()),
                 ("reset_required", report.reset_required.to_string()),
+                ("indeterminate", report.indeterminate.to_string()),
                 ("already_terminal", report.already_terminal.to_string()),
                 ("deferred", report.deferred.to_string()),
             ],

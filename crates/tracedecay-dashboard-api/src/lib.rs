@@ -106,6 +106,7 @@ pub mod project_graph;
 pub mod project_registry;
 mod projects;
 mod read_model;
+mod request_deadline;
 mod savings_api;
 use tracedecay_usecases::provider_pricing as savings_pricing;
 pub mod scope;
@@ -123,6 +124,8 @@ mod util;
 mod version;
 pub use version::install_build_version;
 mod work_api;
+
+use request_deadline::dashboard_http_request_deadline_micros;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -1169,36 +1172,6 @@ async fn admit_dashboard_http_request(
     response
 }
 
-fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
-    if matches!(
-        path,
-        "/api/automation/run/memory-curator"
-            | "/api/automation/run/session-reflection"
-            | "/api/automation/run/skill-writing"
-    ) || is_project_scoped_automation_run_path(path)
-    {
-        DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS
-    } else {
-        DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS
-    }
-}
-
-fn is_project_scoped_automation_run_path(path: &str) -> bool {
-    let Some(project_and_tail) = path.strip_prefix("/api/projects/") else {
-        return false;
-    };
-    let Some((project_id, tail)) = project_and_tail.split_once('/') else {
-        return false;
-    };
-    !project_id.is_empty()
-        && matches!(
-            tail,
-            "automation/run/memory-curator"
-                | "automation/run/session-reflection"
-                | "automation/run/skill-writing"
-        )
-}
-
 fn internal_error_response(error: impl std::fmt::Display) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1914,6 +1887,10 @@ mod authority_tests {
             DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
         );
         assert_eq!(
+            dashboard_http_request_deadline_micros("/api/automation/jobs/nightly-review/run"),
+            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
+        );
+        assert_eq!(
             dashboard_http_request_deadline_micros(
                 "/api/projects/project-7/automation/run/memory-curator"
             ),
@@ -2342,7 +2319,7 @@ mod authority_tests {
     }
 
     #[tokio::test]
-    async fn dashboard_user_job_run_without_observation_authority_fails_closed() {
+    async fn dashboard_user_job_run_without_automation_authority_fails_closed() {
         let fixture = DashboardStateFixture::open("project.dashboard-job-observation").await;
         let app = router_with_active_application(fixture.state, None, Router::new());
         let create = app
@@ -2384,7 +2361,7 @@ mod authority_tests {
         let payload: Value = serde_json::from_slice(&body).expect("automation unavailable json");
         assert_eq!(
             payload["detail"],
-            json!("dashboard automation observation authority is unavailable")
+            json!("dashboard automation authority is not mounted")
         );
     }
 

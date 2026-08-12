@@ -10,11 +10,15 @@ use super::config_error;
 use crate::errors::{Result, TraceDecayError};
 
 mod cursor;
+mod exact_lookup;
 mod publication;
+mod scheduler_diagnostic;
 
 pub(crate) use cursor::load_latest_task_validation_pointer;
+pub use exact_lookup::find_run_record_exact_bounded;
 pub(crate) use publication::publish_run_artifact_chain;
 pub use publication::read_published_artifact_chain;
+pub(crate) use scheduler_diagnostic::append_or_reuse_scheduler_diagnostic;
 
 const RUN_LEDGER_FILENAME: &str = "automation_runs.jsonl";
 const RUN_ARTIFACTS_DIR: &str = "automation_artifacts";
@@ -176,6 +180,8 @@ pub struct AutomationRunLedgerRecord {
     pub artifacts: Vec<AutomationRunArtifact>,
     pub started_at: String,
     pub completed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_micros: Option<i64>,
 }
 
 impl tracedecay_automation::AutomationRunRecord for AutomationRunLedgerRecord {
@@ -194,6 +200,18 @@ impl tracedecay_automation::AutomationRunRecord for AutomationRunLedgerRecord {
 
 pub fn run_ledger_path(dashboard_root: &Path) -> PathBuf {
     dashboard_root.join(RUN_LEDGER_FILENAME)
+}
+
+pub(crate) fn current_timestamp_micros() -> Result<i64> {
+    timestamp_micros_at(std::time::SystemTime::now())
+}
+
+pub(crate) fn timestamp_micros_at(now: std::time::SystemTime) -> Result<i64> {
+    let elapsed = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| config_error(format!("system clock predates the UNIX epoch: {error}")))?;
+    i64::try_from(elapsed.as_micros())
+        .map_err(|_| config_error("current UNIX timestamp does not fit in signed microseconds"))
 }
 
 pub fn run_artifact_path(
@@ -289,26 +307,7 @@ pub async fn find_run_record(
     dashboard_root: &Path,
     run_id: &str,
 ) -> Result<Option<AutomationRunLedgerRecord>> {
-    let path = run_ledger_path(dashboard_root);
-    let contents = match tokio::fs::read_to_string(&path).await {
-        Ok(contents) => contents,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
-            return Err(config_error(format!(
-                "failed to read automation run ledger '{}': {e}",
-                path.display()
-            )));
-        }
-    };
-    Ok(contents.lines().rev().find_map(|line| {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        serde_json::from_str::<AutomationRunLedgerRecord>(trimmed)
-            .ok()
-            .filter(|record| record.run_id == run_id)
-    }))
+    find_run_record_exact_bounded(dashboard_root, run_id).await
 }
 
 pub async fn append_run_record(
@@ -471,9 +470,29 @@ pub async fn load_run_records_for_task_key(
     .map_err(|e| config_error(format!("failed to join automation task ledger read: {e}")))?
 }
 
+pub async fn load_latest_scheduler_effectful_for_task_key(
+    dashboard_root: &Path,
+    requested_task_key: &str,
+) -> Result<Option<AutomationRunLedgerRecord>> {
+    let path = run_ledger_path(dashboard_root);
+    let task_key = requested_task_key.to_string();
+    tokio::task::spawn_blocking(move || {
+        read_run_records_tail_with_filter(
+            &path,
+            1,
+            RUN_LEDGER_TAIL_CHUNK_BYTES,
+            &RunRecordFilter::SchedulerEffectfulTaskKey(task_key),
+        )
+        .map(|mut records| records.pop())
+    })
+    .await
+    .map_err(|error| config_error(format!("failed to join scheduler ledger read: {error}")))?
+}
+
 enum RunRecordFilter {
     Any,
     TaskKey(String),
+    SchedulerEffectfulTaskKey(String),
 }
 
 impl RunRecordFilter {
@@ -486,6 +505,18 @@ impl RunRecordFilter {
                     .as_deref()
                     .unwrap_or_else(|| canonical_task_key(record.task))
                     == requested
+            }
+            Self::SchedulerEffectfulTaskKey(requested) => {
+                record
+                    .task_key
+                    .as_deref()
+                    .unwrap_or_else(|| canonical_task_key(record.task))
+                    == requested
+                    && record.trigger == AutomationTrigger::Scheduler
+                    && matches!(
+                        record.status,
+                        AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
+                    )
             }
         }
     }
@@ -733,7 +764,8 @@ mod tests {
             "{{\"schema_version\":2,\"run_id\":\"{run_id}\",\"trigger\":\"scheduler\",\
              \"task\":\"memory_curator\",\"backend\":\"codex_app_server\",\"status\":\"succeeded\",\
              \"accepted_count\":0,\"rejected_count\":0,\"started_at\":\"{completed_at}\",\
-             \"completed_at\":\"{completed_at}\"}}"
+             \"completed_at\":\"{completed_at}\",\"completed_at_micros\":{}}}"
+            completed_at.saturating_mul(1_000_000),
         )
     }
 
@@ -895,5 +927,32 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].run_id, "skill-target");
+    }
+
+    #[tokio::test]
+    async fn scheduler_effectful_anchor_is_not_evicted_by_same_task_non_effect_rows() {
+        let anchor = ledger_line("scheduler-anchor", 1).replace(
+            "\"task\":\"memory_curator\"",
+            "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
+        );
+        let mut lines = vec![anchor];
+        lines.extend((0..300).map(|index| {
+            ledger_line(&format!("manual-{index}"), 2 + index)
+                .replace("\"trigger\":\"scheduler\"", "\"trigger\":\"dashboard\"")
+                .replace(
+                    "\"task\":\"memory_curator\"",
+                    "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
+                )
+        }));
+        let (temp, _path) = write_ledger(&lines);
+
+        let found = load_latest_scheduler_effectful_for_task_key(temp.path(), "user_job:nightly")
+            .await
+            .unwrap()
+            .expect("filtered reverse scan reaches the scheduler anchor");
+
+        assert_eq!(found.run_id, "scheduler-anchor");
+        assert_eq!(found.trigger, AutomationTrigger::Scheduler);
+        assert_eq!(found.status, AutomationRunStatus::Succeeded);
     }
 }

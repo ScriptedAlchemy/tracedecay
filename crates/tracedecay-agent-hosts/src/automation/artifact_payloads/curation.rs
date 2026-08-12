@@ -115,19 +115,14 @@ fn effect_summary(effect: &ProjectMemoryFactCurationOperationEffectV1) -> Value 
             "fact_id": fact.fact_id(),
             "commit": commit_summary(commit),
         }),
-        ProjectMemoryFactCurationOperationEffectV1::LinkFacts {
-            relation,
-            disposition,
-            commit,
-        } => json!({
+        ProjectMemoryFactCurationOperationEffectV1::LinkFacts { relation, commit } => json!({
             "kind": "link_facts",
             "source_fact_id": relation.source_fact_id(),
             "target_fact_id": relation.target_fact_id(),
             "relation": relation.relation(),
             "evidence_fact_ids": relation.evidence_fact_ids(),
             "confidence": relation.confidence(),
-            "disposition": disposition,
-            "commit": commit.as_ref().map(commit_summary),
+            "commit": commit_summary(commit),
         }),
     }
 }

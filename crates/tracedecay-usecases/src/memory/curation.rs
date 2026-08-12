@@ -782,6 +782,27 @@ fn merge_outcome_matches_command(
         && outcome.content_updated() == command.merged_content().is_some()
 }
 
+pub(super) fn canonicalize_relation_evidence(
+    owner: &FactOwnerV1,
+    evidence_fact_ids: &mut [FactId],
+) -> Result<(), MemoryApplicationError> {
+    if evidence_fact_ids
+        .iter()
+        .any(|fact_id| fact_id.validate_owner(owner).is_err())
+    {
+        return Err(MemoryApplicationError::InvalidInput {
+            invariant: "canonical relation evidence owner",
+        });
+    }
+    evidence_fact_ids.sort_unstable();
+    if evidence_fact_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(MemoryApplicationError::InvalidInput {
+            invariant: "canonical relation evidence must be unique",
+        });
+    }
+    Ok(())
+}
+
 fn canonicalize_review_evidence(
     owner: &FactOwnerV1,
     evidence: &mut [ProjectMemoryCurationMutationTarget],

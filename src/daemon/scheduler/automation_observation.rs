@@ -26,11 +26,12 @@ fn automation_funnel_observation_from_record(
         .completed_at
         .parse::<i64>()
         .map_err(|_| "invalid_completed_at")?;
-    let observed_at = UtcMicros(
-        completed_at_seconds
+    let observed_at = UtcMicros(match record.completed_at_micros {
+        Some(completed_at_micros) => completed_at_micros,
+        None => completed_at_seconds
             .checked_mul(1_000_000)
             .ok_or("invalid_completed_at")?,
-    );
+    });
     let terminal = match record.status {
         AutomationRunStatus::Succeeded => AutomationTerminalV1::Succeeded,
         AutomationRunStatus::Failed => AutomationTerminalV1::Failed,
@@ -216,6 +217,7 @@ mod tests {
             artifacts: Vec::new(),
             started_at: "1700000000".to_owned(),
             completed_at: "1700000001".to_owned(),
+            completed_at_micros: Some(1_700_000_001_000_000),
         }
     }
 

@@ -137,7 +137,7 @@ pub struct MemoryAutomationCurationReceiptV1 {
 impl MemoryAutomationCurationReceiptV1 {
     pub fn canonical_digest(&self) -> Result<ManifestDigest, DomainError> {
         canonical_sha256(&(
-            "tracedecay.memory-automation-run.curation-receipt.v1",
+            "tracedecay.automation-run.curation-receipt.v1",
             &self.receipt,
         ))
     }

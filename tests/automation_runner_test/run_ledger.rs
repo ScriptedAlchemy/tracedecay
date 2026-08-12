@@ -43,7 +43,7 @@ fn record(run_id: &str, status: AutomationRunStatus) -> AutomationRunLedgerRecor
         artifacts: Vec::new(),
         started_at: "2026-06-24T05:00:00Z".to_string(),
         completed_at: "2026-06-24T05:00:01Z".to_string(),
-        completed_at_micros: 1_772_000_401_000_000,
+        completed_at_micros: Some(1_772_000_401_000_000),
     }
 }
 
@@ -229,7 +229,7 @@ async fn run_ledger_loads_records_without_optional_fields() {
     assert_eq!(loaded[0].host_mode, None);
     assert_eq!(loaded[0].input_hash, None);
     assert_eq!(loaded[0].applied_ops, None);
-    assert_eq!(loaded[0].completed_at_micros, 1_772_000_401_000_000);
+    assert_eq!(loaded[0].completed_at_micros, Some(1_772_000_401_000_000));
     assert_eq!(loaded[0].fallback_status, None);
     assert!(loaded[0].artifacts.is_empty());
 }

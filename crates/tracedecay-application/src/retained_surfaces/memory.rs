@@ -4,17 +4,7 @@ use super::{CURRENT_SURFACES, RetainedSurfaceOperation, RetainedSurfaceSpec};
 
 const MEMORY_SCOPE: &[ScopeDimension] = &[ScopeDimension::Resource];
 
-pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
-    RetainedSurfaceSpec {
-        operation: RetainedSurfaceOperation::MemoryAutomationRun,
-        summary: "Run canonical automatic memory maintenance",
-        description: "Executes one admitted automatic-memory run with durable inner mutation receipts and reconciliation.",
-        example: r#"{"run_id":"run.memory.example","task":{"kind":"memory_curator","options":{"fact_review_limit":24,"min_confidence_millionths":720000}}}"#,
-        effect: EffectClass::Administrative,
-        scope: &[ScopeDimension::Project],
-        paginated: false,
-        surfaces: &[],
-    },
+pub(super) const SPECS: [RetainedSurfaceSpec; 12] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::FactStoreAdd,
         summary: "Add a retained fact",

@@ -1,9 +1,7 @@
-//! Canonical admitted problem mapping for automatic-memory runs.
+//! Canonical admitted problem mapping for automation runs.
 
 use tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord;
-use tracedecay_application::retained_surfaces::{
-    MemoryAutomationRunProblemV1, MemoryAutomationRunRequestV1,
-};
+use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunRequestV1};
 use tracedecay_application::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemEnvelope,
     ApplicationUnavailableClassV1, CancellationSignal, CancellationStage, LegalAction,
@@ -17,7 +15,7 @@ use crate::errors::{Result, TraceDecayError};
 pub(super) fn reset_required_problem(
     operation: &tracedecay_application::ApplicationOperation,
     context: &RequestContext,
-    request: &MemoryAutomationRunRequestV1,
+    request: &AutomationRunRequestV1,
 ) -> Result<AutomationSettledProblem> {
     zero_effect_terminal(
         operation,
@@ -25,8 +23,29 @@ pub(super) fn reset_required_problem(
         request,
         ApplicationProblem::ResetRequired {
             diagnostic: SafeDiagnostic::new(
-                "application.memory-automation-run.reset-required",
-                "No canonical memory effect was found for the interrupted automatic-memory run; reset its exact run identity before reuse.",
+                "application.automation-run.reset-required",
+                "The interrupted automation run has no reconcilable terminal; preserve its exact run identity and reset it explicitly before reuse.",
+            )
+            .map_err(contract_error)?,
+            retry: RetryDirective::Never,
+            legal_actions: vec![LegalAction::Reset],
+        },
+    )
+}
+
+pub(super) fn indeterminate_external_effect_problem(
+    operation: &tracedecay_application::ApplicationOperation,
+    context: &RequestContext,
+    request: &AutomationRunRequestV1,
+) -> Result<AutomationSettledProblem> {
+    zero_effect_terminal(
+        operation,
+        context,
+        request,
+        ApplicationProblem::ResetRequired {
+            diagnostic: SafeDiagnostic::new(
+                "application.automation-run.external-effect-indeterminate",
+                "An external automation effect may have committed before its terminal was published; the effect will not be replayed and its exact run identity requires explicit reconciliation or reset.",
             )
             .map_err(contract_error)?,
             retry: RetryDirective::Never,
@@ -38,7 +57,7 @@ pub(super) fn reset_required_problem(
 pub(super) fn shipped_proposal_reset_required_problem(
     operation: &tracedecay_application::ApplicationOperation,
     context: &RequestContext,
-    request: &MemoryAutomationRunRequestV1,
+    request: &AutomationRunRequestV1,
 ) -> Result<AutomationSettledProblem> {
     zero_effect_terminal(
         operation,
@@ -71,8 +90,8 @@ fn failure_class_problem(
     classification: Option<AgentTaskFailureClass>,
 ) -> Result<ApplicationProblem> {
     let diagnostic = SafeDiagnostic::new(
-        "application.memory-automation-run.execution-failed",
-        "The admitted automatic-memory backend failed before a canonical memory effect committed.",
+        "application.automation-run.execution-failed",
+        "The admitted automation backend failed before a canonical effect committed.",
     )
     .map_err(contract_error)?;
     let problem = match classification {
@@ -118,8 +137,8 @@ pub(super) fn runtime_problem(
     if error.reset_required_context().is_some() {
         return Ok(ApplicationProblem::ResetRequired {
             diagnostic: SafeDiagnostic::new(
-                "application.memory-automation-run.reset-required",
-                "The admitted automatic-memory authority requires an explicit reset before reuse.",
+                "application.automation-run.reset-required",
+                "The admitted automation authority requires an explicit reset before reuse.",
             )
             .map_err(contract_error)?,
             retry: RetryDirective::Never,
@@ -129,8 +148,8 @@ pub(super) fn runtime_problem(
     ApplicationProblem::execution_failed(
         ApplicationExecutionFailureClassV1::Permanent,
         SafeDiagnostic::new(
-            "application.memory-automation-run.execution-failed",
-            "The admitted automatic-memory run failed before a canonical memory effect committed.",
+            "application.automation-run.execution-failed",
+            "The admitted automation run failed before a canonical effect committed.",
         )
         .map_err(contract_error)?,
     )
@@ -167,7 +186,7 @@ fn post_admission_termination_problem(
 fn zero_effect_terminal(
     operation: &tracedecay_application::ApplicationOperation,
     context: &RequestContext,
-    request: &MemoryAutomationRunRequestV1,
+    request: &AutomationRunRequestV1,
     problem: ApplicationProblem,
 ) -> Result<AutomationSettledProblem> {
     problem.validate().map_err(contract_error)?;
@@ -178,9 +197,8 @@ fn zero_effect_terminal(
     )
     .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Application))
     .map_err(contract_error)?;
-    MemoryAutomationRunProblemV1::new(
-        request.run_id.clone(),
-        request.task_kind(),
+    AutomationRunProblemV1::new(
+        request,
         context.scope().clone(),
         problem,
         Vec::new(),

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_agent_hosts::automation::automatic_facts::ShippedFactProposalDisposition;
-use tracedecay_application::{DirectorySyncPolicy, retained_surfaces::MemoryAutomationTaskV1};
+use tracedecay_application::{DirectorySyncPolicy, retained_surfaces::AutomationTaskV1};
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -64,10 +64,10 @@ pub(super) fn classify(
 }
 
 pub(super) async fn classify_for_task(
-    task: MemoryAutomationTaskV1,
+    task: AutomationTaskV1,
     dashboard_root: &Path,
 ) -> Result<RetirementClassification> {
-    if task != MemoryAutomationTaskV1::SessionReflector {
+    if task != AutomationTaskV1::SessionReflector {
         return Ok(RetirementClassification::Absent);
     }
     classify(
@@ -101,7 +101,7 @@ pub(super) fn verify_plan_matches_binding(
 }
 
 /// Completes only after the caller has durably persisted the main typed
-/// zero-effect `MemoryAutomationRun` terminal that contains this binding in
+/// zero-effect `AutomationRun` terminal that contains this binding in
 /// its admitted input digest.
 pub(super) fn finalize_after_terminal(
     dashboard_root: &Path,
@@ -362,7 +362,7 @@ mod tests {
         tokio::fs::write(&source_path, &source_bytes).await.unwrap();
 
         let curator = classify_for_task(
-            tracedecay_application::retained_surfaces::MemoryAutomationTaskV1::MemoryCurator,
+            tracedecay_application::retained_surfaces::AutomationTaskV1::MemoryCurator,
             root.path(),
         )
         .await
@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(tokio::fs::read(&source_path).await.unwrap(), source_bytes);
 
         let reflector = classify_for_task(
-            tracedecay_application::retained_surfaces::MemoryAutomationTaskV1::SessionReflector,
+            tracedecay_application::retained_surfaces::AutomationTaskV1::SessionReflector,
             root.path(),
         )
         .await

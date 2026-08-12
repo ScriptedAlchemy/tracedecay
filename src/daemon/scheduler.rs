@@ -15,7 +15,9 @@ use super::{
     DAEMON_TASK_ABORT_DEADLINE, DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event,
 };
 
+mod combined_effect;
 pub(crate) mod effect_admission;
+mod host_receipt_review;
 mod run_control;
 mod termination;
 pub(super) use effect_admission::run_automation_scheduler_tick;
@@ -23,6 +25,7 @@ use effect_admission::{
     log_scheduler_pre_admission_problem, scheduler_automation_effect,
     synchronize_scheduler_effect_control,
 };
+use host_receipt_review::run_host_receipt_review;
 use run_control::AutomationSchedulerStop;
 pub(super) use termination::MaintenanceTaskTermination;
 
@@ -54,7 +57,7 @@ fn log_scheduler_task_start(
 fn scheduler_task_error_log_fields(
     project_path: &Path,
     task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
-    error: &TraceDecayError,
+    error: &impl std::fmt::Display,
 ) -> Vec<(&'static str, String)> {
     vec![
         ("project", project_path.display().to_string()),
@@ -69,7 +72,7 @@ fn scheduler_task_error_log_fields(
 fn log_scheduler_task_error(
     project_path: &Path,
     task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
-    error: &TraceDecayError,
+    error: &impl std::fmt::Display,
 ) {
     log_daemon_event(
         "scheduler_task_error",
@@ -123,7 +126,7 @@ async fn settle_scheduler_automation_error(
         record_scheduler_run(engine, project_id, project_path, record);
     }
     match effect.settle_problem(&error).await {
-        Ok(Some(problem)) => {
+        Ok(problem) => {
             let problem = match serde_json::to_string(&problem) {
                 Ok(problem) => problem,
                 Err(error) => {
@@ -147,18 +150,6 @@ async fn settle_scheduler_automation_error(
             );
             None
         }
-        Ok(None) => match error {
-            tracedecay_agent_hosts::automation::AutomationRunError::Runtime(error) => {
-                log_scheduler_task_error(project_path, task, &error);
-                Some(error)
-            }
-            tracedecay_agent_hosts::automation::AutomationRunError::PartialEffect { .. } => {
-                Some(TraceDecayError::Config {
-                    message: "automation partial effect did not produce an application terminal"
-                        .to_owned(),
-                })
-            }
-        },
         Err(error) => Some(error),
     }
 }
@@ -1371,289 +1362,6 @@ async fn maybe_run_global_retention(
     reservation.finish(std::time::Instant::now(), succeeded);
 }
 
-async fn run_host_receipt_review(
-    project_path: &Path,
-    cg: &TraceDecay,
-    _handshake: &DaemonHandshake,
-    engine: &DaemonEngine,
-    run_control: &AutomationRunControl,
-) -> Result<()> {
-    use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-    use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
-    use tracedecay_agent_hosts::automation::runner::{
-        CombinedReviewAutomationOptions, CombinedReviewDispatch, SessionReflectorAutomationOptions,
-        SkillWriterAutomationOptions, registered_project_automation_retrieval,
-        run_combined_review_with_backend_and_retrieval,
-    };
-
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let Some(ready) =
-        tracedecay_agent_hosts::automation::host_receipts::oldest_ready(&dashboard_root).await?
-    else {
-        return Ok(());
-    };
-    let pending = ready.pending;
-    if tracedecay_agent_hosts::automation::scheduler::load_scheduler_control(&dashboard_root)
-        .await?
-        .paused
-    {
-        return Ok(());
-    }
-    let configuration = effective_automation_config_for_project(cg).await?;
-    let config = &configuration.settings;
-    let session_id = pending
-        .route
-        .as_ref()
-        .and_then(|route| route.session_id.clone());
-    let Some(authoritative_project_id) = cg.store_layout().identity.project_id.as_deref() else {
-        return Ok(());
-    };
-    let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_string())
-        .map_err(|error| TraceDecayError::Config {
-            message: format!(
-                "host receipt review has an invalid authoritative project identity: {error}"
-            ),
-        })?;
-    let session_database = engine
-        .store_administration
-        .registered_project_session_database(project_path, cg.store_layout())
-        .await?;
-    let watermark_durable =
-        {
-            let snapshot = session_database.read_snapshot().await.map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!("host receipt session snapshot unavailable: {error}"),
-                }
-            })?;
-            let mut rows = snapshot
-                .query(
-                    "SELECT 1
-                 FROM lcm_raw_messages
-                 WHERE provider = ?1 AND message_id = ?2
-                 LIMIT 1",
-                    crate::db::engine::params!["hermes", ready.transcript_watermark.as_str()],
-                )
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("host receipt transcript watermark query failed: {error}"),
-                })?;
-            rows.next()
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("host receipt transcript watermark read failed: {error}"),
-                })?
-                .is_some()
-        };
-    if !watermark_durable {
-        // Never review a terminal receipt until the exact completed-turn
-        // watermark is durable in LCM.
-        return Ok(());
-    }
-    let profile_identity = engine.store_administration.profile_identity()?.clone();
-    let retrieval =
-        registered_project_automation_retrieval(session_database, &profile_identity, &project_id)
-            .await?;
-    let backend = CodexAppServerBackend::from_automation_config(config);
-    let host_run_id = format!("host_receipt_{}", pending.generation);
-    let combined_options = CombinedReviewAutomationOptions {
-        session_reflector: SessionReflectorAutomationOptions {
-            trigger: AutomationTrigger::HostReceipt,
-            provider: "hermes".to_string(),
-            session_id,
-            ..SessionReflectorAutomationOptions::default()
-        },
-        skill_writer: SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::HostReceipt,
-            provider: "hermes".to_string(),
-            profile_root: Some(profile_identity.profile_root().to_path_buf()),
-            ..SkillWriterAutomationOptions::default()
-        },
-        trigger: AutomationTrigger::HostReceipt,
-        ..CombinedReviewAutomationOptions::default()
-    };
-    let (admission, run_id, effect_run_control) = scheduler_automation_effect(
-        engine,
-        cg,
-        run_control,
-        project_path,
-        &cg.store_layout().dashboard_root,
-        Some(&host_run_id),
-        configuration.configuration_digest.clone(),
-        |run_id| {
-            crate::daemon::automation_effect::session_reflector_run_request(
-                run_id,
-                &combined_options.session_reflector,
-            )
-        },
-    )
-    .await?;
-    let effect = match admission {
-        AutomationEffectAdmission::PreAdmissionProblem(problem) => {
-            log_scheduler_pre_admission_problem(
-                project_path,
-                AgentTaskKind::CombinedReview,
-                &problem,
-            );
-            return Ok(());
-        }
-        AutomationEffectAdmission::Execute(effect) => effect,
-        AutomationEffectAdmission::Replay(terminal) => {
-            log_scheduler_automation_replay(project_path, AgentTaskKind::CombinedReview, &terminal);
-            if terminal.is_completed() {
-                tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
-                    &dashboard_root,
-                    &pending.session_key,
-                    pending.generation,
-                )
-                .await?;
-            }
-            return Ok(());
-        }
-    };
-    let result = match run_combined_review_with_backend_and_retrieval(
-        cg,
-        config,
-        &configuration.configuration_revision_id,
-        &backend,
-        retrieval.as_ref(),
-        CombinedReviewAutomationOptions {
-            run_id: Some(run_id),
-            ..combined_options
-        },
-        &effect_run_control,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            if let Some(error) = settle_scheduler_automation_error(
-                engine,
-                &project_id,
-                project_path,
-                AgentTaskKind::CombinedReview,
-                &effect_run_control,
-                effect,
-                AutomationRunError::Runtime(error),
-            )
-            .await
-            {
-                return Err(error);
-            }
-            return Ok(());
-        }
-    };
-    match result {
-        CombinedReviewDispatch::Ran(run) => {
-            synchronize_scheduler_effect_control(&effect_run_control);
-            effect
-                .settle_run(
-                    &run.session_reflector.ledger_record,
-                    run.session_reflector.committed_receipt.as_ref(),
-                )
-                .await?;
-            record_combined_scheduler_run(engine, &project_id, project_path, &run);
-            if run.session_reflector.ledger_record.status
-                == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
-                && run.skill_writer.ledger_record.status
-                    == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Succeeded
-            {
-                tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
-                    &dashboard_root,
-                    &pending.session_key,
-                    pending.generation,
-                )
-                .await?;
-            }
-        }
-        CombinedReviewDispatch::MemoryCompletedSkillFailure {
-            session_reflector,
-            skill_writer_record,
-            error,
-        } => {
-            synchronize_scheduler_effect_control(&effect_run_control);
-            effect
-                .settle_run(
-                    &session_reflector.ledger_record,
-                    session_reflector.committed_receipt.as_ref(),
-                )
-                .await?;
-            record_scheduler_run(
-                engine,
-                &project_id,
-                project_path,
-                &session_reflector.ledger_record,
-            );
-            if let Some(record) = skill_writer_record.as_ref() {
-                record_scheduler_run(engine, &project_id, project_path, record);
-            }
-            log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &error);
-            tracedecay_agent_hosts::automation::host_receipts::mark_consumed(
-                &dashboard_root,
-                &pending.session_key,
-                pending.generation,
-            )
-            .await?;
-        }
-        CombinedReviewDispatch::RecordedFailure { run, error } => {
-            record_combined_scheduler_run(engine, &project_id, project_path, &run);
-            if let Some(error) = settle_scheduler_automation_error(
-                engine,
-                &project_id,
-                project_path,
-                AgentTaskKind::CombinedReview,
-                &effect_run_control,
-                effect,
-                AutomationRunError::Runtime(error),
-            )
-            .await
-            {
-                return Err(error);
-            }
-        }
-        CombinedReviewDispatch::PartialEffect {
-            run,
-            run_id,
-            committed_receipt,
-            detail,
-        } => {
-            if let Some(run) = run {
-                record_combined_scheduler_run(engine, &project_id, project_path, &run);
-            }
-            let error = AutomationRunError::PartialEffect {
-                run_id,
-                committed_receipt,
-                ledger_record: None,
-                detail,
-            };
-            if let Some(error) = settle_scheduler_automation_error(
-                engine,
-                &project_id,
-                project_path,
-                AgentTaskKind::CombinedReview,
-                &effect_run_control,
-                effect,
-                error,
-            )
-            .await
-            {
-                return Err(error);
-            }
-        }
-        CombinedReviewDispatch::NotCombined { reason } => {
-            effect.abandon_uncommitted().await?;
-            log_daemon_event(
-                "host_receipt_review",
-                &[
-                    ("project", project_path.display().to_string()),
-                    ("outcome", "deferred".to_string()),
-                    ("reason", reason.to_string()),
-                ],
-            );
-        }
-    }
-    Ok(())
-}
-
 struct PinnedAutomationConfiguration {
     configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId,
     configuration_digest: tracedecay_domain::ManifestDigest,
@@ -1744,10 +1452,12 @@ async fn automation_scheduler_has_work(
 /// discipline as the fixed tasks (enforced inside the job runner).
 async fn run_user_jobs_scheduler_pass(
     engine: &DaemonEngine,
+    run_control: &AutomationRunControl,
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
     profile_root: &Path,
     cg: &crate::tracedecay::TraceDecay,
+    configuration_digest: tracedecay_domain::ManifestDigest,
     config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
     backend: &tracedecay_agent_hosts::automation::backend::CodexAppServerBackend,
     first_error: &mut Option<TraceDecayError>,
@@ -1773,6 +1483,65 @@ async fn run_user_jobs_scheduler_pass(
         .filter(|job| tracedecay_agent_hosts::automation::jobs::job_is_schedulable(job))
     {
         log_scheduler_task_start(project_path, AgentTaskKind::UserJob);
+        let requested_run_id =
+            match scheduled_user_job_run_id(&dashboard_root, job, &configuration_digest).await {
+                Ok(run_id) => run_id,
+                Err(error) => {
+                    log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+        match tracedecay_agent_hosts::automation::jobs::evaluate_and_record_scheduler_skip(
+            &dashboard_root,
+            config,
+            job,
+            &requested_run_id,
+        )
+        .await
+        {
+            Ok(Some(run)) => {
+                record_scheduler_run(engine, project_id, project_path, &run.ledger_record);
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
+                first_error.get_or_insert(error);
+                continue;
+            }
+        }
+        let effect = match scheduler_automation_effect(
+            engine,
+            cg,
+            run_control,
+            project_path,
+            &dashboard_root,
+            Some(&requested_run_id),
+            configuration_digest.clone(),
+            |run_id| crate::daemon::automation_effect::user_job_run_request(run_id, &job.id),
+        )
+        .await
+        {
+            Ok(effect) => effect,
+            Err(error) => {
+                log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
+                first_error.get_or_insert(error);
+                continue;
+            }
+        };
+        let (admission, run_id, effect_run_control) = effect;
+        let effect = match admission {
+            AutomationEffectAdmission::Execute(effect) => effect,
+            AutomationEffectAdmission::Replay(terminal) => {
+                log_scheduler_automation_replay(project_path, AgentTaskKind::UserJob, &terminal);
+                continue;
+            }
+            AutomationEffectAdmission::PreAdmissionProblem(problem) => {
+                log_scheduler_pre_admission_problem(project_path, AgentTaskKind::UserJob, &problem);
+                continue;
+            }
+        };
         match tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend(
             &dashboard_root,
             config,
@@ -1781,6 +1550,7 @@ async fn run_user_jobs_scheduler_pass(
             tracedecay_agent_hosts::automation::jobs::UserJobRunOptions {
                 trigger:
                     tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Scheduler,
+                run_id: Some(run_id),
                 profile_root: Some(profile_root.to_path_buf()),
                 project_root: Some(project_path.to_path_buf()),
                 ..tracedecay_agent_hosts::automation::jobs::UserJobRunOptions::default()
@@ -1788,13 +1558,81 @@ async fn run_user_jobs_scheduler_pass(
         )
         .await
         {
-            Ok(run) => record_scheduler_run(engine, project_id, project_path, &run.ledger_record),
-            Err(e) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &e);
-                first_error.get_or_insert(e);
+            Ok(run) => {
+                synchronize_scheduler_effect_control(&effect_run_control);
+                if run.ledger_record.status
+                    == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
+                    && run.ledger_record.error.as_deref() == Some("scheduler_lock_active")
+                {
+                    record_scheduler_run(engine, project_id, project_path, &run.ledger_record);
+                    if let Err(error) = effect.abandon_uncommitted().await {
+                        first_error.get_or_insert(error);
+                    }
+                    continue;
+                }
+                match effect
+                    .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
+                    .await
+                {
+                    Ok(_) => {
+                        record_scheduler_run(engine, project_id, project_path, &run.ledger_record)
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(error) = settle_scheduler_automation_error(
+                    engine,
+                    project_id,
+                    project_path,
+                    AgentTaskKind::UserJob,
+                    &effect_run_control,
+                    effect,
+                    error,
+                )
+                .await
+                {
+                    first_error.get_or_insert(error);
+                }
             }
         }
     }
+}
+
+async fn scheduled_user_job_run_id(
+    dashboard_root: &Path,
+    job: &tracedecay_agent_hosts::automation::jobs::AutomationJob,
+    configuration_digest: &tracedecay_domain::ManifestDigest,
+) -> Result<String> {
+    let task_key = tracedecay_agent_hosts::automation::jobs::job_task_key(&job.id);
+    let latest_scheduler_terminal =
+        tracedecay_agent_hosts::automation::run_ledger::load_latest_scheduler_effectful_for_task_key(
+            dashboard_root,
+            &task_key,
+        )
+        .await?;
+    let occurrence = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.scheduler.user-job-occurrence.v1",
+        job,
+        configuration_digest,
+        latest_scheduler_terminal.as_ref().map(|record| {
+            (
+                record.run_id.as_str(),
+                record.completed_at.as_str(),
+                record.status,
+            )
+        }),
+    ))
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("user-job occurrence identity is invalid: {error}"),
+    })?;
+    Ok(format!(
+        "user_job_{}_{}",
+        job.id,
+        occurrence.as_str().trim_start_matches("sha256:")
+    ))
 }
 
 #[cfg(test)]

@@ -6,22 +6,22 @@ mod memory;
 mod session;
 
 pub use automation::{
-    MemoryAutomationCommittedReceiptV1, MemoryAutomationCurationAddDispositionV1,
-    MemoryAutomationCurationLinkDispositionV1, MemoryAutomationCurationMergeV1,
-    MemoryAutomationCurationOperationEffectV1, MemoryAutomationCurationReceiptV1,
-    MemoryAutomationCurationRelationKindV1, MemoryAutomationCurationRelationProvenanceV1,
-    MemoryAutomationCurationRelationV1, MemoryAutomationCurationRemoveDispositionV1,
-    MemoryAutomationCurationResultV1, MemoryAutomationFactConflictSourceV1,
-    MemoryAutomationFactConflictValidationV1, MemoryAutomationFactDedupeValidationV1,
-    MemoryAutomationFactDispositionV1, MemoryAutomationFactEffectV1,
-    MemoryAutomationFactEvidenceItemV1, MemoryAutomationFactEvidenceSourceSpanV1,
-    MemoryAutomationFactEvidenceTrustBucketV1, MemoryAutomationFactEvidenceTrustV1,
-    MemoryAutomationFactEvidenceV1, MemoryAutomationFactInputDigestError,
-    MemoryAutomationFactInputDigestV1, MemoryAutomationFactNearestMatchV1,
-    MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
-    MemoryAutomationFactTargetV1, MemoryAutomationFactValidationStatusV1,
-    MemoryAutomationFactValidationV1, MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1,
-    MemoryAutomationRunSummaryV1, MemoryAutomationRunTerminalV1, MemoryAutomationSkipReasonV1,
+    AutomationCommittedReceiptV1, AutomationExternalEffectReceiptV1, AutomationRunProblemV1,
+    AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1, AutomationSkipReasonV1,
+    MemoryAutomationCurationAddDispositionV1, MemoryAutomationCurationLinkDispositionV1,
+    MemoryAutomationCurationMergeV1, MemoryAutomationCurationOperationEffectV1,
+    MemoryAutomationCurationReceiptV1, MemoryAutomationCurationRelationKindV1,
+    MemoryAutomationCurationRelationProvenanceV1, MemoryAutomationCurationRelationV1,
+    MemoryAutomationCurationRemoveDispositionV1, MemoryAutomationCurationResultV1,
+    MemoryAutomationFactConflictSourceV1, MemoryAutomationFactConflictValidationV1,
+    MemoryAutomationFactDedupeValidationV1, MemoryAutomationFactDispositionV1,
+    MemoryAutomationFactEffectV1, MemoryAutomationFactEvidenceItemV1,
+    MemoryAutomationFactEvidenceSourceSpanV1, MemoryAutomationFactEvidenceTrustBucketV1,
+    MemoryAutomationFactEvidenceTrustV1, MemoryAutomationFactEvidenceV1,
+    MemoryAutomationFactInputDigestError, MemoryAutomationFactInputDigestV1,
+    MemoryAutomationFactNearestMatchV1, MemoryAutomationFactReceiptV1,
+    MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1, MemoryAutomationFactTargetV1,
+    MemoryAutomationFactValidationStatusV1, MemoryAutomationFactValidationV1,
 };
 pub use lcm::{
     CompactLineageEdgeV1, LcmAuthorityOutcomeV1, LcmConfigStatusV1, LcmContentRangeV1,
@@ -117,7 +117,7 @@ pub struct RetainedErrorV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(untagged)]
 pub enum RetainedSurfaceResultV1 {
-    MemoryAutomationRun(MemoryAutomationRunResultV1),
+    AutomationRun(AutomationRunResultV1),
     FactStoreAdd(FactStoreAddResultV1),
     FactStoreSearch(FactStoreSearchResultV1),
     FactStoreProbe(FactStoreProbeResultV1),
@@ -152,7 +152,7 @@ mod tests {
     use super::RetainedSurfaceResultV1;
 
     #[test]
-    fn automatic_memory_terminal_selects_only_its_exact_result_variant() {
+    fn automation_terminal_selects_only_its_exact_result_variant() {
         let result = serde_json::from_value::<RetainedSurfaceResultV1>(json!({
             "run_id": "run.memory.zero",
             "task": "memory_curator",
@@ -167,11 +167,8 @@ mod tests {
             },
             "committed_receipts": []
         }))
-        .expect("canonical automatic memory terminal");
+        .expect("canonical automation terminal");
 
-        assert!(matches!(
-            result,
-            RetainedSurfaceResultV1::MemoryAutomationRun(_)
-        ));
+        assert!(matches!(result, RetainedSurfaceResultV1::AutomationRun(_)));
     }
 }

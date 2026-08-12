@@ -4,7 +4,8 @@ use tracedecay_global_db::RegisteredGlobalDb;
 
 use super::{
     AgentTaskRunContext, AutomationRunControl, NonEmptyAutomaticFactReceipts, RUN_ID_COUNTER,
-    SchedulerGate, append_skipped_record, generated_run_id, task_run_gate,
+    SchedulerGate, append_skipped_record, failed_output_projection, generated_run_id,
+    task_run_gate,
 };
 use crate::automation::backend::AgentTaskKind;
 use crate::automation::config::{
@@ -23,6 +24,111 @@ struct TestSessionsDb {
 #[test]
 fn committed_automatic_fact_receipts_cannot_be_empty() {
     assert!(NonEmptyAutomaticFactReceipts::from_vec(Vec::new()).is_none());
+}
+
+#[test]
+fn session_reflector_malformed_output_projection_is_payload_free() {
+    let secret = "sk-live-malformed-reflector-output";
+    let output = serde_json::Value::Object(
+        [(secret.to_owned(), serde_json::json!({"content": secret}))]
+            .into_iter()
+            .collect(),
+    );
+
+    let projection = failed_output_projection(AgentTaskKind::SessionReflector, "facts", &output);
+    let serialized = serde_json::to_string(&projection).expect("projection JSON");
+
+    assert_eq!(
+        projection.pointer("/expected_field"),
+        Some(&serde_json::json!("facts"))
+    );
+    assert!(projection.pointer("/output_sha256").is_some());
+    assert_eq!(
+        projection.pointer("/output_kind"),
+        Some(&serde_json::json!("object"))
+    );
+    assert!(!serialized.contains(secret));
+}
+
+#[test]
+fn pre_epoch_completion_clock_fails_before_ledger_mutation() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let config = AutomationConfig::default();
+    let completion_time = std::time::UNIX_EPOCH
+        .checked_sub(std::time::Duration::from_micros(1))
+        .expect("pre-epoch instant");
+
+    let error = match super::AgentRunFinalizer::new_at(
+        temp.path(),
+        "run.pre-epoch",
+        AutomationTrigger::ManualCli,
+        &config,
+        AgentTaskKind::SessionReflector,
+        "0",
+        None,
+        completion_time,
+    ) {
+        Ok(_) => panic!("pre-epoch clock must fail before effects"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("predates the UNIX epoch"));
+    assert!(!super::super::run_ledger::run_ledger_path(temp.path()).exists());
+}
+
+#[test]
+fn terminal_clock_is_fresh_and_posteffect_failure_stays_typed() {
+    let temp = tempfile::TempDir::new().expect("temp dir");
+    let config = AutomationConfig::default();
+    let preflight = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+    let finalizer = super::AgentRunFinalizer::new_at(
+        temp.path(),
+        "run.clock-progression",
+        AutomationTrigger::ManualCli,
+        &config,
+        AgentTaskKind::SessionReflector,
+        "1",
+        None,
+        preflight,
+    )
+    .expect("preflight clock");
+    let outcome = super::RunRecordOutcome {
+        model: None,
+        status: super::AutomationRunStatus::Succeeded,
+        evidence_hash: None,
+        proposed_ops: None,
+        accepted_count: 1,
+        rejected_count: 0,
+        error: None,
+    };
+
+    let record = finalizer
+        .record_at(
+            outcome,
+            std::time::UNIX_EPOCH + std::time::Duration::from_micros(2_500_000),
+        )
+        .expect("fresh terminal clock");
+    assert_eq!(record.completed_at, "2");
+    assert_eq!(record.completed_at_micros, Some(2_500_000));
+
+    let pre_epoch = std::time::UNIX_EPOCH
+        .checked_sub(std::time::Duration::from_micros(1))
+        .expect("pre-epoch instant");
+    let error = finalizer
+        .record_at(
+            super::RunRecordOutcome {
+                model: None,
+                status: super::AutomationRunStatus::Succeeded,
+                evidence_hash: None,
+                proposed_ops: None,
+                accepted_count: 1,
+                rejected_count: 0,
+                error: None,
+            },
+            pre_epoch,
+        )
+        .expect_err("post-effect clock failure remains typed for caller reconciliation");
+    assert!(error.to_string().contains("predates the UNIX epoch"));
 }
 
 async fn test_sessions_db(root: &Path) -> TestSessionsDb {

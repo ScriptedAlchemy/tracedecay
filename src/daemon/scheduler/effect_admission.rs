@@ -1,14 +1,14 @@
 use std::path::Path;
 
+use tracedecay_agent_hosts::automation::AutomationRunControl;
 use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
-use tracedecay_agent_hosts::automation::{AutomationRunControl, AutomationRunError};
 
 use super::super::{DaemonEngine, DaemonHandshake, log_daemon_event};
 use super::{
     automation_scheduler_has_work, effective_automation_config_for_project,
     log_scheduler_automation_replay, log_scheduler_task_error, log_scheduler_task_start,
-    maybe_run_global_retention, record_combined_scheduler_run, record_scheduler_run,
-    run_user_jobs_scheduler_pass, settle_scheduler_automation_error,
+    maybe_run_global_retention, record_scheduler_run, run_user_jobs_scheduler_pass,
+    settle_scheduler_automation_error,
 };
 use crate::daemon::automation_effect::AutomationEffectAdmission;
 use crate::errors::{Result, TraceDecayError};
@@ -46,9 +46,8 @@ pub(super) async fn scheduler_automation_effect(
     configuration_digest: tracedecay_domain::ManifestDigest,
     request: impl FnOnce(
         &str,
-    ) -> Result<
-        tracedecay_application::retained_surfaces::MemoryAutomationRunRequestV1,
-    >,
+    )
+        -> Result<tracedecay_application::retained_surfaces::AutomationRunRequestV1>,
 ) -> Result<(
     crate::daemon::automation_effect::AutomationEffectAdmission,
     String,
@@ -119,10 +118,10 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
     use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
     use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
     use tracedecay_agent_hosts::automation::runner::{
-        CombinedReviewAutomationOptions, CombinedReviewDispatch, MemoryCuratorAutomationOptions,
+        CombinedReviewAutomationOptions, MemoryCuratorAutomationOptions,
         SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-        registered_project_automation_retrieval, run_combined_review_with_backend_and_retrieval,
-        run_memory_curator_with_backend, run_session_reflector_with_backend_and_retrieval,
+        registered_project_automation_retrieval, run_memory_curator_with_backend,
+        run_session_reflector_with_backend_and_retrieval,
         run_skill_writer_with_backend_and_retrieval,
     };
 
@@ -297,7 +296,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
             },
             ..CombinedReviewAutomationOptions::default()
         };
-        let combined_effect = scheduler_automation_effect(
+        match super::combined_effect::prepare_combined_effects(
             engine,
             cg,
             run_control,
@@ -305,204 +304,30 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
             &cg.store_layout().dashboard_root,
             None,
             configuration.configuration_digest.clone(),
-            |run_id| {
-                crate::daemon::automation_effect::session_reflector_run_request(
-                    run_id,
-                    &combined_options.session_reflector,
-                )
-            },
+            &combined_options,
         )
-        .await;
-        match combined_effect {
-            Err(error) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
-                first_error.get_or_insert(error);
-            }
-            Ok((AutomationEffectAdmission::PreAdmissionProblem(problem), _, _)) => {
-                combined_handled = true;
-                log_scheduler_pre_admission_problem(
-                    project_path,
-                    AgentTaskKind::CombinedReview,
-                    &problem,
-                );
-            }
-            Ok((AutomationEffectAdmission::Replay(terminal), _, _)) => {
-                // This journal is the memory half only. Per-task gates below
-                // decide whether the independent skill authority still needs
-                // work after a memory replay.
-                combined_handled = false;
-                log_scheduler_automation_replay(
-                    project_path,
-                    AgentTaskKind::CombinedReview,
-                    &terminal,
-                );
-            }
-            Ok((AutomationEffectAdmission::Execute(effect), run_id, effect_run_control)) => {
-                match run_combined_review_with_backend_and_retrieval(
+        .await
+        {
+            Ok(admission) => {
+                combined_handled = super::combined_effect::run_combined_scheduler_effect(
+                    admission,
+                    engine,
                     cg,
+                    &project_id,
+                    project_path,
                     config,
                     &configuration.configuration_revision_id,
                     &backend,
                     retrieval.as_ref(),
-                    CombinedReviewAutomationOptions {
-                        run_id: Some(run_id),
-                        ..combined_options
-                    },
-                    &effect_run_control,
+                    combined_options,
+                    &mut first_error,
                 )
                 .await
-                {
-                    Ok(CombinedReviewDispatch::Ran(run)) => {
-                        synchronize_scheduler_effect_control(&effect_run_control);
-                        match effect
-                            .settle_run(
-                                &run.session_reflector.ledger_record,
-                                run.session_reflector.committed_receipt.as_ref(),
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                record_combined_scheduler_run(
-                                    engine,
-                                    &project_id,
-                                    project_path,
-                                    &run,
-                                );
-                                combined_handled = true;
-                            }
-                            Err(error) => {
-                                log_scheduler_task_error(
-                                    project_path,
-                                    AgentTaskKind::CombinedReview,
-                                    &error,
-                                );
-                                first_error.get_or_insert(error);
-                            }
-                        }
-                    }
-                    Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure {
-                        session_reflector,
-                        skill_writer_record,
-                        error,
-                    }) => {
-                        synchronize_scheduler_effect_control(&effect_run_control);
-                        match effect
-                            .settle_run(
-                                &session_reflector.ledger_record,
-                                session_reflector.committed_receipt.as_ref(),
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                record_scheduler_run(
-                                    engine,
-                                    &project_id,
-                                    project_path,
-                                    &session_reflector.ledger_record,
-                                );
-                                if let Some(record) = skill_writer_record.as_ref() {
-                                    record_scheduler_run(engine, &project_id, project_path, record);
-                                }
-                                log_scheduler_task_error(
-                                    project_path,
-                                    AgentTaskKind::SkillWriter,
-                                    &error,
-                                );
-                            }
-                            Err(settlement_error) => {
-                                log_scheduler_task_error(
-                                    project_path,
-                                    AgentTaskKind::SessionReflector,
-                                    &settlement_error,
-                                );
-                                first_error.get_or_insert(settlement_error);
-                            }
-                        }
-                        combined_handled = false;
-                    }
-                    Ok(CombinedReviewDispatch::RecordedFailure { run, error }) => {
-                        record_combined_scheduler_run(engine, &project_id, project_path, &run);
-                        if let Some(error) = settle_scheduler_automation_error(
-                            engine,
-                            &project_id,
-                            project_path,
-                            AgentTaskKind::CombinedReview,
-                            &effect_run_control,
-                            effect,
-                            AutomationRunError::Runtime(error),
-                        )
-                        .await
-                        {
-                            first_error.get_or_insert(error);
-                        }
-                        combined_handled = true;
-                    }
-                    Ok(CombinedReviewDispatch::PartialEffect {
-                        run,
-                        run_id,
-                        committed_receipt,
-                        detail,
-                    }) => {
-                        if let Some(run) = run.as_deref() {
-                            record_combined_scheduler_run(engine, &project_id, project_path, run);
-                        }
-                        let error = AutomationRunError::PartialEffect {
-                            run_id,
-                            committed_receipt,
-                            ledger_record: None,
-                            detail,
-                        };
-                        if let Some(error) = settle_scheduler_automation_error(
-                            engine,
-                            &project_id,
-                            project_path,
-                            AgentTaskKind::CombinedReview,
-                            &effect_run_control,
-                            effect,
-                            error,
-                        )
-                        .await
-                        {
-                            first_error.get_or_insert(error);
-                        }
-                        combined_handled = true;
-                    }
-                    Ok(CombinedReviewDispatch::NotCombined { reason }) => {
-                        if let Err(error) = effect.abandon_uncommitted().await {
-                            log_scheduler_task_error(
-                                project_path,
-                                AgentTaskKind::CombinedReview,
-                                &error,
-                            );
-                            first_error.get_or_insert(error);
-                        }
-                        log_daemon_event(
-                            "scheduler_task",
-                            &[
-                                ("project", project_path.display().to_string()),
-                                ("task", "combined_review".to_string()),
-                                ("outcome", "not_combined".to_string()),
-                                ("reason", reason.to_string()),
-                            ],
-                        );
-                    }
-                    Err(error) => {
-                        if let Some(error) = settle_scheduler_automation_error(
-                            engine,
-                            &project_id,
-                            project_path,
-                            AgentTaskKind::CombinedReview,
-                            &effect_run_control,
-                            effect,
-                            AutomationRunError::Runtime(error),
-                        )
-                        .await
-                        {
-                            first_error.get_or_insert(error);
-                        }
-                        combined_handled = true;
-                    }
-                }
+                .handled();
+            }
+            Err(error) => {
+                log_scheduler_task_error(project_path, AgentTaskKind::CombinedReview, &error);
+                first_error.get_or_insert(error);
             }
         }
     }
@@ -603,33 +428,100 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
             }
         }
         log_scheduler_task_start(project_path, AgentTaskKind::SkillWriter);
-        match run_skill_writer_with_backend_and_retrieval(
+        let skill_options = SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            profile_root: Some(profile_identity.profile_root().to_path_buf()),
+            ..SkillWriterAutomationOptions::default()
+        };
+        match scheduler_automation_effect(
+            engine,
             cg,
-            config,
-            &configuration.configuration_revision_id,
-            &backend,
-            retrieval.as_ref(),
-            SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                profile_root: Some(profile_identity.profile_root().to_path_buf()),
-                ..SkillWriterAutomationOptions::default()
+            run_control,
+            project_path,
+            &cg.store_layout().dashboard_root,
+            None,
+            configuration.configuration_digest.clone(),
+            |run_id| {
+                crate::daemon::automation_effect::skill_writer_run_request(run_id, &skill_options)
             },
         )
         .await
         {
-            Ok(run) => record_scheduler_run(engine, &project_id, project_path, &run.ledger_record),
-            Err(e) => {
-                log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &e);
-                first_error.get_or_insert(e);
+            Err(error) => {
+                log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &error);
+                first_error.get_or_insert(error);
+            }
+            Ok((AutomationEffectAdmission::PreAdmissionProblem(problem), _, _)) => {
+                log_scheduler_pre_admission_problem(
+                    project_path,
+                    AgentTaskKind::SkillWriter,
+                    &problem,
+                );
+            }
+            Ok((AutomationEffectAdmission::Replay(terminal), _, _)) => {
+                log_scheduler_automation_replay(
+                    project_path,
+                    AgentTaskKind::SkillWriter,
+                    &terminal,
+                );
+            }
+            Ok((AutomationEffectAdmission::Execute(effect), run_id, effect_run_control)) => {
+                let mut options = skill_options;
+                options.run_id = Some(run_id);
+                match run_skill_writer_with_backend_and_retrieval(
+                    cg,
+                    config,
+                    &configuration.configuration_revision_id,
+                    &backend,
+                    retrieval.as_ref(),
+                    options,
+                )
+                .await
+                {
+                    Ok(run) => {
+                        synchronize_scheduler_effect_control(&effect_run_control);
+                        match effect
+                            .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
+                            .await
+                        {
+                            Ok(_) => record_scheduler_run(
+                                engine,
+                                &project_id,
+                                project_path,
+                                &run.ledger_record,
+                            ),
+                            Err(error) => {
+                                first_error.get_or_insert(error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(error) = settle_scheduler_automation_error(
+                            engine,
+                            &project_id,
+                            project_path,
+                            AgentTaskKind::SkillWriter,
+                            &effect_run_control,
+                            effect,
+                            error,
+                        )
+                        .await
+                        {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                }
             }
         }
     }
     run_user_jobs_scheduler_pass(
         engine,
+        run_control,
         &project_id,
         project_path,
         &handshake.client_identity.profile_root,
         cg,
+        configuration.configuration_digest.clone(),
         config,
         &backend,
         &mut first_error,

@@ -14,6 +14,8 @@ use super::backend::{
     run_agent_task_with_retry_report, task_key,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
+use super::config_error;
+use super::jobs::effect_receipt::ExternalAutomationEffectReceipt;
 use super::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
     load_run_records_for_task_key,
@@ -46,6 +48,8 @@ pub struct AutomationRunControl {
 pub enum AutomationCommittedReceipt {
     MemoryCuration(ProjectMemoryFactCurationReceiptV1),
     AutomaticFacts(NonEmptyAutomaticFactReceipts),
+    UserJobDelivery(ExternalAutomationEffectReceipt),
+    SkillWriting(ExternalAutomationEffectReceipt),
 }
 
 /// One or more canonical automatic-fact authority results.
@@ -254,7 +258,7 @@ impl<'a> AgentTaskRunContext<'a> {
                 .is_some_and(|records| is_repeat_scheduler_skip(records, self.task, reason))
     }
 
-    pub(crate) fn finalizer(&self, input_hash: Option<String>) -> AgentRunFinalizer<'_> {
+    pub(crate) fn finalizer(&self, input_hash: Option<String>) -> Result<AgentRunFinalizer<'_>> {
         AgentRunFinalizer::new(
             &self.dashboard_root,
             &self.run_id,
@@ -382,7 +386,7 @@ async fn append_skipped_record_with_validation(
     is_repeat: bool,
     validation_report: Option<Value>,
 ) -> Result<AutomationRunLedgerRecord> {
-    let mut record = run.finalizer(None).record(RunRecordOutcome {
+    let mut record = run.finalizer(None)?.record(RunRecordOutcome {
         model: None,
         status: AutomationRunStatus::Skipped,
         evidence_hash,
@@ -390,7 +394,7 @@ async fn append_skipped_record_with_validation(
         accepted_count: 0,
         rejected_count: 0,
         error: Some(reason.to_string()),
-    });
+    })?;
     record.validation_report = validation_report;
     // Scheduler ticks re-evaluate every task every few seconds, so a standing
     // skip condition (interval not elapsed, task disabled, ...) would append
@@ -522,8 +526,32 @@ impl<'a> AgentRunFinalizer<'a> {
         task: AgentTaskKind,
         started_at: &'a str,
         input_hash: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Self::new_at(
+            dashboard_root,
+            run_id,
+            trigger,
+            config,
+            task,
+            started_at,
+            input_hash,
+            std::time::SystemTime::now(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_at(
+        dashboard_root: &'a Path,
+        run_id: &'a str,
+        trigger: AutomationTrigger,
+        config: &'a AutomationConfig,
+        task: AgentTaskKind,
+        started_at: &'a str,
+        input_hash: Option<String>,
+        completion_time: std::time::SystemTime,
+    ) -> Result<Self> {
+        super::run_ledger::timestamp_micros_at(completion_time)?;
+        Ok(Self {
             dashboard_root,
             run_id,
             trigger,
@@ -532,7 +560,7 @@ impl<'a> AgentRunFinalizer<'a> {
             started_at,
             input_hash,
             combined_run_id: None,
-        }
+        })
     }
 
     #[must_use]
@@ -560,7 +588,7 @@ impl<'a> AgentRunFinalizer<'a> {
             accepted_count: 0,
             rejected_count: 0,
             error: Some(error),
-        });
+        })?;
         record.input_hash.clone_from(&self.input_hash);
         record.output_hash = record.proposed_ops.as_ref().map(sha256_json);
         record.fallback_status = Some("backend_failed_noop".to_string());
@@ -615,7 +643,7 @@ impl<'a> AgentRunFinalizer<'a> {
             accepted_count: 0,
             rejected_count: 0,
             error: Some(error),
-        });
+        })?;
         apply_retry_report(&mut record, retry_report);
         self.finish_record(&mut record);
         append_run_record(self.dashboard_root, &record).await?;
@@ -647,7 +675,7 @@ impl<'a> AgentRunFinalizer<'a> {
             accepted_count,
             rejected_count,
             error: Some(error),
-        });
+        })?;
         record.applied_ops = applied_ops;
         record.rejected_ops = rejected_ops;
         record.validation_report = validation_report;
@@ -664,7 +692,7 @@ impl<'a> AgentRunFinalizer<'a> {
         proposed_ops: Option<Value>,
         accepted_count: usize,
         rejected_count: usize,
-    ) -> AutomationRunLedgerRecord {
+    ) -> Result<AutomationRunLedgerRecord> {
         self.record(RunRecordOutcome {
             model: response.model.clone(),
             status: AutomationRunStatus::Succeeded,
@@ -674,6 +702,33 @@ impl<'a> AgentRunFinalizer<'a> {
             rejected_count,
             error: None,
         })
+    }
+
+    pub(crate) fn completion_timestamp_micros(&self) -> Result<i64> {
+        super::run_ledger::current_timestamp_micros()
+    }
+
+    pub(crate) fn success_record_at(
+        &self,
+        response: &AgentTaskResponse,
+        evidence_hash: Option<String>,
+        proposed_ops: Option<Value>,
+        accepted_count: usize,
+        rejected_count: usize,
+        completed_at_micros: i64,
+    ) -> AutomationRunLedgerRecord {
+        self.record_from_micros(
+            RunRecordOutcome {
+                model: response.model.clone(),
+                status: AutomationRunStatus::Succeeded,
+                evidence_hash,
+                proposed_ops,
+                accepted_count,
+                rejected_count,
+                error: None,
+            },
+            completed_at_micros,
+        )
     }
 
     pub(crate) async fn append_success_record(
@@ -694,6 +749,17 @@ impl<'a> AgentRunFinalizer<'a> {
             &record,
         )
         .await?;
+        append_run_record(self.dashboard_root, &record).await?;
+        Ok(record)
+    }
+
+    pub(crate) async fn append_prebuilt_failed_record(
+        &self,
+        mut record: AutomationRunLedgerRecord,
+        retry_report: &AgentTaskRetryReport,
+    ) -> Result<AutomationRunLedgerRecord> {
+        apply_retry_report(&mut record, retry_report);
+        self.finish_record(&mut record);
         append_run_record(self.dashboard_root, &record).await?;
         Ok(record)
     }
@@ -745,7 +811,7 @@ impl<'a> AgentRunFinalizer<'a> {
         self.append_failed_record(
             response.model.clone(),
             evidence_hash,
-            Some(output),
+            Some(failed_output_projection(self.task, field, &output)),
             err.to_string(),
             retry_report,
         )
@@ -759,8 +825,25 @@ impl<'a> AgentRunFinalizer<'a> {
         self.annotate_combined_run(record);
     }
 
-    fn record(&self, outcome: RunRecordOutcome) -> AutomationRunLedgerRecord {
-        let completed_at = current_timestamp().to_string();
+    fn record(&self, outcome: RunRecordOutcome) -> Result<AutomationRunLedgerRecord> {
+        self.record_at(outcome, std::time::SystemTime::now())
+    }
+
+    fn record_at(
+        &self,
+        outcome: RunRecordOutcome,
+        completion_time: std::time::SystemTime,
+    ) -> Result<AutomationRunLedgerRecord> {
+        let completed_at_micros = super::run_ledger::timestamp_micros_at(completion_time)?;
+        Ok(self.record_from_micros(outcome, completed_at_micros))
+    }
+
+    fn record_from_micros(
+        &self,
+        outcome: RunRecordOutcome,
+        completed_at_micros: i64,
+    ) -> AutomationRunLedgerRecord {
+        let completed_at = (completed_at_micros / 1_000_000).to_string();
         let error_classification = (outcome.status == AutomationRunStatus::Failed)
             .then(|| {
                 outcome
@@ -810,6 +893,7 @@ impl<'a> AgentRunFinalizer<'a> {
             artifacts: Vec::new(),
             started_at: self.started_at.to_string(),
             completed_at,
+            completed_at_micros: Some(completed_at_micros),
         }
     }
 
@@ -827,6 +911,19 @@ impl<'a> AgentRunFinalizer<'a> {
                 json!(task_key(AgentTaskKind::CombinedReview)),
             );
         }
+    }
+}
+
+fn failed_output_projection(task: AgentTaskKind, field: &str, output: &Value) -> Value {
+    if task == AgentTaskKind::SessionReflector {
+        json!({
+            "schema_version": 1,
+            "expected_field": field,
+            "output_sha256": sha256_json(output),
+            "output_kind": if output.is_object() { "object" } else { "non_object" },
+        })
+    } else {
+        output.clone()
     }
 }
 

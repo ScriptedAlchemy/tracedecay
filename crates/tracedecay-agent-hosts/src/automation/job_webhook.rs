@@ -16,10 +16,19 @@ pub(crate) fn validate_url(raw: &str) -> Result<()> {
     validate_host(&host)
 }
 
-pub(crate) fn post_json_url(raw_url: &str, payload: &Value, timeout: Duration) -> Result<u16> {
-    let url = parse_url(raw_url)?;
-    let endpoint = resolve_endpoint(&url)?;
-    post_json(&endpoint, payload, timeout)
+pub(crate) enum WebhookPostError {
+    NotAttempted(TraceDecayError),
+    Indeterminate,
+}
+
+pub(crate) fn post_json_url(
+    raw_url: &str,
+    payload: &Value,
+    timeout: Duration,
+) -> std::result::Result<u16, WebhookPostError> {
+    let url = parse_url(raw_url).map_err(WebhookPostError::NotAttempted)?;
+    let endpoint = resolve_endpoint(&url).map_err(WebhookPostError::NotAttempted)?;
+    post_json_phased(&endpoint, payload, timeout)
 }
 
 fn parse_url(raw: &str) -> Result<Url> {
@@ -149,13 +158,13 @@ fn resolve_endpoint(url: &Url) -> Result<WebhookEndpoint> {
         Host::Domain(host) => {
             let addrs: Vec<SocketAddr> = (host, port)
                 .to_socket_addrs()
-                .map_err(|e| TraceDecayError::Config {
-                    message: format!("failed to resolve webhook host '{host}': {e}"),
+                .map_err(|_| TraceDecayError::Config {
+                    message: "failed to resolve webhook host".to_owned(),
                 })?
                 .collect();
             if addrs.is_empty() {
                 return Err(TraceDecayError::Config {
-                    message: format!("webhook host '{host}' resolved no addresses"),
+                    message: "webhook host resolved no addresses".to_owned(),
                 });
             }
             for addr in &addrs {
@@ -172,53 +181,77 @@ fn resolve_endpoint(url: &Url) -> Result<WebhookEndpoint> {
 }
 
 fn post_json(endpoint: &WebhookEndpoint, payload: &Value, timeout: Duration) -> Result<u16> {
-    let body = serde_json::to_vec(payload).map_err(|e| TraceDecayError::Config {
-        message: format!("failed to encode webhook payload: {e}"),
-    })?;
+    post_json_phased(endpoint, payload, timeout).map_err(|error| match error {
+        WebhookPostError::NotAttempted(error) => error,
+        WebhookPostError::Indeterminate => TraceDecayError::Config {
+            message: "webhook delivery outcome is indeterminate".to_owned(),
+        },
+    })
+}
+
+fn post_json_phased(
+    endpoint: &WebhookEndpoint,
+    payload: &Value,
+    timeout: Duration,
+) -> std::result::Result<u16, WebhookPostError> {
+    let body = serde_json::to_vec(payload)
+        .map_err(|e| TraceDecayError::Config {
+            message: format!("failed to encode webhook payload: {e}"),
+        })
+        .map_err(WebhookPostError::NotAttempted)?;
     match endpoint.url.scheme() {
         "http" => post_json_over_http(endpoint, &body, timeout),
         "https" => post_json_over_https(endpoint, &body, timeout),
-        _ => job_error("job webhook delivery url must use http:// or https://"),
+        _ => Err(WebhookPostError::NotAttempted(TraceDecayError::Config {
+            message: "job webhook delivery url must use http:// or https://".to_owned(),
+        })),
     }
 }
 
-fn post_json_over_http(endpoint: &WebhookEndpoint, body: &[u8], timeout: Duration) -> Result<u16> {
-    let mut stream = connect_tcp(endpoint, timeout)?;
+fn post_json_over_http(
+    endpoint: &WebhookEndpoint,
+    body: &[u8],
+    timeout: Duration,
+) -> std::result::Result<u16, WebhookPostError> {
+    let mut stream = connect_tcp(endpoint, timeout).map_err(WebhookPostError::NotAttempted)?;
     write_request(&mut stream, endpoint, body)?;
-    read_status(&mut stream)
+    read_status(&mut stream).map_err(|_| WebhookPostError::Indeterminate)
 }
 
-fn post_json_over_https(endpoint: &WebhookEndpoint, body: &[u8], timeout: Duration) -> Result<u16> {
-    let stream = connect_tcp(endpoint, timeout)?;
+fn post_json_over_https(
+    endpoint: &WebhookEndpoint,
+    body: &[u8],
+    timeout: Duration,
+) -> std::result::Result<u16, WebhookPostError> {
+    let stream = connect_tcp(endpoint, timeout).map_err(WebhookPostError::NotAttempted)?;
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
     let config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
-    let host_label = host_label(&endpoint.url)?;
-    let server_name = rustls::pki_types::ServerName::try_from(host_label).map_err(|_| {
-        TraceDecayError::Config {
+    let host_label = host_label(&endpoint.url).map_err(WebhookPostError::NotAttempted)?;
+    let server_name = rustls::pki_types::ServerName::try_from(host_label)
+        .map_err(|_| TraceDecayError::Config {
             message: "invalid webhook host for TLS verification".to_string(),
-        }
-    })?;
-    let conn = rustls::ClientConnection::new(Arc::new(config), server_name).map_err(|e| {
-        TraceDecayError::Config {
-            message: format!("failed to create webhook TLS connection: {e}"),
-        }
-    })?;
+        })
+        .map_err(WebhookPostError::NotAttempted)?;
+    let conn = rustls::ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|_| target_free_tls_error("connection setup"))
+        .map_err(WebhookPostError::NotAttempted)?;
     let mut stream = rustls::StreamOwned::new(conn, stream);
+    stream
+        .conn
+        .complete_io(&mut stream.sock)
+        .map_err(|_| WebhookPostError::NotAttempted(target_free_tls_error("handshake")))?;
     write_request(&mut stream, endpoint, body)?;
-    read_status(&mut stream)
+    read_status(&mut stream).map_err(|_| WebhookPostError::Indeterminate)
 }
 
 fn connect_tcp(endpoint: &WebhookEndpoint, timeout: Duration) -> Result<TcpStream> {
-    let stream = TcpStream::connect_timeout(&endpoint.connect_addr, timeout).map_err(|e| {
+    let stream = TcpStream::connect_timeout(&endpoint.connect_addr, timeout).map_err(|_| {
         TraceDecayError::Config {
-            message: format!(
-                "failed to connect webhook endpoint '{}': {e}",
-                endpoint.connect_addr
-            ),
+            message: "failed to connect webhook endpoint".to_owned(),
         }
     })?;
     stream
@@ -230,19 +263,43 @@ fn connect_tcp(endpoint: &WebhookEndpoint, timeout: Duration) -> Result<TcpStrea
     Ok(stream)
 }
 
-fn write_request<W: Write>(writer: &mut W, endpoint: &WebhookEndpoint, body: &[u8]) -> Result<()> {
+fn target_free_tls_error(phase: &'static str) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("webhook TLS {phase} failed"),
+    }
+}
+
+fn write_request<W: Write>(
+    writer: &mut W,
+    endpoint: &WebhookEndpoint,
+    body: &[u8],
+) -> std::result::Result<(), WebhookPostError> {
     let path = request_target(&endpoint.url);
-    let host = host_header(&endpoint.url)?;
-    write!(
-        writer,
+    let host = host_header(&endpoint.url).map_err(WebhookPostError::NotAttempted)?;
+    let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: tracedecay-automation-jobs\r\nContent-Type: application/json\r\nAccept: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
         body.len()
-    )
-    .and_then(|()| writer.write_all(body))
-    .and_then(|()| writer.flush())
-    .map_err(|e| TraceDecayError::Config {
-        message: format!("failed to write webhook request: {e}"),
-    })
+    );
+    let bytes = [request.as_bytes(), body].concat();
+    let mut written = 0;
+    while written < bytes.len() {
+        match writer.write(&bytes[written..]) {
+            Ok(0) if written == 0 => {
+                return Err(WebhookPostError::NotAttempted(TraceDecayError::Config {
+                    message: "webhook request wrote zero bytes".to_owned(),
+                }));
+            }
+            Ok(0) => return Err(WebhookPostError::Indeterminate),
+            Ok(count) => written += count,
+            Err(error) if written == 0 => {
+                return Err(WebhookPostError::NotAttempted(TraceDecayError::Config {
+                    message: format!("failed to start webhook request: {error}"),
+                }));
+            }
+            Err(_) => return Err(WebhookPostError::Indeterminate),
+        }
+    }
+    writer.flush().map_err(|_| WebhookPostError::Indeterminate)
 }
 
 fn read_status<R: Read>(reader: &mut R) -> Result<u16> {
@@ -350,6 +407,78 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
     use std::sync::mpsc;
     use std::thread;
+
+    struct FailingWriter {
+        written: usize,
+        fail_after: usize,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.written >= self.fail_after {
+                return Err(std::io::Error::other("injected write failure"));
+            }
+            let count = bytes.len().min(self.fail_after - self.written);
+            self.written += count;
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn webhook_errors_distinguish_prewrite_from_postwrite_failure() {
+        assert!(matches!(
+            post_json_url("not a url", &json!({}), Duration::from_secs(1)),
+            Err(WebhookPostError::NotAttempted(_))
+        ));
+
+        let endpoint = WebhookEndpoint::new_for_test(
+            Url::parse("http://example.test/hook").expect("url"),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1),
+        );
+        assert!(matches!(
+            post_json_over_http(&endpoint, b"{}", Duration::from_millis(10)),
+            Err(WebhookPostError::NotAttempted(_))
+        ));
+
+        let mut before = FailingWriter {
+            written: 0,
+            fail_after: 0,
+        };
+        assert!(matches!(
+            write_request(&mut before, &endpoint, b"{}"),
+            Err(WebhookPostError::NotAttempted(_))
+        ));
+        let mut after = FailingWriter {
+            written: 0,
+            fail_after: 8,
+        };
+        assert!(matches!(
+            write_request(&mut after, &endpoint, b"{}"),
+            Err(WebhookPostError::Indeterminate)
+        ));
+    }
+
+    #[test]
+    fn resolution_failure_does_not_disclose_the_webhook_host() {
+        let url = Url::parse("http://tenant-secret.invalid/hook?token=private").unwrap();
+        let detail = resolve_endpoint(&url)
+            .expect_err("reserved invalid host must not resolve")
+            .to_string();
+        assert!(!detail.contains("tenant-secret"));
+        assert!(!detail.contains("token"));
+    }
+
+    #[test]
+    fn tls_failure_detail_is_target_independent() {
+        let detail = target_free_tls_error("handshake").to_string();
+        assert!(!detail.contains("tenant-secret.example"));
+        assert!(!detail.contains("certificate"));
+        assert_eq!(detail, "config error: webhook TLS handshake failed");
+    }
 
     /// A reader that yields a canned buffer once, then fails every subsequent
     /// read with `ConnectionAborted` — models a peer that sends its full

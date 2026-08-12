@@ -424,7 +424,7 @@ async fn serve_stdio_smokes_automation_run_artifact_view() {
             artifacts: vec![artifact],
             started_at: "1782283199".to_string(),
             completed_at: "1782283200".to_string(),
-            completed_at_micros: 1_782_283_200_000_000,
+            completed_at_micros: Some(1_782_283_200_000_000),
         },
     )
     .await

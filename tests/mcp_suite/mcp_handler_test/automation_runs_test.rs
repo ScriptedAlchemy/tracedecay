@@ -41,13 +41,14 @@ fn run_record(run_id: &str, completed_at: &str) -> AutomationRunLedgerRecord {
         artifacts: Vec::new(),
         started_at: "1782283199".to_owned(),
         completed_at: completed_at.to_owned(),
+        completed_at_micros: None,
     }
 }
 
 #[test]
 fn automation_run_read_definitions_are_bounded_and_read_only() {
-    let tools = tracedecay::mcp::tools::definitions::get_tool_definitions()
-        .expect("tool definitions");
+    let tools =
+        tracedecay::mcp::tools::definitions::get_tool_definitions().expect("tool definitions");
     let list = tools
         .iter()
         .find(|tool| tool.name == "tracedecay_automation_run_list")

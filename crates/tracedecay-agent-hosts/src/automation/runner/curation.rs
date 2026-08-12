@@ -162,6 +162,7 @@ pub(super) fn unpersisted_rejected_parts(
         artifacts: Vec::new(),
         started_at: run.started_at().to_string(),
         completed_at,
+        completed_at_micros: None,
     };
     (report, record)
 }

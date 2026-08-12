@@ -679,6 +679,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 artifacts: vec![artifact],
                 started_at: created_at.to_string(),
                 completed_at: created_at.to_string(),
+                completed_at_micros: Some(1_782_259_200_000_000),
             },
         )
         .await

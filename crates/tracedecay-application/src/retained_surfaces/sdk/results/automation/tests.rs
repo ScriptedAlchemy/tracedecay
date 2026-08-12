@@ -1,17 +1,17 @@
+use super::{
+    AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunResultV1, AutomationTaskV1,
+    MemoryAutomationCurationRelationV1,
+};
 use serde_json::{Value, json};
 use tracedecay_domain::{
     ActorId, FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ManifestDigest,
-    ProjectId, ProvenanceId, RepositoryId, RunId, WorktreeId, canonical_sha256,
+    ProjectId, ProvenanceId, RepositoryId, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::EffectClass;
-
-use super::{
-    MemoryAutomationCommittedReceiptV1, MemoryAutomationCurationRelationV1,
-    MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1, MemoryAutomationSkipReasonV1,
-    MemoryAutomationTaskV1,
-};
+mod admission_binding;
+mod outer_partial;
 use crate::retained_surfaces::{
-    RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
+    AutomationRunRequestV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
     retained_surface_application_operation, retained_surface_execution_problem,
 };
 use crate::{
@@ -26,62 +26,56 @@ fn zero_terminal(status: &str) -> Value {
     } else {
         json!({"status":"skipped","reason":"nothing_to_review","summary":{"reviewed_count":0,"accepted_count":0,"rejected_count":0,"skipped_count":1}})
     };
-    json!({"run_id":"run.memory.zero","task":"memory_curator","terminal":terminal,"committed_receipts":[]})
+    with_request_digest(
+        json!({"run_id":"run.memory.zero","task":"memory_curator","terminal":terminal,"committed_receipts":[]}),
+        &automation_request("run.memory.zero", AutomationTaskV1::MemoryCurator),
+    )
 }
 
-#[test]
-fn zero_effect_completion_and_skip_are_typed_without_partial_receipts() {
-    for status in ["completed", "skipped"] {
-        let result = serde_json::from_value::<MemoryAutomationRunResultV1>(zero_terminal(status))
-            .expect("typed zero-effect terminal");
-        assert!(result.matches_terminal());
-    }
+fn automation_request(run_id: &str, task: AutomationTaskV1) -> AutomationRunRequestV1 {
+    let reflector = json!({
+        "provider":"codex","query":"canonical evidence","scope":"all","session_id":null,
+        "include_summaries":true,"evidence_limit":10,"include_recent_sessions":true,
+        "recent_sessions_limit":3,"sort":"recency","source":null,"role":null,
+        "start_time":null,"end_time":null
+    });
+    let skill = json!({
+        "provider":"codex","query":"canonical skill evidence","evidence_limit":10,
+        "include_recent_sessions":true,"recent_sessions_limit":3
+    });
+    let (kind, options) = match task {
+        AutomationTaskV1::MemoryCurator => (
+            "memory_curator",
+            json!({
+                "fact_review_limit":24,"min_confidence_millionths":720000
+            }),
+        ),
+        AutomationTaskV1::SessionReflector => ("session_reflector", reflector),
+        AutomationTaskV1::SkillWriter => ("skill_writer", skill),
+        AutomationTaskV1::CombinedReview => (
+            "combined_review",
+            json!({
+                "session_reflector":reflector,"skill_writer":skill
+            }),
+        ),
+        AutomationTaskV1::UserJob => ("user_job", json!({"job_id":"nightly"})),
+    };
+    serde_json::from_value(json!({
+        "run_id":run_id,"task":{"kind":kind,"options":options}
+    }))
+    .expect("automation request fixture")
 }
 
-#[test]
-fn skill_writer_state_cannot_become_a_memory_automation_terminal() {
-    for reason in ["skill_writer_evidence_unavailable", "skill_writer_not_due"] {
-        assert!(MemoryAutomationSkipReasonV1::from_ledger_reason(reason).is_none());
-        let mut terminal = zero_terminal("skipped");
-        terminal["terminal"]["reason"] = json!(reason);
-        assert!(serde_json::from_value::<MemoryAutomationRunResultV1>(terminal).is_err());
-    }
-}
-
-#[test]
-fn skipped_reason_must_belong_to_the_memory_task() {
-    let mut terminal = zero_terminal("skipped");
-    terminal["terminal"]["reason"] = json!("session_reflector_disabled");
-    assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(terminal)
-            .expect("typed cross-task skip")
-            .matches_terminal()
-    );
-}
-
-#[test]
-fn zero_effect_result_is_bound_to_exact_run_and_task() {
-    let result = serde_json::from_value::<MemoryAutomationRunResultV1>(zero_terminal("completed"))
-        .expect("zero-effect result");
-    assert!(result.matches_admission(
-        &RunId::new("run.memory.zero").expect("run id"),
-        MemoryAutomationTaskV1::MemoryCurator,
-    ));
-    assert!(!result.matches_admission(
-        &RunId::new("run.memory.other").expect("other run"),
-        MemoryAutomationTaskV1::MemoryCurator,
-    ));
-    assert!(!result.matches_admission(
-        &RunId::new("run.memory.zero").expect("run id"),
-        MemoryAutomationTaskV1::SessionReflector,
-    ));
+fn with_request_digest(mut value: Value, request: &AutomationRunRequestV1) -> Value {
+    value["request_digest"] = json!(request.input_digest().expect("request digest").as_str());
+    value
 }
 
 #[test]
 fn skipped_terminal_rejects_a_committed_receipt() {
     let mut terminal = automatic_fact_terminal();
     terminal["terminal"] = zero_terminal("skipped")["terminal"].clone();
-    let terminal = serde_json::from_value::<MemoryAutomationRunResultV1>(terminal)
+    let terminal = serde_json::from_value::<AutomationRunResultV1>(terminal)
         .expect("typed but inconsistent skipped terminal");
     assert!(!terminal.matches_terminal());
 }
@@ -94,14 +88,14 @@ fn terminal_rejects_removed_open_fields() {
     ] {
         let mut legacy = zero_terminal("completed");
         legacy[field] = value;
-        assert!(serde_json::from_value::<MemoryAutomationRunResultV1>(legacy).is_err());
+        assert!(serde_json::from_value::<AutomationRunResultV1>(legacy).is_err());
     }
 }
 
 #[test]
 fn automatic_fact_receipt_binds_command_target_task_and_summary() {
     let receipt = automatic_fact_terminal();
-    let result = serde_json::from_value::<MemoryAutomationRunResultV1>(receipt.clone())
+    let result = serde_json::from_value::<AutomationRunResultV1>(receipt.clone())
         .expect("exact automatic fact terminal");
     assert!(result.matches_terminal());
     for pointer in [
@@ -110,14 +104,14 @@ fn automatic_fact_receipt_binds_command_target_task_and_summary() {
     ] {
         let mut mismatched = receipt.clone();
         *mismatched.pointer_mut(pointer).expect("identity pointer") = json!("fact.profile.wrong");
-        let mismatched = serde_json::from_value::<MemoryAutomationRunResultV1>(mismatched)
-            .expect("typed mismatch");
+        let mismatched =
+            serde_json::from_value::<AutomationRunResultV1>(mismatched).expect("typed mismatch");
         assert!(!mismatched.matches_terminal());
     }
     let mut wrong_task = receipt.clone();
     wrong_task["task"] = json!("memory_curator");
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(wrong_task)
+        !serde_json::from_value::<AutomationRunResultV1>(wrong_task)
             .expect("typed cross-task receipt")
             .matches_terminal()
     );
@@ -125,7 +119,7 @@ fn automatic_fact_receipt_binds_command_target_task_and_summary() {
     wrong_count["terminal"]["summary"]["accepted_count"] = json!(0);
     wrong_count["terminal"]["summary"]["rejected_count"] = json!(1);
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(wrong_count)
+        !serde_json::from_value::<AutomationRunResultV1>(wrong_count)
             .expect("typed count mismatch")
             .matches_terminal()
     );
@@ -142,7 +136,7 @@ fn duplicate_automatic_receipt_is_not_a_second_effect() {
     terminal["terminal"]["summary"]["reviewed_count"] = json!(2);
     terminal["terminal"]["summary"]["accepted_count"] = json!(2);
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(terminal)
+        !serde_json::from_value::<AutomationRunResultV1>(terminal)
             .expect("typed duplicate receipt")
             .matches_terminal()
     );
@@ -152,7 +146,7 @@ fn duplicate_automatic_receipt_is_not_a_second_effect() {
 fn curation_receipt_binds_outer_run_and_inner_commits() {
     let terminal = curation_terminal();
     assert!(
-        serde_json::from_value::<MemoryAutomationRunResultV1>(terminal.clone())
+        serde_json::from_value::<AutomationRunResultV1>(terminal.clone())
             .expect("canonical curation terminal")
             .matches_terminal()
     );
@@ -160,17 +154,16 @@ fn curation_receipt_binds_outer_run_and_inner_commits() {
     wrong_run["committed_receipts"][0]["receipt"]["receipt"]["automation_run_id"] =
         json!("run.memory.wrong");
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(wrong_run)
+        !serde_json::from_value::<AutomationRunResultV1>(wrong_run)
             .expect("typed wrong run")
             .matches_terminal()
     );
     let mut wrong_fact = terminal;
     wrong_fact["committed_receipts"][0]["receipt"]["receipt"]["changed_fact_ids"] =
         json!([project_fact_id("curation"), project_fact_id("other")]);
-    let mut wrong_result = serde_json::from_value::<MemoryAutomationRunResultV1>(wrong_fact)
-        .expect("typed extra fact");
-    let MemoryAutomationCommittedReceiptV1::Curation(receipt) =
-        &mut wrong_result.committed_receipts[0]
+    let mut wrong_result =
+        serde_json::from_value::<AutomationRunResultV1>(wrong_fact).expect("typed extra fact");
+    let AutomationCommittedReceiptV1::Curation(receipt) = &mut wrong_result.committed_receipts[0]
     else {
         panic!("curation receipt fixture")
     };
@@ -188,7 +181,7 @@ fn linked_curation_receipt_requires_the_exact_ordered_endpoint_union() {
         ["operation_effects"][0]["target_fact_id"]
         .clone();
     assert!(
-        serde_json::from_value::<MemoryAutomationRunResultV1>(terminal.clone())
+        serde_json::from_value::<AutomationRunResultV1>(terminal.clone())
             .expect("canonical linked curation terminal")
             .matches_terminal()
     );
@@ -202,7 +195,7 @@ fn linked_curation_receipt_requires_the_exact_ordered_endpoint_union() {
             changed_fact_ids;
         let changed = with_current_curation_digest(changed);
         assert!(
-            !serde_json::from_value::<MemoryAutomationRunResultV1>(changed)
+            !serde_json::from_value::<AutomationRunResultV1>(changed)
                 .expect("typed changed endpoint union")
                 .matches_terminal()
         );
@@ -229,7 +222,7 @@ fn curation_receipt_rejects_a_duplicate_normalize_effect_with_fresh_events() {
     terminal["terminal"]["summary"]["accepted_count"] = json!(2);
     let terminal = with_current_curation_digest(terminal);
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(terminal)
+        !serde_json::from_value::<AutomationRunResultV1>(terminal)
             .expect("typed duplicate commit")
             .matches_terminal()
     );
@@ -252,7 +245,7 @@ fn curation_receipt_rejects_a_duplicate_link_effect_with_a_fresh_event() {
     terminal["terminal"]["summary"]["accepted_count"] = json!(2);
     let terminal = with_current_curation_digest(terminal);
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(terminal)
+        !serde_json::from_value::<AutomationRunResultV1>(terminal)
             .expect("typed duplicate link effect")
             .matches_terminal()
     );
@@ -266,7 +259,7 @@ fn curation_receipt_requires_last_event_id_to_be_the_ordered_tail() {
     let terminal = with_current_curation_digest(terminal);
 
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(terminal)
+        !serde_json::from_value::<AutomationRunResultV1>(terminal)
             .expect("typed non-tail last event")
             .matches_terminal()
     );
@@ -279,7 +272,7 @@ fn curation_effects_require_their_exact_event_cardinality() {
         json!(["event.curation.assertion"]);
     normalize = with_current_curation_digest(normalize);
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(normalize)
+        !serde_json::from_value::<AutomationRunResultV1>(normalize)
             .expect("typed one-event normalization")
             .matches_terminal()
     );
@@ -289,7 +282,7 @@ fn curation_effects_require_their_exact_event_cardinality() {
         json!(["event.curation.link.first", "event.curation.link"]);
     link = with_current_curation_digest(link);
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(link)
+        !serde_json::from_value::<AutomationRunResultV1>(link)
             .expect("typed two-event link")
             .matches_terminal()
     );
@@ -322,7 +315,7 @@ fn curation_effects_are_bounded_and_share_one_commit_disposition() {
     mixed_disposition["terminal"]["summary"]["accepted_count"] = json!(2);
     let mixed_disposition = with_current_curation_digest(mixed_disposition);
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(mixed_disposition)
+        !serde_json::from_value::<AutomationRunResultV1>(mixed_disposition)
             .expect("typed mixed commit dispositions")
             .matches_terminal()
     );
@@ -354,7 +347,7 @@ fn curation_effects_are_bounded_and_share_one_commit_disposition() {
     oversized["terminal"]["summary"]["accepted_count"] = json!(257);
     let oversized = with_current_curation_digest(oversized);
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(oversized)
+        !serde_json::from_value::<AutomationRunResultV1>(oversized)
             .expect("typed oversized curation receipt")
             .matches_terminal()
     );
@@ -371,7 +364,7 @@ fn linked_curation_receipt_is_closed_and_semantically_bounded() {
     let mut raw_metadata = terminal.clone();
     raw_metadata["committed_receipts"][0]["receipt"]["receipt"]["operation_effects"][0]["relation"]
         ["provenance"]["metadata"] = json!({"forbidden":"raw"});
-    assert!(serde_json::from_value::<MemoryAutomationRunResultV1>(raw_metadata).is_err());
+    assert!(serde_json::from_value::<AutomationRunResultV1>(raw_metadata).is_err());
 
     for (pointer, value) in [
         (
@@ -395,7 +388,7 @@ fn linked_curation_receipt_is_closed_and_semantically_bounded() {
         *invalid.pointer_mut(pointer).expect("relation field") = value;
         invalid = with_current_curation_digest(invalid);
         assert!(
-            !serde_json::from_value::<MemoryAutomationRunResultV1>(invalid)
+            !serde_json::from_value::<AutomationRunResultV1>(invalid)
                 .expect("typed invalid relation receipt")
                 .matches_terminal()
         );
@@ -437,11 +430,9 @@ fn curation_relation_schema_exposes_only_sanitizer_bound_provenance() {
 fn linked_curation_receipt_preserves_every_canonical_relation_kind() {
     for relation in ["supports", "contradicts", "supersedes", "derived_from"] {
         assert!(
-            serde_json::from_value::<MemoryAutomationRunResultV1>(linked_curation_terminal(
-                relation
-            ))
-            .expect("canonical relation kind")
-            .matches_terminal()
+            serde_json::from_value::<AutomationRunResultV1>(linked_curation_terminal(relation))
+                .expect("canonical relation kind")
+                .matches_terminal()
         );
     }
 }
@@ -471,11 +462,9 @@ fn linked_curation_receipt_allows_distinct_targets_from_one_source() {
     terminal["terminal"]["summary"]["accepted_count"] = json!(2);
 
     assert!(
-        serde_json::from_value::<MemoryAutomationRunResultV1>(with_current_curation_digest(
-            terminal
-        ))
-        .expect("two distinct links from one source")
-        .matches_terminal()
+        serde_json::from_value::<AutomationRunResultV1>(with_current_curation_digest(terminal))
+            .expect("two distinct links from one source")
+            .matches_terminal()
     );
 }
 
@@ -484,18 +473,18 @@ fn automatic_fact_receipt_rejects_noncanonical_or_changed_identity() {
     let mut uppercase = automatic_fact_terminal();
     uppercase["committed_receipts"][0]["receipt"]["request"]["input_digest"] =
         json!("A".repeat(64));
-    assert!(serde_json::from_value::<MemoryAutomationRunResultV1>(uppercase).is_err());
+    assert!(serde_json::from_value::<AutomationRunResultV1>(uppercase).is_err());
     let mut missing = automatic_fact_terminal();
     missing["committed_receipts"][0]["receipt"]["request"]
         .as_object_mut()
         .expect("request")
         .remove("sanitization_receipt");
-    assert!(serde_json::from_value::<MemoryAutomationRunResultV1>(missing).is_err());
+    assert!(serde_json::from_value::<AutomationRunResultV1>(missing).is_err());
     let mut changed = automatic_fact_terminal();
     changed["committed_receipts"][0]["receipt"]["evidence"]["item"]["reason"] =
         json!("changed after settlement");
     assert!(
-        !serde_json::from_value::<MemoryAutomationRunResultV1>(changed)
+        !serde_json::from_value::<AutomationRunResultV1>(changed)
             .expect("typed digest mismatch")
             .matches_terminal()
     );
@@ -505,10 +494,9 @@ fn automatic_fact_receipt_rejects_noncanonical_or_changed_identity() {
 fn absent_automatic_fact_evidence_uses_the_canonical_omitted_shape() {
     let mut terminal = automatic_fact_terminal();
     terminal["committed_receipts"][0]["receipt"]["evidence"] = json!({});
-    let mut result = serde_json::from_value::<MemoryAutomationRunResultV1>(terminal)
+    let mut result = serde_json::from_value::<AutomationRunResultV1>(terminal)
         .expect("closed absent-evidence terminal");
-    let MemoryAutomationCommittedReceiptV1::AutomaticFact(receipt) =
-        &mut result.committed_receipts[0]
+    let AutomationCommittedReceiptV1::AutomaticFact(receipt) = &mut result.committed_receipts[0]
     else {
         panic!("automatic receipt fixture")
     };
@@ -525,40 +513,38 @@ fn absent_automatic_fact_evidence_uses_the_canonical_omitted_shape() {
 
 #[test]
 fn partial_problem_preserves_exact_inner_receipts_and_rejects_flattening() {
-    let result = serde_json::from_value::<MemoryAutomationRunResultV1>(automatic_fact_terminal())
+    let result = serde_json::from_value::<AutomationRunResultV1>(automatic_fact_terminal())
         .expect("automatic terminal");
     let problem = automatic_partial_problem(result.committed_receipts);
     let wire = serde_json::to_value(&problem).expect("problem wire");
-    let decoded = serde_json::from_value::<MemoryAutomationRunProblemV1>(wire.clone())
+    let decoded = serde_json::from_value::<AutomationRunProblemV1>(wire.clone())
         .expect("exact partial terminal");
     assert!(decoded.matches_terminal(&decoded.problem.request_id));
-    assert!(decoded.matches_admission(
-        &RunId::new("run.memory.fact").expect("run id"),
-        MemoryAutomationTaskV1::SessionReflector,
-    ));
+    let request = automation_request("run.memory.fact", AutomationTaskV1::SessionReflector);
+    assert!(decoded.matches_admission(&request, &decoded.problem.request_id,));
     assert!(!decoded.matches_admission(
-        &RunId::new("run.memory.other").expect("other run id"),
-        MemoryAutomationTaskV1::SessionReflector,
+        &automation_request("run.memory.other", AutomationTaskV1::SessionReflector),
+        &decoded.problem.request_id,
     ));
 
     let mut flattened = wire.clone();
     flattened["committed_receipts"] = json!([]);
-    assert!(serde_json::from_value::<MemoryAutomationRunProblemV1>(flattened).is_err());
+    assert!(serde_json::from_value::<AutomationRunProblemV1>(flattened).is_err());
 
     let mut wrong_operation = wire.clone();
     wrong_operation["problem"]["contract"]["schema_id"] =
         json!("schema.application.retained.wrong.result");
-    assert!(serde_json::from_value::<MemoryAutomationRunProblemV1>(wrong_operation).is_err());
+    assert!(serde_json::from_value::<AutomationRunProblemV1>(wrong_operation).is_err());
 
     let mut changed = wire;
     changed["committed_receipts"][0]["receipt"]["evidence"]["item"]["reason"] =
         json!("changed after the outer terminal committed");
-    assert!(serde_json::from_value::<MemoryAutomationRunProblemV1>(changed).is_err());
+    assert!(serde_json::from_value::<AutomationRunProblemV1>(changed).is_err());
 }
 
 #[test]
 fn partial_problem_rejects_duplicate_automatic_effect_identity() {
-    let result = serde_json::from_value::<MemoryAutomationRunResultV1>(automatic_fact_terminal())
+    let result = serde_json::from_value::<AutomationRunResultV1>(automatic_fact_terminal())
         .expect("automatic terminal");
     let receipt = result.committed_receipts[0].clone();
     assert!(automatic_partial_problem_result(vec![receipt.clone(), receipt]).is_err());
@@ -566,11 +552,10 @@ fn partial_problem_rejects_duplicate_automatic_effect_identity() {
 
 #[test]
 fn partial_curator_problem_rejects_two_distinct_valid_receipts() {
-    let first = serde_json::from_value::<MemoryAutomationRunResultV1>(curation_terminal())
+    let first = serde_json::from_value::<AutomationRunResultV1>(curation_terminal())
         .expect("first curation terminal");
     let mut second = first.clone();
-    let MemoryAutomationCommittedReceiptV1::Curation(receipt) = &mut second.committed_receipts[0]
-    else {
+    let AutomationCommittedReceiptV1::Curation(receipt) = &mut second.committed_receipts[0] else {
         panic!("curation receipt fixture")
     };
     receipt.receipt.operation_id =
@@ -582,7 +567,7 @@ fn partial_curator_problem_rejects_two_distinct_valid_receipts() {
     assert!(
         partial_problem_result(
             "run.memory.curation",
-            MemoryAutomationTaskV1::MemoryCurator,
+            AutomationTaskV1::MemoryCurator,
             vec![
                 first.committed_receipts[0].clone(),
                 second.committed_receipts[0].clone(),
@@ -594,51 +579,41 @@ fn partial_curator_problem_rejects_two_distinct_valid_receipts() {
 
 #[test]
 fn zero_effect_problem_is_bound_to_exact_run_and_task() {
-    let request_id = RequestId::new("request.memory-automation.reset-bound").expect("request id");
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("automation operation");
+    let request_id = RequestId::new("request.automation.reset-bound").expect("request id");
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("automation operation");
     let problem = ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         request_id.clone(),
         ApplicationProblem::reset_required(
             SafeDiagnostic::new(
-                "application.memory-automation-run.reset-bound",
+                "application.automation-run.reset-bound",
                 "The exact admitted memory run requires reconciliation",
             )
             .expect("diagnostic"),
         ),
     )
     .expect("problem envelope");
-    let terminal = MemoryAutomationRunProblemV1::new(
-        RunId::new("run.memory.reset-bound").expect("run id"),
-        MemoryAutomationTaskV1::MemoryCurator,
-        memory_scope(),
-        problem,
-        Vec::new(),
+    let request = automation_request("run.memory.reset-bound", AutomationTaskV1::MemoryCurator);
+    let terminal =
+        AutomationRunProblemV1::new(&request, memory_scope(), problem, Vec::new(), &request_id)
+            .expect("zero-effect problem");
+    assert!(terminal.matches_admission(&request, &request_id));
+    assert!(!terminal.matches_admission(
+        &automation_request("run.memory.other", AutomationTaskV1::MemoryCurator),
         &request_id,
-    )
-    .expect("zero-effect problem");
-    assert!(terminal.matches_admission(
-        &RunId::new("run.memory.reset-bound").expect("run id"),
-        MemoryAutomationTaskV1::MemoryCurator,
     ));
     assert!(!terminal.matches_admission(
-        &RunId::new("run.memory.other").expect("other run"),
-        MemoryAutomationTaskV1::MemoryCurator,
-    ));
-    assert!(!terminal.matches_admission(
-        &RunId::new("run.memory.reset-bound").expect("run id"),
-        MemoryAutomationTaskV1::SessionReflector,
+        &automation_request("run.memory.reset-bound", AutomationTaskV1::SessionReflector),
+        &request_id,
     ));
 }
 
 #[test]
 fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("automation operation");
-    let run_id = RunId::new("run.memory.failure-bound").expect("run id");
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("automation operation");
+    let request = automation_request("run.memory.failure-bound", AutomationTaskV1::MemoryCurator);
     let request_id = RequestId::new("request.memory.failure-bound").expect("request id");
     let terminal = |problem| {
         let envelope = ApplicationProblemEnvelope::new(
@@ -647,14 +622,7 @@ fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
             problem,
         )
         .expect("problem envelope");
-        MemoryAutomationRunProblemV1::new(
-            run_id.clone(),
-            MemoryAutomationTaskV1::MemoryCurator,
-            memory_scope(),
-            envelope,
-            Vec::new(),
-            &request_id,
-        )
+        AutomationRunProblemV1::new(&request, memory_scope(), envelope, Vec::new(), &request_id)
     };
 
     assert!(terminal(ApplicationProblem::cancelled_before_admission()).is_err());
@@ -678,7 +646,7 @@ fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
             ApplicationProblem::admitted_unavailable(
                 ApplicationUnavailableClassV1::BackendDisconnected,
                 SafeDiagnostic::new(
-                    "application.memory-automation-run.backend-disconnected",
+                    "application.automation-run.backend-disconnected",
                     "The admitted automation backend disconnected",
                 )
                 .expect("diagnostic"),
@@ -692,7 +660,7 @@ fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
             ApplicationProblem::execution_failed(
                 ApplicationExecutionFailureClassV1::MalformedOutput,
                 SafeDiagnostic::new(
-                    "application.memory-automation-run.malformed-output",
+                    "application.automation-run.malformed-output",
                     "The admitted automation backend returned malformed output",
                 )
                 .expect("diagnostic"),
@@ -705,7 +673,7 @@ fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
         ApplicationProblem::admitted_unavailable(
             ApplicationUnavailableClassV1::Authority,
             SafeDiagnostic::new(
-                "application.memory-automation-run.authority-unavailable",
+                "application.automation-run.authority-unavailable",
                 "The automation authority is unavailable",
             )
             .expect("diagnostic"),
@@ -716,16 +684,15 @@ fn zero_effect_problem_requires_an_admitted_stage_or_execution_class() {
 
 #[test]
 fn non_partial_problem_rejects_committed_memory_receipts() {
-    let result = serde_json::from_value::<MemoryAutomationRunResultV1>(automatic_fact_terminal())
+    let result = serde_json::from_value::<AutomationRunResultV1>(automatic_fact_terminal())
         .expect("automatic terminal");
-    let request_id = RequestId::new("request.memory-automation.reset").expect("request id");
+    let request_id = RequestId::new("request.automation.reset").expect("request id");
     let scope = memory_scope();
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("automation operation");
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("automation operation");
     let problem = ApplicationProblem::ResetRequired {
         diagnostic: SafeDiagnostic::new(
-            "application.memory-automation-run.reset-required",
+            "application.automation-run.reset-required",
             "The exact admitted run requires reconciliation before it can resume",
         )
         .expect("diagnostic"),
@@ -739,9 +706,8 @@ fn non_partial_problem_rejects_committed_memory_receipts() {
     )
     .expect("problem envelope");
     assert!(
-        MemoryAutomationRunProblemV1::new(
-            result.run_id,
-            result.task,
+        AutomationRunProblemV1::new(
+            &automation_request("run.memory.fact", AutomationTaskV1::SessionReflector),
             scope,
             problem,
             result.committed_receipts,
@@ -752,21 +718,23 @@ fn non_partial_problem_rejects_committed_memory_receipts() {
 }
 
 fn automatic_fact_terminal() -> Value {
-    let value = json!({
-        "run_id":"run.memory.fact","task":"session_reflector",
-        "terminal":{"status":"completed","summary":{"reviewed_count":1,"accepted_count":1,"rejected_count":0,"skipped_count":0}},
-        "committed_receipts":[{"kind":"automatic_fact","receipt":{
-            "apply_id":"apply.memory.fact","owner":{"kind":"profile"},"state":"applied","disposition":"applied","automation_run_id":"run.memory.fact",
-            "request":{"operation_id":"operation.memory.fact","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actor":"actor.memory",
-                "sanitization_receipt":{"receipt":{"receipt_id":"receipt.sanitization.memory","sanitizer_version":"sanitizer.memory.v1"},"disposition":"accepted","sensitivity":"non_sensitive","payload":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byte_len":40}},
-                "content":"Remember the exact canonical fact","category":"general","source_label":"automation:session-reflector","tags":["canonical"],"entities":[],"default_trust_millionths":750000,"metadata":{}},
-            "evidence":{"evidence_hash":"evidence-memory-fact","item":{"content":"Remember the exact canonical fact","category":"general","tags":["canonical"],"entities":[],"trust":0.75,"source_span":{"session_id":"session.memory.fact","message_id":"message.memory.fact"},"reason":"The bounded session evidence supports this fact"},"validation":{"status":"accepted","dedupe":{"nearest":null,"near_duplicate_threshold":0.9},"conflict":{"source":"apply_time_add_fact_diff","note":"Apply-time add authority resolves any final conflict"}}},
-            "effect":{"state":"applied","fact_id":"fact.profile.memory-fact","target":{"owner":{"kind":"profile"},"fact_id":"fact.profile.memory-fact"},"assertion_id":"assertion.memory.fact","event_id":"event.memory.fact"},
-            "recorded_at_micros":1700000000000000,"canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
-    });
-    let mut result = serde_json::from_value::<MemoryAutomationRunResultV1>(value).expect("fixture");
-    let MemoryAutomationCommittedReceiptV1::AutomaticFact(receipt) =
-        &mut result.committed_receipts[0]
+    let value = with_request_digest(
+        json!({
+            "run_id":"run.memory.fact","task":"session_reflector",
+            "terminal":{"status":"completed","summary":{"reviewed_count":1,"accepted_count":1,"rejected_count":0,"skipped_count":0}},
+            "committed_receipts":[{"kind":"automatic_fact","receipt":{
+                "apply_id":"apply.memory.fact","owner":{"kind":"profile"},"state":"applied","disposition":"applied","automation_run_id":"run.memory.fact",
+                "request":{"operation_id":"operation.memory.fact","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actor":"actor.memory",
+                    "sanitization_receipt":{"receipt":{"receipt_id":"receipt.sanitization.memory","sanitizer_version":"sanitizer.memory.v1"},"disposition":"accepted","sensitivity":"non_sensitive","payload":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byte_len":40}},
+                    "content":"Remember the exact canonical fact","category":"general","source_label":"automation:session-reflector","tags":["canonical"],"entities":[],"default_trust_millionths":750000,"metadata":{}},
+                "evidence":{"evidence_hash":"evidence-memory-fact","item":{"content":"Remember the exact canonical fact","category":"general","tags":["canonical"],"entities":[],"trust":0.75,"source_span":{"session_id":"session.memory.fact","message_id":"message.memory.fact"},"reason":"The bounded session evidence supports this fact"},"validation":{"status":"accepted","dedupe":{"nearest":null,"near_duplicate_threshold":0.9},"conflict":{"source":"apply_time_add_fact_diff","note":"Apply-time add authority resolves any final conflict"}}},
+                "effect":{"state":"applied","fact_id":"fact.profile.memory-fact","target":{"owner":{"kind":"profile"},"fact_id":"fact.profile.memory-fact"},"assertion_id":"assertion.memory.fact","event_id":"event.memory.fact"},
+                "recorded_at_micros":1700000000000000,"canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
+        }),
+        &automation_request("run.memory.fact", AutomationTaskV1::SessionReflector),
+    );
+    let mut result = serde_json::from_value::<AutomationRunResultV1>(value).expect("fixture");
+    let AutomationCommittedReceiptV1::AutomaticFact(receipt) = &mut result.committed_receipts[0]
     else {
         panic!("automatic fact receipt fixture")
     };
@@ -776,20 +744,22 @@ fn automatic_fact_terminal() -> Value {
 
 fn curation_terminal() -> Value {
     let fact_id = project_fact_id("curation");
-    let value = json!({
-        "run_id":"run.memory.curation","task":"memory_curator",
-        "terminal":{"status":"completed","summary":{"reviewed_count":1,"accepted_count":1,"rejected_count":0,"skipped_count":0}},
-        "committed_receipts":[{"kind":"curation","receipt":{"receipt":{
-            "owner":{"kind":"project","project_id":"project.curation"},"operation_id":"operation.curation","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "automation_run_id":"run.memory.curation",
-            "operation_effects":[{"kind":"normalize_tags","fact_id":fact_id,"commit":{"disposition":"committed","fact_id":fact_id,"owner":{"kind":"project","project_id":"project.curation"},"committed_event_ids":["event.curation.fact","event.curation.assertion"],"last_event_id":"event.curation.assertion","active_assertion_id":"assertion.curation"}}],
-            "replay_fact_id":fact_id,"replay_event_id":"event.curation.assertion","changed_fact_ids":[fact_id],
-            "accepted_operations":1,"facts_added":0,"facts_updated":0,"facts_merged":0,"facts_removed":0,"normalized_tags":1,"facts_linked":0},
-            "canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
-    });
-    let mut result = serde_json::from_value::<MemoryAutomationRunResultV1>(value).expect("fixture");
-    let MemoryAutomationCommittedReceiptV1::Curation(receipt) = &mut result.committed_receipts[0]
-    else {
+    let value = with_request_digest(
+        json!({
+            "run_id":"run.memory.curation","task":"memory_curator",
+            "terminal":{"status":"completed","summary":{"reviewed_count":1,"accepted_count":1,"rejected_count":0,"skipped_count":0}},
+            "committed_receipts":[{"kind":"curation","receipt":{"receipt":{
+                "owner":{"kind":"project","project_id":"project.curation"},"operation_id":"operation.curation","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "automation_run_id":"run.memory.curation",
+                "operation_effects":[{"kind":"normalize_tags","fact_id":fact_id,"commit":{"disposition":"committed","fact_id":fact_id,"owner":{"kind":"project","project_id":"project.curation"},"committed_event_ids":["event.curation.fact","event.curation.assertion"],"last_event_id":"event.curation.assertion","active_assertion_id":"assertion.curation"}}],
+                "replay_fact_id":fact_id,"replay_event_id":"event.curation.assertion","changed_fact_ids":[fact_id],
+                "accepted_operations":1,"facts_added":0,"facts_updated":0,"facts_merged":0,"facts_removed":0,"normalized_tags":1,"facts_linked":0},
+                "canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
+        }),
+        &automation_request("run.memory.curation", AutomationTaskV1::MemoryCurator),
+    );
+    let mut result = serde_json::from_value::<AutomationRunResultV1>(value).expect("fixture");
+    let AutomationCommittedReceiptV1::Curation(receipt) = &mut result.committed_receipts[0] else {
         panic!("curation receipt fixture")
     };
     receipt.canonical_digest = receipt.canonical_digest().expect("digest");
@@ -800,31 +770,33 @@ fn linked_curation_terminal(relation: &str) -> Value {
     let source_fact_id = project_fact_id("source");
     let target_fact_id = project_fact_id("target");
     let evidence_fact_id = project_fact_id("evidence");
-    with_current_curation_digest(json!({
-        "run_id":"run.memory.curation","task":"memory_curator",
-        "terminal":{"status":"completed","summary":{"reviewed_count":1,"accepted_count":1,"rejected_count":0,"skipped_count":0}},
-        "committed_receipts":[{"kind":"curation","receipt":{"receipt":{
-            "owner":{"kind":"project","project_id":"project.curation"},"operation_id":"operation.curation","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "automation_run_id":"run.memory.curation",
-            "operation_effects":[{"kind":"link_facts","source_fact_id":source_fact_id,"target_fact_id":target_fact_id,"relation":{
-                "kind":relation,"evidence_fact_ids":[evidence_fact_id],"confidence_millionths":800000,
-                "provenance":{"source_label":"automation:memory-curator","sanitization_receipt":{
-                    "receipt":{"receipt_id":"receipt.curation.relation","sanitizer_version":"sanitizer.memory.v1"},
-                    "disposition":"accepted","sensitivity":"non_sensitive",
-                    "payload":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byte_len":128}
-                }}
-            },"disposition":"linked","commit":{"disposition":"committed","fact_id":source_fact_id,"owner":{"kind":"project","project_id":"project.curation"},"committed_event_ids":["event.curation.link"],"last_event_id":"event.curation.link","active_assertion_id":"assertion.curation.link"}}],
-            "replay_fact_id":source_fact_id,"replay_event_id":"event.curation.link","changed_fact_ids":[source_fact_id,target_fact_id],
-            "accepted_operations":1,"facts_added":0,"facts_updated":0,"facts_merged":0,"facts_removed":0,"normalized_tags":0,"facts_linked":1},
-            "canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
-    }))
+    with_current_curation_digest(with_request_digest(
+        json!({
+            "run_id":"run.memory.curation","task":"memory_curator",
+            "terminal":{"status":"completed","summary":{"reviewed_count":1,"accepted_count":1,"rejected_count":0,"skipped_count":0}},
+            "committed_receipts":[{"kind":"curation","receipt":{"receipt":{
+                "owner":{"kind":"project","project_id":"project.curation"},"operation_id":"operation.curation","input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "automation_run_id":"run.memory.curation",
+                "operation_effects":[{"kind":"link_facts","source_fact_id":source_fact_id,"target_fact_id":target_fact_id,"relation":{
+                    "kind":relation,"evidence_fact_ids":[evidence_fact_id],"confidence_millionths":800000,
+                    "provenance":{"source_label":"automation:memory-curator","sanitization_receipt":{
+                        "receipt":{"receipt_id":"receipt.curation.relation","sanitizer_version":"sanitizer.memory.v1"},
+                        "disposition":"accepted","sensitivity":"non_sensitive",
+                        "payload":{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","byte_len":128}
+                    }}
+                },"disposition":"linked","commit":{"disposition":"committed","fact_id":source_fact_id,"owner":{"kind":"project","project_id":"project.curation"},"committed_event_ids":["event.curation.link"],"last_event_id":"event.curation.link","active_assertion_id":"assertion.curation.link"}}],
+                "replay_fact_id":source_fact_id,"replay_event_id":"event.curation.link","changed_fact_ids":[source_fact_id,target_fact_id],
+                "accepted_operations":1,"facts_added":0,"facts_updated":0,"facts_merged":0,"facts_removed":0,"normalized_tags":0,"facts_linked":1},
+                "canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}]
+        }),
+        &automation_request("run.memory.curation", AutomationTaskV1::MemoryCurator),
+    ))
 }
 
 fn with_current_curation_digest(value: Value) -> Value {
-    let mut result = serde_json::from_value::<MemoryAutomationRunResultV1>(value)
-        .expect("curation terminal fixture");
-    let MemoryAutomationCommittedReceiptV1::Curation(receipt) = &mut result.committed_receipts[0]
-    else {
+    let mut result =
+        serde_json::from_value::<AutomationRunResultV1>(value).expect("curation terminal fixture");
+    let AutomationCommittedReceiptV1::Curation(receipt) = &mut result.committed_receipts[0] else {
         panic!("curation receipt fixture")
     };
     receipt.canonical_digest = receipt.canonical_digest().expect("digest");
@@ -848,30 +820,30 @@ fn project_fact_id(label: &str) -> String {
 }
 
 fn automatic_partial_problem(
-    committed_receipts: Vec<MemoryAutomationCommittedReceiptV1>,
-) -> MemoryAutomationRunProblemV1 {
+    committed_receipts: Vec<AutomationCommittedReceiptV1>,
+) -> AutomationRunProblemV1 {
     automatic_partial_problem_result(committed_receipts).expect("canonical problem terminal")
 }
 
 fn automatic_partial_problem_result(
-    committed_receipts: Vec<MemoryAutomationCommittedReceiptV1>,
-) -> Result<MemoryAutomationRunProblemV1, crate::ApplicationContractError> {
+    committed_receipts: Vec<AutomationCommittedReceiptV1>,
+) -> Result<AutomationRunProblemV1, crate::ApplicationContractError> {
     partial_problem_result(
         "run.memory.fact",
-        MemoryAutomationTaskV1::SessionReflector,
+        AutomationTaskV1::SessionReflector,
         committed_receipts,
     )
 }
 
 fn partial_problem_result(
     run_id: &str,
-    task: MemoryAutomationTaskV1,
-    committed_receipts: Vec<MemoryAutomationCommittedReceiptV1>,
-) -> Result<MemoryAutomationRunProblemV1, crate::ApplicationContractError> {
-    let request_id = RequestId::new("request.memory-automation.partial").expect("request id");
+    task: AutomationTaskV1,
+    committed_receipts: Vec<AutomationCommittedReceiptV1>,
+) -> Result<AutomationRunProblemV1, crate::ApplicationContractError> {
+    let request_id = RequestId::new("request.automation.partial").expect("request id");
     let scope = memory_scope();
     let committed_state = canonical_sha256(&(
-        "tracedecay.memory-automation-run.partial-state.v1",
+        "tracedecay.automation-run.partial-state.v1",
         run_id,
         &committed_receipts,
     ))
@@ -880,16 +852,15 @@ fn partial_problem_result(
         ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64)))
             .expect("fixture digest")
     };
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("automation operation");
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("automation operation");
     let receipt = EffectReceipt {
         operation: operation.use_case_id().clone(),
         request_id: request_id.clone(),
-        actor: ActorId::new("actor.memory-automation").expect("actor"),
+        actor: ActorId::new("actor.automation").expect("actor"),
         scope: scope.clone(),
         effect_class: EffectClass::Administrative,
-        idempotency_key: IdempotencyKey::new("idempotency.memory-automation.partial")
+        idempotency_key: IdempotencyKey::new("idempotency.automation.partial")
             .expect("idempotency key"),
         input_digest: digest('1'),
         expected_state: digest('2'),
@@ -903,7 +874,7 @@ fn partial_problem_result(
     };
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
-            reason_code: "application.memory-automation-run.partial-effect".to_owned(),
+            reason_code: "application.automation-run.partial-effect".to_owned(),
             committed_receipt: receipt,
             detail: "A canonical memory effect committed before the run stopped".to_owned(),
         });
@@ -913,9 +884,8 @@ fn partial_problem_result(
         problem,
     )
     .expect("problem envelope");
-    MemoryAutomationRunProblemV1::new(
-        RunId::new(run_id).expect("run id"),
-        task,
+    AutomationRunProblemV1::new(
+        &automation_request(run_id, task),
         scope,
         problem,
         committed_receipts,
@@ -925,9 +895,9 @@ fn partial_problem_result(
 
 fn memory_scope() -> ResolvedScope {
     ResolvedScope::new(
-        ProjectId::new("project.memory-automation").expect("project id"),
-        RepositoryId::new("repository.memory-automation").expect("repository id"),
-        WorktreeId::new("worktree.memory-automation").expect("worktree id"),
+        ProjectId::new("project.automation").expect("project id"),
+        RepositoryId::new("repository.automation").expect("repository id"),
+        WorktreeId::new("worktree.automation").expect("worktree id"),
         None,
     )
     .expect("scope")

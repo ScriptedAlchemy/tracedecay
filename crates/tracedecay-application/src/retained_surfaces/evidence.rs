@@ -384,7 +384,7 @@ impl RetainedSurfaceResultV1 {
                 value.temporal.as_ref(),
                 None,
             ),
-            Self::MemoryAutomationRun(_)
+            Self::AutomationRun(_)
             | Self::FactStoreAdd(_)
             | Self::FactStoreUpdate(_)
             | Self::FactStoreRemove(_)

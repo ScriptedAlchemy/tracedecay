@@ -1,12 +1,84 @@
-//! Typed application settlement for manual memory automation runs.
+//! Typed application settlement for manual automation runs.
 
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::automation::{
-    AutomationRunError, AutomationRunResult, run_ledger::AutomationRunLedgerRecord,
+    lifecycle::{AutomationCommittedReceipt, AutomationRunError, AutomationRunResult},
+    run_ledger::AutomationRunLedgerRecord,
 };
 
 use crate::daemon::automation_effect::{AutomationEffectAuthority, AutomationSettledTerminal};
 use crate::errors::{Result, TraceDecayError};
+
+pub(super) fn require_observation(
+    service: Option<&crate::daemon::DaemonInvocationService>,
+) -> Result<&crate::daemon::DaemonInvocationService> {
+    service.ok_or_else(|| TraceDecayError::Config {
+        message: "manual automation observation authority is unavailable".to_owned(),
+    })
+}
+
+pub(super) fn decode_options<T: serde::de::DeserializeOwned>(options: Value) -> Result<T> {
+    serde_json::from_value(options).map_err(|error| TraceDecayError::Config {
+        message: format!("invalid tracedecay_admin_project automation options: {error}"),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn run_skill_writer(
+    invocation_service: &crate::daemon::DaemonInvocationService,
+    cg: &crate::tracedecay::TraceDecay,
+    request_id: tracedecay_application::RequestId,
+    deadline: tracedecay_application::Deadline,
+    cancellation: &tracedecay_application::CancellationSignal,
+    configuration_digest: tracedecay_domain::ManifestDigest,
+    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    revision_id: &tracedecay_domain::configuration::ConfigurationRevisionId,
+    backend: &tracedecay_agent_hosts::automation::backend::CodexAppServerBackend,
+    options: tracedecay_agent_hosts::automation::runner::SkillWriterAutomationOptions,
+) -> Result<(Value, Option<AutomationRunLedgerRecord>)> {
+    let run_id = options
+        .run_id
+        .as_deref()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "manual skill writer requires its pre-admitted run identity".to_owned(),
+        })?;
+    let admission = AutomationEffectAuthority::prepare(
+        invocation_service,
+        cg,
+        cg.project_root(),
+        &cg.store_layout().dashboard_root,
+        request_id,
+        deadline,
+        cancellation,
+        tracedecay_application::now_micros(),
+        configuration_digest,
+        crate::daemon::automation_effect::skill_writer_run_request(run_id, &options)?,
+    )
+    .await?;
+    let effect = match admission {
+        crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => effect,
+        crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
+            return Ok((terminal_response_value(&terminal)?, None));
+        }
+        crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
+            problem,
+        ) => {
+            return Ok((pre_admission_problem_value(problem)?, None));
+        }
+    };
+    settle_run(
+        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend(
+            cg,
+            config,
+            revision_id,
+            backend,
+            options,
+        )
+        .await,
+        effect,
+    )
+    .await
+}
 
 fn problem_value(
     problem: crate::daemon::automation_effect::AutomationSettledProblem,
@@ -14,43 +86,49 @@ fn problem_value(
     Ok(serde_json::to_value(problem)?)
 }
 
-trait MemoryAutomationRunTerminal: serde::Serialize {
+pub(super) trait AutomationRunTerminal: serde::Serialize {
     fn ledger_record(&self) -> &AutomationRunLedgerRecord;
 
-    fn committed_receipt(
-        &self,
-    ) -> Option<&tracedecay_agent_hosts::automation::AutomationCommittedReceipt>;
+    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt>;
 }
 
-impl MemoryAutomationRunTerminal
+impl AutomationRunTerminal
     for tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun
 {
     fn ledger_record(&self) -> &AutomationRunLedgerRecord {
         &self.ledger_record
     }
 
-    fn committed_receipt(
-        &self,
-    ) -> Option<&tracedecay_agent_hosts::automation::AutomationCommittedReceipt> {
+    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt> {
         self.committed_receipt.as_ref()
     }
 }
 
-impl MemoryAutomationRunTerminal
+impl AutomationRunTerminal
     for tracedecay_agent_hosts::automation::runner::SessionReflectorAutomationRun
 {
     fn ledger_record(&self) -> &AutomationRunLedgerRecord {
         &self.ledger_record
     }
 
-    fn committed_receipt(
-        &self,
-    ) -> Option<&tracedecay_agent_hosts::automation::AutomationCommittedReceipt> {
+    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt> {
         self.committed_receipt.as_ref()
     }
 }
 
-pub(super) async fn settle_run<T: MemoryAutomationRunTerminal>(
+impl AutomationRunTerminal
+    for tracedecay_agent_hosts::automation::runner::SkillWriterAutomationRun
+{
+    fn ledger_record(&self) -> &AutomationRunLedgerRecord {
+        &self.ledger_record
+    }
+
+    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt> {
+        self.committed_receipt.as_ref()
+    }
+}
+
+pub(super) async fn settle_run<T: AutomationRunTerminal>(
     result: AutomationRunResult<T>,
     effect: AutomationEffectAuthority,
 ) -> Result<(Value, Option<AutomationRunLedgerRecord>)> {
@@ -62,19 +140,17 @@ pub(super) async fn settle_run<T: MemoryAutomationRunTerminal>(
                 .await?;
             Ok((terminal_value(&terminal)?, Some(ledger)))
         }
-        Err(error) => match effect.settle_problem(&error).await? {
-            Some(problem) => Ok((
+        Err(error) => {
+            let partial_ledger = match &error {
+                AutomationRunError::PartialEffect { ledger_record, .. } => ledger_record.clone(),
+                AutomationRunError::Runtime(_) => None,
+            };
+            let problem = effect.settle_problem(&error).await?;
+            Ok((
                 json!({ "kind": "problem", "value": problem_value(problem)? }),
-                None,
-            )),
-            None => match error {
-                AutomationRunError::Runtime(error) => Err(error),
-                AutomationRunError::PartialEffect { .. } => Err(TraceDecayError::Config {
-                    message: "automation partial effect did not produce an application terminal"
-                        .to_owned(),
-                }),
-            },
-        },
+                partial_ledger,
+            ))
+        }
     }
 }
 
@@ -86,7 +162,7 @@ pub(super) fn terminal_value(terminal: &AutomationSettledTerminal) -> Result<Val
         return Ok(json!({ "kind": "problem", "value": problem_value(problem.clone())? }));
     }
     Err(TraceDecayError::Config {
-        message: "memory automation terminal has neither a run nor a problem".to_owned(),
+        message: "automation terminal has neither a run nor a problem".to_owned(),
     })
 }
 
@@ -119,7 +195,7 @@ mod tests {
     #[test]
     fn pre_admission_problem_keeps_the_canonical_application_envelope() {
         let operation =
-            retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
+            retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
                 .unwrap();
         let request_id = RequestId::new("run.mcp.pre-admission".to_owned()).unwrap();
         let envelope = ApplicationProblemEnvelope::new(

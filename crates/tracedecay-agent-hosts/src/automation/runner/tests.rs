@@ -39,13 +39,48 @@ use super::retrieval::{
 use super::{
     AuthorizedAutomationSessionRetrieval, AutomationRunControl, AutomationSessionRetrieval,
     AutomationSessionRetrievalFuture, AutomationTemporalEvidence, AutomationTemporalEvidenceItem,
-    AutomationTemporalRetrieval, canonical_evidence_hash, validate_session_fact_candidates,
+    AutomationTemporalRetrieval, canonical_evidence_hash, combined_reflector_failure_projection,
+    combined_skill_failure_projection, validate_session_fact_candidates,
 };
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 
 mod early_gate;
+
+#[test]
+fn combined_reflector_failure_projection_is_payload_free() {
+    let secret = "sk-live-combined-reflector-failure";
+    let output = json!({
+        "facts": [{"content": secret}],
+        "skills": [{"instructions": secret}],
+    });
+
+    let projection = combined_reflector_failure_projection(&output);
+
+    assert_eq!(projection.pointer("/proposed/count"), Some(&json!(1)));
+    assert!(projection.pointer("/proposed/sha256").is_some());
+    assert!(!serde_json::to_string(&projection).unwrap().contains(secret));
+}
+
+#[test]
+fn combined_skill_failure_projection_excludes_fact_payloads() {
+    let fact_secret = "sk-live-combined-fact-do-not-persist-in-skill-ledger";
+    let output = json!({
+        "facts": [{"content": fact_secret}],
+        "skills": [{"name": "safe-skill", "instructions": "safe instructions"}],
+    });
+
+    let projection = combined_skill_failure_projection(&output);
+    let serialized = serde_json::to_string(&projection).unwrap();
+
+    assert_eq!(
+        projection.pointer("/skills/0/name"),
+        Some(&json!("safe-skill"))
+    );
+    assert!(!serialized.contains(fact_secret));
+    assert!(projection.get("facts").is_none());
+}
 
 struct RecordingDenyAutomationAuthorizer {
     requests: Arc<Mutex<Vec<SessionScopeAuthorizationRequest>>>,

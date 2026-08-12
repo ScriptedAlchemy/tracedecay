@@ -42,7 +42,7 @@ pub async fn run_skill_writer_with_backend(
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
-) -> Result<SkillWriterAutomationRun> {
+) -> AutomationRunResult<SkillWriterAutomationRun> {
     let retrieval = production_project_automation_retrieval(cg).await;
     run_skill_writer_with_backend_and_retrieval(
         cg,
@@ -62,7 +62,7 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     options: SkillWriterAutomationOptions,
-) -> Result<SkillWriterAutomationRun> {
+) -> AutomationRunResult<SkillWriterAutomationRun> {
     let authority =
         project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
     let sessions_db = project_automation_sessions(cg).await?;
@@ -90,7 +90,7 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
     backend: &dyn AgentTaskBackend,
     retrieval: &dyn AutomationSessionRetrieval,
     mut options: SkillWriterAutomationOptions,
-) -> Result<SkillWriterAutomationRun> {
+) -> AutomationRunResult<SkillWriterAutomationRun> {
     options.profile_root = Some(profile_root.to_path_buf());
     let sessions_db = session_registry.profile_sessions().await?;
     let authority = profile_curation_authority(
@@ -128,7 +128,7 @@ pub(super) async fn run_skill_writer_for_store(
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
-) -> Result<SkillWriterAutomationRun> {
+) -> AutomationRunResult<SkillWriterAutomationRun> {
     let SkillWriterStoreRuntime {
         dashboard_root,
         sessions_db,
@@ -203,7 +203,7 @@ pub(super) async fn run_skill_writer_for_store(
         }),
     );
     let input_hash = Some(request.input_hash.clone());
-    let finalizer = run.finalizer(input_hash.clone());
+    let finalizer = run.finalizer(input_hash.clone())?;
     let (mut response, mut retry_report) = match finalizer
         .run_backend_or_fallback(backend, &request, evidence_hash.clone())
         .await?
@@ -219,6 +219,7 @@ pub(super) async fn run_skill_writer_for_store(
                 report: failed_backend_fallback_report(&record),
                 ledger_record: record,
                 backend_response: None,
+                committed_receipt: None,
             });
         }
     };
@@ -256,7 +257,7 @@ pub(super) async fn run_skill_writer_for_store(
                     &retry_report,
                 )
                 .await?;
-            return Err(error);
+            return Err(error.into());
         }
         let repair_request = AgentTaskRequest::new(
             run.run_id.clone(),
@@ -294,7 +295,7 @@ pub(super) async fn run_skill_writer_for_store(
                         &retry_report,
                     )
                     .await?;
-                return Err(error);
+                return Err(error.into());
             }
         };
         retry_report.append(repair_retry_report);
@@ -308,14 +309,14 @@ pub(super) async fn run_skill_writer_for_store(
             )
             .await?;
     }
-    let (report, record) = match finalize_skill_writer_success(
+    let (report, record, committed_receipt) = match finalize_skill_writer_success(
         &finalizer,
         &profile_root,
         analytics_project_root,
         config,
         &authority,
         activation_policy,
-        ProposedAgentOutput {
+        ProposedSkillOutput {
             response: &response,
             retry_report: &retry_report,
             evidence: &evidence,
@@ -327,9 +328,13 @@ pub(super) async fn run_skill_writer_for_store(
     )
     .await
     {
-        Ok(SkillWriterFinalization::Completed { report, record }) => (report, record),
-        Ok(SkillWriterFinalization::FailedRecorded { error, .. }) => return Err(error),
-        Err(err) => {
+        Ok(SkillWriterFinalization::Completed {
+            report,
+            record,
+            committed_receipt,
+        }) => (report, record, committed_receipt),
+        Ok(SkillWriterFinalization::FailedRecorded { error, .. }) => return Err(error.into()),
+        Err(AutomationRunError::Runtime(err)) => {
             finalizer
                 .append_failed_record(
                     response.model.clone(),
@@ -339,23 +344,50 @@ pub(super) async fn run_skill_writer_for_store(
                     &retry_report,
                 )
                 .await?;
-            return Err(err);
+            return Err(err.into());
         }
+        Err(error @ AutomationRunError::PartialEffect { .. }) => return Err(error),
     };
     let record = finalizer
         .append_success_record(&request, &response, &retry_report, record)
-        .await?;
+        .await
+        .map_err(|error| match committed_receipt.clone() {
+            Some(committed_receipt) => AutomationRunError::PartialEffect {
+                run_id: run.run_id.clone(),
+                committed_receipt,
+                ledger_record: None,
+                detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
+            },
+            None => AutomationRunError::Runtime(error),
+        })?;
 
     Ok(SkillWriterAutomationRun {
         run_id: run.run_id,
         report,
         ledger_record: record,
         backend_response: Some(response),
+        committed_receipt,
     })
 }
 
 /// Validates and automatically applies the `skills` half of a skill-writer (or
 /// combined) run, returning the report plus the not-yet-appended ledger record.
+pub(super) struct ProposedSkillOutput<'a> {
+    pub(super) response: &'a AgentTaskResponse,
+    pub(super) retry_report: &'a AgentTaskRetryReport,
+    pub(super) evidence: &'a Value,
+    pub(super) evidence_hash: Option<String>,
+    pub(super) proposed_ops: &'a Value,
+    pub(super) proposals: &'a [Value],
+}
+
+fn skill_validation_repairs_summary(validation_repairs: &[Value]) -> Value {
+    json!({
+        "count": validation_repairs.len(),
+        "sha256": sha256_json(&json!(validation_repairs)),
+    })
+}
+
 pub(super) async fn finalize_skill_writer_success(
     finalizer: &AgentRunFinalizer<'_>,
     profile_root: &std::path::Path,
@@ -363,10 +395,10 @@ pub(super) async fn finalize_skill_writer_success(
     config: &AutomationConfig,
     authority: &CurationApplyAuthorityV1,
     activation_policy: &'static str,
-    output: ProposedAgentOutput<'_>,
+    output: ProposedSkillOutput<'_>,
     validation_repairs: &[Value],
-) -> Result<SkillWriterFinalization> {
-    let ProposedAgentOutput {
+) -> AutomationRunResult<SkillWriterFinalization> {
+    let ProposedSkillOutput {
         response,
         retry_report,
         evidence,
@@ -389,6 +421,48 @@ pub(super) async fn finalize_skill_writer_success(
         + proposal_outcome.updated.len()
         + proposal_outcome.consolidations.len();
     let rejected_count = proposal_outcome.rejected.len();
+    let committed_receipt = (accepted_count > 0).then(|| {
+        let deployment = match proposal_outcome
+            .deployment
+            .as_ref()
+            .map(|receipt| receipt.status)
+        {
+            None => ExternalSkillDeploymentDisposition::NotRequired,
+            Some(crate::automation::skill_writer::ManagedSkillDeploymentStatus::Complete) => {
+                ExternalSkillDeploymentDisposition::Complete
+            }
+            Some(crate::automation::skill_writer::ManagedSkillDeploymentStatus::PartialFailure) => {
+                ExternalSkillDeploymentDisposition::PartialFailure
+            }
+            Some(crate::automation::skill_writer::ManagedSkillDeploymentStatus::Unavailable) => {
+                ExternalSkillDeploymentDisposition::Unavailable
+            }
+        };
+        crate::automation::jobs::effect_receipt::skill_writing_receipt(
+            run_id,
+            proposal_outcome.created.len(),
+            proposal_outcome.updated.len(),
+            proposal_outcome.consolidations.len(),
+            deployment,
+            sha256_json(&json!({
+                "created": &proposal_outcome.created,
+                "updated": &proposal_outcome.updated,
+                "consolidations": &proposal_outcome.consolidations,
+                "deployment": &proposal_outcome.deployment,
+            })),
+        )
+    });
+    let completed_at_micros = finalizer
+        .completion_timestamp_micros()
+        .map_err(|error| match committed_receipt.clone() {
+            Some(committed_receipt) => AutomationRunError::PartialEffect {
+                run_id: run_id.to_owned(),
+                committed_receipt,
+                ledger_record: None,
+                detail: "Skill lifecycle changes committed, but their exact completion time could not be recorded; reconcile the skill receipt before another run.",
+            },
+            None => AutomationRunError::Runtime(error),
+        })?;
     let deployment_failed = proposal_outcome
         .deployment
         .as_ref()
@@ -439,35 +513,57 @@ pub(super) async fn finalize_skill_writer_success(
                 "skill curation could not apply every validated proposal".to_string()
             },
         };
+        let mut record = finalizer.success_record_at(
+            response,
+            evidence_hash,
+            Some(
+                json!({"skills": proposed_ops.get("skills").cloned().unwrap_or_else(|| json!([]))}),
+            ),
+            accepted_count,
+            rejected_count,
+            completed_at_micros,
+        );
+        record.status = crate::automation::run_ledger::AutomationRunStatus::Failed;
+        record.error = Some(error.to_string());
+        record.error_classification =
+            Some(crate::automation::backend::AgentTaskFailureClass::Permanent);
+        record.error_retryable = Some(false);
+        record.applied_ops = Some(json!({
+            "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
+            "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
+            "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
+            "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
+        }));
+        record.rejected_ops = report.get("rejected_skills").cloned();
+        record.validation_report = Some(json!({
+            "status": "failed_after_partial_effects",
+            "validation_repairs": skill_validation_repairs_summary(validation_repairs),
+            "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
+            "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
+        }));
         let record = finalizer
-            .append_failed_record_with_effects(
-                response.model.clone(),
-                evidence_hash,
-                Some(json!({
-                    "skills": proposed_ops.get("skills").cloned().unwrap_or_else(|| json!([])),
-                })),
-                error.to_string(),
-                retry_report,
-                Some(json!({
-                    "created_skills": report.get("created_skills").cloned().unwrap_or_else(|| json!([])),
-                    "updated_skills": report.get("updated_skills").cloned().unwrap_or_else(|| json!([])),
-                    "applied_consolidations": report.get("applied_consolidations").cloned().unwrap_or_else(|| json!([])),
-                    "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
-                })),
-                report.get("rejected_skills").cloned(),
-                Some(json!({
-                    "status": "failed_after_partial_effects",
-                    "validation_repairs": validation_repairs,
-                    "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
-                    "deployment": report.get("deployment").cloned().unwrap_or(Value::Null),
-                })),
-                accepted_count,
-                rejected_count,
-            )
-            .await?;
+            .append_prebuilt_failed_record(record, retry_report)
+            .await
+            .map_err(|error| match committed_receipt.clone() {
+                Some(committed_receipt) => AutomationRunError::PartialEffect {
+                    run_id: run_id.to_owned(),
+                    committed_receipt,
+                    ledger_record: None,
+                    detail: "Skill lifecycle changes committed, but their failed automation terminal could not be published; reconcile the skill receipt before another run.",
+                },
+                None => AutomationRunError::Runtime(error),
+            })?;
+        if let Some(committed_receipt) = committed_receipt {
+            return Err(AutomationRunError::PartialEffect {
+                run_id: run_id.to_owned(),
+                committed_receipt,
+                ledger_record: Some(record),
+                detail: "Skill lifecycle changes committed, but the batch did not reach complete success; reconcile the skill receipt before another run.",
+            });
+        }
         return Ok(SkillWriterFinalization::FailedRecorded { error, record });
     }
-    let mut record = finalizer.success_record(
+    let mut record = finalizer.success_record_at(
         response,
         report
             .get("evidence_hash")
@@ -483,6 +579,7 @@ pub(super) async fn finalize_skill_writer_success(
         })),
         accepted_count,
         rejected_count,
+        completed_at_micros,
     );
     record.applied_ops = (accepted_count > 0).then(|| {
         json!({
@@ -499,10 +596,14 @@ pub(super) async fn finalize_skill_writer_success(
         "activation_policy": activation_policy,
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
-        "validation_repairs": validation_repairs,
+        "validation_repairs": skill_validation_repairs_summary(validation_repairs),
         "curation_policy": report.get("curation_policy").cloned().unwrap_or_else(|| json!({})),
     }));
-    Ok(SkillWriterFinalization::Completed { report, record })
+    Ok(SkillWriterFinalization::Completed {
+        report,
+        record,
+        committed_receipt,
+    })
 }
 
 impl Default for SkillWriterAutomationOptions {
@@ -527,12 +628,15 @@ pub struct SkillWriterAutomationRun {
     pub ledger_record: AutomationRunLedgerRecord,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_response: Option<AgentTaskResponse>,
+    #[serde(skip)]
+    pub committed_receipt: Option<AutomationCommittedReceipt>,
 }
 
 pub(super) enum SkillWriterFinalization {
     Completed {
         report: Value,
         record: AutomationRunLedgerRecord,
+        committed_receipt: Option<AutomationCommittedReceipt>,
     },
     FailedRecorded {
         error: TraceDecayError,
@@ -600,6 +704,7 @@ pub(super) async fn skipped_skill_writer_run(
         report,
         ledger_record: record,
         backend_response: None,
+        committed_receipt: None,
     })
 }
 
@@ -622,5 +727,6 @@ pub(super) fn rejected_skill_writer_run(
         report,
         ledger_record: record,
         backend_response: None,
+        committed_receipt: None,
     }
 }

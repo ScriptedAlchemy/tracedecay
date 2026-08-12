@@ -2,10 +2,11 @@ use super::*;
 
 use serde_json::json;
 use tracedecay_application::retained_surfaces::{
-    MemoryAutomationCommittedReceiptV1, MemoryAutomationCurationReceiptV1,
-    MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1, MemoryAutomationRunSummaryV1,
-    MemoryAutomationRunTerminalV1, MemoryCuratorRunInputV1, RetainedSurfaceExecutionErrorV1,
-    RetainedSurfaceOperation, RetainedSurfaceResultV1, retained_surface_application_operation,
+    AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
+    AutomationRunResultV1, AutomationRunSummaryV1, AutomationRunTerminalV1,
+    AutomationTaskRequestV1, AutomationTaskV1, MemoryAutomationCurationReceiptV1,
+    MemoryCuratorRunInputV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
+    RetainedSurfaceResultV1, UserJobRunInputV1, retained_surface_application_operation,
     retained_surface_execution_problem,
 };
 use tracedecay_application::{
@@ -19,8 +20,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use super::*;
-use crate::daemon::automation_effect::AutomationSettledTerminal;
+use crate::daemon::automation_effect::{AutomationSettledTerminal, recovery_index};
 
 fn digest(seed: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).expect("fixture digest")
@@ -36,27 +36,23 @@ fn scope() -> ResolvedScope {
     .expect("scope")
 }
 
-fn request(run_id: &str) -> MemoryAutomationRunRequestV1 {
-    MemoryAutomationRunRequestV1 {
+fn request(run_id: &str) -> AutomationRunRequestV1 {
+    AutomationRunRequestV1 {
         run_id: RunId::new(run_id).expect("run id"),
-        task:
-            tracedecay_application::retained_surfaces::MemoryAutomationTaskRequestV1::MemoryCurator(
-                MemoryCuratorRunInputV1 {
-                    fact_review_limit: 24,
-                    min_confidence_millionths: 720_000,
-                },
-            ),
+        task: AutomationTaskRequestV1::MemoryCurator(MemoryCuratorRunInputV1 {
+            fact_review_limit: 24,
+            min_confidence_millionths: 720_000,
+        }),
     }
 }
 
 fn reset_problem(
     request_id: &RequestId,
     scope: &ResolvedScope,
-    request: &MemoryAutomationRunRequestV1,
-) -> MemoryAutomationRunProblemV1 {
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("operation");
+    request: &AutomationRunRequestV1,
+) -> AutomationRunProblemV1 {
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("operation");
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::ProjectResetRequired);
     let problem = ApplicationProblemEnvelope::new(
@@ -65,15 +61,8 @@ fn reset_problem(
         problem,
     )
     .expect("problem envelope");
-    MemoryAutomationRunProblemV1::new(
-        request.run_id.clone(),
-        request.task_kind(),
-        scope.clone(),
-        problem,
-        Vec::new(),
-        request_id,
-    )
-    .expect("reset terminal")
+    AutomationRunProblemV1::new(request, scope.clone(), problem, Vec::new(), request_id)
+        .expect("reset terminal")
 }
 
 fn admission(run_id: &str, request_id: &str) -> DurableAutomationAdmission {
@@ -91,24 +80,40 @@ fn admission(run_id: &str, request_id: &str) -> DurableAutomationAdmission {
         grant_revision: 1,
         grant_digest: digest('6'),
         disclosure: DisclosureClass::Evidence,
-        owner: FactOwnerV1::Project {
-            project_id: scope.project_id.clone(),
-        },
         effect_receipt_template: partial_receipt_template(&request_id, &scope),
         actor: ActorId::new("actor.memory-journal").expect("actor"),
         scope: scope.clone(),
         request_id: request_id.clone(),
         process_run_id: "process.memory-journal".to_owned(),
-        recovery_problem: reset_problem(&request_id, &scope, &request),
-        retirement: None,
-        reset_source_digest: None,
+        recovery: AutomationRecoveryBinding::Memory {
+            owner: FactOwnerV1::Project {
+                project_id: scope.project_id.clone(),
+            },
+            recovery_problem: reset_problem(&request_id, &scope, &request),
+            retirement: None,
+            reset_source_digest: None,
+        },
     }
 }
 
+fn external_admission(run_id: &str, request_id: &str) -> DurableAutomationAdmission {
+    let mut admission = admission(run_id, request_id);
+    let request = AutomationRunRequestV1 {
+        run_id: admission.request.run_id.clone(),
+        task: AutomationTaskRequestV1::UserJob(UserJobRunInputV1 {
+            job_id: "nightly-delivery".to_owned(),
+        }),
+    };
+    admission.recovery = AutomationRecoveryBinding::External {
+        recovery_problem: reset_problem(&admission.request_id, &admission.scope, &request),
+    };
+    admission.request = request;
+    admission
+}
+
 fn partial_receipt_template(request_id: &RequestId, scope: &ResolvedScope) -> EffectReceipt {
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("operation");
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("operation");
     EffectReceipt {
         operation: operation.use_case_id().clone(),
         request_id: request_id.clone(),
@@ -133,13 +138,13 @@ fn authority(scope: &ResolvedScope) -> AuthorityReceipt {
         grant_id: tracedecay_application::CapabilityGrantId::new("grant.memory-journal")
             .expect("grant"),
         grant_revision: 1,
-        grant_digest: digest('3'),
+        grant_digest: digest('6'),
         authorized_scope_digest: scope.scope_digest.clone(),
         disclosure: DisclosureClass::Evidence,
         policy: PolicyDecisionRef::new(
             "policy.memory-journal",
             1,
-            digest('4'),
+            digest('6'),
             ComponentVersion::new("policy.memory-journal.v1").expect("component"),
         )
         .expect("policy"),
@@ -151,9 +156,8 @@ fn success_terminal(
     admission: &DurableAutomationAdmission,
     result_run_id: &str,
 ) -> AutomationSettledTerminal {
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("operation");
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("operation");
     let expected_state = digest('5');
     let idempotency_key = IdempotencyKey::new("idempotency.memory-journal").expect("key");
     let receipt = EffectReceipt {
@@ -173,11 +177,12 @@ fn success_terminal(
         committed_state: Some(digest('9')),
         external_proof: None,
     };
-    let result = MemoryAutomationRunResultV1 {
+    let result = AutomationRunResultV1 {
         run_id: RunId::new(result_run_id).expect("result run id"),
-        task: tracedecay_application::retained_surfaces::MemoryAutomationTaskV1::MemoryCurator,
-        terminal: MemoryAutomationRunTerminalV1::Completed {
-            summary: MemoryAutomationRunSummaryV1 {
+        task: AutomationTaskV1::MemoryCurator,
+        request_digest: admission.request.input_digest().expect("request digest"),
+        terminal: AutomationRunTerminalV1::Completed {
+            summary: AutomationRunSummaryV1 {
                 reviewed_count: 0,
                 accepted_count: 0,
                 rejected_count: 0,
@@ -201,7 +206,7 @@ fn success_terminal(
         .expect("execution"),
         ReconciliationState::Reconciled,
         receipt,
-        Some(RetainedSurfaceResultV1::MemoryAutomationRun(result)),
+        Some(RetainedSurfaceResultV1::AutomationRun(result)),
     )
     .expect("effect result");
     AutomationSettledTerminal::Outcome {
@@ -225,16 +230,15 @@ fn partial_terminal(admission: &DurableAutomationAdmission) -> AutomationSettled
         }))
         .expect("curation receipt");
     receipt.canonical_digest = receipt.canonical_digest().expect("canonical digest");
-    let committed_receipts = vec![MemoryAutomationCommittedReceiptV1::Curation(receipt)];
+    let committed_receipts = vec![AutomationCommittedReceiptV1::Curation(receipt)];
     let committed_state = canonical_sha256(&(
-        "tracedecay.memory-automation-run.partial-state.v1",
+        "tracedecay.automation-run.partial-state.v1",
         receipt_run_id,
         &committed_receipts,
     ))
     .expect("committed state");
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("operation");
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("operation");
     let effect_receipt = EffectReceipt {
         operation: operation.use_case_id().clone(),
         request_id: admission.request_id.clone(),
@@ -254,7 +258,7 @@ fn partial_terminal(admission: &DurableAutomationAdmission) -> AutomationSettled
     };
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
-            reason_code: "application.memory-automation-run.partial-effect".to_owned(),
+            reason_code: "application.automation-run.partial-effect".to_owned(),
             committed_receipt: effect_receipt,
             detail: "canonical memory effect committed before delivery".to_owned(),
         });
@@ -265,9 +269,8 @@ fn partial_terminal(admission: &DurableAutomationAdmission) -> AutomationSettled
     )
     .expect("problem envelope");
     AutomationSettledTerminal::Problem(
-        MemoryAutomationRunProblemV1::new(
-            admission.request.run_id.clone(),
-            admission.request.task_kind(),
+        AutomationRunProblemV1::new(
+            &admission.request,
             admission.scope.clone(),
             problem,
             committed_receipts,
@@ -301,6 +304,41 @@ fn durable_journal_reopens_the_byte_identical_terminal() {
 }
 
 #[test]
+fn foreign_external_reservation_closes_indeterminate_without_a_second_execution() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("external-terminal.json");
+    let original = external_admission("run.external-journal", "request.external-journal");
+    assert!(matches!(
+        reserve_or_replay_blocking(&path, original.clone()).expect("reserve external run"),
+        ReservationResult::Execute { .. }
+    ));
+
+    let mut reopened = original.clone();
+    reopened.process_run_id = "process.external-journal.reopened".to_owned();
+    let ReservationResult::Recover { .. } =
+        reserve_or_replay_blocking(&path, reopened.clone()).expect("recover external reservation")
+    else {
+        panic!("foreign external reservation must recover")
+    };
+    assert!(reopened.is_external());
+    let terminal = AutomationSettledTerminal::Problem(reopened.recovery_problem().clone());
+    let stored = persist_recovered_terminal_blocking(&path, &reopened, terminal.clone(), None)
+        .expect("close external reservation")
+        .expect("recovery was not cancelled");
+    assert_eq!(stored, terminal);
+
+    let mut replay_request = original;
+    replay_request.process_run_id = "process.external-journal.third".to_owned();
+    let ReservationResult::Replay {
+        terminal: replayed, ..
+    } = reserve_or_replay_blocking(&path, replay_request).expect("replay indeterminate terminal")
+    else {
+        panic!("closed external reservation must replay its exact problem")
+    };
+    assert_eq!(replayed, terminal);
+}
+
+#[test]
 fn durable_journal_rejects_changed_request_identity() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
@@ -320,24 +358,23 @@ fn durable_journal_rejects_changed_task_identity() {
     let original = admission("run.memory-journal", "request.memory-journal");
     reserve_or_replay_blocking(&path, original).expect("reserve");
     let mut changed = admission("run.memory-journal", "request.memory-journal");
-    changed.request.task =
-        tracedecay_application::retained_surfaces::MemoryAutomationTaskRequestV1::SessionReflector(
-            tracedecay_application::retained_surfaces::SessionReflectorRunInputV1 {
-                provider: "cursor".to_owned(),
-                query: "changed task".to_owned(),
-                scope: tracedecay_application::retained_surfaces::LcmSearchScopeV1::Current,
-                session_id: None,
-                include_summaries: true,
-                evidence_limit: 5,
-                include_recent_sessions: false,
-                recent_sessions_limit: 1,
-                sort: tracedecay_application::retained_surfaces::LcmGrepSortV1::Recency,
-                source: None,
-                role: None,
-                start_time: None,
-                end_time: None,
-            },
-        );
+    changed.request.task = AutomationTaskRequestV1::SessionReflector(
+        tracedecay_application::retained_surfaces::SessionReflectorRunInputV1 {
+            provider: "cursor".to_owned(),
+            query: "changed task".to_owned(),
+            scope: tracedecay_application::retained_surfaces::LcmSearchScopeV1::Current,
+            session_id: None,
+            include_summaries: true,
+            evidence_limit: 5,
+            include_recent_sessions: false,
+            recent_sessions_limit: 1,
+            sort: tracedecay_application::retained_surfaces::LcmGrepSortV1::Recency,
+            source: None,
+            role: None,
+            start_time: None,
+            end_time: None,
+        },
+    );
     assert!(reserve_or_replay_blocking(&path, changed).is_err());
 }
 
@@ -363,8 +400,8 @@ fn durable_journal_rejects_changed_effect_authority() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let original = admission("run.memory-journal", "request.memory-journal");
-    reserve_or_replay_blocking(&path, original).expect("reserve");
-    let mut changed = admission("run.memory-journal", "request.memory-journal");
+    reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
+    let mut changed = original;
     changed.effect_authority_digest = digest('b');
     assert!(reserve_or_replay_blocking(&path, changed).is_err());
 }
@@ -376,7 +413,10 @@ fn durable_journal_rejects_changed_project_owner() {
     let original = admission("run.memory-journal", "request.memory-journal");
     reserve_or_replay_blocking(&path, original).expect("reserve");
     let mut changed = admission("run.memory-journal", "request.memory-journal");
-    changed.owner = FactOwnerV1::Project {
+    let AutomationRecoveryBinding::Memory { owner, .. } = &mut changed.recovery else {
+        panic!("memory admission must carry memory recovery")
+    };
+    *owner = FactOwnerV1::Project {
         project_id: ProjectId::new("project.memory-journal.other").expect("project"),
     };
     assert!(reserve_or_replay_blocking(&path, changed).is_err());
@@ -406,10 +446,14 @@ fn project_open_crash_recovery_defers_retirement_until_exact_finalization() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let mut original = admission("run.memory-retirement", "request.memory-retirement");
-    original.retirement = Some(super::super::retirement::RetirementBinding {
+    let binding = super::super::retirement::RetirementBinding {
         source_digest: format!("sha256:{}", "a".repeat(64)),
         archive_name: format!("fact_proposals.{}.json", "a".repeat(64)),
-    });
+    };
+    let AutomationRecoveryBinding::Memory { retirement, .. } = &mut original.recovery else {
+        panic!("memory admission must carry memory recovery")
+    };
+    *retirement = Some(binding.clone());
     reserve_or_replay_blocking(&path, original.clone()).expect("reserve retirement");
     let mut reopened = original.clone();
     reopened.process_run_id = "process.memory-journal.reopened".to_owned();
@@ -418,11 +462,11 @@ fn project_open_crash_recovery_defers_retirement_until_exact_finalization() {
     else {
         panic!("crashed retirement must require canonical receipt recovery")
     };
-    assert_eq!(retirement, original.retirement);
+    assert_eq!(retirement, Some(binding.clone()));
     let reopened_record = read_indexed_record_blocking(&path)
         .expect("physical reopen")
         .expect("reserved retirement");
-    assert_eq!(reopened_record.admission().retirement, original.retirement);
+    assert_eq!(reopened_record.admission().retirement(), Some(&binding));
     assert_eq!(
         super::super::recovery_index::special_recovery_defer_reason(
             reopened_record.admission(),
@@ -450,7 +494,15 @@ fn project_open_crash_recovery_preserves_shipped_reset_digest_until_exact_diagno
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let mut original = admission("run.memory-reset", "request.memory-reset");
-    original.reset_source_digest = Some(format!("sha256:{}", "b".repeat(64)));
+    let reset_digest = format!("sha256:{}", "b".repeat(64));
+    let AutomationRecoveryBinding::Memory {
+        reset_source_digest,
+        ..
+    } = &mut original.recovery
+    else {
+        panic!("memory admission must carry memory recovery")
+    };
+    *reset_source_digest = Some(reset_digest.clone());
     reserve_or_replay_blocking(&path, original.clone()).expect("reserve shipped reset");
     let mut reopened = original.clone();
     reopened.process_run_id = "process.memory-journal.reopened".to_owned();
@@ -462,8 +514,8 @@ fn project_open_crash_recovery_preserves_shipped_reset_digest_until_exact_diagno
         .expect("physical reopen")
         .expect("reserved shipped reset");
     assert_eq!(
-        reopened_record.admission().reset_source_digest,
-        original.reset_source_digest
+        reopened_record.admission().reset_source_digest(),
+        Some(reset_digest.as_str())
     );
     assert_eq!(
         super::super::recovery_index::special_recovery_defer_reason(
@@ -552,15 +604,14 @@ fn durable_journal_rejects_swapped_partial_receipts_before_write() {
     let AutomationSettledTerminal::Problem(problem) = &mut swapped else {
         panic!("partial terminal must be a problem")
     };
-    let MemoryAutomationCommittedReceiptV1::Curation(receipt) = &mut problem.committed_receipts[0]
-    else {
+    let AutomationCommittedReceiptV1::Curation(receipt) = &mut problem.committed_receipts[0] else {
         panic!("partial fixture must carry a curation receipt")
     };
     receipt.receipt.automation_run_id =
         RunId::new("run.memory-journal.other").expect("other run id");
     receipt.canonical_digest = receipt.canonical_digest().expect("canonical digest");
     let committed_state = canonical_sha256(&(
-        "tracedecay.memory-automation-run.partial-state.v1",
+        "tracedecay.automation-run.partial-state.v1",
         problem.run_id.as_str(),
         &problem.committed_receipts,
     ))
@@ -616,10 +667,10 @@ fn scheduler_stable_request_identity_reopens_the_same_terminal() {
         ))
         .expect("reopened scheduler identity");
     assert_eq!(first_request, reopened_request);
-    let admission = admission("host_receipt_17", first_request.as_str());
-    reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
-    let terminal = success_terminal(&admission, "host_receipt_17");
-    persist_terminal_blocking(&path, &admission, terminal.clone()).expect("persist");
+    let durable_admission = admission("host_receipt_17", first_request.as_str());
+    reserve_or_replay_blocking(&path, durable_admission.clone()).expect("reserve");
+    let terminal = success_terminal(&durable_admission, "host_receipt_17");
+    persist_terminal_blocking(&path, &durable_admission, terminal.clone()).expect("persist");
     let reopened = admission("host_receipt_17", reopened_request.as_str());
     let ReservationResult::Replay {
         terminal: replay, ..
@@ -638,13 +689,12 @@ fn pending_index_survives_physical_reopen_and_closes_after_terminal() {
         .join("automation_effects")
         .join(format!("{}.json", "a".repeat(64)));
     let admission = admission("indexed_physical_reopen", "request.indexed-reopen");
-    super::recovery_index::add_pending_blocking(dashboard_root, &path, &admission)
+    recovery_index::add_pending_blocking(dashboard_root, &path, &admission)
         .expect("durable pending index");
     reserve_or_replay_blocking(&path, admission.clone()).expect("reserve");
 
-    let reopened =
-        super::recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
-            .expect("physical index reopen");
+    let reopened = recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
+        .expect("physical index reopen");
     assert_eq!(reopened.len(), 1);
     assert_eq!(reopened[0].path, path);
     let record = read_indexed_record_blocking(&path)
@@ -658,9 +708,9 @@ fn pending_index_survives_physical_reopen_and_closes_after_terminal() {
     reopened_admission.process_run_id = "process.reopened".to_owned();
     persist_recovered_terminal_blocking(&path, &reopened_admission, terminal, None)
         .expect("recovered terminal");
-    super::recovery_index::remove_pending_blocking(dashboard_root, &path).expect("pending cleanup");
+    recovery_index::remove_pending_blocking(dashboard_root, &path).expect("pending cleanup");
     assert!(
-        super::recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope,)
+        recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope,)
             .expect("closed index reopen")
             .is_empty()
     );

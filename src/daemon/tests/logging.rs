@@ -17,9 +17,7 @@ fn daemon_log_line_formats_stable_key_value_fields() {
 
 #[test]
 fn scheduler_application_problem_log_excludes_hostile_payload() {
-    use tracedecay_application::retained_surfaces::{
-        MemoryAutomationRunProblemV1, MemoryAutomationTaskV1,
-    };
+    use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationTaskV1};
     use tracedecay_application::{
         ApplicationProblem, ApplicationProblemEnvelope, LegalAction, RequestId, ResolvedScope,
         RetainedSurfaceOperation, RetryDirective, SafeDiagnostic,
@@ -30,8 +28,7 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
     const SECRET: &str = "sk-scheduler-log-canary-1234567890";
     let request_id = RequestId::new("request.scheduler.log-privacy").unwrap();
     let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .unwrap();
+        retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun).unwrap();
     let envelope = ApplicationProblemEnvelope::new(
         operation.result_contract().clone(),
         request_id.clone(),
@@ -53,9 +50,9 @@ fn scheduler_application_problem_log_excludes_hostile_payload() {
         None,
     )
     .unwrap();
-    let problem = MemoryAutomationRunProblemV1::new(
+    let problem = AutomationRunProblemV1::new(
         RunId::new("run.scheduler-log-privacy").unwrap(),
-        MemoryAutomationTaskV1::MemoryCurator,
+        AutomationTaskV1::MemoryCurator,
         scope,
         envelope,
         Vec::new(),
@@ -158,7 +155,7 @@ fn scheduler_record_log_preserves_skipped_status_and_reason() {
         artifacts: Vec::new(),
         started_at: "1000".to_string(),
         completed_at: "1001".to_string(),
-        completed_at_micros: 1_001_000_000,
+        completed_at_micros: Some(1_001_000_000),
     };
 
     let line = super::super::daemon_scheduler_record_log_line(

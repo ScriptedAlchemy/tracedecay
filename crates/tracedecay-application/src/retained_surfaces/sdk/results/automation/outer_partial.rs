@@ -3,7 +3,7 @@ use tracedecay_domain::{ActorId, ManifestDigest, canonical_sha256};
 use tracedecay_tool_catalog::EffectClass;
 
 use super::{
-    MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1, automatic_fact_terminal,
+    AutomationRunProblemV1, AutomationRunResultV1, automatic_fact_terminal, automation_request,
     memory_scope, zero_terminal,
 };
 use crate::retained_surfaces::{
@@ -14,15 +14,14 @@ use crate::{
     ApplicationProblemEnvelope, EffectReceipt, EffectTermination, IdempotencyKey, RequestId,
 };
 
-fn outer_delivery_partial(result: MemoryAutomationRunResultV1) -> Value {
-    let request_id = RequestId::new("request.memory-automation.outer-partial").expect("request");
+fn outer_delivery_partial(result: AutomationRunResultV1) -> Value {
+    let request_id = RequestId::new("request.automation.outer-partial").expect("request");
     let scope = memory_scope();
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .expect("operation");
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .expect("operation");
     let committed_state = canonical_sha256(&(
         "tracedecay.retained.effect.committed-state.v1",
-        RetainedSurfaceOperation::MemoryAutomationRun.as_str(),
+        RetainedSurfaceOperation::AutomationRun.as_str(),
         result.run_id.as_str(),
         &result,
     ))
@@ -36,7 +35,7 @@ fn outer_delivery_partial(result: MemoryAutomationRunResultV1) -> Value {
             committed_receipt: EffectReceipt {
                 operation: operation.use_case_id().clone(),
                 request_id: request_id.clone(),
-                actor: ActorId::new("actor.memory-automation").expect("actor"),
+                actor: ActorId::new("actor.automation").expect("actor"),
                 scope: scope.clone(),
                 effect_class: EffectClass::Administrative,
                 idempotency_key: IdempotencyKey::new("idempotency.outer-partial").expect("key"),
@@ -58,9 +57,8 @@ fn outer_delivery_partial(result: MemoryAutomationRunResultV1) -> Value {
         problem,
     )
     .expect("envelope");
-    let terminal = MemoryAutomationRunProblemV1::new_outer_effect_partial(
-        result.run_id.clone(),
-        result.task,
+    let terminal = AutomationRunProblemV1::new_outer_effect_partial(
+        &automation_request(result.run_id.as_str(), result.task),
         scope,
         envelope,
         result,
@@ -70,16 +68,16 @@ fn outer_delivery_partial(result: MemoryAutomationRunResultV1) -> Value {
     serde_json::to_value(terminal).expect("wire")
 }
 
-fn assert_bound_outer_partial(result: MemoryAutomationRunResultV1) {
+fn assert_bound_outer_partial(result: AutomationRunResultV1) {
     let wire = outer_delivery_partial(result);
-    assert!(serde_json::from_value::<MemoryAutomationRunProblemV1>(wire.clone()).is_ok());
+    assert!(serde_json::from_value::<AutomationRunProblemV1>(wire.clone()).is_ok());
     let original_reviewed = wire["committed_outer_result"]["terminal"]["summary"]["reviewed_count"]
         .as_u64()
         .expect("reviewed count");
     let mut changed = wire;
     changed["committed_outer_result"]["terminal"]["summary"]["reviewed_count"] =
         json!(original_reviewed + 1);
-    assert!(serde_json::from_value::<MemoryAutomationRunProblemV1>(changed).is_err());
+    assert!(serde_json::from_value::<AutomationRunProblemV1>(changed).is_err());
 }
 
 #[test]

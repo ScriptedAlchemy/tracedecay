@@ -63,6 +63,7 @@ impl DashboardAutomationRequestRuntime {
             DashboardAutomationRunRequestV1::SkillWriting { .. } => {
                 SKILL_WRITER_REQUEST_TIMEOUT_SECS
             }
+            DashboardAutomationRunRequestV1::UserJob { .. } => SKILL_WRITER_REQUEST_TIMEOUT_SECS,
         };
         let mut config = configured.clone();
         config.timeout_secs = config.timeout_secs.min(timeout_cap);
@@ -422,7 +423,7 @@ async fn execute_dashboard_automation_run(
                 }
                 crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
                     let run = automation_terminal_run(&terminal)?;
-                    return Ok(DashboardAutomationRunOutcomeV1::Memory(run));
+                    return Ok(run);
                 }
             };
             let run = match run_memory_curator_with_backend(
@@ -449,7 +450,7 @@ async fn execute_dashboard_automation_run(
                 &run.ledger_record,
                 "dashboard",
             );
-            DashboardAutomationRunOutcomeV1::Memory(settled_run)
+            settled_run
         }
         DashboardAutomationRunRequestV1::SessionReflection {
             provider,
@@ -520,7 +521,7 @@ async fn execute_dashboard_automation_run(
                 }
                 crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
                     let run = automation_terminal_run(&terminal)?;
-                    return Ok(DashboardAutomationRunOutcomeV1::Memory(run));
+                    return Ok(run);
                 }
             };
             let run = match run_session_reflector_with_backend(
@@ -547,7 +548,7 @@ async fn execute_dashboard_automation_run(
                 &run.ledger_record,
                 "dashboard",
             );
-            DashboardAutomationRunOutcomeV1::Memory(settled_run)
+            settled_run
         }
         DashboardAutomationRunRequestV1::SkillWriting {
             provider,
@@ -569,19 +570,124 @@ async fn execute_dashboard_automation_run(
             if let Some(evidence_limit) = evidence_limit {
                 options.evidence_limit = evidence_limit;
             }
-            let run =
-                run_skill_writer_with_backend(cg, config, &pinned.revision_id, backend, options)
-                    .await
-                    .map_err(automation_failed)?;
+            let run_id = request_control.request_id().as_str().to_owned();
+            options.run_id = Some(run_id.clone());
+            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+                invocation_service,
+                cg,
+                cg.project_root(),
+                &cg.store_layout().dashboard_root,
+                request_control.request_id(),
+                request_control.deadline(),
+                request_control.cancellation(),
+                request_control.observed_at(),
+                configuration_digest,
+                crate::daemon::automation_effect::skill_writer_run_request(&run_id, &options)
+                    .map_err(automation_failed)?,
+            )
+            .await
+            .map_err(automation_failed)?;
+            let effect = match admission {
+                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => {
+                    effect
+                }
+                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
+                    envelope,
+                ) => {
+                    return Err(DashboardAutomationAuthorityErrorV1::ApplicationProblem(envelope));
+                }
+                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
+                    let run = automation_terminal_run(&terminal)?;
+                    return Ok(run);
+                }
+            };
+            let run = match run_skill_writer_with_backend(
+                cg,
+                config,
+                &pinned.revision_id,
+                backend,
+                options,
+            )
+            .await
+            {
+                Ok(run) => run,
+                Err(error) => return Err(automation_run_failed(error, effect).await),
+            };
+            let terminal = effect
+                .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
+                .await
+                .map_err(automation_failed)?;
+            let settled_run = automation_terminal_run(&terminal)?;
             crate::daemon::record_project_automation_run(
                 producer.as_ref(),
                 cg.project_root(),
                 &run.ledger_record,
                 "dashboard",
             );
-            DashboardAutomationRunOutcomeV1::SkillWriting(
-                serde_json::to_value(run).map_err(automation_failed)?,
+            settled_run
+        }
+        DashboardAutomationRunRequestV1::UserJob { job_id, run_id } => {
+            let job = tracedecay_agent_hosts::automation::jobs::find_job(
+                &cg.store_layout().dashboard_root,
+                &job_id,
             )
+            .await
+            .map_err(automation_failed)?
+            .ok_or_else(|| DashboardAutomationAuthorityErrorV1::NotFound {
+                detail: format!("automation job '{job_id}' was not found"),
+            })?;
+            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
+                invocation_service,
+                cg,
+                cg.project_root(),
+                &cg.store_layout().dashboard_root,
+                request_control.request_id(),
+                request_control.deadline(),
+                request_control.cancellation(),
+                request_control.observed_at(),
+                configuration_digest,
+                crate::daemon::automation_effect::user_job_run_request(&run_id, &job_id)
+                    .map_err(automation_failed)?,
+            )
+            .await
+            .map_err(automation_failed)?;
+            let effect = match admission {
+                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => effect,
+                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
+                    return automation_terminal_run(&terminal);
+                }
+                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(envelope) => {
+                    return Err(DashboardAutomationAuthorityErrorV1::ApplicationProblem(envelope));
+                }
+            };
+            let run = match tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend(
+                &cg.store_layout().dashboard_root,
+                config,
+                backend,
+                &job,
+                tracedecay_agent_hosts::automation::jobs::UserJobRunOptions {
+                    trigger: AutomationTrigger::Dashboard,
+                    run_id: Some(run_id),
+                    profile_root: Some(profile_root),
+                    project_root: Some(cg.project_root().to_path_buf()),
+                },
+            )
+            .await
+            {
+                Ok(run) => run,
+                Err(error) => return Err(automation_run_failed(error, effect).await),
+            };
+            let terminal = effect
+                .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
+                .await
+                .map_err(automation_failed)?;
+            crate::daemon::record_project_automation_run(
+                producer.as_ref(),
+                cg.project_root(),
+                &run.ledger_record,
+                "dashboard_user_job",
+            );
+            automation_terminal_run(&terminal)?
         }
     };
     Ok(run)
@@ -716,31 +822,29 @@ async fn automation_run_failed(
     effect: crate::daemon::automation_effect::AutomationEffectAuthority,
 ) -> DashboardAutomationAuthorityErrorV1 {
     match effect.settle_problem(&error).await {
-        Ok(Some(problem)) => memory_automation_problem(problem),
-        Ok(None) => automation_failed(error),
+        Ok(problem) => automation_problem(problem),
         Err(settlement_error) => automation_failed(settlement_error),
     }
 }
 
 fn automation_terminal_run(
     terminal: &crate::daemon::automation_effect::AutomationSettledTerminal,
-) -> DashboardAutomationResult<tracedecay_application::retained_surfaces::MemoryAutomationRunResultV1>
-{
+) -> DashboardAutomationResult<tracedecay_application::retained_surfaces::AutomationRunResultV1> {
     if let Some(run) = terminal.run_result() {
         return Ok(run.clone());
     }
     if let Some(problem) = terminal.problem() {
-        return Err(memory_automation_problem(problem.clone()));
+        return Err(automation_problem(problem.clone()));
     }
     Err(automation_failed(
-        "memory automation terminal has neither a run nor a problem",
+        "automation terminal has neither a run nor a problem",
     ))
 }
 
-fn memory_automation_problem(
+fn automation_problem(
     problem: crate::daemon::automation_effect::AutomationSettledProblem,
 ) -> DashboardAutomationAuthorityErrorV1 {
-    DashboardAutomationAuthorityErrorV1::MemoryAutomationProblem(problem)
+    DashboardAutomationAuthorityErrorV1::AutomationProblem(problem)
 }
 
 #[cfg(test)]

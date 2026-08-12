@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
+mod combined_privacy;
 mod curation;
-
 use super::artifact_feedback::{
     validation_feedback_entries, validation_gate_decision, validation_report_hash,
 };
@@ -85,10 +85,6 @@ pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
     })
 }
 
-/// Extracts the `evidence_mode` label from whichever evidence object the task
-/// placed in the request context (e.g. `session_reflection_evidence` or
-/// `skill_writer_evidence`), so traces distinguish session-replay-backed runs
-/// from grep-only runs. Null for tasks without a mode label.
 fn context_evidence_mode(context: &Value) -> Value {
     let modes = context
         .as_object()
@@ -339,6 +335,18 @@ pub(super) fn codex_handoff_payload(
             "output_hash": ctx.record.output_hash,
             "curation_result": curation::memory_curation_trace_summary(ctx.record),
         })
+    } else if ctx.task == AgentTaskKind::SessionReflector {
+        json!({
+            "model": ctx.response.model,
+            "input_tokens": ctx.response.input_tokens,
+            "output_tokens": ctx.response.output_tokens,
+            "output_hash": ctx.record.output_hash,
+            "session_reflection_result": session_reflection_summary(ctx.record),
+        })
+    } else if ctx.task == AgentTaskKind::SkillWriter
+        && ctx.request.task == AgentTaskKind::CombinedReview
+    {
+        combined_privacy::skill_handoff_response(ctx)
     } else {
         json!({
             "model": ctx.response.model,
@@ -361,10 +369,19 @@ pub(super) fn codex_handoff_payload(
         "evidence_hash": ctx.record.evidence_hash,
         "input_hash": ctx.record.input_hash,
         "output_hash": ctx.record.output_hash,
-        "request": {
-            "evidence_hash": ctx.request.evidence_hash,
-            "prompt_preview": truncate_chars_for_prompt(&ctx.request.prompt, 4000),
-            "context_hash": ctx.record.input_hash,
+        "request": if matches!(ctx.task, AgentTaskKind::MemoryCurator | AgentTaskKind::SessionReflector)
+            || ctx.request.task == AgentTaskKind::CombinedReview
+        {
+            json!({
+                "evidence_hash": ctx.request.evidence_hash,
+                "context_hash": ctx.record.input_hash,
+            })
+        } else {
+            json!({
+                "evidence_hash": ctx.request.evidence_hash,
+                "prompt_preview": truncate_chars_for_prompt(&ctx.request.prompt, 4000),
+                "context_hash": ctx.record.input_hash,
+            })
         },
         "response": response,
         "readiness": {
@@ -568,6 +585,7 @@ mod tests {
             artifacts: Vec::new(),
             started_at: "0".to_string(),
             completed_at: "0".to_string(),
+            completed_at_micros: Some(0),
         };
         (request, response, record)
     }
@@ -635,8 +653,6 @@ mod tests {
                 .unwrap(),
             &json!("ignored")
         );
-        // The validation-replay definitions must stay outcome-free so the
-        // replay gate semantics are unchanged.
         assert_eq!(evals.count, 0);
     }
 

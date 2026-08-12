@@ -30,6 +30,10 @@ pub mod skill_usage;
 pub mod skill_writer;
 pub mod text;
 
+pub use jobs::effect_receipt::{
+    ExternalAutomationEffectDisposition, ExternalAutomationEffectReceipt,
+    ExternalSkillDeploymentDisposition,
+};
 pub use lifecycle::{
     AutomationCommittedReceipt, AutomationRunControl, AutomationRunError, AutomationRunResult,
     NonEmptyAutomaticFactReceipts,

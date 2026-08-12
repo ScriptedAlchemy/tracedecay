@@ -1,5 +1,3 @@
-//! Unadvertised daemon-owned project operations used by one-shot CLI commands.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -22,7 +20,8 @@ use super::json_result;
 mod automation_terminal;
 mod public_memory_automation;
 use automation_terminal::{
-    pre_admission_problem_value, settle_run as automation_run_value,
+    decode_options, pre_admission_problem_value, require_observation,
+    run_skill_writer as run_admitted_skill_writer, settle_run as automation_run_value,
     terminal_response_value as automation_terminal_response,
 };
 pub(super) use public_memory_automation::admin_project_args as public_memory_automation_args;
@@ -369,10 +368,10 @@ async fn run_automation(
     use tracedecay_agent_hosts::automation::runner::{
         MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
         SkillWriterAutomationOptions, run_memory_curator_with_backend,
-        run_session_reflector_with_backend, run_skill_writer_with_backend,
+        run_session_reflector_with_backend,
     };
 
-    let invocation_service = require_manual_automation_observation(daemon_invocation_service)?;
+    let invocation_service = require_observation(daemon_invocation_service)?;
     let producer = crate::daemon::project_automation_observation_producer(
         invocation_service,
         cg.project_root(),
@@ -554,46 +553,47 @@ async fn run_automation(
                 message: "automation skill writing requires exact daemon profile authority"
                     .to_owned(),
             })?;
-            let run = run_skill_writer_with_backend(
+            let run_id = request_id.as_str().to_owned();
+            let run_options = SkillWriterAutomationOptions {
+                trigger,
+                run_id: Some(run_id.clone()),
+                provider: options.provider,
+                query: options.query,
+                evidence_limit: options.evidence_limit,
+                profile_root: Some(profile_root.to_path_buf()),
+                ..SkillWriterAutomationOptions::default()
+            };
+            let (run, ledger_record) = run_admitted_skill_writer(
+                invocation_service,
                 cg,
+                request_id,
+                application_deadline,
+                &application_cancellation,
+                configuration_digest,
                 &config,
                 &pinned.revision_id,
                 &backend,
-                SkillWriterAutomationOptions {
-                    trigger: AutomationTrigger::ManualCli,
-                    run_id: None,
-                    provider: options.provider,
-                    query: options.query,
-                    evidence_limit: options.evidence_limit,
-                    profile_root: Some(profile_root.to_path_buf()),
-                    ..SkillWriterAutomationOptions::default()
-                },
+                run_options,
             )
             .await?;
-            crate::daemon::record_project_automation_run(
-                producer.as_ref(),
-                cg.project_root(),
-                &run.ledger_record,
-                "manual_mcp",
-            );
-            serde_json::to_value(run)?
+            if let Some(ledger_record) = ledger_record.as_ref() {
+                crate::daemon::record_project_automation_run(
+                    producer.as_ref(),
+                    cg.project_root(),
+                    ledger_record,
+                    "manual_mcp",
+                );
+            }
+            if run.get("kind").and_then(Value::as_str) == Some("problem") {
+                return Ok(run);
+            }
+            if ledger_record.is_none() {
+                return Ok(run);
+            }
+            run
         }
     };
     Ok(json!({ "run": run }))
-}
-
-fn require_manual_automation_observation(
-    daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
-) -> Result<&crate::daemon::DaemonInvocationService> {
-    daemon_invocation_service.ok_or_else(|| TraceDecayError::Config {
-        message: "manual automation observation authority is unavailable".to_owned(),
-    })
-}
-
-fn decode_options<T: serde::de::DeserializeOwned>(options: Value) -> Result<T> {
-    serde_json::from_value(options).map_err(|error| TraceDecayError::Config {
-        message: format!("invalid tracedecay_admin_project automation options: {error}"),
-    })
 }
 
 #[cfg(test)]
@@ -974,7 +974,7 @@ mod tests {
 
     #[test]
     fn manual_automation_without_observation_authority_fails_closed() {
-        let Err(error) = require_manual_automation_observation(None) else {
+        let Err(error) = require_observation(None) else {
             panic!("manual automation must not run without observation authority");
         };
 

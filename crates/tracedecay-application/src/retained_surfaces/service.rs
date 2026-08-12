@@ -479,8 +479,8 @@ pub(super) fn outcome_matches_operation(
         ApplicationOutcome::Effect(effect) => effect.payload.as_ref(),
         ApplicationOutcome::Preview(_) => None,
     };
-    if let Some(RetainedSurfaceResultV1::MemoryAutomationRun(result)) = result {
-        return operation == RetainedSurfaceOperation::MemoryAutomationRun
+    if let Some(RetainedSurfaceResultV1::AutomationRun(result)) = result {
+        return operation == RetainedSurfaceOperation::AutomationRun
             && class_matches
             && result.matches_terminal();
     }
@@ -570,7 +570,7 @@ pub(super) fn outcome_matches_operation(
 pub const fn retained_surface_operation_is_effect(operation: RetainedSurfaceOperation) -> bool {
     matches!(
         operation,
-        RetainedSurfaceOperation::MemoryAutomationRun
+        RetainedSurfaceOperation::AutomationRun
             | RetainedSurfaceOperation::FactStoreAdd
             | RetainedSurfaceOperation::FactStoreUpdate
             | RetainedSurfaceOperation::FactStoreRemove

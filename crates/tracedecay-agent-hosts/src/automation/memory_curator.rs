@@ -269,7 +269,7 @@ async fn run_memory_curator_for_store(
         memory_curator_backend_context(&llm_review, min_confidence),
     );
     let input_hash = Some(request.input_hash.clone());
-    let finalizer = run.finalizer(input_hash.clone());
+    let finalizer = run.finalizer(input_hash.clone())?;
 
     let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
     let mut retry_report = AgentTaskRetryReport::default();
@@ -526,13 +526,28 @@ async fn run_memory_curator_for_store(
         resume_after_fact_id.as_ref(),
     );
     let validation_report = Some(terminal_summary);
-    let mut record = finalizer.success_record(
+    let mut record = match finalizer.success_record(
         &response,
         evidence_hash,
         None,
         accepted_count,
         rejected_count,
-    );
+    ) {
+        Ok(record) => record,
+        Err(error) => {
+            if let Some(committed_receipt) = committed_receipt {
+                return Err(AutomationRunError::PartialEffect {
+                    run_id: run.run_id.clone(),
+                    committed_receipt: AutomationCommittedReceipt::MemoryCuration(
+                        committed_receipt,
+                    ),
+                    ledger_record: None,
+                    detail: "Memory curation committed, but its exact completion time could not be recorded; reconcile the committed receipt before another run.",
+                });
+            }
+            return Err(error.into());
+        }
+    };
     record.applied_ops = applied_ops;
     record.rejected_ops = None;
     record.validation_report = validation_report;

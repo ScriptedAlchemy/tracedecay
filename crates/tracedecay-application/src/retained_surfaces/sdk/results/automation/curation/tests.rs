@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tracedecay_domain::{
-    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProjectId, ProvenanceId,
-    RunId,
+    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ManifestDigest, ProjectId,
+    ProvenanceId, RunId,
 };
 
 use super::{
@@ -9,8 +9,8 @@ use super::{
     curation_receipt_matches,
 };
 use crate::retained_surfaces::{
-    FactCommitDispositionV1, MemoryAutomationCommittedReceiptV1, MemoryAutomationRunResultV1,
-    MemoryAutomationRunSummaryV1, MemoryAutomationRunTerminalV1, MemoryAutomationTaskV1,
+    AutomationCommittedReceiptV1, AutomationRunResultV1, AutomationRunSummaryV1,
+    AutomationRunTerminalV1, AutomationTaskV1, FactCommitDispositionV1,
 };
 
 fn fact(label: &str) -> String {
@@ -134,23 +134,24 @@ fn all_noop_receipt_retains_acceptance_without_fabricating_mutations_or_anchors(
     assert!(receipt.receipt.replay_event_id.is_none());
     assert!(matches(&receipt));
 
-    let result = MemoryAutomationRunResultV1 {
+    let result = AutomationRunResultV1 {
         run_id: RunId::new("run.memory.curation").expect("run id"),
-        task: MemoryAutomationTaskV1::MemoryCurator,
-        terminal: MemoryAutomationRunTerminalV1::Completed {
-            summary: MemoryAutomationRunSummaryV1 {
+        task: AutomationTaskV1::MemoryCurator,
+        request_digest: ManifestDigest::new("a".repeat(64)).expect("request digest"),
+        terminal: AutomationRunTerminalV1::Completed {
+            summary: AutomationRunSummaryV1 {
                 reviewed_count: 2,
                 accepted_count: 2,
                 rejected_count: 0,
                 skipped_count: 0,
             },
         },
-        committed_receipts: vec![MemoryAutomationCommittedReceiptV1::Curation(receipt)],
+        committed_receipts: vec![AutomationCommittedReceiptV1::Curation(receipt)],
     };
     assert!(result.matches_terminal());
 
     let mut wrong_count = result;
-    let MemoryAutomationRunTerminalV1::Completed { summary } = &mut wrong_count.terminal else {
+    let AutomationRunTerminalV1::Completed { summary } = &mut wrong_count.terminal else {
         panic!("completed fixture")
     };
     summary.accepted_count = 0;

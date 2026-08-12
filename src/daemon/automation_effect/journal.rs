@@ -5,7 +5,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::{
     CancellationSignal, CapabilityGrantId, DirectorySyncPolicy, DisclosureClass, EffectReceipt,
-    RequestId, ResolvedScope, retained_surfaces::MemoryAutomationRunRequestV1,
+    RequestId, ResolvedScope,
+    retained_surfaces::{AutomationRunRequestV1, AutomationTaskV1},
 };
 use tracedecay_domain::{ActorId, FactOwnerV1, ManifestDigest};
 
@@ -19,7 +20,7 @@ const MAX_AUTOMATION_JOURNAL_BYTES: u64 = 512 * 1024;
 #[serde(deny_unknown_fields)]
 pub(super) struct DurableAutomationAdmission {
     pub(super) schema_version: u32,
-    pub(super) request: MemoryAutomationRunRequestV1,
+    pub(super) request: AutomationRunRequestV1,
     pub(super) input_digest: ManifestDigest,
     pub(super) configuration_digest: ManifestDigest,
     /// Exact registered grant/catalog/privacy authority used to prepare the
@@ -30,8 +31,6 @@ pub(super) struct DurableAutomationAdmission {
     pub(super) grant_revision: u64,
     pub(super) grant_digest: ManifestDigest,
     pub(super) disclosure: DisclosureClass,
-    /// Exact owner selected by the registered project-memory authority.
-    pub(super) owner: FactOwnerV1,
     /// Exact prepared outer-effect receipt material. Recovery changes only
     /// its committed-state digest; it never mints a new grant or request.
     pub(super) effect_receipt_template: EffectReceipt,
@@ -39,9 +38,68 @@ pub(super) struct DurableAutomationAdmission {
     pub(super) scope: ResolvedScope,
     pub(super) request_id: RequestId,
     pub(super) process_run_id: String,
-    pub(super) recovery_problem: AutomationSettledProblem,
-    pub(super) retirement: Option<RetirementBinding>,
-    pub(super) reset_source_digest: Option<String>,
+    pub(super) recovery: AutomationRecoveryBinding,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(
+    tag = "kind",
+    content = "binding",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub(super) enum AutomationRecoveryBinding {
+    Memory {
+        owner: FactOwnerV1,
+        recovery_problem: AutomationSettledProblem,
+        retirement: Option<RetirementBinding>,
+        reset_source_digest: Option<String>,
+    },
+    /// External effects have no canonical destination-side receipt store.
+    /// Restart recovery must close them with this typed indeterminate problem
+    /// and must never repeat the delivery or skill mutation.
+    External {
+        recovery_problem: AutomationSettledProblem,
+    },
+}
+
+impl DurableAutomationAdmission {
+    pub(super) fn recovery_problem(&self) -> &AutomationSettledProblem {
+        match &self.recovery {
+            AutomationRecoveryBinding::Memory {
+                recovery_problem, ..
+            }
+            | AutomationRecoveryBinding::External { recovery_problem } => recovery_problem,
+        }
+    }
+
+    pub(super) fn memory_owner(&self) -> Option<&FactOwnerV1> {
+        match &self.recovery {
+            AutomationRecoveryBinding::Memory { owner, .. } => Some(owner),
+            AutomationRecoveryBinding::External { .. } => None,
+        }
+    }
+
+    pub(super) fn retirement(&self) -> Option<&RetirementBinding> {
+        match &self.recovery {
+            AutomationRecoveryBinding::Memory { retirement, .. } => retirement.as_ref(),
+            AutomationRecoveryBinding::External { .. } => None,
+        }
+    }
+
+    pub(super) fn reset_source_digest(&self) -> Option<&str> {
+        match &self.recovery {
+            AutomationRecoveryBinding::Memory {
+                reset_source_digest,
+                ..
+            } => reset_source_digest.as_deref(),
+            AutomationRecoveryBinding::External { .. } => None,
+        }
+    }
+
+    pub(super) fn is_external(&self) -> bool {
+        matches!(self.recovery, AutomationRecoveryBinding::External { .. })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -99,8 +157,8 @@ pub(super) fn retained_source_bindings(
         Ok(read_record(path)?
             .map(|record| {
                 (
-                    record.admission.retirement,
-                    record.admission.reset_source_digest,
+                    record.admission.retirement().cloned(),
+                    record.admission.reset_source_digest().map(str::to_owned),
                 )
             })
             .unwrap_or_default())
@@ -115,7 +173,7 @@ pub(super) fn reserve_or_replay_blocking(
         let existing = read_record(path)?;
         match existing {
             None => {
-                let retirement = requested.retirement.clone();
+                let retirement = requested.retirement().cloned();
                 write_record(
                     path,
                     &DurableAutomationRecord {
@@ -130,7 +188,7 @@ pub(super) fn reserve_or_replay_blocking(
                 match &record.state {
                     DurableAutomationState::Terminal(terminal) => Ok(ReservationResult::Replay {
                         terminal: terminal.clone(),
-                        retirement: record.admission.retirement.clone(),
+                        retirement: record.admission.retirement().cloned(),
                     }),
                     DurableAutomationState::Reserved
                         if record.admission.process_run_id == requested.process_run_id =>
@@ -140,7 +198,7 @@ pub(super) fn reserve_or_replay_blocking(
                         ))
                     }
                     DurableAutomationState::Reserved => Ok(ReservationResult::Recover {
-                        retirement: record.admission.retirement.clone(),
+                        retirement: record.admission.retirement().cloned(),
                     }),
                 }
             }
@@ -339,8 +397,19 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
                     "memory automation durable admission has an unsupported shape",
                 ));
             }
+            let memory_task = matches!(
+                record.admission.request.task_kind(),
+                AutomationTaskV1::MemoryCurator | AutomationTaskV1::SessionReflector
+            );
+            if memory_task == record.admission.is_external() {
+                return Err(contract_error(
+                    "automation recovery binding does not match the admitted task",
+                ));
+            }
             record.admission.scope.validate().map_err(contract_error)?;
-            record.admission.owner.validate().map_err(contract_error)?;
+            if let Some(owner) = record.admission.memory_owner() {
+                owner.validate().map_err(contract_error)?;
+            }
             record.admission.actor.validate().map_err(contract_error)?;
             record
                 .admission
@@ -369,7 +438,7 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
                 .map_err(contract_error)?;
             if !record
                 .admission
-                .recovery_problem
+                .recovery_problem()
                 .matches_terminal(&record.admission.request_id)
             {
                 return Err(contract_error(
@@ -380,7 +449,10 @@ fn read_record(path: &Path) -> Result<Option<DurableAutomationRecord>> {
                 project_id: record.admission.scope.project_id.clone(),
             };
             let template = &record.admission.effect_receipt_template;
-            if record.admission.owner != expected_owner
+            if record
+                .admission
+                .memory_owner()
+                .is_some_and(|owner| owner != &expected_owner)
                 || template.request_id != record.admission.request_id
                 || template.actor != record.admission.actor
                 || template.scope != record.admission.scope
@@ -414,7 +486,7 @@ fn write_record(path: &Path, record: &DurableAutomationRecord) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(record).map_err(contract_error)?;
     tracedecay_application::atomic_write(
         path,
-        "memory-automation-terminal",
+        "automation-run-terminal",
         &bytes,
         DirectorySyncPolicy::Strict,
     )
@@ -434,13 +506,11 @@ fn validate_stable_admission(
         || stored.grant_revision != requested.grant_revision
         || stored.grant_digest != requested.grant_digest
         || stored.disclosure != requested.disclosure
-        || stored.owner != requested.owner
         || stored.effect_receipt_template != requested.effect_receipt_template
         || stored.actor != requested.actor
         || stored.scope != requested.scope
         || stored.request_id != requested.request_id
-        || stored.retirement != requested.retirement
-        || stored.reset_source_digest != requested.reset_source_digest
+        || stored.recovery != requested.recovery
     {
         return Err(contract_error(
             "memory automation replay conflicts with the persisted admission",

@@ -6,14 +6,17 @@ use serde_json::{Value, json};
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{ActorId, FactOwnerV1};
 
+use super::ExternalSkillDeploymentDisposition;
+use super::artifacts::sha256_json;
 use super::backend::{
     AgentTaskBackend, AgentTaskKind, AgentTaskRequest, AgentTaskResponse, AgentTaskRetryReport,
     BackendRetryPolicy, run_agent_task_with_retry_report,
 };
 use super::config::AutomationConfig;
 use super::lifecycle::{
-    AgentRunFinalizer, AutomationCommittedReceipt, AutomationRunControl, AutomationRunResult,
-    BackendTaskRun, SchedulerGate, failed_backend_fallback_report, generated_run_id, task_run_gate,
+    AgentRunFinalizer, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
+    AutomationRunResult, BackendTaskRun, SchedulerGate, failed_backend_fallback_report,
+    generated_run_id, task_run_gate,
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use super::scheduler::AutomationTaskLock;
@@ -51,8 +54,8 @@ use session_reflector::{
     finalize_session_reflector_success, validate_session_fact_candidates,
 };
 use skill_writer::{
-    SkillWriterFinalization, build_skill_writer_prompt, finalize_skill_writer_success,
-    run_user_skill_writer_with_backend_and_retrieval,
+    ProposedSkillOutput, SkillWriterFinalization, build_skill_writer_prompt,
+    finalize_skill_writer_success, run_user_skill_writer_with_backend_and_retrieval,
 };
 
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
@@ -282,6 +285,7 @@ pub enum CombinedReviewDispatch {
     },
     PartialEffect {
         run: Option<Box<CombinedReviewAutomationRun>>,
+        completed_session_reflector: Option<Box<SessionReflectorAutomationRun>>,
         run_id: String,
         committed_receipt: AutomationCommittedReceipt,
         detail: &'static str,
@@ -499,7 +503,7 @@ async fn run_combined_review_for_retrieval(
         AgentTaskKind::SessionReflector,
         &started_at,
         input_hash.clone(),
-    )
+    )?
     .for_combined_run(run_id.clone());
     let skill_finalizer = AgentRunFinalizer::new(
         &dashboard_root,
@@ -509,7 +513,7 @@ async fn run_combined_review_for_retrieval(
         AgentTaskKind::SkillWriter,
         &started_at,
         input_hash,
-    )
+    )?
     .for_combined_run(run_id.clone());
 
     let retry_policy = BackendRetryPolicy::from_timeout_secs(config.timeout_secs);
@@ -549,6 +553,7 @@ async fn run_combined_review_for_retrieval(
                             report: failed_backend_fallback_report(&skill_record),
                             ledger_record: skill_record,
                             backend_response: None,
+                            committed_receipt: None,
                         },
                     }),
                     error: err,
@@ -716,7 +721,7 @@ async fn run_combined_review_for_retrieval(
                     .append_failed_record(
                         response.model.clone(),
                         skill_bundle.evidence_hash.clone(),
-                        Some(output.clone()),
+                        Some(combined_skill_failure_projection(&output)),
                         detail.to_owned(),
                         &retry_report,
                     )
@@ -727,6 +732,7 @@ async fn run_combined_review_for_retrieval(
                 });
                 return Ok(CombinedReviewDispatch::PartialEffect {
                     run,
+                    completed_session_reflector: None,
                     run_id: committed_run_id,
                     committed_receipt,
                     detail,
@@ -762,6 +768,7 @@ async fn run_combined_review_for_retrieval(
             if let Some(committed_receipt) = reflector_committed_receipt {
                 return Ok(CombinedReviewDispatch::PartialEffect {
                     run: None,
+                    completed_session_reflector: None,
                     run_id: reflector_run_id,
                     committed_receipt,
                     detail: "Automatic facts committed, but the memory automation ledger could not be published; reconcile the committed receipt before another run.",
@@ -778,14 +785,14 @@ async fn run_combined_review_for_retrieval(
         committed_receipt: reflector_committed_receipt,
     };
 
-    let (skill_report, skill_record) = match finalize_skill_writer_success(
+    let (skill_report, skill_record, skill_committed_receipt) = match finalize_skill_writer_success(
         &skill_finalizer,
         &skill_bundle.profile_root,
         Some(cg.store_layout().project_root.as_path()),
         config,
         &skill_authority,
         activation_policy,
-        ProposedAgentOutput {
+        ProposedSkillOutput {
             response: &response,
             retry_report: &retry_report,
             evidence: &skill_bundle.evidence,
@@ -797,7 +804,11 @@ async fn run_combined_review_for_retrieval(
     )
     .await
     {
-        Ok(SkillWriterFinalization::Completed { report, record }) => (report, record),
+        Ok(SkillWriterFinalization::Completed {
+            report,
+            record,
+            committed_receipt,
+        }) => (report, record, committed_receipt),
         Ok(SkillWriterFinalization::FailedRecorded {
             error,
             record: skill_record,
@@ -808,12 +819,12 @@ async fn run_combined_review_for_retrieval(
                 error,
             });
         }
-        Err(err) => {
+        Err(AutomationRunError::Runtime(err)) => {
             let skill_writer_record = skill_finalizer
                 .append_failed_record(
                     response.model.clone(),
                     skill_bundle.evidence_hash.clone(),
-                    Some(output.clone()),
+                    Some(combined_skill_failure_projection(&output)),
                     err.to_string(),
                     &retry_report,
                 )
@@ -825,6 +836,20 @@ async fn run_combined_review_for_retrieval(
                 error: err,
             });
         }
+        Err(AutomationRunError::PartialEffect {
+            run_id,
+            committed_receipt,
+            detail,
+            ..
+        }) => {
+            return Ok(CombinedReviewDispatch::PartialEffect {
+                run: None,
+                completed_session_reflector: Some(Box::new(memory_run)),
+                run_id,
+                committed_receipt,
+                detail,
+            });
+        }
     };
     let skill_record = match skill_finalizer
         .append_success_record(&request, &response, &retry_report, skill_record)
@@ -832,10 +857,19 @@ async fn run_combined_review_for_retrieval(
     {
         Ok(record) => record,
         Err(error) => {
-            return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure {
-                session_reflector: Box::new(memory_run),
-                skill_writer_record: None,
-                error,
+            let Some(committed_receipt) = skill_committed_receipt.clone() else {
+                return Ok(CombinedReviewDispatch::MemoryCompletedSkillFailure {
+                    session_reflector: Box::new(memory_run),
+                    skill_writer_record: None,
+                    error,
+                });
+            };
+            return Ok(CombinedReviewDispatch::PartialEffect {
+                run: None,
+                completed_session_reflector: Some(Box::new(memory_run)),
+                run_id: skill_finalizer.run_id().to_owned(),
+                committed_receipt,
+                detail: "Skill lifecycle changes committed, but their automation terminal could not be published; reconcile the skill receipt before another run.",
             });
         }
     };
@@ -849,6 +883,7 @@ async fn run_combined_review_for_retrieval(
                 report: skill_report,
                 ledger_record: skill_record,
                 backend_response: Some(response),
+                committed_receipt: skill_committed_receipt,
             },
         },
     )))
@@ -874,6 +909,7 @@ fn combined_failed_run(
             report: failed_backend_fallback_report(&skill_record),
             ledger_record: skill_record,
             backend_response: Some(response.clone()),
+            committed_receipt: None,
         },
     })
 }
@@ -898,16 +934,42 @@ async fn append_combined_failed_records(
             retry_report,
         )
         .await?;
+    let skill_projection = proposed_ops.map(combined_skill_failure_projection);
     let skill_record = skill_finalizer
         .append_failed_record(
             response.model.clone(),
             evidence.skill.evidence_hash.clone(),
-            proposed_ops.cloned(),
+            skill_projection,
             err.to_string(),
             retry_report,
         )
         .await?;
     Ok((reflector_record, skill_record))
+}
+
+fn combined_reflector_failure_projection(output: &Value) -> Value {
+    let facts = output
+        .get("facts")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    json!({
+        "schema_version": 1,
+        "proposed": {
+            "count": facts.len(),
+            "sha256": sha256_json(&json!(facts)),
+        },
+    })
+}
+
+fn combined_skill_failure_projection(output: &Value) -> Value {
+    json!({
+        "skills": output
+            .get("skills")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    })
 }
 
 fn build_combined_review_prompt(reflector_evidence: &Value, skill_evidence: &Value) -> String {

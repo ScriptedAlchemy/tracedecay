@@ -1,6 +1,6 @@
 use serde_json::json;
 use tracedecay_application::retained_surfaces::{
-    MemoryAutomationCommittedReceiptV1, MemoryAutomationCurationReceiptV1, MemoryAutomationTaskV1,
+    AutomationCommittedReceiptV1, AutomationTaskV1, MemoryAutomationCurationReceiptV1,
 };
 use tracedecay_domain::{FactId, FactOwnerV1, ProvenanceId, RunId, canonical_sha256};
 use tracedecay_store::ProjectMemoryFactCurationReceiptV1;
@@ -63,14 +63,12 @@ fn all_noop_curation_projects_accepted_effects_without_mutation_or_anchors() {
     assert!(projected.replay_fact_id.is_none());
     assert!(projected.replay_event_id.is_none());
 
-    let canonical_digest = canonical_sha256(&(
-        "tracedecay.memory-automation-run.curation-receipt.v1",
-        &projected,
-    ))
-    .expect("canonical digest");
+    let canonical_digest =
+        canonical_sha256(&("tracedecay.automation-run.curation-receipt.v1", &projected))
+            .expect("canonical digest");
     let summary = project_run_summary(
-        MemoryAutomationTaskV1::MemoryCurator,
-        &[MemoryAutomationCommittedReceiptV1::Curation(
+        AutomationTaskV1::MemoryCurator,
+        &[AutomationCommittedReceiptV1::Curation(
             MemoryAutomationCurationReceiptV1 {
                 receipt: projected,
                 canonical_digest,

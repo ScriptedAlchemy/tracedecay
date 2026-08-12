@@ -411,12 +411,24 @@ mod run_list_tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invocation);
             Box::pin(async {
-                Ok(super::super::DashboardAutomationRunOutcomeV1::SkillWriting(
-                    json!({
-                        "run_id": "daemon-run-1",
-                        "ledger_record": { "status": "succeeded" }
-                    }),
-                ))
+                serde_json::from_value(json!({
+                    "run_id": "daemon-run-1",
+                    "task": "memory_curator",
+                    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "terminal": {
+                        "status": "completed",
+                        "summary": {
+                            "reviewed_count": 0,
+                            "accepted_count": 0,
+                            "rejected_count": 0,
+                            "skipped_count": 0
+                        }
+                    },
+                    "committed_receipts": []
+                }))
+                .map_err(|error| DashboardAutomationAuthorityErrorV1::Failed {
+                    detail: error.to_string(),
+                })
             })
         });
         let skills: super::super::DashboardManagedSkillCommandPortV1 = Arc::new(|_| {
@@ -472,7 +484,18 @@ mod run_list_tests {
             json!({
                 "run": {
                     "run_id": "daemon-run-1",
-                    "ledger_record": { "status": "succeeded" }
+                    "task": "memory_curator",
+                    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "terminal": {
+                        "status": "completed",
+                        "summary": {
+                            "reviewed_count": 0,
+                            "accepted_count": 0,
+                            "rejected_count": 0,
+                            "skipped_count": 0
+                        }
+                    },
+                    "committed_receipts": []
                 }
             })
         );

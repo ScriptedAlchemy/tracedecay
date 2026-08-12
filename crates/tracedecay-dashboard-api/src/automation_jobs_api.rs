@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
@@ -15,15 +16,15 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::DashboardState;
-use super::automation_config_api::effective_automation_config;
-use super::util::{JsonError, http_detail, internal_error, json_error};
-use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-use tracedecay_agent_hosts::automation::config::AutomationConfig;
-use tracedecay_agent_hosts::automation::jobs::{
-    AutomationJob, JobDelivery, UserJobRunOptions, find_job, job_task_key, load_jobs,
-    run_user_job_with_backend, save_jobs, validate_job, validate_job_id,
+use super::util::{JsonError, http_detail, internal_error};
+use super::{
+    DashboardAutomationRunRequestV1, DashboardHttpRequestControlV1,
+    automation_authority_error_response, exact_automation_authority,
 };
-use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
+use tracedecay_agent_hosts::automation::jobs::{
+    AutomationJob, JobDelivery, find_job, job_task_key, load_jobs, save_jobs, validate_job,
+    validate_job_id,
+};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -257,19 +258,13 @@ pub async fn delete(
 
 pub async fn run(
     State(state): State<DashboardState>,
+    Extension(control): Extension<DashboardHttpRequestControlV1>,
     AxumPath(job_id): AxumPath<String>,
 ) -> std::result::Result<(StatusCode, Json<Value>), JsonError> {
     let job = load_job_or_404(&state, &job_id).await?;
-    let observation_admission = state.automation_observation.as_ref().ok_or_else(|| {
-        json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "dashboard automation observation authority is unavailable",
-        )
-    })?;
-    let observation = observation_admission(state.project_root.clone())
-        .await
-        .map_err(|detail| json_error(StatusCode::SERVICE_UNAVAILABLE, detail))?;
-    let config = load_effective_config(&state)?;
+    let authority = exact_automation_authority(&state)
+        .map_err(automation_authority_error_response)?
+        .clone();
     let run_id = format!("dashboard_user_job_{}_{}", job.id, micros_now());
     let payload = json!({
         "run_id": run_id,
@@ -277,35 +272,15 @@ pub async fn run(
         "task": job_task_key(&job.id),
         "status": "accepted",
     });
-    let run_state = state.clone();
+    let project_root = state.project_root.clone();
+    let request = DashboardAutomationRunRequestV1::UserJob {
+        job_id: job.id.clone(),
+        run_id: run_id.clone(),
+    };
     tokio::spawn(async move {
         let job_id = job.id.clone();
-        if let Err(err) = super::automation_run_service::execute_dashboard_automation_write(
-            &run_state,
-            move |state| async move {
-                let backend = CodexAppServerBackend::from_automation_config(&config);
-                let options = UserJobRunOptions {
-                    trigger: AutomationTrigger::Dashboard,
-                    run_id: Some(run_id),
-                    profile_root: None,
-                    project_root: Some(state.project_root.clone()),
-                };
-                let run = run_user_job_with_backend(
-                    &state.dashboard_root,
-                    &config,
-                    &backend,
-                    &job,
-                    options,
-                )
-                .await
-                .map_err(|err| err.to_string())?;
-                observation(run.ledger_record.clone());
-                Ok(Value::Null)
-            },
-        )
-        .await
-        {
-            tracing::warn!(%job_id, error = %err, "dashboard user job failed");
+        if let Err(err) = authority.run(&project_root, request, control).await {
+            tracing::warn!(%job_id, error = err.detail(), "dashboard user job failed");
         }
     });
     Ok((StatusCode::ACCEPTED, Json(payload)))
@@ -321,14 +296,6 @@ async fn load_job_or_404(
         Ok(None) => Err(not_found(job_id)),
         Err(err) => Err(internal_error(&err)),
     }
-}
-
-fn load_effective_config(
-    state: &DashboardState,
-) -> std::result::Result<AutomationConfig, JsonError> {
-    effective_automation_config(state)
-        .map(|(_, config)| config)
-        .map_err(|error| internal_error(&error))
 }
 
 fn micros_now() -> u128 {

@@ -26,6 +26,7 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::surface_name;
 
+mod automation;
 mod evidence;
 mod memory;
 mod sdk;
@@ -40,7 +41,7 @@ pub use service::*;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum RetainedSurfaceOperation {
-    MemoryAutomationRun,
+    AutomationRun,
     FactStoreAdd,
     FactStoreSearch,
     FactStoreProbe,
@@ -74,7 +75,7 @@ impl RetainedSurfaceOperation {
     /// Canonical catalog operations. The broad `session_refresh` translator is
     /// intentionally not a catalog operation.
     pub const ALL: [Self; 26] = [
-        Self::MemoryAutomationRun,
+        Self::AutomationRun,
         Self::FactStoreAdd,
         Self::FactStoreSearch,
         Self::FactStoreProbe,
@@ -163,12 +164,12 @@ impl RetainedSurfaceOperation {
     ];
 
     pub const fn is_callable(self) -> bool {
-        !matches!(self, Self::MemoryAutomationRun | Self::SessionRefresh)
+        !matches!(self, Self::AutomationRun | Self::SessionRefresh)
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::MemoryAutomationRun => "memory_automation_run",
+            Self::AutomationRun => "automation_run",
             Self::FactStoreAdd => "fact_store_add",
             Self::FactStoreSearch => "fact_store_search",
             Self::FactStoreProbe => "fact_store_probe",
@@ -228,8 +229,9 @@ pub(super) struct RetainedSurfaceSpec {
 }
 
 fn surface_specs() -> Vec<&'static RetainedSurfaceSpec> {
-    memory::SPECS
+    automation::SPECS
         .iter()
+        .chain(memory::SPECS.iter())
         .chain(session::SPECS.iter())
         .chain(workflow::SPECS.iter())
         .collect()
@@ -876,9 +878,9 @@ mod tests {
     }
 
     #[test]
-    fn automatic_memory_run_is_registered_without_a_public_route() {
+    fn automation_run_is_registered_without_a_public_route() {
         let contribution = retained_surface_catalog_contribution().expect("contribution");
-        let operation = RetainedSurfaceOperation::MemoryAutomationRun;
+        let operation = RetainedSurfaceOperation::AutomationRun;
         let capability = CapabilityId::new(capability_id(operation)).expect("capability id");
 
         assert!(RetainedSurfaceOperation::ALL.contains(&operation));
@@ -892,11 +894,11 @@ mod tests {
         );
         assert!(contribution.executable_schema(&capability).is_none());
         assert_eq!(
-            RetainedSurfaceOperation::from_operation_name("memory_automation_run"),
+            RetainedSurfaceOperation::from_operation_name("automation_run"),
             None
         );
         assert_eq!(
-            RetainedSurfaceOperation::from_tool_name("tracedecay_memory_automation_run"),
+            RetainedSurfaceOperation::from_tool_name("tracedecay_automation_run"),
             None
         );
         retained_surface_application_operation(operation).expect("registered application use case");

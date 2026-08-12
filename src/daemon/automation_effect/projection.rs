@@ -2,17 +2,18 @@
 
 use tracedecay_agent_hosts::automation::AutomationCommittedReceipt;
 use tracedecay_application::retained_surfaces::{
+    AutomationCommittedReceiptV1, AutomationExternalEffectReceiptV1, AutomationRunRequestV1,
+    AutomationRunSummaryV1, AutomationSkipReasonV1, AutomationTaskRequestV1, AutomationTaskV1,
     FactCommitDispositionV1, FactCommitOwnerV1, FactCommitReceiptV1,
-    MemoryAutomationCommittedReceiptV1, MemoryAutomationCurationAddDispositionV1,
-    MemoryAutomationCurationLinkDispositionV1, MemoryAutomationCurationMergeV1,
-    MemoryAutomationCurationOperationEffectV1, MemoryAutomationCurationReceiptV1,
-    MemoryAutomationCurationRelationKindV1, MemoryAutomationCurationRelationProvenanceV1,
-    MemoryAutomationCurationRelationV1, MemoryAutomationCurationRemoveDispositionV1,
-    MemoryAutomationCurationResultV1, MemoryAutomationFactDispositionV1,
-    MemoryAutomationFactEffectV1, MemoryAutomationFactEvidenceV1,
-    MemoryAutomationFactInputDigestV1, MemoryAutomationFactReceiptV1,
-    MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1, MemoryAutomationFactTargetV1,
-    MemoryAutomationRunSummaryV1, MemoryAutomationSkipReasonV1, MemoryAutomationTaskV1,
+    MemoryAutomationCurationAddDispositionV1, MemoryAutomationCurationLinkDispositionV1,
+    MemoryAutomationCurationMergeV1, MemoryAutomationCurationOperationEffectV1,
+    MemoryAutomationCurationReceiptV1, MemoryAutomationCurationRelationKindV1,
+    MemoryAutomationCurationRelationProvenanceV1, MemoryAutomationCurationRelationV1,
+    MemoryAutomationCurationRemoveDispositionV1, MemoryAutomationCurationResultV1,
+    MemoryAutomationFactDispositionV1, MemoryAutomationFactEffectV1,
+    MemoryAutomationFactEvidenceV1, MemoryAutomationFactInputDigestV1,
+    MemoryAutomationFactReceiptV1, MemoryAutomationFactRequestV1, MemoryAutomationFactStateV1,
+    MemoryAutomationFactTargetV1,
 };
 use tracedecay_domain::{FactCategoryV1, FactOwnerV1, FactRelationKindV1, RunId, canonical_sha256};
 use tracedecay_store::{
@@ -27,14 +28,14 @@ use super::contract_error;
 use crate::errors::Result;
 
 pub(super) fn project_run_summary(
-    task: MemoryAutomationTaskV1,
-    receipts: &[MemoryAutomationCommittedReceiptV1],
-) -> Result<MemoryAutomationRunSummaryV1> {
+    task: AutomationTaskV1,
+    receipts: &[AutomationCommittedReceiptV1],
+) -> Result<AutomationRunSummaryV1> {
     let (accepted_count, rejected_count) = match task {
-        MemoryAutomationTaskV1::MemoryCurator => {
+        AutomationTaskV1::MemoryCurator => {
             let mut accepted = 0_u64;
             for receipt in receipts {
-                let MemoryAutomationCommittedReceiptV1::Curation(receipt) = receipt else {
+                let AutomationCommittedReceiptV1::Curation(receipt) = receipt else {
                     return Err(contract_error(
                         "memory curator summary received a non-curation receipt",
                     ));
@@ -45,11 +46,11 @@ pub(super) fn project_run_summary(
             }
             (accepted, 0)
         }
-        MemoryAutomationTaskV1::SessionReflector => {
+        AutomationTaskV1::SessionReflector => {
             let mut accepted = 0_u64;
             let mut rejected = 0_u64;
             for receipt in receipts {
-                let MemoryAutomationCommittedReceiptV1::AutomaticFact(receipt) = receipt else {
+                let AutomationCommittedReceiptV1::AutomaticFact(receipt) = receipt else {
                     return Err(contract_error(
                         "session reflector summary received a non-fact receipt",
                     ));
@@ -61,8 +62,47 @@ pub(super) fn project_run_summary(
             }
             (accepted, rejected)
         }
+        AutomationTaskV1::SkillWriter | AutomationTaskV1::UserJob => {
+            if receipts.len() > 1 {
+                return Err(contract_error(
+                    "external automation terminal carried more than one committed effect",
+                ));
+            }
+            let accepted = u64::from(!receipts.is_empty());
+            (accepted, 0)
+        }
+        AutomationTaskV1::CombinedReview => {
+            let (accepted, rejected) =
+                receipts
+                    .iter()
+                    .try_fold((0_u64, 0_u64), |(accepted, rejected), receipt| {
+                        let (accepted_delta, rejected_delta) = match receipt {
+                            AutomationCommittedReceiptV1::AutomaticFact(receipt) => {
+                                match receipt.state {
+                                    MemoryAutomationFactStateV1::Applied => (1, 0),
+                                    MemoryAutomationFactStateV1::Quarantined => (0, 1),
+                                }
+                            }
+                            AutomationCommittedReceiptV1::SkillWriting(_) => (1, 0),
+                            _ => {
+                                return Err(contract_error(
+                                    "combined automation terminal carried an unrelated receipt",
+                                ));
+                            }
+                        };
+                        Ok((
+                            accepted.checked_add(accepted_delta).ok_or_else(|| {
+                                contract_error("combined automation accepted summary overflowed")
+                            })?,
+                            rejected.checked_add(rejected_delta).ok_or_else(|| {
+                                contract_error("combined automation rejected summary overflowed")
+                            })?,
+                        ))
+                    })?;
+            (accepted, rejected)
+        }
     };
-    Ok(MemoryAutomationRunSummaryV1 {
+    Ok(AutomationRunSummaryV1 {
         reviewed_count: accepted_count
             .checked_add(rejected_count)
             .ok_or_else(|| contract_error("memory automation summary overflowed"))?,
@@ -72,8 +112,8 @@ pub(super) fn project_run_summary(
     })
 }
 
-pub(super) fn project_skip_reason(reason: &str) -> Result<MemoryAutomationSkipReasonV1> {
-    MemoryAutomationSkipReasonV1::from_ledger_reason(reason).ok_or_else(|| {
+pub(super) fn project_skip_reason(reason: &str) -> Result<AutomationSkipReasonV1> {
+    AutomationSkipReasonV1::from_ledger_reason(reason).ok_or_else(|| {
         contract_error(format!(
             "automation skip reason is not registered: {reason}"
         ))
@@ -81,9 +121,10 @@ pub(super) fn project_skip_reason(reason: &str) -> Result<MemoryAutomationSkipRe
 }
 
 pub(super) fn project_committed_receipts(
-    outer_run_id: &RunId,
+    request: &AutomationRunRequestV1,
     committed: &AutomationCommittedReceipt,
-) -> Result<Vec<MemoryAutomationCommittedReceiptV1>> {
+) -> Result<Vec<AutomationCommittedReceiptV1>> {
+    let outer_run_id = &request.run_id;
     match committed {
         AutomationCommittedReceipt::MemoryCuration(receipt) => {
             if receipt.operation_effects().is_empty() {
@@ -98,7 +139,7 @@ pub(super) fn project_committed_receipts(
             }
             let public_receipt = project_curation_receipt(receipt, receipt.replayed())?;
             let canonical_digest = canonical_sha256(&(
-                "tracedecay.memory-automation-run.curation-receipt.v1",
+                "tracedecay.automation-run.curation-receipt.v1",
                 &public_receipt,
             ))
             .map_err(contract_error)?;
@@ -106,7 +147,7 @@ pub(super) fn project_committed_receipts(
                 receipt: public_receipt,
                 canonical_digest,
             };
-            Ok(vec![MemoryAutomationCommittedReceiptV1::Curation(receipt)])
+            Ok(vec![AutomationCommittedReceiptV1::Curation(receipt)])
         }
         AutomationCommittedReceipt::AutomaticFacts(receipts) => receipts
             .iter()
@@ -117,16 +158,27 @@ pub(super) fn project_committed_receipts(
                     ));
                 }
                 project_automatic_fact_receipt(result)
-                    .map(MemoryAutomationCommittedReceiptV1::AutomaticFact)
+                    .map(AutomationCommittedReceiptV1::AutomaticFact)
             })
             .collect(),
+        AutomationCommittedReceipt::UserJobDelivery(receipt) => {
+            Ok(vec![AutomationCommittedReceiptV1::UserJobDelivery(
+                project_external_receipt(request, receipt)?,
+            )])
+        }
+        AutomationCommittedReceipt::SkillWriting(receipt) => {
+            Ok(vec![AutomationCommittedReceiptV1::SkillWriting(
+                project_external_receipt(request, receipt)?,
+            )])
+        }
     }
 }
 
 pub(super) fn project_recovered_committed_receipts(
-    outer_run_id: &RunId,
+    request: &AutomationRunRequestV1,
     recovered: &ProjectMemoryAutomationRunReceiptsV1,
-) -> Result<Vec<MemoryAutomationCommittedReceiptV1>> {
+) -> Result<Vec<AutomationCommittedReceiptV1>> {
+    let outer_run_id = &request.run_id;
     if recovered.run_id() != outer_run_id {
         return Err(contract_error(
             "recovered memory receipts are not bound to the admitted outer run",
@@ -144,11 +196,11 @@ pub(super) fn project_recovered_committed_receipts(
             }
             let public_receipt = project_curation_receipt(receipt, receipt.replayed())?;
             let canonical_digest = canonical_sha256(&(
-                "tracedecay.memory-automation-run.curation-receipt.v1",
+                "tracedecay.automation-run.curation-receipt.v1",
                 &public_receipt,
             ))
             .map_err(contract_error)?;
-            Ok(vec![MemoryAutomationCommittedReceiptV1::Curation(
+            Ok(vec![AutomationCommittedReceiptV1::Curation(
                 MemoryAutomationCurationReceiptV1 {
                     receipt: public_receipt,
                     canonical_digest,
@@ -163,7 +215,7 @@ pub(super) fn project_recovered_committed_receipts(
                 )
                 .ok_or_else(|| contract_error("recovered automatic-fact receipt set is empty"))?;
             project_committed_receipts(
-                outer_run_id,
+                request,
                 &AutomationCommittedReceipt::AutomaticFacts(receipts),
             )
         }
@@ -172,6 +224,42 @@ pub(super) fn project_recovered_committed_receipts(
             "one automation admission cannot recover mixed curation and reflector receipts",
         )),
     }
+}
+
+fn project_external_receipt(
+    request: &AutomationRunRequestV1,
+    receipt: &tracedecay_agent_hosts::automation::ExternalAutomationEffectReceipt,
+) -> Result<AutomationExternalEffectReceiptV1> {
+    let (expected_run_id, task_key) = match &request.task {
+        AutomationTaskRequestV1::SkillWriter(_) => (
+            request.run_id.as_str().to_owned(),
+            "skill_writer".to_owned(),
+        ),
+        AutomationTaskRequestV1::CombinedReview(_) => (
+            format!("{}_skills", request.run_id.as_str()),
+            "skill_writer".to_owned(),
+        ),
+        AutomationTaskRequestV1::UserJob(options) => (
+            request.run_id.as_str().to_owned(),
+            format!("user_job:{}", options.job_id),
+        ),
+        _ => {
+            return Err(contract_error(
+                "memory automation admission cannot carry an external receipt",
+            ));
+        }
+    };
+    if receipt.run_id() != expected_run_id || receipt.task_key() != task_key {
+        return Err(contract_error(
+            "external automation receipt is not bound to its admitted run and task",
+        ));
+    }
+    let manifest_digest =
+        tracedecay_domain::ManifestDigest::new(receipt.manifest_digest().to_owned())
+            .map_err(contract_error)?;
+    let run_id = request.run_id.clone();
+    AutomationExternalEffectReceiptV1::new(run_id, task_key, manifest_digest)
+        .map_err(contract_error)
 }
 
 fn project_curation_receipt(

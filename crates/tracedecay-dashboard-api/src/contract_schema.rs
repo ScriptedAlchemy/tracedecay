@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
 use tracedecay_application::retained_surfaces::{
-    MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1,
+    AutomationRunProblemV1, AutomationRunRequestV1, AutomationRunResultV1,
 };
 use tracedecay_application::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
@@ -173,8 +173,9 @@ struct DashboardContractCatalogV1 {
     /// Served identically by `GET /api/automation/scheduler/status` and by the
     /// `pause`/`resume` controls, which re-read rather than acknowledge.
     automation_scheduler_status: AutomationSchedulerStatusV1,
-    automation_memory_run: MemoryAutomationRunResultV1,
-    automation_memory_problem: MemoryAutomationRunProblemV1,
+    automation_run_request: AutomationRunRequestV1,
+    automation_run: AutomationRunResultV1,
+    automation_problem: AutomationRunProblemV1,
 }
 
 #[derive(JsonSchema)]
@@ -247,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_automation_terminal_contracts_are_registered() {
+    fn automation_terminal_contracts_are_registered() {
         let schema: serde_json::Value = serde_json::from_str(
             &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
         )
@@ -256,8 +257,9 @@ mod tests {
             .as_object()
             .expect("dashboard contracts expose schema definitions");
 
-        assert!(definitions.contains_key("MemoryAutomationRunResultV1"));
-        assert!(definitions.contains_key("MemoryAutomationRunProblemV1"));
+        assert!(definitions.contains_key("AutomationRunRequestV1"));
+        assert!(definitions.contains_key("AutomationRunResultV1"));
+        assert!(definitions.contains_key("AutomationRunProblemV1"));
     }
 
     #[test]

@@ -220,8 +220,7 @@ pub(crate) fn decode_request(
         RetainedSurfaceOperation::LcmExpandQuery => {
             decode!(LcmExpandQueryRequestV1, LcmExpandQuery)
         }
-        RetainedSurfaceOperation::SessionRefresh
-        | RetainedSurfaceOperation::MemoryAutomationRun => None,
+        RetainedSurfaceOperation::SessionRefresh | RetainedSurfaceOperation::AutomationRun => None,
     }
 }
 

@@ -1275,9 +1275,9 @@ pub(crate) fn scheduler_record_for(
         artifacts: Vec::new(),
         started_at: (completed_at - 1).to_string(),
         completed_at: completed_at.to_string(),
+        completed_at_micros: Some(completed_at.saturating_mul(1_000_000)),
     }
 }
-
 pub(crate) fn test_task_key(task: AgentTaskKind) -> &'static str {
     match task {
         AgentTaskKind::MemoryCurator => "memory_curator",

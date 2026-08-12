@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::http::StatusCode;
-use serde::Serialize;
 use serde_json::Value;
 use tracedecay_agent_hosts::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillUpdate,
@@ -19,9 +18,7 @@ use tracedecay_agent_hosts::automation::managed_skills::{
 use tracedecay_agent_hosts::automation::skill_writer::ManagedSkillDeploymentReceipt;
 use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
 use tracedecay_application::ApplicationProblemEnvelope;
-use tracedecay_application::retained_surfaces::{
-    MemoryAutomationRunProblemV1, MemoryAutomationRunResultV1,
-};
+use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunResultV1};
 
 use super::DashboardHttpRequestControlV1;
 
@@ -34,7 +31,7 @@ pub enum DashboardAutomationAuthorityErrorV1 {
     Conflict { detail: String },
     Failed { detail: String },
     ApplicationProblem(ApplicationProblemEnvelope),
-    MemoryAutomationProblem(MemoryAutomationRunProblemV1),
+    AutomationProblem(AutomationRunProblemV1),
 }
 
 impl DashboardAutomationAuthorityErrorV1 {
@@ -53,7 +50,7 @@ impl DashboardAutomationAuthorityErrorV1 {
             | Self::Conflict { detail }
             | Self::Failed { detail } => detail,
             Self::ApplicationProblem(problem) => &problem.problem.message,
-            Self::MemoryAutomationProblem(problem) => &problem.problem.problem.message,
+            Self::AutomationProblem(problem) => &problem.problem.problem.message,
         }
     }
 
@@ -66,7 +63,7 @@ impl DashboardAutomationAuthorityErrorV1 {
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::Failed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ApplicationProblem(problem) => application_problem_status(problem),
-            Self::MemoryAutomationProblem(problem) => application_problem_status(&problem.problem),
+            Self::AutomationProblem(problem) => application_problem_status(&problem.problem),
         }
     }
 }
@@ -104,7 +101,7 @@ pub(crate) fn automation_authority_error_response(
         DashboardAutomationAuthorityErrorV1::ApplicationProblem(problem) => {
             serde_json::json!({ "kind": "problem", "value": problem })
         }
-        DashboardAutomationAuthorityErrorV1::MemoryAutomationProblem(problem) => {
+        DashboardAutomationAuthorityErrorV1::AutomationProblem(problem) => {
             serde_json::json!({ "kind": "problem", "value": problem })
         }
         error => super::util::http_detail(error.detail()),
@@ -147,6 +144,10 @@ pub enum DashboardAutomationRunRequestV1 {
         query: Option<String>,
         evidence_limit: Option<usize>,
     },
+    UserJob {
+        job_id: String,
+        run_id: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -156,12 +157,7 @@ pub struct DashboardAutomationRunInvocationV1 {
     pub control: DashboardHttpRequestControlV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
-#[serde(untagged)]
-pub enum DashboardAutomationRunOutcomeV1 {
-    Memory(MemoryAutomationRunResultV1),
-    SkillWriting(Value),
-}
+pub type DashboardAutomationRunOutcomeV1 = AutomationRunResultV1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DashboardManagedSkillCommandV1 {
@@ -404,6 +400,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automation_authority_passes_only_user_job_identity_to_the_daemon_port() {
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let observed_run = Arc::clone(&observed);
+        let run: DashboardAutomationRunPortV1 = Arc::new(move |invocation| {
+            *observed_run
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(invocation.request);
+            Box::pin(async {
+                Err(DashboardAutomationAuthorityErrorV1::unavailable(
+                    "test user-job authority",
+                ))
+            })
+        });
+        let profile_root = if cfg!(windows) {
+            PathBuf::from(r"C:\profiles\selected")
+        } else {
+            PathBuf::from("/profiles/selected")
+        };
+        let project_root = if cfg!(windows) {
+            PathBuf::from(r"C:\projects\selected")
+        } else {
+            PathBuf::from("/projects/selected")
+        };
+        let authority =
+            DashboardAutomationAuthorityV1::new(profile_root, run, unavailable_skill_port())
+                .expect("absolute selected profile root");
+
+        let _ = authority
+            .run(
+                &project_root,
+                DashboardAutomationRunRequestV1::UserJob {
+                    job_id: "nightly-summary".to_owned(),
+                    run_id: "dashboard_user_job_nightly-summary_1000000".to_owned(),
+                },
+                request_control(),
+            )
+            .await;
+
+        assert_eq!(
+            observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            Some(DashboardAutomationRunRequestV1::UserJob {
+                job_id: "nightly-summary".to_owned(),
+                run_id: "dashboard_user_job_nightly-summary_1000000".to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn automation_authority_delivers_the_same_live_request_signal_to_the_run_port() {
         let observed = Arc::new(std::sync::Mutex::new(None));
         let observed_run = Arc::clone(&observed);
@@ -413,9 +460,24 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(invocation.control.cancellation().clone());
             Box::pin(async {
-                Ok(DashboardAutomationRunOutcomeV1::SkillWriting(
-                    serde_json::json!({ "status": "accepted" }),
-                ))
+                serde_json::from_value(serde_json::json!({
+                    "run_id": "run.skill-writer.signal",
+                    "task": "skill_writer",
+                    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "terminal": {
+                        "status": "completed",
+                        "summary": {
+                            "reviewed_count": 0,
+                            "accepted_count": 0,
+                            "rejected_count": 0,
+                            "skipped_count": 0
+                        }
+                    },
+                    "committed_receipts": []
+                }))
+                .map_err(|error| DashboardAutomationAuthorityErrorV1::Failed {
+                    detail: error.to_string(),
+                })
             })
         });
         let root = if cfg!(windows) {

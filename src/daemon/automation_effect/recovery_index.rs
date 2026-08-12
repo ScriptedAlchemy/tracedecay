@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_application::retained_surfaces::{
-    MemoryAutomationRunProblemV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
+    AutomationRunProblemV1, RetainedSurfaceExecutionErrorV1, RetainedSurfaceOperation,
 };
 use tracedecay_application::{
     ApplicationProblemEnvelope, CancellationSignal, DirectorySyncPolicy, ProblemOwningLayer,
@@ -31,6 +31,7 @@ pub(crate) struct AutomationEffectRecoveryReport {
     pub(crate) inspected: usize,
     pub(crate) partial_effects: usize,
     pub(crate) reset_required: usize,
+    pub(crate) indeterminate: usize,
     pub(crate) already_terminal: usize,
     pub(crate) deferred: usize,
 }
@@ -59,9 +60,8 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             .map_err(|error| {
                 contract_error(format!("automation recovery index reader failed: {error}"))
             })??;
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::MemoryAutomationRun)
-            .map_err(contract_error)?;
+    let operation = retained_surface_application_operation(RetainedSurfaceOperation::AutomationRun)
+        .map_err(contract_error)?;
     let mut report = AutomationEffectRecoveryReport::default();
     for indexed in indexed {
         if cancellation.is_cancelled() {
@@ -102,7 +102,9 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
         if admission.schema_version != INDEX_SCHEMA_VERSION
             || !admission.request.validate()
             || admission.process_run_id == crate::runtime_identity::process_run_id()
-            || admission.owner != owner
+            || admission
+                .memory_owner()
+                .is_some_and(|candidate| candidate != &owner)
             || admission.scope != scope
             || indexed.path.file_name().and_then(|name| name.to_str())
                 != Some(&automation_journal_filename(&admission.request.run_id)?)
@@ -114,6 +116,35 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
                 reason = "binding_or_authority_mismatch",
             );
             report.deferred += 1;
+            continue;
+        }
+        if admission.is_external() {
+            let terminal = AutomationSettledTerminal::Problem(admission.recovery_problem().clone());
+            let path = indexed.path.clone();
+            let requested = admission.clone();
+            let root = dashboard_root.to_path_buf();
+            let write_cancellation = cancellation.clone();
+            let committed = tokio::task::spawn_blocking(move || {
+                let Some(_) = journal::persist_recovered_terminal_blocking(
+                    &path,
+                    &requested,
+                    terminal,
+                    Some(&write_cancellation),
+                )?
+                else {
+                    return Ok::<bool, crate::errors::TraceDecayError>(false);
+                };
+                remove_pending_blocking(&root, &path)?;
+                Ok(true)
+            })
+            .await
+            .map_err(|error| {
+                contract_error(format!("automation recovery writer failed: {error}"))
+            })??;
+            if !committed {
+                break;
+            }
+            report.indeterminate += 1;
             continue;
         }
         let read_cancellation = cancellation.clone();
@@ -134,8 +165,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
         if cancellation.is_cancelled() {
             break;
         }
-        let committed =
-            project_recovered_committed_receipts(&admission.request.run_id, &recovered)?;
+        let committed = project_recovered_committed_receipts(&admission.request, &recovered)?;
         if let Some(reason) = special_recovery_defer_reason(&admission, committed.is_empty()) {
             tracing::warn!(
                 event = "automation_effect_recovery_deferred",
@@ -145,13 +175,13 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             report.deferred += 1;
             continue;
         }
-        if admission.retirement.is_some() && !committed.is_empty() {
+        if admission.retirement().is_some() && !committed.is_empty() {
             return Err(contract_error(
                 "proposal retirement recovery found unrelated canonical memory commits",
             ));
         }
         let terminal = if committed.is_empty() {
-            AutomationSettledTerminal::Problem(admission.recovery_problem.clone())
+            AutomationSettledTerminal::Problem(admission.recovery_problem().clone())
         } else {
             recovered_partial_terminal(&admission, committed, &operation)?
         };
@@ -167,7 +197,7 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
                 Some(&write_cancellation),
             )?
             else {
-                return Ok(false);
+                return Ok::<bool, crate::errors::TraceDecayError>(false);
             };
             remove_pending_blocking(&root, &path)?;
             Ok(true)
@@ -190,21 +220,21 @@ pub(super) fn special_recovery_defer_reason(
     admission: &DurableAutomationAdmission,
     committed_receipts_empty: bool,
 ) -> Option<&'static str> {
-    if committed_receipts_empty && admission.retirement.is_some() {
+    if committed_receipts_empty && admission.retirement().is_some() {
         Some("retirement_requires_exact_finalization")
-    } else if committed_receipts_empty && admission.reset_source_digest.is_some() {
+    } else if committed_receipts_empty && admission.reset_source_digest().is_some() {
         Some("shipped_proposals_require_exact_reset_diagnostic")
     } else {
         None
     }
 }
 
-fn admission_has_exact_authority(
+pub(super) fn admission_has_exact_authority(
     admission: &DurableAutomationAdmission,
     operation: &tracedecay_application::ApplicationOperation,
 ) -> Result<bool> {
     Ok(digest(&(
-        "tracedecay.memory-automation-run.effect-authority.v1",
+        "tracedecay.automation-run.effect-authority.v1",
         &admission.actor,
         &admission.scope,
         &admission.grant_id,
@@ -221,13 +251,13 @@ fn admission_has_exact_authority(
     ))? == admission.effect_authority_digest)
 }
 
-fn recovered_partial_terminal(
+pub(super) fn recovered_partial_terminal(
     admission: &DurableAutomationAdmission,
-    committed: Vec<tracedecay_application::retained_surfaces::MemoryAutomationCommittedReceiptV1>,
+    committed: Vec<tracedecay_application::retained_surfaces::AutomationCommittedReceiptV1>,
     operation: &tracedecay_application::ApplicationOperation,
 ) -> Result<AutomationSettledTerminal> {
     let state = digest(&(
-        "tracedecay.memory-automation-run.partial-state.v1",
+        "tracedecay.automation-run.partial-state.v1",
         admission.request.run_id.as_str(),
         &committed,
     ))?;
@@ -235,7 +265,7 @@ fn recovered_partial_terminal(
     receipt.committed_state = Some(state);
     let problem =
         retained_surface_execution_problem(RetainedSurfaceExecutionErrorV1::PartialEffect {
-            reason_code: "application.memory-automation-run.recovered-partial-effect".to_owned(),
+            reason_code: "application.automation-run.recovered-partial-effect".to_owned(),
             committed_receipt: receipt,
             detail:
                 "Canonical memory effects committed before the outer run terminal was published."
@@ -249,9 +279,8 @@ fn recovered_partial_terminal(
     .map(|problem| problem.with_owning_layer(ProblemOwningLayer::Application))
     .map_err(contract_error)?;
     Ok(AutomationSettledTerminal::Problem(
-        MemoryAutomationRunProblemV1::new(
-            admission.request.run_id.clone(),
-            admission.request.task_kind(),
+        AutomationRunProblemV1::new(
+            &admission.request,
             admission.scope.clone(),
             envelope,
             committed,
@@ -262,7 +291,7 @@ fn recovered_partial_terminal(
 }
 
 fn automation_journal_filename(run_id: &RunId) -> Result<String> {
-    let key = digest(&("tracedecay.memory-automation-run.terminal-key.v1", run_id))?;
+    let key = digest(&("tracedecay.automation-run.terminal-key.v1", run_id))?;
     Ok(format!(
         "{}.json",
         key.as_str().trim_start_matches("sha256:")
@@ -379,7 +408,7 @@ fn mutate_index(
         }
         tracedecay_application::atomic_write(
             &path,
-            "memory-automation-pending-index",
+            "automation-run-pending-index",
             &bytes,
             DirectorySyncPolicy::Strict,
         )

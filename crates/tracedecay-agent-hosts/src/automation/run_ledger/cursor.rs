@@ -11,7 +11,7 @@ use crate::errors::Result;
 const CURSOR_SCAN_CHUNK_BYTES: usize = 256 * 1024;
 const CURSOR_SCAN_MAX_ROW_BYTES: usize = 1024 * 1024;
 
-pub(super) async fn load_latest_task_validation_pointer(
+pub(crate) async fn load_latest_task_validation_pointer(
     dashboard_root: &Path,
     requested_task_key: &str,
     pointer: &str,
@@ -162,7 +162,7 @@ mod tests {
             "task": "memory_curator", "task_key": "memory_curator",
             "backend": "codex_app_server", "status": "succeeded",
             "accepted_count": 0, "rejected_count": 0,
-            "started_at": "1", "completed_at": "1"
+            "started_at": "1", "completed_at": "1", "completed_at_micros": 1_000_000
         });
         if let Some(report) = report {
             record["validation_report"] = report;
