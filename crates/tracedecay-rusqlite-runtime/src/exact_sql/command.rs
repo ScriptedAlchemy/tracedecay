@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, Transaction, TransactionBehavior};
 
 use super::guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
 use super::{
@@ -50,6 +50,70 @@ pub(crate) enum WriterCommand {
         reply: SyncSender<Result<(), ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
+}
+
+const BEGIN_BUSY_ATTEMPT_BUDGET: u8 = 64;
+
+pub(super) fn begin_transaction_with_busy_retry<'connection>(
+    connection: &'connection Connection,
+    behavior: TransactionBehavior,
+    shutdown_requested: &AtomicBool,
+) -> rusqlite::Result<Transaction<'connection>> {
+    if !matches!(behavior, TransactionBehavior::Immediate) {
+        return Transaction::new_unchecked(connection, behavior);
+    }
+    retry_busy_begin(
+        || Transaction::new_unchecked(connection, behavior),
+        shutdown_requested,
+    )
+}
+
+pub(super) fn retry_busy_begin<T>(
+    mut begin: impl FnMut() -> rusqlite::Result<T>,
+    shutdown_requested: &AtomicBool,
+) -> rusqlite::Result<T> {
+    let deadline = Instant::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+    let mut attempts_remaining = BEGIN_BUSY_ATTEMPT_BUDGET;
+    let mut original_busy_error = None;
+    loop {
+        if shutdown_requested.load(Ordering::Acquire) {
+            if let Some(original) = original_busy_error {
+                return Err(original);
+            }
+        }
+        match begin() {
+            Ok(value) => {
+                if shutdown_requested.load(Ordering::Acquire) {
+                    if let Some(original) = original_busy_error {
+                        return Err(original);
+                    }
+                }
+                return Ok(value);
+            }
+            Err(error) if sqlite_busy_or_locked(&error) => {
+                attempts_remaining = attempts_remaining.saturating_sub(1);
+                let exhausted = attempts_remaining == 0
+                    || shutdown_requested.load(Ordering::Acquire)
+                    || Instant::now() >= deadline;
+                match original_busy_error.take() {
+                    Some(original) if exhausted => return Err(original),
+                    Some(original) => original_busy_error = Some(original),
+                    None if exhausted => return Err(error),
+                    None => original_busy_error = Some(error),
+                }
+                std::thread::yield_now();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn sqlite_busy_or_locked(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, _)
+            if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
 }
 
 pub(crate) enum TransactionCommand {
@@ -126,7 +190,7 @@ pub(crate) fn run_writer_command(
             }
             let completion = {
                 let before = connection.total_changes();
-                match connection.transaction_with_behavior(behavior) {
+                match begin_transaction_with_busy_retry(connection, behavior, shutdown_requested) {
                     Ok(transaction) if reply.send(Ok(())).is_ok() => Some(run_transaction(
                         transaction,
                         receiver,

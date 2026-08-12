@@ -1,4 +1,142 @@
 use super::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+fn busy_begin_connections() -> (TempDir, Connection, Connection) {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("busy-begin.sqlite3");
+    let locker = Connection::open(&path).unwrap();
+    locker.pragma_update(None, "journal_mode", "WAL").unwrap();
+    locker
+        .execute_batch("CREATE TABLE busy_begin(value INTEGER NOT NULL)")
+        .unwrap();
+    let contender = Connection::open(&path).unwrap();
+    contender.busy_timeout(Duration::ZERO).unwrap();
+    (directory, locker, contender)
+}
+
+#[test]
+fn immediate_begin_retries_sqlite_busy_until_lock_releases() {
+    let (_directory, mut locker, contender) = busy_begin_connections();
+    let lock = locker
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let started = Arc::new(AtomicBool::new(false));
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    std::thread::scope(|scope| {
+        let admission_started = Arc::clone(&started);
+        let shutdown = Arc::clone(&shutdown);
+        let admission = scope.spawn(move || {
+            admission_started.store(true, Ordering::Release);
+            let transaction = super::super::command::begin_transaction_with_busy_retry(
+                &contender,
+                TransactionBehavior::Immediate,
+                &shutdown,
+            )
+            .unwrap();
+            transaction.rollback().unwrap();
+        });
+        while !started.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        std::thread::yield_now();
+        lock.rollback().unwrap();
+        admission.join().unwrap();
+    });
+}
+
+#[test]
+fn immediate_begin_busy_retry_is_bounded_and_honors_shutdown() {
+    let (_directory, mut locker, contender) = busy_begin_connections();
+    let _lock = locker
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let shutdown = AtomicBool::new(false);
+
+    let error = super::super::command::begin_transaction_with_busy_retry(
+        &contender,
+        TransactionBehavior::Immediate,
+        &shutdown,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, _)
+            if matches!(
+                error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    ));
+
+    shutdown.store(true, Ordering::Release);
+    let error = super::super::command::begin_transaction_with_busy_retry(
+        &contender,
+        TransactionBehavior::Immediate,
+        &shutdown,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, _)
+            if matches!(
+                error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    ));
+}
+
+#[test]
+fn immediate_begin_shutdown_after_busy_never_publishes_late_success() {
+    let shutdown = AtomicBool::new(false);
+    let mut attempts = 0;
+
+    let error = super::super::command::retry_busy_begin(
+        || {
+            attempts += 1;
+            if attempts == 1 {
+                shutdown.store(true, Ordering::Release);
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                    Some("original database lock".to_owned()),
+                ))
+            } else {
+                Ok(())
+            }
+        },
+        &shutdown,
+    )
+    .unwrap_err();
+
+    assert_eq!(attempts, 1);
+    assert!(matches!(
+        error,
+        rusqlite::Error::SqliteFailure(error, Some(message))
+            if error.code == rusqlite::ErrorCode::DatabaseBusy
+                && message == "original database lock"
+    ));
+}
+
+#[test]
+fn deferred_begin_keeps_one_shot_sqlite_semantics() {
+    let (_directory, mut locker, contender) = busy_begin_connections();
+    let _lock = locker
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let shutdown = AtomicBool::new(true);
+
+    let transaction = super::super::command::begin_transaction_with_busy_retry(
+        &contender,
+        TransactionBehavior::Deferred,
+        &shutdown,
+    )
+    .unwrap();
+
+    transaction.rollback().unwrap();
+}
 
 #[test]
 fn deferred_transaction_is_available_for_default_sqlite_semantics() {
