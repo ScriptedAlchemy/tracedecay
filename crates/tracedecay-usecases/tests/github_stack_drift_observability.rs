@@ -210,6 +210,7 @@ async fn coordinator_drift_is_durable_closed_monotone_and_scope_denial_writes_no
         }
     );
     producer.shutdown().await.expect("flush producer");
+    drop(producer);
 
     let port = RegisteredObservabilityPortV1::new(database.as_ref());
     let page = port
