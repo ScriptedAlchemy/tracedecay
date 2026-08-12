@@ -7,7 +7,9 @@
 use super::*;
 
 mod runtime;
+mod session_database_admission;
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
+use session_database_admission::{join_independent_session_opens, log_session_database_admission};
 
 pub(super) struct ProductionProjectComposition {
     #[cfg(unix)]
@@ -640,10 +642,24 @@ pub(super) async fn production_project_server(
                 });
             }
             project_open_cancellation_checkpoint(cancellation)?;
-            let project_sessions_started = Instant::now();
-            let registered_project_session_db = store_administration
-                .registered_project_session_database(cg.project_root(), cg.store_layout())
-                .await?;
+            let project_session_open = async {
+                let started = Instant::now();
+                let database = store_administration
+                    .registered_project_session_database(cg.project_root(), cg.store_layout())
+                    .await?;
+                Ok((database, started.elapsed()))
+            };
+            let profile_session_open = async {
+                let started = Instant::now();
+                let database = store_administration
+                    .registered_profile_session_database()
+                    .await?;
+                Ok((database, started.elapsed()))
+            };
+            let (
+                (registered_project_session_db, project_sessions_elapsed),
+                (registered_user_session_db, profile_sessions_elapsed),
+            ) = join_independent_session_opens(project_session_open, profile_session_open).await?;
             let project_graph_runtime = graph_runtime
                 .retain_project_graph_runtime(
                     code_search_project_id.clone(),
@@ -659,31 +675,10 @@ pub(super) async fn production_project_server(
                     message: "project graph runtime was already mounted for project sessions"
                         .to_owned(),
                 })?;
-            log_daemon_event(
-                "project_open_phase",
-                &[
-                    ("project", canonical_project_path.display().to_string()),
-                    ("phase", "project_sessions_admitted".to_owned()),
-                    (
-                        "elapsed_ms",
-                        project_sessions_started.elapsed().as_millis().to_string(),
-                    ),
-                ],
-            );
-            let profile_sessions_started = Instant::now();
-            let registered_user_session_db = store_administration
-                .registered_profile_session_database()
-                .await?;
-            log_daemon_event(
-                "project_open_phase",
-                &[
-                    ("project", canonical_project_path.display().to_string()),
-                    ("phase", "profile_sessions_admitted".to_owned()),
-                    (
-                        "elapsed_ms",
-                        profile_sessions_started.elapsed().as_millis().to_string(),
-                    ),
-                ],
+            log_session_database_admission(
+                canonical_project_path,
+                project_sessions_elapsed,
+                profile_sessions_elapsed,
             );
             let session_db = Arc::clone(&registered_project_session_db);
             let user_session_db = Arc::clone(&registered_user_session_db);
