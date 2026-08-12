@@ -989,17 +989,6 @@ async fn open_registered_test_database_with(
         path, &authority, mode, scope,
     )
     .await?;
-    // `Database::conn()` is the retained *reader*; schema DDL has to run on the
-    // serialized writer lane or the exact SQL channel reports
-    // `WriterUnavailable`. Converging here (rather than relying solely on the
-    // kernel's initialise-time port call) keeps the fixture correct for an
-    // already-materialised store too.
-    {
-        let writer = database
-            .writer_connection("initialize registered global-db test schema")
-            .await?;
-        crate::ensure_registered_schema(writer.engine_connection()).await?;
-    }
     let runtime = database.retained_runtime().clone();
     let expected_binding = runtime.binding().clone();
     let expected_locator = runtime.locator().verified().clone();
