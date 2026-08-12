@@ -19,6 +19,8 @@ mod advanced_workflow_journey_test;
 mod fixture_authority_test;
 #[cfg(feature = "test-transport")]
 mod git_watch_test;
+#[cfg(all(unix, feature = "test-transport"))]
+mod indexing_lifecycle_test;
 #[cfg(unix)]
 mod pr_autotrack_test;
 mod workflow_handoff_test;
