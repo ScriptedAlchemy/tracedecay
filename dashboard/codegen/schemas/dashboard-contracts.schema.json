@@ -4672,20 +4672,195 @@
       ],
       "type": "object"
     },
-    "DeliveryCiTimelineV1": {
+    "DeliveryCiCheckV1": {
       "properties": {
-        "items": {
-          "items": true,
-          "type": "array"
+        "annotation_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "check_conclusion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryCiConclusionV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "check_status": {
+          "$ref": "#/$defs/DeliveryCiStatusV1"
+        },
+        "failed_step": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure_kind": {
+          "$ref": "#/$defs/DeliveryCiFailureKindV1"
+        },
+        "id": {
+          "type": "string"
+        },
+        "job_conclusion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryCiConclusionV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "job_status": {
+          "$ref": "#/$defs/DeliveryCiStatusV1"
+        },
+        "label": {
+          "type": "string"
+        },
+        "observation_id": {
+          "type": "string"
+        },
+        "observed_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "provider_head_commit": {
+          "type": "string"
+        },
+        "run": {
+          "$ref": "#/$defs/DeliveryCiRunIdentityV1"
+        },
+        "workflow_conclusion": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryCiConclusionV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workflow_path": {
+          "type": "string"
+        },
+        "workflow_status": {
+          "$ref": "#/$defs/DeliveryCiStatusV1"
         }
       },
       "required": [
-        "items"
+        "id",
+        "label",
+        "observation_id",
+        "run",
+        "workflow_path",
+        "workflow_status",
+        "workflow_conclusion",
+        "job_status",
+        "job_conclusion",
+        "check_status",
+        "check_conclusion",
+        "failed_step",
+        "annotation_count",
+        "provider_head_commit",
+        "failure_kind",
+        "observed_at_micros"
+      ],
+      "type": "object"
+    },
+    "DeliveryCiConclusionV1": {
+      "enum": [
+        "action_required",
+        "cancelled",
+        "failure",
+        "neutral",
+        "skipped",
+        "success",
+        "timed_out"
+      ],
+      "type": "string"
+    },
+    "DeliveryCiFailureKindV1": {
+      "enum": [
+        "test_failure",
+        "compile_failure",
+        "lint_failure",
+        "infrastructure_failure",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "DeliveryCiRunIdentityV1": {
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "check_run_id": {
+          "type": "string"
+        },
+        "check_suite_id": {
+          "type": "string"
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "workflow_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workflow_id",
+        "job_id",
+        "check_suite_id",
+        "check_run_id",
+        "run_id",
+        "attempt_id"
+      ],
+      "type": "object"
+    },
+    "DeliveryCiStatusV1": {
+      "enum": [
+        "pending",
+        "queued",
+        "in_progress",
+        "completed",
+        "failed",
+        "waiting"
+      ],
+      "type": "string"
+    },
+    "DeliveryCiTimelineV1": {
+      "properties": {
+        "expected_head_commit": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DeliveryCiCheckV1"
+          },
+          "type": "array"
+        },
+        "retained_head_commit": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "retained_head_commit",
+        "expected_head_commit",
+        "items",
+        "truncated"
       ],
       "type": "object"
     },
     "DeliveryCommitTimelineV1": {
-      "description": "Bounded commit timeline shared by Delivery and Loom.",
       "properties": {
         "items": {
           "items": {
@@ -4739,24 +4914,44 @@
     "DeliveryFailureLocalizationTimelineV1": {
       "properties": {
         "items": {
-          "items": true,
+          "items": {
+            "$ref": "#/$defs/DeliveryFailureLocalizationV1"
+          },
           "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
         }
       },
       "required": [
-        "items"
+        "items",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "DeliveryFailureLocalizationV1": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
       ],
       "type": "object"
     },
     "DeliveryGenerationComparisonV1": {
       "enum": [
         "current",
-        "behind"
+        "mismatch"
       ],
       "type": "string"
     },
     "DeliveryGenerationFreshnessV1": {
-      "description": "Generation comparison shared by Delivery and any timeline consumer.",
       "properties": {
         "comparison": {
           "$ref": "#/$defs/DeliveryGenerationComparisonV1"
@@ -4830,6 +5025,69 @@
           "type": "object"
         }
       ]
+    },
+    "DeliveryGitHubCoverageV1": {
+      "enum": [
+        "complete",
+        "partial",
+        "unavailable",
+        "denied",
+        "stale"
+      ],
+      "type": "string"
+    },
+    "DeliveryGitHubOperationSnapshotV1": {
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/DeliveryGitHubCoverageV1"
+        },
+        "fetched_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "merge_base_commit_id": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/DeliveryGitHubOutcomeV1"
+        },
+        "provider_base_commit_id": {
+          "type": "string"
+        },
+        "provider_head_commit_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_base_commit_id",
+        "provider_head_commit_id",
+        "merge_base_commit_id",
+        "outcome",
+        "coverage",
+        "fetched_at_micros"
+      ],
+      "type": "object"
+    },
+    "DeliveryGitHubOutcomeV1": {
+      "enum": [
+        "complete",
+        "partial",
+        "unavailable",
+        "denied",
+        "rate_limited",
+        "stale",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "DeliveryGitHubReadOperationV1": {
+      "enum": [
+        "pull_request",
+        "reviews",
+        "review_comments",
+        "review_threads"
+      ],
+      "type": "string"
     },
     "DeliveryGitStatusV1": {
       "properties": {
@@ -4931,12 +5189,160 @@
       "type": "object"
     },
     "DeliveryProjectionV1": {
-      "description": "One reusable source projection. Absence never collapses into an empty list.",
       "oneOf": [
         {
           "properties": {
             "state": {
               "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGitStatusV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGitStatusV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGitStatusV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryGitStatusV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGitStatusV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryGitStatusV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "not_published",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "empty_measured",
               "type": "string"
             },
             "value": {
@@ -4960,12 +5366,156 @@
             "state": {
               "const": "unavailable",
               "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryGitStatusV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "state",
             "required_authority",
-            "reason"
+            "reason",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV12": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCommitTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCommitTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCommitTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryCommitTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCommitTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryCommitTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
           ],
           "type": "object"
         },
@@ -4978,7 +5528,7 @@
               "type": "string"
             },
             "state": {
-              "const": "unsupported",
+              "const": "not_published",
               "type": "string"
             }
           },
@@ -4988,16 +5538,11 @@
             "reason"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "DeliveryProjectionV12": {
-      "description": "One reusable source projection. Absence never collapses into an empty list.",
-      "oneOf": [
+        },
         {
           "properties": {
             "state": {
-              "const": "ready",
+              "const": "empty_measured",
               "type": "string"
             },
             "value": {
@@ -5021,12 +5566,156 @@
             "state": {
               "const": "unavailable",
               "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryCommitTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "state",
             "required_authority",
-            "reason"
+            "reason",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV13": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryPullRequestTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryPullRequestTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryPullRequestTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryPullRequestTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryPullRequestTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryPullRequestTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
           ],
           "type": "object"
         },
@@ -5039,7 +5728,7 @@
               "type": "string"
             },
             "state": {
-              "const": "unsupported",
+              "const": "not_published",
               "type": "string"
             }
           },
@@ -5049,16 +5738,11 @@
             "reason"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "DeliveryProjectionV13": {
-      "description": "One reusable source projection. Absence never collapses into an empty list.",
-      "oneOf": [
+        },
         {
           "properties": {
             "state": {
-              "const": "ready",
+              "const": "empty_measured",
               "type": "string"
             },
             "value": {
@@ -5082,12 +5766,156 @@
             "state": {
               "const": "unavailable",
               "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryPullRequestTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "state",
             "required_authority",
-            "reason"
+            "reason",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV14": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReviewTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReviewTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReviewTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryReviewTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReviewTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryReviewTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
           ],
           "type": "object"
         },
@@ -5100,7 +5928,7 @@
               "type": "string"
             },
             "state": {
-              "const": "unsupported",
+              "const": "not_published",
               "type": "string"
             }
           },
@@ -5110,16 +5938,11 @@
             "reason"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "DeliveryProjectionV14": {
-      "description": "One reusable source projection. Absence never collapses into an empty list.",
-      "oneOf": [
+        },
         {
           "properties": {
             "state": {
-              "const": "ready",
+              "const": "empty_measured",
               "type": "string"
             },
             "value": {
@@ -5143,12 +5966,156 @@
             "state": {
               "const": "unavailable",
               "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryReviewTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "state",
             "required_authority",
-            "reason"
+            "reason",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV15": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCiTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCiTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCiTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryCiTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCiTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryCiTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
           ],
           "type": "object"
         },
@@ -5161,7 +6128,7 @@
               "type": "string"
             },
             "state": {
-              "const": "unsupported",
+              "const": "not_published",
               "type": "string"
             }
           },
@@ -5171,16 +6138,11 @@
             "reason"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "DeliveryProjectionV15": {
-      "description": "One reusable source projection. Absence never collapses into an empty list.",
-      "oneOf": [
+        },
         {
           "properties": {
             "state": {
-              "const": "ready",
+              "const": "empty_measured",
               "type": "string"
             },
             "value": {
@@ -5204,12 +6166,156 @@
             "state": {
               "const": "unavailable",
               "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryCiTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "state",
             "required_authority",
-            "reason"
+            "reason",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV16": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryFailureLocalizationTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryFailureLocalizationTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryFailureLocalizationTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryFailureLocalizationTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryFailureLocalizationTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryFailureLocalizationTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
           ],
           "type": "object"
         },
@@ -5222,7 +6328,7 @@
               "type": "string"
             },
             "state": {
-              "const": "unsupported",
+              "const": "not_published",
               "type": "string"
             }
           },
@@ -5232,16 +6338,11 @@
             "reason"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "DeliveryProjectionV16": {
-      "description": "One reusable source projection. Absence never collapses into an empty list.",
-      "oneOf": [
+        },
         {
           "properties": {
             "state": {
-              "const": "ready",
+              "const": "empty_measured",
               "type": "string"
             },
             "value": {
@@ -5265,12 +6366,156 @@
             "state": {
               "const": "unavailable",
               "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryFailureLocalizationTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "state",
             "required_authority",
-            "reason"
+            "reason",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV17": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReleaseTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReleaseTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReleaseTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryReleaseTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReleaseTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryReleaseTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
           ],
           "type": "object"
         },
@@ -5283,7 +6528,7 @@
               "type": "string"
             },
             "state": {
-              "const": "unsupported",
+              "const": "not_published",
               "type": "string"
             }
           },
@@ -5293,16 +6538,11 @@
             "reason"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "DeliveryProjectionV17": {
-      "description": "One reusable source projection. Absence never collapses into an empty list.",
-      "oneOf": [
+        },
         {
           "properties": {
             "state": {
-              "const": "ready",
+              "const": "empty_measured",
               "type": "string"
             },
             "value": {
@@ -5326,12 +6566,156 @@
             "state": {
               "const": "unavailable",
               "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryReleaseTimelineV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "state",
             "required_authority",
-            "reason"
+            "reason",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV18": {
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "partial",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "stale",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "checkpoint": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryRateLimitCheckpointV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "retry_at_micros": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "rate_limited",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "checkpoint",
+            "retry_at_micros"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "failed",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
           ],
           "type": "object"
         },
@@ -5344,7 +6728,7 @@
               "type": "string"
             },
             "state": {
-              "const": "unsupported",
+              "const": "not_published",
               "type": "string"
             }
           },
@@ -5354,16 +6738,11 @@
             "reason"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "DeliveryProjectionV18": {
-      "description": "One reusable source projection. Absence never collapses into an empty list.",
-      "oneOf": [
+        },
         {
           "properties": {
             "state": {
-              "const": "ready",
+              "const": "empty_measured",
               "type": "string"
             },
             "value": {
@@ -5387,71 +6766,449 @@
             "state": {
               "const": "unavailable",
               "type": "string"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "state",
             "required_authority",
-            "reason"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "reason": {
-              "type": "string"
-            },
-            "required_authority": {
-              "type": "string"
-            },
-            "state": {
-              "const": "unsupported",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state",
-            "required_authority",
-            "reason"
+            "reason",
+            "value"
           ],
           "type": "object"
         }
       ]
     },
-    "DeliveryPullRequestTimelineV1": {
-      "description": "Placeholder value shapes are intentionally concrete so later authority\nmounts preserve this route rather than forcing consumers onto private APIs.",
+    "DeliveryPullRequestOperationV1": {
       "properties": {
-        "items": {
-          "items": true,
-          "type": "array"
+        "last_complete": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryGitHubOperationSnapshotV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_attempt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryGitHubOperationSnapshotV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation": {
+          "$ref": "#/$defs/DeliveryGitHubReadOperationV1"
         }
       },
       "required": [
-        "items"
+        "operation",
+        "latest_attempt",
+        "last_complete"
+      ],
+      "type": "object"
+    },
+    "DeliveryPullRequestTimelineV1": {
+      "properties": {
+        "expected_head_commit": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DeliveryPullRequestV1"
+          },
+          "type": "array"
+        },
+        "retained_head_commit": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "retained_head_commit",
+        "expected_head_commit",
+        "items",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "DeliveryPullRequestV1": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "operations": {
+          "items": {
+            "$ref": "#/$defs/DeliveryPullRequestOperationV1"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "pull_request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "provider",
+        "pull_request_id",
+        "operations"
+      ],
+      "type": "object"
+    },
+    "DeliveryRateLimitCheckpointV1": {
+      "properties": {
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reset_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "limit",
+        "remaining",
+        "reset_at_micros"
+      ],
+      "type": "object"
+    },
+    "DeliveryReleaseAssetV1": {
+      "properties": {
+        "asset_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content_type": {
+          "type": "string"
+        },
+        "created_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "download_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "download_url": {
+          "type": "string"
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updated_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "asset_id",
+        "name",
+        "label",
+        "content_type",
+        "size_bytes",
+        "download_count",
+        "download_url",
+        "digest",
+        "created_at_micros",
+        "updated_at_micros"
       ],
       "type": "object"
     },
     "DeliveryReleaseTimelineV1": {
       "properties": {
         "items": {
-          "items": true,
+          "items": {
+            "$ref": "#/$defs/DeliveryReleaseV1"
+          },
           "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
         }
       },
       "required": [
-        "items"
+        "items",
+        "truncated"
       ],
       "type": "object"
     },
-    "DeliveryReviewTimelineV1": {
+    "DeliveryReleaseV1": {
       "properties": {
-        "items": {
-          "items": true,
+        "assets": {
+          "items": {
+            "$ref": "#/$defs/DeliveryReleaseAssetV1"
+          },
           "type": "array"
+        },
+        "created_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "draft": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prerelease": {
+          "type": "boolean"
+        },
+        "published_at_micros": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "release_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_url": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
         }
       },
       "required": [
-        "items"
+        "id",
+        "label",
+        "release_id",
+        "tag",
+        "name",
+        "source_url",
+        "draft",
+        "prerelease",
+        "created_at_micros",
+        "published_at_micros",
+        "assets"
+      ],
+      "type": "object"
+    },
+    "DeliveryReviewAuthorClassV1": {
+      "enum": [
+        "bot",
+        "maintainer",
+        "other_observed_role"
+      ],
+      "type": "string"
+    },
+    "DeliveryReviewItemV1": {
+      "properties": {
+        "comment_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "observations": {
+          "items": {
+            "$ref": "#/$defs/DeliveryReviewObservationV1"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "pull_request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "provider",
+        "pull_request_id",
+        "comment_id",
+        "observations"
+      ],
+      "type": "object"
+    },
+    "DeliveryReviewLifecycleV1": {
+      "enum": [
+        "current",
+        "outdated",
+        "resolved",
+        "edited",
+        "deleted"
+      ],
+      "type": "string"
+    },
+    "DeliveryReviewObservationKindV1": {
+      "enum": [
+        "latest_attempt",
+        "last_complete"
+      ],
+      "type": "string"
+    },
+    "DeliveryReviewObservationV1": {
+      "properties": {
+        "author_class": {
+          "$ref": "#/$defs/DeliveryReviewAuthorClassV1"
+        },
+        "kind": {
+          "$ref": "#/$defs/DeliveryReviewObservationKindV1"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/DeliveryReviewLifecycleV1"
+        },
+        "observed_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "operation": {
+          "$ref": "#/$defs/DeliveryGitHubReadOperationV1"
+        },
+        "provider_outcome": {
+          "$ref": "#/$defs/DeliveryGitHubOutcomeV1"
+        },
+        "reply_to_comment_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "review_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_state": {
+          "$ref": "#/$defs/DeliveryReviewStateV1"
+        },
+        "source_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "thread_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version_digest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "kind",
+        "version_digest",
+        "repository_id",
+        "review_id",
+        "thread_id",
+        "reply_to_comment_id",
+        "author_class",
+        "review_state",
+        "lifecycle",
+        "provider_outcome",
+        "observed_at_micros",
+        "source_url"
+      ],
+      "type": "object"
+    },
+    "DeliveryReviewStateV1": {
+      "enum": [
+        "approved",
+        "changes_requested",
+        "commented",
+        "dismissed",
+        "pending",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "DeliveryReviewTimelineV1": {
+      "properties": {
+        "expected_head_commit": {
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DeliveryReviewItemV1"
+          },
+          "type": "array"
+        },
+        "retained_head_commit": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "retained_head_commit",
+        "expected_head_commit",
+        "items",
+        "truncated"
       ],
       "type": "object"
     },

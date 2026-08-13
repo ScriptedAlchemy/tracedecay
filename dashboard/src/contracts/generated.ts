@@ -898,12 +898,53 @@ export const DecideWorkRelationReplanRequestV1Schema = z.object({
 }).strict();
 export type DecideWorkRelationReplanRequestV1 = z.infer<typeof DecideWorkRelationReplanRequestV1Schema>;
 
+export const DeliveryCiCheckV1Schema = z.object({
+  annotation_count: z.number().int().safe().min(0),
+  check_conclusion: z.union([z.lazy(() => DeliveryCiConclusionV1Schema), z.null()]),
+  check_status: z.lazy(() => DeliveryCiStatusV1Schema),
+  failed_step: z.string().nullable(),
+  failure_kind: z.lazy(() => DeliveryCiFailureKindV1Schema),
+  id: z.string(),
+  job_conclusion: z.union([z.lazy(() => DeliveryCiConclusionV1Schema), z.null()]),
+  job_status: z.lazy(() => DeliveryCiStatusV1Schema),
+  label: z.string(),
+  observation_id: z.string(),
+  observed_at_micros: z.number().int().safe(),
+  provider_head_commit: z.string(),
+  run: z.lazy(() => DeliveryCiRunIdentityV1Schema),
+  workflow_conclusion: z.union([z.lazy(() => DeliveryCiConclusionV1Schema), z.null()]),
+  workflow_path: z.string(),
+  workflow_status: z.lazy(() => DeliveryCiStatusV1Schema),
+});
+export type DeliveryCiCheckV1 = z.infer<typeof DeliveryCiCheckV1Schema>;
+
+export const DeliveryCiConclusionV1Schema = z.enum(["action_required", "cancelled", "failure", "neutral", "skipped", "success", "timed_out"]);
+export type DeliveryCiConclusionV1 = z.infer<typeof DeliveryCiConclusionV1Schema>;
+
+export const DeliveryCiFailureKindV1Schema = z.enum(["compile_failure", "infrastructure_failure", "lint_failure", "test_failure", "unknown"]);
+export type DeliveryCiFailureKindV1 = z.infer<typeof DeliveryCiFailureKindV1Schema>;
+
+export const DeliveryCiRunIdentityV1Schema = z.object({
+  attempt_id: z.string(),
+  check_run_id: z.string(),
+  check_suite_id: z.string(),
+  job_id: z.string(),
+  run_id: z.string(),
+  workflow_id: z.string(),
+});
+export type DeliveryCiRunIdentityV1 = z.infer<typeof DeliveryCiRunIdentityV1Schema>;
+
+export const DeliveryCiStatusV1Schema = z.enum(["completed", "failed", "in_progress", "pending", "queued", "waiting"]);
+export type DeliveryCiStatusV1 = z.infer<typeof DeliveryCiStatusV1Schema>;
+
 export const DeliveryCiTimelineV1Schema = z.object({
-  items: z.array(z.unknown()),
+  expected_head_commit: z.string(),
+  items: z.array(z.lazy(() => DeliveryCiCheckV1Schema)),
+  retained_head_commit: z.string(),
+  truncated: z.boolean(),
 });
 export type DeliveryCiTimelineV1 = z.infer<typeof DeliveryCiTimelineV1Schema>;
 
-/** Bounded commit timeline shared by Delivery and Loom. */
 export const DeliveryCommitTimelineV1Schema = z.object({
   items: z.array(z.lazy(() => DeliveryCommitV1Schema)),
   truncated: z.boolean(),
@@ -921,14 +962,20 @@ export const DeliveryCommitV1Schema = z.object({
 export type DeliveryCommitV1 = z.infer<typeof DeliveryCommitV1Schema>;
 
 export const DeliveryFailureLocalizationTimelineV1Schema = z.object({
-  items: z.array(z.unknown()),
+  items: z.array(z.lazy(() => DeliveryFailureLocalizationV1Schema)),
+  truncated: z.boolean(),
 });
 export type DeliveryFailureLocalizationTimelineV1 = z.infer<typeof DeliveryFailureLocalizationTimelineV1Schema>;
 
-export const DeliveryGenerationComparisonV1Schema = z.enum(["behind", "current"]);
+export const DeliveryFailureLocalizationV1Schema = z.object({
+  id: z.string(),
+  label: z.string(),
+});
+export type DeliveryFailureLocalizationV1 = z.infer<typeof DeliveryFailureLocalizationV1Schema>;
+
+export const DeliveryGenerationComparisonV1Schema = z.enum(["current", "mismatch"]);
 export type DeliveryGenerationComparisonV1 = z.infer<typeof DeliveryGenerationComparisonV1Schema>;
 
-/** Generation comparison shared by Delivery and any timeline consumer. */
 export const DeliveryGenerationFreshnessV1Schema = z.object({
   comparison: z.lazy(() => DeliveryGenerationComparisonV1Schema),
   head_commit: z.string(),
@@ -948,6 +995,25 @@ export const DeliveryGitHeadV1Schema = z.discriminatedUnion("state", [z.object({
   state: z.literal("unborn"),
 })]);
 export type DeliveryGitHeadV1 = z.infer<typeof DeliveryGitHeadV1Schema>;
+
+export const DeliveryGitHubCoverageV1Schema = z.enum(["complete", "denied", "partial", "stale", "unavailable"]);
+export type DeliveryGitHubCoverageV1 = z.infer<typeof DeliveryGitHubCoverageV1Schema>;
+
+export const DeliveryGitHubOperationSnapshotV1Schema = z.object({
+  coverage: z.lazy(() => DeliveryGitHubCoverageV1Schema),
+  fetched_at_micros: z.number().int().safe(),
+  merge_base_commit_id: z.string(),
+  outcome: z.lazy(() => DeliveryGitHubOutcomeV1Schema),
+  provider_base_commit_id: z.string(),
+  provider_head_commit_id: z.string(),
+});
+export type DeliveryGitHubOperationSnapshotV1 = z.infer<typeof DeliveryGitHubOperationSnapshotV1Schema>;
+
+export const DeliveryGitHubOutcomeV1Schema = z.enum(["complete", "denied", "failed", "partial", "rate_limited", "stale", "unavailable"]);
+export type DeliveryGitHubOutcomeV1 = z.infer<typeof DeliveryGitHubOutcomeV1Schema>;
+
+export const DeliveryGitHubReadOperationV1Schema = z.enum(["pull_request", "review_comments", "review_threads", "reviews"]);
+export type DeliveryGitHubReadOperationV1 = z.infer<typeof DeliveryGitHubReadOperationV1Schema>;
 
 export const DeliveryGitStatusV1Schema = z.object({
   changed_paths: z.array(z.string()),
@@ -975,140 +1041,396 @@ export const DeliveryOverviewV1Schema = z.object({
 });
 export type DeliveryOverviewV1 = z.infer<typeof DeliveryOverviewV1Schema>;
 
-/** One reusable source projection. Absence never collapses into an empty list. */
 export const DeliveryProjectionV1Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryGitStatusV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryGitStatusV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryGitStatusV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryGitStatusV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryGitStatusV1Schema), z.null()]),
+}), z.object({
   state: z.literal("ready"),
+  value: z.lazy(() => DeliveryGitStatusV1Schema),
+}), z.object({
+  state: z.literal("stale"),
   value: z.lazy(() => DeliveryGitStatusV1Schema),
 }), z.object({
   reason: z.string(),
   required_authority: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  reason: z.string(),
-  required_authority: z.string(),
-  state: z.literal("unsupported"),
+  value: z.union([z.lazy(() => DeliveryGitStatusV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV1 = z.infer<typeof DeliveryProjectionV1Schema>;
 
-/** One reusable source projection. Absence never collapses into an empty list. */
 export const DeliveryProjectionV12Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryCommitTimelineV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryCommitTimelineV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryCommitTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryCommitTimelineV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryCommitTimelineV1Schema), z.null()]),
+}), z.object({
   state: z.literal("ready"),
+  value: z.lazy(() => DeliveryCommitTimelineV1Schema),
+}), z.object({
+  state: z.literal("stale"),
   value: z.lazy(() => DeliveryCommitTimelineV1Schema),
 }), z.object({
   reason: z.string(),
   required_authority: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  reason: z.string(),
-  required_authority: z.string(),
-  state: z.literal("unsupported"),
+  value: z.union([z.lazy(() => DeliveryCommitTimelineV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV12 = z.infer<typeof DeliveryProjectionV12Schema>;
 
-/** One reusable source projection. Absence never collapses into an empty list. */
 export const DeliveryProjectionV13Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryPullRequestTimelineV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryPullRequestTimelineV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryPullRequestTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryPullRequestTimelineV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryPullRequestTimelineV1Schema), z.null()]),
+}), z.object({
   state: z.literal("ready"),
+  value: z.lazy(() => DeliveryPullRequestTimelineV1Schema),
+}), z.object({
+  state: z.literal("stale"),
   value: z.lazy(() => DeliveryPullRequestTimelineV1Schema),
 }), z.object({
   reason: z.string(),
   required_authority: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  reason: z.string(),
-  required_authority: z.string(),
-  state: z.literal("unsupported"),
+  value: z.union([z.lazy(() => DeliveryPullRequestTimelineV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV13 = z.infer<typeof DeliveryProjectionV13Schema>;
 
-/** One reusable source projection. Absence never collapses into an empty list. */
 export const DeliveryProjectionV14Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryReviewTimelineV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryReviewTimelineV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryReviewTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryReviewTimelineV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryReviewTimelineV1Schema), z.null()]),
+}), z.object({
   state: z.literal("ready"),
+  value: z.lazy(() => DeliveryReviewTimelineV1Schema),
+}), z.object({
+  state: z.literal("stale"),
   value: z.lazy(() => DeliveryReviewTimelineV1Schema),
 }), z.object({
   reason: z.string(),
   required_authority: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  reason: z.string(),
-  required_authority: z.string(),
-  state: z.literal("unsupported"),
+  value: z.union([z.lazy(() => DeliveryReviewTimelineV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV14 = z.infer<typeof DeliveryProjectionV14Schema>;
 
-/** One reusable source projection. Absence never collapses into an empty list. */
 export const DeliveryProjectionV15Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryCiTimelineV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryCiTimelineV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryCiTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryCiTimelineV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryCiTimelineV1Schema), z.null()]),
+}), z.object({
   state: z.literal("ready"),
+  value: z.lazy(() => DeliveryCiTimelineV1Schema),
+}), z.object({
+  state: z.literal("stale"),
   value: z.lazy(() => DeliveryCiTimelineV1Schema),
 }), z.object({
   reason: z.string(),
   required_authority: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  reason: z.string(),
-  required_authority: z.string(),
-  state: z.literal("unsupported"),
+  value: z.union([z.lazy(() => DeliveryCiTimelineV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV15 = z.infer<typeof DeliveryProjectionV15Schema>;
 
-/** One reusable source projection. Absence never collapses into an empty list. */
 export const DeliveryProjectionV16Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema), z.null()]),
+}), z.object({
   state: z.literal("ready"),
+  value: z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema),
+}), z.object({
+  state: z.literal("stale"),
   value: z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema),
 }), z.object({
   reason: z.string(),
   required_authority: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  reason: z.string(),
-  required_authority: z.string(),
-  state: z.literal("unsupported"),
+  value: z.union([z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV16 = z.infer<typeof DeliveryProjectionV16Schema>;
 
-/** One reusable source projection. Absence never collapses into an empty list. */
 export const DeliveryProjectionV17Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryReleaseTimelineV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryReleaseTimelineV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryReleaseTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryReleaseTimelineV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryReleaseTimelineV1Schema), z.null()]),
+}), z.object({
   state: z.literal("ready"),
+  value: z.lazy(() => DeliveryReleaseTimelineV1Schema),
+}), z.object({
+  state: z.literal("stale"),
   value: z.lazy(() => DeliveryReleaseTimelineV1Schema),
 }), z.object({
   reason: z.string(),
   required_authority: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  reason: z.string(),
-  required_authority: z.string(),
-  state: z.literal("unsupported"),
+  value: z.union([z.lazy(() => DeliveryReleaseTimelineV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV17 = z.infer<typeof DeliveryProjectionV17Schema>;
 
-/** One reusable source projection. Absence never collapses into an empty list. */
 export const DeliveryProjectionV18Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+  value: z.union([z.lazy(() => DeliveryGenerationFreshnessV1Schema), z.null()]),
+}), z.object({
+  state: z.literal("empty_measured"),
+  value: z.lazy(() => DeliveryGenerationFreshnessV1Schema),
+}), z.object({
+  state: z.literal("failed"),
+  value: z.lazy(() => DeliveryGenerationFreshnessV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("not_published"),
+}), z.object({
+  state: z.literal("partial"),
+  value: z.lazy(() => DeliveryGenerationFreshnessV1Schema),
+}), z.object({
+  checkpoint: z.union([z.lazy(() => DeliveryRateLimitCheckpointV1Schema), z.null()]),
+  retry_at_micros: z.number().int().safe().nullable(),
+  state: z.literal("rate_limited"),
+  value: z.union([z.lazy(() => DeliveryGenerationFreshnessV1Schema), z.null()]),
+}), z.object({
   state: z.literal("ready"),
+  value: z.lazy(() => DeliveryGenerationFreshnessV1Schema),
+}), z.object({
+  state: z.literal("stale"),
   value: z.lazy(() => DeliveryGenerationFreshnessV1Schema),
 }), z.object({
   reason: z.string(),
   required_authority: z.string(),
   state: z.literal("unavailable"),
-}), z.object({
-  reason: z.string(),
-  required_authority: z.string(),
-  state: z.literal("unsupported"),
+  value: z.union([z.lazy(() => DeliveryGenerationFreshnessV1Schema), z.null()]),
 })]);
 export type DeliveryProjectionV18 = z.infer<typeof DeliveryProjectionV18Schema>;
 
-/** Placeholder value shapes are intentionally concrete so later authority
-mounts preserve this route rather than forcing consumers onto private APIs. */
+export const DeliveryPullRequestOperationV1Schema = z.object({
+  last_complete: z.union([z.lazy(() => DeliveryGitHubOperationSnapshotV1Schema), z.null()]),
+  latest_attempt: z.union([z.lazy(() => DeliveryGitHubOperationSnapshotV1Schema), z.null()]),
+  operation: z.lazy(() => DeliveryGitHubReadOperationV1Schema),
+});
+export type DeliveryPullRequestOperationV1 = z.infer<typeof DeliveryPullRequestOperationV1Schema>;
+
 export const DeliveryPullRequestTimelineV1Schema = z.object({
-  items: z.array(z.unknown()),
+  expected_head_commit: z.string(),
+  items: z.array(z.lazy(() => DeliveryPullRequestV1Schema)),
+  retained_head_commit: z.string(),
+  truncated: z.boolean(),
 });
 export type DeliveryPullRequestTimelineV1 = z.infer<typeof DeliveryPullRequestTimelineV1Schema>;
 
+export const DeliveryPullRequestV1Schema = z.object({
+  id: z.string(),
+  label: z.string(),
+  operations: z.array(z.lazy(() => DeliveryPullRequestOperationV1Schema)),
+  provider: z.string(),
+  pull_request_id: z.string(),
+});
+export type DeliveryPullRequestV1 = z.infer<typeof DeliveryPullRequestV1Schema>;
+
+export const DeliveryRateLimitCheckpointV1Schema = z.object({
+  limit: z.number().int().min(0),
+  remaining: z.number().int().min(0),
+  reset_at_micros: z.number().int().safe(),
+});
+export type DeliveryRateLimitCheckpointV1 = z.infer<typeof DeliveryRateLimitCheckpointV1Schema>;
+
+export const DeliveryReleaseAssetV1Schema = z.object({
+  asset_id: z.number().int().safe().min(0),
+  content_type: z.string(),
+  created_at_micros: z.number().int().safe(),
+  digest: z.string().nullable(),
+  download_count: z.number().int().safe().min(0),
+  download_url: z.string(),
+  label: z.string().nullable(),
+  name: z.string(),
+  size_bytes: z.number().int().safe().min(0),
+  updated_at_micros: z.number().int().safe(),
+});
+export type DeliveryReleaseAssetV1 = z.infer<typeof DeliveryReleaseAssetV1Schema>;
+
 export const DeliveryReleaseTimelineV1Schema = z.object({
-  items: z.array(z.unknown()),
+  items: z.array(z.lazy(() => DeliveryReleaseV1Schema)),
+  truncated: z.boolean(),
 });
 export type DeliveryReleaseTimelineV1 = z.infer<typeof DeliveryReleaseTimelineV1Schema>;
 
+export const DeliveryReleaseV1Schema = z.object({
+  assets: z.array(z.lazy(() => DeliveryReleaseAssetV1Schema)),
+  created_at_micros: z.number().int().safe(),
+  draft: z.boolean(),
+  id: z.string(),
+  label: z.string(),
+  name: z.string().nullable(),
+  prerelease: z.boolean(),
+  published_at_micros: z.number().int().safe().nullable(),
+  release_id: z.number().int().safe().min(0),
+  source_url: z.string(),
+  tag: z.string(),
+});
+export type DeliveryReleaseV1 = z.infer<typeof DeliveryReleaseV1Schema>;
+
+export const DeliveryReviewAuthorClassV1Schema = z.enum(["bot", "maintainer", "other_observed_role"]);
+export type DeliveryReviewAuthorClassV1 = z.infer<typeof DeliveryReviewAuthorClassV1Schema>;
+
+export const DeliveryReviewItemV1Schema = z.object({
+  comment_id: z.string(),
+  id: z.string(),
+  label: z.string(),
+  observations: z.array(z.lazy(() => DeliveryReviewObservationV1Schema)),
+  provider: z.string(),
+  pull_request_id: z.string(),
+});
+export type DeliveryReviewItemV1 = z.infer<typeof DeliveryReviewItemV1Schema>;
+
+export const DeliveryReviewLifecycleV1Schema = z.enum(["current", "deleted", "edited", "outdated", "resolved"]);
+export type DeliveryReviewLifecycleV1 = z.infer<typeof DeliveryReviewLifecycleV1Schema>;
+
+export const DeliveryReviewObservationKindV1Schema = z.enum(["last_complete", "latest_attempt"]);
+export type DeliveryReviewObservationKindV1 = z.infer<typeof DeliveryReviewObservationKindV1Schema>;
+
+export const DeliveryReviewObservationV1Schema = z.object({
+  author_class: z.lazy(() => DeliveryReviewAuthorClassV1Schema),
+  kind: z.lazy(() => DeliveryReviewObservationKindV1Schema),
+  lifecycle: z.lazy(() => DeliveryReviewLifecycleV1Schema),
+  observed_at_micros: z.number().int().safe(),
+  operation: z.lazy(() => DeliveryGitHubReadOperationV1Schema),
+  provider_outcome: z.lazy(() => DeliveryGitHubOutcomeV1Schema),
+  reply_to_comment_id: z.string().nullable(),
+  repository_id: z.string(),
+  review_id: z.string().nullable(),
+  review_state: z.lazy(() => DeliveryReviewStateV1Schema),
+  source_url: z.string().nullable(),
+  thread_id: z.string().nullable(),
+  version_digest: z.string(),
+});
+export type DeliveryReviewObservationV1 = z.infer<typeof DeliveryReviewObservationV1Schema>;
+
+export const DeliveryReviewStateV1Schema = z.enum(["approved", "changes_requested", "commented", "dismissed", "pending", "unknown"]);
+export type DeliveryReviewStateV1 = z.infer<typeof DeliveryReviewStateV1Schema>;
+
 export const DeliveryReviewTimelineV1Schema = z.object({
-  items: z.array(z.unknown()),
+  expected_head_commit: z.string(),
+  items: z.array(z.lazy(() => DeliveryReviewItemV1Schema)),
+  retained_head_commit: z.string(),
+  truncated: z.boolean(),
 });
 export type DeliveryReviewTimelineV1 = z.infer<typeof DeliveryReviewTimelineV1Schema>;
 
