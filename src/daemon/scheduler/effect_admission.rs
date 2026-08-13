@@ -107,13 +107,92 @@ pub(super) async fn scheduler_automation_effect(
     Ok((effect, run_id, effect_run_control))
 }
 
+/// Poll period for the scheduler cancellation bridge.
+///
+/// Retained settlement retries back off to at most five seconds, so a
+/// sub-second poll guarantees an in-flight settlement observes cancellation
+/// within one retry iteration of scheduler retirement or daemon draining.
+const SCHEDULER_CANCELLATION_BRIDGE_POLL: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+/// Hard ceiling on one bridge's lifetime.
+///
+/// A bridge normally ends as soon as its effect run control is dropped or the
+/// signal is cancelled. This bound is the backstop that stops a leaked run
+/// control clone from polling for the remaining life of the daemon.
+const SCHEDULER_CANCELLATION_BRIDGE_MAX_LIFETIME: std::time::Duration =
+    std::time::Duration::from_secs(30 * 60);
+
+/// Keeps one scheduler run's cancellation signal live while its settlement
+/// blocks, and aborts that polling task as soon as the owning effect run
+/// control is dropped.
+struct SchedulerCancellationBridge {
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for SchedulerCancellationBridge {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Flips one scheduler run's cancellation signal when the scheduler's own
+/// interruption predicate turns true, without waiting for the next evaluation
+/// of the effect run control.
+///
+/// The scheduler's shutdown sources (`DaemonLifecycle` draining and
+/// `AutomationSchedulerStop`) are synchronous atomics with no shutdown future
+/// to await, and the effect run control only sees them through the parent's
+/// opaque predicate, so this polls that predicate rather than bridging a
+/// channel.
+fn spawn_scheduler_cancellation_bridge<Interrupted>(
+    interrupted: Interrupted,
+    cancellation: tracedecay_application::CancellationSignal,
+) -> SchedulerCancellationBridge
+where
+    Interrupted: Fn() -> bool + Send + 'static,
+{
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return SchedulerCancellationBridge { task: None };
+    };
+    let task = runtime.spawn(async move {
+        let started = tokio::time::Instant::now();
+        loop {
+            tokio::time::sleep(SCHEDULER_CANCELLATION_BRIDGE_POLL).await;
+            if cancellation.is_cancelled() {
+                return;
+            }
+            if interrupted() {
+                let _ = cancellation.cancel(tracedecay_application::now_micros());
+                return;
+            }
+            if started.elapsed() >= SCHEDULER_CANCELLATION_BRIDGE_MAX_LIFETIME {
+                return;
+            }
+        }
+    });
+    SchedulerCancellationBridge { task: Some(task) }
+}
+
 fn scheduler_effect_run_control(
     run_control: &AutomationRunControl,
     cancellation: tracedecay_application::CancellationSignal,
     deadline: tracedecay_application::Deadline,
 ) -> AutomationRunControl {
     let parent = run_control.read_control().clone();
+    let bridge = spawn_scheduler_cancellation_bridge(
+        {
+            let parent = parent.clone();
+            move || parent.interrupted()
+        },
+        cancellation.clone(),
+    );
     AutomationRunControl::from_interrupted(std::sync::Arc::new(move || {
+        // Load-bearing capture: the bridge is owned by this predicate, so it
+        // is aborted exactly when the effect run control is dropped.
+        let _bridge = &bridge;
         let observed_at = tracedecay_application::now_micros();
         if parent.interrupted() {
             let _ = cancellation.cancel(observed_at);
@@ -695,12 +774,13 @@ pub(crate) fn scheduler_automation_request_id(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use tracedecay_agent_hosts::automation::AutomationRunControl;
     use tracedecay_application::{CancellationSignal, Deadline};
     use tracedecay_domain::UtcMicros;
 
-    use super::scheduler_effect_run_control;
+    use super::{scheduler_effect_run_control, synchronize_scheduler_effect_control};
 
     #[test]
     fn effect_control_propagates_live_scheduler_stop_to_cancellation() {
@@ -739,5 +819,62 @@ mod tests {
 
         assert!(control.read_control().interrupted());
         assert!(!effect_cancellation.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn effect_control_bridge_cancels_a_blocked_settlement_on_scheduler_stop() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&stopped);
+        let scheduler = AutomationRunControl::from_interrupted(Arc::new(move || {
+            observed.load(Ordering::Acquire)
+        }));
+        let cancellation = CancellationSignal::active("cancel.scheduler-effect-bridge")
+            .expect("valid cancellation signal");
+        let effect_cancellation = cancellation.clone();
+        let control = scheduler_effect_run_control(
+            &scheduler,
+            cancellation,
+            Deadline::new(UtcMicros(i64::MAX)).expect("valid scheduler deadline"),
+        );
+        // The one production evaluation that happens before settlement starts.
+        synchronize_scheduler_effect_control(&control);
+        assert!(!effect_cancellation.is_cancelled());
+
+        stopped.store(true, Ordering::Release);
+        // Nothing evaluates the run control again while settlement blocks, so
+        // only the bridge can flip the signal the retry loop polls.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert!(
+            effect_cancellation.is_cancelled(),
+            "scheduler retirement must reach an in-flight settlement within one retry iteration"
+        );
+        drop(control);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn effect_control_bridge_stops_when_the_run_control_is_dropped() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&stopped);
+        let scheduler = AutomationRunControl::from_interrupted(Arc::new(move || {
+            observed.load(Ordering::Acquire)
+        }));
+        let cancellation = CancellationSignal::active("cancel.scheduler-effect-bridge-drop")
+            .expect("valid cancellation signal");
+        let effect_cancellation = cancellation.clone();
+        let control = scheduler_effect_run_control(
+            &scheduler,
+            cancellation,
+            Deadline::new(UtcMicros(i64::MAX)).expect("valid scheduler deadline"),
+        );
+
+        drop(control);
+        stopped.store(true, Ordering::Release);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+
+        assert!(
+            !effect_cancellation.is_cancelled(),
+            "a settled run's bridge must not outlive its effect run control"
+        );
     }
 }
