@@ -228,9 +228,23 @@ impl ProductionProjectCompositionHarnessV1 {
                     .await
                 })
                 .await?;
+            let code_search_scope = {
+                let graph = composition.server.cg().await;
+                let target = graph.configuration_runtime().configuration_target();
+                project_open_owners::resolved_scope_for_project(
+                    graph.project_root(),
+                    &target.project_id,
+                )
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "production-composition code-index scope is invalid: {error:?}"
+                    ),
+                })?
+            };
             wait_for_production_composition_code_index(
                 &invocation,
                 &composition.canonical_project_path,
+                &code_search_scope,
             )
             .await?;
             semantic_auto_download_enabled |= composition
@@ -670,12 +684,16 @@ impl ProductionProjectCompositionHarnessV1 {
 async fn wait_for_production_composition_code_index(
     invocation: &DaemonInvocationState,
     project_root: &Path,
+    scope: &tracedecay_application::ResolvedScope,
 ) -> Result<()> {
     timeout(Duration::from_secs(20), async {
         loop {
+            // Scope-aware readiness is the authenticated demand boundary that
+            // starts the registered route-local activation owner. The root-only
+            // probe cannot mount an idle on-demand scheduler.
             if invocation
                 .code_index_schedulers
-                .latest_complete_ready(project_root)
+                .latest_complete_ready_for_scope(scope)
                 .await
                 .is_some()
             {
@@ -734,6 +752,63 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
     )
     .await;
     drop(resources);
+}
+
+#[cfg(test)]
+mod code_index_activation_test {
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn open_activates_code_index_before_waiting_for_publication() {
+        let isolation = TempDir::new().expect("production harness isolation");
+        let project = isolation.path().join("project");
+        std::fs::create_dir_all(&project).expect("project root");
+        std::fs::write(project.join("lib.rs"), "pub fn indexed_symbol() {}\n")
+            .expect("project source");
+        for arguments in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "-qm",
+                "seed project",
+            ],
+        ] {
+            let status = Command::new(crate::git::git_program())
+                .args(&arguments)
+                .current_dir(&project)
+                .status()
+                .expect("git fixture command");
+            assert!(status.success(), "git {arguments:?}");
+        }
+
+        let harness =
+            ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+                .await
+                .expect("production harness activates its code index");
+        let resources = harness
+            .resources
+            .as_ref()
+            .expect("production harness resources");
+        assert!(
+            resources
+                .invocation
+                .code_index_schedulers
+                .latest_complete_ready(&project)
+                .await
+                .is_some(),
+            "production harness returned before code-index publication"
+        );
+        harness.shutdown().await;
+    }
 }
 
 #[cfg(test)]
