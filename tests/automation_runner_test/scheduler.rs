@@ -913,7 +913,7 @@ fn scheduler_rejects_conflicting_duplicate_canonical_identity_in_either_order() 
         schedule_decision(
             &config,
             AgentTaskKind::SkillWriter,
-            &[success.clone(), success],
+            &[success.clone(), success.clone()],
             SessionActivity::none(),
             1_500,
         )
