@@ -656,7 +656,7 @@ fn publish_under_ledger_lock(
 ) -> Result<ExactRunPublishOutcome> {
     let mut ledger = super::exact_lookup::open_stabilized_run_ledger(ledger_path, true)?
         .ok_or_else(|| config_error("automation run ledger disappeared during durable open"))?;
-    recover_matching_append_intent(
+    let recovered_intent = recover_matching_append_intent(
         dashboard_root,
         ledger_path,
         &mut ledger,
@@ -671,6 +671,12 @@ fn publish_under_ledger_lock(
             if existing.digest == publication.ledger_digest
                 && existing.payload_len == publication.payload_len =>
         {
+            // A retained recovered intent cannot coexist with a durable exact
+            // row (its partial append was truncated under this same lock),
+            // but never return Published while one is outstanding.
+            if recovered_intent.is_some() {
+                clear_append_intent(dashboard_root)?;
+            }
             return Ok(ExactRunPublishOutcome::Published);
         }
         Some(_) => {
@@ -682,16 +688,38 @@ fn publish_under_ledger_lock(
     }
 
     let Some(mut spool) = open_bound_spool(spool_path, run_id, publication)? else {
+        if recovered_intent.is_some() {
+            // Recovery opened this spool under the same held lock; losing it
+            // here would strand the retained intent and wedge future appends.
+            return Err(config_error(
+                "automation run append intent lost its exact staged payload",
+            ));
+        }
         return Ok(ExactRunPublishOutcome::MissingPayload);
     };
     let pre_append_eof = ledger.metadata().map_err(TraceDecayError::from)?.len();
-    let intent = LedgerAppendIntent {
-        schema_version: 1,
-        run_id: run_id.to_owned(),
-        pre_append_eof,
-        publication: publication.clone(),
+    let intent = match recovered_intent {
+        Some(intent) => {
+            if intent.pre_append_eof != pre_append_eof {
+                return Err(config_error(
+                    "automation run ledger changed under its retained append intent",
+                ));
+            }
+            // The recovered intent was already write-through republished;
+            // resume the append it owns without a second identical write.
+            intent
+        }
+        None => {
+            let intent = LedgerAppendIntent {
+                schema_version: 1,
+                run_id: run_id.to_owned(),
+                pre_append_eof,
+                publication: publication.clone(),
+            };
+            write_append_intent_with_publisher(dashboard_root, &intent, publish_file)?;
+            intent
+        }
     };
-    write_append_intent_with_publisher(dashboard_root, &intent, publish_file)?;
 
     ledger
         .seek(SeekFrom::Start(pre_append_eof))
@@ -704,6 +732,14 @@ fn publish_under_ledger_lock(
     Ok(ExactRunPublishOutcome::Published)
 }
 
+/// Resolves a pre-existing append intent before a new exact publication may
+/// proceed. Returns `Some(intent)` when a matching intent was write-through
+/// republished and RETAINED because its append has not completed: the caller
+/// must resume the append under that exact intent (the ledger has been
+/// truncated back to `intent.pre_append_eof`) rather than clearing and
+/// rewriting identical bytes. Returns `None` when no intent remains
+/// outstanding (absent, repaired-corrupt, or its append was already durably
+/// complete and the intent was cleared).
 fn recover_matching_append_intent(
     dashboard_root: &Path,
     ledger_path: &Path,
@@ -712,14 +748,14 @@ fn recover_matching_append_intent(
     run_id: &str,
     publication: &ExactRunPublication,
     publish_file: &AtomicFilePublisher<'_>,
-) -> Result<()> {
+) -> Result<Option<LedgerAppendIntent>> {
     let intent = match read_append_intent_state(dashboard_root)? {
-        LedgerAppendIntentState::Missing => return Ok(()),
+        LedgerAppendIntentState::Missing => return Ok(None),
         LedgerAppendIntentState::Valid(intent) => intent,
         LedgerAppendIntentState::Corrupt(bytes) => {
             quarantine_corrupt_append_intent(dashboard_root, &bytes)?;
             repair_corrupt_append_intent(dashboard_root, ledger_path, ledger, &bytes)?;
-            return Ok(());
+            return Ok(None);
         }
     };
     if intent.run_id != run_id || intent.publication != *publication {
@@ -751,13 +787,17 @@ fn recover_matching_append_intent(
     if appended_len == complete_len {
         verify_published_range(ledger, &mut spool, &intent)?;
         sync_run_ledger_file_and_parent(ledger_path, ledger)?;
-        return clear_append_intent(dashboard_root);
+        clear_append_intent(dashboard_root)?;
+        return Ok(None);
     }
     ledger
         .set_len(intent.pre_append_eof)
         .map_err(TraceDecayError::from)?;
     sync_run_ledger_file_and_parent(ledger_path, ledger)?;
-    clear_append_intent(dashboard_root)
+    // The republished intent stays durable and owns the upcoming append; the
+    // caller resumes under it instead of clearing and rewriting the same
+    // bytes with a second atomic publication.
+    Ok(Some(intent))
 }
 
 fn compare_owned_prefix(
