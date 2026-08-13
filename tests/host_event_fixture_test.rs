@@ -968,8 +968,13 @@ async fn cross_provider_host_admission_commit_before_ack_and_cancel_are_idempote
             .await;
         assert_eq!(
             committed.status,
-            HostAdmissionStatus::Committed,
-            "{provider}: first capture must commit, got {committed:?}"
+            HostAdmissionStatus::AcceptedForReplay,
+            "{provider}: first capture must retain projection-pending replay authority, got {committed:?}"
+        );
+        assert_eq!(
+            committed.reason_code,
+            Some("external_source_projection_pending"),
+            "{provider}"
         );
 
         let duplicate = facade
