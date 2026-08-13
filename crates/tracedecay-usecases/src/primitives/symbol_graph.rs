@@ -28,6 +28,7 @@ use crate::primitives::concrete::SymbolGraphCursorSnapshot;
 
 const MAX_COMPATIBILITY_RESULTS: usize = 500;
 const MAX_IMPLEMENTATION_RESULTS: usize = 200;
+const MAX_GRAPH_SCAN: usize = 500_000;
 
 pub type SymbolGraphCursorFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, PrimitiveFailure>> + Send + 'a>>;
@@ -719,7 +720,6 @@ fn all_symbols(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Vec<CodeGraphSymbolSummaryV1>, ()> {
-    const MAX_SYMBOLS: usize = 500_000;
     const PAGE_SIZE: usize = 4_096;
     let mut after = None;
     let mut symbols = Vec::new();
@@ -727,7 +727,7 @@ fn all_symbols(
         let page = graph
             .symbols_page(after.as_ref(), PAGE_SIZE, Arc::clone(&cancellation))
             .map_err(|_| ())?;
-        if symbols.len().saturating_add(page.symbols.len()) > MAX_SYMBOLS {
+        if symbols.len().saturating_add(page.symbols.len()) > MAX_GRAPH_SCAN {
             return Err(());
         }
         after = page.symbols.last().map(|symbol| symbol.occurrence.clone());
@@ -738,20 +738,26 @@ fn all_symbols(
     }
 }
 
-fn trait_implementations(
+pub(super) fn trait_implementations(
     graph: &CodeGraphInteractiveReader,
     cancellation: Arc<dyn GraphCancellation>,
     name: &str,
     scope: &SymbolGraphScope,
 ) -> Result<Vec<SymbolRelationRecord>, ()> {
-    let candidates = graph
-        .resolve_simple_name(
-            name,
-            None,
-            MAX_IMPLEMENTATION_RESULTS,
-            Arc::clone(&cancellation),
-        )
-        .map_err(|_| ())?;
+    let symbols = all_symbols(graph, Arc::clone(&cancellation))?;
+    let exact_candidates = symbols
+        .iter()
+        .filter(|node| is_trait_named(node, name, true))
+        .cloned()
+        .collect::<Vec<_>>();
+    let candidates = if exact_candidates.is_empty() {
+        symbols
+            .into_iter()
+            .filter(|node| is_trait_named(node, name, false))
+            .collect()
+    } else {
+        exact_candidates
+    };
     let mut records = Vec::new();
     for trait_node in candidates.into_iter().filter(|node| {
         node.metadata.as_ref().is_some_and(|metadata| {
@@ -765,7 +771,7 @@ fn trait_implementations(
             .callers(
                 std::slice::from_ref(&trait_node.occurrence),
                 &[RelationEdgeKindV1::Implements],
-                MAX_IMPLEMENTATION_RESULTS,
+                MAX_GRAPH_SCAN,
                 Arc::clone(&cancellation),
             )
             .map_err(|_| ())?;
@@ -781,12 +787,30 @@ fn trait_implementations(
                 dispatch_from: Some(trait_node.occurrence.as_str().to_owned()),
                 depth: None,
             });
-            if records.len() >= MAX_IMPLEMENTATION_RESULTS {
-                return Ok(records);
-            }
         }
     }
+    records.sort_by(|left, right| {
+        left.symbol
+            .node_id
+            .cmp(&right.symbol.node_id)
+            .then_with(|| left.dispatch_from.cmp(&right.dispatch_from))
+    });
+    records.dedup_by(|left, right| left.symbol.node_id == right.symbol.node_id);
+    records.truncate(MAX_IMPLEMENTATION_RESULTS);
     Ok(records)
+}
+
+fn is_trait_named(node: &CodeGraphSymbolSummaryV1, name: &str, qualified: bool) -> bool {
+    node.metadata.as_ref().is_some_and(|metadata| {
+        matches!(
+            NodeKind::from_str(&metadata.kind),
+            Some(NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType)
+        ) && if qualified {
+            metadata.qualified_name == name
+        } else {
+            metadata.simple_name.eq_ignore_ascii_case(name)
+        }
+    })
 }
 
 fn signature_matches(node: &CodeGraphSymbolSummaryV1, request: &SignatureSearchRequest) -> bool {
