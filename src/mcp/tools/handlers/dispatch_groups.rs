@@ -542,6 +542,13 @@ pub(super) async fn dispatch_analysis_tools(
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
             analysis::handle_unused_imports(cg, &graph, args, scope_prefix).await
         }
+        // The one analysis tool that opens no graph query: its whole finding is
+        // that the graph and the compiler disagree, so taking the graph's file
+        // set as input would answer the question with the very source that is
+        // under suspicion.
+        "tracedecay_unmounted_files" => {
+            analysis::handle_unmounted_files(cg, args, scope_prefix).await
+        }
         "tracedecay_rank" => {
             let graph = admitted_graph_query(cg, &options, "health_read").await?;
             analysis::handle_rank(cg, &graph, args, scope_prefix).await

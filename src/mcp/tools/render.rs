@@ -655,6 +655,75 @@ pub(super) fn unused_imports_md(value: &Value) -> String {
     md.render()
 }
 
+/// Dedicated markdown renderer for `tracedecay_unmounted_files`.
+///
+/// An empty answer here is a real and welcome verdict — "every source file is
+/// mounted" — so it is spelled out rather than left as the generic renderer's
+/// silence. When findings exist, each one leads with the repair (`add
+/// `mod foo;` to src/daemon.rs`) because the reader's next action is an edit,
+/// not further investigation.
+pub(super) fn unmounted_files_md(value: &Value) -> String {
+    let mut md = Md::new();
+    md.heading(2, "Unmounted Files");
+
+    let unmounted = value
+        .get("unmounted")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let count = value
+        .get("unmounted_file_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(unmounted.len() as u64);
+    md.field("Unmounted file count", &count.to_string());
+    for (key, label) in [
+        ("crate_count", "Crates walked"),
+        ("scanned_file_count", "Files scanned"),
+        ("mounted_file_count", "Files mounted"),
+    ] {
+        if let Some(number) = value.get(key).and_then(Value::as_u64) {
+            md.field(label, &number.to_string());
+        }
+    }
+    // A truncated list must never read as the whole finding.
+    if value.get("complete").and_then(Value::as_bool) == Some(false)
+        && let Some(omitted) = value.get("omitted_count").and_then(Value::as_u64)
+    {
+        md.field("Coverage", "partial");
+        md.field("Omitted", &format!("{omitted} (raise `limit` to see them)"));
+    }
+    md.blank();
+
+    if unmounted.is_empty() {
+        if value.get("crate_count").and_then(Value::as_u64) == Some(0) {
+            md.empty_note("No cargo package was found; this audit covers Rust crates.");
+        } else {
+            md.empty_note("Every scanned source file is reachable from a cargo target root.");
+        }
+        return md.render();
+    }
+
+    md.heading(3, "Findings");
+    for entry in unmounted {
+        let file = entry
+            .get("file")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let crate_name = entry.get("crate").and_then(Value::as_str).unwrap_or("");
+        md.bullet(&format!("**{file}** (crate `{crate_name}`)"));
+        let declaration = entry
+            .get("suggested_declaration")
+            .and_then(Value::as_str)
+            .unwrap_or("mod <module>;");
+        match entry.get("nearest_mounted_parent").and_then(Value::as_str) {
+            Some(parent) => md.line(&format!("  **Fix:** add `{declaration}` to {parent}")),
+            None => md.line(&format!(
+                "  **Fix:** no mounted ancestor exists; the whole branch needs a root, then `{declaration}`"
+            )),
+        };
+    }
+    md.render()
+}
+
 fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
     let level = diagnostic
         .get("level")

@@ -35,7 +35,7 @@ pub mod projection;
 pub mod provider;
 pub mod receipts;
 pub mod retained_parse;
-mod source_walk;
+pub mod source_walk;
 pub mod test_attribution;
 
 pub use self::intake::CodeIndexIntake;

@@ -101,6 +101,37 @@ pub(super) fn def_unused_imports() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_unmounted_files() -> ToolDefinition {
+    def(
+        "tracedecay_unmounted_files",
+        "Unmounted Files",
+        "Find Rust source files present on disk that no `mod` declaration reaches from any cargo \
+         target root — files the code graph indexes as healthy symbols but the compiler never \
+         parses. Walks each workspace crate from its own roots (src/lib.rs, src/main.rs, \
+         src/bin/*.rs, every tests/*.rs and tests/<name>/main.rs, benches, examples, build.rs), \
+         follows `mod name;` and `#[path = \"...\"]`, and diffs the reachable set against the \
+         .rs files under that crate's source directories. Each finding names the crate, the \
+         nearest mounted parent module that could declare it, and the exact `mod` line to add. \
+         cfg-gated modules count as mounted (predicates are not evaluated). Known blind spots: a \
+         file pulled in by `include!` and a `mod` declared inside a function body are reported as \
+         unmounted. Paths listed in the workspace's `[workspace.metadata.cargo-shear] \
+         ignored-paths` are excluded.",
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Filter findings to files under this directory path (e.g. 'src/daemon'). The whole workspace is still walked — mount status is not a per-directory question."
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum unmounted files to return (default: 200, max: 2000). The response always states the true total and how many rows were omitted."
+                }
+            }
+        }),
+    )
+}
+
 pub(super) fn def_rank() -> ToolDefinition {
     def(
         "tracedecay_rank",

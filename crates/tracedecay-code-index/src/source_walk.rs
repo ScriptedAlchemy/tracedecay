@@ -1,12 +1,22 @@
+//! The one working-tree walk every source-reading surface shares.
+//!
+//! Grep, ast-grep search, and the module-mount audit must all agree on what
+//! "a file in this project" means: the same `.gitignore` rules, the same
+//! generated-directory skips, the same refusal to follow links. A second walker
+//! built next to this one would drift, and a scan that disagrees with the one
+//! the indexer used reports findings the rest of the product cannot see. The
+//! walk is therefore public rather than crate-private — the audit in the root
+//! crate reuses this policy instead of restating it.
+
 use std::path::{Path, PathBuf};
 
 use ignore::overrides::{Override, OverrideBuilder};
 use ignore::{Walk, WalkBuilder};
 
 #[derive(Debug)]
-pub(crate) struct SourceWalkError {
-    pub(crate) glob: String,
-    pub(crate) message: String,
+pub struct SourceWalkError {
+    pub glob: String,
+    pub message: String,
 }
 
 struct GeneratedDirScope {
@@ -70,10 +80,7 @@ impl GeneratedDirScope {
     }
 }
 
-pub(crate) fn source_walk(
-    project_root: &Path,
-    path_glob: Option<&str>,
-) -> Result<Walk, SourceWalkError> {
+pub fn source_walk(project_root: &Path, path_glob: Option<&str>) -> Result<Walk, SourceWalkError> {
     let overrides = build_overrides(project_root, path_glob)?;
     let has_positive_override = overrides
         .as_ref()

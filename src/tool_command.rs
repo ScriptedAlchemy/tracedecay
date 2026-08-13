@@ -744,6 +744,7 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         "workflow"
     } else if n == "tracedecay_dead_code"
         || n == "tracedecay_unused_imports"
+        || n == "tracedecay_unmounted_files"
         || n == "tracedecay_module_api"
         || n == "tracedecay_circular"
         || n == "tracedecay_hotspots"

@@ -94,6 +94,7 @@ const ANALYSIS_TOOLS: &[&str] = &[
     "circular",
     "hotspots",
     "unused_imports",
+    "unmounted_files",
     "rank",
     "largest",
     "coupling",

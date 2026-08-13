@@ -7,7 +7,10 @@
 //! `constructors`, `field_sites`, `imports`, `recursion`, and `unsafe_patterns`
 //! read Rust source with hand-rolled byte scanners built on [`lex`]. That
 //! scanning is scheduled to move onto ast-grep patterns and graph edges — see
-//! the migration notes in `docs/` before extending it.
+//! the migration notes in `docs/` before extending it. `unmounted_files` is the
+//! one source-reading sibling that already parses: a mis-read `mod` line there
+//! would report a compiled file as an orphan (or, worse, hide a real one), so
+//! it uses tree-sitter rather than joining the byte-scanner cohort.
 
 mod circular;
 mod complexity;
@@ -20,6 +23,7 @@ mod imports;
 mod lex;
 mod metrics;
 mod recursion;
+mod unmounted_files;
 mod unsafe_patterns;
 
 pub(super) use circular::handle_circular;
@@ -34,6 +38,7 @@ pub(super) use metrics::{
     handle_coupling, handle_distribution, handle_inheritance_depth, handle_largest, handle_rank,
 };
 pub(super) use recursion::handle_recursion;
+pub(super) use unmounted_files::handle_unmounted_files;
 pub(super) use unsafe_patterns::handle_unsafe_patterns;
 
 use lex::{is_ident_byte, line_number_at, skip_ascii_whitespace};
