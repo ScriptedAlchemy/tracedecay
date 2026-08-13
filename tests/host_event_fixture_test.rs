@@ -83,6 +83,7 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
     let _data_dir = EnvVarGuard::set(tracedecay::config::USER_DATA_DIR_ENV, &data_root);
     let boundary_project = initialize_boundary_project(&home);
+    let _daemon = spawn_tracedecay_daemon(&home);
     let init = tracedecay_command_with_home(&home)
         .arg("init")
         .current_dir(&boundary_project)
@@ -94,7 +95,6 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
         String::from_utf8_lossy(&init.stdout),
         String::from_utf8_lossy(&init.stderr)
     );
-    let _daemon = spawn_tracedecay_daemon(&home);
     let transcript_path = write_claude_boundary_transcript(&home, &boundary_project);
     let unavailable = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
 
