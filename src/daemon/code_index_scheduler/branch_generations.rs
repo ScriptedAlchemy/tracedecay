@@ -39,6 +39,31 @@ pub(in crate::daemon) struct BranchGenerationPairV1 {
     pub(in crate::daemon) head: LatestCompleteCodeIndexV1,
 }
 
+/// Which half of a requested exact revision pair the durable index could not
+/// serve. Carrying both sides separately is the whole point: the mint path used
+/// to rebuild *base* whenever anything was missing, so a request whose base was
+/// already sealed and whose head was not paid for a redundant full-tree capture
+/// — and failed outright whenever that redundant base capture could not be
+/// performed.
+#[derive(Clone, Copy, Debug)]
+struct ExactGenerationMissV1 {
+    base: bool,
+    head: bool,
+}
+
+/// Outcome of resolving one exact revision pair against the durable generation
+/// index. A miss is deliberately *not* an error: sealing a generation from an
+/// immutable commit tree is idempotent, so every shape of absence — never
+/// indexed, pruned out of the bounded index, or named by an entry whose sealed
+/// bytes are gone — is answered the same way, by minting it.
+enum ExactGenerationPairV1 {
+    Sealed(
+        Arc<CodeIndexPublishedGenerationV1>,
+        Arc<CodeIndexPublishedGenerationV1>,
+    ),
+    Missing(ExactGenerationMissV1),
+}
+
 impl DaemonCodeIndexPublicationStoreV1 {
     pub(super) fn exact_read_error(
         error: crate::code_index::production::CodeIndexPublicationStoreErrorV1,
@@ -60,20 +85,29 @@ impl DaemonCodeIndexPublicationStoreV1 {
         head_revision: &GitOidV1,
         head_tree: &GitOidV1,
         control: &BranchGenerationReadControlV1,
-    ) -> Result<
-        (
-            Arc<CodeIndexPublishedGenerationV1>,
-            Arc<CodeIndexPublishedGenerationV1>,
-        ),
-        CodeIndexSearchUnavailableReasonV1,
-    > {
+    ) -> Result<ExactGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
         if let Some(reason) = control.termination() {
             return Err(reason);
         }
-        let pointer = self
+        let Some(pointer) = self
             .read_publication_pointer()
             .map_err(Self::exact_read_error)?
-            .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
+        else {
+            // No publication at all is the emptiest possible index miss, and an
+            // empty index is exactly as mint-eligible as a pruned one.
+            return Ok(ExactGenerationPairV1::Missing(ExactGenerationMissV1 {
+                base: true,
+                head: true,
+            }));
+        };
+        // `generation_index_truncated` says only that the absence of an entry no
+        // longer proves the revision was never indexed. It used to be reported
+        // here as `CapacityUnavailable`, which callers read as a transient
+        // "retry later" — but the flag latches on the first eviction and never
+        // clears, so once the bounded index had evicted anything, every
+        // unindexed revision became permanently, and falsely, transient. The
+        // truthful answer is the same one an untruncated miss gets: we do not
+        // hold this generation, so mint it from the commit tree.
         let find = |reference: &RefId, revision: &GitOidV1, tree: &GitOidV1| {
             pointer
                 .generation_index
@@ -84,20 +118,15 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         && entry.source_tree.as_deref() == Some(tree.as_str())
                 })
                 .cloned()
-                .ok_or(if pointer.generation_index_truncated {
-                    CodeIndexSearchUnavailableReasonV1::CapacityUnavailable
-                } else {
-                    CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
-                })
         };
-        let base_entry = find(base_reference, base_revision, base_tree)?;
-        let head_entry = if base_reference == head_reference
+        let same_revision = base_reference == head_reference
             && base_revision == head_revision
-            && base_tree == head_tree
-        {
+            && base_tree == head_tree;
+        let base_entry = find(base_reference, base_revision, base_tree);
+        let head_entry = if same_revision {
             base_entry.clone()
         } else {
-            find(head_reference, head_revision, head_tree)?
+            find(head_reference, head_revision, head_tree)
         };
         if let Some(reason) = control.termination() {
             return Err(reason);
@@ -112,10 +141,16 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 let generation_id =
                     tracedecay_domain::CodeGenerationId::new(entry.generation_id.clone())
                         .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?;
-                let generation = self
+                // An index entry whose sealed bytes are gone is an absence, not
+                // a corruption: it is reported as a miss so the caller mints the
+                // generation back rather than failing a read the object database
+                // can still answer.
+                let Some(generation) = self
                     .load_generation(&generation_id)
                     .map_err(Self::exact_read_error)?
-                    .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
+                else {
+                    return Ok(None);
+                };
                 if generation
                     .snapshot()
                     .source_revision
@@ -133,18 +168,27 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 {
                     return Err(CodeIndexSearchUnavailableReasonV1::Internal);
                 }
-                Ok(generation)
+                Ok(Some(generation))
             };
-        let base = load(&base_entry, base_revision, base_tree, base_reference)?;
-        let head = if base_reference == head_reference
-            && base_revision == head_revision
-            && base_tree == head_tree
-        {
-            Arc::clone(&base)
-        } else {
-            load(&head_entry, head_revision, head_tree, head_reference)?
+        let base = match base_entry.as_ref() {
+            Some(entry) => load(entry, base_revision, base_tree, base_reference)?,
+            None => None,
         };
-        Ok((base, head))
+        let head = if same_revision {
+            base.clone()
+        } else {
+            match head_entry.as_ref() {
+                Some(entry) => load(entry, head_revision, head_tree, head_reference)?,
+                None => None,
+            }
+        };
+        match (base, head) {
+            (Some(base), Some(head)) => Ok(ExactGenerationPairV1::Sealed(base, head)),
+            (base, head) => Ok(ExactGenerationPairV1::Missing(ExactGenerationMissV1 {
+                base: base.is_none(),
+                head: head.is_none(),
+            })),
+        }
     }
 }
 
@@ -193,6 +237,20 @@ impl CodeIndexSchedulerRegistryV1 {
                     return Err(CodeIndexSearchUnavailableReasonV1::Internal);
                 }
             };
+            let exact_source = |reference: &RefId, revision: &GitOidV1, tree: &GitOidV1| {
+                Ok::<_, CodeIndexSearchUnavailableReasonV1>(
+                    super::git_tree_capture::ExactGitTreeSourceV1 {
+                        reference: reference.clone(),
+                        revision: tracedecay_domain::CommitId::new(revision.as_str().to_owned())
+                            .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?,
+                        tree: tracedecay_domain::TreeId::new(tree.as_str().to_owned())
+                            .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?,
+                    },
+                )
+            };
+            let same_revision = base_reference == head_reference
+                && base_revision == head_revision
+                && base_tree == head_tree;
             let revisions = scheduler.publication.revisions(
                 &base_reference,
                 &base_revision,
@@ -201,42 +259,30 @@ impl CodeIndexSchedulerRegistryV1 {
                 &head_revision,
                 &head_tree,
                 &control,
-            );
+            )?;
             let (base, head) = match revisions {
-                Ok(generations) => generations,
-                Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable) => {
-                    scheduler.publish_exact_git_tree_generation(
-                        &super::git_tree_capture::ExactGitTreeSourceV1 {
-                            reference: base_reference.clone(),
-                            revision: tracedecay_domain::CommitId::new(
-                                base_revision.as_str().to_owned(),
-                            )
-                            .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?,
-                            tree: tracedecay_domain::TreeId::new(base_tree.as_str().to_owned())
-                                .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?,
-                        },
-                        &control,
-                    )?;
-                    if base_reference != head_reference
-                        || base_revision != head_revision
-                        || base_tree != head_tree
-                    {
+                ExactGenerationPairV1::Sealed(base, head) => (base, head),
+                // Mint only the side the index could not serve. Capturing a
+                // whole commit tree is the expensive part of this path, and a
+                // base that is already sealed is evidence we already hold — the
+                // unconditional base capture that used to run here charged every
+                // head-only miss for a second full tree, and turned any base the
+                // working repository could no longer capture into a hard failure
+                // of a read the index could have answered.
+                ExactGenerationPairV1::Missing(missing) => {
+                    if missing.base {
                         scheduler.publish_exact_git_tree_generation(
-                            &super::git_tree_capture::ExactGitTreeSourceV1 {
-                                reference: head_reference.clone(),
-                                revision: tracedecay_domain::CommitId::new(
-                                    head_revision.as_str().to_owned(),
-                                )
-                                .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?,
-                                tree: tracedecay_domain::TreeId::new(head_tree.as_str().to_owned())
-                                    .map_err(|_| {
-                                        CodeIndexSearchUnavailableReasonV1::InvalidRequest
-                                    })?,
-                            },
+                            &exact_source(&base_reference, &base_revision, &base_tree)?,
                             &control,
                         )?;
                     }
-                    scheduler.publication.revisions(
+                    if missing.head && !same_revision {
+                        scheduler.publish_exact_git_tree_generation(
+                            &exact_source(&head_reference, &head_revision, &head_tree)?,
+                            &control,
+                        )?;
+                    }
+                    match scheduler.publication.revisions(
                         &base_reference,
                         &base_revision,
                         &base_tree,
@@ -244,9 +290,15 @@ impl CodeIndexSchedulerRegistryV1 {
                         &head_revision,
                         &head_tree,
                         &control,
-                    )?
+                    )? {
+                        ExactGenerationPairV1::Sealed(base, head) => (base, head),
+                        // A miss that survives its own mint is terminal: the
+                        // generation is genuinely unavailable, not pending.
+                        ExactGenerationPairV1::Missing(_) => {
+                            return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
+                        }
+                    }
                 }
-                Err(reason) => return Err(reason),
             };
             let base = scheduler.bind_latest_complete(base);
             let head = scheduler.bind_latest_complete(head);
@@ -470,21 +522,28 @@ mod tests {
         .expect("bounded exact-generation read")
         .expect("both clean commit generations");
         let base_generation_id = pair.base.generation().manifest().generation_id.clone();
-        assert!(matches!(
-            registry
-                .generations_for_revisions(
-                    &scope,
-                    &reference,
-                    &base_revision,
-                    &head_tree,
-                    &reference,
-                    &base_revision,
-                    &head_tree,
-                    control.clone(),
-                )
-                .await,
-            Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
-        ));
+        // A revision paired with a tree that is not its own names no commit in
+        // this repository, so neither the index nor a capture can serve it.
+        let mismatched_tree = registry
+            .generations_for_revisions(
+                &scope,
+                &reference,
+                &base_revision,
+                &head_tree,
+                &reference,
+                &base_revision,
+                &head_tree,
+                control.clone(),
+            )
+            .await
+            .map(|_| "sealed pair");
+        assert!(
+            matches!(
+                mismatched_tree,
+                Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
+            ),
+            "a revision/tree pair Git does not have must be unavailable, got {mismatched_tree:?}"
+        );
         let wrong_reference =
             tracedecay_domain::RefId::new("refs/heads/not-main").expect("wrong reference");
         assert!(matches!(
@@ -881,6 +940,297 @@ mod tests {
         assert!(
             symbols.iter().all(|symbol| symbol.name != "dirty_value"),
             "exact generations must read immutable commit-tree blobs, not dirty worktree bytes"
+        );
+    }
+
+    fn init_fixture_repository(root: &Path) {
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            root,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(root.join("src")).expect("source directory");
+    }
+
+    fn commit_source(root: &Path, source: &str, message: &str) -> (GitOidV1, GitOidV1) {
+        std::fs::write(root.join("src/lib.rs"), source).expect("fixture source");
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", message]);
+        (
+            GitOidV1::new(git(root, &["rev-parse", "HEAD"])).expect("fixture revision"),
+            GitOidV1::new(git(root, &["rev-parse", "HEAD^{tree}"])).expect("fixture tree"),
+        )
+    }
+
+    /// Latch the durable index's truncation flag the way an eviction does,
+    /// while keeping every entry, so the test isolates the flag itself from the
+    /// question of which entries survived.
+    fn latch_generation_index_truncation(scoped_store: &Path) {
+        use crate::retention::code_index_generations::{
+            DurablePublicationPointerV1, durable_generation_index_digest,
+        };
+
+        let pointer_path = scoped_store.join("active-code-generation-v1.json");
+        let mut pointer: DurablePublicationPointerV1 =
+            serde_json::from_slice(&std::fs::read(&pointer_path).expect("read pointer"))
+                .expect("decode publication pointer");
+        pointer.generation_index_truncated = true;
+        pointer.generation_index_digest = Some(
+            durable_generation_index_digest(&pointer.generation_index, true)
+                .expect("digest truncated publication index"),
+        );
+        std::fs::write(
+            &pointer_path,
+            serde_json::to_vec(&pointer).expect("encode truncated pointer"),
+        )
+        .expect("write truncated publication pointer");
+    }
+
+    async fn settled_pair(
+        registry: &CodeIndexSchedulerRegistryV1,
+        scope: &ResolvedScope,
+        base: (&RefId, &GitOidV1, &GitOidV1),
+        head: (&RefId, &GitOidV1, &GitOidV1),
+        control: &BranchGenerationReadControlV1,
+    ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match registry
+                    .generations_for_revisions(
+                        scope,
+                        base.0,
+                        base.1,
+                        base.2,
+                        head.0,
+                        head.1,
+                        head.2,
+                        control.clone(),
+                    )
+                    .await
+                {
+                    // Only scheduler-lock contention may be retried here: a
+                    // capacity answer that outlives the deadline is exactly the
+                    // spin these tests exist to rule out.
+                    Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable) => {
+                        tokio::task::yield_now().await;
+                    }
+                    result => break result,
+                }
+            }
+        })
+        .await
+        .expect("bounded exact-generation read")
+    }
+
+    /// A revision the branch has already moved past is an ordinary request — a
+    /// base whose ref advanced between the caller's rev-parse and this read, a
+    /// merge-base, a deliberately pinned commit. The capture used to peel the
+    /// reference and refuse anything that was not its current tip, which made
+    /// every one of those revisions permanently unmintable.
+    #[tokio::test]
+    async fn exact_generations_mint_for_a_commit_that_is_no_longer_the_ref_tip() {
+        let project = TempDir::new().expect("project");
+        let store = TempDir::new().expect("store");
+        init_fixture_repository(project.path());
+        let (base_revision, base_tree) = commit_source(
+            project.path(),
+            "pub fn superseded_tip_value() -> usize { 1 }\n",
+            "base",
+        );
+        let (head_revision, head_tree) = commit_source(
+            project.path(),
+            "pub fn current_tip_value() -> usize { 2 }\n",
+            "head",
+        );
+
+        let project_id = ProjectId::new("project.superseded-tip-mint").expect("project id");
+        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
+        // Only the current tip is indexed, so the pair's head is served from the
+        // index and its base — a commit the branch has already left behind — is
+        // the single half that has to be captured from the object database.
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_project,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open scheduler");
+        scheduler.reconcile_now().expect("publish tip generation");
+        let head_generation_id = scheduler
+            .latest_complete()
+            .expect("tip generation")
+            .generation()
+            .manifest()
+            .generation_id
+            .clone();
+        drop(scheduler);
+
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        registry
+            .mount_worktree(
+                project_id.clone(),
+                &canonical_project,
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount sealed store");
+        let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
+            .expect("indexing identity");
+        let reference = identity.head_ref().cloned().expect("head reference");
+        let scope = ResolvedScope::new(
+            project_id,
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            Some(reference.clone()),
+        )
+        .expect("resolved scope");
+        let control = BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+
+        let pair = settled_pair(
+            &registry,
+            &scope,
+            (&reference, &base_revision, &base_tree),
+            (&reference, &head_revision, &head_tree),
+            &control,
+        )
+        .await
+        .expect("the superseded commit is minted from its immutable tree");
+
+        assert_eq!(
+            pair.base
+                .generation()
+                .snapshot()
+                .source_revision
+                .as_ref()
+                .map(|value| value.as_str()),
+            Some(base_revision.as_str()),
+            "the superseded commit must be captured as itself, not as the ref tip"
+        );
+        assert_eq!(
+            pair.head.generation().manifest().generation_id,
+            head_generation_id,
+            "the indexed tip must be served, never re-minted"
+        );
+        let base_symbols =
+            generation_symbols(pair.base.generation(), None, None, &control).expect("base symbols");
+        let head_symbols =
+            generation_symbols(pair.head.generation(), None, None, &control).expect("head symbols");
+        assert!(
+            base_symbols
+                .iter()
+                .any(|symbol| symbol.name == "superseded_tip_value")
+        );
+        assert!(
+            head_symbols
+                .iter()
+                .any(|symbol| symbol.name == "current_tip_value")
+        );
+    }
+
+    /// Once the bounded index evicts anything its truncation flag latches on
+    /// forever, and a missing entry used to be reported as `CapacityUnavailable`
+    /// — a transient answer callers retry until their deadline, for a generation
+    /// that was never going to appear. A truncated miss is mint-eligible like
+    /// any other, and only the missing half is minted: the base here is served
+    /// from the index alone, since its reference no longer exists to capture.
+    #[tokio::test]
+    async fn a_truncated_index_mints_only_the_half_it_cannot_serve() {
+        let project = TempDir::new().expect("project");
+        let store = TempDir::new().expect("store");
+        init_fixture_repository(project.path());
+        let (base_revision, base_tree) = commit_source(
+            project.path(),
+            "pub fn retained_base_value() -> usize { 1 }\n",
+            "base",
+        );
+
+        let project_id = ProjectId::new("project.truncated-index-mint").expect("project id");
+        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_project,
+            scoped_store.clone(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open scheduler");
+        scheduler.reconcile_now().expect("publish base generation");
+        let base_generation_id = scheduler
+            .latest_complete()
+            .expect("base generation")
+            .generation()
+            .manifest()
+            .generation_id
+            .clone();
+        drop(scheduler);
+
+        git(project.path(), &["checkout", "-qb", "feature"]);
+        let (head_revision, head_tree) = commit_source(
+            project.path(),
+            "pub fn unindexed_head_value() -> usize { 2 }\n",
+            "head",
+        );
+        let base_reference =
+            tracedecay_domain::RefId::new("refs/heads/main").expect("base reference");
+        let head_reference =
+            tracedecay_domain::RefId::new("refs/heads/feature").expect("head reference");
+        // Deleting the base branch leaves its sealed generation reachable only
+        // through the index. If the read still minted the base unconditionally,
+        // that capture would fail and take the whole answer with it.
+        git(project.path(), &["branch", "-q", "-D", "main"]);
+        latch_generation_index_truncation(&scoped_store);
+
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        registry
+            .mount_worktree(
+                project_id.clone(),
+                &canonical_project,
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount sealed store");
+        let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
+            .expect("indexing identity");
+        let scope = ResolvedScope::new(
+            project_id,
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            Some(head_reference.clone()),
+        )
+        .expect("resolved scope");
+        let control = BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+
+        let pair = settled_pair(
+            &registry,
+            &scope,
+            (&base_reference, &base_revision, &base_tree),
+            (&head_reference, &head_revision, &head_tree),
+            &control,
+        )
+        .await
+        .expect("a truncated index miss is minted, not reported as capacity");
+
+        assert_eq!(
+            pair.base.generation().manifest().generation_id,
+            base_generation_id,
+            "the indexed base must be served, never re-minted"
+        );
+        let head_symbols =
+            generation_symbols(pair.head.generation(), None, None, &control).expect("head symbols");
+        assert!(
+            head_symbols
+                .iter()
+                .any(|symbol| symbol.name == "unindexed_head_value")
         );
     }
 }

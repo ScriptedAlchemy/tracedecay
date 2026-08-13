@@ -102,14 +102,32 @@ impl DaemonCodeIndexPublicationStoreV1 {
         {
             return Ok(None);
         }
-        let mut git_reference = repository
+        // The reference must exist — evidence naming a ref this repository does
+        // not have is provenance we cannot stand behind — but it is *only* the
+        // provenance name. The commit is resolved by its own object id, because
+        // demanding the reference still peel to this revision silently dropped
+        // the Git evidence of every generation sealed at a revision the branch
+        // has since moved past. Those entries then looked, to a later exact
+        // read, exactly like revisions that were never indexed at all.
+        if repository
             .try_find_reference(reference.as_str())
             .map_err(Self::unavailable)?
-            .ok_or_else(|| Self::unavailable("exact code-generation reference is missing"))?;
-        let commit = git_reference.peel_to_commit().map_err(Self::unavailable)?;
-        if commit.id().to_string() != source_revision.as_str() {
-            return Ok(None);
+            .is_none()
+        {
+            return Err(Self::unavailable(
+                "exact code-generation reference is missing",
+            ));
         }
+        let Some(commit) = gix::hash::ObjectId::from_hex(source_revision.as_str().as_bytes())
+            .ok()
+            .and_then(|object_id| repository.find_object(object_id).ok())
+            .and_then(|object| object.try_into_commit().ok())
+        else {
+            // A revision this repository cannot resolve yields no evidence, but
+            // it is not a reason to fail the publication: the generation is
+            // still sound, it simply carries no exact-commit claim.
+            return Ok(None);
+        };
         let tree = commit.tree_id().map_err(Self::unavailable)?;
         Ok(Some((
             reference.as_str().to_owned(),
@@ -196,16 +214,30 @@ impl CodeIndexWorktreeSchedulerV1 {
         control.termination().map_or(Ok(()), Err)?;
         let repository = gix::open(&self.project_root)
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-        let mut reference = repository
+        // The reference is required to exist, so a capture can never mint a
+        // generation stamped with a branch name this repository does not have.
+        // It is not, however, allowed to *select* the commit: peeling the ref
+        // and demanding it equal `source.revision` made every revision that is
+        // not the current tip permanently uncapturable — a base whose branch
+        // advanced between the caller's rev-parse and this capture, a
+        // merge-base, or any deliberately pinned older commit. Committed
+        // objects are immutable, so resolving `source.revision` in the object
+        // database is the honest identity check; the tree equality below is
+        // what actually binds the requested tree to that commit.
+        if repository
             .try_find_reference(source.reference.as_str())
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
-            .ok_or(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-        let commit = reference
-            .peel_to_commit()
-            .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
-        if commit.id().to_string() != source.revision.as_str() {
+            .is_none()
+        {
             return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
         }
+        let object_id = gix::hash::ObjectId::from_hex(source.revision.as_str().as_bytes())
+            .map_err(|_| CodeIndexSearchUnavailableReasonV1::InvalidRequest)?;
+        let commit = repository
+            .find_object(object_id)
+            .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?
+            .try_into_commit()
+            .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
         let tree = commit
             .tree()
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
@@ -334,9 +366,22 @@ impl CodeIndexWorktreeSchedulerV1 {
             changed_paths,
             retained_bytes: _retained_bytes,
         } = captured;
+        // Retained-history generations live inside the active publication
+        // pointer, so they need an active generation to ride on. A store with
+        // no publication at all has no such anchor — there the mint itself
+        // establishes the pointer, and every later exact mint (including the
+        // second half of a both-sides miss in one call) rides it as history.
+        let publication = match self
+            .publication
+            .load_active_shared()
+            .map_err(DaemonCodeIndexPublicationStoreV1::exact_read_error)?
+        {
+            Some(_) => self.publication.retained_history(),
+            None => self.publication.clone(),
+        };
         let mut owner = open_production_code_index_owner_v1(
             self.production_config.clone(),
-            self.publication.retained_history(),
+            publication,
             DaemonProjectionSinkV1,
         )
         .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?
@@ -383,8 +428,9 @@ mod tests {
     use tracedecay_domain::ProjectId;
 
     use super::{
-        CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
-        classify_capture_failure,
+        CodeIndexSchedulerErrorV1, CodeIndexSearchUnavailableReasonV1,
+        CodeIndexWorktreeSchedulerV1, ExactGitTreeSourceV1, SharedCodeIndexBytePoolV1,
+        branch_generations, classify_capture_failure,
     };
 
     fn git(root: &Path, arguments: &[&str]) {
@@ -397,6 +443,23 @@ mod tests {
             status.success(),
             "git fixture command failed: {arguments:?}"
         );
+    }
+
+    fn git_output(root: &Path, arguments: &[&str]) -> String {
+        let output = Command::new(crate::git::git_program())
+            .current_dir(root)
+            .args(arguments)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git fixture command failed: {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output")
+            .trim()
+            .to_owned()
     }
 
     fn generated_source_fixture() -> (TempDir, TempDir, CodeIndexWorktreeSchedulerV1) {
@@ -491,6 +554,131 @@ mod tests {
 
         assert_eq!(withheld.logical_path, "src/fixtures/malformed.json");
         assert_eq!(withheld.reason, "structured document is malformed");
+    }
+
+    /// A revision the branch has already moved past is still an immutable
+    /// commit, and capturing it is the only way a base whose ref advanced
+    /// mid-request — or a merge-base, or a deliberately pinned commit — ever
+    /// gets indexed. The capture used to peel the reference and refuse every
+    /// revision that was not its current tip, so all of those were permanently
+    /// uncapturable while the reference itself carried no information the
+    /// commit id did not already give.
+    #[test]
+    fn a_commit_the_reference_has_moved_past_is_still_captured() {
+        let project = TempDir::new().expect("project root");
+        git(project.path(), &["init", "-q", "-b", "main"]);
+        git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+        git(
+            project.path(),
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn superseded_tip_value() -> usize { 1 }\n",
+        )
+        .expect("superseded source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "superseded"]);
+        let superseded_revision = git_output(project.path(), &["rev-parse", "HEAD"]);
+        let superseded_tree = git_output(project.path(), &["rev-parse", "HEAD^{tree}"]);
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn current_tip_value() -> usize { 2 }\n",
+        )
+        .expect("current source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "current"]);
+        assert_ne!(
+            git_output(project.path(), &["rev-parse", "HEAD"]),
+            superseded_revision,
+            "the fixture must request a commit the reference no longer points at"
+        );
+
+        let store = TempDir::new().expect("code-index store");
+        let scheduler = CodeIndexWorktreeSchedulerV1::open(
+            ProjectId::new("project.superseded-commit-capture").expect("project id"),
+            project.path(),
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open code-index scheduler");
+        let control = branch_generations::BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+        let source = ExactGitTreeSourceV1 {
+            reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
+            revision: tracedecay_domain::CommitId::new(superseded_revision.clone())
+                .expect("revision"),
+            tree: tracedecay_domain::TreeId::new(superseded_tree.clone()).expect("tree"),
+        };
+
+        let captured = scheduler
+            .capture_exact_git_tree_snapshot(&source, &control)
+            .expect("capture the superseded commit's own tree");
+
+        assert_eq!(
+            captured
+                .snapshot
+                .source_revision
+                .as_ref()
+                .map(|revision| revision.as_str()),
+            Some(superseded_revision.as_str())
+        );
+        assert_eq!(
+            captured
+                .repository_parse_identity
+                .tree
+                .as_ref()
+                .map(|tree| tree.as_str()),
+            Some(superseded_tree.as_str())
+        );
+        let bytes = captured
+            .captured_files
+            .iter()
+            .map(|file| String::from_utf8_lossy(&file.sanitized_bytes).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            bytes.contains("superseded_tip_value"),
+            "the captured bytes must be the requested commit's tree"
+        );
+        assert!(
+            !bytes.contains("current_tip_value"),
+            "the capture must never fall back to the reference's current tip"
+        );
+    }
+
+    /// The reference is provenance, and provenance a repository cannot vouch
+    /// for is refused: a capture may resolve any commit in the object database,
+    /// but never stamp it with a branch name that does not exist.
+    #[test]
+    fn a_capture_still_refuses_a_reference_the_repository_does_not_have() {
+        let (project, _store, scheduler) = generated_source_fixture();
+        let revision = git_output(project.path(), &["rev-parse", "HEAD"]);
+        let tree = git_output(project.path(), &["rev-parse", "HEAD^{tree}"]);
+
+        let captured = scheduler.capture_exact_git_tree_snapshot(
+            &ExactGitTreeSourceV1 {
+                reference: tracedecay_domain::RefId::new("refs/heads/not-main")
+                    .expect("absent reference"),
+                revision: tracedecay_domain::CommitId::new(revision).expect("revision"),
+                tree: tracedecay_domain::TreeId::new(tree).expect("tree"),
+            },
+            &branch_generations::BranchGenerationReadControlV1 {
+                deadline: None,
+                cancellation: None,
+            },
+        );
+
+        assert!(
+            matches!(
+                captured,
+                Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
+            ),
+            "a reference this repository does not have must not be captured"
+        );
     }
 
     /// Everything that is not the sanitizer's own refusal says the capture
