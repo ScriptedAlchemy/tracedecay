@@ -178,6 +178,11 @@ npm run contracts:check      # what CI runs; exits 1 on any drift
 an advisory one. Do not hand-edit the generated files — the check will fail and
 the fix is to regenerate and commit.
 
+The generated contract files (and the embedded Cursor extension bundle) are
+marked `linguist-generated` in `.gitattributes`, so GitHub collapses them in
+PR diffs and excludes them from language stats; review the Rust source of the
+contract change instead.
+
 ## Running Specific Tests
 
 ```bash

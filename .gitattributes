@@ -25,3 +25,11 @@ benchmarks/pr7-memory/** text eol=lf
 # Collapse them out of PR diffs and language stats.
 vendor/** linguist-generated=true
 crates/tracedecay-code-extraction/vendor/** linguist-generated=true
+# Generated wire-contract and embedded-extension artifacts: the authoritative
+# sources are Rust schemars output (contracts) and the extension TS sources;
+# CI verifies the committed copies byte-for-byte (`contracts:check`, the
+# extension staleness check). Collapse them out of PR diffs and stats.
+dashboard/src/contracts/generated.ts linguist-generated=true
+dashboard/src/contracts/index.ts linguist-generated=true
+dashboard/codegen/schemas/dashboard-contracts.schema.json linguist-generated=true
+plugin/cursor-native-extension/embedded/extension.js linguist-generated=true
