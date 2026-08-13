@@ -6,7 +6,7 @@ use tokio::time::{Duration, timeout};
 use tracedecay_agent_hosts::automation::AutomationRunControl;
 use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
 
-use crate::daemon::automation_effect::AutomationEffectAdmission;
+use crate::daemon::automation_effect::{AutomationEffectAdmission, RetainedSettlementWaiter};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -133,25 +133,35 @@ pub(super) fn scheduler_application_problem_log_fields(
     ]
 }
 
-async fn settle_scheduler_automation_error(
+fn scheduler_run_observer(
     engine: &DaemonEngine,
     project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
+) -> Box<
+    dyn FnOnce(&tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord)
+        + Send
+        + 'static,
+> {
+    let engine = engine.clone();
+    let project_id = project_id.clone();
+    let project_path = project_path.to_path_buf();
+    Box::new(move |record| {
+        record_scheduler_run(&engine, &project_id, &project_path, record);
+    })
+}
+
+async fn await_scheduler_automation_problem(
+    project_path: &Path,
     task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
-    run_control: &AutomationRunControl,
-    effect: crate::daemon::automation_effect::AutomationEffectAuthority,
-    error: tracedecay_agent_hosts::automation::AutomationRunError,
+    settlement: RetainedSettlementWaiter<
+        Result<(
+            crate::daemon::automation_effect::AutomationSettledProblem,
+            Option<tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord>,
+        )>,
+    >,
 ) -> Option<TraceDecayError> {
-    synchronize_scheduler_effect_control(run_control);
-    if let tracedecay_agent_hosts::automation::AutomationRunError::PartialEffect {
-        ledger_record: Some(record),
-        ..
-    } = &error
-    {
-        record_scheduler_run(engine, project_id, project_path, record);
-    }
-    match effect.settle_problem(&error).await {
-        Ok(problem) => {
+    match settlement.wait().await {
+        Ok((problem, _)) => {
             log_daemon_event(
                 "scheduler_task_application_problem",
                 &scheduler_application_problem_log_fields(project_path, task, &problem),
@@ -215,7 +225,7 @@ fn log_daemon_scheduler_record(
 
 pub(crate) mod automation_observation;
 
-use automation_observation::{record_combined_scheduler_run, record_scheduler_run};
+use automation_observation::record_scheduler_run;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AutomationSchedulerLifecycle {
@@ -1554,7 +1564,7 @@ async fn run_user_jobs_scheduler_pass(
                 continue;
             }
         };
-        match tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend(
+        let retained_run = tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend_for_retained_settlement(
             &dashboard_root,
             config,
             backend,
@@ -1568,41 +1578,48 @@ async fn run_user_jobs_scheduler_pass(
                 ..tracedecay_agent_hosts::automation::jobs::UserJobRunOptions::default()
             },
         )
-        .await
-        {
+        .await;
+        let (run, settlement_guard) = retained_run.into_parts();
+        match run {
             Ok(run) => {
                 synchronize_scheduler_effect_control(&effect_run_control);
                 if run.ledger_record.status
                     == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
                     && run.ledger_record.error.as_deref() == Some("scheduler_lock_active")
                 {
-                    record_scheduler_run(engine, project_id, project_path, &run.ledger_record);
-                    if let Err(error) = effect.abandon_uncommitted().await {
-                        first_error.get_or_insert(error);
+                    let ledger_record = run.ledger_record;
+                    let settlement = effect.start_retained_abandon(settlement_guard);
+                    match settlement.wait().await {
+                        Ok(()) => {
+                            record_scheduler_run(engine, project_id, project_path, &ledger_record);
+                        }
+                        Err(error) => {
+                            first_error.get_or_insert(error);
+                        }
                     }
                     continue;
                 }
-                match effect
-                    .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
-                    .await
-                {
-                    Ok(_) => {
-                        record_scheduler_run(engine, project_id, project_path, &run.ledger_record)
-                    }
-                    Err(error) => {
-                        first_error.get_or_insert(error);
-                    }
+                let settlement = effect.start_deferred_run_settlement_observed(
+                    run.ledger_record,
+                    run.committed_receipt,
+                    settlement_guard,
+                    Some(scheduler_run_observer(engine, project_id, project_path)),
+                );
+                if let Err(error) = settlement.wait().await {
+                    first_error.get_or_insert(error);
                 }
             }
             Err(error) => {
-                if let Some(error) = settle_scheduler_automation_error(
-                    engine,
-                    project_id,
+                synchronize_scheduler_effect_control(&effect_run_control);
+                let settlement = effect.start_deferred_problem_settlement_observed(
+                    error,
+                    settlement_guard,
+                    Some(scheduler_run_observer(engine, project_id, project_path)),
+                );
+                if let Some(error) = await_scheduler_automation_problem(
                     project_path,
                     AgentTaskKind::UserJob,
-                    &effect_run_control,
-                    effect,
-                    error,
+                    settlement,
                 )
                 .await
                 {

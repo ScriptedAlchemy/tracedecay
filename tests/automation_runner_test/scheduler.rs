@@ -564,6 +564,388 @@ fn scheduler_uses_latest_record_status_before_failure_cooldown() {
 }
 
 #[test]
+fn scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
+    let config = automation_config(Some("daily"), None);
+    let mut later_failure = record(
+        "z-failure",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Failed,
+        1_000,
+    );
+    later_failure.completed_at_micros = Some(1_000_000_900);
+    later_failure.error = Some("the request is permanently invalid".to_string());
+    later_failure.error_classification = Some(AgentTaskFailureClass::Permanent);
+    later_failure.error_retryable = Some(false);
+    let mut older_success = record(
+        "a-success",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    older_success.completed_at_micros = None;
+    let mut records = vec![later_failure, older_success];
+
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &records,
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_non_retryable_failure")
+    );
+
+    records.reverse();
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &records,
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_non_retryable_failure")
+    );
+
+    records
+        .iter_mut()
+        .for_each(|record| record.completed_at_micros = Some(1_000_000_100));
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &records,
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_non_retryable_failure")
+    );
+    records.reverse();
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &records,
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_non_retryable_failure")
+    );
+}
+
+#[test]
+fn scheduler_ranks_legacy_fractional_completions_before_run_id() {
+    let config = automation_config(Some("daily"), None);
+    let mut later_failure = record(
+        "a-failure",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Failed,
+        1_000,
+    );
+    later_failure.schema_version = 1;
+    later_failure.started_at = "1970-01-01T00:16:39Z".to_string();
+    later_failure.completed_at = "1970-01-01T00:16:40.9Z".to_string();
+    later_failure.completed_at_micros = None;
+    later_failure.error = Some("the request is permanently invalid".to_string());
+    later_failure.error_classification = Some(AgentTaskFailureClass::Permanent);
+    later_failure.error_retryable = Some(false);
+    let mut older_success = record(
+        "z-success",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    older_success.schema_version = 1;
+    older_success.started_at = "1970-01-01T00:16:39Z".to_string();
+    older_success.completed_at = "1970-01-01T00:16:40.1Z".to_string();
+    older_success.completed_at_micros = None;
+    let mut records = vec![later_failure, older_success];
+
+    for _ in 0..2 {
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SkillWriter,
+                &records,
+                SessionActivity::none(),
+                1_500,
+            )
+            .skip_reason(),
+            Some("scheduler_non_retryable_failure")
+        );
+        records.reverse();
+    }
+}
+
+#[test]
+fn scheduler_ranks_latest_success_by_canonical_completion() {
+    let config = automation_config(Some("every 10m"), None);
+    let mut later_success = record(
+        "z-later-success",
+        AgentTaskKind::SessionReflector,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    later_success.started_at = "999".to_string();
+    later_success.completed_at_micros = Some(1_000_000_900);
+    let mut older_success = record(
+        "a-older-success",
+        AgentTaskKind::SessionReflector,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    older_success.started_at = "998".to_string();
+    older_success.completed_at_micros = Some(1_000_000_100);
+    let mut records = vec![later_success, older_success];
+
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &records,
+            SessionActivity::at(999),
+            1_700,
+        )
+        .skip_reason(),
+        Some("no_new_session_activity")
+    );
+
+    records[0].completed_at_micros = Some(1_000_000_100);
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &records,
+            SessionActivity::at(999),
+            1_700,
+        )
+        .skip_reason(),
+        Some("no_new_session_activity")
+    );
+}
+
+#[test]
+fn scheduler_fails_closed_on_invalid_completion_history() {
+    let config = automation_config(Some("daily"), None);
+    let mut inconsistent = record(
+        "inconsistent",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    inconsistent.completed_at_micros = Some(1_001_000_000);
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &[inconsistent],
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_history_invalid")
+    );
+
+    let mut malformed = record(
+        "malformed",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    malformed.completed_at = "not-a-timestamp".to_string();
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &[malformed],
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_history_invalid")
+    );
+
+    let mut overflow = record(
+        "overflow",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    overflow.completed_at = i64::MAX.to_string();
+    overflow.completed_at_micros = None;
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &[overflow],
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_history_invalid")
+    );
+
+    let pre_epoch = record(
+        "pre-epoch",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Succeeded,
+        -1,
+    );
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &[pre_epoch],
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_history_invalid")
+    );
+}
+
+#[test]
+fn scheduler_fails_closed_on_pre_epoch_session_start() {
+    let config = automation_config(Some("daily"), None);
+    let mut record = record(
+        "pre-epoch-start",
+        AgentTaskKind::SessionReflector,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    record.started_at = "-1".to_string();
+
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[record],
+            SessionActivity::at(0),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_history_invalid")
+    );
+}
+
+#[test]
+fn scheduler_parses_started_at_by_record_schema() {
+    let config = automation_config(Some("daily"), None);
+    let mut schema_v2 = record(
+        "schema-v2-rfc3339-start",
+        AgentTaskKind::SessionReflector,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    schema_v2.started_at = "1970-01-01T00:16:39Z".to_string();
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[schema_v2],
+            SessionActivity::at(1_001),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_history_invalid")
+    );
+
+    let mut schema_v1 = record(
+        "schema-v1-rfc3339-start",
+        AgentTaskKind::SessionReflector,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    schema_v1.schema_version = 1;
+    schema_v1.started_at = "1970-01-01T00:16:39Z".to_string();
+    schema_v1.completed_at = "1970-01-01T00:16:40Z".to_string();
+    schema_v1.completed_at_micros = None;
+    assert!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SessionReflector,
+            &[schema_v1],
+            SessionActivity::at(1_000),
+            1_500,
+        )
+        .is_due()
+    );
+}
+
+#[test]
+fn scheduler_rejects_conflicting_duplicate_canonical_identity_in_either_order() {
+    let config = automation_config(Some("daily"), None);
+    let success = record(
+        "same-run",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Succeeded,
+        1_000,
+    );
+    let mut failure = success.clone();
+    failure.status = AutomationRunStatus::Failed;
+    failure.error = Some("the request is permanently invalid".to_string());
+    failure.error_classification = Some(AgentTaskFailureClass::Permanent);
+    failure.error_retryable = Some(false);
+
+    for records in [
+        vec![success.clone(), failure.clone()],
+        vec![failure.clone(), success.clone()],
+    ] {
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SkillWriter,
+                &records,
+                SessionActivity::none(),
+                1_500,
+            )
+            .skip_reason(),
+            Some("scheduler_history_invalid")
+        );
+    }
+
+    assert_eq!(
+        schedule_decision(
+            &config,
+            AgentTaskKind::SkillWriter,
+            &[success.clone(), success],
+            SessionActivity::none(),
+            1_500,
+        )
+        .skip_reason(),
+        Some("scheduler_interval_not_elapsed")
+    );
+
+    let later = record(
+        "later-run",
+        AgentTaskKind::SkillWriter,
+        AutomationRunStatus::Succeeded,
+        1_200,
+    );
+    for records in [
+        vec![success.clone(), failure.clone(), later.clone()],
+        vec![later.clone(), success.clone(), failure.clone()],
+    ] {
+        assert_eq!(
+            schedule_decision(
+                &config,
+                AgentTaskKind::SkillWriter,
+                &records,
+                SessionActivity::none(),
+                1_500,
+            )
+            .skip_reason(),
+            Some("scheduler_interval_not_elapsed")
+        );
+    }
+}
+
+#[test]
 fn scheduler_idle_window_measures_time_since_session_activity() {
     let mut config = automation_config(Some("every 10m"), None);
     config.tasks.skill_writer.min_idle_secs = Some(600);
@@ -879,13 +1261,15 @@ fn config_validates_scheduler_idle_and_lock_bounds() {
     );
 }
 
+#[cfg(any(unix, windows))]
 #[tokio::test]
 async fn task_lock_reclaims_stale_dead_pid_lock_file() {
     let temp = tempdir().unwrap();
     let lock_dir = temp.path().join("automation_locks");
     std::fs::create_dir_all(&lock_dir).unwrap();
     let lock_path = lock_dir.join("memory_curator.lock");
-    std::fs::write(&lock_path, "pid=999999\ncreated_at=100\n").unwrap();
+    let dead_pid = reaped_task_lock_child_pid();
+    std::fs::write(&lock_path, format!("pid={dead_pid}\ncreated_at=100\n")).unwrap();
 
     let lock =
         AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 200)
@@ -916,4 +1300,219 @@ async fn task_lock_keeps_live_pid_lock_file() {
 
     assert!(lock.is_none());
     assert!(lock_path.exists());
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn task_lock_keeps_foreign_live_pid_past_stale_threshold() {
+    let temp = tempdir().unwrap();
+    let lock_dir = temp.path().join("automation_locks");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join("session_reflector.lock");
+    let ready_path = temp.path().join("live-child-ready");
+    let mut child = spawn_task_lock_liveness_child(&ready_path);
+    let child_pid = child.id();
+    assert!(child.try_wait().unwrap().is_none());
+    std::fs::write(
+        &lock_path,
+        format!(
+            "pid={child_pid}\ncreated_at=100\ntoken={}\n",
+            "1".repeat(64)
+        ),
+    )
+    .unwrap();
+
+    let lock = AutomationTaskLock::try_acquire(
+        temp.path(),
+        AgentTaskKind::SessionReflector,
+        Some(10),
+        200,
+    )
+    .await
+    .unwrap();
+
+    assert!(lock.is_none());
+    assert!(lock_path.exists());
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn old_task_lock_guard_cannot_remove_replacement_token() {
+    let temp = tempdir().unwrap();
+    let lock_path = temp
+        .path()
+        .join("automation_locks")
+        .join("memory_curator.lock");
+    let first =
+        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 100)
+            .await
+            .unwrap()
+            .unwrap();
+    let first_record = std::fs::read_to_string(&lock_path).unwrap();
+    let first_token = task_lock_token(&first_record);
+    let dead_pid = reaped_task_lock_child_pid();
+    std::fs::write(
+        &lock_path,
+        format!("pid={dead_pid}\ncreated_at=100\ntoken={first_token}\n"),
+    )
+    .unwrap();
+
+    let replacement =
+        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 200)
+            .await
+            .unwrap()
+            .unwrap();
+    let replacement_record = std::fs::read_to_string(&lock_path).unwrap();
+    assert_ne!(task_lock_token(&replacement_record), first_token);
+
+    drop(first);
+    assert_eq!(
+        std::fs::read_to_string(&lock_path).unwrap(),
+        replacement_record,
+        "the prior guard must not unlink a newer owner's exact token"
+    );
+    let third =
+        AutomationTaskLock::try_acquire(temp.path(), AgentTaskKind::MemoryCurator, Some(10), 300)
+            .await
+            .unwrap();
+    assert!(third.is_none());
+
+    drop(replacement);
+    assert!(!lock_path.exists());
+}
+
+#[tokio::test]
+async fn cancelled_task_lock_acquisition_cleans_detached_owner() {
+    use std::future::Future;
+
+    let temp = tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    let lock_dir = root.join("automation_locks");
+    std::fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join("skill_writer.lock");
+    let coordination_path = tracedecay_runtime_core::storage::append_lock_path(&lock_path);
+    #[cfg(windows)]
+    let coordination = {
+        let file = tracedecay_runtime_core::windows_security::open_or_create_private_lock_file(
+            &coordination_path,
+        )
+        .unwrap();
+        fs2::FileExt::lock_exclusive(&file).unwrap();
+        file
+    };
+    #[cfg(not(windows))]
+    let coordination =
+        tracedecay_runtime_core::storage::acquire_sidecar_lock_blocking(&coordination_path)
+            .unwrap();
+    let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+    let mut submitted_tx = Some(submitted_tx);
+    let acquire = tokio::spawn(async move {
+        let mut future = Box::pin(AutomationTaskLock::try_acquire(
+            &root,
+            AgentTaskKind::SkillWriter,
+            Some(10),
+            200,
+        ));
+        std::future::poll_fn(move |context| {
+            let poll = future.as_mut().poll(context);
+            if poll.is_pending()
+                && let Some(submitted_tx) = submitted_tx.take()
+            {
+                let _ = submitted_tx.send(());
+            }
+            poll
+        })
+        .await
+    });
+    submitted_rx.await.unwrap();
+    acquire.abort();
+    assert!(acquire.await.unwrap_err().is_cancelled());
+    fs2::FileExt::unlock(&coordination).unwrap();
+    drop(coordination);
+
+    let acquired = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(lock) = AutomationTaskLock::try_acquire(
+                temp.path(),
+                AgentTaskKind::SkillWriter,
+                Some(10),
+                200,
+            )
+            .await
+            .unwrap()
+            {
+                break lock;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("detached acquisition must release its exact owner token");
+    drop(acquired);
+    assert!(!lock_path.exists());
+}
+
+#[cfg(any(unix, windows))]
+const TASK_LOCK_LIVENESS_CHILD_ENV: &str = "TRACEDECAY_TASK_LOCK_LIVENESS_CHILD";
+#[cfg(any(unix, windows))]
+const TASK_LOCK_LIVENESS_READY_ENV: &str = "TRACEDECAY_TASK_LOCK_LIVENESS_READY";
+
+#[cfg(any(unix, windows))]
+fn spawn_task_lock_liveness_child(ready_path: &std::path::Path) -> std::process::Child {
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "scheduler::task_lock_liveness_child",
+            "--nocapture",
+        ])
+        .env(TASK_LOCK_LIVENESS_CHILD_ENV, "1")
+        .env(TASK_LOCK_LIVENESS_READY_ENV, ready_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    for _ in 0..400 {
+        if ready_path.exists() {
+            return child;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("task-lock liveness child exited before readiness: {status}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("task-lock liveness child did not publish readiness")
+}
+
+#[cfg(any(unix, windows))]
+fn reaped_task_lock_child_pid() -> u32 {
+    let temp = tempdir().unwrap();
+    let mut child = spawn_task_lock_liveness_child(&temp.path().join("child-ready"));
+    let pid = child.id();
+    assert!(child.try_wait().unwrap().is_none());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    pid
+}
+
+#[cfg(any(unix, windows))]
+fn task_lock_token(record: &str) -> &str {
+    record
+        .lines()
+        .find_map(|line| line.strip_prefix("token="))
+        .unwrap()
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn task_lock_liveness_child() {
+    if std::env::var_os(TASK_LOCK_LIVENESS_CHILD_ENV).is_some() {
+        let ready_path = std::env::var_os(TASK_LOCK_LIVENESS_READY_ENV).unwrap();
+        std::fs::write(ready_path, b"ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
 }

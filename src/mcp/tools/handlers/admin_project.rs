@@ -19,8 +19,9 @@ use super::json_result;
 
 mod automation_terminal;
 use automation_terminal::{
-    admission_conflict_value, decode_options, pre_admission_problem_value, require_observation,
-    run_skill_writer as run_admitted_skill_writer, settle_run as automation_run_value,
+    admission_conflict_value, automation_run_observer, decode_options, pre_admission_problem_value,
+    require_observation, run_skill_writer as run_admitted_skill_writer,
+    settle_retained_run as automation_run_value,
     terminal_response_value as automation_terminal_response,
 };
 
@@ -364,7 +365,7 @@ async fn run_automation(
     use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
     use tracedecay_agent_hosts::automation::runner::{
         SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-        run_session_reflector_with_backend,
+        run_session_reflector_with_backend_for_retained_settlement,
     };
 
     let invocation_service = require_observation(daemon_invocation_service)?;
@@ -448,7 +449,7 @@ async fn run_automation(
                 ) => return pre_admission_problem_value(problem),
             };
             let (run, ledger_record) = automation_run_value(
-                run_session_reflector_with_backend(
+                run_session_reflector_with_backend_for_retained_settlement(
                     cg,
                     &config,
                     run_control,
@@ -458,16 +459,13 @@ async fn run_automation(
                 )
                 .await,
                 effect,
+                automation_run_observer(
+                    Arc::clone(&producer),
+                    cg.project_root().to_path_buf(),
+                    "manual_mcp",
+                ),
             )
             .await?;
-            if let Some(ledger_record) = ledger_record.as_ref() {
-                crate::daemon::record_project_automation_run(
-                    producer.as_ref(),
-                    cg.project_root(),
-                    ledger_record,
-                    "manual_mcp",
-                );
-            }
             if run.get("kind").and_then(Value::as_str) == Some("problem") {
                 return Ok(run);
             }
@@ -505,16 +503,13 @@ async fn run_automation(
                 &pinned.revision_id,
                 &backend,
                 run_options,
+                automation_run_observer(
+                    Arc::clone(&producer),
+                    cg.project_root().to_path_buf(),
+                    "manual_mcp",
+                ),
             )
             .await?;
-            if let Some(ledger_record) = ledger_record.as_ref() {
-                crate::daemon::record_project_automation_run(
-                    producer.as_ref(),
-                    cg.project_root(),
-                    ledger_record,
-                    "manual_mcp",
-                );
-            }
             if run.get("kind").and_then(Value::as_str) == Some("problem") {
                 return Ok(run);
             }

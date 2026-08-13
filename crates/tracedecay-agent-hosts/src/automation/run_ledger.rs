@@ -11,22 +11,28 @@ use crate::errors::{Result, TraceDecayError};
 
 mod cursor;
 mod exact_lookup;
+mod exact_publication;
 mod publication;
 mod scheduler_diagnostic;
 
 pub(crate) use cursor::load_latest_task_validation_pointer;
-pub use exact_lookup::find_run_record_exact_bounded;
+pub use exact_lookup::{find_run_record_exact_bounded, find_run_record_exact_bounded_blocking};
+pub use exact_publication::{
+    ExactRunPublication, ExactRunPublishOutcome, ExactRunUnboundDiscardOutcome,
+    bind_staged_run_record_exact, discard_staged_run_record_exact,
+    discard_staged_run_record_exact_blocking, discard_stale_staged_run_record_exact_after_terminal,
+    discard_unbound_staged_run_records_if, publish_staged_run_record_exact,
+    publish_staged_run_record_exact_blocking, repair_corrupt_run_ledger_append_intent_blocking,
+};
 pub(crate) use publication::publish_run_artifact_chain;
 pub use publication::read_published_artifact_chain;
 pub(crate) use scheduler_diagnostic::append_or_reuse_scheduler_diagnostic;
 
 const RUN_LEDGER_FILENAME: &str = "automation_runs.jsonl";
 const RUN_ARTIFACTS_DIR: &str = "automation_artifacts";
-/// Trailing bytes read from the ledger on the first tail pass. Sized to hold
-/// several hundred JSONL records so the common scheduler read (`limit == 200`)
-/// is satisfied by one bounded read even as the append-only ledger grows into
-/// tens of thousands of lines. The window doubles on demand when a pass has
-/// not yet gathered `limit` distinct records.
+/// Bounded tail window retained by durable append deduplication. Ledger
+/// readers use the fixed-buffer `exact_lookup` scanner instead of allocating
+/// this window or the complete append-only ledger.
 const RUN_LEDGER_TAIL_CHUNK_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -319,11 +325,6 @@ pub async fn append_run_record(
     record: &AutomationRunLedgerRecord,
 ) -> Result<()> {
     let path = run_ledger_path(dashboard_root);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| config_error(format!("failed to create run ledger directory: {e}")))?;
-    }
     let line = serde_json::to_string(record).map_err(TraceDecayError::from)?;
     let write_path = path.clone();
     tokio::task::spawn_blocking(move || append_jsonl_line_locked(&write_path, &line))
@@ -339,58 +340,45 @@ pub async fn append_run_record(
 }
 
 fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::Write;
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::storage::PrivateStoreIo::create_dir_all_durable(parent)?;
     }
     crate::storage::retry_transient_file_op(|| {
-        let lock_path = crate::storage::append_lock_path(path);
-        let lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path)?;
+        let lock = exact_publication::acquire_run_ledger_lock(path)?;
         let write_result: std::io::Result<()> = (|| {
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .read(true)
-                .append(true)
-                .open(path)?;
-            let file_len = file.metadata()?.len();
-            let mut requested = RUN_LEDGER_TAIL_CHUNK_BYTES.max(1);
-            let duplicate = loop {
-                let window = requested.min(file_len);
-                let start = file_len.saturating_sub(window);
-                file.seek(SeekFrom::Start(start))?;
-                let mut tail = vec![0u8; window as usize];
-                file.read_exact(&mut tail)?;
-                let complete = if start == 0 {
-                    tail.as_slice()
-                } else {
-                    tail.iter()
-                        .position(|byte| *byte == b'\n')
-                        .map_or(&[][..], |newline| &tail[newline + 1..])
-                };
-                if let Some(newest) = complete
-                    .split(|byte| *byte == b'\n')
-                    .rev()
-                    .find(|candidate| !candidate.is_empty())
-                {
-                    break newest == line.as_bytes();
-                }
-                if start == 0 {
-                    break false;
-                }
-                requested = requested.saturating_mul(2);
-            };
+            let dashboard_root = path.parent().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "automation run ledger has no parent directory",
+                )
+            })?;
+            exact_publication::ensure_no_exact_append_intent(dashboard_root)?;
+            let mut file =
+                exact_publication::open_run_ledger_nofollow(path, true, false, true, true)?
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "automation run ledger disappeared during durable open",
+                        )
+                    })?;
+            ensure_run_ledger_eof_guard(&mut file)?;
+            let candidate = serde_json::from_str::<AutomationRunLedgerRecord>(line)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            validate_run_ledger_record_semantics(&candidate).map_err(run_ledger_scan_io_error)?;
+            let duplicate = find_existing_ordinary_run(&file, path, &candidate, line.as_bytes())?;
             if duplicate {
                 file.sync_all()?;
             } else {
-                file.write_all(format!("{line}\n").as_bytes())?;
+                file.write_all(line.as_bytes())?;
+                file.write_all(b"\n")?;
                 file.sync_all()?;
             }
-            #[cfg(unix)]
-            if let Some(parent) = path.parent() {
-                std::fs::File::open(parent)?.sync_all()?;
-            }
-            Ok(())
+            tracedecay_application::sync_parent_directory(
+                path,
+                tracedecay_application::DirectorySyncPolicy::Strict,
+            )
         })();
         let unlock_result = fs2::FileExt::unlock(&lock);
         write_result?;
@@ -399,15 +387,382 @@ fn append_jsonl_line_locked(path: &Path, line: &str) -> std::io::Result<()> {
     })
 }
 
-/// Loads up to `limit` of the newest ledger records, deduplicated by
-/// `run_id` (keeping the latest lifecycle row for each run), newest first.
+fn find_existing_ordinary_run(
+    file: &std::fs::File,
+    path: &Path,
+    candidate: &AutomationRunLedgerRecord,
+    candidate_bytes: &[u8],
+) -> std::io::Result<bool> {
+    let mut rows =
+        exact_lookup::ForwardJsonlScanner::new(file, path).map_err(run_ledger_scan_io_error)?;
+    let mut duplicate = false;
+    let mut newest_status = None;
+    let mut newest_completion = None;
+    let mut status_spans: [Option<std::ops::Range<u64>>; 5] = std::array::from_fn(|_| None);
+    while let Some(span) = rows.next_span().map_err(run_ledger_scan_io_error)? {
+        let Some(projection) = exact_lookup::scan_jsonl_row(file, path, span.clone())
+            .map_err(run_ledger_scan_io_error)?
+        else {
+            continue;
+        };
+        if projection.run_id != candidate.run_id {
+            continue;
+        }
+        let projection_task_key = projection
+            .task_key
+            .as_deref()
+            .unwrap_or_else(|| canonical_task_key(projection.task));
+        let candidate_task_key = effective_record_task_key(candidate);
+        if projection.task != candidate.task
+            || projection_task_key != candidate_task_key
+            || projection.trigger != candidate.trigger
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "automation run ledger run '{}' mutates immutable admission identity",
+                    candidate.run_id
+                ),
+            ));
+        }
+        let matches_candidate = projection.status == candidate.status
+            && exact_lookup::span_matches_bytes(file, &projection.span, candidate_bytes)?;
+        let status_index = run_status_index(projection.status);
+        if let Some(canonical_span) = status_spans[status_index].as_ref() {
+            let same_existing_state =
+                exact_lookup::spans_match(file, path, canonical_span, &projection.span)
+                    .map_err(run_ledger_scan_io_error)?;
+            if !same_existing_state {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "automation run ledger run '{}' repeats a conflicting lifecycle state",
+                        candidate.run_id
+                    ),
+                ));
+            }
+            duplicate |= matches_candidate;
+            continue;
+        }
+        if !valid_run_status_transition(newest_status, projection.status) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "automation run ledger contains lifecycle rows after terminal run '{}'",
+                    candidate.run_id
+                ),
+            ));
+        }
+        let completion = exact_lookup::canonical_completion_key(&projection)
+            .map_err(run_ledger_scan_io_error)?;
+        let completion = (completion.0, completion.1);
+        if newest_completion.is_some_and(|previous| completion < previous) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "automation run ledger run '{}' regresses its completion timestamp",
+                    candidate.run_id
+                ),
+            ));
+        }
+        duplicate |= matches_candidate;
+        status_spans[status_index] = Some(projection.span);
+        newest_status = Some(projection.status);
+        newest_completion = Some(completion);
+    }
+    if duplicate {
+        return Ok(true);
+    }
+    let candidate_completion = canonical_completion_parts(
+        candidate.schema_version,
+        &candidate.completed_at,
+        candidate.completed_at_micros,
+    )
+    .map_err(run_ledger_scan_io_error)?;
+    if newest_completion.is_some_and(|previous| candidate_completion < previous) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "automation run ledger run '{}' regresses its completion timestamp",
+                candidate.run_id
+            ),
+        ));
+    }
+    let legal = valid_run_status_transition(newest_status, candidate.status);
+    if legal {
+        Ok(false)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "automation run ledger run '{}' has an invalid lifecycle transition",
+                candidate.run_id
+            ),
+        ))
+    }
+}
+
+pub(super) fn run_status_index(status: AutomationRunStatus) -> usize {
+    match status {
+        AutomationRunStatus::Queued => 0,
+        AutomationRunStatus::Running => 1,
+        AutomationRunStatus::Succeeded => 2,
+        AutomationRunStatus::Failed => 3,
+        AutomationRunStatus::Skipped => 4,
+    }
+}
+
+pub(super) fn valid_run_status_transition(
+    previous: Option<AutomationRunStatus>,
+    next: AutomationRunStatus,
+) -> bool {
+    match previous {
+        None => true,
+        Some(AutomationRunStatus::Queued) => {
+            next == AutomationRunStatus::Running || next.is_terminal()
+        }
+        Some(AutomationRunStatus::Running) => next.is_terminal(),
+        Some(status) if status.is_terminal() => false,
+        Some(_) => false,
+    }
+}
+
+pub(super) fn canonical_completion_parts(
+    schema_version: u32,
+    completed_at: &str,
+    completed_at_micros: Option<i64>,
+) -> Result<(i64, i64)> {
+    let (completed_at, canonical_micros) = match schema_version {
+        1 => parse_schema_v1_rfc3339_micros(completed_at, "completion timestamp")?,
+        2 => {
+            let completed_at =
+                parse_nonnegative_unix_integer(completed_at, "schema-v2 completion timestamp")?;
+            let canonical_micros = completed_at.checked_mul(1_000_000).ok_or_else(|| {
+                config_error("automation completion timestamp overflows signed microseconds")
+            })?;
+            (completed_at, canonical_micros)
+        }
+        _ => {
+            return Err(config_error(format!(
+                "automation run ledger schema version {schema_version} is unsupported"
+            )));
+        }
+    };
+    let completed_at_micros = completed_at_micros.unwrap_or(canonical_micros);
+    if completed_at_micros < 0 {
+        return Err(config_error(
+            "automation completion timestamp predates the UNIX epoch",
+        ));
+    }
+    let consistent = match schema_version {
+        1 => completed_at_micros == canonical_micros,
+        2 => completed_at_micros.div_euclid(1_000_000) == completed_at,
+        _ => false,
+    };
+    if !consistent {
+        return Err(config_error(
+            "automation completion timestamp seconds and microseconds disagree",
+        ));
+    }
+    Ok((completed_at, completed_at_micros))
+}
+
+/// Returns one record's exact schema-aware completion instant in Unix
+/// microseconds.
+pub fn canonical_record_completion_micros(record: &AutomationRunLedgerRecord) -> Result<i64> {
+    canonical_completion_parts(
+        record.schema_version,
+        &record.completed_at,
+        record.completed_at_micros,
+    )
+    .map(|(_, completed_at_micros)| completed_at_micros)
+}
+
+pub(super) fn canonical_record_started_at_seconds(
+    record: &AutomationRunLedgerRecord,
+    label: &str,
+) -> Result<i64> {
+    canonical_started_at_seconds(record.schema_version, &record.started_at, label)
+}
+
+pub(super) fn canonical_started_at_seconds(
+    schema_version: u32,
+    started_at: &str,
+    label: &str,
+) -> Result<i64> {
+    match schema_version {
+        1 => tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp(started_at).ok_or_else(
+            || {
+                config_error(format!(
+                    "automation schema-v1 {label} '{started_at}' is not valid RFC3339"
+                ))
+            },
+        ),
+        2 => parse_nonnegative_unix_integer(started_at, label),
+        schema_version => Err(config_error(format!(
+            "automation run ledger schema version {schema_version} is unsupported"
+        ))),
+    }
+}
+
+pub(super) fn validate_run_ledger_record_semantics(
+    record: &AutomationRunLedgerRecord,
+) -> Result<()> {
+    canonical_record_started_at_seconds(record, "ledger row started_at")?;
+    canonical_completion_parts(
+        record.schema_version,
+        &record.completed_at,
+        record.completed_at_micros,
+    )
+    .map(|_| ())
+}
+
+fn parse_schema_v1_rfc3339_micros(value: &str, label: &str) -> Result<(i64, i64)> {
+    let seconds =
+        tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp(value).ok_or_else(|| {
+            config_error(format!(
+                "automation schema-v1 {label} '{value}' is not valid RFC3339"
+            ))
+        })?;
+    let fraction_micros = rfc3339_fraction_micros(value, label)?;
+    let micros = seconds
+        .checked_mul(1_000_000)
+        .and_then(|whole| whole.checked_add(fraction_micros))
+        .ok_or_else(|| {
+            config_error(format!(
+                "automation schema-v1 {label} overflows signed microseconds"
+            ))
+        })?;
+    Ok((seconds, micros))
+}
+
+fn rfc3339_fraction_micros(value: &str, label: &str) -> Result<i64> {
+    let Some(dot) = value.find('.') else {
+        return Ok(0);
+    };
+    let digits = value.as_bytes()[dot + 1..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit());
+    let mut micros = 0_i64;
+    let mut count = 0_usize;
+    for digit in digits {
+        count += 1;
+        if count <= 6 {
+            micros = micros * 10 + i64::from(*digit - b'0');
+        } else if *digit != b'0' {
+            return Err(config_error(format!(
+                "automation schema-v1 {label} has precision finer than exact microseconds"
+            )));
+        }
+    }
+    if count == 0 {
+        return Err(config_error(format!(
+            "automation schema-v1 {label} has an empty fractional component"
+        )));
+    }
+    for _ in count..6 {
+        micros *= 10;
+    }
+    Ok(micros)
+}
+
+fn parse_nonnegative_unix_integer(value: &str, label: &str) -> Result<i64> {
+    match value.parse::<i64>() {
+        Ok(seconds) if seconds >= 0 => Ok(seconds),
+        Ok(_) => Err(config_error(format!(
+            "automation {label} predates the UNIX epoch"
+        ))),
+        Err(integer_error) => Err(config_error(format!(
+            "automation {label} '{value}' is not nonnegative Unix seconds: {integer_error}"
+        ))),
+    }
+}
+
+/// Selects the latest candidate using the ledger's status-neutral completion
+/// order. Conflicting states at the winning canonical identity make the
+/// selection invalid; conflicts superseded by a strictly later identity do not
+/// affect the selected result. Returning parsed seconds with the record keeps
+/// schedule arithmetic on the same validated timestamp that established the
+/// winner.
+pub(super) fn latest_record_by_canonical_completion<'a>(
+    records: impl IntoIterator<Item = &'a AutomationRunLedgerRecord>,
+) -> Result<Option<(&'a AutomationRunLedgerRecord, i64)>> {
+    let mut latest = None;
+    for record in records {
+        validate_run_id_component(&record.run_id)?;
+        let (completed_at, completed_at_micros) = canonical_completion_parts(
+            record.schema_version,
+            &record.completed_at,
+            record.completed_at_micros,
+        )?;
+        let candidate_key = (completed_at, completed_at_micros, record.run_id.as_str());
+        match latest.as_mut() {
+            None => latest = Some((record, completed_at, completed_at_micros, false)),
+            Some((current, current_completed_at, current_completed_at_micros, conflict)) => {
+                let current_key = (
+                    *current_completed_at,
+                    *current_completed_at_micros,
+                    current.run_id.as_str(),
+                );
+                if candidate_key == current_key && record != *current {
+                    *conflict = true;
+                } else if candidate_key > current_key {
+                    latest = Some((record, completed_at, completed_at_micros, false));
+                }
+            }
+        }
+    }
+    match latest {
+        Some((record, _, _, true)) => Err(config_error(format!(
+            "automation history repeats run '{}' with conflicting canonical state",
+            record.run_id
+        ))),
+        Some((record, completed_at, _, false)) => Ok(Some((record, completed_at))),
+        None => Ok(None),
+    }
+}
+
+fn run_ledger_scan_io_error(error: TraceDecayError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+}
+
+pub(super) fn ensure_run_ledger_eof_guard(file: &mut std::fs::File) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "automation run ledger has an incomplete durable tail",
+        ))
+    }
+}
+
+pub(super) fn sync_run_ledger_file_and_parent(path: &Path, file: &std::fs::File) -> Result<()> {
+    file.sync_all().map_err(TraceDecayError::from)?;
+    tracedecay_application::sync_parent_directory(
+        path,
+        tracedecay_application::DirectorySyncPolicy::Strict,
+    )
+    .map_err(TraceDecayError::from)
+}
+
+/// Loads up to `limit` of the most recently touched runs, newest first.
 ///
-/// The ledger is append-only and grows without bound, so this reads only the
-/// tail of the file rather than the whole thing: a bounded window is read
-/// backwards from the end and doubled on demand until it yields `limit`
-/// distinct records or reaches the start of the file. The per-tick scheduler
-/// gate calls this every few seconds, so the cost is kept proportional to
-/// `limit` instead of the ledger length.
+/// A byte-identical retry refreshes a run's physical ordering without
+/// regressing the logical lifecycle state returned for that run.
+///
+/// The ledger is append-only and grows without bound, so rows are located from
+/// the tail using fixed-size scan buffers. Full JSON records are decoded only
+/// after their bounded identity projection passes the filter and dedup checks.
 pub async fn load_run_records(
     dashboard_root: &Path,
     limit: usize,
@@ -415,11 +770,16 @@ pub async fn load_run_records(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
     let read_path = path.clone();
-    tokio::task::spawn_blocking(move || read_run_records_tail(&read_path, limit))
-        .await
-        .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
+    tokio::task::spawn_blocking(move || {
+        with_run_ledger_read_lock(&root, &read_path, || {
+            read_run_records_tail(&read_path, limit)
+        })
+    })
+    .await
+    .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -435,21 +795,69 @@ impl AutomationRunLedgerPageV1 {
     }
 }
 
+/// Fixed-memory scheduler authority for one exact `(task, task_key)` identity.
+///
+/// Unlike operator pages, this summary ranks effectful rows by their durable
+/// completion timestamp across the complete ledger. Logical activity uses the
+/// same canonical ordering, so byte-identical retries never move the summary.
+#[derive(Debug, Clone, Default)]
+pub struct AutomationRunLedgerTaskSummary {
+    records: Vec<AutomationRunLedgerRecord>,
+    latest_logical_activity: Option<usize>,
+    latest_successful: Option<usize>,
+    latest_effectful_any_trigger: Option<usize>,
+    latest_scheduler_effectful: Option<usize>,
+    latest_scheduler_activity: Option<usize>,
+}
+
+impl AutomationRunLedgerTaskSummary {
+    pub fn records(&self) -> &[AutomationRunLedgerRecord] {
+        &self.records
+    }
+
+    pub fn latest_successful(&self) -> Option<&AutomationRunLedgerRecord> {
+        self.latest_successful.map(|index| &self.records[index])
+    }
+
+    pub fn latest_logical_activity(&self) -> Option<&AutomationRunLedgerRecord> {
+        self.latest_logical_activity
+            .map(|index| &self.records[index])
+    }
+
+    pub fn latest_effectful_any_trigger(&self) -> Option<&AutomationRunLedgerRecord> {
+        self.latest_effectful_any_trigger
+            .map(|index| &self.records[index])
+    }
+
+    pub fn latest_scheduler_effectful(&self) -> Option<&AutomationRunLedgerRecord> {
+        self.latest_scheduler_effectful
+            .map(|index| &self.records[index])
+    }
+
+    pub fn latest_scheduler_activity(&self) -> Option<&AutomationRunLedgerRecord> {
+        self.latest_scheduler_activity
+            .map(|index| &self.records[index])
+    }
+
+    pub fn latest_scheduler_effectful_user_job_terminal(
+        &self,
+    ) -> Option<&AutomationRunLedgerRecord> {
+        self.latest_scheduler_effectful()
+            .filter(|record| record.task == AgentTaskKind::UserJob)
+    }
+}
+
 pub async fn load_run_records_page(
     dashboard_root: &Path,
     limit: usize,
 ) -> Result<AutomationRunLedgerPageV1> {
-    if limit == 0 {
-        return Ok(AutomationRunLedgerPageV1 {
-            records: Vec::new(),
-            malformed_row_count: 0,
-            has_more: false,
-        });
-    }
+    let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
-    tokio::task::spawn_blocking(move || read_run_records_tail_page(&path, limit))
-        .await
-        .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
+    tokio::task::spawn_blocking(move || {
+        with_run_ledger_read_lock(&root, &path, || read_run_records_tail_page(&path, limit))
+    })
+    .await
+    .map_err(|e| config_error(format!("failed to join automation run ledger read: {e}")))?
 }
 
 pub async fn load_run_records_for_task_key(
@@ -460,47 +868,100 @@ pub async fn load_run_records_for_task_key(
     if limit == 0 {
         return Ok(Vec::new());
     }
+    validate_requested_task_key(requested_task_key)?;
+    let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
     let task_key = requested_task_key.to_string();
     tokio::task::spawn_blocking(move || {
-        read_run_records_tail_with_filter(
-            &path,
-            limit,
-            RUN_LEDGER_TAIL_CHUNK_BYTES,
-            &RunRecordFilter::TaskKey(task_key),
-        )
+        with_run_ledger_read_lock(&root, &path, || {
+            read_run_records_tail_with_filter(
+                &path,
+                limit,
+                RUN_LEDGER_TAIL_CHUNK_BYTES,
+                &RunRecordFilter::TaskKey(task_key),
+            )
+        })
     })
     .await
     .map_err(|e| config_error(format!("failed to join automation task ledger read: {e}")))?
+}
+
+/// Loads the complete-ledger scheduler summary for one exact task identity.
+/// The scan retains at most five row projections and fully decodes only their
+/// unique selected records.
+pub async fn load_run_ledger_task_summary(
+    dashboard_root: &Path,
+    task: AgentTaskKind,
+    requested_task_key: &str,
+) -> Result<AutomationRunLedgerTaskSummary> {
+    validate_requested_task_key(requested_task_key)?;
+    if requested_task_key != canonical_task_key(task)
+        && !requested_task_key.starts_with("user_job:")
+    {
+        return Err(config_error(
+            "automation task summary requires an exact canonical task identity",
+        ));
+    }
+    let root = dashboard_root.to_path_buf();
+    let path = run_ledger_path(dashboard_root);
+    let task_key = requested_task_key.to_owned();
+    tokio::task::spawn_blocking(move || {
+        with_run_ledger_read_lock(&root, &path, || {
+            read_run_ledger_task_summary(&path, task, &task_key)
+        })
+    })
+    .await
+    .map_err(|error| config_error(format!("failed to join task ledger summary read: {error}")))?
 }
 
 pub async fn load_latest_scheduler_effectful_for_task_key(
     dashboard_root: &Path,
     requested_task_key: &str,
 ) -> Result<Option<AutomationRunLedgerRecord>> {
-    let path = run_ledger_path(dashboard_root);
-    let task_key = requested_task_key.to_string();
-    tokio::task::spawn_blocking(move || {
-        read_run_records_tail_with_filter(
-            &path,
-            1,
-            RUN_LEDGER_TAIL_CHUNK_BYTES,
-            &RunRecordFilter::SchedulerEffectfulTaskKey(task_key),
-        )
-        .map(|mut records| records.pop())
-    })
-    .await
-    .map_err(|error| config_error(format!("failed to join scheduler ledger read: {error}")))?
+    validate_requested_task_key(requested_task_key)?;
+    let task = requested_task_key
+        .starts_with("user_job:")
+        .then_some(AgentTaskKind::UserJob)
+        .ok_or_else(|| {
+            config_error("scheduler effectful task-key lookup requires a UserJob task key")
+        })?;
+    load_run_ledger_task_summary(dashboard_root, task, requested_task_key)
+        .await
+        .map(|summary| summary.latest_scheduler_effectful().cloned())
+}
+
+fn validate_requested_task_key(task_key: &str) -> Result<()> {
+    if task_key.len() > tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES {
+        Err(config_error(
+            "requested automation task key exceeds its byte bound",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn with_run_ledger_read_lock<T>(
+    dashboard_root: &Path,
+    path: &Path,
+    read: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let lock = exact_publication::acquire_run_ledger_lock(path).map_err(TraceDecayError::from)?;
+    let result = (|| {
+        exact_publication::ensure_no_exact_append_intent(dashboard_root)
+            .map_err(TraceDecayError::from)?;
+        read()
+    })();
+    let unlock = fs2::FileExt::unlock(&lock).map_err(TraceDecayError::from);
+    result.and_then(|value| unlock.map(|()| value))
 }
 
 enum RunRecordFilter {
     Any,
     TaskKey(String),
-    SchedulerEffectfulTaskKey(String),
 }
 
 impl RunRecordFilter {
-    fn matches(&self, record: &AutomationRunLedgerRecord) -> bool {
+    fn matches_projection(&self, record: &exact_lookup::RunLedgerRowProjection) -> bool {
         match self {
             Self::Any => true,
             Self::TaskKey(requested) => {
@@ -510,26 +971,20 @@ impl RunRecordFilter {
                     .unwrap_or_else(|| canonical_task_key(record.task))
                     == requested
             }
-            Self::SchedulerEffectfulTaskKey(requested) => {
-                record
-                    .task_key
-                    .as_deref()
-                    .unwrap_or_else(|| canonical_task_key(record.task))
-                    == requested
-                    && record.trigger == AutomationTrigger::Scheduler
-                    && matches!(
-                        record.status,
-                        AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
-                    )
-            }
+        }
+    }
+
+    fn matches_record(&self, record: &AutomationRunLedgerRecord) -> bool {
+        match self {
+            Self::Any => true,
+            Self::TaskKey(requested) => effective_record_task_key(record) == requested,
         }
     }
 }
 
 /// Reads the tail of the ledger and parses the newest `limit` distinct
-/// records. Only complete lines are parsed: when the read window does not
-/// begin at the start of the file, the (possibly truncated) leading line is
-/// dropped so a chunk boundary never masquerades as a malformed row.
+/// records. Line spans and identity fields use fixed memory; allocation of a
+/// complete row is reserved for records that will be returned.
 fn read_run_records_tail(path: &Path, limit: usize) -> Result<Vec<AutomationRunLedgerRecord>> {
     read_run_records_tail_with_window(path, limit, RUN_LEDGER_TAIL_CHUNK_BYTES)
 }
@@ -567,139 +1022,415 @@ fn read_run_records_tail_with_filter(
 fn read_run_records_tail_page_with_filter(
     path: &Path,
     limit: usize,
-    initial_window: u64,
+    _initial_window: u64,
     filter: &RunRecordFilter,
 ) -> Result<AutomationRunLedgerPageV1> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    let file = match exact_lookup::open_stabilized_run_ledger(path, false)? {
+        Some(file) => file,
+        None => {
             return Ok(AutomationRunLedgerPageV1 {
                 records: Vec::new(),
                 malformed_row_count: 0,
                 has_more: false,
             });
         }
-        Err(e) => {
-            return Err(config_error(format!(
-                "failed to read automation run ledger '{}': {e}",
-                path.display()
-            )));
-        }
     };
-    let file_len = file
-        .metadata()
-        .map_err(|e| {
-            config_error(format!(
-                "failed to inspect automation run ledger '{}': {e}",
-                path.display()
-            ))
-        })?
-        .len();
-    if file_len == 0 {
+    drop(exact_lookup::ReverseJsonlScanner::new(&file, path)?);
+    if limit == 0 {
         return Ok(AutomationRunLedgerPageV1 {
             records: Vec::new(),
             malformed_row_count: 0,
-            has_more: false,
+            has_more: file.metadata().map_err(TraceDecayError::from)?.len() != 0,
+        });
+    }
+    if !matches!(filter, RunRecordFilter::Any) {
+        return read_filtered_run_records_two_pass(&file, path, limit, filter);
+    }
+    read_any_run_records_page(&file, path, limit)
+}
+
+#[derive(Default)]
+struct TaskSummarySpans {
+    latest_logical_activity: Option<exact_lookup::RunLedgerRowProjection>,
+    latest_successful: Option<exact_lookup::RunLedgerRowProjection>,
+    latest_effectful_any_trigger: Option<exact_lookup::RunLedgerRowProjection>,
+    latest_scheduler_effectful: Option<exact_lookup::RunLedgerRowProjection>,
+    latest_scheduler_activity: Option<exact_lookup::RunLedgerRowProjection>,
+}
+
+fn read_run_ledger_task_summary(
+    path: &Path,
+    task: AgentTaskKind,
+    requested_task_key: &str,
+) -> Result<AutomationRunLedgerTaskSummary> {
+    let Some(file) = exact_lookup::open_stabilized_run_ledger(path, false)? else {
+        return Ok(AutomationRunLedgerTaskSummary::default());
+    };
+    let mut rows = exact_lookup::ForwardJsonlScanner::new(&file, path)?;
+    let mut selected = TaskSummarySpans::default();
+    while let Some(line) = rows.next_span()? {
+        let Some(projection) = exact_lookup::scan_jsonl_row(&file, path, line)? else {
+            continue;
+        };
+        let effective_task_key = projection
+            .task_key
+            .as_deref()
+            .unwrap_or_else(|| canonical_task_key(projection.task));
+        if projection.task != task || effective_task_key != requested_task_key {
+            continue;
+        }
+        exact_lookup::canonical_completion_key(&projection)?;
+        select_summary_projection(&mut selected.latest_logical_activity, &projection)?;
+        if projection.trigger == AutomationTrigger::Scheduler {
+            select_summary_projection(&mut selected.latest_scheduler_activity, &projection)?;
+        }
+        if projection.status == AutomationRunStatus::Succeeded {
+            select_summary_projection(&mut selected.latest_successful, &projection)?;
+        }
+        if matches!(
+            projection.status,
+            AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
+        ) {
+            select_summary_projection(&mut selected.latest_effectful_any_trigger, &projection)?;
+            if projection.trigger == AutomationTrigger::Scheduler {
+                select_summary_projection(&mut selected.latest_scheduler_effectful, &projection)?;
+            }
+        }
+    }
+    let selected_run_ids = [
+        selected.latest_logical_activity.as_ref(),
+        selected.latest_successful.as_ref(),
+        selected.latest_effectful_any_trigger.as_ref(),
+        selected.latest_scheduler_effectful.as_ref(),
+        selected.latest_scheduler_activity.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|projection| projection.run_id.clone())
+    .collect::<std::collections::HashSet<_>>();
+    let lifecycles =
+        exact_lookup::read_logical_run_lifecycles(&file, path, &selected_run_ids, true)?;
+    decode_task_summary(&file, path, task, requested_task_key, selected, &lifecycles)
+}
+
+fn select_summary_projection(
+    slot: &mut Option<exact_lookup::RunLedgerRowProjection>,
+    candidate: &exact_lookup::RunLedgerRowProjection,
+) -> Result<()> {
+    let candidate_key = exact_lookup::canonical_completion_key(candidate)?;
+    let replace = slot
+        .as_ref()
+        .map(|current| exact_lookup::canonical_completion_key(current))
+        .transpose()?
+        .is_none_or(|current_key| candidate_key > current_key);
+    if replace {
+        *slot = Some(candidate.clone());
+    }
+    Ok(())
+}
+
+fn decode_task_summary(
+    file: &std::fs::File,
+    path: &Path,
+    task: AgentTaskKind,
+    requested_task_key: &str,
+    selected: TaskSummarySpans,
+    lifecycles: &std::collections::HashMap<String, exact_lookup::LogicalRunLifecycle>,
+) -> Result<AutomationRunLedgerTaskSummary> {
+    let mut summary = AutomationRunLedgerTaskSummary::default();
+    let TaskSummarySpans {
+        latest_logical_activity,
+        latest_successful,
+        latest_effectful_any_trigger,
+        latest_scheduler_effectful,
+        latest_scheduler_activity,
+    } = selected;
+    for (projection, category) in [
+        (latest_logical_activity, 0_u8),
+        (latest_successful, 1),
+        (latest_effectful_any_trigger, 2),
+        (latest_scheduler_effectful, 3),
+        (latest_scheduler_activity, 4),
+    ] {
+        let Some(selected_projection) = projection else {
+            continue;
+        };
+        let lifecycle = lifecycles
+            .get(selected_projection.run_id.as_str())
+            .ok_or_else(|| config_error("automation task summary selected run disappeared"))?;
+        let projection = &lifecycle.newest;
+        if exact_lookup::canonical_completion_key(projection)?
+            != exact_lookup::canonical_completion_key(&selected_projection)?
+        {
+            return Err(config_error(
+                "automation task summary lifecycle changed its selected completion order",
+            ));
+        }
+        let projection_task_key = projection
+            .task_key
+            .as_deref()
+            .unwrap_or_else(|| canonical_task_key(projection.task));
+        if projection.task != task || projection_task_key != requested_task_key {
+            return Err(config_error(
+                "automation task summary lifecycle changed its task identity",
+            ));
+        }
+        let category_matches = match category {
+            0 => true,
+            1 => projection.status == AutomationRunStatus::Succeeded,
+            2 => matches!(
+                projection.status,
+                AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
+            ),
+            3 => {
+                projection.trigger == AutomationTrigger::Scheduler
+                    && matches!(
+                        projection.status,
+                        AutomationRunStatus::Succeeded | AutomationRunStatus::Failed
+                    )
+            }
+            4 => projection.trigger == AutomationTrigger::Scheduler,
+            _ => false,
+        };
+        if !category_matches {
+            return Err(config_error(
+                "automation task summary lifecycle changed its selected category",
+            ));
+        }
+        let index = if let Some(index) = summary
+            .records
+            .iter()
+            .position(|record| record.run_id == projection.run_id)
+        {
+            index
+        } else {
+            let record = exact_lookup::decode_jsonl_row(file, path, &projection.span)?;
+            require_projection_identity(&record, projection)?;
+            if record.task != task || effective_record_task_key(&record) != requested_task_key {
+                return Err(config_error(
+                    "automation task summary selection changed task identity during decode",
+                ));
+            }
+            summary.records.push(record);
+            summary.records.len() - 1
+        };
+        if category == 1 {
+            let record = &summary.records[index];
+            canonical_record_started_at_seconds(
+                record,
+                &format!(
+                    "task summary latest successful run '{}' started_at",
+                    record.run_id
+                ),
+            )?;
+        }
+        match category {
+            0 => summary.latest_logical_activity = Some(index),
+            1 => summary.latest_successful = Some(index),
+            2 => summary.latest_effectful_any_trigger = Some(index),
+            3 => summary.latest_scheduler_effectful = Some(index),
+            4 => summary.latest_scheduler_activity = Some(index),
+            _ => {
+                return Err(config_error(
+                    "automation task summary selected an unknown category",
+                ));
+            }
+        }
+    }
+    Ok(summary)
+}
+
+fn read_any_run_records_page(
+    file: &std::fs::File,
+    path: &Path,
+    limit: usize,
+) -> Result<AutomationRunLedgerPageV1> {
+    let mut lines = exact_lookup::ReverseJsonlScanner::new(file, path)?;
+    let mut selected_run_order = Vec::new();
+    let mut selected_run_ids = std::collections::HashSet::new();
+    let mut malformed_row_count = 0;
+    let mut has_more = false;
+    while let Some(line) = lines.next_span()? {
+        let projection = match exact_lookup::scan_jsonl_row(file, path, line) {
+            Ok(Some(projection)) => projection,
+            Ok(None) => continue,
+            Err(error) => {
+                malformed_row_count = malformed_row_count.saturating_add(1);
+                tracing::warn!(
+                    automation_run_ledger = %path.display(),
+                    error = %error,
+                    "skipping malformed automation run ledger jsonl row"
+                );
+                continue;
+            }
+        };
+        if selected_run_ids.contains(projection.run_id.as_str()) {
+            continue;
+        }
+        if selected_run_order.len() == limit {
+            has_more = true;
+            break;
+        }
+        selected_run_ids.insert(projection.run_id.clone());
+        selected_run_order.push(projection.run_id);
+    }
+    let logical = resolve_selected_logical_records(file, path, &selected_run_ids, false)?;
+    let records = selected_run_order
+        .into_iter()
+        .filter_map(|run_id| logical.get(run_id.as_str()).cloned())
+        .collect::<Vec<_>>();
+    Ok(AutomationRunLedgerPageV1 {
+        records,
+        malformed_row_count,
+        has_more,
+    })
+}
+
+struct FilteredRunSelection {
+    record: AutomationRunLedgerRecord,
+    effective_task_key: String,
+}
+
+fn read_filtered_run_records_two_pass(
+    file: &std::fs::File,
+    path: &Path,
+    limit: usize,
+    filter: &RunRecordFilter,
+) -> Result<AutomationRunLedgerPageV1> {
+    let mut selected_run_order = Vec::new();
+    let mut selected_run_ids = std::collections::HashSet::new();
+    let mut reverse = exact_lookup::ReverseJsonlScanner::new(file, path)?;
+    while selected_run_order.len() < limit {
+        let Some(line) = reverse.next_span()? else {
+            break;
+        };
+        let Some(projection) = exact_lookup::scan_jsonl_row(file, path, line)? else {
+            continue;
+        };
+        if !filter.matches_projection(&projection)
+            || selected_run_ids.contains(projection.run_id.as_str())
+        {
+            continue;
+        }
+        selected_run_ids.insert(projection.run_id.clone());
+        selected_run_order.push(projection.run_id);
+    }
+
+    let logical = resolve_selected_logical_records(file, path, &selected_run_ids, true)?;
+    let mut selected = Vec::new();
+    for run_id in selected_run_order {
+        let record = logical
+            .get(run_id.as_str())
+            .ok_or_else(|| config_error("automation filtered lifecycle selection disappeared"))?;
+        if !filter.matches_record(record) {
+            return Err(config_error(
+                "automation filtered logical newest row no longer satisfies its filter",
+            ));
+        }
+        selected.push(FilteredRunSelection {
+            effective_task_key: effective_record_task_key(record).to_owned(),
+            record: record.clone(),
         });
     }
 
-    let mut requested = initial_window.max(1);
-    loop {
-        let window = requested.min(file_len);
-        let start = file_len - window;
-        let reached_start = start == 0;
-        file.seek(SeekFrom::Start(start)).map_err(|e| {
-            config_error(format!(
-                "failed to seek automation run ledger '{}': {e}",
-                path.display()
-            ))
-        })?;
-        let mut buf = vec![0u8; window as usize];
-        file.read_exact(&mut buf).map_err(|e| {
-            config_error(format!(
-                "failed to read automation run ledger '{}': {e}",
-                path.display()
-            ))
-        })?;
-
-        // Drop a partial leading line unless the window covers the whole file,
-        // so we never parse a byte-truncated JSON row as malformed.
-        let slice: &[u8] = if reached_start {
-            &buf
-        } else {
-            match buf.iter().position(|&byte| byte == b'\n') {
-                Some(newline) => &buf[newline + 1..],
-                // No line boundary inside the window: grow and retry.
-                None => &[],
-            }
+    let selected_indexes = selected
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.record.run_id.as_str(), index))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut has_more = false;
+    let mut forward = exact_lookup::ForwardJsonlScanner::new(file, path)?;
+    while let Some(line) = forward.next_span()? {
+        let Some(projection) = exact_lookup::scan_jsonl_row(file, path, line)? else {
+            continue;
         };
-        let text = String::from_utf8_lossy(slice);
-        let parsed = parse_run_records_newest_first(&text, limit, path, filter);
-        if parsed.records.len() >= limit || reached_start {
-            return Ok(AutomationRunLedgerPageV1 {
-                records: parsed.records,
-                malformed_row_count: parsed.malformed_row_count,
-                has_more: parsed.stopped_at_limit || !reached_start,
-            });
+        let Some(index) = selected_indexes.get(projection.run_id.as_str()).copied() else {
+            if !has_more && filter.matches_projection(&projection) {
+                has_more = true;
+            }
+            continue;
+        };
+        let entry = &selected[index];
+        let projection_task_key = projection
+            .task_key
+            .as_deref()
+            .unwrap_or_else(|| canonical_task_key(projection.task));
+        if projection.task != entry.record.task
+            || projection_task_key != entry.effective_task_key
+            || projection.trigger != entry.record.trigger
+        {
+            return Err(config_error(
+                "automation run ledger mutates immutable filtered admission identity",
+            ));
         }
-        requested = requested.saturating_mul(2);
     }
+
+    Ok(AutomationRunLedgerPageV1 {
+        records: selected.into_iter().map(|entry| entry.record).collect(),
+        malformed_row_count: 0,
+        has_more,
+    })
 }
 
-/// Parses `text` (a suffix of the ledger containing only complete lines) into
-/// up to `limit` distinct records, newest first, deduplicated by `run_id`.
-fn parse_run_records_newest_first(
-    text: &str,
-    limit: usize,
+fn resolve_selected_logical_records(
+    file: &std::fs::File,
     path: &Path,
-    filter: &RunRecordFilter,
-) -> ParsedRunRecords {
-    let mut records = Vec::new();
-    let mut seen_run_ids = std::collections::BTreeSet::new();
-    let mut malformed_row_count = 0;
-    let mut stopped_at_limit = false;
-    for line in text.lines().rev() {
-        if records.len() >= limit {
-            stopped_at_limit = true;
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    selected_run_ids: &std::collections::HashSet<String>,
+    fail_on_malformed: bool,
+) -> Result<std::collections::HashMap<String, AutomationRunLedgerRecord>> {
+    let mut resolved = std::collections::HashMap::with_capacity(selected_run_ids.len());
+    let lifecycles =
+        exact_lookup::read_logical_run_lifecycles(file, path, selected_run_ids, fail_on_malformed)?;
+    for run_id in selected_run_ids {
+        let Some(lifecycle) = lifecycles.get(run_id) else {
+            if fail_on_malformed {
+                return Err(config_error("automation selected lifecycle disappeared"));
+            }
+            continue;
+        };
+        let record = match exact_lookup::decode_jsonl_row(file, path, &lifecycle.newest.span) {
+            Ok(record) => record,
+            Err(error) if fail_on_malformed => return Err(error),
+            Err(_) => continue,
+        };
+        if let Err(error) = require_projection_identity(&record, &lifecycle.newest) {
+            if fail_on_malformed {
+                return Err(error);
+            }
             continue;
         }
-        match serde_json::from_str::<AutomationRunLedgerRecord>(trimmed) {
-            Ok(record) => {
-                if !filter.matches(&record) {
-                    continue;
-                }
-                if !seen_run_ids.insert(record.run_id.clone()) {
-                    continue;
-                }
-                records.push(record);
-            }
-            Err(err) => {
-                malformed_row_count += 1;
-                tracing::warn!(
-                    automation_run_ledger = %path.display(),
-                    error = %err,
-                    "skipping malformed automation run ledger jsonl row"
-                );
-            }
-        }
+        resolved.insert(run_id.clone(), record);
     }
-    ParsedRunRecords {
-        records,
-        malformed_row_count,
-        stopped_at_limit,
+    Ok(resolved)
+}
+
+fn require_projection_identity(
+    record: &AutomationRunLedgerRecord,
+    projection: &exact_lookup::RunLedgerRowProjection,
+) -> Result<()> {
+    if record.run_id == projection.run_id
+        && record.schema_version == projection.schema_version
+        && record.status == projection.status
+        && record.trigger == projection.trigger
+        && record.task == projection.task
+        && record.task_key == projection.task_key
+        && record.started_at == projection.started_at
+        && record.completed_at == projection.completed_at
+        && record.completed_at_micros == projection.completed_at_micros
+    {
+        Ok(())
+    } else {
+        Err(config_error(
+            "automation run ledger row projection changed during filtered decode",
+        ))
     }
 }
 
-struct ParsedRunRecords {
-    records: Vec<AutomationRunLedgerRecord>,
-    malformed_row_count: usize,
-    stopped_at_limit: bool,
+fn effective_record_task_key(record: &AutomationRunLedgerRecord) -> &str {
+    record
+        .task_key
+        .as_deref()
+        .unwrap_or_else(|| canonical_task_key(record.task))
 }
 
 fn artifact_relative_path(run_id: &str, kind: AutomationRunArtifactKind) -> String {
@@ -745,9 +1476,12 @@ fn artifact_path_from_relative(
 
 fn validate_run_id_component(run_id: &str) -> Result<()> {
     let valid = !run_id.is_empty()
+        && run_id != "."
+        && run_id != ".."
+        && run_id.len() <= tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES
         && run_id
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
     if valid {
         Ok(())
     } else {
@@ -761,6 +1495,15 @@ fn validate_run_id_component(run_id: &str) -> Result<()> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_id_path_validation_accepts_canonical_dashboard_ids_only_as_normal_components() {
+        validate_run_id_component("request.dashboard.http.123.4").unwrap();
+        assert!(validate_run_id_component(".").is_err());
+        assert!(validate_run_id_component("..").is_err());
+        assert!(validate_run_id_component("request/dashboard").is_err());
+        assert!(validate_run_id_component("request\\dashboard").is_err());
+    }
 
     /// A minimal valid ledger line for `run_id`, ordered by `completed_at`.
     fn ledger_line(run_id: &str, completed_at: i64) -> String {
@@ -850,7 +1593,10 @@ mod tests {
         // grow past `limit` raw lines.
         let mut lines = Vec::new();
         for i in 0..20 {
-            lines.push(ledger_line(&format!("run-{i:02}"), 3000 + i * 2));
+            lines.push(
+                ledger_line(&format!("run-{i:02}"), 3000 + i * 2)
+                    .replace("\"succeeded\"", "\"running\""),
+            );
             lines.push(ledger_line(&format!("run-{i:02}"), 3000 + i * 2 + 1));
         }
         let (_temp, path) = write_ledger(&lines);
@@ -881,6 +1627,410 @@ mod tests {
     }
 
     #[test]
+    fn page_counts_projection_valid_malformed_duplicate_before_limit() {
+        let malformed_duplicate = "{\"schema_version\":2,\"run_id\":\"duplicate\",\"trigger\":\"scheduler\",\"task\":\"memory_curator\",\"status\":\"succeeded\"}";
+        let lines = vec![
+            ledger_line("older", 100),
+            malformed_duplicate.to_owned(),
+            ledger_line("duplicate", 200),
+        ];
+        let (_temp, path) = write_ledger(&lines);
+
+        let page = read_run_records_tail_page_with_window(&path, 3, 8).unwrap();
+
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(page.malformed_row_count, 1);
+        assert!(!page.has_more);
+        assert!(!page.is_complete());
+    }
+
+    #[test]
+    fn page_stream_validates_large_duplicates_before_dedup() {
+        let large_valid_duplicate = ledger_line("duplicate", 150).replace(
+            "\"completed_at\":\"150\"",
+            &format!(
+                "\"validation_report\":{{\"payload\":\"{}\"}},\"completed_at\":\"150\"",
+                "x".repeat(2 * 1024 * 1024)
+            ),
+        );
+        let large_malformed_duplicate =
+            large_valid_duplicate.replace("\"accepted_count\":0", "\"accepted_count\":false");
+        let lines = vec![
+            ledger_line("older", 100),
+            large_malformed_duplicate,
+            ledger_line("duplicate", 200),
+        ];
+        let (_temp, path) = write_ledger(&lines);
+
+        let page = read_run_records_tail_page_with_window(&path, 3, 8).unwrap();
+
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(page.malformed_row_count, 1);
+        assert!(!page.has_more);
+        assert!(!page.is_complete());
+    }
+
+    #[test]
+    fn recognized_values_validate_numbers_but_unknown_fields_stream_skip_them() {
+        let recognized = ledger_line("recognized", 100).replace(
+            "\"completed_at\":\"100\"",
+            "\"response_schema\":1e999999,\"completed_at\":\"100\"",
+        );
+        let unknown = ledger_line("unknown", 200).replace(
+            "\"completed_at\":\"200\"",
+            "\"future_payload\":1e999999,\"completed_at\":\"200\"",
+        );
+        let (_temp, path) = write_ledger(&[recognized, unknown]);
+
+        let page = read_run_records_tail_page_with_window(&path, 3, 8).unwrap();
+
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].run_id, "unknown");
+        assert_eq!(page.malformed_row_count, 1);
+        assert!(!page.is_complete());
+    }
+
+    #[test]
+    fn page_streams_long_keys_inside_canonical_values() {
+        let line = ledger_line("long-key", 100).replace(
+            "\"completed_at\":\"100\"",
+            &format!(
+                "\"validation_report\":{{\"{}\":null}},\"completed_at\":\"100\"",
+                "κ".repeat(tracedecay_domain::canonical_text::CANONICAL_TEXT_MAX_BYTES)
+            ),
+        );
+        let (_temp, path) = write_ledger(&[line]);
+
+        let page = read_run_records_tail_page_with_window(&path, 1, 8).unwrap();
+
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].run_id, "long-key");
+        assert!(page.is_complete());
+    }
+
+    #[test]
+    fn page_and_filter_reject_valid_json_without_commit_newline() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        std::fs::write(&path, ledger_line("unterminated", 100)).unwrap();
+
+        assert!(read_run_records_tail_page_with_window(&path, 1, 8).is_err());
+        assert!(
+            read_run_records_tail_with_filter(
+                &path,
+                1,
+                8,
+                &RunRecordFilter::TaskKey("memory_curator".to_owned()),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_newest_matching_run_reserves_identity_before_fallback() {
+        let older = ledger_line("same-run", 100).replace(
+            "\"task\":\"memory_curator\"",
+            "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
+        );
+        let older = older.replace("\"succeeded\"", "\"running\"");
+        let newer = ledger_line("same-run", 200)
+            .replace(
+                "\"task\":\"memory_curator\"",
+                "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
+            )
+            .replace("\"accepted_count\":0", "\"accepted_count\":false");
+        let (_temp, path) = write_ledger(&[older, newer]);
+
+        let task = read_run_records_tail_with_filter(
+            &path,
+            1,
+            8,
+            &RunRecordFilter::TaskKey("user_job:nightly".to_owned()),
+        );
+        let page = read_run_records_tail_page_with_window(&path, 2, 8).unwrap();
+
+        assert!(task.is_err());
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].run_id, "same-run");
+        assert_eq!(page.malformed_row_count, 1);
+        assert!(!page.is_complete());
+    }
+
+    #[test]
+    fn filtered_reads_fail_closed_on_any_traversed_malformed_row() {
+        let target = ledger_line("target", 100).replace(
+            "\"task\":\"memory_curator\"",
+            "\"task\":\"user_job\",\"task_key\":\"user_job:nightly\"",
+        );
+        let (_temp, path) = write_ledger(&[target.clone(), "{\"unrelated\":".to_owned()]);
+
+        assert!(
+            read_run_records_tail_with_filter(
+                &path,
+                1,
+                8,
+                &RunRecordFilter::TaskKey("user_job:nightly".to_owned()),
+            )
+            .is_err()
+        );
+        let unrelated_schema_invalid = ledger_line("unrelated", 200)
+            .replace("\"accepted_count\":0", "\"accepted_count\":false");
+        let (_temp, path) = write_ledger(&[
+            target,
+            unrelated_schema_invalid,
+            ledger_line("newest-unrelated", 300),
+        ]);
+        assert!(
+            read_run_records_tail_with_filter(
+                &path,
+                1,
+                8,
+                &RunRecordFilter::TaskKey("user_job:nightly".to_owned()),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn filtered_verification_streams_older_same_identity_payload() {
+        let older = ledger_line("same-run", 100)
+            .replace(
+                "\"completed_at\":\"100\"",
+                &format!(
+                    "\"validation_report\":{{\"payload\":\"{}\"}},\"completed_at\":\"100\"",
+                    "x".repeat(2 * 1024 * 1024)
+                ),
+            )
+            .replace("\"succeeded\"", "\"running\"");
+        let newest = ledger_line("same-run", 200);
+        let (_temp, path) = write_ledger(&[older, newest]);
+
+        let records = read_run_records_tail_with_filter(
+            &path,
+            1,
+            8,
+            &RunRecordFilter::TaskKey("memory_curator".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].completed_at, "200");
+    }
+
+    #[test]
+    fn has_more_requires_an_additional_distinct_qualifying_run() {
+        let lines = vec![
+            ledger_line("only", 100).replace("\"succeeded\"", "\"running\""),
+            ledger_line("only", 200),
+        ];
+        let (_temp, path) = write_ledger(&lines);
+
+        let page = read_run_records_tail_page_with_window(&path, 1, 8).unwrap();
+
+        assert_eq!(page.records.len(), 1);
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn page_and_filter_use_logical_newest_across_historical_retry() {
+        let queued = ledger_line("same-run", 100).replace("\"succeeded\"", "\"queued\"");
+        let running = ledger_line("same-run", 200).replace("\"succeeded\"", "\"running\"");
+        let (_temp, path) = write_ledger(&[queued.clone(), running, queued]);
+
+        let page = read_run_records_tail_page_with_window(&path, 1, 8).unwrap();
+        let filtered = read_run_records_tail_with_filter(
+            &path,
+            1,
+            8,
+            &RunRecordFilter::TaskKey("memory_curator".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(page.records[0].status, AutomationRunStatus::Running);
+        assert!(!page.has_more);
+        assert_eq!(filtered[0].status, AutomationRunStatus::Running);
+    }
+
+    #[test]
+    fn page_and_filter_reject_terminal_lifecycle_regression() {
+        let terminal = ledger_line("same-run", 100);
+        let running = ledger_line("same-run", 200).replace("\"succeeded\"", "\"running\"");
+        let (_temp, path) = write_ledger(&[terminal, running]);
+
+        assert!(read_run_records_tail_page_with_window(&path, 1, 8).is_err());
+        assert!(
+            read_run_records_tail_with_filter(
+                &path,
+                1,
+                8,
+                &RunRecordFilter::TaskKey("memory_curator".to_owned()),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn physical_retry_orders_run_without_regressing_its_logical_state() {
+        let queued = ledger_line("run-a", 100).replace("\"succeeded\"", "\"queued\"");
+        let running = ledger_line("run-a", 200).replace("\"succeeded\"", "\"running\"");
+        let other = ledger_line("run-b", 300);
+        let (_temp, path) = write_ledger(&[queued.clone(), running, other, queued]);
+
+        let page = read_run_records_tail_page_with_window(&path, 2, 8).unwrap();
+
+        assert_eq!(page.records.len(), 2);
+        assert_eq!(page.records[0].run_id, "run-a");
+        assert_eq!(page.records[0].status, AutomationRunStatus::Running);
+        assert_eq!(page.records[1].run_id, "run-b");
+        assert_eq!(page.records[1].status, AutomationRunStatus::Succeeded);
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn task_summary_uses_logical_completion_order_across_large_retry_tail() {
+        let queued = ledger_line("run-a", 100).replace("\"succeeded\"", "\"queued\"");
+        let running = ledger_line("run-a", 200).replace("\"succeeded\"", "\"running\"");
+        let succeeded = ledger_line("run-b", 300);
+        let mut lines = vec![queued.clone(), running, succeeded];
+        lines.extend(std::iter::repeat_n(queued, 250));
+        let (_temp, path) = write_ledger(&lines);
+
+        let summary =
+            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
+                .unwrap();
+
+        assert_eq!(summary.records().len(), 1);
+        assert_eq!(summary.latest_logical_activity().unwrap().run_id, "run-b");
+        assert_eq!(summary.latest_successful().unwrap().run_id, "run-b");
+        assert_eq!(
+            summary.latest_effectful_any_trigger().unwrap().run_id,
+            "run-b"
+        );
+        assert_eq!(
+            summary.latest_scheduler_effectful().unwrap().run_id,
+            "run-b"
+        );
+    }
+
+    #[test]
+    fn task_summary_exposes_latest_scheduler_activity_without_moving_effectful_anchor() {
+        let success = ledger_line("a-success", 100);
+        let skipped = ledger_line("z-skip", 100)
+            .replace("\"succeeded\"", "\"skipped\"")
+            .replace(
+                "\"completed_at_micros\":100000000",
+                "\"completed_at_micros\":100000900",
+            );
+        let (_temp, path) = write_ledger(&[success, skipped]);
+
+        let summary =
+            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
+                .unwrap();
+
+        assert_eq!(
+            summary.latest_scheduler_activity().unwrap().run_id,
+            "z-skip"
+        );
+        assert_eq!(
+            summary.latest_scheduler_effectful().unwrap().run_id,
+            "a-success"
+        );
+    }
+
+    #[test]
+    fn task_summary_and_append_reject_completion_time_regression() {
+        let queued = ledger_line("regressed", 300).replace("\"succeeded\"", "\"queued\"");
+        let running = ledger_line("regressed", 100).replace("\"succeeded\"", "\"running\"");
+        let (_temp, path) = write_ledger(&[queued.clone(), running.clone()]);
+
+        assert!(
+            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
+                .is_err()
+        );
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        append_jsonl_line_locked(&path, &queued).unwrap();
+        assert!(append_jsonl_line_locked(&path, &running).is_err());
+    }
+
+    #[test]
+    fn task_summary_rejects_nonnumeric_started_at_for_latest_success() {
+        let corrupt = ledger_line("corrupt-started-at", 100)
+            .replace("\"started_at\":\"100\"", "\"started_at\":\"corrupt\"");
+        let (_temp, path) = write_ledger(&[corrupt]);
+
+        assert!(
+            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn task_summary_rejects_semantically_invalid_unrelated_rows() {
+        let valid = ledger_line("selected", 100);
+        let unrelated = ledger_line("unrelated", 200)
+            .replace("\"task\":\"memory_curator\"", "\"task\":\"skill_writer\"");
+        let invalid_rows = [
+            unrelated.clone().replace(
+                "\"completed_at\":\"200\"",
+                "\"completed_at\":\"9223372036854775807\"",
+            ),
+            unrelated.replace(
+                "\"completed_at_micros\":200000000",
+                "\"completed_at_micros\":199000000",
+            ),
+        ];
+
+        for invalid in invalid_rows {
+            let (_temp, path) = write_ledger(&[valid.clone(), invalid]);
+            assert!(
+                read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn any_page_does_not_decode_the_limit_sentinel_payload() {
+        let sentinel = ledger_line("sentinel", 100).replace(
+            "\"completed_at\":\"100\"",
+            &format!(
+                "\"validation_report\":{{\"payload\":\"{}\"}},\"completed_at\":\"100\"",
+                "x".repeat(2 * 1024 * 1024)
+            ),
+        );
+        let selected = ledger_line("selected", 200);
+        let (_temp, path) = write_ledger(&[sentinel, selected]);
+
+        let page = read_run_records_tail_page_with_window(&path, 1, 8).unwrap();
+
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].run_id, "selected");
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn zero_limit_reports_nonempty_committed_history_without_scanning_rows() {
+        let (_temp, path) = write_ledger(&["not-json".to_owned()]);
+
+        let page = read_run_records_tail_page_with_window(&path, 0, 8).unwrap();
+
+        assert!(page.records.is_empty());
+        assert_eq!(page.malformed_row_count, 0);
+        assert!(page.has_more);
+        assert!(!page.is_complete());
+    }
+
+    #[test]
+    fn zero_limit_still_rejects_incomplete_durable_tail() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        std::fs::write(&path, ledger_line("unterminated", 100)).unwrap();
+
+        assert!(read_run_records_tail_page_with_window(&path, 0, 8).is_err());
+    }
+
+    #[test]
     fn tail_read_handles_missing_and_empty_ledger() {
         let temp = tempfile::TempDir::new().unwrap();
         let missing = temp.path().join(RUN_LEDGER_FILENAME);
@@ -902,10 +2052,13 @@ mod tests {
     fn durable_append_deduplicates_large_unicode_terminal_rows() {
         let temp = tempfile::TempDir::new().unwrap();
         let path = temp.path().join(RUN_LEDGER_FILENAME);
-        let line = format!(
-            "{{\"run_id\":\"large-unicode\",\"payload\":\"{}🧪{}\"}}",
-            "a".repeat(RUN_LEDGER_TAIL_CHUNK_BYTES as usize),
-            "b".repeat(1024),
+        let line = ledger_line("large-unicode", 100).replace(
+            "\"completed_at\":\"100\"",
+            &format!(
+                "\"validation_report\":{{\"payload\":\"{}🧪{}\"}},\"completed_at\":\"100\"",
+                "a".repeat(RUN_LEDGER_TAIL_CHUNK_BYTES as usize),
+                "b".repeat(1024),
+            ),
         );
 
         append_jsonl_line_locked(&path, &line).unwrap();
@@ -914,6 +2067,107 @@ mod tests {
         let contents = std::fs::read_to_string(path).unwrap();
         assert_eq!(contents.lines().count(), 1);
         assert_eq!(contents.lines().next(), Some(line.as_str()));
+    }
+
+    #[test]
+    fn durable_append_compares_large_newest_row_with_fixed_memory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let huge = ledger_line("huge", 100).replace(
+            "\"completed_at\":\"100\"",
+            &format!(
+                "\"validation_report\":{{\"payload\":\"{}\"}},\"completed_at\":\"100\"",
+                "x".repeat(2 * 1024 * 1024)
+            ),
+        );
+        let next = ledger_line("next", 200);
+        std::fs::write(&path, format!("{huge}\n")).unwrap();
+
+        append_jsonl_line_locked(&path, &huge).unwrap();
+        append_jsonl_line_locked(&path, &next).unwrap();
+
+        let contents = std::fs::read_to_string(path).unwrap();
+        assert_eq!(contents, format!("{huge}\n{next}\n"));
+    }
+
+    #[test]
+    fn durable_append_retry_deduplicates_behind_intervening_record() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let first = ledger_line("first", 100);
+        let second = ledger_line("second", 200);
+
+        append_jsonl_line_locked(&path, &first).unwrap();
+        append_jsonl_line_locked(&path, &second).unwrap();
+        append_jsonl_line_locked(&path, &first).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            format!("{first}\n{second}\n")
+        );
+    }
+
+    #[test]
+    fn durable_append_rejects_same_run_with_different_bytes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let first = ledger_line("same-run", 100);
+        let conflict = ledger_line("same-run", 200);
+
+        append_jsonl_line_locked(&path, &first).unwrap();
+
+        assert!(append_jsonl_line_locked(&path, &conflict).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), format!("{first}\n"));
+    }
+
+    #[test]
+    fn durable_append_rejects_semantically_invalid_candidate_before_write() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let invalid = ledger_line("invalid-candidate", 100)
+            .replace("\"started_at\":\"100\"", "\"started_at\":\"-1\"");
+
+        let error = append_jsonl_line_locked(&path, &invalid)
+            .expect_err("negative schema-v2 start must not append");
+
+        assert!(error.to_string().contains("predates the UNIX epoch"));
+        assert_eq!(std::fs::read(path).unwrap(), b"");
+    }
+
+    #[test]
+    fn durable_append_allows_forward_lifecycle_and_coalesces_old_retry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let queued = ledger_line("lifecycle", 100).replace("\"succeeded\"", "\"queued\"");
+        let running = ledger_line("lifecycle", 200).replace("\"succeeded\"", "\"running\"");
+        let terminal = ledger_line("lifecycle", 300);
+
+        append_jsonl_line_locked(&path, &queued).unwrap();
+        append_jsonl_line_locked(&path, &running).unwrap();
+        append_jsonl_line_locked(&path, &queued).unwrap();
+        append_jsonl_line_locked(&path, &terminal).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            format!("{queued}\n{running}\n{terminal}\n")
+        );
+    }
+
+    #[test]
+    fn durable_append_accepts_terminal_after_historical_nonadjacent_retry() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let queued = ledger_line("historical", 100).replace("\"succeeded\"", "\"queued\"");
+        let running = ledger_line("historical", 200).replace("\"succeeded\"", "\"running\"");
+        let terminal = ledger_line("historical", 300);
+        std::fs::write(&path, format!("{queued}\n{running}\n{queued}\n")).unwrap();
+
+        append_jsonl_line_locked(&path, &terminal).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            format!("{queued}\n{running}\n{queued}\n{terminal}\n")
+        );
     }
 
     #[tokio::test]
@@ -953,7 +2207,7 @@ mod tests {
         let found = load_latest_scheduler_effectful_for_task_key(temp.path(), "user_job:nightly")
             .await
             .unwrap()
-            .expect("filtered reverse scan reaches the scheduler anchor");
+            .expect("full-history summary reaches the scheduler anchor");
 
         assert_eq!(found.run_id, "scheduler-anchor");
         assert_eq!(found.trigger, AutomationTrigger::Scheduler);

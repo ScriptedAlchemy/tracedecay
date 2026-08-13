@@ -8,8 +8,16 @@
 //! removal; unresolved records are never approved or imported.
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(unix)]
+use cap_std::{
+    ambient_authority,
+    fs::{Dir, MetadataExt, OpenOptions as CapOpenOptions},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -29,6 +37,11 @@ use crate::privacy::sanitize_provider_metadata_text;
 use tracedecay_usecases::memory::{MemoryMutationError, ProjectMemoryFactAddRequest};
 
 const SHIPPED_FACT_PROPOSALS_FILENAME: &str = "fact_proposals.json";
+
+/// The shipped v1 store is one JSON document that retirement copies byte-exact
+/// into one archive. A 16 MiB whole-record ceiling preserves generously sized
+/// historical display metadata while bounding both parse allocation and copy.
+pub const MAX_SHIPPED_FACT_PROPOSAL_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -273,34 +286,13 @@ pub async fn inspect_shipped_fact_proposals(
     dashboard_root: &Path,
 ) -> Result<ShippedFactProposalDisposition> {
     let source_path = dashboard_root.join(SHIPPED_FACT_PROPOSALS_FILENAME);
-    let bytes = match tokio::fs::read(&source_path).await {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    let bytes = match read_shipped_fact_proposal_bytes(&source_path)? {
+        Some(bytes) => bytes,
+        None => {
             return Ok(ShippedFactProposalDisposition::Absent);
-        }
-        Err(error) => {
-            return Err(config_error(format!(
-                "failed to read shipped fact proposal sidecar '{}': {error}",
-                source_path.display()
-            )));
         }
     };
     let source_digest = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
-    let source_metadata = tokio::fs::symlink_metadata(&source_path)
-        .await
-        .map_err(|error| {
-            config_error(format!(
-                "failed to inspect shipped fact proposal sidecar '{}': {error}",
-                source_path.display()
-            ))
-        })?;
-    if !source_metadata.file_type().is_file() {
-        return Ok(shipped_fact_proposal_reset_required(
-            source_path,
-            source_digest,
-            "the shipped v1 sidecar is not a regular file",
-        ));
-    }
     let store = match serde_json::from_slice::<ShippedFactProposalStoreV1>(&bytes) {
         Ok(store) => store,
         Err(error) => {
@@ -364,6 +356,128 @@ pub async fn inspect_shipped_fact_proposals(
         source_digest,
         source_bytes: bytes,
     })
+}
+
+/// Reads an exact shipped proposal source or archive through a no-follow,
+/// owner-private handle and rejects any file that changes length while read.
+///
+/// `None` means the exact leaf was absent. Every other namespace, privacy, or
+/// byte-bound failure remains typed so retirement cannot digest, archive, or
+/// delete bytes that were not read from the admitted regular file.
+pub fn read_shipped_fact_proposal_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    let file = match open_shipped_fact_proposal_file(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(config_error(format!(
+                "failed to open shipped fact proposal file '{}': {error}",
+                path.display()
+            )));
+        }
+    };
+    let initial = file.metadata().map_err(|error| {
+        config_error(format!(
+            "failed to inspect shipped fact proposal file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if !initial.is_file() || initial.len() > MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64 {
+        return Err(config_error(format!(
+            "shipped fact proposal file '{}' is not a regular file within the {}-byte limit",
+            path.display(),
+            MAX_SHIPPED_FACT_PROPOSAL_BYTES
+        )));
+    }
+
+    read_opened_shipped_fact_proposal_bytes(path, file, initial).map(Some)
+}
+
+fn read_opened_shipped_fact_proposal_bytes(
+    path: &Path,
+    mut file: std::fs::File,
+    initial: std::fs::Metadata,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(initial.len() as usize);
+    (&mut file)
+        .take(MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            config_error(format!(
+                "failed to read shipped fact proposal file '{}': {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() > MAX_SHIPPED_FACT_PROPOSAL_BYTES {
+        return Err(config_error(format!(
+            "shipped fact proposal file '{}' grew beyond the {}-byte limit",
+            path.display(),
+            MAX_SHIPPED_FACT_PROPOSAL_BYTES
+        )));
+    }
+    let final_metadata = file.metadata().map_err(|error| {
+        config_error(format!(
+            "failed to reinspect shipped fact proposal file '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if !final_metadata.is_file()
+        || final_metadata.len() > MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64
+        || final_metadata.len() != initial.len()
+        || bytes.len() as u64 != final_metadata.len()
+    {
+        return Err(config_error(format!(
+            "shipped fact proposal file '{}' changed length while being read",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_shipped_fact_proposal_file(path: &Path) -> std::io::Result<std::fs::File> {
+    crate::storage::reject_symlink_components(path, "shipped fact proposal file")?;
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "shipped fact proposal file has no parent directory",
+        )
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "shipped fact proposal file has no filename",
+        )
+    })?;
+    let directory = Dir::open_ambient_dir(parent, ambient_authority())?;
+    let directory_metadata = directory.dir_metadata()?;
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory.open_with(name, &options)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.uid() != directory_metadata.uid()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "shipped fact proposal file is not private to its directory owner",
+        ));
+    }
+    Ok(file.into_std())
+}
+
+#[cfg(windows)]
+fn open_shipped_fact_proposal_file(path: &Path) -> std::io::Result<std::fs::File> {
+    crate::storage::reject_symlink_components(path, "shipped fact proposal file")?;
+    tracedecay_runtime_core::windows_security::open_private_file(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_shipped_fact_proposal_file(_path: &Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "bounded no-follow shipped proposal reads are unavailable on this platform",
+    ))
 }
 
 fn shipped_fact_proposal_reset_required(

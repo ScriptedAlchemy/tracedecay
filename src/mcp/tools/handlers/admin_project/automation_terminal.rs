@@ -1,13 +1,34 @@
 //! Typed application settlement for manual automation runs.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 use tracedecay_agent_hosts::automation::{
-    AutomationCommittedReceipt, AutomationRunError, AutomationRunResult,
-    run_ledger::AutomationRunLedgerRecord,
+    AutomationCommittedReceipt, run_ledger::AutomationRunLedgerRecord,
+    runner::RetainedAutomationRun,
 };
 
 use crate::daemon::automation_effect::{AutomationEffectAuthority, AutomationSettledTerminal};
 use crate::errors::{Result, TraceDecayError};
+
+pub(super) type AutomationRunObserver =
+    Box<dyn FnOnce(&AutomationRunLedgerRecord) + Send + 'static>;
+
+pub(super) fn automation_run_observer(
+    producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    project_root: PathBuf,
+    surface: &'static str,
+) -> AutomationRunObserver {
+    Box::new(move |ledger_record| {
+        crate::daemon::record_project_automation_run(
+            producer.as_ref(),
+            &project_root,
+            ledger_record,
+            surface,
+        );
+    })
+}
 
 pub(super) fn require_observation(
     service: Option<&crate::daemon::DaemonInvocationService>,
@@ -35,6 +56,7 @@ pub(super) async fn run_skill_writer(
     revision_id: &tracedecay_domain::configuration::ConfigurationRevisionId,
     backend: &tracedecay_agent_hosts::automation::backend::CodexAppServerBackend,
     options: tracedecay_agent_hosts::automation::runner::SkillWriterAutomationOptions,
+    observer: AutomationRunObserver,
 ) -> Result<(Value, Option<AutomationRunLedgerRecord>)> {
     let run_id = options
         .run_id
@@ -69,8 +91,8 @@ pub(super) async fn run_skill_writer(
             return Ok((pre_admission_problem_value(problem)?, None));
         }
     };
-    settle_run(
-        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend(
+    settle_retained_run(
+        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_for_retained_settlement(
             cg,
             config,
             revision_id,
@@ -79,6 +101,7 @@ pub(super) async fn run_skill_writer(
         )
         .await,
         effect,
+        observer,
     )
     .await
 }
@@ -89,58 +112,78 @@ fn problem_value(
     Ok(serde_json::to_value(problem)?)
 }
 
-pub(super) trait AutomationRunTerminal: serde::Serialize {
-    fn ledger_record(&self) -> &AutomationRunLedgerRecord;
-
-    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt>;
+pub(super) trait AutomationRunTerminal {
+    fn into_terminal_parts(
+        self,
+    ) -> (
+        AutomationRunLedgerRecord,
+        Option<AutomationCommittedReceipt>,
+    );
 }
 
 impl AutomationRunTerminal
     for tracedecay_agent_hosts::automation::runner::SessionReflectorAutomationRun
 {
-    fn ledger_record(&self) -> &AutomationRunLedgerRecord {
-        &self.ledger_record
-    }
-
-    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt> {
-        self.committed_receipt.as_ref()
+    fn into_terminal_parts(
+        self,
+    ) -> (
+        AutomationRunLedgerRecord,
+        Option<AutomationCommittedReceipt>,
+    ) {
+        (self.ledger_record, self.committed_receipt)
     }
 }
 
 impl AutomationRunTerminal
     for tracedecay_agent_hosts::automation::runner::SkillWriterAutomationRun
 {
-    fn ledger_record(&self) -> &AutomationRunLedgerRecord {
-        &self.ledger_record
-    }
-
-    fn committed_receipt(&self) -> Option<&AutomationCommittedReceipt> {
-        self.committed_receipt.as_ref()
+    fn into_terminal_parts(
+        self,
+    ) -> (
+        AutomationRunLedgerRecord,
+        Option<AutomationCommittedReceipt>,
+    ) {
+        (self.ledger_record, self.committed_receipt)
     }
 }
 
-pub(super) async fn settle_run<T: AutomationRunTerminal>(
-    result: AutomationRunResult<T>,
+pub(super) async fn settle_retained_run<T: AutomationRunTerminal>(
+    retained: RetainedAutomationRun<T>,
     effect: AutomationEffectAuthority,
+    observer: AutomationRunObserver,
 ) -> Result<(Value, Option<AutomationRunLedgerRecord>)> {
+    let (result, settlement_guard) = retained.into_parts();
     match result {
         Ok(run) => {
-            let ledger = run.ledger_record().clone();
-            let terminal = effect
-                .settle_run(run.ledger_record(), run.committed_receipt())
-                .await?;
-            Ok((terminal_value(&terminal)?, Some(ledger)))
+            let (ledger, committed_receipt) = run.into_terminal_parts();
+            let waiter = effect.start_deferred_run_settlement_observed(
+                ledger,
+                committed_receipt,
+                settlement_guard,
+                Some(observer),
+            );
+            match waiter.wait().await {
+                Ok((terminal, published_ledger)) => {
+                    terminal_value(&terminal).map(|value| (value, Some(published_ledger)))
+                }
+                Err(error) => Err(error),
+            }
         }
         Err(error) => {
-            let partial_ledger = match &error {
-                AutomationRunError::PartialEffect { ledger_record, .. } => ledger_record.clone(),
-                AutomationRunError::Runtime(_) => None,
-            };
-            let problem = effect.settle_problem(&error).await?;
-            Ok((
-                json!({ "kind": "problem", "value": problem_value(problem)? }),
-                partial_ledger,
-            ))
+            let waiter = effect.start_deferred_problem_settlement_observed(
+                error,
+                settlement_guard,
+                Some(observer),
+            );
+            match waiter.wait().await {
+                Ok((problem, published_ledger)) => problem_value(problem).map(|problem| {
+                    (
+                        json!({ "kind": "problem", "value": problem }),
+                        published_ledger,
+                    )
+                }),
+                Err(error) => Err(error),
+            }
         }
     }
 }

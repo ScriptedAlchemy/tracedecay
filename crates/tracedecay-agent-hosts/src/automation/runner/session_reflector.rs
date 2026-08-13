@@ -14,8 +14,9 @@ use crate::automation::backend::{
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::{
     AgentRunFinalizer, AgentTaskRunContext, AutomationCommittedReceipt, AutomationRunControl,
-    AutomationRunError, AutomationRunResult, BackendTaskRun, NonEmptyAutomaticFactReceipts,
-    SchedulerGate, failed_backend_fallback_report,
+    AutomationRunError, AutomationRunLedgerPublication, AutomationRunResult,
+    AutomationRunSettlementGuard, BackendTaskRun, NonEmptyAutomaticFactReceipts,
+    RetainedAutomationRun, SchedulerGate, failed_backend_fallback_report,
 };
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::automation::session_reflector::validate_fact_candidates;
@@ -629,6 +630,38 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
     options: SessionReflectorAutomationOptions,
     prebuilt_evidence: Option<SessionReflectorEvidenceBundle>,
 ) -> AutomationRunResult<SessionReflectorAutomationRun> {
+    run_session_reflector_for_store_with_publication(
+        dashboard_root,
+        sessions_db,
+        retrieval,
+        memory,
+        config,
+        run_control,
+        authority,
+        backend,
+        options,
+        prebuilt_evidence,
+        AutomationRunLedgerPublication::Immediate,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_reflector_for_store_with_publication<A: ProjectMemoryFactStore>(
+    dashboard_root: PathBuf,
+    sessions_db: Arc<RegisteredGlobalDb>,
+    retrieval: &dyn AutomationSessionRetrieval,
+    memory: &MemoryApplication<A>,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    authority: &tracedecay_policy::CurationApplyAuthorityV1,
+    backend: &dyn AgentTaskBackend,
+    options: SessionReflectorAutomationOptions,
+    prebuilt_evidence: Option<SessionReflectorEvidenceBundle>,
+    ledger_publication: AutomationRunLedgerPublication,
+    settlement_guard: Option<&AutomationRunSettlementGuard>,
+) -> AutomationRunResult<SessionReflectorAutomationRun> {
     let mut run = AgentTaskRunContext::new(
         dashboard_root,
         sessions_db,
@@ -637,7 +670,9 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
         options.trigger,
         config,
         AgentTaskKind::SessionReflector,
-    );
+    )
+    .with_ledger_publication(ledger_publication)
+    .with_settlement_guard(settlement_guard);
     let _run_lock = match run.gate().await? {
         SchedulerGate::Proceed(lock) => lock,
         SchedulerGate::Skip(reason) => {
@@ -766,7 +801,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                     automatic_fact_receipt_ids: Vec::new(),
                     applied_fact_ids: Vec::new(),
                 };
-                finalizer
+                let ledger_record = finalizer
                     .append_failed_record_with_effects(
                         None,
                         evidence_hash,
@@ -789,7 +824,10 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                         rejected_facts.len(),
                     )
                     .await?;
-                return Err(error.into());
+                return Err(AutomationRunError::RecordedFailure {
+                    error,
+                    ledger_record,
+                });
             }
         };
         retry_report.append(repair_retry_report);
@@ -839,7 +877,7 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
             });
         }
         Err(err) => {
-            finalizer
+            let ledger_record = finalizer
                 .append_failed_record(
                     response.model.clone(),
                     evidence_hash,
@@ -848,7 +886,10 @@ pub(super) async fn run_session_reflector_for_store<A: ProjectMemoryFactStore>(
                     &retry_report,
                 )
                 .await?;
-            return Err(err.into());
+            return Err(AutomationRunError::RecordedFailure {
+                error: err,
+                ledger_record,
+            });
         }
     };
     let record = match finalizer
@@ -887,6 +928,32 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
     retrieval: &dyn AutomationSessionRetrieval,
     options: SessionReflectorAutomationOptions,
 ) -> AutomationRunResult<SessionReflectorAutomationRun> {
+    run_session_reflector_with_backend_and_retrieval_publication(
+        cg,
+        config,
+        run_control,
+        configuration_revision_id,
+        backend,
+        retrieval,
+        options,
+        AutomationRunLedgerPublication::Immediate,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_session_reflector_with_backend_and_retrieval_publication(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    configuration_revision_id: &ConfigurationRevisionId,
+    backend: &dyn AgentTaskBackend,
+    retrieval: &dyn AutomationSessionRetrieval,
+    options: SessionReflectorAutomationOptions,
+    ledger_publication: AutomationRunLedgerPublication,
+    settlement_guard: Option<&AutomationRunSettlementGuard>,
+) -> AutomationRunResult<SessionReflectorAutomationRun> {
     let authority = super::project_curation_authority(
         cg,
         "automation:session-reflector",
@@ -903,7 +970,7 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
             "could not initialize project session reflector memory authority: {error}"
         ),
     })?;
-    run_session_reflector_for_store(
+    run_session_reflector_for_store_with_publication(
         cg.store_layout().dashboard_root.clone(),
         sessions_db,
         retrieval,
@@ -914,6 +981,8 @@ pub async fn run_session_reflector_with_backend_and_retrieval(
         backend,
         options,
         None,
+        ledger_publication,
+        settlement_guard,
     )
     .await
 }
@@ -937,6 +1006,58 @@ pub async fn run_session_reflector_with_backend(
         options,
     )
     .await
+}
+
+/// Runs one already-admitted retained application effect without publishing
+/// its ledger terminal ahead of outer settlement. The retained settlement
+/// authority must bind and publish the returned exact record.
+pub async fn run_session_reflector_with_backend_for_retained_settlement(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    configuration_revision_id: &ConfigurationRevisionId,
+    backend: &dyn AgentTaskBackend,
+    options: SessionReflectorAutomationOptions,
+) -> RetainedAutomationRun<SessionReflectorAutomationRun> {
+    let retrieval = production_project_automation_retrieval(cg).await;
+    run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
+        cg,
+        config,
+        run_control,
+        configuration_revision_id,
+        backend,
+        retrieval.as_ref(),
+        options,
+    )
+    .await
+}
+
+/// Retained-settlement variant that preserves the caller's canonical session
+/// retrieval authority instead of silently reopening the production route.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    run_control: &AutomationRunControl,
+    configuration_revision_id: &ConfigurationRevisionId,
+    backend: &dyn AgentTaskBackend,
+    retrieval: &dyn AutomationSessionRetrieval,
+    options: SessionReflectorAutomationOptions,
+) -> RetainedAutomationRun<SessionReflectorAutomationRun> {
+    let settlement_guard = AutomationRunSettlementGuard::new();
+    let result = run_session_reflector_with_backend_and_retrieval_publication(
+        cg,
+        config,
+        run_control,
+        configuration_revision_id,
+        backend,
+        retrieval,
+        options,
+        AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
+        Some(&settlement_guard),
+    )
+    .await;
+    RetainedAutomationRun::new(result, settlement_guard)
 }
 
 #[cfg(test)]

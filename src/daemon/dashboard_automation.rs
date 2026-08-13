@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use tracedecay_agent_hosts::automation::AutomationRunControl;
 use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
 use tracedecay_agent_hosts::automation::config::{AutomationConfig, from_configuration_snapshot};
 use tracedecay_agent_hosts::automation::managed_skills::{
@@ -12,13 +13,15 @@ use tracedecay_agent_hosts::automation::managed_skills::{
     load_managed_skill, managed_skill_dir, preview_managed_skill_update, restore_managed_skill,
     save_managed_skill,
 };
-use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
+use tracedecay_agent_hosts::automation::run_ledger::{
+    AutomationRunLedgerRecord, AutomationTrigger,
+};
 use tracedecay_agent_hosts::automation::runner::{
     SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-    run_session_reflector_with_backend, run_skill_writer_with_backend,
+    run_session_reflector_with_backend_for_retained_settlement,
+    run_skill_writer_with_backend_for_retained_settlement,
 };
 use tracedecay_agent_hosts::automation::skill_writer::deploy_managed_skills_to_project;
-use tracedecay_agent_hosts::automation::{AutomationRunControl, AutomationRunError};
 use tracedecay_application::now_micros;
 use tracedecay_automation::managed_skills::validate_skill_id;
 use tracedecay_dashboard_api::{
@@ -46,6 +49,21 @@ type DashboardAutomationProjectResolver =
 
 const SESSION_REFLECTOR_REQUEST_TIMEOUT_SECS: u64 = 120;
 const SKILL_WRITER_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+fn automation_run_observer(
+    producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
+    project_root: PathBuf,
+    surface: &'static str,
+) -> Box<dyn FnOnce(&AutomationRunLedgerRecord) + Send + 'static> {
+    Box::new(move |ledger_record| {
+        crate::daemon::record_project_automation_run(
+            producer.as_ref(),
+            &project_root,
+            ledger_record,
+            surface,
+        );
+    })
+}
 
 struct DashboardAutomationRequestRuntime {
     config: AutomationConfig,
@@ -455,7 +473,12 @@ async fn execute_dashboard_automation_run(
                     return Err(automation_admission_conflict());
                 }
             };
-            let run = match run_session_reflector_with_backend(
+            let observer = automation_run_observer(
+                Arc::clone(&producer),
+                cg.project_root().to_path_buf(),
+                "dashboard",
+            );
+            let retained_run = run_session_reflector_with_backend_for_retained_settlement(
                 cg,
                 config,
                 run_control,
@@ -463,23 +486,30 @@ async fn execute_dashboard_automation_run(
                 backend,
                 options,
             )
-            .await
-            {
+            .await;
+            let (run, settlement_guard) = retained_run.into_parts();
+            let run = match run {
                 Ok(run) => run,
-                Err(error) => return Err(automation_run_failed(error, effect).await),
+                Err(error) => {
+                    let waiter = effect.start_deferred_problem_settlement_observed(
+                        error,
+                        settlement_guard,
+                        Some(observer),
+                    );
+                    return Err(match waiter.wait().await {
+                        Ok((problem, _ledger_record)) => automation_problem(problem),
+                        Err(settlement_error) => automation_failed(settlement_error),
+                    });
+                }
             };
-            let terminal = effect
-                .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
-                .await
-                .map_err(automation_failed)?;
-            let settled_run = automation_terminal_run(&terminal)?;
-            crate::daemon::record_project_automation_run(
-                producer.as_ref(),
-                cg.project_root(),
-                &run.ledger_record,
-                "dashboard",
+            let waiter = effect.start_deferred_run_settlement_observed(
+                run.ledger_record,
+                run.committed_receipt,
+                settlement_guard,
+                Some(observer),
             );
-            settled_run
+            let (terminal, _ledger_record) = waiter.wait().await.map_err(automation_failed)?;
+            automation_terminal_run(&terminal)?
         }
         DashboardAutomationRunRequestV1::SkillWriting {
             provider,
@@ -535,30 +565,42 @@ async fn execute_dashboard_automation_run(
                     return Err(automation_admission_conflict());
                 }
             };
-            let run = match run_skill_writer_with_backend(
+            let observer = automation_run_observer(
+                Arc::clone(&producer),
+                cg.project_root().to_path_buf(),
+                "dashboard",
+            );
+            let retained_run = run_skill_writer_with_backend_for_retained_settlement(
                 cg,
                 config,
                 &pinned.revision_id,
                 backend,
                 options,
             )
-            .await
-            {
+            .await;
+            let (run, settlement_guard) = retained_run.into_parts();
+            let run = match run {
                 Ok(run) => run,
-                Err(error) => return Err(automation_run_failed(error, effect).await),
+                Err(error) => {
+                    let waiter = effect.start_deferred_problem_settlement_observed(
+                        error,
+                        settlement_guard,
+                        Some(observer),
+                    );
+                    return Err(match waiter.wait().await {
+                        Ok((problem, _ledger_record)) => automation_problem(problem),
+                        Err(settlement_error) => automation_failed(settlement_error),
+                    });
+                }
             };
-            let terminal = effect
-                .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
-                .await
-                .map_err(automation_failed)?;
-            let settled_run = automation_terminal_run(&terminal)?;
-            crate::daemon::record_project_automation_run(
-                producer.as_ref(),
-                cg.project_root(),
-                &run.ledger_record,
-                "dashboard",
+            let waiter = effect.start_deferred_run_settlement_observed(
+                run.ledger_record,
+                run.committed_receipt,
+                settlement_guard,
+                Some(observer),
             );
-            settled_run
+            let (terminal, _ledger_record) = waiter.wait().await.map_err(automation_failed)?;
+            automation_terminal_run(&terminal)?
         }
         DashboardAutomationRunRequestV1::UserJob { job_id, run_id } => {
             let job = tracedecay_agent_hosts::automation::jobs::find_job(
@@ -597,33 +639,47 @@ async fn execute_dashboard_automation_run(
                     return Err(automation_admission_conflict());
                 }
             };
-            let run = match tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend(
-                &cg.store_layout().dashboard_root,
-                config,
-                backend,
-                &job,
-                tracedecay_agent_hosts::automation::jobs::UserJobRunOptions {
-                    trigger: AutomationTrigger::Dashboard,
-                    run_id: Some(run_id),
-                    profile_root: Some(profile_root),
-                    project_root: Some(cg.project_root().to_path_buf()),
-                },
-            )
-            .await
-            {
-                Ok(run) => run,
-                Err(error) => return Err(automation_run_failed(error, effect).await),
-            };
-            let terminal = effect
-                .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
-                .await
-                .map_err(automation_failed)?;
-            crate::daemon::record_project_automation_run(
-                producer.as_ref(),
-                cg.project_root(),
-                &run.ledger_record,
+            let observer = automation_run_observer(
+                Arc::clone(&producer),
+                cg.project_root().to_path_buf(),
                 "dashboard_user_job",
             );
+            let retained_run = tracedecay_agent_hosts::automation::jobs::
+                run_user_job_with_backend_for_retained_settlement(
+                    &cg.store_layout().dashboard_root,
+                    config,
+                    backend,
+                    &job,
+                    tracedecay_agent_hosts::automation::jobs::UserJobRunOptions {
+                        trigger: AutomationTrigger::Dashboard,
+                        run_id: Some(run_id),
+                        profile_root: Some(profile_root),
+                        project_root: Some(cg.project_root().to_path_buf()),
+                    },
+                )
+                .await;
+            let (run, settlement_guard) = retained_run.into_parts();
+            let run = match run {
+                Ok(run) => run,
+                Err(error) => {
+                    let waiter = effect.start_deferred_problem_settlement_observed(
+                        error,
+                        settlement_guard,
+                        Some(observer),
+                    );
+                    return match waiter.wait().await {
+                        Ok((problem, _ledger_record)) => Err(automation_problem(problem)),
+                        Err(settlement_error) => Err(automation_failed(settlement_error)),
+                    };
+                }
+            };
+            let waiter = effect.start_deferred_run_settlement_observed(
+                run.ledger_record,
+                run.committed_receipt,
+                settlement_guard,
+                Some(observer),
+            );
+            let (terminal, _ledger_record) = waiter.wait().await.map_err(automation_failed)?;
             automation_terminal_run(&terminal)?
         }
     };
@@ -757,16 +813,6 @@ fn automation_failed(error: impl std::fmt::Display) -> DashboardAutomationAuthor
 fn automation_admission_conflict() -> DashboardAutomationAuthorityErrorV1 {
     DashboardAutomationAuthorityErrorV1::Conflict {
         detail: "automation run identity conflicts with its durable admission".to_owned(),
-    }
-}
-
-async fn automation_run_failed(
-    error: AutomationRunError,
-    effect: crate::daemon::automation_effect::AutomationEffectAuthority,
-) -> DashboardAutomationAuthorityErrorV1 {
-    match effect.settle_problem(&error).await {
-        Ok(problem) => automation_problem(problem),
-        Err(settlement_error) => automation_failed(settlement_error),
     }
 }
 
