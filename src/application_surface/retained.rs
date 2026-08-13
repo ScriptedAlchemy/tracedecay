@@ -103,7 +103,7 @@ fn active_request_conflict(
 }
 
 #[cfg(test)]
-mod tests {
+mod conflict_tests {
     use super::active_request_conflict;
 
     #[test]

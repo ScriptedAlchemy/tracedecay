@@ -21,12 +21,12 @@ use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindings;
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
-    APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceAdapterError,
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, CallableCodeSurfaceRequest,
-    ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
-    HttpDisconnectCancellation, HttpOperationEventState, NativeIntegrationSurfaceRequest,
+    APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ActiveHttpRequest,
+    ApplicationSurfaceAdapterError, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
+    CallableCodeSurfaceRequest, ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest,
+    ContextScoutClaimSurfaceRequest, ContextScoutClaimWindowSurfaceV1,
+    ContextScoutControlSurfaceRequest, ContextScoutSurfaceRequest, FeedbackSurfaceRequest,
+    HttpCancellationRegistry, HttpOperationEventState, NativeIntegrationSurfaceRequest,
     PrimitiveCodeSurfaceRequest, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, invocation_problem,
@@ -1299,15 +1299,14 @@ fn dropped_http_request_unregisters_without_cancelling_work() {
     let request_id = RequestId::new("request.http.disconnect").expect("request");
     let cancellation = CancellationSignal::active("cancel.http.disconnect").expect("cancellation");
     let registry: HttpCancellationRegistry = Arc::default();
-    registry
-        .lock()
-        .expect("registry")
-        .insert(request_id.clone(), cancellation.clone());
-
-    drop(HttpDisconnectCancellation::new(
-        Arc::clone(&registry),
-        request_id.clone(),
-    ));
+    drop(
+        ActiveHttpRequest::register(
+            Arc::clone(&registry),
+            request_id.clone(),
+            cancellation.clone(),
+        )
+        .expect("active request"),
+    );
 
     assert!(!cancellation.is_cancelled());
     assert!(!registry.lock().expect("registry").contains_key(&request_id));
