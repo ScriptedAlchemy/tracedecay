@@ -232,6 +232,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 continue;
             }
             let logical_path = entry.filepath.to_str_lossy().into_owned();
+            if crate::config::is_generated_path_segment(&logical_path) {
+                continue;
+            }
             let blob = repository
                 .find_blob(entry.oid)
                 .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
@@ -371,7 +374,109 @@ impl CodeIndexWorktreeSchedulerV1 {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodeIndexSchedulerErrorV1, classify_capture_failure};
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use tracedecay_code_index::production::CodeIndexIgnoredSourceAdmissionV1;
+    use tracedecay_domain::ProjectId;
+
+    use super::{
+        CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1,
+        classify_capture_failure,
+    };
+
+    fn git(root: &Path, arguments: &[&str]) {
+        let status = Command::new(crate::git::git_program())
+            .current_dir(root)
+            .args(arguments)
+            .status()
+            .expect("run git fixture command");
+        assert!(
+            status.success(),
+            "git fixture command failed: {arguments:?}"
+        );
+    }
+
+    fn generated_source_fixture() -> (TempDir, TempDir, CodeIndexWorktreeSchedulerV1) {
+        let project = TempDir::new().expect("project root");
+        git(project.path(), &["init", "-q", "-b", "main"]);
+        git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+        git(
+            project.path(),
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+        std::fs::create_dir_all(project.path().join("dist")).expect("generated directory");
+        std::fs::write(project.path().join("src/lib.rs"), "pub fn kept() {}\n")
+            .expect("ordinary source");
+        std::fs::write(
+            project.path().join("dist/generated.js"),
+            "export function generatedOnly() {}\n",
+        )
+        .expect("generated source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "fixture"]);
+
+        let store = TempDir::new().expect("code-index store");
+        let scheduler = CodeIndexWorktreeSchedulerV1::open(
+            ProjectId::new("project.generated-source-policy").expect("project id"),
+            project.path(),
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open code-index scheduler");
+        (project, store, scheduler)
+    }
+
+    fn captured_paths(scheduler: &CodeIndexWorktreeSchedulerV1) -> Vec<String> {
+        scheduler
+            .capture_authoritative_snapshot(None)
+            .expect("capture authoritative snapshot")
+            .snapshot
+            .files
+            .into_iter()
+            .map(|file| file.logical_path)
+            .collect()
+    }
+
+    #[test]
+    fn committed_generated_directory_source_is_excluded_from_exact_tree_capture() {
+        let (_project, _store, scheduler) = generated_source_fixture();
+
+        assert_eq!(captured_paths(&scheduler), vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn dirty_generated_candidate_is_excluded_while_ordinary_source_remains() {
+        let (project, _store, scheduler) = generated_source_fixture();
+        std::fs::write(
+            project.path().join("dist/generated.js"),
+            "export function changedGeneratedOnly() {}\n",
+        )
+        .expect("modify generated source");
+
+        assert_eq!(captured_paths(&scheduler), vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn explicit_ignored_source_admission_can_include_generated_path() {
+        let (project, _store, mut scheduler) = generated_source_fixture();
+        std::fs::write(
+            project.path().join("dist/generated.js"),
+            "export function explicitlyAdmitted() {}\n",
+        )
+        .expect("modify generated source");
+        scheduler.ignored_source_admissions = vec![CodeIndexIgnoredSourceAdmissionV1 {
+            logical_path: "dist/generated.js".to_owned(),
+        }];
+
+        assert_eq!(
+            captured_paths(&scheduler),
+            vec!["dist/generated.js", "src/lib.rs"]
+        );
+    }
 
     /// A sanitizer refusal is evidence about one file. Before this, the first
     /// refused path failed the whole tree capture, so a single file the privacy

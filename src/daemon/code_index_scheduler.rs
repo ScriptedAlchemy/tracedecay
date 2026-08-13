@@ -2527,15 +2527,18 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Err(cancelled_code_index_reconcile());
         }
         ignored_dependencies::checkpoint_if_present(control)?;
+        let explicitly_admitted = self
+            .ignored_source_admissions
+            .iter()
+            .any(|admission| admission.logical_path == logical_path);
+        if !explicitly_admitted && crate::config::is_generated_path_segment(logical_path) {
+            return Ok(None);
+        }
         let absolute = self.project_root.join(logical_path);
         if !absolute.is_file() {
             return Ok(None);
         }
-        let raw_bytes = if self
-            .ignored_source_admissions
-            .iter()
-            .any(|admission| admission.logical_path == logical_path)
-        {
+        let raw_bytes = if explicitly_admitted {
             ignored_dependencies::read_bounded_admitted_source(
                 &self.project_root,
                 logical_path,
