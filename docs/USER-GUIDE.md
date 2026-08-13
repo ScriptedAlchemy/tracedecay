@@ -634,6 +634,7 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 |------|-------------|
 | `tracedecay_dead_code` | Find unreachable symbols — functions with no callers. |
 | `tracedecay_unused_imports` | Find import statements that are never referenced. |
+| `tracedecay_unmounted_files` | Find Rust source files no `mod` declaration reaches from any cargo target root — indexed as healthy symbols, never parsed by the compiler. Names the nearest mounted parent and the exact `mod` line to add. |
 | `tracedecay_circular` | Detect circular file dependencies. |
 | `tracedecay_recursion` | Detect recursive and mutually-recursive call cycles. |
 | `tracedecay_complexity` | Rank functions by composite complexity score, including cyclomatic complexity from the AST. |

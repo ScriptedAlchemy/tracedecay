@@ -451,11 +451,12 @@ the commit as attribution evidence.
   decision handed to the daemon lane: `StackSignalKindV1::PotentialConflict`
   and `::AuthorizationLost` (plus four `StackDriftKindV1` variants) have no
   producer — decide intended emission scope or retire the variants.
-- Checkpoint the canonical-parent cutover that removes remaining
-  `crate::application` facade imports from daemon, project runtime, session
-  sync/registry, MCP session retrieval, and root composition. Complete the
-  in-place removal of unreleased compatibility modules and aliases; do not
-  create replacement facades.
+- DONE 2026-08-12 (verified 2026-08-13): the canonical-parent cutover landed
+  — `src/application.rs` was removed in `540b6a605` and `05924ecdf`, and the
+  tree carries zero `crate::application` facade imports in `src/`. Residual
+  crate-split cleanup (open SEAMS: agent-hosts packaging seam, dashboard-api
+  inversions, root-wiring lists) is tracked separately and is not part of
+  this cutover's contract.
 - Semantic configuration table ownership and activation reconciliation are
   implemented, but the real accepted-profile/Linux evaluation and a live
   profile activation journey remain. Exact, lexical, graph, and ordinary
