@@ -22,12 +22,23 @@ use tracedecay_domain::{
 use super::{AUTH_TOKEN, current_micros};
 use crate::daemon::http_application::{
     DaemonHttpApplicationRegistry, DaemonHttpApplicationService,
+    validate_remote_brain_tls_identity_at,
 };
 
 const REMOTE_TLS_CERTIFICATE: &[u8] =
     include_bytes!("../../../tests/fixtures/remote_tls/localhost.crt.pem");
+const REMOTE_TLS_LEAF_CERTIFICATE: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/localhost-leaf.crt.pem");
 const REMOTE_TLS_PRIVATE_KEY: &[u8] =
     include_bytes!("../../../tests/fixtures/remote_tls/localhost.key.pem");
+const REMOTE_TLS_CA_TRUE_CERTIFICATE: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/ca-true.crt.pem");
+const REMOTE_TLS_CLIENT_AUTH_CERTIFICATE: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/client-auth-only.crt.pem");
+const REMOTE_TLS_WRONG_IP_CERTIFICATE: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/wrong-ip.crt.pem");
+const REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/alternate-root.crt.pem");
 
 fn remote_tls_fixture(
     temporary: &tempfile::TempDir,
@@ -292,10 +303,23 @@ async fn remote_tls_connect(
     endpoint: std::net::SocketAddr,
     certificate: &Path,
 ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
-    let certificate = rustls::pki_types::CertificateDer::from_pem_file(certificate)
-        .expect("decode TLS trust fixture");
+    let certificates = rustls::pki_types::CertificateDer::pem_file_iter(certificate)
+        .expect("open TLS chain fixture")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("decode TLS chain fixture");
+    assert_eq!(
+        certificates.len(),
+        2,
+        "TLS chain fixture must be leaf then explicit trust anchor"
+    );
+    let trust_anchor = certificates
+        .last()
+        .expect("TLS chain fixture contains an explicit trust anchor")
+        .clone();
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(certificate).expect("install TLS trust fixture");
+    roots
+        .add(trust_anchor)
+        .expect("install TLS trust anchor fixture");
     let mut client = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -319,14 +343,69 @@ async fn remote_tls_connect(
     stream
 }
 
+async fn remote_tls_write_and_flush_with_wall_timeout(
+    stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+    bytes: &[u8],
+    context: &str,
+) {
+    let completed = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let watchdog_completed = Arc::clone(&completed);
+    let mut watchdog = tokio::task::spawn_blocking(move || {
+        let (lock, condition) = &*watchdog_completed;
+        let completed = lock.lock().expect("lock real-wall write watchdog");
+        let (_completed, wait) = condition
+            .wait_timeout_while(completed, std::time::Duration::from_secs(1), |completed| {
+                !*completed
+            })
+            .expect("wait for paused TLS write completion");
+        wait.timed_out()
+    });
+    let operation = async {
+        stream.write_all(bytes).await?;
+        stream.flush().await
+    };
+    tokio::pin!(operation);
+    let outcome = tokio::select! {
+        outcome = &mut operation => outcome,
+        timed_out = &mut watchdog => {
+            assert!(
+                timed_out.expect("join real-wall write watchdog"),
+                "real-wall write watchdog stopped before {context} completed"
+            );
+            panic!("{context} exceeded the one-second real-wall bound");
+        }
+    };
+    let (lock, condition) = &*completed;
+    *lock.lock().expect("lock completed TLS write watchdog") = true;
+    condition.notify_one();
+    assert!(
+        !watchdog.await.expect("join real-wall write watchdog"),
+        "{context} completed after the one-second real-wall bound"
+    );
+    outcome.unwrap_or_else(|error| panic!("{context}: {error}"));
+}
+
 async fn remote_tls_h2_only_handshake_is_rejected(
     endpoint: std::net::SocketAddr,
     certificate: &Path,
 ) {
-    let certificate = rustls::pki_types::CertificateDer::from_pem_file(certificate)
-        .expect("decode TLS trust fixture");
+    let certificates = rustls::pki_types::CertificateDer::pem_file_iter(certificate)
+        .expect("open TLS chain fixture")
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("decode TLS chain fixture");
+    assert_eq!(
+        certificates.len(),
+        2,
+        "TLS chain fixture must be leaf then explicit trust anchor"
+    );
+    let trust_anchor = certificates
+        .last()
+        .expect("TLS chain fixture contains an explicit trust anchor")
+        .clone();
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(certificate).expect("install TLS trust fixture");
+    roots
+        .add(trust_anchor)
+        .expect("install TLS trust anchor fixture");
     let mut client = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -442,6 +521,183 @@ async fn remote_tls_startup_rejects_invalid_identity_and_occupied_address() {
         bind_error
             .to_string()
             .contains("bind Remote Brain TLS listener")
+    );
+}
+
+#[tokio::test]
+async fn remote_tls_startup_rejects_unusable_leaf_and_chain_constraints() {
+    let temporary = tempfile::tempdir().expect("remote TLS constraint fixture");
+    let leaf_without_anchor = temporary.path().join("leaf-without-anchor.crt.pem");
+    let leaf_without_anchor_key = temporary.path().join("leaf-without-anchor.key.pem");
+    std::fs::write(&leaf_without_anchor, REMOTE_TLS_LEAF_CERTIFICATE)
+        .expect("write leaf-only TLS certificate");
+    std::fs::write(&leaf_without_anchor_key, REMOTE_TLS_PRIVATE_KEY)
+        .expect("write leaf-only TLS private key");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &leaf_without_anchor_key,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("restrict leaf-only TLS private key");
+    }
+    let leaf_without_anchor_config = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some(leaf_without_anchor),
+        Some(leaf_without_anchor_key),
+    )
+    .unwrap()
+    .unwrap();
+    let leaf_without_anchor_error = match DaemonHttpApplicationService::bind_with_remote_tls(
+        unprovisioned_remote_registry("remote-tls-leaf-without-anchor"),
+        AUTH_TOKEN,
+        Some(&leaf_without_anchor_config),
+    )
+    .await
+    {
+        Ok(_) => panic!("a leaf without an explicit trust anchor must stop startup"),
+        Err(error) => error,
+    };
+    assert!(
+        leaf_without_anchor_error
+            .to_string()
+            .contains("requires a leaf followed by an explicit trust anchor"),
+        "leaf-only identity returned the wrong startup error: {leaf_without_anchor_error}"
+    );
+
+    for (name, certificate, expected_error) in [
+        (
+            "ca-true",
+            REMOTE_TLS_CA_TRUE_CERTIFICATE,
+            "validate Remote Brain TLS certificate chain",
+        ),
+        (
+            "client-auth-only",
+            REMOTE_TLS_CLIENT_AUTH_CERTIFICATE,
+            "validate Remote Brain TLS certificate chain",
+        ),
+        (
+            "wrong-ip",
+            REMOTE_TLS_WRONG_IP_CERTIFICATE,
+            "validate Remote Brain TLS listen address identity",
+        ),
+    ] {
+        let certificate_path = temporary.path().join(format!("{name}.crt.pem"));
+        let private_key_path = temporary.path().join(format!("{name}.key.pem"));
+        std::fs::write(&certificate_path, certificate).expect("write invalid TLS certificate");
+        std::fs::write(&private_key_path, REMOTE_TLS_PRIVATE_KEY)
+            .expect("write matching TLS private key");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&private_key_path, std::fs::Permissions::from_mode(0o600))
+                .expect("restrict TLS private key fixture");
+        }
+        let config = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+            Some("127.0.0.1:0".parse().unwrap()),
+            Some(certificate_path),
+            Some(private_key_path),
+        )
+        .unwrap()
+        .unwrap();
+        let error = match DaemonHttpApplicationService::bind_with_remote_tls(
+            unprovisioned_remote_registry(&format!("remote-tls-{name}")),
+            AUTH_TOKEN,
+            Some(&config),
+        )
+        .await
+        {
+            Ok(_) => panic!("{name} TLS identity must stop startup"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains(expected_error),
+            "{name} returned the wrong startup error: {error}"
+        );
+    }
+
+    let unrelated_chain = temporary.path().join("unrelated-chain.crt.pem");
+    let unrelated_key = temporary.path().join("unrelated-chain.key.pem");
+    let mut chain = REMOTE_TLS_LEAF_CERTIFICATE.to_vec();
+    chain.extend_from_slice(REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE);
+    std::fs::write(&unrelated_chain, chain).expect("write unrelated TLS chain");
+    std::fs::write(&unrelated_key, REMOTE_TLS_PRIVATE_KEY).expect("write TLS private key");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&unrelated_key, std::fs::Permissions::from_mode(0o600))
+            .expect("restrict TLS private key fixture");
+    }
+    let unrelated = crate::daemon::RemoteBrainTlsConfig::from_optional_parts(
+        Some("127.0.0.1:0".parse().unwrap()),
+        Some(unrelated_chain),
+        Some(unrelated_key),
+    )
+    .unwrap()
+    .unwrap();
+    let unrelated_error = match DaemonHttpApplicationService::bind_with_remote_tls(
+        unprovisioned_remote_registry("remote-tls-unrelated-chain"),
+        AUTH_TOKEN,
+        Some(&unrelated),
+    )
+    .await
+    {
+        Ok(_) => panic!("an unrelated terminal trust anchor must stop startup"),
+        Err(error) => error,
+    };
+    assert!(
+        unrelated_error
+            .to_string()
+            .contains("validate Remote Brain TLS certificate chain"),
+        "unrelated trust anchor returned the wrong startup error: {unrelated_error}"
+    );
+
+    let valid_chain = rustls::pki_types::CertificateDer::pem_slice_iter(REMOTE_TLS_CERTIFICATE)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .expect("decode valid TLS chain");
+    assert_eq!(valid_chain.len(), 2, "fixture must be leaf then root");
+    let duplicated_leaf_chain = vec![valid_chain[0].clone(), valid_chain[0].clone()];
+    let duplicated_leaf_error = validate_remote_brain_tls_identity_at(
+        &duplicated_leaf_chain,
+        "127.0.0.1:0".parse().unwrap(),
+        rustls::pki_types::UnixTime::now(),
+    )
+    .expect_err("an end-entity leaf cannot also be its explicit trust anchor");
+    assert!(
+        duplicated_leaf_error
+            .to_string()
+            .contains("leaf and explicit trust anchor must be distinct certificates"),
+        "duplicated leaf returned the wrong startup error: {duplicated_leaf_error}"
+    );
+    let not_yet_valid_at =
+        rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(0));
+    let not_yet_valid_error = validate_remote_brain_tls_identity_at(
+        &valid_chain,
+        "127.0.0.1:0".parse().unwrap(),
+        not_yet_valid_at,
+    )
+    .expect_err("a not-yet-valid TLS leaf must fail the startup validator");
+    assert!(
+        not_yet_valid_error
+            .to_string()
+            .contains("validate Remote Brain TLS certificate chain"),
+        "not-yet-valid leaf returned the wrong startup error: {not_yet_valid_error}"
+    );
+    let expired_at = rustls::pki_types::UnixTime::since_unix_epoch(std::time::Duration::from_secs(
+        4_102_444_800,
+    ));
+    let expired_error = validate_remote_brain_tls_identity_at(
+        &valid_chain,
+        "127.0.0.1:0".parse().unwrap(),
+        expired_at,
+    )
+    .expect_err("an expired TLS leaf must fail the startup validator");
+    assert!(
+        expired_error
+            .to_string()
+            .contains("validate Remote Brain TLS certificate chain"),
+        "expired leaf returned the wrong startup error: {expired_error}"
     );
 }
 
@@ -869,56 +1125,160 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
             .any(|window| window == b"\"kind\":\"problem\""),
         "progressing body failure must retain the canonical typed problem wrapper"
     );
-    let mut absolute_slowloris = remote_tls_connect(endpoint, &certificate).await;
-    absolute_slowloris
-        .write_all(b"G")
-        .await
-        .expect("start absolute slowloris probe");
-    absolute_slowloris
-        .flush()
-        .await
-        .expect("flush initial absolute slowloris byte");
-    tokio::time::pause();
-    let mut slowloris_bytes = b"ET /remote/enrollment".iter();
-    for byte in slowloris_bytes.by_ref().take(14) {
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-        absolute_slowloris
-            .write_all(std::slice::from_ref(byte))
-            .await
-            .expect("slowloris progress before the absolute deadline must be accepted");
-        absolute_slowloris
-            .flush()
-            .await
-            .expect("flush slowloris progress before the absolute deadline");
-    }
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    absolute_slowloris
-        .write_all(std::slice::from_ref(slowloris_bytes.next().expect(
-            "slowloris fixture extends past the absolute deadline probe",
-        )))
-        .await
-        .expect("slowloris progress at 59 seconds must be accepted");
-    absolute_slowloris
-        .flush()
-        .await
-        .expect("flush slowloris progress at 59 seconds");
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let mut absolute_slowloris_response = Vec::new();
-    let _closed = tokio::time::timeout(
+    let (mut absolute_slowloris, initial_absolute_body_bytes) = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        absolute_slowloris.read_to_end(&mut absolute_slowloris_response),
+        async {
+            let initial_absolute_ingress = service
+                .remote_tls_ingress_snapshot()
+                .expect("TLS ingress observer");
+            let mut stream = remote_tls_connect(endpoint, &certificate).await;
+            let headers = format!(
+                "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n",
+                String::from_utf8_lossy(&credential),
+                "0123456789abcdef0123456789abcdef",
+            )
+            .into_bytes();
+            stream
+                .write_all(&headers)
+                .await
+                .expect("write absolute slowloris HTTP body headers");
+            stream
+                .flush()
+                .await
+                .expect("flush absolute slowloris HTTP body headers");
+            loop {
+                let observed = service
+                    .remote_tls_ingress_snapshot()
+                    .expect("TLS ingress observer")
+                    .headers_complete;
+                assert!(
+                    observed <= initial_absolute_ingress.headers_complete + 1,
+                    "TLS ingress observed unexpected absolute slowloris request headers"
+                );
+                if observed == initial_absolute_ingress.headers_complete + 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let body_bytes = service
+                .remote_tls_ingress_snapshot()
+                .expect("TLS ingress observer")
+                .body_bytes_observed;
+            (stream, body_bytes)
+        }
     )
     .await
-    .expect("a progressing slowloris must hit the absolute admission deadline");
-    assert!(absolute_slowloris_response.is_empty());
-    for _ in 0..128 {
-        if service.remote_tls_available_admissions() == Some(128) {
+    .expect("absolute slowloris setup must reach the real TLS reader within one second");
+    let (inhibitor_ready_tx, inhibitor_ready_rx) = std::sync::mpsc::sync_channel(0);
+    let (inhibitor_release_tx, inhibitor_release_rx) = std::sync::mpsc::sync_channel(0);
+    let auto_advance_inhibitor = tokio::task::spawn_blocking(move || {
+        inhibitor_ready_tx
+            .send(())
+            .expect("announce absolute slowloris auto-advance inhibitor");
+        inhibitor_release_rx
+            .recv()
+            .expect("release absolute slowloris auto-advance inhibitor");
+    });
+    inhibitor_ready_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("absolute slowloris auto-advance inhibitor must start");
+    tokio::time::pause();
+    let mut slowloris_bytes = b"              {".iter();
+    for (offset, byte) in slowloris_bytes.by_ref().take(14).enumerate() {
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        remote_tls_write_and_flush_with_wall_timeout(
+            &mut absolute_slowloris,
+            std::slice::from_ref(byte),
+            &format!("write absolute slowloris body byte {offset} before deadline"),
+        )
+        .await;
+        let observation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let observed = service
+                .remote_tls_ingress_snapshot()
+                .expect("TLS ingress observer")
+                .body_bytes_observed;
+            let expected = initial_absolute_body_bytes + offset + 1;
+            assert!(
+                observed <= expected,
+                "TLS ingress consumed absolute slowloris body bytes out of order"
+            );
+            if observed == expected {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < observation_deadline,
+                "absolute slowloris body byte {offset} must reach TLS ingress"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    let final_offset = 14;
+    remote_tls_write_and_flush_with_wall_timeout(
+        &mut absolute_slowloris,
+        std::slice::from_ref(
+            slowloris_bytes
+                .next()
+                .expect("slowloris fixture extends past the absolute deadline probe"),
+        ),
+        "write absolute slowloris body byte at 58 seconds",
+    )
+    .await;
+    let observation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let observed = service
+            .remote_tls_ingress_snapshot()
+            .expect("TLS ingress observer")
+            .body_bytes_observed;
+        let expected = initial_absolute_body_bytes + final_offset + 1;
+        assert!(
+            observed <= expected,
+            "TLS ingress consumed absolute slowloris body bytes out of order"
+        );
+        if observed == expected {
             break;
         }
+        assert!(
+            std::time::Instant::now() < observation_deadline,
+            "absolute slowloris body byte {final_offset} must reach TLS ingress at 58 seconds"
+        );
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(std::time::Duration::from_secs(3)).await;
+    let absolute_slowloris_reader = tokio::task::spawn(async move {
+        let mut response = Vec::new();
+        let closed = absolute_slowloris.read_to_end(&mut response).await;
+        (closed, response)
+    });
+    let close_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while !absolute_slowloris_reader.is_finished() {
+        assert!(
+            std::time::Instant::now() < close_deadline,
+            "a progressing slowloris must hit the absolute admission deadline"
+        );
+        tokio::task::yield_now().await;
+    }
+    let (_closed, absolute_slowloris_response) = absolute_slowloris_reader
+        .await
+        .expect("join absolute slowloris response reader");
+    assert!(absolute_slowloris_response.is_empty());
+    let reset_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while service.remote_tls_available_admissions() != Some(128) {
+        assert!(
+            std::time::Instant::now() < reset_deadline,
+            "absolute slowloris admission must be released before the reset idle deadline"
+        );
         tokio::task::yield_now().await;
     }
     assert_eq!(service.remote_tls_available_admissions(), Some(128));
 
+    inhibitor_release_tx
+        .send(())
+        .expect("release absolute slowloris auto-advance inhibitor");
+    auto_advance_inhibitor
+        .await
+        .expect("join absolute slowloris auto-advance inhibitor");
     tokio::time::resume();
     let force_closed = remote_tls_request_without_connection_close(endpoint, &certificate).await;
     assert!(force_closed.starts_with("HTTP/1.1 404"), "{force_closed}");

@@ -33,6 +33,14 @@ const REMOTE_TLS_CERTIFICATE: &[u8] =
     include_bytes!("../../../tests/fixtures/remote_tls/localhost.crt.pem");
 const REMOTE_TLS_PRIVATE_KEY: &[u8] =
     include_bytes!("../../../tests/fixtures/remote_tls/localhost.key.pem");
+const REMOTE_TLS_ROOT_CERTIFICATE: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/localhost-root.crt.pem");
+const REMOTE_TLS_ALTERNATE_CERTIFICATE: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/alternate.crt.pem");
+const REMOTE_TLS_ALTERNATE_PRIVATE_KEY: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/alternate.key.pem");
+const REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE: &[u8] =
+    include_bytes!("../../../tests/fixtures/remote_tls/alternate-root.crt.pem");
 
 struct Daemon {
     child: Child,
@@ -81,11 +89,6 @@ fn installed_rust_client_requires_workflow_reads_and_exact_lifecycle_capability(
         .args(["init", "--quiet"])
         .current_dir(&project));
     let binary = production_binary();
-    let mut init = Command::new(&binary);
-    init.arg("init").current_dir(&project);
-    isolated(&mut init, &home, &profile);
-    run(&mut init);
-
     let socket = profile.join("daemon.sock");
     let authority_path = profile.join("daemon-authority.json");
     let mut daemon_command = Command::new(&binary);
@@ -101,6 +104,10 @@ fn installed_rust_client_requires_workflow_reads_and_exact_lifecycle_capability(
         child: daemon_command.spawn().unwrap(),
     };
     let authority = wait_for_authority(&mut daemon.child, &authority_path);
+    let mut init = Command::new(&binary);
+    init.arg("init").current_dir(&project);
+    isolated(&mut init, &home, &profile);
+    run(&mut init);
 
     let mut context_command = Command::new(&binary);
     context_command
@@ -193,7 +200,7 @@ fn installed_rust_client_requires_workflow_reads_and_exact_lifecycle_capability(
 
 #[test]
 #[ignore = "requires a prebuilt production tracedecay daemon"]
-fn enrolled_remote_client_reaches_only_its_trusted_tls_authority() {
+fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_enrollment() {
     let scratch = TempDir::new().unwrap();
     let first_home = scratch.path().join("first-home");
     let second_home = scratch.path().join("second-home");
@@ -219,6 +226,36 @@ fn enrolled_remote_client_reaches_only_its_trusted_tls_authority() {
         .current_dir(&project));
 
     let binary = production_binary();
+    let first_certificate = scratch.path().join("first-localhost.crt.pem");
+    let first_private_key = scratch.path().join("first-localhost.key.pem");
+    let second_certificate = scratch.path().join("second-localhost.crt.pem");
+    let second_private_key = scratch.path().join("second-localhost.key.pem");
+    fs::write(&first_certificate, REMOTE_TLS_CERTIFICATE).unwrap();
+    fs::write(&first_private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
+    fs::write(&second_certificate, REMOTE_TLS_ALTERNATE_CERTIFICATE).unwrap();
+    fs::write(&second_private_key, REMOTE_TLS_ALTERNATE_PRIVATE_KEY).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&first_private_key, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&second_private_key, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let (mut first, first_authority, first_remote) = spawn_remote_daemon(
+        &binary,
+        &first_home,
+        &first_profile,
+        &project,
+        &first_certificate,
+        &first_private_key,
+    );
+    let (mut second, _, second_remote) = spawn_remote_daemon(
+        &binary,
+        &second_home,
+        &second_profile,
+        &project,
+        &second_certificate,
+        &second_private_key,
+    );
+    assert_ne!(first_remote, second_remote);
+
     for (home, profile) in [
         (&first_home, &first_profile),
         (&second_home, &second_profile),
@@ -228,31 +265,6 @@ fn enrolled_remote_client_reaches_only_its_trusted_tls_authority() {
         isolated(&mut init, home, profile);
         run(&mut init);
     }
-
-    let certificate = scratch.path().join("localhost.crt.pem");
-    let private_key = scratch.path().join("localhost.key.pem");
-    fs::write(&certificate, REMOTE_TLS_CERTIFICATE).unwrap();
-    fs::write(&private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&private_key, fs::Permissions::from_mode(0o600)).unwrap();
-
-    let (mut first, first_authority, first_remote) = spawn_remote_daemon(
-        &binary,
-        &first_home,
-        &first_profile,
-        &project,
-        &certificate,
-        &private_key,
-    );
-    let (mut second, _, second_remote) = spawn_remote_daemon(
-        &binary,
-        &second_home,
-        &second_profile,
-        &project,
-        &certificate,
-        &private_key,
-    );
-    assert_ne!(first_remote, second_remote);
 
     let mut context_command = Command::new(&binary);
     context_command
@@ -293,13 +305,23 @@ fn enrolled_remote_client_reaches_only_its_trusted_tls_authority() {
         .unwrap();
     assert_eq!(provisioned.status(), reqwest::StatusCode::NO_CONTENT);
 
-    let certificate_pem = fs::read(&certificate).unwrap();
     let request = enrollment_request(&grant);
+    let untrusted_authority = EnrolledRemoteClient::new_with_root_certificate(
+        format!("https://{second_remote}/remote/"),
+        grant_credential,
+        Duration::from_secs(5),
+        REMOTE_TLS_ROOT_CERTIFICATE,
+    )
+    .unwrap();
+    assert!(matches!(
+        untrusted_authority.enroll(&request, enrollment_credential),
+        Err(RemoteClientError::Transport(_))
+    ));
     let other_authority = EnrolledRemoteClient::new_with_root_certificate(
         format!("https://{second_remote}/remote/"),
         grant_credential,
         Duration::from_secs(5),
-        &certificate_pem,
+        REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE,
     )
     .unwrap();
     assert!(matches!(
@@ -311,16 +333,16 @@ fn enrolled_remote_client_reaches_only_its_trusted_tls_authority() {
         format!("https://{first_remote}/remote/"),
         grant_credential,
         Duration::from_secs(5),
-        &certificate_pem,
+        REMOTE_TLS_ROOT_CERTIFICATE,
     )
     .unwrap()
     .enroll(&request, enrollment_credential)
-    .expect("the SDK must join /remote/ and trust the configured TLS authority");
+    .expect("the SDK must join /remote/ and trust the configured private root");
     assert!(enrolled.result.is_ok());
 
     let local_route_response = tls_http11_request(
         first_remote,
-        &certificate_pem,
+        REMOTE_TLS_ROOT_CERTIFICATE,
         &format!(
             "POST /projects/{project_id}/application/workflow/list-definitions HTTP/1.1\r\nHost: {first_remote}\r\nAuthorization: Bearer {local_token}\r\nOrigin: {local_base}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
         ),

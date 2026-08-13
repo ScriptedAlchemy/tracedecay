@@ -773,10 +773,10 @@ pub enum DaemonAction {
         /// Profile data root owned by this daemon process
         #[arg(long = "profile-root")]
         profile_root: Option<String>,
-        /// Explicit TCP address for the enrolled Remote Brain HTTPS listener
+        /// TCP address whose IP must appear in the Remote Brain leaf certificate SAN
         #[arg(long = "remote-listen", requires_all = ["remote_tls_cert", "remote_tls_key"])]
         remote_listen: Option<std::net::SocketAddr>,
-        /// PEM certificate chain for the enrolled Remote Brain HTTPS listener
+        /// PEM chain ordered leaf, intermediates, final explicit trust anchor
         #[arg(long = "remote-tls-cert", requires_all = ["remote_listen", "remote_tls_key"])]
         remote_tls_cert: Option<String>,
         /// PEM private key for the enrolled Remote Brain HTTPS listener
@@ -792,10 +792,10 @@ pub enum DaemonAction {
         /// Write the service file but do not start/enable it
         #[arg(long)]
         no_start: bool,
-        /// Explicit TCP address for the enrolled Remote Brain HTTPS listener
+        /// TCP address whose IP must appear in the Remote Brain leaf certificate SAN
         #[arg(long = "remote-listen", requires_all = ["remote_tls_cert", "remote_tls_key"])]
         remote_listen: Option<std::net::SocketAddr>,
-        /// PEM certificate chain for the enrolled Remote Brain HTTPS listener
+        /// PEM chain ordered leaf, intermediates, final explicit trust anchor
         #[arg(long = "remote-tls-cert", requires_all = ["remote_listen", "remote_tls_key"])]
         remote_tls_cert: Option<String>,
         /// PEM private key for the enrolled Remote Brain HTTPS listener

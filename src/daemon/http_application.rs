@@ -28,8 +28,10 @@ use axum::routing::{any, post};
 use constant_time_eq::constant_time_eq;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
+use rustls::client::{verify_server_cert_signed_by_trust_anchor, verify_server_name};
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::server::ParsedCertificate;
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, oneshot};
@@ -875,11 +877,18 @@ impl RemoteBrainTlsListener {
             .map_err(|error| {
                 tls_configuration_error("decode Remote Brain TLS certificate", error)
             })?;
-        if certificates.is_empty() {
+        if certificates.len() < 2 {
             return Err(TraceDecayError::Config {
-                message: "Remote Brain TLS certificate chain is empty".to_owned(),
+                message: "Remote Brain TLS certificate chain requires a leaf followed by an explicit trust anchor".to_owned(),
             });
         }
+        let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
+        validate_remote_brain_tls_identity(
+            &certificates,
+            config.listen(),
+            UnixTime::now(),
+            &crypto_provider,
+        )?;
         let private_key_file = tracedecay_private_fs::open_private_file(config.private_key())
             .map_err(|error| {
                 tls_configuration_error("open and validate Remote Brain TLS private key", error)
@@ -887,7 +896,11 @@ impl RemoteBrainTlsListener {
         let private_key = PrivateKeyDer::from_pem_reader(private_key_file).map_err(|error| {
             tls_configuration_error("decode Remote Brain TLS private key", error)
         })?;
-        let mut server = rustls::ServerConfig::builder()
+        let mut server = rustls::ServerConfig::builder_with_provider(crypto_provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|error| {
+                tls_configuration_error("select Remote Brain TLS protocol versions", error)
+            })?
             .with_no_client_auth()
             .with_single_cert(certificates, private_key)
             .map_err(|error| tls_configuration_error("bind Remote Brain TLS identity", error))?;
@@ -935,6 +948,69 @@ impl RemoteBrainTlsListener {
             address,
         ))
     }
+}
+
+fn validate_remote_brain_tls_identity(
+    certificates: &[CertificateDer<'_>],
+    listen: SocketAddr,
+    now: UnixTime,
+    crypto_provider: &rustls::crypto::CryptoProvider,
+) -> Result<()> {
+    let leaf = certificates
+        .first()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "Remote Brain TLS certificate chain is empty".to_owned(),
+        })?;
+    if certificates.len() < 2 {
+        return Err(TraceDecayError::Config {
+            message: "Remote Brain TLS certificate chain requires a leaf followed by an explicit trust anchor".to_owned(),
+        });
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    let trust_anchor = &certificates[certificates.len() - 1];
+    if leaf.as_ref() == trust_anchor.as_ref() {
+        return Err(TraceDecayError::Config {
+            message:
+                "Remote Brain TLS leaf and explicit trust anchor must be distinct certificates"
+                    .to_owned(),
+        });
+    }
+    roots.add(trust_anchor.clone()).map_err(|error| {
+        tls_configuration_error("load Remote Brain TLS chain trust anchor", error)
+    })?;
+    let intermediates = &certificates[1..certificates.len() - 1];
+    let parsed_leaf = ParsedCertificate::try_from(leaf).map_err(|error| {
+        tls_configuration_error("parse Remote Brain TLS leaf certificate", error)
+    })?;
+    let server_name = ServerName::IpAddress(listen.ip().into());
+    verify_server_cert_signed_by_trust_anchor(
+        &parsed_leaf,
+        &roots,
+        intermediates,
+        now,
+        crypto_provider.signature_verification_algorithms.all,
+    )
+    .map_err(|error| {
+        tls_configuration_error("validate Remote Brain TLS certificate chain", error)
+    })?;
+    verify_server_name(&parsed_leaf, &server_name).map_err(|error| {
+        tls_configuration_error("validate Remote Brain TLS listen address identity", error)
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn validate_remote_brain_tls_identity_at(
+    certificates: &[CertificateDer<'_>],
+    listen: SocketAddr,
+    now: UnixTime,
+) -> Result<()> {
+    validate_remote_brain_tls_identity(
+        certificates,
+        listen,
+        now,
+        &rustls::crypto::ring::default_provider(),
+    )
 }
 
 async fn serve_remote_brain_tls(
