@@ -41,6 +41,7 @@ pub use external_source::install_external_source_schema;
 pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
+pub use metadata::BoundedMetadataValue;
 pub(crate) use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
 };
