@@ -273,11 +273,11 @@ if (!("workflow_list_definitions" in availabilityClient.operations) ||
     !("workflow_get_definition" in availabilityClient.operations) ||
     !("workflow_register_definition" in availabilityClient.operations) ||
     !("work_views" in availabilityClient.operations) ||
+    !("application_test_results" in availabilityClient.operations) ||
     "work_snapshot" in availabilityClient.operations ||
     "work_delta" in availabilityClient.operations ||
     "work_replan_dependencies" in availabilityClient.operations ||
     "work_accept_task" in availabilityClient.operations ||
-    "application_test_results" in availabilityClient.operations ||
     "invoke" in availabilityClient ||
     "requestOperation" in availabilityClient) {
   throw new Error("only schema-authorized operations may be callable");
