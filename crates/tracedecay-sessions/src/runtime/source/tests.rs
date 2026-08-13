@@ -807,6 +807,111 @@ fn stream_new_jsonl_resets_offset_when_file_identity_changes() {
 }
 
 #[test]
+fn stream_new_jsonl_does_not_flag_append_only_progress_as_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("append-only.jsonl");
+    std::fs::write(&path, "{\"a\":1}\n").unwrap();
+
+    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+    assert!(!first.replacement_generation);
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"{\"a\":2}\n")
+        .unwrap();
+
+    let appended = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
+    assert_eq!(appended.start_offset, first.new_cursor.position);
+    assert!(!appended.replacement_generation);
+    assert_eq!(appended.new_cursor.file_id, first.new_cursor.file_id);
+}
+
+#[test]
+fn stream_new_jsonl_keeps_one_replacement_namespace_across_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rewritten.jsonl");
+    std::fs::write(&path, "{\"a\":1}\n").unwrap();
+
+    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+    assert!(!first.replacement_generation);
+
+    // Replace the file with more records than one batch can frame, so the
+    // rewrite is only visible at the head of the first batch.
+    let records = jsonl::MAX_JSONL_FRAMES_PER_BATCH + 500;
+    let rewritten = (0..records).fold(String::new(), |mut text, index| {
+        text.push_str(&format!("{{\"b\":{index}}}\n"));
+        text
+    });
+    std::fs::write(&path, &rewritten).unwrap();
+
+    let head = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
+    assert_eq!(head.start_offset, 0);
+    assert!(head.replacement_generation);
+    assert_eq!(head.lines.len(), jsonl::MAX_JSONL_FRAMES_PER_BATCH);
+    assert_ne!(head.new_cursor.file_id, first.new_cursor.file_id);
+
+    let tail = stream_new_jsonl(&path, head.new_cursor, None).unwrap();
+    assert!(tail.start_offset > 0);
+    // The rewrite is a property of the stored generation, so the tail of that
+    // generation namespaces its ids with the same suffix as the head instead
+    // of re-minting bare offsets over the retained pre-rewrite rows.
+    assert!(tail.replacement_generation);
+    assert_eq!(tail.new_cursor.file_id, head.new_cursor.file_id);
+    assert_eq!(
+        tail.lines.len(),
+        records - jsonl::MAX_JSONL_FRAMES_PER_BATCH
+    );
+}
+
+#[test]
+fn stream_new_jsonl_flags_replacement_when_the_rewrite_starts_with_a_blank_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blank-head.jsonl");
+    std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n").unwrap();
+
+    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+    assert_eq!(first.lines.len(), 2);
+
+    // The replacement opens with a whitespace-only frame, so no parsed line
+    // carries offset zero even though the scan restarted at the file head.
+    std::fs::write(&path, "   \n{\"b\":1}\n").unwrap();
+    let rewritten = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
+    assert_eq!(rewritten.start_offset, 0);
+    assert!(rewritten.lines.first().unwrap().offset > 0);
+    assert!(rewritten.replacement_generation);
+}
+
+#[test]
+fn stream_new_jsonl_mints_a_distinct_generation_for_each_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("repeated-rewrite.jsonl");
+    // A stable head line keeps the file identity constant across rewrites so
+    // only the recorded generation can separate them.
+    std::fs::write(&path, "{\"same\":1}\n{\"a\":1}\n").unwrap();
+    let first = stream_new_jsonl(&path, StoredCursor::default(), None).unwrap();
+    assert!(!first.replacement_generation);
+
+    std::fs::write(&path, "{\"same\":1}\n").unwrap();
+    let second = stream_new_jsonl(&path, first.new_cursor, None).unwrap();
+    assert_eq!(second.start_offset, 0);
+    assert!(second.replacement_generation);
+
+    std::fs::write(&path, "{\"same\":1}\n{\"b\":2}\n").unwrap();
+    let appended = stream_new_jsonl(&path, second.new_cursor, None).unwrap();
+    assert!(appended.start_offset > 0);
+    assert!(appended.replacement_generation);
+    assert_eq!(appended.new_cursor.file_id, second.new_cursor.file_id);
+
+    std::fs::write(&path, "{\"same\":1}\n").unwrap();
+    let third = stream_new_jsonl(&path, appended.new_cursor, None).unwrap();
+    assert_eq!(third.start_offset, 0);
+    assert!(third.replacement_generation);
+    assert_ne!(third.new_cursor.file_id, second.new_cursor.file_id);
+}
+
+#[test]
 fn raw_strict_resume_checkpoint_detects_same_inode_rewrite_past_the_head() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("same-inode.jsonl");

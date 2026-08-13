@@ -20,6 +20,13 @@ pub struct JsonlLine {
 pub struct NewJsonl {
     pub lines: Vec<JsonlLine>,
     pub new_cursor: StoredCursor,
+    /// Absolute source offset this batch resumed from.
+    pub start_offset: u64,
+    /// Whether `new_cursor.file_id` names a replacement (truncate-and-rewrite)
+    /// generation instead of the file's append-only identity. It is a property
+    /// of the stored cursor, so every batch of one replacement generation
+    /// reports it -- not just the batch that starts at offset zero.
+    pub replacement_generation: bool,
 }
 
 /// Why strict JSONL framing stopped before consuming the next record.
@@ -171,6 +178,46 @@ fn bounded_jsonl_snapshot_fingerprint(
         remaining = remaining.saturating_sub(read as u64);
     }
     Ok(digest_prefix_u64(hasher.finalize()))
+}
+
+/// Chain depth for replacement markers derived from one file identity.
+///
+/// The marker for a rewritten file must be recoverable from the persisted
+/// cursor alone (there is no room for a separate generation column), so it is
+/// re-derived by searching this bounded counter space. Successive rewrites of a
+/// file whose identity never changes therefore stay distinct until the counter
+/// wraps.
+const MAX_JSONL_REPLACEMENT_GENERATIONS: u32 = 64;
+
+/// Deterministic replacement marker for `counter`-th rewrite of `file_identity`.
+///
+/// Never zero: the resume check reads zero as "identity unknown".
+fn replacement_jsonl_generation(file_identity: u64, counter: u32) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay-jsonl-replacement-generation-v1");
+    hasher.update(file_identity.to_le_bytes());
+    hasher.update(counter.to_le_bytes());
+    digest_prefix_u64(hasher.finalize()).max(1)
+}
+
+fn replacement_generation_counter(file_identity: u64, generation: u64) -> Option<u32> {
+    if generation == 0 || generation == file_identity {
+        return None;
+    }
+    (1..=MAX_JSONL_REPLACEMENT_GENERATIONS)
+        .find(|counter| replacement_jsonl_generation(file_identity, *counter) == generation)
+}
+
+/// Whether `generation` was minted for a rewritten generation of this file.
+pub(super) fn is_replacement_jsonl_generation(file_identity: u64, generation: u64) -> bool {
+    replacement_generation_counter(file_identity, generation).is_some()
+}
+
+/// Marker for the generation that replaces the one `previous_generation` names.
+fn next_replacement_jsonl_generation(file_identity: u64, previous_generation: u64) -> u64 {
+    let counter = replacement_generation_counter(file_identity, previous_generation)
+        .map_or(1, |counter| counter % MAX_JSONL_REPLACEMENT_GENERATIONS + 1);
+    replacement_jsonl_generation(file_identity, counter)
 }
 
 fn rewritten_jsonl_generation(
@@ -438,6 +485,8 @@ pub(super) fn stream_new_jsonl_with_policy(
         NewJsonl {
             lines,
             new_cursor: raw.new_cursor,
+            start_offset: raw.start_offset,
+            replacement_generation: raw.replacement_generation,
         },
         raw.deferred,
         raw.start_offset,
@@ -476,6 +525,9 @@ pub struct RawNewJsonl {
     pub read_through: u64,
     pub file_identity: u64,
     pub new_cursor: StoredCursor,
+    /// Whether `new_cursor.file_id` names a replacement generation rather than
+    /// the append-only identity of the scanned file.
+    pub replacement_generation: bool,
     pub deferred: Option<JsonlFrameDeferral>,
 }
 
@@ -559,6 +611,7 @@ struct JsonlScanGeneration {
     file_identity: u64,
     snapshot_fingerprint: u64,
     seek_to: u64,
+    replacement: bool,
 }
 
 struct PreparedJsonlScan {
@@ -611,10 +664,37 @@ impl PreparedJsonlScan {
                 )
             }
         } else if should_resume_jsonl(previous, file_size, mtime, file_identity) {
-            (previous.position, file_identity)
+            // Carry the stored generation forward: a replacement marker minted
+            // when this file was rewritten must survive every later batch of
+            // that generation, otherwise batch two would re-mint ids that
+            // collide with the retained pre-rewrite rows.
+            (
+                previous.position,
+                if previous.file_id == 0 {
+                    file_identity
+                } else {
+                    previous.file_id
+                },
+            )
+        } else if previous.position > 0 {
+            // The cursor is being rewound to the head of a file it had already
+            // read past: this generation replaces the recorded one.
+            (
+                0,
+                next_replacement_jsonl_generation(file_identity, previous.file_id),
+            )
+        } else if is_replacement_jsonl_generation(file_identity, previous.file_id) {
+            // A replacement that was truncated to nothing keeps its marker so
+            // the records written into it stay namespaced.
+            (0, previous.file_id)
         } else {
             (0, file_identity)
         };
+        // A generation that is not the file's own identity was minted for a
+        // rewrite, so it stays flagged for every batch it covers. The rewind
+        // clause additionally covers the first batch after a file was replaced
+        // by a different identity, whose generation is that new identity.
+        let replacement = file_id != file_identity || (seek_to == 0 && previous.position > 0);
         Ok(Self {
             file,
             generation: JsonlScanGeneration {
@@ -624,6 +704,7 @@ impl PreparedJsonlScan {
                 file_identity,
                 snapshot_fingerprint,
                 seek_to,
+                replacement,
             },
         })
     }
@@ -645,6 +726,7 @@ impl PreparedJsonlScan {
                 mtime: generation.mtime,
                 file_id: generation.file_id,
             },
+            replacement_generation: generation.replacement,
             deferred: None,
         }
     }
@@ -984,6 +1066,7 @@ impl RawJsonlBatchScanner {
                 mtime: file_mtime_secs(&final_metadata),
                 file_id: self.generation.file_id,
             },
+            replacement_generation: self.generation.replacement,
             deferred: self.deferred,
         })
     }

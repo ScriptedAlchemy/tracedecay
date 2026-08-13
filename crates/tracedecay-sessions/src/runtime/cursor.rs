@@ -323,9 +323,10 @@ fn parse_cursor_jsonl(
     let new = stream_new_jsonl(path, prev, max_new_bytes)?;
     // A truncate-and-rewrite can reuse every byte offset from the previous
     // file generation. Legacy projection keys are offset-based, so keep
-    // replacement rows distinct instead of overwriting retained history.
-    let replayed_from_start =
-        prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
+    // replacement rows distinct instead of overwriting retained history. The
+    // scan reports this from the stored cursor generation, so a rewrite spread
+    // over several batches namespaces all of them, not just the first.
+    let namespace_replacement = new.replacement_generation;
     let subagent = cursor_subagent_identity(path, parent_session_id);
     let session_id = subagent.as_ref().map_or_else(
         || parent_session_id.to_string(),
@@ -361,7 +362,7 @@ fn parse_cursor_jsonl(
             context,
         ));
     }
-    if replayed_from_start {
+    if namespace_replacement {
         namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
     }
 
@@ -1968,5 +1969,62 @@ mod tests {
                 "{rejected} must not survive Cursor JSONL normalization"
             );
         }
+    }
+
+    #[test]
+    fn every_batch_of_a_rewritten_transcript_keeps_one_replacement_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-redacted.jsonl");
+        let event = json!({"session_id": "session-redacted"});
+        std::fs::write(&path, "{\"role\":\"user\",\"content\":\"first generation\"}\n").unwrap();
+
+        let first = parse_cursor_jsonl(
+            &event,
+            "session-redacted",
+            &path,
+            StoredCursor::default(),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(first.messages.len(), 1);
+        assert!(!first.messages[0].message_id.contains(":generation:"));
+
+        // Truncate-and-rewrite, then read the replacement one record per batch
+        // so the second batch no longer starts at the file head.
+        std::fs::write(
+            &path,
+            "{\"role\":\"user\",\"content\":\"replacement head\"}\n\
+             {\"role\":\"user\",\"content\":\"replacement tail\"}\n",
+        )
+        .unwrap();
+
+        let head = parse_cursor_jsonl(
+            &event,
+            "session-redacted",
+            &path,
+            first.new_cursor,
+            Some(1),
+            false,
+        )
+        .unwrap();
+        assert_eq!(head.messages.len(), 1);
+        let suffix = format!(":generation:{}", head.new_cursor.file_id);
+        assert!(head.messages[0].message_id.ends_with(&suffix));
+
+        let tail = parse_cursor_jsonl(
+            &event,
+            "session-redacted",
+            &path,
+            head.new_cursor,
+            Some(1),
+            false,
+        )
+        .unwrap();
+        assert_eq!(tail.messages.len(), 1);
+        // Without the stored generation the tail would re-mint the bare
+        // `<session>:<offset>` id and overwrite retained pre-rewrite history.
+        assert!(tail.messages[0].message_id.ends_with(&suffix));
+        assert_ne!(tail.messages[0].message_id, first.messages[0].message_id);
     }
 }

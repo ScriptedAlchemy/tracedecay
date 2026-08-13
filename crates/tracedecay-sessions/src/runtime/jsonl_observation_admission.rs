@@ -431,7 +431,10 @@ pub(super) async fn admit_jsonl_observations<State>(
     let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
     let mut state = initialize(JsonlObservationScan {
         resumed: had_expected_cursor && raw.start_offset > 0,
-        replacement_rescan: previous.position > 0 && raw.start_offset == 0,
+        // Derived from the scanned generation rather than this batch's first
+        // offset, so a rewrite that spans several batches keeps namespacing
+        // ids past the batch that started at the file head.
+        replacement_rescan: raw.replacement_generation,
         start_offset: raw.start_offset,
         source_mtime: raw.new_cursor.mtime,
         generation: raw.new_cursor.file_id,

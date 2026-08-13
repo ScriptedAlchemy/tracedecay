@@ -861,7 +861,11 @@ fn should_resume_jsonl(prev: StoredCursor, file_size: u64, mtime: u64, file_id: 
         return false;
     }
     if prev.file_id != 0 && file_id != 0 {
-        return prev.file_id == file_id;
+        // A stored replacement marker still names this file: it is the
+        // generation minted when the file was last rewritten, so resuming past
+        // it keeps one namespace across every batch of that generation.
+        return prev.file_id == file_id
+            || jsonl::is_replacement_jsonl_generation(file_id, prev.file_id);
     }
     mtime >= prev.mtime
 }

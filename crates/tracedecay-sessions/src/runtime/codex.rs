@@ -216,10 +216,12 @@ impl TranscriptSource for CodexSource {
         // objective- or status-change opens a new `goal` row.
         let mut last_goal_key: Option<(String, Option<String>)> = None;
         let mut structured = events::CodexStructuredState::new();
-        let replayed_from_start =
-            prev.position > 0 && new.lines.first().is_some_and(|line| line.offset == 0);
-        let mut context_state = if prev.position > 0 && !replayed_from_start {
-            CodexContextState::scan_prior(path, prev.position, &meta)
+        // Namespacing follows the stored cursor generation, so every batch of a
+        // rewritten file is namespaced; prior-context recovery follows this
+        // batch's own resume point, which is zero only at the file head.
+        let namespace_replacement = new.replacement_generation;
+        let mut context_state = if new.start_offset > 0 {
+            CodexContextState::scan_prior(path, new.start_offset, &meta)
         } else {
             CodexContextState::from_meta(&meta)
         };
@@ -403,7 +405,7 @@ impl TranscriptSource for CodexSource {
         // A truncate-and-rewrite can reuse every byte offset from the previous
         // file generation. Legacy projection keys are offset-based, so keep
         // replacement rows distinct instead of overwriting retained history.
-        if replayed_from_start {
+        if namespace_replacement {
             namespace_replacement_message_ids(&mut messages, new.new_cursor.file_id);
         }
 
