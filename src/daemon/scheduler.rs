@@ -6,7 +6,9 @@ use tokio::time::{Duration, timeout};
 use tracedecay_agent_hosts::automation::AutomationRunControl;
 use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
 
-use crate::daemon::automation_effect::{AutomationEffectAdmission, RetainedSettlementWaiter};
+use crate::daemon::automation_effect::{
+    AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
@@ -150,25 +152,53 @@ fn scheduler_run_observer(
     })
 }
 
-async fn await_scheduler_automation_problem(
+async fn settle_scheduler_retained_automation<T, P>(
+    engine: &DaemonEngine,
+    project_id: &tracedecay_domain::ProjectId,
     project_path: &Path,
-    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
-    settlement: RetainedSettlementWaiter<
-        Result<(
-            crate::daemon::automation_effect::AutomationSettledProblem,
-            Option<tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord>,
-        )>,
-    >,
-) -> Option<TraceDecayError> {
+    task: AgentTaskKind,
+    run_control: &AutomationRunControl,
+    effect: AutomationEffectAuthority,
+    retained: tracedecay_agent_hosts::automation::runner::RetainedAutomationRun<T>,
+    projector: P,
+) -> Option<TraceDecayError>
+where
+    T: Send + 'static,
+    P: FnOnce(
+            T,
+        ) -> (
+            tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
+            Option<tracedecay_agent_hosts::automation::AutomationCommittedReceipt>,
+        ) + Send
+        + 'static,
+{
+    synchronize_scheduler_effect_control(run_control);
+    let settlement = effect.start_retained_automation_settlement(
+        retained,
+        Some(scheduler_run_observer(engine, project_id, project_path)),
+        projector,
+    );
     match settlement.wait().await {
-        Ok((problem, _)) => {
+        Ok(RetainedAutomationSettlementOutcome::Problem {
+            problem,
+            record: _record,
+        }) => {
             log_daemon_event(
                 "scheduler_task_application_problem",
                 &scheduler_application_problem_log_fields(project_path, task, &problem),
             );
             None
         }
-        Err(error) => Some(error),
+        Ok(RetainedAutomationSettlementOutcome::Run {
+            terminal: _terminal,
+            record: _record,
+        }) => None,
+        Ok(RetainedAutomationSettlementOutcome::Reused { record: _record }) => None,
+        Ok(RetainedAutomationSettlementOutcome::AbandonedObserved { record: _record }) => None,
+        Err(error) => {
+            log_scheduler_task_error(project_path, task, &error);
+            Some(error)
+        }
     }
 }
 
@@ -1586,52 +1616,47 @@ async fn run_user_jobs_scheduler_pass(
             },
         )
         .await;
-        let (run, settlement_guard) = retained_run.into_parts();
-        match run {
-            Ok(run) => {
-                synchronize_scheduler_effect_control(&effect_run_control);
+        synchronize_scheduler_effect_control(&effect_run_control);
+        let settlement = effect.start_retained_automation_settlement(
+            retained_run,
+            Some(scheduler_run_observer(engine, project_id, project_path)),
+            |run| {
                 if run.ledger_record.status
                     == tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
                     && run.ledger_record.error.as_deref() == Some("scheduler_lock_active")
                 {
-                    let ledger_record = run.ledger_record;
-                    let settlement = effect.start_retained_abandon(settlement_guard);
-                    match settlement.wait().await {
-                        Ok(()) => {
-                            record_scheduler_run(engine, project_id, project_path, &ledger_record);
-                        }
-                        Err(error) => {
-                            first_error.get_or_insert(error);
-                        }
+                    crate::daemon::automation_effect::RetainedAutomationSettlementProjection::AbandonObserved {
+                        record: run.ledger_record,
                     }
-                    continue;
+                } else {
+                    crate::daemon::automation_effect::RetainedAutomationSettlementProjection::Run {
+                        record: run.ledger_record,
+                        committed: run.committed_receipt,
+                    }
                 }
-                let settlement = effect.start_deferred_run_settlement_observed(
-                    run.ledger_record,
-                    run.committed_receipt,
-                    settlement_guard,
-                    Some(scheduler_run_observer(engine, project_id, project_path)),
+            },
+        );
+        match settlement.wait().await {
+            Ok(RetainedAutomationSettlementOutcome::Problem {
+                problem,
+                record: _record,
+            }) => {
+                log_daemon_event(
+                    "scheduler_task_application_problem",
+                    &scheduler_application_problem_log_fields(
+                        project_path,
+                        AgentTaskKind::UserJob,
+                        &problem,
+                    ),
                 );
-                if let Err(error) = settlement.wait().await {
-                    first_error.get_or_insert(error);
-                }
             }
+            Ok(
+                RetainedAutomationSettlementOutcome::Run { .. }
+                | RetainedAutomationSettlementOutcome::Reused { .. }
+                | RetainedAutomationSettlementOutcome::AbandonedObserved { .. },
+            ) => {}
             Err(error) => {
-                synchronize_scheduler_effect_control(&effect_run_control);
-                let settlement = effect.start_deferred_problem_settlement_observed(
-                    error,
-                    settlement_guard,
-                    Some(scheduler_run_observer(engine, project_id, project_path)),
-                );
-                if let Some(error) = await_scheduler_automation_problem(
-                    project_path,
-                    AgentTaskKind::UserJob,
-                    settlement,
-                )
-                .await
-                {
-                    first_error.get_or_insert(error);
-                }
+                first_error.get_or_insert(error);
             }
         }
     }

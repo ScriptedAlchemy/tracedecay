@@ -579,15 +579,15 @@ pub(crate) const AUTOMATION_AFTER_HELP: &str = "\
 Examples:
   tracedecay automation config get --json        Effective config
   tracedecay automation config enable            Turn the loop on
-  tracedecay automation run skill-writing        Run managed-skill evolution
   tracedecay automation runs list --json         Run history
   tracedecay automation runs artifact run-123 codex_handoff --json
   tracedecay automation skills list              Managed skills
   tracedecay automation skills create --help     Direct lifecycle changes
   tracedecay automation facts list               Terminal automatic fact receipts
 
-Related: tracedecay install --agent codex --automation (enable at install),
-tracedecay dashboard (automation outcomes), tracedecay memory status.";
+Related: tracedecay tool fact_store_curate (bounded manual curation), tracedecay
+install --agent codex --automation (enable at install), tracedecay dashboard
+(automation outcomes), tracedecay memory status.";
 
 pub(crate) const STORAGE_LONG_ABOUT: &str = "\
 Profile-storage maintenance: read-only per-store size and retention reporting, \

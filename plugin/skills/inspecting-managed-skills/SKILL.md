@@ -21,7 +21,7 @@ The daemon automation loop (skill writer, memory curator, session reflector) pro
 
 ## Handoff
 
-- Running or configuring the automation jobs themselves → `tracedecay automation run` / `tracedecay automation config` (CLI).
+- Running bounded memory curation → `tracedecay tool fact_store_curate`; configuring the autonomous automation loop → `tracedecay automation config` (CLI).
 - Inspecting session-reflection fact automation outcomes → `tracedecay automation facts list|view` (CLI).
 - Memory fact curation → `tracedecay:project-memory`.
 

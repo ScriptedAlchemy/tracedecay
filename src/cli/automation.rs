@@ -8,11 +8,6 @@ pub enum AutomationAction {
         #[command(subcommand)]
         action: AutomationConfigAction,
     },
-    /// Run an explicit self-improvement automation job.
-    Run {
-        #[command(subcommand)]
-        action: AutomationRunAction,
-    },
     /// Inspect automation run history.
     Runs {
         #[command(subcommand)]
@@ -152,70 +147,6 @@ pub enum AutomationConfigAction {
         /// Skill writer stale-lock seconds. Empty string clears it.
         #[arg(long)]
         skill_writer_stale_lock_secs: Option<String>,
-        /// Project path (default: current directory, with discovery).
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Subcommand)]
-pub enum AutomationRunAction {
-    /// Build and automatically apply session-reflection facts from LCM evidence.
-    #[command(name = "session-reflection")]
-    SessionReflection {
-        /// LCM provider to inspect.
-        #[arg(long, default_value = "cursor")]
-        provider: String,
-        /// LCM grep query used to collect bounded evidence.
-        #[arg(long, default_value = "remember prefer decision requirement workflow")]
-        query: String,
-        /// Maximum LCM evidence snippets included in the backend review request.
-        #[arg(long, default_value_t = 20)]
-        evidence_limit: usize,
-        /// LCM grep scope: all, session, or current.
-        #[arg(long, default_value = "all")]
-        scope: String,
-        /// Provider-local session id when --scope session/current or to filter all-scope evidence.
-        #[arg(long)]
-        session_id: Option<String>,
-        /// Include LCM summary nodes when no raw-message-only filters are active.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        include_summaries: bool,
-        /// LCM grep sort: recency, relevance, or hybrid.
-        #[arg(long, default_value = "recency")]
-        sort: String,
-        /// Optional LCM raw-message source filter.
-        #[arg(long)]
-        source: Option<String>,
-        /// Optional LCM raw-message role filter.
-        #[arg(long)]
-        role: Option<String>,
-        /// Optional inclusive minimum raw-message timestamp.
-        #[arg(long)]
-        start_time: Option<i64>,
-        /// Optional inclusive maximum raw-message timestamp.
-        #[arg(long)]
-        end_time: Option<i64>,
-        /// Project path (default: current directory, with discovery).
-        #[arg(short, long)]
-        path: Option<String>,
-    },
-    /// Write validated skills from repeated workflow evidence, then activate and deploy automatically.
-    #[command(name = "skill-writing")]
-    SkillWriting {
-        /// LCM provider to inspect. Use all for unified cross-provider evidence.
-        #[arg(long, default_value = "all")]
-        provider: String,
-        /// LCM grep query used to collect bounded evidence.
-        #[arg(
-            long,
-            default_value = "workflow correction repeated skill tool pattern"
-        )]
-        query: String,
-        /// Maximum LCM evidence snippets included in the backend review request.
-        #[arg(long, default_value_t = 20)]
-        evidence_limit: usize,
         /// Project path (default: current directory, with discovery).
         #[arg(short, long)]
         path: Option<String>,

@@ -530,22 +530,6 @@ pub(crate) async fn resolve_cli_project_root(
     Ok(tracedecay::config::resolve_path_with_discovery(path))
 }
 
-pub(crate) fn parse_lcm_scope_arg(
-    value: &str,
-) -> tracedecay::errors::Result<tracedecay_sessions::runtime::lcm::LcmScope> {
-    use tracedecay_sessions::runtime::lcm::LcmScope;
-    match value.trim().replace('-', "_").as_str() {
-        "all" => Ok(LcmScope::All),
-        "session" => Ok(LcmScope::Session),
-        "current" => Ok(LcmScope::Current),
-        other => Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!(
-                "invalid session-reflection --scope '{other}'; expected all, session, or current"
-            ),
-        }),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandFamily {
     Project,

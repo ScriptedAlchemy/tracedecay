@@ -10,7 +10,8 @@ use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, ExactRunPublication, ExactRunPublishOutcome,
 };
 use tracedecay_agent_hosts::automation::runner::{
-    AutomationRunSettlementGuard, ReusedSchedulerSkip,
+    AutomationRunSettlementGuard, RetainedAutomationRun, RetainedAutomationSettlementDisposition,
+    ReusedSchedulerSkip,
 };
 use tracedecay_agent_hosts::automation::{AutomationCommittedReceipt, AutomationRunError};
 use tracedecay_application::retained_surfaces::{
@@ -200,6 +201,49 @@ pub(crate) struct DeferredSettledOutcome {
 pub(crate) enum DeferredSettlementOutcome {
     Settled(Box<DeferredSettledOutcome>),
     Abandoned,
+}
+
+pub(crate) enum RetainedAutomationSettlementOutcome {
+    Run {
+        terminal: AutomationSettledTerminal,
+        record: AutomationRunLedgerRecord,
+    },
+    Problem {
+        problem: AutomationSettledProblem,
+        record: Option<AutomationRunLedgerRecord>,
+    },
+    Reused {
+        record: AutomationRunLedgerRecord,
+    },
+    AbandonedObserved {
+        record: AutomationRunLedgerRecord,
+    },
+}
+
+pub(crate) enum RetainedAutomationSettlementProjection {
+    Run {
+        record: AutomationRunLedgerRecord,
+        committed: Option<AutomationCommittedReceipt>,
+    },
+    AbandonObserved {
+        record: AutomationRunLedgerRecord,
+    },
+}
+
+impl
+    From<(
+        AutomationRunLedgerRecord,
+        Option<AutomationCommittedReceipt>,
+    )> for RetainedAutomationSettlementProjection
+{
+    fn from(
+        (record, committed): (
+            AutomationRunLedgerRecord,
+            Option<AutomationCommittedReceipt>,
+        ),
+    ) -> Self {
+        Self::Run { record, committed }
+    }
 }
 
 struct PairSettlementGuards {
@@ -449,6 +493,157 @@ pub(crate) fn pinned_automation_configuration_digest(
 }
 
 impl AutomationEffectAuthority {
+    pub(crate) fn start_retained_automation_settlement<T, P, R>(
+        self,
+        retained: RetainedAutomationRun<T>,
+        observer: Option<AutomationLedgerObserver>,
+        projector: P,
+    ) -> RetainedSettlementWaiter<Result<RetainedAutomationSettlementOutcome>>
+    where
+        T: Send + 'static,
+        P: FnOnce(T) -> R + Send + 'static,
+        R: Into<RetainedAutomationSettlementProjection> + Send + 'static,
+    {
+        self.start_retained_automation_settlement_inner(
+            retained,
+            observer,
+            projector,
+            #[cfg(test)]
+            None,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn start_retained_automation_settlement_inner<T, P, R>(
+        self,
+        retained: RetainedAutomationRun<T>,
+        observer: Option<AutomationLedgerObserver>,
+        projector: P,
+        #[cfg(test)] phase_hook: Option<SettlementPhaseHook>,
+        #[cfg(test)] prepared_write_hook: Option<PreparedWriteHook>,
+    ) -> RetainedSettlementWaiter<Result<RetainedAutomationSettlementOutcome>>
+    where
+        T: Send + 'static,
+        P: FnOnce(T) -> R + Send + 'static,
+        R: Into<RetainedAutomationSettlementProjection> + Send + 'static,
+    {
+        RetainedSettlementWaiter {
+            task: tokio::task::spawn_blocking(move || {
+                match retained.into_settlement_disposition() {
+                    RetainedAutomationSettlementDisposition::Current {
+                        result,
+                        settlement_guard,
+                    } => match result {
+                        Ok(run) => {
+                            let projected =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    projector(run)
+                                }));
+                            let projected = match projected {
+                                Ok(projected) => projected.into(),
+                                Err(_) => {
+                                    return self.finish_projection_failure(
+                                        RetainedSettlementGuardOwner::Single(settlement_guard),
+                                        contract_error(
+                                            "retained automation settlement projector panicked",
+                                        ),
+                                    );
+                                }
+                            };
+                            match projected {
+                                RetainedAutomationSettlementProjection::Run {
+                                    record,
+                                    committed,
+                                } => self
+                                    .settle_retained_run_blocking(
+                                        record,
+                                        committed,
+                                        RetainedSettlementGuardOwner::Single(settlement_guard),
+                                        observer,
+                                        #[cfg(test)]
+                                        phase_hook,
+                                        #[cfg(test)]
+                                        prepared_write_hook,
+                                    )
+                                    .map(|owned| {
+                                        let (terminal, record) = owned.value;
+                                        RetainedAutomationSettlementOutcome::Run {
+                                            terminal,
+                                            record,
+                                        }
+                                    }),
+                                RetainedAutomationSettlementProjection::AbandonObserved {
+                                    record,
+                                } => {
+                                    self.abandon_retained_blocking(
+                                        RetainedSettlementGuardOwner::Single(settlement_guard),
+                                    )?;
+                                    observe_automation_ledger(observer, &record);
+                                    Ok(RetainedAutomationSettlementOutcome::AbandonedObserved {
+                                        record,
+                                    })
+                                }
+                            }
+                        }
+                        Err(error) => self
+                            .settle_retained_problem_blocking(
+                                error,
+                                RetainedSettlementGuardOwner::Single(settlement_guard),
+                                observer,
+                                #[cfg(test)]
+                                phase_hook,
+                            )
+                            .map(|owned| {
+                                let (problem, record) = owned.value;
+                                RetainedAutomationSettlementOutcome::Problem { problem, record }
+                            }),
+                    },
+                    RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
+                        reused,
+                        settlement_guard,
+                    } => {
+                        if let Err(error) = self.validate_reused_scheduler_skip(&reused) {
+                            return self.finish_projection_failure(
+                                RetainedSettlementGuardOwner::Single(settlement_guard),
+                                error,
+                            );
+                        }
+                        self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(
+                            settlement_guard,
+                        ))?;
+                        let record = reused.prior_record;
+                        observe_automation_ledger(observer, &record);
+                        Ok(RetainedAutomationSettlementOutcome::Reused { record })
+                    }
+                }
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn start_retained_automation_settlement_with_phase_hooks<T, P, R>(
+        self,
+        retained: RetainedAutomationRun<T>,
+        observer: Option<AutomationLedgerObserver>,
+        projector: P,
+        phase_hook: SettlementPhaseHook,
+        prepared_write_hook: Option<PreparedWriteHook>,
+    ) -> RetainedSettlementWaiter<Result<RetainedAutomationSettlementOutcome>>
+    where
+        T: Send + 'static,
+        P: FnOnce(T) -> R + Send + 'static,
+        R: Into<RetainedAutomationSettlementProjection> + Send + 'static,
+    {
+        self.start_retained_automation_settlement_inner(
+            retained,
+            observer,
+            projector,
+            Some(phase_hook),
+            prepared_write_hook,
+        )
+    }
+
     pub(crate) fn start_deferred_settlement_pair(
         first: (
             Self,
@@ -540,34 +735,6 @@ impl AutomationEffectAuthority {
         )
     }
 
-    #[cfg(test)]
-    fn start_deferred_run_settlement_with_phase_hook(
-        self,
-        ledger: AutomationRunLedgerRecord,
-        committed: Option<AutomationCommittedReceipt>,
-        guard: AutomationRunSettlementGuard,
-        observer: Option<AutomationLedgerObserver>,
-        phase_hook: SettlementPhaseHook,
-        prepared_write_hook: Option<PreparedWriteHook>,
-    ) -> RetainedSettlementWaiter<Result<(AutomationSettledTerminal, AutomationRunLedgerRecord)>>
-    {
-        RetainedSettlementWaiter {
-            task: tokio::task::spawn_blocking(move || {
-                self.settle_retained_run_blocking(
-                    ledger,
-                    committed,
-                    RetainedSettlementGuardOwner::Single(guard),
-                    observer,
-                    #[cfg(test)]
-                    Some(phase_hook),
-                    #[cfg(test)]
-                    prepared_write_hook,
-                )
-                .map(|owned| owned.value)
-            }),
-        }
-    }
-
     pub(crate) fn start_deferred_run_settlement_observed(
         self,
         ledger: AutomationRunLedgerRecord,
@@ -611,18 +778,6 @@ impl AutomationEffectAuthority {
                     None,
                 )
                 .map(|owned| owned.value)
-            }),
-        }
-    }
-
-    pub(crate) fn start_retained_abandon(
-        self,
-        guard: AutomationRunSettlementGuard,
-    ) -> RetainedSettlementWaiter<Result<()>> {
-        RetainedSettlementWaiter {
-            task: tokio::task::spawn_blocking(move || {
-                self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(guard))
-                    .map(|owned| owned.value)
             }),
         }
     }

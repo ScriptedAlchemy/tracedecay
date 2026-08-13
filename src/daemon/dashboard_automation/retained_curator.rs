@@ -105,33 +105,29 @@ pub(crate) async fn execute_retained_memory_curator(
         &control,
     )
     .await;
-    let (run, settlement_guard) = retained_run.into_parts();
-    let run = match run {
-        Ok(run) => run,
-        Err(error) => {
-            let waiter = effect.start_deferred_problem_settlement_observed(
-                error,
-                settlement_guard,
-                observer,
-            );
-            let (problem, _ledger_record) = waiter
-                .wait()
-                .await
-                .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-            return Err(automation_problem(problem));
-        }
-    };
-    let waiter = effect.start_deferred_run_settlement_observed(
-        run.ledger_record,
-        run.committed_receipt,
-        settlement_guard,
-        observer,
-    );
-    let (terminal, _ledger_record) = waiter
+    let waiter = effect.start_retained_automation_settlement(retained_run, observer, |run| {
+        (run.ledger_record, run.committed_receipt)
+    });
+    let settlement = waiter
         .wait()
         .await
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    terminal.into_outcome().map_err(automation_problem)
+    match settlement {
+        crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Run {
+            terminal,
+            record: _record,
+        } => terminal.into_outcome().map_err(automation_problem),
+        crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Problem {
+            problem,
+            record: _record,
+        } => Err(automation_problem(problem)),
+        crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Reused {
+            record: _record,
+        }
+        | crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::AbandonedObserved {
+            record: _record,
+        } => Err(RetainedSurfaceExecutionErrorV1::Unavailable),
+    }
 }
 
 fn automation_problem(
