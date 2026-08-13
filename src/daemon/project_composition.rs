@@ -1046,7 +1046,9 @@ pub(super) async fn production_project_server(
             // The registry cutover prevents new core leases. Existing core
             // requests may finish while dependent owners warm, then the
             // displaced server is drained without closing the shared graph.
-            resolved.revoke_project_server_responses();
+            resolved
+                .revoke_project_server_responses_after_drain()
+                .await;
             schedule_project_server_retirement(
                 store_administration,
                 key.owner.clone(),

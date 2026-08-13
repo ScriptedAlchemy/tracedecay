@@ -296,6 +296,14 @@ impl ProjectServerResponseLifecycle {
         self.response_revoked.cancel();
     }
 
+    /// Close response admission without invalidating an already-admitted reply.
+    /// Tokio's write-preferring lock prevents later readers from overtaking the
+    /// queued retirement writer, so cancellation is published at the cutover.
+    pub(crate) async fn revoke_after_request_drain(&self) {
+        let _guard = self.response_gate.write().await;
+        self.response_revoked.cancel();
+    }
+
     pub(crate) async fn wait_for_request_drain(&self) {
         let _guard = self.response_gate.write().await;
     }
@@ -348,6 +356,12 @@ impl McpServer {
 
     pub(crate) fn revoke_project_server_responses(&self) {
         self.project_server_lifecycle.revoke();
+    }
+
+    pub(crate) async fn revoke_project_server_responses_after_drain(&self) {
+        self.project_server_lifecycle
+            .revoke_after_request_drain()
+            .await;
     }
 
     pub(crate) async fn wait_for_project_server_request_drain(&self) {
@@ -758,6 +772,35 @@ impl McpServer {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod response_lifecycle_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn response_revocation_waits_for_admitted_response_lease_to_drain() {
+        let lifecycle = ProjectServerResponseLifecycle::default();
+        let admitted_response = Arc::clone(lifecycle.response_gate()).read_owned().await;
+        let mut retirement = Box::pin(lifecycle.revoke_after_request_drain());
+        std::future::poll_fn(|context| {
+            let retirement_poll = std::future::Future::poll(retirement.as_mut(), context);
+            assert!(
+                retirement_poll.is_pending(),
+                "retirement bypassed an admitted response"
+            );
+            std::task::Poll::Ready(())
+        })
+        .await;
+
+        assert!(
+            !lifecycle.response_revoked().is_cancelled(),
+            "retirement must not revoke an already-admitted response"
+        );
+        drop(admitted_response);
+        retirement.await;
+        assert!(lifecycle.response_revoked().is_cancelled());
     }
 }
 
