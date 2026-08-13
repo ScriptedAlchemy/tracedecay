@@ -23,17 +23,11 @@ impl PrivateFileCreationFailure {
         }
     }
 
-    /// Returns the underlying error and the created file, when creation had
-    /// already linearized before validation failed.
-    pub fn into_parts(self) -> (io::Error, Option<File>) {
-        (self.error, self.file)
-    }
-
     /// Returns only the underlying error, releasing any retained file handle.
-    ///
-    /// Callers that must retain a created identity should use [`Self::into_parts`].
     pub fn into_error(self) -> io::Error {
-        self.error
+        let Self { error, file } = self;
+        drop(file);
+        error
     }
 }
 

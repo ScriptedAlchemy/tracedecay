@@ -266,11 +266,6 @@ impl VerifiedGraphSnapshot {
         &self.head.head
     }
 
-    #[must_use]
-    pub fn dependency_generations(&self) -> &[GraphGenerationDependency] {
-        &self.head.dependency_identities
-    }
-
     pub fn entity(
         &self,
         reference: &GraphEntityRef,

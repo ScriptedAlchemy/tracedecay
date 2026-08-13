@@ -15,7 +15,6 @@ pub const GENERATION_TOMBSTONE_LABEL: &str = "semantic-vector-generation-tombsto
 pub const GENERATION_RECEIPT_LABEL: &str = "semantic-vector-generation-receipt-v1";
 pub const CONTAINS_KIND: &str = "semantic_vector_contains";
 pub const BASE_KIND: &str = "semantic_vector_base";
-pub const BUILD_CATALOG_KIND: &str = "semantic_vector_build_catalog";
 pub const GENERATION_CATALOG_KIND: &str = "semantic_vector_generation_catalog";
 pub const REVISION: &str = "revision";
 pub const BUILD_ID: &str = "build_id";
