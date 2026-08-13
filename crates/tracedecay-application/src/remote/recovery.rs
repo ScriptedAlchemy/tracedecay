@@ -343,16 +343,12 @@ impl AuthorityRejoinStateV1 {
     }
 }
 
+/// Delegates to the crate-shared bounded-identifier validator in
+/// [`crate::identity`] instead of re-implementing the same empty/trim/
+/// control-character/length checks locally. Recovery identifiers keep their
+/// existing 512-byte bound.
 fn validate_identifier(field: &'static str, value: &str) -> Result<(), ApplicationContractError> {
-    if value.is_empty()
-        || value.len() > 512
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
-        Err(ApplicationContractError::InvalidIdentifier { field })
-    } else {
-        Ok(())
-    }
+    crate::identity::validate_identifier(value, field, 512)
 }
 
 #[cfg(test)]

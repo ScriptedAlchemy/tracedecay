@@ -544,12 +544,7 @@ fn validate_scope_meta(
     meta: &RetrievalRequestMeta,
 ) -> Result<(), ApplicationContractError> {
     scope.validate()?;
-    if meta.temporal != tracedecay_domain::TemporalModeV1::Current {
-        return Err(ApplicationContractError::Inconsistent {
-            field: "code query temporal mode",
-        });
-    }
-    super::PageRequest::new(meta.page.page_size, meta.page.cursor.clone()).map(|_| ())
+    super::validate_current_temporal_meta(meta, "code query temporal mode")
 }
 
 fn validate_filters(
@@ -566,28 +561,24 @@ fn validate_filters(
 }
 
 fn validate_node_depth(node_id: &str, maximum_depth: u32) -> Result<(), ApplicationContractError> {
-    validate_query(node_id, "code graph node id")?;
-    if maximum_depth == 0 || maximum_depth > MAX_CALLABLE_CODE_DEPTH {
-        return Err(ApplicationContractError::InvalidRange {
-            field: "code graph maximum depth",
-        });
-    }
-    Ok(())
+    super::validate_node_depth(
+        node_id,
+        "code graph node id",
+        MAX_CALLABLE_CODE_QUERY_BYTES,
+        maximum_depth,
+        "code graph maximum depth",
+        MAX_CALLABLE_CODE_DEPTH,
+    )
 }
 
+/// Note: over-long input previously returned `InvalidRange` from a length
+/// check re-added after the (bound-dropping) local `validate_text`, distinct
+/// from the `InvalidIdentifier` the shared validator returns for the same
+/// violation. No caller, SDK, or test pins `InvalidRange` for query length on
+/// this surface, so the code is now unified on `InvalidIdentifier` via
+/// `super::validate_bounded_text`.
 fn validate_query(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
-    validate_text(value, field)?;
-    if value.len() > MAX_CALLABLE_CODE_QUERY_BYTES {
-        return Err(ApplicationContractError::InvalidRange { field });
-    }
-    Ok(())
-}
-
-fn validate_text(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
-    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
-        return Err(ApplicationContractError::InvalidIdentifier { field });
-    }
-    Ok(())
+    super::validate_bounded_text(value, field, MAX_CALLABLE_CODE_QUERY_BYTES)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

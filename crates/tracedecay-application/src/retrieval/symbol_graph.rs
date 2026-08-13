@@ -405,37 +405,39 @@ impl ValidatedPrimitiveRequest for GraphImpactPrimitiveRequest {
 }
 
 fn validate_meta(meta: &RetrievalRequestMeta) -> Result<(), ApplicationContractError> {
-    if meta.temporal != tracedecay_domain::TemporalModeV1::Current {
-        return Err(ApplicationContractError::Inconsistent {
-            field: "symbol graph temporal mode",
-        });
-    }
-    super::PageRequest::new(meta.page.page_size, meta.page.cursor.clone()).map(|_| ())
+    super::validate_current_temporal_meta(meta, "symbol graph temporal mode")
 }
 
+/// Note: this previously validated `node_id` via the unbounded [`validate_text`]
+/// (empty/trim/control-character checks only, no length cap), while the
+/// `code graph node id` sibling in `callable_code.rs` was already bounded via
+/// `validate_query`. Routing through the shared `super::validate_node_depth`
+/// closes that gap: symbol graph node ids are now bounded by
+/// `MAX_SYMBOL_GRAPH_QUERY_BYTES`, matching callable code's existing bound.
 fn validate_node_depth(node_id: &str, maximum_depth: u32) -> Result<(), ApplicationContractError> {
-    validate_text(node_id, "symbol graph node id")?;
-    if maximum_depth == 0 || maximum_depth > MAX_SYMBOL_GRAPH_DEPTH {
-        return Err(ApplicationContractError::InvalidRange {
-            field: "symbol graph maximum depth",
-        });
-    }
-    Ok(())
+    super::validate_node_depth(
+        node_id,
+        "symbol graph node id",
+        MAX_SYMBOL_GRAPH_QUERY_BYTES,
+        maximum_depth,
+        "symbol graph maximum depth",
+        MAX_SYMBOL_GRAPH_DEPTH,
+    )
 }
 
+/// Note: over-long input previously returned `InvalidRange` from this
+/// function's own length check, distinct from the `InvalidIdentifier` the
+/// shared validator returns for the same violation. No caller, SDK, or test
+/// pins `InvalidRange` for query length on this surface, so the code is now
+/// unified on `InvalidIdentifier` via `super::validate_bounded_text`.
 fn validate_query(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
-    validate_text(value, field)?;
-    if value.len() > MAX_SYMBOL_GRAPH_QUERY_BYTES {
-        return Err(ApplicationContractError::InvalidRange { field });
-    }
-    Ok(())
+    super::validate_bounded_text(value, field, MAX_SYMBOL_GRAPH_QUERY_BYTES)
 }
 
+/// Unbounded sibling of [`validate_query`], used for free-text fields (path
+/// prefix, support-gap reason) that have no length cap.
 fn validate_text(value: &str, field: &'static str) -> Result<(), ApplicationContractError> {
-    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
-        return Err(ApplicationContractError::InvalidIdentifier { field });
-    }
-    Ok(())
+    super::validate_bounded_text(value, field, usize::MAX)
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -12,6 +12,55 @@ mod source_read;
 mod symbol_graph;
 mod test_attribution;
 
+use crate::error::ApplicationContractError;
+
+/// Shared bounded-string validator for the retrieval leaf modules.
+/// Delegates to [`crate::identity::validate_identifier`] so a single
+/// implementation defines what counts as a valid identifier or bounded query
+/// string (non-empty, trimmed, control-character-free, within
+/// `maximum_bytes`). Pass `usize::MAX` for fields that intentionally allow
+/// unbounded free text (e.g. a support-gap explanation) while still
+/// rejecting empty, untrimmed, or control-character input.
+fn validate_bounded_text(
+    value: &str,
+    field: &'static str,
+    maximum_bytes: usize,
+) -> Result<(), ApplicationContractError> {
+    crate::identity::validate_identifier(value, field, maximum_bytes)
+}
+
+/// Shared node-id + traversal-depth validator for the graph primitive
+/// surfaces (symbol graph and callable code). `node_field`/`node_max_bytes`
+/// bound the node id text via [`validate_bounded_text`]; `depth_field`/
+/// `max_depth` bound the requested traversal depth.
+fn validate_node_depth(
+    node_id: &str,
+    node_field: &'static str,
+    node_max_bytes: usize,
+    maximum_depth: u32,
+    depth_field: &'static str,
+    max_depth: u32,
+) -> Result<(), ApplicationContractError> {
+    validate_bounded_text(node_id, node_field, node_max_bytes)?;
+    if maximum_depth == 0 || maximum_depth > max_depth {
+        return Err(ApplicationContractError::InvalidRange { field: depth_field });
+    }
+    Ok(())
+}
+
+/// Shared "current temporal mode + valid page request" check used by every
+/// retrieval request whose `meta` only supports
+/// [`tracedecay_domain::TemporalModeV1::Current`].
+fn validate_current_temporal_meta(
+    meta: &RetrievalRequestMeta,
+    field: &'static str,
+) -> Result<(), ApplicationContractError> {
+    if meta.temporal != tracedecay_domain::TemporalModeV1::Current {
+        return Err(ApplicationContractError::Inconsistent { field });
+    }
+    PageRequest::new(meta.page.page_size, meta.page.cursor.clone()).map(|_| ())
+}
+
 pub use callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,
     CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
