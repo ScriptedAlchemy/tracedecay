@@ -28,6 +28,7 @@ use tracedecay_usecases::session::{
 };
 
 use super::super::automatic_facts::{AutomaticFactState, record_session_automatic_facts};
+use super::super::run_ledger::AutomationRunLedgerRecord;
 use super::evidence::{
     AutomationEvidenceFilters, SESSION_REPLAY_SNIPPET_CHARS,
     serialize_automation_temporal_evidence, validate_complete_evidence,
@@ -74,7 +75,7 @@ fn combined_skill_runtime_failure_preserves_both_error_causes() {
 
 #[test]
 fn asymmetric_combined_failure_preserves_the_successful_sibling_record() {
-    let record = serde_json::from_value(json!({
+    let record: AutomationRunLedgerRecord = serde_json::from_value(json!({
         "schema_version": 2,
         "run_id": "combined-asymmetric",
         "trigger": "scheduler",
