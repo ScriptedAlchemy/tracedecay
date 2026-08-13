@@ -117,6 +117,18 @@ pub struct UserJobRunOptions {
     /// Project root used as cwd for optional pre-run commands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_root: Option<PathBuf>,
+    /// Latest scheduler-effectful terminal run_id visible in the ledger
+    /// snapshot the caller minted `run_id` from. Scheduler-triggered runs that
+    /// record a diagnostic (currently the lock-contention skip) must scan back
+    /// to this anchor rather than to one re-derived from a later read, or a
+    /// concurrently committed terminal can shrink the anti-duplicate window
+    /// below an already-appended row carrying the same derived identity. See
+    /// `scheduler_gate::evaluate_and_record_scheduler_skip` for the invariant.
+    /// `None` means "no anchor known" and scans the full ledger, which is
+    /// always a safe superset; non-scheduler triggers never reach the
+    /// diagnostic path at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrence_anchor_run_id: Option<String>,
 }
 
 impl Default for UserJobRunOptions {
@@ -126,6 +138,7 @@ impl Default for UserJobRunOptions {
             run_id: None,
             profile_root: None,
             project_root: None,
+            occurrence_anchor_run_id: None,
         }
     }
 }
@@ -494,6 +507,7 @@ async fn run_user_job_with_backend_publication(
         run_id,
         profile_root,
         project_root,
+        occurrence_anchor_run_id,
     } = options;
     let run_id = run_id.unwrap_or_else(|| generated_run_id("user_job"));
     let started_at = current_timestamp().to_string();
@@ -520,19 +534,18 @@ async fn run_user_job_with_backend_publication(
             "job_lock_active"
         };
         if trigger == AutomationTrigger::Scheduler {
-            let scheduler_summary = load_run_ledger_task_summary(
-                dashboard_root,
-                AgentTaskKind::UserJob,
-                &job_task_key(&job.id),
-            )
-            .await?;
+            // The diagnostic identity is derived from `run_id`, which the
+            // caller minted against `occurrence_anchor_run_id`'s snapshot.
+            // Re-loading a summary here to derive a fresher anchor would race
+            // a concurrently committed terminal and bound the anti-duplicate
+            // scan below a row that already carries this identity.
             return scheduler_gate::record_scheduler_lock_skip(
                 dashboard_root,
                 config,
                 job,
                 &run_id,
                 &started_at,
-                scheduler_summary.records(),
+                occurrence_anchor_run_id.as_deref(),
             )
             .await
             .map_err(Into::into);
@@ -848,16 +861,23 @@ impl JobRunContext<'_> {
         })
     }
 
+    /// `effectful_anchor_run_id` must come from the same ledger snapshot that
+    /// minted `self.run_id`'s occurrence identity — never from a summary
+    /// loaded at append time. See
+    /// `scheduler_gate::evaluate_and_record_scheduler_skip` for why a fresher
+    /// anchor can silently duplicate this diagnostic.
     async fn scheduler_diagnostic_skipped(
         &self,
         reason: &'static str,
-        records: &[AutomationRunLedgerRecord],
+        effectful_anchor_run_id: Option<&str>,
     ) -> Result<UserJobAutomationRun> {
         let candidate = self.base_record(AutomationRunStatus::Skipped, Some(reason.to_owned()))?;
-        let anchor = latest_effectful_scheduler_job_record(records, &job_task_key(&self.job.id))?
-            .map(|record| record.run_id.as_str());
-        let record =
-            append_or_reuse_scheduler_diagnostic(self.dashboard_root, &candidate, anchor).await?;
+        let record = append_or_reuse_scheduler_diagnostic(
+            self.dashboard_root,
+            &candidate,
+            effectful_anchor_run_id,
+        )
+        .await?;
         Ok(UserJobAutomationRun {
             run_id: record.run_id.clone(),
             report: json!({
@@ -1029,4 +1049,5 @@ mod scheduler_config_tests;
 #[path = "jobs/scheduler_gate.rs"]
 mod scheduler_gate;
 pub use scheduler_gate::evaluate_and_record_scheduler_skip;
+#[cfg(test)]
 use scheduler_gate::latest_effectful_scheduler_job_record;

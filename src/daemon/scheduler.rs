@@ -1501,9 +1501,14 @@ async fn run_user_jobs_scheduler_pass(
         .filter(|job| tracedecay_agent_hosts::automation::jobs::job_is_schedulable(job))
     {
         log_scheduler_task_start(project_path, AgentTaskKind::UserJob);
-        let requested_run_id =
+        // One ledger read mints the occurrence identity AND yields the anchor
+        // every diagnostic appended for this occurrence must scan back to.
+        // Splitting those across two reads lets a terminal committed in
+        // between narrow the anti-duplicate window below a row that already
+        // carries this occurrence's derived diagnostic identity.
+        let (requested_run_id, occurrence_anchor_run_id) =
             match scheduled_user_job_run_id(&dashboard_root, job, &configuration_digest).await {
-                Ok(run_id) => run_id,
+                Ok(occurrence) => occurrence,
                 Err(error) => {
                     log_scheduler_task_error(project_path, AgentTaskKind::UserJob, &error);
                     first_error.get_or_insert(error);
@@ -1515,6 +1520,7 @@ async fn run_user_jobs_scheduler_pass(
             config,
             job,
             &requested_run_id,
+            occurrence_anchor_run_id.as_deref(),
         )
         .await
         {
@@ -1575,6 +1581,7 @@ async fn run_user_jobs_scheduler_pass(
                 run_id: Some(run_id),
                 profile_root: Some(profile_root.to_path_buf()),
                 project_root: Some(project_path.to_path_buf()),
+                occurrence_anchor_run_id: occurrence_anchor_run_id.clone(),
                 ..tracedecay_agent_hosts::automation::jobs::UserJobRunOptions::default()
             },
         )
@@ -1630,11 +1637,23 @@ async fn run_user_jobs_scheduler_pass(
     }
 }
 
+/// Mints the scheduler occurrence run_id for one user job and returns the
+/// ledger anchor it was derived from.
+///
+/// The anchor is the latest scheduler-effectful terminal in the SAME snapshot
+/// that fed the occurrence digest. Callers must carry it forward to every
+/// scheduler diagnostic appended for this occurrence, because the diagnostic's
+/// anti-duplicate scan is bounded by that anchor: a diagnostic row carrying
+/// this occurrence's derived identity can only have been appended after the
+/// anchor row existed, so scanning back to it always covers every such row.
+/// Deriving a fresher anchor at append time can bound the scan below an
+/// already-appended row and silently write a byte-different duplicate.
+/// `None` means this snapshot held no scheduler-effectful terminal at all.
 async fn scheduled_user_job_run_id(
     dashboard_root: &Path,
     job: &tracedecay_agent_hosts::automation::jobs::AutomationJob,
     configuration_digest: &tracedecay_domain::ManifestDigest,
-) -> Result<String> {
+) -> Result<(String, Option<String>)> {
     let task_key = tracedecay_agent_hosts::automation::jobs::job_task_key(&job.id);
     let latest_scheduler_terminal =
         tracedecay_agent_hosts::automation::run_ledger::load_latest_scheduler_effectful_for_task_key(
@@ -1657,10 +1676,13 @@ async fn scheduled_user_job_run_id(
     .map_err(|error| TraceDecayError::Config {
         message: format!("user-job occurrence identity is invalid: {error}"),
     })?;
-    Ok(format!(
-        "user_job_{}_{}",
-        job.id,
-        occurrence.as_str().trim_start_matches("sha256:")
+    Ok((
+        format!(
+            "user_job_{}_{}",
+            job.id,
+            occurrence.as_str().trim_start_matches("sha256:")
+        ),
+        latest_scheduler_terminal.map(|record| record.run_id),
     ))
 }
 

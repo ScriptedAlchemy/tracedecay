@@ -400,6 +400,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
             run_id: Some("user-job-run-1".to_string()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -477,6 +478,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
             run_id: Some("cmd-run-1".to_string()),
             profile_root: Some(profile_root.clone()),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -526,6 +528,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
             run_id: Some("cmd-run-2".to_string()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -582,6 +585,7 @@ async fn user_job_pre_run_command_runs_from_project_root() {
             run_id: Some("cmd-cwd-run".to_string()),
             profile_root: Some(profile_root),
             project_root: Some(project_root),
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -654,6 +658,7 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
             run_id: Some("profile-skill-run".to_string()),
             profile_root: Some(profile_root),
             project_root: Some(project_root),
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -735,6 +740,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
             run_id: Some("archived-profile-skill-run".to_string()),
             profile_root: Some(profile_root),
             project_root: Some(project_root),
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -765,6 +771,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
             run_id: Some("fail-run-1".to_string()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -813,6 +820,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
                 run_id: Some(run_id.to_string()),
                 profile_root: Some(profile_root.clone()),
                 project_root: None,
+                occurrence_anchor_run_id: None,
             },
         )
         .await
@@ -838,6 +846,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
             run_id: Some("sched-run-3".to_owned()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -871,6 +880,7 @@ async fn manual_job_trigger_respects_existing_per_job_lock() {
             run_id: Some("dashboard-lock-run".to_string()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -906,6 +916,7 @@ async fn disabled_automation_skip_precedes_existing_per_job_lock() {
             run_id: Some("dashboard-disabled-run".to_string()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await
@@ -951,6 +962,7 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
             run_id: Some(occurrence.to_owned()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await;
@@ -966,14 +978,16 @@ async fn scheduler_prefilter_config_skip_precedes_live_lock_and_is_exact() {
     );
     drop(guard);
 
-    let first = evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence)
-        .await
-        .unwrap()
-        .expect("disabled automation must produce an out-of-band diagnostic");
-    let repeated = evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence)
-        .await
-        .unwrap()
-        .expect("the same config skip must return its exact diagnostic");
+    let first =
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+            .await
+            .unwrap()
+            .expect("disabled automation must produce an out-of-band diagnostic");
+    let repeated =
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+            .await
+            .unwrap()
+            .expect("the same config skip must return its exact diagnostic");
 
     assert_eq!(first.report["reason"], json!("automation_disabled"));
     assert_ne!(first.run_id, occurrence);
@@ -1025,10 +1039,11 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
 
     let config = enabled_job_config();
     let occurrence = "locked-prefilter-occurrence";
-    let prefilter = evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence)
-        .await
-        .unwrap()
-        .expect("the live job lock must produce a diagnostic");
+    let prefilter =
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
+            .await
+            .unwrap()
+            .expect("the live job lock must produce a diagnostic");
     assert_eq!(prefilter.report["reason"], json!("scheduler_lock_active"));
     assert_ne!(prefilter.run_id, occurrence);
 
@@ -1043,6 +1058,7 @@ async fn scheduler_prefilter_live_lock_wins_over_not_due_summary() {
             run_id: Some(occurrence.to_owned()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await;
@@ -1080,7 +1096,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
     let occurrence = "prefilter-gap-occurrence";
 
     assert!(
-        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence,)
+        evaluate_and_record_scheduler_skip(&dashboard_root, &config, &job, occurrence, None)
             .await
             .unwrap()
             .is_none(),
@@ -1114,6 +1130,7 @@ async fn retained_scheduler_runner_reacquires_after_due_prefilter() {
             run_id: Some(occurrence.to_owned()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await;
@@ -1185,6 +1202,7 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
                 run_id: Some("concurrent-run-1".to_string()),
                 profile_root: Some(profile_root.clone()),
                 project_root: None,
+                occurrence_anchor_run_id: None,
             },
         ),
         run_user_job_with_backend(
@@ -1197,6 +1215,7 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
                 run_id: Some("concurrent-run-2".to_string()),
                 profile_root: Some(profile_root),
                 project_root: None,
+                occurrence_anchor_run_id: None,
             },
         )
     );
@@ -1235,6 +1254,7 @@ async fn retained_user_job_defers_ledger_and_keeps_exact_keyed_lock() {
             run_id: Some("retained-job-run".to_owned()),
             profile_root: Some(profile_root.clone()),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await;
@@ -1259,6 +1279,7 @@ async fn retained_user_job_defers_ledger_and_keeps_exact_keyed_lock() {
             run_id: Some("competing-job-run".to_owned()),
             profile_root: Some(profile_root),
             project_root: None,
+            occurrence_anchor_run_id: None,
         },
     )
     .await

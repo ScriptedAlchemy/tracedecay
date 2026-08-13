@@ -182,6 +182,10 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
         &job,
         "next-occurrence",
         101,
+        // Mirrors production: the anchor comes from the same snapshot that
+        // minted the occurrence identity, so the diagnostic scan window
+        // always covers every row that can carry that identity.
+        Some("success-a"),
     )
     .await
     .unwrap();
@@ -194,6 +198,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
         &job,
         "next-occurrence",
         102,
+        Some("success-a"),
     )
     .await
     .unwrap();
@@ -221,6 +226,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
         &job,
         "next-occurrence",
         160,
+        Some("success-a"),
     )
     .await
     .unwrap();
@@ -246,6 +252,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
         &job,
         "following-occurrence",
         161,
+        Some("next-occurrence"),
     )
     .await
     .unwrap()
@@ -257,6 +264,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
         &job,
         "following-occurrence",
         162,
+        Some("next-occurrence"),
     )
     .await
     .unwrap()
@@ -285,6 +293,7 @@ async fn persisted_and_deduplicated_skips_do_not_block_later_due_execution() {
         &job,
         "following-occurrence",
         163,
+        Some("next-occurrence"),
     )
     .await
     .unwrap()
@@ -313,7 +322,9 @@ async fn scheduler_lock_skip_uses_a_diagnostic_identity_outside_the_effect_occur
         &job,
         occurrence,
         &started_at,
-        &[],
+        // No scheduler-effectful terminal existed when this occurrence's
+        // identity was minted, so the diagnostic scan is unbounded.
+        None,
     )
     .await
     .unwrap();

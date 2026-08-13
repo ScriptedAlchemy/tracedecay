@@ -436,6 +436,9 @@ async fn execute_dashboard_automation_run(
                         run_id: Some(run_id),
                         profile_root: Some(profile_root),
                         project_root: Some(cg.project_root().to_path_buf()),
+                        // Dashboard triggers never reach the scheduler
+                        // diagnostic append path.
+                        occurrence_anchor_run_id: None,
                     },
                 )
                 .await;
