@@ -66,6 +66,8 @@ pub(super) struct DaemonAuthorityRecord {
     pub(super) endpoint: DaemonEndpoint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) http_application_endpoint: Option<SocketAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) remote_brain_tls_endpoint: Option<SocketAddr>,
     pub(super) auth_token: String,
     pub(super) profile_root: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +157,7 @@ impl DaemonAuthority {
             version: version.to_string(),
             endpoint: canonical_endpoint(endpoint)?,
             http_application_endpoint: None,
+            remote_brain_tls_endpoint: None,
             auth_token: new_auth_token()?,
             profile_root,
             brain_id: Some(profile_identity.brain_id().clone()),
@@ -218,6 +221,18 @@ impl DaemonAuthority {
         write_record(&self.record_path, &self.record)
     }
 
+    pub(super) fn publish_remote_brain_tls_endpoint(&mut self, endpoint: SocketAddr) -> Result<()> {
+        if endpoint.ip().is_unspecified() || endpoint.port() == 0 {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "daemon Remote Brain TLS endpoint must be an actual bound address (got '{endpoint}')"
+                ),
+            });
+        }
+        self.record.remote_brain_tls_endpoint = Some(endpoint);
+        write_record(&self.record_path, &self.record)
+    }
+
     pub(super) fn ensure_current(&self) -> Result<()> {
         let current = read_record_if_present(&self.record_path)?;
         if current.as_ref().is_some_and(|record| {
@@ -226,6 +241,7 @@ impl DaemonAuthority {
                 && record.profile_root == self.record.profile_root
                 && record.endpoint == self.record.endpoint
                 && record.http_application_endpoint == self.record.http_application_endpoint
+                && record.remote_brain_tls_endpoint == self.record.remote_brain_tls_endpoint
                 && record.auth_token == self.record.auth_token
         }) {
             return Ok(());
@@ -250,6 +266,9 @@ impl DaemonAuthority {
         if !self.endpoint_bound || self.ensure_current().is_err() {
             return Ok(());
         }
+        self.record.http_application_endpoint = None;
+        self.record.remote_brain_tls_endpoint = None;
+        write_record(&self.record_path, &self.record)?;
         match &self.record.endpoint {
             #[cfg(unix)]
             DaemonEndpoint::Unix(path) => remove_if_present(path)?,
@@ -671,6 +690,51 @@ mod tests {
         assert!(authority.ensure_current().is_ok());
     }
 
+    #[test]
+    fn published_remote_brain_tls_endpoint_is_the_actual_bound_address() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let requested = test_endpoint(&profile);
+        let mut authority = DaemonAuthority::acquire(&profile, &requested, "test").unwrap();
+        let endpoint = "192.0.2.44:43125".parse().unwrap();
+
+        authority
+            .publish_remote_brain_tls_endpoint(endpoint)
+            .unwrap();
+
+        let published = current_record(&profile).unwrap().unwrap();
+        assert_eq!(published.remote_brain_tls_endpoint, Some(endpoint));
+        assert!(authority.ensure_current().is_ok());
+        assert!(
+            authority
+                .publish_remote_brain_tls_endpoint("127.0.0.1:0".parse().unwrap())
+                .is_err(),
+            "requested port zero is not a bound endpoint"
+        );
+    }
+
+    #[test]
+    fn endpoint_cleanup_withdraws_bound_http_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = temp.path().join("profile");
+        let requested = test_endpoint(&profile);
+        let mut authority = DaemonAuthority::acquire(&profile, &requested, "test").unwrap();
+        authority.publish_endpoint(&requested).unwrap();
+        authority
+            .publish_http_application_endpoint("127.0.0.1:43124".parse().unwrap())
+            .unwrap();
+        authority
+            .publish_remote_brain_tls_endpoint("192.0.2.44:43125".parse().unwrap())
+            .unwrap();
+
+        authority.cleanup_owned_endpoint().unwrap();
+
+        let published = current_record(&profile).unwrap().unwrap();
+        assert_eq!(published.http_application_endpoint, None);
+        assert_eq!(published.remote_brain_tls_endpoint, None);
+        assert!(authority.ensure_current().is_ok());
+    }
+
     #[cfg(unix)]
     #[test]
     fn legacy_socket_path_record_is_accepted_by_current_reader() {
@@ -778,6 +842,14 @@ mod tests {
                 .unwrap();
         std::fs::write(&socket, b"successor").unwrap();
         authority.mark_endpoint_bound();
+        let local_http_endpoint = "127.0.0.1:43124".parse().unwrap();
+        let remote_tls_endpoint = "192.0.2.44:43125".parse().unwrap();
+        authority
+            .publish_http_application_endpoint(local_http_endpoint)
+            .unwrap();
+        authority
+            .publish_remote_brain_tls_endpoint(remote_tls_endpoint)
+            .unwrap();
         let mut successor = authority.record().clone();
         successor.epoch += 1;
         successor.process_run_id.push_str("-successor");
@@ -785,6 +857,15 @@ mod tests {
 
         authority.cleanup_owned_endpoint().unwrap();
         assert!(socket.exists());
+        let published = current_record(&profile).unwrap().unwrap();
+        assert_eq!(
+            published.http_application_endpoint,
+            Some(local_http_endpoint)
+        );
+        assert_eq!(
+            published.remote_brain_tls_endpoint,
+            Some(remote_tls_endpoint)
+        );
     }
 
     #[cfg(unix)]

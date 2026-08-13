@@ -187,10 +187,140 @@ fn socket_path_from_args<'a>(mut args: impl Iterator<Item = &'a str>) -> Option<
     None
 }
 
+fn remote_tls_from_args<'a>(
+    mut args: impl Iterator<Item = &'a str>,
+) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+    let mut listen = None;
+    let mut certificate_chain = None;
+    let mut private_key = None;
+    while let Some(arg) = args.next() {
+        match arg {
+            "--remote-listen" => set_unique_argument(
+                &mut listen,
+                args.next().map(str::to_owned),
+                "--remote-listen",
+            )?,
+            "--remote-tls-cert" => set_unique_argument(
+                &mut certificate_chain,
+                args.next().map(PathBuf::from),
+                "--remote-tls-cert",
+            )?,
+            "--remote-tls-key" => set_unique_argument(
+                &mut private_key,
+                args.next().map(PathBuf::from),
+                "--remote-tls-key",
+            )?,
+            _ => {
+                if let Some(value) = arg.strip_prefix("--remote-listen=") {
+                    set_unique_argument(&mut listen, Some(value.to_owned()), "--remote-listen")?;
+                } else if let Some(value) = arg.strip_prefix("--remote-tls-cert=") {
+                    set_unique_argument(
+                        &mut certificate_chain,
+                        Some(PathBuf::from(value)),
+                        "--remote-tls-cert",
+                    )?;
+                } else if let Some(value) = arg.strip_prefix("--remote-tls-key=") {
+                    set_unique_argument(
+                        &mut private_key,
+                        Some(PathBuf::from(value)),
+                        "--remote-tls-key",
+                    )?;
+                }
+            }
+        }
+    }
+    let listen = listen
+        .map(|value| {
+            value.parse().map_err(|_| TraceDecayError::Config {
+                message: "installed daemon service has an invalid Remote Brain listener address"
+                    .to_string(),
+            })
+        })
+        .transpose()?;
+    let remote_tls = super::super::RemoteBrainTlsConfig::from_optional_parts(
+        listen,
+        certificate_chain,
+        private_key,
+    )?;
+    super::validate_managed_remote_tls(remote_tls.as_ref())?;
+    Ok(remote_tls)
+}
+
+pub(super) fn set_unique_argument<T>(
+    slot: &mut Option<T>,
+    value: Option<T>,
+    name: &str,
+) -> Result<()> {
+    let value = value.ok_or_else(|| TraceDecayError::Config {
+        message: format!("installed daemon service is missing a value for {name}"),
+    })?;
+    if slot.replace(value).is_some() {
+        return Err(TraceDecayError::Config {
+            message: format!("installed daemon service repeats {name}"),
+        });
+    }
+    Ok(())
+}
+
+fn systemd_exec_tokens(exec_start: &str) -> Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut chars = exec_start.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => quoted = !quoted,
+            '\\' if quoted => {
+                let escaped = chars.next().ok_or_else(|| TraceDecayError::Config {
+                    message: "installed daemon service has a truncated quoted argument".to_string(),
+                })?;
+                if !matches!(escaped, '\\' | '"') {
+                    return Err(TraceDecayError::Config {
+                        message:
+                            "installed daemon service has an unsupported quoted argument escape"
+                                .to_string(),
+                    });
+                }
+                token.push(escaped);
+            }
+            ch if ch.is_whitespace() && !quoted => {
+                if !token.is_empty() {
+                    tokens.push(token.replace("%%", "%").replace("$$", "$"));
+                    token = String::new();
+                }
+            }
+            _ => token.push(ch),
+        }
+    }
+    if quoted {
+        return Err(TraceDecayError::Config {
+            message: "installed daemon service has an unterminated quoted argument".to_string(),
+        });
+    }
+    if !token.is_empty() {
+        tokens.push(token.replace("%%", "%").replace("$$", "$"));
+    }
+    Ok(tokens)
+}
+
 fn socket_path_from_service_unit(unit: &str) -> Option<PathBuf> {
     unit.lines()
         .filter_map(|line| line.trim().strip_prefix("ExecStart="))
         .find_map(|exec_start| socket_path_from_args(exec_start.split_whitespace()))
+}
+
+pub(super) fn remote_tls_from_service_unit(
+    unit: &str,
+) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+    let Some(exec_start) = unit
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("ExecStart="))
+        .next()
+    else {
+        return Ok(None);
+    };
+    let tokens = systemd_exec_tokens(exec_start)?;
+    remote_tls_from_args(tokens.iter().map(String::as_str))
 }
 
 pub(super) fn socket_path_from_launchd_plist(plist: &str) -> Option<PathBuf> {
@@ -203,6 +333,29 @@ pub(super) fn socket_path_from_launchd_plist(plist: &str) -> Option<PathBuf> {
     let strings = plist_string_values(array_text);
 
     socket_path_from_args(strings.iter().map(String::as_str))
+}
+
+pub(super) fn remote_tls_from_launchd_plist(
+    plist: &str,
+) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+    let Some(program_arguments_start) = plist.find("<key>ProgramArguments</key>") else {
+        return Ok(None);
+    };
+    let arguments_text = &plist[program_arguments_start..];
+    let array_start = arguments_text
+        .find("<array>")
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "installed launchd daemon service has malformed program arguments".to_string(),
+        })?
+        + "<array>".len();
+    let after_array_start = &arguments_text[array_start..];
+    let array_end = after_array_start
+        .find("</array>")
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "installed launchd daemon service has malformed program arguments".to_string(),
+        })?;
+    let strings = plist_string_values(&after_array_start[..array_end]);
+    remote_tls_from_args(strings.iter().map(String::as_str))
 }
 
 pub(super) fn launchd_plist_env_value(plist: &str, name: &str) -> Option<String> {
@@ -241,6 +394,16 @@ pub(super) fn socket_path_from_unit_text(unit: &str) -> Option<PathBuf> {
         ServiceRunner::Launchd => socket_path_from_launchd_plist(unit),
         ServiceRunner::WindowsTask => windows_task::profile_root_from_task_xml(unit)
             .map(|profile_root| profile_root.join("daemon.sock")),
+    }
+}
+
+pub(super) fn remote_tls_from_unit_text(
+    unit: &str,
+) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+    match ServiceRunner::current()? {
+        ServiceRunner::Systemd => remote_tls_from_service_unit(unit),
+        ServiceRunner::Launchd => remote_tls_from_launchd_plist(unit),
+        ServiceRunner::WindowsTask => windows_task::remote_tls_from_task_xml(unit),
     }
 }
 

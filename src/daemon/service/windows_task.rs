@@ -420,6 +420,7 @@ pub(super) fn render_task_xml(spec: &DaemonServiceSpec) -> Result<String> {
 }
 
 fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Result<String> {
+    validate_task_remote_tls(spec.remote_tls.as_ref())?;
     let profile_root = match &spec.data_dir_override {
         Some(profile_root) => profile_root.clone(),
         None => super::tracedecay_data_dir()?,
@@ -429,10 +430,25 @@ fn render_task_xml_for(spec: &DaemonServiceSpec, identity: &TaskIdentity) -> Res
     let executable_text = windows_path_text(&executable_path, "daemon executable")?;
     validate_task_command_text(executable_text)?;
     let executable = xml_escape(executable_text);
-    let arguments = xml_escape(&format!(
+    let mut arguments = format!(
         "daemon run --profile-root {}",
         quote_windows_argument(windows_path_text(&profile_root, "daemon profile root")?)
-    ));
+    );
+    if let Some(remote_tls) = &spec.remote_tls {
+        arguments.push_str(" --remote-listen ");
+        arguments.push_str(&quote_windows_argument(&remote_tls.listen().to_string()));
+        arguments.push_str(" --remote-tls-cert ");
+        arguments.push_str(&quote_windows_argument(windows_path_text(
+            remote_tls.certificate_chain(),
+            "Remote Brain TLS certificate",
+        )?));
+        arguments.push_str(" --remote-tls-key ");
+        arguments.push_str(&quote_windows_argument(windows_path_text(
+            remote_tls.private_key(),
+            "Remote Brain TLS private key",
+        )?));
+    }
+    let arguments = xml_escape(&arguments);
     let user_sid = xml_escape(&identity.user_sid);
 
     Ok(format!(
@@ -540,7 +556,7 @@ fn validate_task_command_text(command: &str) -> Result<()> {
 pub(super) fn profile_root_from_task_xml(xml: &str) -> Option<PathBuf> {
     let arguments = xml_element_text(xml, "Arguments")?;
     let arguments = xml_unescape(arguments);
-    let tokens = windows_argument_tokens(&arguments);
+    let tokens = windows_argument_tokens(&arguments).ok()?;
     let mut tokens = tokens.iter();
     while let Some(token) = tokens.next() {
         if token == "--profile-root" {
@@ -551,6 +567,109 @@ pub(super) fn profile_root_from_task_xml(xml: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+pub(super) fn remote_tls_from_task_xml(
+    xml: &str,
+) -> Result<Option<super::super::RemoteBrainTlsConfig>> {
+    let Some(arguments) = xml_element_text(xml, "Arguments") else {
+        return Ok(None);
+    };
+    let arguments = xml_unescape(arguments);
+    let tokens = windows_argument_tokens(&arguments)?;
+    let mut listen = None;
+    let mut certificate_chain = None;
+    let mut private_key = None;
+    let mut tokens = tokens.iter();
+    while let Some(token) = tokens.next() {
+        match token.as_str() {
+            "--remote-listen" => super::unit_file::set_unique_argument(
+                &mut listen,
+                tokens.next().cloned(),
+                "--remote-listen",
+            )?,
+            "--remote-tls-cert" => super::unit_file::set_unique_argument(
+                &mut certificate_chain,
+                tokens.next().map(PathBuf::from),
+                "--remote-tls-cert",
+            )?,
+            "--remote-tls-key" => super::unit_file::set_unique_argument(
+                &mut private_key,
+                tokens.next().map(PathBuf::from),
+                "--remote-tls-key",
+            )?,
+            _ => {
+                if let Some(value) = token.strip_prefix("--remote-listen=") {
+                    super::unit_file::set_unique_argument(
+                        &mut listen,
+                        Some(value.to_owned()),
+                        "--remote-listen",
+                    )?;
+                } else if let Some(value) = token.strip_prefix("--remote-tls-cert=") {
+                    super::unit_file::set_unique_argument(
+                        &mut certificate_chain,
+                        Some(PathBuf::from(value)),
+                        "--remote-tls-cert",
+                    )?;
+                } else if let Some(value) = token.strip_prefix("--remote-tls-key=") {
+                    super::unit_file::set_unique_argument(
+                        &mut private_key,
+                        Some(PathBuf::from(value)),
+                        "--remote-tls-key",
+                    )?;
+                }
+            }
+        }
+    }
+    let listen = listen
+        .map(|value| {
+            value.parse().map_err(|_| TraceDecayError::Config {
+                message:
+                    "installed Windows daemon task has an invalid Remote Brain listener address"
+                        .to_string(),
+            })
+        })
+        .transpose()?;
+    let remote_tls = super::super::RemoteBrainTlsConfig::from_optional_parts(
+        listen,
+        certificate_chain,
+        private_key,
+    )?;
+    validate_task_remote_tls(remote_tls.as_ref())?;
+    Ok(remote_tls)
+}
+
+fn validate_task_remote_tls(remote_tls: Option<&super::super::RemoteBrainTlsConfig>) -> Result<()> {
+    let Some(remote_tls) = remote_tls else {
+        return Ok(());
+    };
+    for (description, path) in [
+        (
+            "Remote Brain TLS certificate",
+            remote_tls.certificate_chain(),
+        ),
+        ("Remote Brain TLS private key", remote_tls.private_key()),
+    ] {
+        #[cfg(windows)]
+        if !path.is_absolute() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Windows Task Scheduler {description} path '{}' is not fully qualified",
+                    path.display()
+                ),
+            });
+        }
+        let path = fully_qualified_windows_path(path, description)?;
+        let path_text = windows_path_text(&path, description)?;
+        if path_text.chars().any(char::is_control) {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "Windows Task Scheduler {description} path contains a control character"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn materialize_service_spec_after_quiescence(
@@ -1837,7 +1956,7 @@ fn quote_windows_argument(argument: &str) -> String {
     quoted
 }
 
-fn windows_argument_tokens(arguments: &str) -> Vec<String> {
+fn windows_argument_tokens(arguments: &str) -> Result<Vec<String>> {
     let characters: Vec<char> = arguments.chars().collect();
     let mut tokens = Vec::new();
     let mut position = 0;
@@ -1845,7 +1964,7 @@ fn windows_argument_tokens(arguments: &str) -> Vec<String> {
         while characters[position].is_whitespace() {
             position += 1;
             if position == characters.len() {
-                return tokens;
+                return Ok(tokens);
             }
         }
 
@@ -1882,12 +2001,18 @@ fn windows_argument_tokens(arguments: &str) -> Vec<String> {
             token.push(characters[position]);
             position += 1;
         }
+        if quoted {
+            return Err(TraceDecayError::Config {
+                message: "installed Windows daemon task has an unterminated quoted argument"
+                    .to_string(),
+            });
+        }
         tokens.push(token);
         while position < characters.len() && characters[position].is_whitespace() {
             position += 1;
         }
     }
-    tokens
+    Ok(tokens)
 }
 
 fn with_platform_api<T>(
@@ -2548,6 +2673,7 @@ mod tests {
             tracedecay_bin: executable.into(),
             socket_path: PathBuf::from("ignored-by-windows-task"),
             data_dir_override: Some(profile_root.into()),
+            remote_tls: None,
         }
     }
 
@@ -2590,6 +2716,84 @@ mod tests {
             &format!("{}(A;;GA;;;BA)", identity.sddl),
             &identity
         ));
+    }
+
+    #[test]
+    fn task_xml_round_trips_remote_tls_listener_paths() {
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let remote_tls = super::super::super::RemoteBrainTlsConfig::from_optional_parts(
+            Some("192.0.2.10:7443".parse().expect("listener address")),
+            Some(PathBuf::from(r"C:\TraceDecay TLS\server & chain.pem")),
+            Some(PathBuf::from(r"C:\TraceDecay TLS\server % key.pem")),
+        )
+        .expect("valid Remote Brain TLS task configuration")
+        .expect("enabled Remote Brain TLS task configuration");
+        let mut service_spec = spec(r"C:\TraceDecay\tracedecay.exe", r"C:\TraceDecay\data");
+        service_spec.remote_tls = Some(remote_tls.clone());
+
+        let xml = render_task_xml_for(&service_spec, &identity).expect("task XML");
+
+        assert_eq!(
+            remote_tls_from_task_xml(&xml).expect("parse task Remote Brain arguments"),
+            Some(remote_tls)
+        );
+        assert!(!xml.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn task_xml_rejects_ambiguous_remote_tls_argument_quoting() {
+        let xml = r#"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-tls-cert &quot;C:\TraceDecay TLS\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>"#;
+
+        let error = remote_tls_from_task_xml(xml)
+            .expect_err("unterminated Windows argument quoting must fail closed");
+
+        assert!(error.to_string().contains("unterminated quoted argument"));
+    }
+
+    #[test]
+    fn task_xml_rejects_partial_and_duplicate_remote_tls_arguments() {
+        let partial =
+            r#"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443</Arguments></Task>"#;
+        let duplicate = r#"<Task><Arguments>daemon run --remote-listen 192.0.2.10:7443 --remote-listen 192.0.2.11:7443 --remote-tls-cert C:\TraceDecay\server.pem --remote-tls-key C:\TraceDecay\server-key.pem</Arguments></Task>"#;
+
+        assert!(remote_tls_from_task_xml(partial).is_err());
+        assert!(remote_tls_from_task_xml(duplicate).is_err());
+    }
+
+    #[test]
+    fn task_xml_rejects_remote_tls_path_control_characters() {
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let remote_tls = super::super::super::RemoteBrainTlsConfig::from_optional_parts(
+            Some("192.0.2.10:7443".parse().expect("listener address")),
+            Some(PathBuf::from("C:\\TraceDecay TLS\\server.pem\nInjected")),
+            Some(PathBuf::from(r"C:\TraceDecay TLS\server-key.pem")),
+        )
+        .expect("complete Remote Brain TLS task configuration")
+        .expect("enabled Remote Brain TLS task configuration");
+        let mut service_spec = spec(r"C:\TraceDecay\tracedecay.exe", r"C:\TraceDecay\data");
+        service_spec.remote_tls = Some(remote_tls);
+
+        let error = render_task_xml_for(&service_spec, &identity)
+            .expect_err("control characters must not enter task XML");
+
+        assert!(error.to_string().contains("control character"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_xml_rejects_relative_remote_tls_paths() {
+        let identity = TaskIdentity::for_user_sid(TEST_SID).expect("task identity");
+        let remote_tls = super::super::super::RemoteBrainTlsConfig::from_optional_parts(
+            Some("192.0.2.10:7443".parse().expect("listener address")),
+            Some(PathBuf::from("server.pem")),
+            Some(PathBuf::from("server-key.pem")),
+        )
+        .expect("complete Remote Brain TLS task configuration")
+        .expect("enabled Remote Brain TLS task configuration");
+        let mut service_spec = spec(r"C:\TraceDecay\tracedecay.exe", r"C:\TraceDecay\data");
+        service_spec.remote_tls = Some(remote_tls);
+
+        assert!(render_task_xml_for(&service_spec, &identity).is_err());
     }
 
     #[cfg(unix)]

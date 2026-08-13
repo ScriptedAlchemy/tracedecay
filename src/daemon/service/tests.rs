@@ -322,9 +322,10 @@ fn user_service_runs_daemon_with_socket_path() {
         tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
         socket_path: PathBuf::from("/tmp/tracedecay.sock"),
         data_dir_override: None,
+        remote_tls: None,
     };
 
-    let unit = spec.render_systemd_user_unit();
+    let unit = spec.render_systemd_user_unit().expect("systemd unit");
 
     assert!(
         unit.contains(
@@ -335,6 +336,114 @@ fn user_service_runs_daemon_with_socket_path() {
     assert!(unit.contains("Environment=\"MALLOC_ARENA_MAX=2\""));
     assert!(unit.contains("Restart=on-failure"));
     assert!(unit.contains("LimitNOFILE=8192"));
+}
+
+fn remote_tls_config(
+    listen: &str,
+    certificate_chain: impl Into<PathBuf>,
+    private_key: impl Into<PathBuf>,
+) -> super::super::RemoteBrainTlsConfig {
+    super::super::RemoteBrainTlsConfig::from_optional_parts(
+        Some(listen.parse().expect("listener address")),
+        Some(certificate_chain.into()),
+        Some(private_key.into()),
+    )
+    .expect("valid Remote Brain TLS service configuration")
+    .expect("enabled Remote Brain TLS service configuration")
+}
+
+#[test]
+fn systemd_service_round_trips_remote_tls_listener_paths() {
+    let remote_tls = remote_tls_config(
+        "192.0.2.10:7443",
+        "/etc/trace decay/server%$\"chain\\part.pem",
+        "/etc/trace decay/server%$key.pem",
+    );
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/usr/local/bin/tracedecay"),
+        socket_path: PathBuf::from("/tmp/tracedecay.sock"),
+        data_dir_override: None,
+        remote_tls: Some(remote_tls.clone()),
+    };
+
+    let unit = spec.render_systemd_user_unit().expect("systemd unit");
+
+    assert_eq!(
+        super::unit_file::remote_tls_from_service_unit(&unit)
+            .expect("parse systemd Remote Brain arguments"),
+        Some(remote_tls)
+    );
+    assert!(!unit.contains("PRIVATE KEY"));
+}
+
+#[test]
+fn partial_systemd_remote_tls_arguments_fail_closed() {
+    let unit = "ExecStart=/usr/bin/tracedecay daemon run --remote-listen 192.0.2.10:7443";
+
+    assert!(super::unit_file::remote_tls_from_service_unit(unit).is_err());
+}
+
+#[test]
+fn managed_service_rejects_relative_remote_tls_paths() {
+    let remote_tls = remote_tls_config("192.0.2.10:7443", "server.pem", "server-key.pem");
+
+    let error =
+        super::service_spec_with_remote_tls("/usr/local/bin/tracedecay", None, Some(remote_tls))
+            .expect_err("relative TLS paths must not depend on a service working directory");
+
+    assert!(error.to_string().contains("must be absolute"));
+}
+
+#[test]
+fn managed_service_rejects_remote_tls_path_control_characters() {
+    let remote_tls = remote_tls_config(
+        "192.0.2.10:7443",
+        "/etc/tracedecay/server.pem\nEnvironment=INJECTED",
+        "/etc/tracedecay/server-key.pem",
+    );
+
+    let error =
+        super::service_spec_with_remote_tls("/usr/local/bin/tracedecay", None, Some(remote_tls))
+            .expect_err("control characters must not enter a service definition");
+
+    assert!(error.to_string().contains("control character"));
+}
+
+#[test]
+fn duplicate_systemd_remote_tls_arguments_fail_closed() {
+    let unit = "ExecStart=/usr/bin/tracedecay daemon run --remote-listen 192.0.2.10:7443 --remote-listen 192.0.2.11:7443 --remote-tls-cert /etc/server.pem --remote-tls-key /etc/server-key.pem";
+
+    assert!(super::unit_file::remote_tls_from_service_unit(unit).is_err());
+}
+
+#[test]
+fn parsed_systemd_remote_tls_paths_are_validated_before_refresh() {
+    let relative = "ExecStart=/usr/bin/tracedecay daemon run --remote-listen 192.0.2.10:7443 --remote-tls-cert server.pem --remote-tls-key server-key.pem";
+    let control = "ExecStart=/usr/bin/tracedecay daemon run --remote-listen 192.0.2.10:7443 --remote-tls-cert \"/etc/server.pem\tInjected\" --remote-tls-key /etc/server-key.pem";
+    let ambiguous_escape = r#"ExecStart=/usr/bin/tracedecay daemon run --remote-listen 192.0.2.10:7443 --remote-tls-cert "/etc/server\tname.pem" --remote-tls-key /etc/server-key.pem"#;
+
+    assert!(super::unit_file::remote_tls_from_service_unit(relative).is_err());
+    assert!(super::unit_file::remote_tls_from_service_unit(control).is_err());
+    assert!(super::unit_file::remote_tls_from_service_unit(ambiguous_escape).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_service_rejects_non_unicode_remote_tls_paths() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let certificate = std::ffi::OsString::from_vec(vec![b'/', b'e', b't', b'c', b'/', 0xff]);
+    let remote_tls = remote_tls_config(
+        "192.0.2.10:7443",
+        PathBuf::from(certificate),
+        "/etc/server-key.pem",
+    );
+
+    let error =
+        super::service_spec_with_remote_tls("/usr/local/bin/tracedecay", None, Some(remote_tls))
+            .expect_err("non-Unicode TLS paths must not be rendered lossily");
+
+    assert!(error.to_string().contains("valid Unicode"));
 }
 
 // The launchd render tests use Unix-style absolute binary paths, which
@@ -350,6 +459,7 @@ fn render_launchd_plist_includes_program_arguments_socket_logs_and_label() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: profile.path().join("daemon.sock"),
         data_dir_override: Some(profile.path().to_path_buf()),
+        remote_tls: None,
     };
 
     let plist = spec.render_launchd_plist().expect("launchd plist");
@@ -383,6 +493,43 @@ fn render_launchd_plist_includes_program_arguments_socket_logs_and_label() {
 
 #[cfg(unix)]
 #[test]
+fn launchd_service_round_trips_remote_tls_listener_paths() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let profile = tempfile::TempDir::new().expect("profile temp dir");
+    let home = tempfile::TempDir::new().expect("home temp dir");
+    let _home_guard = EnvVarGuard::set("HOME", home.path());
+    let remote_tls = remote_tls_config(
+        "192.0.2.10:7443",
+        "/Library/Application Support/TraceDecay/server<&\"'chain.pem",
+        "/Library/Application Support/TraceDecay/server>&key.pem",
+    );
+    let spec = DaemonServiceSpec {
+        tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
+        socket_path: profile.path().join("daemon.sock"),
+        data_dir_override: Some(profile.path().to_path_buf()),
+        remote_tls: Some(remote_tls.clone()),
+    };
+
+    let plist = spec.render_launchd_plist().expect("launchd plist");
+
+    assert_eq!(
+        super::unit_file::remote_tls_from_launchd_plist(&plist)
+            .expect("parse launchd Remote Brain arguments"),
+        Some(remote_tls)
+    );
+    assert!(!plist.contains("PRIVATE KEY"));
+}
+
+#[cfg(unix)]
+#[test]
+fn parsed_launchd_remote_tls_paths_are_validated_before_refresh() {
+    let plist = "<key>ProgramArguments</key><array><string>/usr/bin/tracedecay</string><string>daemon</string><string>run</string><string>--remote-listen</string><string>192.0.2.10:7443</string><string>--remote-tls-cert</string><string>server.pem</string><string>--remote-tls-key</string><string>/etc/server-key.pem</string></array>";
+
+    assert!(super::unit_file::remote_tls_from_launchd_plist(plist).is_err());
+}
+
+#[cfg(unix)]
+#[test]
 fn render_launchd_plist_escapes_xml_and_parser_unescapes_socket_path() {
     let _env_lock = lock_user_data_dir_test_env();
     let profile = tempfile::TempDir::new().expect("profile temp dir");
@@ -394,6 +541,7 @@ fn render_launchd_plist_escapes_xml_and_parser_unescapes_socket_path() {
         tracedecay_bin: PathBuf::from("/opt/trace&decay/bin/tracedecay"),
         socket_path: socket_path.clone(),
         data_dir_override: None,
+        remote_tls: None,
     };
 
     let plist = spec.render_launchd_plist().expect("launchd plist");
@@ -448,6 +596,7 @@ fn launchd_plist_env_value_round_trips_data_dir_override() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: profile.path().join("daemon.sock"),
         data_dir_override: Some(profile.path().to_path_buf()),
+        remote_tls: None,
     };
 
     let plist = spec.render_launchd_plist().expect("launchd plist");
@@ -474,6 +623,7 @@ fn launchd_plist_env_value_ignores_plist_without_override() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: profile.path().join("daemon.sock"),
         data_dir_override: None,
+        remote_tls: None,
     };
 
     let plist = spec.render_launchd_plist().expect("launchd plist");
@@ -681,6 +831,7 @@ fn refresh_service_rewrites_unit_and_restarts_daemon() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        remote_tls: None,
     };
 
     let service_path = super::refresh_service(&spec).expect("refresh service");
@@ -721,6 +872,7 @@ fn refresh_installed_service_skips_missing_unit() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        remote_tls: None,
     };
 
     let service_path = config_home
@@ -793,7 +945,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
              Description=TraceDecay daemon\n\
              \n\
              [Service]\n\
-             ExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock\n",
+             ExecStart=/old/tracedecay daemon run --socket /custom/tracedecay.sock --remote-listen 192.0.2.10:7443 --remote-tls-cert \"/etc/trace decay/server.pem\" --remote-tls-key \"/etc/trace decay/server-key.pem\"\n",
     )
     .expect("existing service unit");
 
@@ -801,6 +953,7 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        remote_tls: None,
     };
 
     let previous_state =
@@ -818,6 +971,9 @@ fn refresh_installed_service_preserves_existing_socket_path() {
         "ExecStart=/opt/tracedecay/bin/tracedecay daemon run --socket /custom/tracedecay.sock"
     ));
     assert!(!unit.contains("/run/user/1000/tracedecay.sock"));
+    assert!(unit.contains("--remote-listen \"192.0.2.10:7443\""));
+    assert!(unit.contains("--remote-tls-cert \"/etc/trace decay/server.pem\""));
+    assert!(unit.contains("--remote-tls-key \"/etc/trace decay/server-key.pem\""));
     assert_eq!(
         std::fs::read_to_string(log).expect("systemctl log"),
         "--user is-active --quiet tracedecay.service\n--user is-enabled tracedecay.service\n--user stop tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user daemon-reload\n--user enable tracedecay.service\n--user start tracedecay.service\n"
@@ -910,6 +1066,7 @@ fn refresh_installed_service_preserves_stopped_state() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        remote_tls: None,
     };
 
     super::refresh_installed_service(&spec).expect("refresh service");
@@ -964,6 +1121,7 @@ fn refresh_preserves_persistent_systemd_mask_symlink() {
         tracedecay_bin: PathBuf::from("/opt/tracedecay/bin/tracedecay"),
         socket_path: PathBuf::from("/run/user/1000/tracedecay.sock"),
         data_dir_override: None,
+        remote_tls: None,
     };
 
     let error =

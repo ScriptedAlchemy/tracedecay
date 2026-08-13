@@ -45,6 +45,7 @@ pub struct DaemonServiceSpec {
     pub tracedecay_bin: PathBuf,
     pub socket_path: PathBuf,
     pub data_dir_override: Option<PathBuf>,
+    pub remote_tls: Option<super::RemoteBrainTlsConfig>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,9 +244,25 @@ impl DaemonServiceState {
 }
 
 impl DaemonServiceSpec {
-    pub fn render_systemd_user_unit(&self) -> String {
+    pub fn render_systemd_user_unit(&self) -> Result<String> {
+        validate_managed_remote_tls(self.remote_tls.as_ref())?;
         let service_path = daemon_service_path_env(&self.tracedecay_bin);
-        format!(
+        let remote_arguments = match self.remote_tls.as_ref() {
+            Some(config) => format!(
+                " --remote-listen {} --remote-tls-cert {} --remote-tls-key {}",
+                systemd_escape_exec_argument(&config.listen().to_string()),
+                systemd_escape_exec_argument(managed_remote_tls_path_text(
+                    "certificate chain",
+                    config.certificate_chain(),
+                )?),
+                systemd_escape_exec_argument(managed_remote_tls_path_text(
+                    "private key",
+                    config.private_key(),
+                )?),
+            ),
+            None => String::new(),
+        };
+        Ok(format!(
             "[Unit]\n\
              Description=TraceDecay daemon\n\
              After=network.target\n\
@@ -254,7 +271,7 @@ impl DaemonServiceSpec {
              Type=simple\n\
              Environment=\"PATH={}\"\n\
              Environment=\"MALLOC_ARENA_MAX=2\"\n\
-             ExecStart={} daemon run --socket {}\n\
+             ExecStart={} daemon run --socket {}{}\n\
              Restart=on-failure\n\
              RestartSec=2\n\
              LimitNOFILE={}\n\
@@ -264,11 +281,13 @@ impl DaemonServiceSpec {
             systemd_escape_env_value(&service_path),
             self.tracedecay_bin.display(),
             self.socket_path.display(),
+            remote_arguments,
             DAEMON_OPEN_FILE_LIMIT,
-        )
+        ))
     }
 
     pub fn render_launchd_plist(&self) -> Result<String> {
+        validate_managed_remote_tls(self.remote_tls.as_ref())?;
         if !self.tracedecay_bin.is_absolute() {
             return Err(TraceDecayError::Config {
                 message: format!(
@@ -307,6 +326,27 @@ impl DaemonServiceSpec {
             );
         }
 
+        let remote_arguments = match self.remote_tls.as_ref() {
+            Some(config) => format!(
+                "                 <string>--remote-listen</string>\n\
+                 <string>{}</string>\n\
+                 <string>--remote-tls-cert</string>\n\
+                 <string>{}</string>\n\
+                 <string>--remote-tls-key</string>\n\
+                 <string>{}</string>\n",
+                plist_xml_escape(&config.listen().to_string()),
+                plist_xml_escape(managed_remote_tls_path_text(
+                    "certificate chain",
+                    config.certificate_chain(),
+                )?),
+                plist_xml_escape(managed_remote_tls_path_text(
+                    "private key",
+                    config.private_key(),
+                )?),
+            ),
+            None => String::new(),
+        };
+
         Ok(format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
              <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\"\n\
@@ -323,6 +363,7 @@ impl DaemonServiceSpec {
                  <string>run</string>\n\
                  <string>--socket</string>\n\
                  <string>{socket}</string>\n\
+             {remote_arguments}\
                </array>\n\
              \n\
                <key>EnvironmentVariables</key>\n\
@@ -366,11 +407,59 @@ impl DaemonServiceSpec {
 
     fn render_unit(&self) -> Result<String> {
         match ServiceRunner::current()? {
-            ServiceRunner::Systemd => Ok(self.render_systemd_user_unit()),
+            ServiceRunner::Systemd => self.render_systemd_user_unit(),
             ServiceRunner::Launchd => self.render_launchd_plist(),
             ServiceRunner::WindowsTask => windows_task::render_task_xml(self),
         }
     }
+}
+
+pub(super) fn validate_managed_remote_tls(
+    remote_tls: Option<&super::RemoteBrainTlsConfig>,
+) -> Result<()> {
+    let Some(remote_tls) = remote_tls else {
+        return Ok(());
+    };
+    for (description, path) in [
+        ("certificate chain", remote_tls.certificate_chain()),
+        ("private key", remote_tls.private_key()),
+    ] {
+        managed_remote_tls_path_text(description, path)?;
+    }
+    Ok(())
+}
+
+fn managed_remote_tls_path_text<'a>(description: &str, path: &'a Path) -> Result<&'a str> {
+    if !path.is_absolute() {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "managed Remote Brain TLS {description} path must be absolute, got '{}'",
+                path.display()
+            ),
+        });
+    }
+    let path_text = path.to_str().ok_or_else(|| TraceDecayError::Config {
+        message: format!("managed Remote Brain TLS {description} path must be valid Unicode"),
+    })?;
+    if path_text.chars().any(char::is_control) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "managed Remote Brain TLS {description} path contains a control character"
+            ),
+        });
+    }
+    Ok(path_text)
+}
+
+fn systemd_escape_exec_argument(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "$$")
+            .replace('%', "%%")
+    )
 }
 
 fn daemon_service_path_env(tracedecay_bin: &Path) -> String {
@@ -487,13 +576,23 @@ pub fn service_spec(
     tracedecay_bin: impl Into<PathBuf>,
     socket: Option<String>,
 ) -> Result<DaemonServiceSpec> {
+    service_spec_with_remote_tls(tracedecay_bin, socket, None)
+}
+
+pub fn service_spec_with_remote_tls(
+    tracedecay_bin: impl Into<PathBuf>,
+    socket: Option<String>,
+    remote_tls: Option<super::RemoteBrainTlsConfig>,
+) -> Result<DaemonServiceSpec> {
     let tracedecay_bin = tracedecay_bin.into();
+    validate_managed_remote_tls(remote_tls.as_ref())?;
     Ok(DaemonServiceSpec {
         tracedecay_bin,
         socket_path: socket_path_or_default(socket)?,
         data_dir_override: std::env::var_os(crate::config::USER_DATA_DIR_ENV)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from),
+        remote_tls,
     })
 }
 
@@ -631,6 +730,7 @@ fn refresh_installed_service_with_state(
     if let Some(socket_path) = socket_path_from_unit_text(&unit) {
         refreshed_spec.socket_path = socket_path;
     }
+    refreshed_spec.remote_tls = unit_file::remote_tls_from_unit_text(&unit)?;
     let runner = ServiceRunner::current()?;
     let previous_state = match previous_state {
         Some(state) => state,
