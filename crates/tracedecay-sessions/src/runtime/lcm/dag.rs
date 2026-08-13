@@ -167,10 +167,31 @@ async fn expand_summary_node_with_content(
     for source_ref in &summary.source_refs {
         match source_ref {
             LcmSourceRef::RawMessage { store_id } => {
-                let raw = raw_sources
-                    .get(store_id)
-                    .cloned()
-                    .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+                // An *absent* raw row is not an ownership violation: publication
+                // (`session_temporal::operations::sources::prepare_raw_source`)
+                // proves every raw source exists and is session-owned before the
+                // lineage row is written, so a row that is missing at read time
+                // was removed afterwards — by the projection-durability retention
+                // drop pass (plan 38 §3), whose whole premise is that the summary
+                // is the durable survivor. Report the source as retention-expired
+                // (plan 23 hydration state) and keep expanding; aborting the whole
+                // expansion would make every summary older than the drop window
+                // unreadable, and would do so under a misleading ownership error.
+                let Some(raw) = raw_sources.get(store_id).cloned() else {
+                    sources.push(LcmExpandedSummarySource {
+                        source_ref: source_ref.clone(),
+                        state: HydrationStateV1::RetentionExpired,
+                        content: String::new(),
+                        content_range: None,
+                        content_truncated: false,
+                        raw_message: None,
+                        raw_message_metadata: None,
+                        summary_node: None,
+                    });
+                    continue;
+                };
+                // A row that is present but foreign is still a hard ownership
+                // violation and must never be disclosed.
                 if raw.provider() != provider || raw.session_id() != session_id {
                     return Err(LcmError::SummarySourceNotOwnedBySession);
                 }

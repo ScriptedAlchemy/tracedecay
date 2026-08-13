@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 
-use crate::runtime::lcm::schema;
+use crate::runtime::lcm::{LcmSourceRef, dag, schema};
+use tracedecay_domain::HydrationStateV1;
 use tracedecay_runtime_core::db::engine::{
     Connection, Executor, IntoParams, QueryExecutor, TestConnection, params,
 };
+use tracedecay_runtime_core::privacy::sanitize_lcm_payload_text;
 
 use super::*;
 
@@ -11,6 +13,9 @@ const PROVIDER: &str = "cursor";
 const SESSION: &str = "session-a";
 const DAY: i64 = 24 * 60 * 60;
 const NOW: i64 = 1_900_000_000;
+/// Summary text every fixture summary node carries; the node stores this text's
+/// real content hash so expansion's integrity check passes.
+const SUMMARY_TEXT: &str = "summary";
 
 struct TestStore {
     conn: Connection,
@@ -88,7 +93,8 @@ async fn test_store() -> Result<TestStore, String> {
 }
 
 /// Inserts an inline raw message (and its projected `session_messages` twin)
-/// with the given age. Returns the assigned `store_id`.
+/// with the given age. Returns the assigned `store_id`. The row carries a real
+/// ingest sanitization receipt so verified reads (summary expansion) accept it.
 async fn insert_message(
     conn: &(impl Executor + ?Sized),
     ordinal: i64,
@@ -97,14 +103,20 @@ async fn insert_message(
 ) -> Result<i64, String> {
     let message_id = format!("msg-{ordinal}");
     let timestamp = NOW - age_days * DAY;
+    let sanitization = sanitize_lcm_payload_text(content).map_err(|err| format!("sanitize: {err}"))?;
+    let content = sanitization.sanitized_text();
     let hash = crate::runtime::lcm::util::sha256_hex(content.as_bytes());
+    let metadata = serde_json::json!({
+        "ingest_protection": { "sanitization_receipt": sanitization.receipt() }
+    })
+    .to_string();
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
             content, content_hash, storage_kind, payload_ref, snippet_text,
             index_text, metadata_json
          )
-         VALUES (?1, ?2, ?3, 'assistant', ?4, ?5, ?6, ?7, 'inline', NULL, ?6, ?6, NULL)",
+         VALUES (?1, ?2, ?3, 'assistant', ?4, ?5, ?6, ?7, 'inline', NULL, ?6, ?6, ?8)",
         params![
             PROVIDER,
             message_id.as_str(),
@@ -112,7 +124,8 @@ async fn insert_message(
             ordinal,
             timestamp,
             content,
-            hash.as_str()
+            hash.as_str(),
+            metadata.as_str()
         ],
     )
     .await
@@ -141,19 +154,26 @@ async fn insert_message(
 }
 
 /// Marks a raw row projection-durable by adding a summary node whose lineage
-/// covers `store_id`.
+/// covers `store_id`. Returns the summary node id so callers can expand it.
 async fn make_projection_durable(
     conn: &(impl Executor + ?Sized),
     store_id: i64,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let node_id = format!("node-{store_id}");
+    let summary_hash = crate::retrieval_content::projected_content_hash(SUMMARY_TEXT);
     conn.execute(
         "INSERT INTO lcm_summary_nodes(
             node_id, provider, conversation_id, session_id, depth, summary_text,
             summary_hash, summary_token_count, source_token_count
          )
-         VALUES (?1, ?2, 'conv', ?3, 0, 'summary', 'h', 1, 1)",
-        params![node_id.as_str(), PROVIDER, SESSION],
+         VALUES (?1, ?2, 'conv', ?3, 0, ?4, ?5, 1, 1)",
+        params![
+            node_id.as_str(),
+            PROVIDER,
+            SESSION,
+            SUMMARY_TEXT,
+            summary_hash.as_str()
+        ],
     )
     .await
     .map_err(|err| format!("insert summary node: {err}"))?;
@@ -164,7 +184,7 @@ async fn make_projection_durable(
     )
     .await
     .map_err(|err| format!("insert summary source: {err}"))?;
-    Ok(())
+    Ok(node_id)
 }
 
 async fn fetch_i64(
@@ -297,6 +317,94 @@ async fn drop_reaps_only_projection_durable_rows() -> Result<(), String> {
     // Projected twin of the dropped row is gone; the live twin remains.
     assert_eq!(count(conn, "session_messages").await?, 1);
     assert!(report.dropped.bytes_reclaimed > 0, "reclaim is measurable");
+    Ok(())
+}
+
+// Dropping projection-durable raw rows is intentional (plan 38 §3: the summary
+// is the durable survivor), so summary expansion must degrade rather than
+// abort once the drop window passes. The dropped source is reported as
+// retention-expired (plan 23 hydration state); it is never confused with an
+// ownership violation, which would make every summary older than the window
+// unreadable under a misleading error.
+#[tokio::test]
+async fn expansion_survives_sources_dropped_by_retention() -> Result<(), String> {
+    let store = test_store().await?;
+    let conn = &store.conn;
+    let durable = insert_message(conn, 1, 90, "durable old content").await?;
+    let node_id = make_projection_durable(conn, durable).await?;
+
+    let before = dag::expand_summary_node(conn, PROVIDER, SESSION, &node_id)
+        .await
+        .map_err(|error| format!("expansion before retention: {error}"))?;
+    assert_eq!(before.sources.len(), 1);
+    assert_eq!(before.sources[0].state, HydrationStateV1::Available);
+    assert_eq!(before.sources[0].content, "durable old content");
+
+    let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
+    assert_eq!(report.dropped.acted, 1, "the summary's source row is dropped");
+    assert_eq!(count(conn, "lcm_raw_messages").await?, 0);
+    assert_eq!(
+        count(conn, "lcm_summary_sources").await?,
+        1,
+        "lineage still points at the dropped store_id"
+    );
+
+    let after = dag::expand_summary_node(conn, PROVIDER, SESSION, &node_id)
+        .await
+        .map_err(|error| format!("expansion must survive retention: {error}"))?;
+
+    assert_eq!(after.summary.node_id, node_id, "the summary itself survives");
+    assert_eq!(after.summary.summary_text, SUMMARY_TEXT);
+    assert_eq!(
+        after.sources.len(),
+        1,
+        "the retention-dropped source is still reported, not silently elided"
+    );
+    assert_eq!(
+        after.sources[0].source_ref,
+        LcmSourceRef::RawMessage { store_id: durable }
+    );
+    assert_eq!(
+        after.sources[0].state,
+        HydrationStateV1::RetentionExpired,
+        "dropped source is reported unavailable, not as a session-ownership error"
+    );
+    assert!(after.sources[0].content.is_empty());
+    assert!(after.sources[0].raw_message.is_none());
+    assert!(after.sources[0].raw_message_metadata.is_none());
+    Ok(())
+}
+
+// A raw row that is present but owned by a different session is still a hard
+// ownership violation: degrading on absence must not weaken that boundary.
+#[tokio::test]
+async fn expansion_still_rejects_foreign_session_sources() -> Result<(), String> {
+    let store = test_store().await?;
+    let conn = &store.conn;
+    let store_id = insert_message(conn, 1, 90, "foreign content").await?;
+    let node_id = make_projection_durable(conn, store_id).await?;
+    conn.execute(
+        "INSERT INTO sessions(provider, session_id, project_key, project_path)
+         VALUES (?1, 'session-b', '/p', '/p')",
+        params![PROVIDER],
+    )
+    .await
+    .map_err(|err| format!("insert foreign session: {err}"))?;
+    conn.execute(
+        "UPDATE lcm_raw_messages SET session_id = 'session-b' WHERE store_id = ?1",
+        params![store_id],
+    )
+    .await
+    .map_err(|err| format!("reassign raw row: {err}"))?;
+
+    let error = dag::expand_summary_node(conn, PROVIDER, SESSION, &node_id)
+        .await
+        .expect_err("a present but foreign source must not be disclosed");
+
+    assert!(
+        matches!(error, LcmError::SummarySourceNotOwnedBySession),
+        "unexpected error: {error:?}"
+    );
     Ok(())
 }
 
