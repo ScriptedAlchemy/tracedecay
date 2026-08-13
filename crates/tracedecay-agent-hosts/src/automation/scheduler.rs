@@ -1,12 +1,12 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt;
+use cap_std::time::SystemClock;
 use serde::{Deserialize, Serialize};
 use tracedecay_automation::config::validate_schedule as validate_leaf_schedule;
 pub use tracedecay_automation::config::{AutomationSchedule, CronSchedule, parse_schedule};
@@ -778,10 +778,12 @@ fn prepare_task_lock_publication(
         .and_then(|()| file.sync_all());
     if let Err(error) = write_result {
         drop(file);
-        return Err(cleanup_unpublished_task_lock_staging(
-            &staging_path,
-            "automation task-lock staging write failed",
-            error,
+        return Err(TaskLockStagingCreationError::Definite(
+            cleanup_unpublished_task_lock_staging(
+                &staging_path,
+                "automation task-lock staging write failed",
+                error,
+            ),
         ));
     }
     drop(file);
@@ -1004,7 +1006,7 @@ fn read_task_lock_snapshot(path: &Path) -> std::io::Result<Option<AutomationTask
         metadata
             .modified()
             .ok()?
-            .duration_since(UNIX_EPOCH)
+            .duration_since(SystemClock::UNIX_EPOCH)
             .ok()
             .and_then(|duration| i64::try_from(duration.as_secs()).ok())
     });
