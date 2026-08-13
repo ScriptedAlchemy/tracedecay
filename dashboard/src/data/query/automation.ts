@@ -559,11 +559,11 @@ const ApplicationProblemResponseSchema = z
   })
   .strict();
 
-const CuratorAdmittedTerminalClaimSchema = z.object({
+const CuratorApplicationProblemClaimSchema = z.object({
   kind: z.literal("problem"),
   value: z.object({
     problem: z.object({
-      kind: z.enum(["partial_effect", "reset_required"]),
+      kind: z.enum(["conflict", "partial_effect", "reset_required"]),
     }),
   }),
 });
@@ -652,19 +652,26 @@ export async function runAutomaticCurator(
       return { outcome: "reset_required", problem };
     }
     if (
+      response.status === 409 &&
+      await automaticCuratorProblemMatchesEndpoint(problem, "conflict")
+    ) {
+      return { outcome: "conflicting", detail: "the automation request conflicted" };
+    }
+    if (
+      problem.problem.kind === "conflict" ||
       problem.problem.kind === "partial_effect" ||
       problem.problem.kind === "reset_required"
     ) {
       return {
         outcome: "unsupported_schema",
-        detail: "the application terminal does not match fact_store_curate",
+        detail: "the application problem does not match fact_store_curate",
       };
     }
   }
-  if (CuratorAdmittedTerminalClaimSchema.safeParse(body).success) {
+  if (CuratorApplicationProblemClaimSchema.safeParse(body).success) {
     return {
       outcome: "unsupported_schema",
-      detail: "the application terminal does not match fact_store_curate",
+      detail: "the application problem does not match fact_store_curate",
     };
   }
 
@@ -676,7 +683,10 @@ export async function runAutomaticCurator(
     case 405:
       return { outcome: "read_only_scope", detail: "this project scope is read-only" };
     case 409:
-      return { outcome: "conflicting", detail: "the automation request conflicted" };
+      return {
+        outcome: "unsupported_schema",
+        detail: "the daemon returned HTTP 409 without a matching application problem",
+      };
     case 408:
       return { outcome: "cancelled", detail: "the automatic run was cancelled" };
     case 429:
@@ -779,7 +789,7 @@ const FACT_STORE_CURATE_USE_CASE_ID =
 
 async function automaticCuratorProblemMatchesEndpoint(
   terminal: ApplicationProblemEnvelope,
-  kind: "partial_effect" | "reset_required",
+  kind: "conflict" | "partial_effect" | "reset_required",
 ): Promise<boolean> {
   if (
     terminal.contract.schema_id !== FACT_STORE_CURATE_RESULT_SCHEMA_ID ||
@@ -791,7 +801,7 @@ async function automaticCuratorProblemMatchesEndpoint(
     return false;
   }
   const receipt = terminal.problem.committed_receipt;
-  if (kind === "reset_required") return receipt === null;
+  if (kind === "conflict" || kind === "reset_required") return receipt === null;
   return (
     receipt !== null &&
     receipt.operation === FACT_STORE_CURATE_USE_CASE_ID &&

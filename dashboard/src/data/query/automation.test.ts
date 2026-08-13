@@ -429,6 +429,44 @@ describe("runAutomaticCurator", () => {
     expect((await runScopedAutomaticCurator()).outcome).toBe("partial_effect");
   });
 
+  it("requires a typed application conflict instead of inferring one from HTTP 409", async () => {
+    respond(automaticProblem("conflict"), { ok: false, statusCode: 409 });
+    expect((await runScopedAutomaticCurator()).outcome).toBe("conflicting");
+
+    respond({ error: "conflict" }, { ok: false, statusCode: 409 });
+    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    respond(
+      {
+        kind: "problem",
+        value: {
+          binding_id: "binding.http.fact_store_curate.v1",
+          contract: {
+            schema_id: "schema.application.retained.fact-store-curate.result",
+            schema_revision: 1,
+          },
+          request_id: "request.dashboard.conflict",
+          problem: { kind: "conflict" },
+        },
+      },
+      { ok: false, statusCode: 409 },
+    );
+    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
+  it("binds a typed conflict to its canonical application request identity", async () => {
+    const mismatched = automaticProblem("conflict");
+    mismatched.value.problem.request_id = "request.dashboard.other";
+    respond(mismatched, { ok: false, statusCode: 409 });
+    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
+
+    const malformed = automaticProblem("conflict");
+    malformed.value.request_id = " request.dashboard.conflict";
+    malformed.value.problem.request_id = malformed.value.request_id;
+    respond(malformed, { ok: false, statusCode: 409 });
+    expect((await runScopedAutomaticCurator()).outcome).toBe("unsupported_schema");
+  });
+
   it("rejects a partial terminal belonging to another application effect", async () => {
     const body = automaticProblem("partial_effect");
     const receipt = body.value.problem.committed_receipt;
@@ -734,7 +772,7 @@ function curatorSuccess(run: unknown) {
   };
 }
 
-function automaticProblem(kind: "partial_effect" | "reset_required") {
+function automaticProblem(kind: "conflict" | "partial_effect" | "reset_required") {
   const requestId = `request.dashboard.${kind}`;
   const scope = {
     project_id: "project.dashboard",
@@ -783,13 +821,20 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
         code: `automation.memory-curator.${kind}`,
         message: kind === "partial_effect"
           ? "curation committed before projection failed"
-          : "the retained memory store must be reset",
-        diagnostic: null,
+          : kind === "reset_required"
+          ? "the retained memory store must be reset"
+          : "the retained operation conflicts with current state",
+        diagnostic: kind === "conflict"
+          ? {
+              code: "application.retained.conflict",
+              message: "The retained operation conflicts with current state.",
+            }
+          : null,
         committed_receipt: effectReceipt,
         owning_layer: "runtime",
-        terminality: "admitted_terminal",
-        retryable: false,
-        retry: "never",
+        terminality: kind === "conflict" ? "pre_admission" : "admitted_terminal",
+        retryable: kind === "conflict",
+        retry: kind === "conflict" ? "after_revalidate" : "never",
         retry_scope: null,
         retry_after_millis: null,
         cancellation_stage: null,
@@ -797,7 +842,13 @@ function automaticProblem(kind: "partial_effect" | "reset_required") {
         request_id: requestId,
         trace_id: requestId,
         details: [],
-        legal_actions: [kind === "partial_effect" ? "reconcile" : "reset"],
+        legal_actions: [
+          kind === "partial_effect"
+            ? "reconcile"
+            : kind === "reset_required"
+            ? "reset"
+            : "refresh",
+        ],
         coverage: null,
         unavailable_classification: null,
       },
