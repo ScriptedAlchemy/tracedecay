@@ -78,35 +78,36 @@ describe("curation console", () => {
     });
   });
 
-  it("renders the canonical commit disposition for every committed effect", async () => {
-    stubRoutes({
-      runResponse: {
-        run: automaticRunWithReceipt(
-          "run-dashboard-effects",
-          committedEffectsReceipt("run-dashboard-effects"),
-        ),
-      },
-    });
-    renderConsole();
+  it.each(["idempotent_replay", "committed"] as const)(
+    "renders exact effect rows for the %s commit disposition",
+    async (disposition) => {
+      stubRoutes({
+        runResponse: {
+          run: automaticRunWithReceipt(
+            "run-dashboard-effects",
+            committedEffectsReceipt("run-dashboard-effects", disposition),
+          ),
+        },
+      });
+      renderConsole();
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Run automatic curator now" }),
-    );
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: "Run automatic curator now",
+        }),
+      );
 
-    const effects = await screen.findByLabelText("Committed curator effects");
-    expect(effects.querySelectorAll("li")).toHaveLength(6);
-    for (const label of [
-      "add fact",
-      "link facts",
-      "merge facts",
-      "normalize tags",
-      "remove fact",
-      "update fact",
-    ]) {
-      expect(effects.textContent).toContain(label);
-    }
-    expect(effects.textContent?.match(/idempotent_replay/g)).toHaveLength(6);
-  });
+      const effects = await screen.findByLabelText("Committed curator effects");
+      const rows = Array.from(effects.querySelectorAll("li"), (row) =>
+        (row.textContent ?? "").replace(/\s+/g, " ").trim(),
+      );
+      const expected = committedEffectRows(disposition);
+      expect(rows).toHaveLength(expected.length);
+      for (const [index, row] of rows.entries()) {
+        expect(row).toEqual(expected[index]);
+      }
+    },
+  );
 
   it("suppresses effects whose canonical commit is absent", async () => {
     stubRoutes({
@@ -126,6 +127,34 @@ describe("curation console", () => {
     expect(
       await screen.findByText(
         /run run-dashboard-nullable-effects settled completed/,
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByLabelText("Committed curator effects")).toBeNull();
+  });
+
+  it("rejects an empty merge receipt before the effect renderer", async () => {
+    const receipt = committedEffectsReceipt("run-dashboard-empty-merge");
+    const merge = receipt.receipt.receipt.operation_effects.find(
+      (effect) => effect.kind === "merge",
+    );
+    if (merge?.kind !== "merge") throw new Error("merge fixture drifted");
+    merge.outcome.commit_receipts = [];
+    refreshCurationDigest(receipt);
+
+    stubRoutes({
+      runResponse: {
+        run: automaticRunWithReceipt("run-dashboard-empty-merge", receipt),
+      },
+    });
+    renderConsole();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Run automatic curator now" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "the automatic curator result does not match this build",
       ),
     ).toBeTruthy();
     expect(screen.queryByLabelText("Committed curator effects")).toBeNull();
@@ -290,7 +319,10 @@ function automaticRunWithReceipt(
   return run;
 }
 
-function committedEffectsReceipt(runId: string): CurationReceipt {
+function committedEffectsReceipt(
+  runId: string,
+  disposition: "committed" | "idempotent_replay" = "idempotent_replay",
+): CurationReceipt {
   const addFact = factId("1");
   const linkSource = factId("2");
   const linkTarget = factId("3");
@@ -315,7 +347,13 @@ function committedEffectsReceipt(runId: string): CurationReceipt {
             closest_fact_id: null,
             similarity_millionths: null,
             disposition: "added",
-            commit: factCommit(addFact, "add", 1, "assertion.dashboard.add"),
+            commit: factCommit(
+              addFact,
+              "add",
+              1,
+              "assertion.dashboard.add",
+              disposition,
+            ),
           },
           {
             kind: "link_facts",
@@ -344,6 +382,7 @@ function committedEffectsReceipt(runId: string): CurationReceipt {
               "link",
               1,
               "assertion.dashboard.link",
+              disposition,
             ),
           },
           {
@@ -354,7 +393,9 @@ function committedEffectsReceipt(runId: string): CurationReceipt {
               winner_fact_id: mergeWinner,
               deleted_loser_fact_ids: [mergeLoser],
               content_updated: false,
-              commit_receipts: [factCommit(mergeLoser, "merge", 2, null)],
+              commit_receipts: [
+                factCommit(mergeLoser, "merge", 2, null, disposition),
+              ],
             },
           },
           {
@@ -365,6 +406,7 @@ function committedEffectsReceipt(runId: string): CurationReceipt {
               "normalize",
               2,
               "assertion.dashboard.normalize",
+              disposition,
             ),
           },
           {
@@ -372,7 +414,7 @@ function committedEffectsReceipt(runId: string): CurationReceipt {
             target_fact_id: removedFact,
             disposition: "removed",
             remaining_fact_count: 8,
-            commit: factCommit(removedFact, "remove", 1, null),
+            commit: factCommit(removedFact, "remove", 1, null, disposition),
           },
           {
             kind: "update",
@@ -383,6 +425,7 @@ function committedEffectsReceipt(runId: string): CurationReceipt {
               "update",
               1,
               "assertion.dashboard.update",
+              disposition,
             ),
           },
         ],
@@ -408,6 +451,19 @@ function committedEffectsReceipt(runId: string): CurationReceipt {
     },
   };
   return refreshCurationDigest(receipt);
+}
+
+function committedEffectRows(
+  disposition: "committed" | "idempotent_replay",
+): string[] {
+  return [
+    `add fact · fact ${factId("1")} · added · ${disposition} · event event.dashboard.add.1`,
+    `link facts · ${factId("2")} → ${factId("3")} · supports · linked · ${disposition} · event event.dashboard.link.1`,
+    `merge facts · winner ${factId("5")} · 1 removed · ${disposition} · event event.dashboard.merge.2`,
+    `normalize tags · fact ${factId("7")} · ${disposition} · event event.dashboard.normalize.2`,
+    `remove fact · fact ${factId("8")} · removed · ${disposition} · event event.dashboard.remove.1`,
+    `update fact · fact ${factId("9")} · ${disposition} · event event.dashboard.update.1`,
+  ];
 }
 
 function nullableEffectsReceipt(runId: string): CurationReceipt {
@@ -483,13 +539,14 @@ function factCommit(
   eventLabel: string,
   eventCount: number,
   activeAssertionId: string | null,
+  disposition: "committed" | "idempotent_replay" = "idempotent_replay",
 ) {
   const committedEventIds = Array.from(
     { length: eventCount },
     (_, index) => `event.dashboard.${eventLabel}.${index + 1}`,
   );
   return {
-    disposition: "idempotent_replay" as const,
+    disposition,
     fact_id: fact,
     owner: { kind: "project" as const, project_id: "project.dashboard" },
     committed_event_ids: committedEventIds,
