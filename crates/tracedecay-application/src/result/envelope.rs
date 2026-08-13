@@ -1,5 +1,8 @@
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, de::MapAccess, de::SeqAccess, de::Visitor};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{IntoDeserializer, MapAccess, SeqAccess, Visitor},
+};
 use std::fmt;
 use tracedecay_tool_catalog::{SchemaId, SchemaRef};
 
@@ -381,6 +384,24 @@ where
                 E: serde::de::Error,
             {
                 Ok(RequiredNullable(None))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                T::deserialize(value.into_deserializer())
+                    .map(Some)
+                    .map(RequiredNullable)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                T::deserialize(value.into_deserializer())
+                    .map(Some)
+                    .map(RequiredNullable)
             }
 
             fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
@@ -853,19 +874,75 @@ mod tests {
     }
 
     #[test]
+    fn problem_record_round_trips_scalar_failure_classifications() {
+        let cases = [
+            (
+                ApplicationProblem::unavailable(
+                    SafeDiagnostic::new("authority.unavailable", "The authority is unavailable.")
+                        .expect("diagnostic"),
+                ),
+                "unavailable_classification",
+                "authority",
+            ),
+            (
+                ApplicationProblem::execution_failed(
+                    ApplicationExecutionFailureClassV1::Permanent,
+                    SafeDiagnostic::new("execution.failed", "The execution failed permanently.")
+                        .expect("diagnostic"),
+                )
+                .expect("execution failure"),
+                "execution_failure_classification",
+                "permanent",
+            ),
+        ];
+
+        for (index, (problem, classification_field, expected_classification)) in
+            cases.into_iter().enumerate()
+        {
+            let envelope = ApplicationProblemEnvelope::new(
+                contract(),
+                RequestId::new(format!("request.problem.scalar.{index}")).expect("request"),
+                problem,
+            )
+            .expect("problem envelope");
+            let wire = serde_json::to_value(&envelope).expect("envelope serializes");
+            assert_eq!(
+                wire["problem"][classification_field],
+                expected_classification
+            );
+            assert_eq!(
+                serde_json::from_value::<ApplicationProblemEnvelope>(wire)
+                    .expect("scalar classification decodes"),
+                envelope
+            );
+        }
+    }
+
+    #[test]
     fn problem_schema_is_closed_and_requires_a_nullable_committed_receipt() {
-        fn schema_accepts_null(schema: &serde_json::Value) -> bool {
+        fn schema_accepts_null(root: &serde_json::Value, schema: &serde_json::Value) -> bool {
+            if let Some(definition) = schema["$ref"]
+                .as_str()
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                .and_then(|definition| root["$defs"].get(definition))
+            {
+                return schema_accepts_null(root, definition);
+            }
             schema == &serde_json::json!({ "type": "null" })
                 || schema["type"] == "null"
                 || schema["type"]
                     .as_array()
                     .is_some_and(|types| types.iter().any(|ty| ty == "null"))
-                || schema["anyOf"]
-                    .as_array()
-                    .is_some_and(|branches| branches.iter().any(schema_accepts_null))
-                || schema["oneOf"]
-                    .as_array()
-                    .is_some_and(|branches| branches.iter().any(schema_accepts_null))
+                || schema["anyOf"].as_array().is_some_and(|branches| {
+                    branches
+                        .iter()
+                        .any(|branch| schema_accepts_null(root, branch))
+                })
+                || schema["oneOf"].as_array().is_some_and(|branches| {
+                    branches
+                        .iter()
+                        .any(|branch| schema_accepts_null(root, branch))
+                })
         }
 
         let record_schema = serde_json::to_value(schemars::schema_for!(ApplicationProblemRecord))
@@ -879,6 +956,7 @@ mod tests {
                 .any(|field| field == "committed_receipt")
         );
         assert!(schema_accepts_null(
+            &record_schema,
             &record_schema["properties"]["committed_receipt"]
         ));
         assert!(record_schema["properties"].get("source").is_none());
@@ -895,6 +973,7 @@ mod tests {
                     .any(|field| field == required_nullable)
             );
             assert!(schema_accepts_null(
+                &record_schema,
                 &record_schema["properties"][required_nullable]
             ));
         }
