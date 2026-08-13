@@ -9,27 +9,27 @@ use tracedecay_application::{RequestAdmission, RequestContext};
 use tracedecay_domain::feedback::{
     FeedbackAuthoritativeRuntimeStateV1, FeedbackCycleRuntimeSnapshotV1, FeedbackEvaluationInputV1,
 };
-use tracedecay_domain::{CodeGenerationId, ManifestDigest, canonical_sha256};
+use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
-use crate::tracedecay::TraceDecay;
+use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest};
 
 /// Resolves feedback runtime state from the admitted evaluation input and the
 /// live graph watermark. It never invents scope/content identities; those come
 /// from the caller-owned evaluation request.
 pub struct ProductionFeedbackRuntimeStateV1 {
-    graph: Arc<TraceDecay>,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     configuration_digest: ManifestDigest,
     policy_digest: ManifestDigest,
 }
 
 impl ProductionFeedbackRuntimeStateV1 {
     pub fn new(
-        graph: Arc<TraceDecay>,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         configuration_digest: ManifestDigest,
         policy_digest: ManifestDigest,
     ) -> Self {
         Self {
-            graph,
+            code_graph,
             configuration_digest,
             policy_digest,
         }
@@ -53,31 +53,32 @@ impl FeedbackRuntimeStatePort for ProductionFeedbackRuntimeStateV1 {
             {
                 return None;
             }
-            let watermark = self
-                .graph
-                .get_stats()
+            let Ok(graph) = self
+                .code_graph
+                .open(CodeGraphReadRequest::from_context(
+                    context,
+                    input.observed_at,
+                ))
                 .await
-                .ok()
-                .and_then(|stats| {
-                    canonical_sha256(&(
-                        "tracedecay.feedback.runtime-watermark.v1",
-                        stats.node_count,
-                        stats.edge_count,
-                        &self.configuration_digest,
-                        &self.policy_digest,
-                    ))
-                    .ok()
-                })
-                .unwrap_or_else(|| self.configuration_digest.clone());
+            else {
+                return None;
+            };
+            let graph_generation = graph.generation().clone();
+            let watermark = canonical_sha256(&(
+                "tracedecay.feedback.runtime-watermark.v1",
+                &graph_generation,
+                &self.configuration_digest,
+                &self.policy_digest,
+            ))
+            .ok()?;
             let generation_id = match &input.request.content {
                 tracedecay_domain::feedback::FeedbackContentIdentityV1::SavedContent { .. } => {
-                    input.target.generation_id.clone().or_else(|| {
-                        CodeGenerationId::new(format!(
-                            "generation.project-open.{}",
-                            watermark.as_str().trim_start_matches("sha256:")
-                        ))
-                        .ok()
-                    })
+                    match input.target.generation_id.as_ref() {
+                        Some(generation) if generation == &graph_generation => {
+                            Some(graph_generation)
+                        }
+                        Some(_) | None => return None,
+                    }
                 }
                 tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
                     ..

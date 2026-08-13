@@ -16,7 +16,7 @@ use tracedecay_runtime_core::resident_memory::{
 
 use crate::errors::{Result, TraceDecayError};
 
-use super::service::invocation::DaemonRetainedRuntimeRegistrar;
+use super::service::invocation::{DaemonAdvisoryRuntimeRegistrar, DaemonRetainedRuntimeRegistrar};
 use super::*;
 
 mod project_invocation;
@@ -149,8 +149,23 @@ impl DaemonInvocationState {
         self.github_credential_lifecycle.configure_profile(identity);
     }
 
+    pub(super) fn mount_github_read_only_credential_authority_for_project(
+        &self,
+        profile_id: &tracedecay_domain::UserProfileId,
+        repository_owner: &str,
+        repository_name: &str,
+    ) -> tracedecay_usecases::advisory::github_runtime::ProfileGitHubReadOnlyCredentialMountOutcomeV1
+    {
+        self.github_credential_lifecycle
+            .mount(profile_id, repository_owner, repository_name)
+    }
+
     pub(super) fn feedback_runtime_registrar(&self) -> DaemonFeedbackRuntimeRegistrar {
         DaemonFeedbackRuntimeRegistrar::new(&self.service)
+    }
+
+    pub(super) fn advisory_runtime_registrar(&self) -> DaemonAdvisoryRuntimeRegistrar {
+        DaemonAdvisoryRuntimeRegistrar::new(&self.service)
     }
 
     pub(super) fn context_scout_runtime_registrar(&self) -> DaemonContextScoutRuntimeRegistrar {

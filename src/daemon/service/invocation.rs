@@ -6,7 +6,6 @@
 //! LSP frames are handled by a daemon-owned protocol actor; the bridge only
 //! receives the actor's bounded responses through explicit frame operations.
 
-#[cfg(test)]
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -20,22 +19,26 @@ use std::time::Duration;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tracedecay_application::feedback::{FeedbackReadPort, FeedbackRouteAuthorizationPort};
+use tracedecay_application::feedback::{
+    FeedbackReadPort, FeedbackRouteAuthorizationPort, FeedbackRuntimeStatePort,
+};
 use tracedecay_application::{
-    ApplicationContractError, ApplicationOperation, ApplicationOutcome, ApplicationProblem,
-    ApplicationProblemKind, ApplicationResult, AuthorityReceipt, AuthorizedScopeSet,
-    AuthorizedScopeSetAuthority, CallableCodeAuthorizationPort, CallableCodeOperationKind,
-    CallableCodeQueryService, CancellationContext, CancellationState, CapabilityGrantId,
-    CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
-    EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
-    EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
+    AffectedTestsRetrievalPort, AnalyzerAdmittedDiagnosticProviderV1, ApplicationContractError,
+    ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
+    ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
+    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryService,
+    CancellationContext, CancellationState, CapabilityGrantId, CapabilityGrantSnapshot,
+    CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticProviderIdentity,
+    DisclosureClass, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
+    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
     GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
     GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
     GitIndexTransactionApplicationError, GitIndexTransactionPort, GitIndexTransactionPortError,
     GitIndexTransactionService, IdempotencyKey, MultiRootScopeSetCasRequestV1,
     MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, Omission, OmissionReason,
     OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyDecisionRef, PreviewId, PreviewResult, ReconciliationState, RequestAdmission,
+    PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
+    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestAdmission,
     RequestContext, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic, TemporalState,
     callable_code_operations,
 };
@@ -66,11 +69,15 @@ use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
     ConfigurationMutationPermissionV1,
 };
+use tracedecay_policy::{
+    AnalyzerAdmissionInputV1, CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1,
+    TruthFreshnessRequirementV1, TruthSourceStateV1,
+};
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use super::project_runtime::{
-    ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
-    RegisteredObservabilityProducerV1,
+    FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered, ProjectRuntimeRegistryError,
+    ProjectRuntimeRegistryV1, RegisteredObservabilityProducerV1,
 };
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ProjectContextScoutAddressRegistryV1,
@@ -96,10 +103,15 @@ use tracedecay_usecases::configuration::{
     configuration_layer_scope_digest,
 };
 
-use tracedecay_usecases::feedback::FeedbackCycleRuntimeError;
+use tracedecay_usecases::advisory::{
+    AdvisoryDaemonStartupErrorV1, AdvisoryProductionOpenErrorV1, AdvisoryProductionOpenV1,
+    AdvisoryProductionStartupRegistrationV1, AdvisoryRuntimeOpenV1,
+    open_advisory_production_authorities, register_advisory_daemon_startup,
+};
 use tracedecay_usecases::feedback::concrete::{
     FeedbackRuntime, FeedbackRuntimeError, ProjectFeedbackStore, open_feedback_runtime,
 };
+use tracedecay_usecases::feedback::cycle_production::production_proximity_feedback_cycle_input;
 use tracedecay_usecases::feedback::observations::{
     FeedbackAnchorOperationV1, FeedbackArgumentRejectionClassV1, FeedbackDeliveryRouteV1,
     FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1,
@@ -108,6 +120,10 @@ use tracedecay_usecases::feedback::observations::{
 use tracedecay_usecases::feedback::owner::{
     DaemonFeedbackReadOwnerV1, FeedbackCanonicalProjectionKindV1, FeedbackReadInvocationResultV1,
     FeedbackReadOperationV1, FeedbackReadOwnerErrorV1, FeedbackReadRequestAuthority,
+};
+use tracedecay_usecases::feedback::{
+    FeedbackCycleLspInput, FeedbackCycleRuntime, FeedbackCycleRuntimeError,
+    ProductionFeedbackCycleProximityPortV1, open_feedback_cycle_runtime,
 };
 use tracedecay_usecases::lsp_runtime::{
     DaemonLspSessionFactory, LspCodeIndexProjectionIdentityPort, lsp_session_factory,
@@ -209,7 +225,12 @@ pub(in crate::daemon) use work_routing::DaemonWorkProposalRoutingAuthorityV1;
 pub(crate) use configuration::{
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
 };
-pub(crate) use feedback::{DaemonFeedbackInvocationOwner, daemon_operation_event_authority};
+pub(crate) use feedback::{
+    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
+    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonFeedbackInvocationOwner, advisory_cycle_invocation_result,
+    daemon_operation_event_authority,
+};
 pub(crate) use primitive::{
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,
@@ -224,9 +245,9 @@ pub(crate) use types::{
 // from `service::project_runtime`. Re-export at the same absolute reach the
 // definitions themselves now declare via `pub(in crate::daemon::service)`.
 pub(crate) use registrars::{
-    DaemonConfigurationRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar,
-    DaemonFeedbackRuntimeRegistrationError, DaemonLspOwnerRegistrar,
-    DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
+    DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
+    DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
+    DaemonLspOwnerRegistrar, DaemonRetainedRuntimeRegistrar, DaemonWorkRuntimeRegistrar,
 };
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,

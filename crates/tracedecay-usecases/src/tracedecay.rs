@@ -1,4 +1,4 @@
-//! Downward graph-runtime port used by transport-neutral use cases.
+//! Narrow root-owned source authorities used by transport-neutral use cases.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -14,15 +14,11 @@ use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use fs2::FileExt;
 use same_file::Handle;
 use serde::{Deserialize, Serialize};
-use tracedecay_application::retrieval::grep_analysis::{RedundancyRequestV1, RedundancyResultV1};
 use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult, RenameResult,
     RenameSymbolBindingV1,
 };
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
-use tracedecay_domain::code_intelligence::{
-    Edge, GraphStats, Node, NodeKind, SearchResult, Subgraph,
-};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::errors::Result;
@@ -32,9 +28,6 @@ use tracedecay_runtime_core::path_safety::{
 use tracedecay_runtime_core::storage::StoreLayout;
 
 pub type GraphFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
-pub type GraphValueFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-pub type GraphCallChain = Vec<(Node, Option<Edge>)>;
-pub type ComplexityRankedNode = (Node, u32, u64, u64, u64);
 
 /// One application-admitted immutable graph generation used for a source-edit
 /// plan and its exact preview/apply identity.
@@ -62,6 +55,15 @@ impl SourceEditGraphReadV1 {
     pub fn cancellation(&self) -> Arc<dyn GraphCancellation> {
         Arc::clone(&self.cancellation)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct EditDiagnosticRecord {
+    pub file: String,
+    pub line_start: u32,
+    pub level: String,
+    pub code: Option<String>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,89 +108,6 @@ pub struct BranchDiagnostics {
     pub tracked_branch_count: usize,
     pub branches: Vec<TrackedBranchDiagnostic>,
     pub warnings: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EditDiagnosticRecord {
-    pub file: String,
-    pub line_start: u32,
-    pub level: String,
-    pub code: Option<String>,
-    pub message: String,
-}
-
-pub trait GraphRuntimePort: Send + Sync {
-    fn project_root(&self) -> &Path;
-    fn db(&self) -> &Database;
-    fn db_path(&self) -> PathBuf;
-    fn store_layout(&self) -> &StoreLayout;
-    fn is_read_only(&self) -> bool;
-    fn branch_diagnostics(&self) -> BranchDiagnostics;
-
-    fn get_node<'a>(&'a self, id: &'a str) -> GraphFuture<'a, Option<Node>>;
-    fn get_nodes_by_file<'a>(&'a self, file: &'a str) -> GraphFuture<'a, Vec<Node>>;
-    fn get_nodes_by_name<'a>(&'a self, name: &'a str) -> GraphFuture<'a, Vec<Node>>;
-    fn get_nodes_by_qualified_name<'a>(
-        &'a self,
-        qualified_name: &'a str,
-    ) -> GraphFuture<'a, Vec<Node>>;
-    fn search<'a>(&'a self, query: &'a str, limit: usize) -> GraphFuture<'a, Vec<SearchResult>>;
-    fn get_stats(&self) -> GraphFuture<'_, GraphStats>;
-    fn get_all_nodes(&self) -> GraphFuture<'_, Vec<Node>>;
-    fn get_all_edges(&self) -> GraphFuture<'_, Vec<Edge>>;
-    fn get_incoming_edges<'a>(&'a self, node_id: &'a str) -> GraphFuture<'a, Vec<Edge>>;
-    fn get_outgoing_edges<'a>(&'a self, node_id: &'a str) -> GraphFuture<'a, Vec<Edge>>;
-    fn get_callers<'a>(
-        &'a self,
-        node_id: &'a str,
-        max_depth: usize,
-    ) -> GraphFuture<'a, Vec<(Node, Edge)>>;
-    fn get_callees<'a>(
-        &'a self,
-        node_id: &'a str,
-        max_depth: usize,
-    ) -> GraphFuture<'a, Vec<(Node, Edge)>>;
-    fn get_call_chain<'a>(
-        &'a self,
-        from_id: &'a str,
-        to_id: &'a str,
-        max_depth: usize,
-    ) -> GraphFuture<'a, Option<GraphCallChain>>;
-    fn get_impact_radius<'a>(
-        &'a self,
-        node_id: &'a str,
-        max_depth: usize,
-    ) -> GraphFuture<'a, Subgraph>;
-    fn get_impact_radius_multi<'a>(
-        &'a self,
-        seed_ids: &'a [String],
-        max_depth: usize,
-    ) -> GraphFuture<'a, Vec<Node>>;
-    fn get_trait_dispatch_targets<'a>(&'a self, method: &'a Node) -> GraphFuture<'a, Vec<Node>>;
-    fn get_test_annotated_node_ids<'a>(
-        &'a self,
-        candidate_ids: &'a [String],
-    ) -> GraphFuture<'a, std::collections::HashSet<String>>;
-    fn get_files_with_test_annotations(&self)
-    -> GraphFuture<'_, std::collections::HashSet<String>>;
-    fn node_at_location<'a>(
-        &'a self,
-        file: &'a str,
-        line_1based: u32,
-    ) -> GraphFuture<'a, Option<Node>>;
-    fn last_synced_commit(&self) -> GraphValueFuture<'_, Option<String>>;
-    fn storage_page_counts(&self) -> GraphFuture<'_, (u64, u64, u64)>;
-    fn get_complexity_ranked<'a>(
-        &'a self,
-        node_kind: Option<&'a NodeKind>,
-        path_prefix: Option<&'a str>,
-        limit: usize,
-    ) -> GraphFuture<'a, Vec<ComplexityRankedNode>>;
-    fn redundancy<'a>(
-        &'a self,
-        request: &'a RedundancyRequestV1,
-        scope_prefix: Option<&'a str>,
-    ) -> GraphFuture<'a, RedundancyResultV1>;
 }
 
 /// Narrow root-owned mutation authority used by the source-edit application.
@@ -286,7 +205,6 @@ pub trait SourceReadRuntimePort: Send + Sync {
     fn is_read_only(&self) -> bool;
 }
 
-pub type TraceDecay = dyn GraphRuntimePort;
 pub type SourceEditRuntime = dyn SourceEditRuntimePort;
 pub type SourceReadRuntime = dyn SourceReadRuntimePort;
 

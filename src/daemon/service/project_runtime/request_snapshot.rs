@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::daemon::service::invocation::{
-    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredRetainedRuntime, RegisteredWorkRuntime,
+    DaemonAdvisoryCycleInvocationOwner, DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
+    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredRetainedRuntime,
+    RegisteredWorkRuntime,
 };
 use tracedecay_usecases::feedback::concrete::FeedbackRuntime;
 
@@ -20,6 +21,7 @@ pub(in crate::daemon::service) struct ProjectRequestRuntimesV1 {
     admitted: bool,
     pub(in crate::daemon::service) feedback: Option<Arc<FeedbackRuntime>>,
     pub(in crate::daemon::service) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
+    pub(in crate::daemon::service) advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
     pub(in crate::daemon::service) configuration: Option<RegisteredConfigurationRuntime>,
     pub(in crate::daemon::service) work: Option<RegisteredWorkRuntime>,
     pub(in crate::daemon::service) retained: Option<RegisteredRetainedRuntime>,
@@ -93,6 +95,7 @@ impl ProjectRuntimeRegistryV1 {
             admitted: true,
             feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
+            advisory_cycle: runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
             configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
             work: runtime.and_then(|runtime| runtime.work.clone()),
             retained: runtime.and_then(|runtime| runtime.retained.clone()),
@@ -119,6 +122,7 @@ impl ProjectRuntimeRegistryV1 {
             admitted: true,
             feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
+            advisory_cycle: runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
             configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
             work: runtime.and_then(|runtime| runtime.work.clone()),
             retained: runtime.and_then(|runtime| runtime.retained.clone()),
@@ -142,5 +146,54 @@ fn candidate_roots(project_root: &Path, canonical_root: Option<&Path>) -> BTreeS
 impl ProjectRequestRuntimesV1 {
     pub(in crate::daemon::service) fn is_admitted(&self) -> bool {
         self.admitted
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::service::invocation::{
+        DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationPort,
+        DaemonAdvisoryCycleInvocationRequest,
+    };
+    use tracedecay_application::{ApplicationProblem, SafeDiagnostic};
+    use tracedecay_domain::ProjectId;
+
+    struct UnavailableAdvisoryCycle;
+
+    impl DaemonAdvisoryCycleInvocationPort for UnavailableAdvisoryCycle {
+        fn invoke(
+            &self,
+            _request: DaemonAdvisoryCycleInvocationRequest,
+        ) -> DaemonAdvisoryCycleInvocationFuture<'_> {
+            Box::pin(async {
+                Err(ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "feedback.test-advisory-owner".to_owned(),
+                    message: "The test advisory owner is unavailable".to_owned(),
+                }))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_carries_the_exact_mounted_advisory_owner() {
+        let registry = ProjectRuntimeRegistryV1::default();
+        let project_root = PathBuf::from("/projects/advisory-owner");
+        let project_id = ProjectId::new("project.advisory-owner").expect("project id");
+        let owner = DaemonAdvisoryCycleInvocationOwner::new(
+            project_id.clone(),
+            Arc::new(UnavailableAdvisoryCycle),
+        );
+        registry
+            .register(project_root.clone(), owner)
+            .await
+            .expect("advisory owner registration");
+
+        let snapshot = registry.request_runtimes(Some(&project_root), None).await;
+
+        let mounted = snapshot
+            .advisory_cycle
+            .expect("mounted advisory owner must be in the request snapshot");
+        assert_eq!(mounted.project_id, project_id);
     }
 }

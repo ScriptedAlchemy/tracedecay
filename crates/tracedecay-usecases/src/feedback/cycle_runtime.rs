@@ -1,11 +1,7 @@
-//! Concrete, one-shot feedback-cycle composition.
-//!
-//! The runtime only composes existing application ports and direct graph
-//! queries. It owns no provider lifecycle, source write, or second feedback
-//! store.
+//! Concrete one-shot feedback-cycle composition over existing authorities.
 
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,12 +24,13 @@ use tracedecay_application::{
     ApplicationContractError, ApplicationOperation, CoverageCompleteness, FreshnessState,
     PolicyEvaluationV1, RequestAdmission, RequestContext,
 };
+use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_domain::feedback::{
     FeedbackDurabilityV1, FeedbackFindingId, FeedbackFindingV1, FeedbackImpactStateV1,
     FeedbackImpactV1, FeedbackTriggerV1,
 };
 use tracedecay_domain::{
-    FileOccurrenceId, RetrievalAnchorId, SymbolOccurrenceId, canonical_sha256,
+    FileOccurrenceId, RelationEdgeKindV1, RetrievalAnchorId, SymbolOccurrenceId, canonical_sha256,
 };
 use tracedecay_lsp::{
     DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
@@ -42,7 +39,10 @@ use tracedecay_lsp::{
 use tracedecay_policy::CapabilityRoutingDecisionV1;
 
 use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_index_logical_path};
-use crate::tracedecay::TraceDecay;
+use crate::graph::{
+    CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest, map_projection_error,
+    request_graph_cancellation,
+};
 use tracedecay_runtime_core::db::Database;
 
 use super::concrete::{FeedbackRuntime, ProjectFeedbackRouteAuthorization, ProjectFeedbackStore};
@@ -52,9 +52,11 @@ use super::observations::{
     FeedbackObservationEmitterV1, FeedbackOperationV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
 };
 
-/// Resolves one LSP lifecycle request to the already-authorized, bounded
-/// application input. The caller owns URI-to-identity resolution, cancellation,
-/// deadline, and budget measurement.
+const FEEDBACK_IMPACT_DEPTH_V1: u32 = 3;
+const FEEDBACK_IMPACT_MAX_SYMBOLS_V1: usize = 1_000;
+const FEEDBACK_IMPACT_MAX_RELATIONS_PER_HOP_V1: usize = 10_000;
+
+/// Resolves one LSP request; the caller owns identity, cancellation, and budget.
 pub type FeedbackCycleLspInput = Arc<
     dyn Fn(
             FeedbackCycleRequest,
@@ -96,10 +98,7 @@ impl FeedbackCycleInvocation {
     }
 }
 
-/// Short-lived canonical-read handles for one stable finding identity.
-///
-/// The handles grant no authority by possession. Resolving either handle
-/// re-enters the existing feedback read owner, which rechecks route authority.
+/// Short-lived handles that re-enter the authoritative feedback read owner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FeedbackFindingHandlesV1 {
     pub finding_id: FeedbackFindingId,
@@ -108,9 +107,7 @@ pub struct FeedbackFindingHandlesV1 {
     pub expansion_handle: Option<String>,
 }
 
-/// One transport-neutral Plan 09 result shared by Hook, MCP, HTTP, LSP, CLI,
-/// and later dashboard projections. Evidence remains reference-only in the
-/// underlying result; this layer adds only authorized, short-lived handles.
+/// Transport-neutral result retaining reference-only evidence and read handles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalFeedbackResultV1 {
     pub execution: FeedbackCycleExecutionResult,
@@ -228,10 +225,7 @@ type ProductionFeedbackCycleService = FeedbackCycleService<
     ProjectFeedbackRouteAuthorization,
 >;
 
-/// Concrete Plan 09 runtime for saved-edit, explicit-diagnostic, stop-gate,
-/// and session-overlay cycles. Every invocation delegates once to
-/// [`FeedbackCycleService`]; only its durable compare-and-record boundary can
-/// publish a terminal result.
+/// Concrete runtime whose durable service alone publishes terminal results.
 #[derive(Clone)]
 pub struct FeedbackCycleRuntime {
     feedback: Arc<FeedbackRuntime>,
@@ -243,10 +237,7 @@ pub struct FeedbackCycleRuntime {
     source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
-/// Opens the one concrete feedback-cycle owner from already-open project
-/// authorities. Diagnostics are bound directly to the project database,
-/// graph/test queries retain their existing services, and publication reuses
-/// the exact store and route authorization owned by `feedback`.
+/// Opens one cycle owner from already-open graph, test, and feedback authorities.
 #[allow(clippy::too_many_arguments)]
 pub fn open_feedback_cycle_runtime(
     database: Database,
@@ -254,7 +245,8 @@ pub fn open_feedback_cycle_runtime(
     runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     provider_admissions: Vec<AnalyzerAdmittedDiagnosticProviderV1>,
-    graph: Arc<TraceDecay>,
+    project_root: PathBuf,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     affected_tests: Arc<dyn AffectedTestsRetrievalPort + Send + Sync>,
     observations: Arc<dyn FeedbackObservationPort + Send + Sync>,
     operation: ApplicationOperation,
@@ -275,7 +267,8 @@ pub fn open_feedback_cycle_runtime(
     )?;
     let route_authorization = feedback.route_authorization();
     let impact = DirectFeedbackImpactAdapter::new(
-        graph,
+        project_root,
+        code_graph,
         SharedAffectedTests(affected_tests),
         route_authorization.clone(),
         graph_operation,
@@ -554,7 +547,8 @@ impl FeedbackRuntimeStatePort for SharedFeedbackRuntimeState {
 }
 
 struct DirectFeedbackImpactAdapter {
-    graph: Arc<TraceDecay>,
+    project_root: PathBuf,
+    code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     tests: SharedAffectedTests,
     authorization: ProjectFeedbackRouteAuthorization,
     graph_operation: ApplicationOperation,
@@ -568,7 +562,8 @@ struct DirectFeedbackImpactAdapter {
 
 impl DirectFeedbackImpactAdapter {
     fn new(
-        graph: Arc<TraceDecay>,
+        project_root: PathBuf,
+        code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         tests: SharedAffectedTests,
         authorization: ProjectFeedbackRouteAuthorization,
         graph_operation: ApplicationOperation,
@@ -576,7 +571,8 @@ impl DirectFeedbackImpactAdapter {
         code_index_identity: Option<Arc<dyn CodeIndexPublicationIdentityPortV1>>,
     ) -> Self {
         Self {
-            graph,
+            project_root,
+            code_graph,
             tests,
             authorization,
             graph_operation,
@@ -585,16 +581,6 @@ impl DirectFeedbackImpactAdapter {
         }
     }
 
-    /// Resolves graph-node file paths onto code-index file identity.
-    ///
-    /// This adapter used to mint `FileOccurrenceId::new(node.file_path)` — a
-    /// raw repository-relative path — which disagreed with every other file
-    /// identity in the system. Identity is now resolved from the same authority
-    /// that mints the cycle's impact target, and the outcome distinguishes the
-    /// three reasons a node can contribute nothing: no resolver is bound, the
-    /// published identity belongs to another generation, or the generation
-    /// simply does not contain that path. Each maps onto its own coverage state
-    /// rather than collapsing into one indistinguishable empty vector.
     async fn resolved_affected_files(
         &self,
         generation: &tracedecay_domain::CodeGenerationId,
@@ -602,7 +588,7 @@ impl DirectFeedbackImpactAdapter {
     ) -> ResolvedAffectedFiles {
         resolve_affected_files_for_published_generation(
             self.code_index_identity.as_deref(),
-            self.graph.project_root(),
+            &self.project_root,
             generation,
             file_paths,
         )
@@ -644,24 +630,91 @@ async fn resolve_affected_files_for_published_generation(
     }
 }
 
-/// Typed outcome of resolving graph-node paths onto code-index file identity.
-///
-/// The empty-vector cases used to be indistinguishable from "this generation
-/// genuinely has no affected files"; each now carries its own coverage meaning.
 enum ResolvedAffectedFiles {
-    /// Every graph-node path resolved against the requested generation.
     Complete(Vec<FileOccurrenceId>),
-    /// The generation matched, but at least one graph-node path has no file
-    /// identity in it, so the resolved set is a subset of the impact radius.
     Partial(Vec<FileOccurrenceId>),
-    /// No code-index identity authority is bound to this runtime — the case for
-    /// runtimes opened outside the daemon. The adapter reports no affected files
-    /// rather than minting raw-path identities the rest of the system cannot
-    /// match.
     IdentityUnavailable,
-    /// The published identity belongs to a different generation than the one the
-    /// request targets, so nothing it contains describes this impact.
     GenerationMismatch,
+}
+
+fn graph_read_failure(error: CodeGraphReadError) -> FeedbackImpactPortOutcome {
+    match error {
+        CodeGraphReadError::Cancelled => FeedbackImpactPortOutcome::Cancelled,
+        CodeGraphReadError::TimedOut => FeedbackImpactPortOutcome::TimedOut,
+        CodeGraphReadError::Stale { .. } => FeedbackImpactPortOutcome::Stale,
+        CodeGraphReadError::MissingRegistry
+        | CodeGraphReadError::Unavailable { .. }
+        | CodeGraphReadError::ResetRequired { .. }
+        | CodeGraphReadError::BudgetExhausted { .. }
+        | CodeGraphReadError::Denied
+        | CodeGraphReadError::InvalidRequest { .. }
+        | CodeGraphReadError::Corrupt { .. } => FeedbackImpactPortOutcome::Unavailable,
+    }
+}
+
+struct VerifiedImpactEvidenceV1 {
+    file_paths: Vec<String>,
+    affected_callers: Vec<SymbolOccurrenceId>,
+    complete: bool,
+}
+
+fn read_verified_impact_evidence_v1(
+    reader: &CodeGraphInteractiveReader,
+    symbol: &SymbolOccurrenceId,
+    cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation>,
+) -> Result<Option<VerifiedImpactEvidenceV1>, CodeGraphReadError> {
+    let Some(seed) = reader
+        .symbol_summary(symbol, Arc::clone(&cancellation))
+        .map_err(map_projection_error)?
+    else {
+        return Ok(None);
+    };
+    let graph_impact = reader
+        .impact(
+            std::slice::from_ref(symbol),
+            &[RelationEdgeKindV1::Calls, RelationEdgeKindV1::Uses],
+            FEEDBACK_IMPACT_DEPTH_V1,
+            FEEDBACK_IMPACT_MAX_SYMBOLS_V1,
+            FEEDBACK_IMPACT_MAX_RELATIONS_PER_HOP_V1,
+            Arc::clone(&cancellation),
+        )
+        .map_err(map_projection_error)?;
+    let caller_impact = reader
+        .impact(
+            std::slice::from_ref(symbol),
+            &[RelationEdgeKindV1::Calls],
+            FEEDBACK_IMPACT_DEPTH_V1,
+            FEEDBACK_IMPACT_MAX_SYMBOLS_V1,
+            FEEDBACK_IMPACT_MAX_RELATIONS_PER_HOP_V1,
+            cancellation,
+        )
+        .map_err(map_projection_error)?;
+    let impacted_summaries = std::iter::once(&seed)
+        .chain(graph_impact.impacted.iter().map(|node| &node.summary))
+        .collect::<Vec<_>>();
+    let mut file_paths = impacted_summaries
+        .iter()
+        .filter_map(|node| {
+            node.binding
+                .as_ref()
+                .and_then(|binding| binding.logical_path.clone())
+        })
+        .collect::<Vec<_>>();
+    let bindings_complete = file_paths.len() == impacted_summaries.len();
+    file_paths.sort();
+    file_paths.dedup();
+    let mut affected_callers = caller_impact
+        .impacted
+        .iter()
+        .map(|node| node.summary.occurrence.clone())
+        .collect::<Vec<_>>();
+    affected_callers.sort();
+    affected_callers.dedup();
+    Ok(Some(VerifiedImpactEvidenceV1 {
+        file_paths,
+        affected_callers,
+        complete: graph_impact.complete && caller_impact.complete && bindings_complete,
+    }))
 }
 
 impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
@@ -691,33 +744,42 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
             let Some(generation) = request.input.target.generation_id.clone() else {
                 return FeedbackImpactPortOutcome::Unavailable;
             };
-            let Ok(subgraph) = self.graph.get_impact_radius(symbol.as_str(), 3).await else {
-                return FeedbackImpactPortOutcome::Unavailable;
-            };
-            match context.admission_at(request.input.observed_at) {
-                RequestAdmission::Admitted => {}
-                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
-                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
-            }
-            let Ok(callers) = self.graph.get_callers(symbol.as_str(), 3).await else {
-                return FeedbackImpactPortOutcome::Unavailable;
-            };
-            match context.admission_at(request.input.observed_at) {
-                RequestAdmission::Admitted => {}
-                RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
-                RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
-            }
-
-            let node_file_paths = subgraph
-                .nodes
-                .iter()
-                .map(|node| node.file_path.clone())
-                .collect::<Vec<_>>();
-            let (affected_files, graph_state) = match self
-                .resolved_affected_files(&generation, &node_file_paths)
+            let graph = match self
+                .code_graph
+                .open(CodeGraphReadRequest::from_context(
+                    context,
+                    request.input.observed_at,
+                ))
                 .await
             {
-                ResolvedAffectedFiles::Complete(files) => (files, FeedbackImpactStateV1::Complete),
+                Ok(graph) if graph.generation() == &generation => graph,
+                Ok(_) => return FeedbackImpactPortOutcome::Stale,
+                Err(error) => return graph_read_failure(error),
+            };
+            let cancellation = request_graph_cancellation(context);
+            let reader = match graph.reader_with_cancellation(
+                context,
+                request.input.observed_at,
+                Arc::clone(&cancellation),
+            ) {
+                Ok(reader) => reader,
+                Err(error) => return graph_read_failure(error),
+            };
+            let evidence =
+                match read_verified_impact_evidence_v1(&reader, &symbol, Arc::clone(&cancellation))
+                {
+                    Ok(Some(evidence)) => evidence,
+                    Ok(None) => return FeedbackImpactPortOutcome::Unavailable,
+                    Err(error) => return graph_read_failure(error),
+                };
+            let (affected_files, graph_state) = match self
+                .resolved_affected_files(&generation, &evidence.file_paths)
+                .await
+            {
+                ResolvedAffectedFiles::Complete(files) if evidence.complete => {
+                    (files, FeedbackImpactStateV1::Complete)
+                }
+                ResolvedAffectedFiles::Complete(files) => (files, FeedbackImpactStateV1::Partial),
                 ResolvedAffectedFiles::Partial(files) => (files, FeedbackImpactStateV1::Partial),
                 ResolvedAffectedFiles::IdentityUnavailable => {
                     (Vec::new(), FeedbackImpactStateV1::Partial)
@@ -731,13 +793,7 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                 RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                 RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
             }
-            let mut affected_callers = callers
-                .into_iter()
-                .map(|(node, _)| node)
-                .filter_map(|node| SymbolOccurrenceId::new(node.id.clone()).ok())
-                .collect::<Vec<_>>();
-            affected_callers.sort();
-            affected_callers.dedup();
+            let affected_callers = evidence.affected_callers;
 
             let Ok(page) = PageRequest::first(100) else {
                 return FeedbackImpactPortOutcome::Unavailable;

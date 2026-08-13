@@ -216,6 +216,7 @@ impl DaemonInvocationService {
         let now_ms = now_millis();
         self.expire_sessions(now_ms).await;
         let feedback_service = runtimes.feedback_owner;
+        let advisory_cycle = runtimes.advisory_cycle;
         let configuration_runtime = runtimes.configuration;
         let work_runtime = runtimes.work;
         let retained_runtime = runtimes.retained;
@@ -398,6 +399,7 @@ impl DaemonInvocationService {
             } => {
                 execute_feedback_advisory_cycle(
                     request_id,
+                    advisory_cycle,
                     document_uri,
                     observed_at,
                     deadline,

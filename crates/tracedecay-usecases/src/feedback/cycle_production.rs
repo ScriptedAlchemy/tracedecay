@@ -63,7 +63,6 @@ use crate::config::analyzer::{configured_language_selection, resolved_analyzer_s
 use crate::configuration::ConfigurationCurrentStateV1;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::source_authorization::ProjectSourceAccessSnapshot;
-use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_lsp::analyzer::broker::MountedLspProvider;
@@ -78,7 +77,6 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub access_configuration: ConfigurationCurrentStateV1,
     pub requester: ActorId,
     pub authorization: Arc<dyn ProductionFeedbackCycleAuthorizationPort>,
-    pub graph: Arc<TraceDecay>,
     pub code_graph: Arc<dyn crate::graph::CodeGraphProjectionReadPort>,
     pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
@@ -350,7 +348,6 @@ pub async fn resolve_production_feedback_cycle_parts(
     let proximity_evidence =
         crate::advisory::proximity_runtime::production_proximity_evidence_authority_v1(
             Arc::clone(&input.project_runtime_db),
-            Arc::clone(&input.graph),
             Arc::clone(&input.code_graph),
             feedback_scope.clone(),
             input.project_root.clone(),

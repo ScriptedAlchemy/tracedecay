@@ -48,6 +48,7 @@ use tracedecay_usecases::lsp_runtime::DaemonLspSessionFactory;
 use tracedecay_usecases::primitives::{admitted_root_uri_for_project, locator_digest_for_project};
 use tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot;
 
+mod advisory_runtime;
 mod automation_effect_recovery;
 mod code_index_reads;
 mod lsp_registration;
@@ -57,6 +58,8 @@ mod source_edit_owner;
 #[cfg(test)]
 mod work_grant_tests;
 
+pub(crate) use advisory_runtime::ProjectOpenDependentOwnerState;
+pub(super) use advisory_runtime::register_project_open_dependent_owners;
 pub(crate) use automation_effect_recovery::reconcile_project_open_automation_effects;
 pub(crate) use code_index_reads::{
     project_code_graph_projection_read_port, project_code_index_generation_census_reader,
@@ -585,15 +588,6 @@ pub(crate) async fn install_project_open_source_edit_owners_for_test(
     )
 }
 
-/// State retained after independent owners publish and consumed only after the
-/// durable code-index generation has mounted.
-pub(crate) struct ProjectOpenDependentOwnerState {
-    session_db: Arc<crate::global_db::RegisteredGlobalDb>,
-    graph: Arc<crate::tracedecay::TraceDecay>,
-    scope: ResolvedScope,
-    scout_configuration: tracedecay_usecases::configuration::ConfigurationCurrentStateV1,
-}
-
 /// Registers code-index-independent owners for one newly inserted project.
 pub(super) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
@@ -611,6 +605,13 @@ pub(super) async fn register_project_open_production_owners(
             message: "project-open owners require an authoritative project identity".to_owned(),
         })?;
     let graph = server.cg().await;
+    let code_graph =
+        server
+            .code_graph_projection_read_port()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project-open owners require the verified code-graph projection port"
+                    .to_owned(),
+            })?;
     tracing::info!(
         event = "project_open_owner_phase",
         project = %project_root.display(),
@@ -976,6 +977,9 @@ pub(super) async fn register_project_open_production_owners(
     );
     owner_phase_started = Instant::now();
 
+    let mut mounted_providers = Vec::new();
+    let mut lsp_session_factory = None;
+    let diagnostic_broker = server.diagnostics_lsp();
     let indexed_generation = invocation
         .code_index_schedulers
         .latest_complete_ready_decoded_for_root_scope(project_root, &scope)
@@ -989,11 +993,12 @@ pub(super) async fn register_project_open_production_owners(
             .map(|file| file.logical_path.clone())
             .collect::<Vec<_>>();
         indexed_files.sort();
-        let diagnostic_broker = server.diagnostics_lsp();
-        let admitted_providers = diagnostic_broker
-            .lock()
-            .await
-            .admitted_providers_for_files(&indexed_files);
+        let admitted_providers = {
+            let mut broker = diagnostic_broker.lock().await;
+            let admitted = broker.admitted_providers_for_files(&indexed_files);
+            mounted_providers = broker.mounted_providers_for_files(&indexed_files);
+            admitted
+        };
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
@@ -1011,17 +1016,19 @@ pub(super) async fn register_project_open_production_owners(
                     message: format!("project-open LSP workspace grant is invalid: {error}"),
                 }
             })?;
-        register_production_lsp_owner(
-            invocation,
-            project_root,
-            lsp_scope_grant,
-            Arc::clone(&session_db),
-            database.clone(),
-            diagnostic_broker,
-            &admitted_providers,
-            admitted_root_uri.clone(),
-        )
-        .await?;
+        lsp_session_factory = Some(
+            register_production_lsp_owner(
+                invocation,
+                project_root,
+                lsp_scope_grant,
+                Arc::clone(&session_db),
+                database.clone(),
+                Arc::clone(&diagnostic_broker),
+                &admitted_providers,
+                admitted_root_uri.clone(),
+            )
+            .await?,
+        );
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
@@ -1067,44 +1074,19 @@ pub(super) async fn register_project_open_production_owners(
     );
 
     Ok(ProjectOpenDependentOwnerState {
+        database,
         session_db,
         graph,
+        code_graph,
         scope,
+        access,
         scout_configuration,
+        requester,
+        mounted_providers,
+        admitted_root_uri,
+        diagnostic_broker,
+        lsp_session_factory,
     })
-}
-
-/// Registers owners whose exact authority depends on a mounted code index.
-pub(super) async fn register_project_open_dependent_owners(
-    invocation: &DaemonInvocationState,
-    project_root: &Path,
-    state: ProjectOpenDependentOwnerState,
-) -> Result<()> {
-    let state = Arc::new(state);
-    tracing::info!(
-        event = "project_open_owner_phase",
-        project = %project_root.display(),
-        phase = "feedback_advisory_unavailable",
-        reason = "current application feedback graph port is not mounted",
-    );
-
-    let semantic_activation_started = Instant::now();
-    register_semantic_activation_owner(
-        invocation,
-        project_root,
-        &state.graph,
-        Arc::clone(&state.session_db),
-        state.scope.clone(),
-        &state.scout_configuration,
-    )
-    .await?;
-    tracing::info!(
-        event = "project_open_owner_phase",
-        project = %project_root.display(),
-        phase = "semantic_activation_resolved",
-        elapsed_ms = semantic_activation_started.elapsed().as_millis(),
-    );
-    Ok(())
 }
 
 async fn register_semantic_activation_owner(

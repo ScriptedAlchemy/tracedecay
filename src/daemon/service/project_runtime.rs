@@ -1,7 +1,6 @@
 //! One typed runtime registry entry per canonical project.
 //! Publication and shutdown operate on each project's components as a unit.
 
-#[cfg(test)]
 use std::any::Any;
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -15,9 +14,9 @@ use tracedecay_usecases::feedback::FeedbackCycleRuntime;
 use tracedecay_usecases::primitives::PrimitiveProjectRuntime;
 
 use super::invocation::{
-    DaemonLspInvocationOwner, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredRetainedRuntime, RegisteredWorkRuntime,
-    SwitchableFeedbackCycleRuntimeV1,
+    DaemonAdvisoryCycleInvocationOwner, DaemonLspInvocationOwner, RegisteredCallableCodeRuntime,
+    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredRetainedRuntime,
+    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
 };
 
 mod observability;
@@ -114,6 +113,8 @@ impl<const SLOT: u8> Drop for RecordingComponent<SLOT> {
 pub(crate) struct ProjectRuntime {
     callable_code: Option<RegisteredCallableCodeRuntime>,
     feedback: Option<RegisteredFeedbackRuntime>,
+    advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
+    advisory: Option<RegisteredAdvisoryRuntimeV1>,
     feedback_cycle: Option<Arc<FeedbackCycleRuntime>>,
     feedback_cycle_input: Option<Arc<SwitchableFeedbackCycleRuntimeV1>>,
     primitive: Option<PrimitiveProjectRuntime>,
@@ -145,6 +146,8 @@ impl ProjectRuntime {
     fn has_components(&self) -> bool {
         self.callable_code.is_some()
             || self.feedback.is_some()
+            || self.advisory_cycle.is_some()
+            || self.advisory.is_some()
             || self.feedback_cycle.is_some()
             || self.feedback_cycle_input.is_some()
             || self.primitive.is_some()
@@ -202,6 +205,8 @@ macro_rules! project_runtime_components {
 project_runtime_components!(
     RegisteredCallableCodeRuntime => callable_code,
     RegisteredFeedbackRuntime => feedback,
+    DaemonAdvisoryCycleInvocationOwner => advisory_cycle,
+    RegisteredAdvisoryRuntimeV1 => advisory,
     Arc<FeedbackCycleRuntime> => feedback_cycle,
     Arc<SwitchableFeedbackCycleRuntimeV1> => feedback_cycle_input,
     PrimitiveProjectRuntime => primitive,
@@ -357,6 +362,8 @@ impl ProjectRuntimePublication {
                 }
                 move_component!(callable_code);
                 move_component!(feedback);
+                move_component!(advisory_cycle);
+                move_component!(advisory);
                 move_component!(feedback_cycle);
                 move_component!(feedback_cycle_input);
                 move_component!(primitive);
@@ -396,10 +403,33 @@ impl ProjectRuntimePublication {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProjectRuntimeAlreadyRegistered;
 
+#[derive(Clone)]
+pub(crate) struct RegisteredAdvisoryRuntimeV1 {
+    _owner: Arc<dyn Any + Send + Sync>,
+}
+
+impl RegisteredAdvisoryRuntimeV1 {
+    pub(crate) fn new(owner: Arc<dyn Any + Send + Sync>) -> Self {
+        Self { _owner: owner }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectRuntimeRegistryError {
     AlreadyRegistered,
     Closed,
+}
+
+#[derive(Debug)]
+pub(crate) enum FeedbackCyclePublicationError {
+    Registry(ProjectRuntimeRegistryError),
+    RouterUnavailable,
+}
+
+impl From<ProjectRuntimeRegistryError> for FeedbackCyclePublicationError {
+    fn from(error: ProjectRuntimeRegistryError) -> Self {
+        Self::Registry(error)
+    }
 }
 
 impl From<ProjectRuntimeAlreadyRegistered> for ProjectRuntimeRegistryError {
@@ -784,6 +814,93 @@ impl ProjectRuntimeRegistryV1 {
         reservation.reserve::<Arc<SwitchableFeedbackCycleRuntimeV1>>();
         self.publish_atomically_after_preflight(project_root, reservation, build)
             .await
+    }
+
+    pub(crate) async fn publish_feedback_cycle_atomically(
+        &self,
+        project_root: PathBuf,
+        runtime: Arc<FeedbackCycleRuntime>,
+        production_input: Arc<dyn tracedecay_lsp::FeedbackCycleRuntimePort>,
+    ) -> Result<(), FeedbackCyclePublicationError> {
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let root_fences = self.lock_root_fences();
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) || root_fences.contains(&project_root) {
+                    return Err(ProjectRuntimeRegistryError::Closed.into());
+                }
+                let incumbent = runtimes.entry(project_root.clone()).or_default();
+                let reserved = incumbent.reservations.iter().any(|type_id| {
+                    *type_id == TypeId::of::<Arc<FeedbackCycleRuntime>>()
+                        || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
+                });
+                if !reserved {
+                    if incumbent.feedback_cycle.is_some() {
+                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
+                    }
+                    let router = incumbent
+                        .feedback_cycle_input
+                        .as_ref()
+                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?;
+                    router
+                        .replace(production_input)
+                        .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
+                    incumbent.feedback_cycle = Some(runtime);
+                    return Ok(());
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed.into());
+            }
+        }
+    }
+
+    /// Publishes the already-constructed advisory owner and redirects the
+    /// existing feedback input under one project-runtime lock.
+    pub(crate) async fn publish_advisory_atomically(
+        &self,
+        project_root: &Path,
+        advisory: RegisteredAdvisoryRuntimeV1,
+        advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
+        feedback_input: Arc<dyn tracedecay_lsp::FeedbackCycleRuntimePort>,
+    ) -> Result<(), FeedbackCyclePublicationError> {
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let root_fences = self.lock_root_fences();
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) || root_fences.contains(project_root) {
+                    return Err(ProjectRuntimeRegistryError::Closed.into());
+                }
+                let Some(runtime) = runtimes.get_mut(project_root) else {
+                    return Err(FeedbackCyclePublicationError::RouterUnavailable);
+                };
+                let reserved = runtime.reservations.iter().any(|type_id| {
+                    *type_id == TypeId::of::<RegisteredAdvisoryRuntimeV1>()
+                        || *type_id == TypeId::of::<DaemonAdvisoryCycleInvocationOwner>()
+                        || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
+                });
+                if !reserved {
+                    if runtime.advisory.is_some() || runtime.advisory_cycle.is_some() {
+                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
+                    }
+                    let router = runtime
+                        .feedback_cycle_input
+                        .as_ref()
+                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?;
+                    router
+                        .replace(feedback_input)
+                        .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
+                    runtime.advisory = Some(advisory);
+                    runtime.advisory_cycle = Some(advisory_cycle);
+                    return Ok(());
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed.into());
+            }
+        }
     }
 
     /// Withdraw a component, returning it if it was there.

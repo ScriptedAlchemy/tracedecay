@@ -11,8 +11,11 @@ use zeroize::Zeroizing;
 use tracedecay_usecases::advisory::github_runtime::{
     GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialAuthorityV1,
     GitHubReadOnlyCredentialSecretV1, GitHubReadPermissionV1,
+    ProfileGitHubReadOnlyCredentialMountOutcomeV1,
+    mount_profile_github_read_only_credential_authority_v1,
     register_profile_github_public_repository_v1,
     register_profile_github_read_only_credential_authority_v1,
+    unmount_profile_github_read_only_credential_authority_v1,
     unregister_profile_github_public_repository_v1,
     unregister_profile_github_read_only_credential_authority_v1,
 };
@@ -242,9 +245,34 @@ enum ProfileRepositoryCredentialRegistrationV1 {
 #[derive(Clone, Default)]
 pub(super) struct DaemonGitHubReadOnlyCredentialLifecycleV1 {
     registrations: Arc<Mutex<Vec<ProfileRepositoryCredentialRegistrationV1>>>,
+    mounts: Arc<Mutex<BTreeSet<ProfileRepositoryCredentialKeyV1>>>,
 }
 
 impl DaemonGitHubReadOnlyCredentialLifecycleV1 {
+    pub(super) fn mount(
+        &self,
+        profile_id: &UserProfileId,
+        repository_owner: &str,
+        repository_name: &str,
+    ) -> ProfileGitHubReadOnlyCredentialMountOutcomeV1 {
+        let Ok(mut mounts) = self.mounts.lock() else {
+            return ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected;
+        };
+        let outcome = mount_profile_github_read_only_credential_authority_v1(
+            profile_id,
+            repository_owner,
+            repository_name,
+        );
+        if outcome == ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted {
+            mounts.insert((
+                profile_id.clone(),
+                repository_owner.to_owned(),
+                repository_name.to_owned(),
+            ));
+        }
+        outcome
+    }
+
     pub(super) fn configure_profile(
         &self,
         identity: &super::profile_identity::LocalProfileIdentityAuthorityV1,
@@ -333,6 +361,17 @@ impl DaemonGitHubReadOnlyCredentialLifecycleV1 {
     }
 
     pub(super) fn shutdown(&self) {
+        let mounts = match self.mounts.lock() {
+            Ok(mut mounts) => std::mem::take(&mut *mounts),
+            Err(_) => return,
+        };
+        for (profile_id, repository_owner, repository_name) in mounts {
+            let _ = unmount_profile_github_read_only_credential_authority_v1(
+                &profile_id,
+                &repository_owner,
+                &repository_name,
+            );
+        }
         let registrations = match self.registrations.lock() {
             Ok(mut registrations) => std::mem::take(&mut *registrations),
             Err(_) => return,

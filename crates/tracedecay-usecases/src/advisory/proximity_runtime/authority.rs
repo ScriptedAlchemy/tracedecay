@@ -33,7 +33,6 @@ use super::{
 };
 use crate::graph::{CodeGraphProjectionReadPort, CodeGraphReadRequest, request_graph_cancellation};
 use crate::store::GlobalDbObservationStore;
-use crate::tracedecay::TraceDecay;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_sessions::runtime::git_correlation::{
     GitEvidenceProjectionStore, GitRefFilter, SessionsForQuery, git_evidence_projection_identity,
@@ -82,13 +81,11 @@ pub type SharedCanonicalProximityEvidenceAuthorityV1 =
 impl ProductionProximityEvidenceAuthorityV1 {
     pub(crate) fn new(
         sessions: Arc<RegisteredGlobalDb>,
-        graph: Arc<TraceDecay>,
         code_graph: Arc<dyn CodeGraphProjectionReadPort>,
         scope: FeedbackScopeV1,
-        _worktree_root: PathBuf,
+        worktree_root: PathBuf,
     ) -> Option<Self> {
         scope.validate().ok()?;
-        let worktree_root = graph.project_root().to_path_buf();
         let normalized_worktree = normalize_worktree(worktree_root.to_str()?);
         if normalized_worktree.is_empty() {
             return None;
@@ -594,7 +591,6 @@ impl CanonicalProximityEvidenceAuthorityV1 for ProductionProximityEvidenceAuthor
 /// keeps the already-open project authorities alive without a new store.
 pub(crate) fn production_proximity_evidence_authority_v1(
     sessions: Arc<RegisteredGlobalDb>,
-    graph: Arc<TraceDecay>,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
     scope: FeedbackScopeV1,
     worktree_root: PathBuf,
@@ -603,14 +599,8 @@ pub(crate) fn production_proximity_evidence_authority_v1(
     >,
 ) -> Option<SharedCanonicalProximityEvidenceAuthorityV1> {
     Some(Arc::new(
-        ProductionProximityEvidenceAuthorityV1::new(
-            sessions,
-            graph,
-            code_graph,
-            scope,
-            worktree_root,
-        )?
-        .with_code_index_identity(code_index_identity),
+        ProductionProximityEvidenceAuthorityV1::new(sessions, code_graph, scope, worktree_root)?
+            .with_code_index_identity(code_index_identity),
     ))
 }
 
