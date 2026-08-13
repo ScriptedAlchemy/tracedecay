@@ -2100,6 +2100,20 @@ mod authority_tests {
             let project_root = temporary.path().join("project");
             let profile_root = temporary.path().join("profile");
             std::fs::create_dir_all(&project_root).expect("project root");
+            let git_init = std::process::Command::new("git")
+                .current_dir(&project_root)
+                .args(["init", "-q"])
+                .status()
+                .expect("git init starts");
+            assert!(git_init.success(), "git init failed for dashboard fixture");
+            assert!(
+                tracedecay_runtime_core::storage::write_repository_identity_marker(
+                    &project_root,
+                    project_id,
+                )
+                .expect("dashboard fixture enrollment marker"),
+                "dashboard fixture project root must accept its enrollment marker"
+            );
             let layout = tracedecay_runtime_core::storage::profile_sharded_layout(
                 &project_root,
                 &profile_root,

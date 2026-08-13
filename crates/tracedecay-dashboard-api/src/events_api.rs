@@ -995,27 +995,21 @@ mod tests {
     async fn registered_database_for_test(
         path: &Path,
     ) -> std::sync::Arc<tracedecay_global_db::RegisteredGlobalDb> {
-        use tracedecay_runtime_core::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+        use tracedecay_runtime_core::db::{
+            Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
+        };
 
         crate::register_test_schema_installer();
         let authority = DatabaseAuthority::acquire_test(path, "dashboard registry fixture")
             .expect("registry authority");
-        let (database, _) =
-            Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize)
-                .await
-                .expect("registry database");
-        // `Database::conn()` is the retained reader; schema DDL has to run on
-        // the serialized writer lane or the exact SQL channel reports
-        // `WriterUnavailable`.
-        {
-            let writer = database
-                .writer_connection("initialize dashboard registry fixture schema")
-                .await
-                .expect("registry writer lane");
-            tracedecay_global_db::ensure_registered_schema(writer.engine_connection())
-                .await
-                .expect("registered schema");
-        }
+        let (database, _) = Database::publish_registered_test_runtime(
+            path,
+            &authority,
+            TestDatabaseRuntimeMode::Initialize,
+            TestDatabaseRuntimeScope::Profile,
+        )
+        .await
+        .expect("registered profile database runtime");
         let runtime = database.retained_runtime().clone();
         let binding = runtime.binding().clone();
         let locator = runtime.locator().verified().clone();
