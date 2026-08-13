@@ -17,6 +17,7 @@ pub use cycle_production::{
     ProductionFeedbackCycleAuthorizationFuture, ProductionFeedbackCycleAuthorizationPort,
     ProductionFeedbackCycleOpenV1, ProductionFeedbackCyclePartsV1,
     ProductionFeedbackCycleProximityPortV1, resolve_production_feedback_cycle_parts,
+    resolve_project_feedback_scope_v1,
 };
 pub use cycle_runtime::{
     CanonicalFeedbackResultV1, FeedbackCycleInvocation, FeedbackCycleLspInput,

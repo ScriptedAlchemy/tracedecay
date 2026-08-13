@@ -33,6 +33,7 @@ pub mod dashboard_diagnostics;
 // `src/diagnostics_store.rs`, `src/diagnostics_publication.rs`,
 // `src/diagnostics_query.rs`): their whole closure is the runtime kernel plus
 // `tracedecay-domain`/`tracedecay-store`. See SEAMS.md.
+pub mod delivery;
 pub mod diagnose;
 pub mod diagnostics_publication;
 pub mod diagnostics_query;

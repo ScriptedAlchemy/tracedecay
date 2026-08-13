@@ -338,7 +338,7 @@ pub fn production_proximity_feedback_cycle_input(
 pub async fn resolve_production_feedback_cycle_parts(
     input: ProductionFeedbackCycleOpenV1,
 ) -> Result<ProductionFeedbackCyclePartsV1, ApplicationContractError> {
-    let feedback_scope = feedback_scope_for_project(&input.project_root, &input.scope)?;
+    let feedback_scope = resolve_project_feedback_scope_v1(&input.project_root, &input.scope)?;
     let proximity_threshold_pin = ProximityThresholdPinV1::from_current_configuration(
         &input.access_configuration,
     )
@@ -510,7 +510,10 @@ fn project_open_policy_context(
     )
 }
 
-fn feedback_scope_for_project(
+/// Resolves branch and head commit from one bounded native read of the exact
+/// admitted checkout. Project-open consumers must reuse this authority rather
+/// than independently reconstructing feedback identity.
+pub fn resolve_project_feedback_scope_v1(
     project_root: &Path,
     scope: &ResolvedScope,
 ) -> Result<FeedbackScopeV1, ApplicationContractError> {

@@ -57,10 +57,11 @@ pub use github::{
     GitHubReadOnlyDescriptorSetV1, GitHubReadOnlyTransport, GitHubRestDescriptorV1,
 };
 pub use github_runtime::{
-    GITHUB_REVIEW_THREADS_QUERY_V1, GitHubCanonicalReviewAnchorAuthorityV1,
-    GitHubCanonicalReviewAnchorsV1, GitHubCiRepositoryTargetV1, GitHubCiTransportOutcomeV1,
-    GitHubGraphQlReadRequestV1, GitHubHttpReadConfigV1, GitHubOfficialResponseDecoderV1,
-    GitHubProviderLifecycleV1, GitHubReadCheckpointAuthorityV1, GitHubReadCheckpointLoadOutcomeV1,
+    GITHUB_REVIEW_THREADS_QUERY_V1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
+    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,
+    GitHubCiRepositoryTargetV1, GitHubCiTransportOutcomeV1, GitHubGraphQlReadRequestV1,
+    GitHubHttpReadConfigV1, GitHubOfficialResponseDecoderV1, GitHubProviderLifecycleV1,
+    GitHubReadCheckpointAuthorityV1, GitHubReadCheckpointLoadOutcomeV1,
     GitHubReadNetworkMetadataV1, GitHubReadNetworkOutcomeV1, GitHubReadNetworkResponseV1,
     GitHubReadNetworkStatusV1, GitHubReadOnlyClientV1, GitHubReadOnlyCredentialAuthorityOutcomeV1,
     GitHubReadOnlyCredentialAuthorityV1, GitHubReadOnlyCredentialSecretV1,
