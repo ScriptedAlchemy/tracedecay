@@ -2,9 +2,11 @@
 
 **Status:** active product delivery; local reboot recovery, the live Work
 product journey, and the verified dashboard code-graph cutover are complete as
-of 2026-08-09. Checkpoints below are current through 2026-08-13, including the
-typed delivery-evidence slice, external TLS listener hardening, and the
-runtime-identity ABA repair.
+of 2026-08-09. Checkpoints below are current through the 2026-08-13 late
+window, including the typed delivery-evidence slice, external TLS listener
+hardening, the runtime-identity ABA repair, the automation
+scheduler/settlement hardening wave, and the multi-agent review wave over
+PR #421.
 
 `00-plan-set-index.md` remains the sole roadmap and acceptance authority. This
 file is the current operational handoff updated from direct branch, test, and
@@ -13,17 +15,24 @@ reconstruct intent from commit subjects alone.
 
 ## Resume invariants
 
-- Branch: `codex/tracedecay-total-redesign-plan`, continued since 2026-08-12
-  as `codex/final-v2-closeout` (the current branch; same tip lineage).
+- Branch: `codex/tracedecay-total-redesign-plan` is the current delivery
+  branch. `codex/final-v2-closeout` briefly carried the tip on 2026-08-12 but
+  work resumed on the redesign-plan branch; as of 2026-08-13 the closeout
+  branch is a strict ancestor of the redesign-plan tip (38 commits behind, 0
+  ahead) and must not be treated as current.
 - Preserve the current shared worktree. It contains substantial unfinished
   peer work. Do not run `git clean`, `git reset`, `git read-tree -u`, checkout
   paths from another revision, or otherwise sweep tracked or untracked files.
 - Re-read every owned file immediately before editing. Use a fresh temporary
   index for each coherent commit and verify that `HEAD` has not advanced
   between seeding that index and committing.
-- The required coordinator identity is intact at wind-down:
-  `crates/tracedecay-usecases/src/stack_coordinator.rs` hashes to
-  `e8dad46d599088b26847371cc8da96c6579b95ba` in both `HEAD` and the worktree.
+- The required coordinator identity:
+  `crates/tracedecay-usecases/src/stack_coordinator.rs` matches `HEAD` in the
+  worktree as of 2026-08-13; its most recent intentional change is the
+  "finalize verified v2 authorities" retrieval cutover (2026-08-13). Verify
+  with `git diff HEAD -- <path>` being empty and `git log -1 -- <path>`
+  naming that change, not against a pinned content hash — an earlier pinned
+  hash in this file predated that cutover and had already drifted.
 - No repository file was mounted or marked immutable at wind-down. An earlier
   filename-focused BPF deletion monitor was stopped cleanly.
 - Cargo build artifacts were reclaimed after wind-down with direct
