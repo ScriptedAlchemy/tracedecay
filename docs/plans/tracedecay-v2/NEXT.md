@@ -387,9 +387,14 @@ the commit as attribution evidence.
   CLI, and both SDKs. Prove the partial-effect committed receipt and reset-only
   legal action survive each boundary and physical daemon restart; unit mappers
   and synthetic SDK envelopes are necessary but not final journey evidence.
-- Repair the ten application bindings that regenerate as `schema_unavailable`,
-  then restore the full TypeScript client suite from 27/28 to green without
-  weakening its complete-operation assertion.
+- DONE 2026-08-10 (verified 2026-08-13): the ten `schema_unavailable`
+  application bindings were repaired in `d2b094ca7` — the primitive-surface
+  read operations gained typed schemas in
+  `crates/tracedecay-application/src/retrieval/primitive_surface.rs` with
+  registration in `retrieval/catalog.rs` (`primitive_executable_schemas`
+  covers all 27 primitive read specs, zero gaps). At HEAD the TypeScript
+  client suite is 34/34 with `UNAVAILABLE_OPERATIONS` asserted empty at full
+  strength, and the canonical generator reproduces the tree byte-identically.
 
 ### Retained production surfaces
 
