@@ -403,8 +403,22 @@ async fn describe_summary_sources(
     for source_ref in source_refs {
         match source_ref {
             LcmSourceRef::RawMessage { store_id } => {
-                let raw = load_raw_message(snapshot, store_id).await?;
-                if raw.provider != provider || raw.session_id != session_id {
+                // An *absent* raw row is not an ownership violation: the
+                // projection-durability retention drop pass (plan 38 §3)
+                // deletes raw rows precisely because the summary is the durable
+                // survivor, so the lineage outlives the row it names. Describe
+                // still reports the source — eliding it would understate the
+                // summary's lineage — but carries no raw metadata for it, which
+                // is how this overview already spells "no raw row backs this
+                // ref" (`role`/`storage_kind` are read straight off that row).
+                // `tracedecay_lcm_expand` on the same node reports the typed
+                // `HydrationStateV1::RetentionExpired` state.
+                let raw = find_raw_message(snapshot, store_id).await?;
+                // A row that is present but foreign is still a hard ownership
+                // violation and must never be disclosed.
+                if let Some(raw) = raw.as_ref()
+                    && (raw.provider != provider || raw.session_id != session_id)
+                {
                     return Err(LcmError::SummarySourceNotOwnedBySession);
                 }
                 out.push(LcmDescribeSourceOverview {
@@ -412,8 +426,8 @@ async fn describe_summary_sources(
                     source_ref: LcmSourceRef::RawMessage { store_id },
                     store_id: Some(store_id),
                     node_id: None,
-                    role: Some(raw.role),
-                    storage_kind: Some(raw.storage_kind),
+                    role: raw.as_ref().map(|raw| raw.role.clone()),
+                    storage_kind: raw.as_ref().map(|raw| raw.storage_kind),
                     summary_token_count: None,
                     source_token_count: None,
                     expand_hint: None,
@@ -467,10 +481,25 @@ async fn describe_external_payload(
     })
 }
 
+/// Loads the raw row a directly requested `store_id` names, refusing when it is
+/// gone. Summary *lineage* reads must use [`find_raw_message`] instead: an
+/// absent row there is retention, not a missing target.
 async fn load_raw_message(
     snapshot: &ReadSnapshot,
     store_id: i64,
 ) -> Result<LcmRawMessageMetadata, LcmError> {
+    find_raw_message(snapshot, store_id)
+        .await?
+        .ok_or(LcmError::SummarySourceNotOwnedBySession)
+}
+
+/// Reads one raw row by `store_id` alone, so a row belonging to another session
+/// is *present* (and rejected by the caller's ownership check) rather than
+/// indistinguishable from a row retention already removed.
+async fn find_raw_message(
+    snapshot: &ReadSnapshot,
+    store_id: i64,
+) -> Result<Option<LcmRawMessageMetadata>, LcmError> {
     let mut rows = query(
         snapshot,
         "SELECT provider, message_id, session_id, store_id, role, ordinal,
@@ -481,10 +510,10 @@ async fn load_raw_message(
         params![store_id],
     )
     .await?;
-    let row = next_row(&mut rows)
-        .await?
-        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-    raw_message_metadata_from_row(&row)
+    let Some(row) = next_row(&mut rows).await? else {
+        return Ok(None);
+    };
+    raw_message_metadata_from_row(&row).map(Some)
 }
 
 fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata, LcmError> {
@@ -566,12 +595,19 @@ async fn relation_source_refs(
     relation: &SummaryRelationRead,
 ) -> Result<Vec<LcmSourceRef>, LcmError> {
     let mut out = Vec::with_capacity(relation.sources.len());
-    for source in &relation.sources {
+    for (ordinal, source) in relation.sources.iter().enumerate() {
         match source {
             GraphSummarySourceRef::Anchor { anchor_id } => {
                 out.push(LcmSourceRef::RawMessage {
-                    store_id: anchor_store_id(snapshot, provider, session_id, anchor_id.as_str())
-                        .await?,
+                    store_id: anchor_store_id(
+                        snapshot,
+                        provider,
+                        session_id,
+                        &relation.summary_id,
+                        ordinal,
+                        anchor_id.as_str(),
+                    )
+                    .await?,
                 });
             }
             GraphSummarySourceRef::Summary { summary_id } => {
@@ -584,10 +620,20 @@ async fn relation_source_refs(
     Ok(out)
 }
 
+/// Resolves the `store_id` an anchored summary source names.
+///
+/// The anchor is bound to a message occurrence, and the occurrence reaches the
+/// locator only through the raw row, so the retention drop pass (plan 38 §3)
+/// takes the mapping down with the row it deletes. That must not make the
+/// summary unreadable, so a resolution that finds no raw row falls back to the
+/// projected lineage, which retains the locator; see
+/// [`retention_dropped_store_id`].
 async fn anchor_store_id(
     snapshot: &ReadSnapshot,
     provider: &str,
     session_id: &str,
+    summary_id: &str,
+    ordinal: usize,
     anchor_id: &str,
 ) -> Result<i64, LcmError> {
     let mut rows = query(
@@ -608,12 +654,54 @@ async fn anchor_store_id(
         params![provider, session_id, anchor_id],
     )
     .await?;
-    let store_id = next_row(&mut rows)
+    let Some(store_id) = next_row(&mut rows)
         .await?
         .map(|row| field!(&row, 0, i64))
         .transpose()?
-        .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
+    else {
+        return retention_dropped_store_id(snapshot, summary_id, ordinal).await;
+    };
     if next_row(&mut rows).await?.is_some() {
+        return Err(LcmError::SummarySourceNotOwnedBySession);
+    }
+    Ok(store_id)
+}
+
+/// Recovers the locator of a raw source whose row retention already dropped.
+///
+/// Publication writes both lineage records from the same manifest source list:
+/// the projected `lcm_summary_sources` row carries the `store_id` as text at the
+/// source's ordinal (`operations::summary_projection`), and the relation graph
+/// carries the anchor at that same ordinal (`relations::build_graph` enumerates
+/// the same sequence). Retention drops the raw row but never the lineage, so the
+/// projected record still names the locator the anchor can no longer reach.
+///
+/// The recovered locator only ever *names* a source that the caller then reports
+/// as retention-expired — no content or metadata is disclosed. It is refused
+/// unless the raw row is genuinely absent: a present row that the anchor failed
+/// to reach is an identity or ownership problem, not retention, and must keep
+/// failing closed.
+async fn retention_dropped_store_id(
+    snapshot: &ReadSnapshot,
+    summary_id: &str,
+    ordinal: usize,
+) -> Result<i64, LcmError> {
+    let ordinal = i64::try_from(ordinal).map_err(|_| LcmError::SummarySourceNotOwnedBySession)?;
+    let mut rows = query(
+        snapshot,
+        "SELECT source_id
+         FROM lcm_summary_sources
+         WHERE node_id = ?1 AND ordinal = ?2 AND source_kind = 'raw_message'",
+        params![summary_id, ordinal],
+    )
+    .await?;
+    let Some(row) = next_row(&mut rows).await? else {
+        return Err(LcmError::SummarySourceNotOwnedBySession);
+    };
+    let store_id = field!(&row, 0, String)?
+        .parse::<i64>()
+        .map_err(|_| LcmError::SummarySourceNotOwnedBySession)?;
+    if find_raw_message(snapshot, store_id).await?.is_some() {
         return Err(LcmError::SummarySourceNotOwnedBySession);
     }
     Ok(store_id)
@@ -657,11 +745,32 @@ async fn load_summary_sources(
     for source_ref in source_refs {
         match source_ref {
             LcmSourceRef::RawMessage { store_id } => {
-                let raw = raw
-                    .get(store_id)
-                    .cloned()
-                    .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-                if raw.provider != provider || raw.session_id != session_id {
+                // An *absent* raw row is not an ownership violation: publication
+                // proves every raw source exists and is session-owned before the
+                // lineage row is written (`operations::sources::prepare_raw_source`),
+                // so a row missing at read time was removed afterwards — by the
+                // projection-durability retention drop pass (plan 38 §3), whose
+                // whole premise is that the summary is the durable survivor.
+                // Report the source as retention-expired (plan 23 hydration
+                // state) and keep rendering; aborting would make every summary
+                // older than the drop window unreadable, and would do so under a
+                // misleading ownership error.
+                let Some(metadata) = raw.get(store_id).cloned() else {
+                    out.push(LcmExpandedSummarySource {
+                        source_ref: source_ref.clone(),
+                        state: HydrationStateV1::RetentionExpired,
+                        content: String::new(),
+                        content_range: None,
+                        content_truncated: false,
+                        raw_message: None,
+                        raw_message_metadata: None,
+                        summary_node: None,
+                    });
+                    continue;
+                };
+                // A row that is present but foreign is still a hard ownership
+                // violation and must never be disclosed.
+                if metadata.provider != provider || metadata.session_id != session_id {
                     return Err(LcmError::SummarySourceNotOwnedBySession);
                 }
                 out.push(LcmExpandedSummarySource {
@@ -671,7 +780,7 @@ async fn load_summary_sources(
                     content_range: None,
                     content_truncated: false,
                     raw_message: None,
-                    raw_message_metadata: Some(raw),
+                    raw_message_metadata: Some(metadata),
                     summary_node: None,
                 });
             }
