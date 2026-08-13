@@ -374,37 +374,6 @@ impl StorageOperationExecutor for NoopRepositoryWrite {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct RecordingEffect;
-
-impl StorageOperationExecutor for RecordingEffect {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-
-    fn apply_inbox(
-        &mut self,
-        savepoint: &Savepoint<'_>,
-        entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
-        savepoint.execute_batch(
-            "CREATE TABLE IF NOT EXISTS runtime_effects (
-                effect_json TEXT NOT NULL
-            );",
-        )?;
-        savepoint.execute(
-            "INSERT INTO runtime_effects(effect_json) VALUES (?1)",
-            [serde_json::to_string(&entry.effect)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?],
-        )?;
-        Ok(())
-    }
-}
-
 pub(crate) fn run<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()

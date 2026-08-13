@@ -6,15 +6,22 @@ use tracedecay_application::{CancellationSignal, RequestAdmission, ResolvedScope
 use tracedecay_code_index::graph_projection::{
     CodeGraphProjectionStore, HermeticCodeGraphProjectionStore,
 };
-use tracedecay_code_index::lineage::{GenerationSymbolIndexV1, LineageSymbolRecordV1};
+use tracedecay_code_index::lineage::GenerationSymbolIndexV1;
+#[cfg(feature = "test-transport")]
+use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_domain::feedback::FeedbackScopeV1;
 use tracedecay_domain::{
-    BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeGenerationId,
-    CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
-    ContentDigest, EdgeAuthorityV1, FileIdentityDigest, FileOccurrenceId,
-    LanguageDescriptorRevision, LanguageId, PolicyRevisionId, RefId, RelationEdgeKindV1,
-    SanitizedCodeFileV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-    SnapshotFileDispositionV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
+    CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, ContentDigest, FileOccurrenceId,
+    LanguageId, RefId, SanitizedCodeFileV1, SnapshotFileDispositionV1,
+};
+// Names below are reachable only from `hermetic_ci_code_graph`, which is itself
+// `test-transport`-gated along with its two callers.
+#[cfg(feature = "test-transport")]
+use tracedecay_domain::{
+    BoundedSanitizedText, ChunkerRevision, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
+    CodeSearchChunkId, EdgeAuthorityV1, FileIdentityDigest, LanguageDescriptorRevision,
+    PolicyRevisionId, RelationEdgeKindV1, SanitizerRevision, SensitivityDecision,
+    SensitivityLevelV1, SourceSpan, SymbolIdentityDigest, SymbolOccurrenceId,
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_usecases::graph::{
@@ -73,7 +80,11 @@ pub(super) fn hermetic_advisory_code_graph(
         ))
         .expect("fixture graph file identity"),
         logical_path: logical_path.to_owned(),
-        language: None,
+        // `SanitizedCodeFileV1::validate` rejects a `Present` snapshot file
+        // with no language ("present snapshot file language references an
+        // unknown identity"); both callers publish `src/lib.rs`, matching the
+        // language `hermetic_ci_code_graph` pins for the same path.
+        language: Some(LanguageId::new("rust").expect("fixture graph language")),
         content_digest: ContentDigest::new(format!("sha256:{source_digest}"))
             .expect("fixture graph content digest"),
         disposition: SnapshotFileDispositionV1::Present,
@@ -81,6 +92,11 @@ pub(super) fn hermetic_advisory_code_graph(
     publish_graph(resolved_scope, generation, &[], &[], &files, None)
 }
 
+/// Live only for the `test-transport` CI-localization acceptance tests
+/// (`ci_localization_resolves_generation_symbol_callers_and_tests_from_canonical_graph`
+/// and `one_saved_edit_cycle_returns_all_four_advisory_pillars_together`),
+/// which are themselves gated on that feature.
+#[cfg(feature = "test-transport")]
 pub(super) fn hermetic_ci_code_graph(
     scope: &FeedbackScopeV1,
     project_root: &Path,

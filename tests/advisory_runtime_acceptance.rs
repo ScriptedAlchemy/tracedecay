@@ -21,15 +21,13 @@ use tracedecay_application::{
     RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::feedback::{
-    FeedbackAdvisoryProviderStateV1, FeedbackCycleTerminationV1, FeedbackDiagnosticProducerV1,
-    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCommentIdV1,
+    FeedbackCycleTerminationV1, FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCommentIdV1,
     GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
     ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    ActorId, CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
-    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros,
-    WorktreeId,
+    ActorId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId, ProviderId,
+    RefId, RepositoryId, RetrievalAnchorId, SourceSpan, UtcMicros, WorktreeId,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{CanonicalObservationIdV1, canonical_sha256};
@@ -79,10 +77,12 @@ use tracedecay_domain::configuration::{
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::feedback::{
-    FeedbackAuthoritativeRuntimeStateV1, FeedbackBaselineHorizonV1, FeedbackBaselineStateV1,
-    FeedbackBudgetV1, FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
+    FeedbackAdvisoryProviderStateV1, FeedbackAuthoritativeRuntimeStateV1,
+    FeedbackBaselineHorizonV1, FeedbackBaselineStateV1, FeedbackBudgetV1,
+    FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
     FeedbackCycleRuntimeSnapshotV1, FeedbackDiagnosticBaselineIdentityV1,
-    FeedbackDiagnosticBaselineV1, FeedbackDiagnosticV1, FeedbackEvaluationInputV1,
+    FeedbackDiagnosticBaselineV1, FeedbackDiagnosticProducerV1, FeedbackDiagnosticV1,
+    FeedbackEvaluationInputV1,
     FeedbackFindingLifecycleV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackTargetV1,
     FeedbackTriggerV1, ProximityBranchWorktreeIncompatibilityV1, ProximityCoverageV1,
     ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityWarningClassV1,
@@ -90,9 +90,9 @@ use tracedecay_domain::feedback::{
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
-    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ComponentVersion, LocatorDigest,
-    ObservationId, ObservationOrderingDomainV1, ObservationSourceRangeV1, SessionId,
-    SymbolOccurrenceId,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, CodeGenerationId,
+    ComponentVersion, LocatorDigest, ObservationId, ObservationOrderingDomainV1,
+    ObservationSourceRangeV1, SessionId, SymbolOccurrenceId,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
@@ -110,7 +110,10 @@ use tracedecay_usecases::feedback::concrete::open_feedback_runtime;
 mod code_graph;
 mod common;
 
-use code_graph::{hermetic_advisory_code_graph, hermetic_ci_code_graph};
+use code_graph::hermetic_advisory_code_graph;
+// Only the `test-transport` CI-localization tests build a hermetic CI graph.
+#[cfg(feature = "test-transport")]
+use code_graph::hermetic_ci_code_graph;
 
 struct NoAnchors;
 
