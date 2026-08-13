@@ -72,9 +72,13 @@ tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0" }
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tree-sitter = "0.26"
 
 [[bench]]
@@ -89,5 +93,10 @@ test = false
 
 [[bench]]
 name = "source_search"
+harness = false
+test = false
+
+[[bench]]
+name = "git_ancestry"
 harness = false
 test = false
