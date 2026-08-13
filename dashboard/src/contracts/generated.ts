@@ -419,17 +419,6 @@ export const AutomationRunProblemV1Schema = z.object({
 }).strict();
 export type AutomationRunProblemV1 = z.infer<typeof AutomationRunProblemV1Schema>;
 
-/** Canonical input to one durable automation run.
-
-Trigger, actor, configuration and input digests are derived by the
-registered application authority. The tagged task prevents a caller from
-pairing one task identity with another task's options. */
-export const AutomationRunRequestV1Schema = z.object({
-  run_id: z.lazy(() => RunIdSchema),
-  task: z.lazy(() => AutomationTaskRequestV1Schema),
-}).strict();
-export type AutomationRunRequestV1 = z.infer<typeof AutomationRunRequestV1Schema>;
-
 /** Durable terminal payload for one admitted automation run.
 
 An empty receipt list is valid for completed or skipped zero-effect runs.
@@ -492,24 +481,6 @@ export type AutomationSettingsPayloadV1 = z.infer<typeof AutomationSettingsPaylo
 
 export const AutomationSkipReasonV1Schema = z.enum(["automation_disabled", "backend_disabled", "combined_review_disabled", "delegated_host_mode", "job_commands_disabled", "memory_curator_disabled", "no_new_session_activity", "no_session_evidence", "nothing_to_review", "partial_coverage_no_candidates", "scheduler_cooldown_active", "scheduler_cron_not_due", "scheduler_idle_window_active", "scheduler_interval_not_elapsed", "scheduler_lock_active", "scheduler_non_retryable_failure", "scheduler_schedule_invalid", "scheduler_schedule_manual", "session_cursor_manifest_limit_exceeded", "session_evidence_budget_exhausted", "session_evidence_cancelled", "session_evidence_denied", "session_evidence_filter_unavailable", "session_evidence_locked", "session_evidence_partial", "session_evidence_reset_required", "session_evidence_retrieval_unavailable", "session_evidence_stale", "session_evidence_unavailable", "session_reflector_disabled", "shipped_fact_proposal_history_retired", "similarity_authority_unavailable", "skill_writer_disabled", "task_not_schedulable", "user_job_disabled"]);
 export type AutomationSkipReasonV1 = z.infer<typeof AutomationSkipReasonV1Schema>;
-
-export const AutomationTaskRequestV1Schema = z.discriminatedUnion("kind", [z.object({
-  kind: z.literal("combined_review"),
-  options: z.lazy(() => CombinedReviewRunInputV1Schema),
-}).strict(), z.object({
-  kind: z.literal("memory_curator"),
-  options: z.lazy(() => MemoryCuratorRunInputV1Schema),
-}).strict(), z.object({
-  kind: z.literal("session_reflector"),
-  options: z.lazy(() => SessionReflectorRunInputV1Schema),
-}).strict(), z.object({
-  kind: z.literal("skill_writer"),
-  options: z.lazy(() => SkillWriterRunInputV1Schema),
-}).strict(), z.object({
-  kind: z.literal("user_job"),
-  options: z.lazy(() => UserJobRunInputV1Schema),
-}).strict()]);
-export type AutomationTaskRequestV1 = z.infer<typeof AutomationTaskRequestV1Schema>;
 
 export const AutomationTaskStatusV1Schema = z.object({
   due: z.boolean(),
@@ -640,12 +611,6 @@ export const CodeIndexWorktreeFreshnessV1Schema = z.object({
   worktree_root: z.string(),
 });
 export type CodeIndexWorktreeFreshnessV1 = z.infer<typeof CodeIndexWorktreeFreshnessV1Schema>;
-
-export const CombinedReviewRunInputV1Schema = z.object({
-  session_reflector: z.lazy(() => SessionReflectorRunInputV1Schema),
-  skill_writer: z.lazy(() => SkillWriterRunInputV1Schema),
-}).strict();
-export type CombinedReviewRunInputV1 = z.infer<typeof CombinedReviewRunInputV1Schema>;
 
 /** Strongly typed canonical identity: `CommitId`. */
 export const CommitIdSchema = z.string();
@@ -2063,6 +2028,16 @@ export type FactSearchGraphCoverageV1 = z.infer<typeof FactSearchGraphCoverageV1
 export const FactSearchGraphDegradationV1Schema = z.enum(["budget_exhausted", "conflict", "deadline_exceeded", "unavailable"]);
 export type FactSearchGraphDegradationV1 = z.infer<typeof FactSearchGraphDegradationV1Schema>;
 
+/** Closed public launcher for the automatic Memory Curator.
+
+Run identity, task selection, operations, proposals, approval, and apply
+authority are deliberately absent and rejected by `deny_unknown_fields`. */
+export const FactStoreCurateRequestV1Schema = z.object({
+  fact_review_limit: z.number().int().min(1).max(1000),
+  min_confidence_millionths: z.number().int().min(0).max(1000000),
+}).strict();
+export type FactStoreCurateRequestV1 = z.infer<typeof FactStoreCurateRequestV1Schema>;
+
 export const FeedbackCoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
 export type FeedbackCoverageV1 = z.infer<typeof FeedbackCoverageV1Schema>;
 
@@ -2330,9 +2305,6 @@ export const LcmDepthCountV1Schema = z.object({
 });
 export type LcmDepthCountV1 = z.infer<typeof LcmDepthCountV1Schema>;
 
-export const LcmGrepSortV1Schema = z.enum(["hybrid", "recency", "relevance"]);
-export type LcmGrepSortV1 = z.infer<typeof LcmGrepSortV1Schema>;
-
 export const LcmLatestSessionV1Schema = z.object({
   last_store_id: z.number().int().safe().nullable(),
   last_timestamp: z.number().int().safe().nullable(),
@@ -2399,9 +2371,6 @@ export const LcmRoleCountV1Schema = z.object({
 });
 export type LcmRoleCountV1 = z.infer<typeof LcmRoleCountV1Schema>;
 
-export const LcmRoleV1Schema = z.enum(["assistant", "system", "tool", "unknown", "user"]);
-export type LcmRoleV1 = z.infer<typeof LcmRoleV1Schema>;
-
 export const LcmSearchEngineDetailV1Schema = z.object({
   messages: z.string(),
   summary_nodes: z.string(),
@@ -2431,9 +2400,6 @@ export const LcmSearchPayloadV1Schema = z.object({
   total: z.lazy(() => LcmSearchTotalsV1Schema),
 });
 export type LcmSearchPayloadV1 = z.infer<typeof LcmSearchPayloadV1Schema>;
-
-export const LcmSearchScopeV1Schema = z.enum(["all", "current", "session"]);
-export type LcmSearchScopeV1 = z.infer<typeof LcmSearchScopeV1Schema>;
 
 export const LcmSearchTotalsV1Schema = z.object({
   messages: z.number().int().safe(),
@@ -2903,12 +2869,6 @@ export const MemoryCategoryCountV1Schema = z.object({
   count: z.number().int().safe().min(0),
 }).strict();
 export type MemoryCategoryCountV1 = z.infer<typeof MemoryCategoryCountV1Schema>;
-
-export const MemoryCuratorRunInputV1Schema = z.object({
-  fact_review_limit: z.number().int().min(0),
-  min_confidence_millionths: z.number().int().min(0),
-}).strict();
-export type MemoryCuratorRunInputV1 = z.infer<typeof MemoryCuratorRunInputV1Schema>;
 
 export const MemoryEntityRowV1Schema = z.object({
   entity_id: z.string(),
@@ -4006,23 +3966,6 @@ export type SensitivityV1 = z.infer<typeof SensitivityV1Schema>;
 export const SessionIdSchema = z.string();
 export type SessionId = z.infer<typeof SessionIdSchema>;
 
-export const SessionReflectorRunInputV1Schema = z.object({
-  end_time: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
-  evidence_limit: z.number().int().min(0),
-  include_recent_sessions: z.boolean(),
-  include_summaries: z.boolean(),
-  provider: z.string(),
-  query: z.string(),
-  recent_sessions_limit: z.number().int().min(0),
-  role: z.union([z.lazy(() => LcmRoleV1Schema), z.null()]),
-  scope: z.lazy(() => LcmSearchScopeV1Schema),
-  session_id: z.string().nullable(),
-  sort: z.lazy(() => LcmGrepSortV1Schema),
-  source: z.string().nullable(),
-  start_time: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
-}).strict();
-export type SessionReflectorRunInputV1 = z.infer<typeof SessionReflectorRunInputV1Schema>;
-
 export const SettingsAvailabilityV1Schema = z.object({
   available: z.boolean(),
   reason: z.string().nullable().optional(),
@@ -4062,15 +4005,6 @@ export const SignificantTableGrowthSampleV1Schema = z.object({
   table: z.string(),
 });
 export type SignificantTableGrowthSampleV1 = z.infer<typeof SignificantTableGrowthSampleV1Schema>;
-
-export const SkillWriterRunInputV1Schema = z.object({
-  evidence_limit: z.number().int().min(0),
-  include_recent_sessions: z.boolean(),
-  provider: z.string(),
-  query: z.string(),
-  recent_sessions_limit: z.number().int().min(0),
-}).strict();
-export type SkillWriterRunInputV1 = z.infer<typeof SkillWriterRunInputV1Schema>;
 
 /** Strongly typed canonical identity: `SourceStoreId`. */
 export const SourceStoreIdSchema = z.string();
@@ -4534,11 +4468,6 @@ export type TopologyNotificationLevelV1 = z.infer<typeof TopologyNotificationLev
 /** Stable, canonical catalog identity for `UseCaseId`. */
 export const UseCaseIdSchema = z.string();
 export type UseCaseId = z.infer<typeof UseCaseIdSchema>;
-
-export const UserJobRunInputV1Schema = z.object({
-  job_id: z.string(),
-}).strict();
-export type UserJobRunInputV1 = z.infer<typeof UserJobRunInputV1Schema>;
 
 /** Strongly typed canonical identity: `UserProfileId`. */
 export const UserProfileIdSchema = z.string();

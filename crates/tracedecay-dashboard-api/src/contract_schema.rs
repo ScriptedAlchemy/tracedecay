@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_api::read_model::multi_root::{MultiRootCapabilityV1, MultiRootQueryReadModelV1};
 use tracedecay_application::retained_surfaces::{
-    AutomationRunProblemV1, AutomationRunRequestV1, AutomationRunResultV1,
+    AutomationRunProblemV1, AutomationRunResultV1, FactStoreCurateRequestV1,
 };
 use tracedecay_application::{
     AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1, AdmitWorkPlacementCommand,
@@ -173,7 +173,7 @@ struct DashboardContractCatalogV1 {
     /// Served identically by `GET /api/automation/scheduler/status` and by the
     /// `pause`/`resume` controls, which re-read rather than acknowledge.
     automation_scheduler_status: AutomationSchedulerStatusV1,
-    automation_run_request: AutomationRunRequestV1,
+    fact_store_curate_request: FactStoreCurateRequestV1,
     automation_run: AutomationRunResultV1,
     automation_problem: AutomationRunProblemV1,
 }
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn automation_terminal_contracts_are_registered() {
+    fn fact_store_curate_contracts_are_registered() {
         let schema: serde_json::Value = serde_json::from_str(
             &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
         )
@@ -257,7 +257,22 @@ mod tests {
             .as_object()
             .expect("dashboard contracts expose schema definitions");
 
-        assert!(definitions.contains_key("AutomationRunRequestV1"));
+        let request = definitions
+            .get("FactStoreCurateRequestV1")
+            .expect("fact-store curate request contract");
+        assert_eq!(request["additionalProperties"], false);
+        assert_eq!(
+            request["properties"]
+                .as_object()
+                .expect("fact-store curate request properties")
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["fact_review_limit", "min_confidence_millionths"]
+                .into_iter()
+                .collect()
+        );
+        assert!(!definitions.contains_key("AutomationRunRequestV1"));
         assert!(definitions.contains_key("AutomationRunResultV1"));
         assert!(definitions.contains_key("AutomationRunProblemV1"));
     }

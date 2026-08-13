@@ -1407,23 +1407,6 @@
       ],
       "type": "object"
     },
-    "AutomationRunRequestV1": {
-      "additionalProperties": false,
-      "description": "Canonical input to one durable automation run.\n\nTrigger, actor, configuration and input digests are derived by the\nregistered application authority. The tagged task prevents a caller from\npairing one task identity with another task's options.",
-      "properties": {
-        "run_id": {
-          "$ref": "#/$defs/RunId"
-        },
-        "task": {
-          "$ref": "#/$defs/AutomationTaskRequestV1"
-        }
-      },
-      "required": [
-        "run_id",
-        "task"
-      ],
-      "type": "object"
-    },
     "AutomationRunResultV1": {
       "additionalProperties": false,
       "description": "Durable terminal payload for one admitted automation run.\n\nAn empty receipt list is valid for completed or skipped zero-effect runs.\nPartial effects are represented only by an application problem carrying a\nnon-empty committed effect receipt.",
@@ -1664,95 +1647,6 @@
         "shipped_fact_proposal_history_retired"
       ],
       "type": "string"
-    },
-    "AutomationTaskRequestV1": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "memory_curator",
-              "type": "string"
-            },
-            "options": {
-              "$ref": "#/$defs/MemoryCuratorRunInputV1"
-            }
-          },
-          "required": [
-            "kind",
-            "options"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "session_reflector",
-              "type": "string"
-            },
-            "options": {
-              "$ref": "#/$defs/SessionReflectorRunInputV1"
-            }
-          },
-          "required": [
-            "kind",
-            "options"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "skill_writer",
-              "type": "string"
-            },
-            "options": {
-              "$ref": "#/$defs/SkillWriterRunInputV1"
-            }
-          },
-          "required": [
-            "kind",
-            "options"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "combined_review",
-              "type": "string"
-            },
-            "options": {
-              "$ref": "#/$defs/CombinedReviewRunInputV1"
-            }
-          },
-          "required": [
-            "kind",
-            "options"
-          ],
-          "type": "object"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "kind": {
-              "const": "user_job",
-              "type": "string"
-            },
-            "options": {
-              "$ref": "#/$defs/UserJobRunInputV1"
-            }
-          },
-          "required": [
-            "kind",
-            "options"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "AutomationTaskStatusV1": {
       "properties": {
@@ -2209,22 +2103,6 @@
         "staleness_state",
         "hook_hint_count",
         "coverage"
-      ],
-      "type": "object"
-    },
-    "CombinedReviewRunInputV1": {
-      "additionalProperties": false,
-      "properties": {
-        "session_reflector": {
-          "$ref": "#/$defs/SessionReflectorRunInputV1"
-        },
-        "skill_writer": {
-          "$ref": "#/$defs/SkillWriterRunInputV1"
-        }
-      },
-      "required": [
-        "session_reflector",
-        "skill_writer"
       ],
       "type": "object"
     },
@@ -9452,6 +9330,31 @@
       ],
       "type": "string"
     },
+    "FactStoreCurateRequestV1": {
+      "additionalProperties": false,
+      "description": "Closed public launcher for the automatic Memory Curator.\n\nRun identity, task selection, operations, proposals, approval, and apply\nauthority are deliberately absent and rejected by `deny_unknown_fields`.",
+      "properties": {
+        "fact_review_limit": {
+          "default": 24,
+          "format": "uint32",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "min_confidence_millionths": {
+          "default": 720000,
+          "format": "uint32",
+          "maximum": 1000000,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fact_review_limit",
+        "min_confidence_millionths"
+      ],
+      "type": "object"
+    },
     "FeedbackCoverageV1": {
       "enum": [
         "known",
@@ -10558,14 +10461,6 @@
       ],
       "type": "object"
     },
-    "LcmGrepSortV1": {
-      "enum": [
-        "recency",
-        "relevance",
-        "hybrid"
-      ],
-      "type": "string"
-    },
     "LcmLatestSessionV1": {
       "properties": {
         "last_store_id": {
@@ -10868,16 +10763,6 @@
       ],
       "type": "object"
     },
-    "LcmRoleV1": {
-      "enum": [
-        "system",
-        "user",
-        "assistant",
-        "tool",
-        "unknown"
-      ],
-      "type": "string"
-    },
     "LcmSearchEngineDetailV1": {
       "properties": {
         "messages": {
@@ -10991,14 +10876,6 @@
         "matches"
       ],
       "type": "object"
-    },
-    "LcmSearchScopeV1": {
-      "enum": [
-        "current",
-        "session",
-        "all"
-      ],
-      "type": "string"
     },
     "LcmSearchTotalsV1": {
       "properties": {
@@ -12828,26 +12705,6 @@
       "required": [
         "category",
         "count"
-      ],
-      "type": "object"
-    },
-    "MemoryCuratorRunInputV1": {
-      "additionalProperties": false,
-      "properties": {
-        "fact_review_limit": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "min_confidence_millionths": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "fact_review_limit",
-        "min_confidence_millionths"
       ],
       "type": "object"
     },
@@ -16754,97 +16611,6 @@
       "description": "Strongly typed canonical identity: `SessionId`.",
       "type": "string"
     },
-    "SessionReflectorRunInputV1": {
-      "additionalProperties": false,
-      "properties": {
-        "end_time": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UtcMicros"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "evidence_limit": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "include_recent_sessions": {
-          "type": "boolean"
-        },
-        "include_summaries": {
-          "type": "boolean"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "query": {
-          "type": "string"
-        },
-        "recent_sessions_limit": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "role": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/LcmRoleV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "scope": {
-          "$ref": "#/$defs/LcmSearchScopeV1"
-        },
-        "session_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "sort": {
-          "$ref": "#/$defs/LcmGrepSortV1"
-        },
-        "source": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "start_time": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UtcMicros"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "provider",
-        "query",
-        "scope",
-        "session_id",
-        "include_summaries",
-        "evidence_limit",
-        "include_recent_sessions",
-        "recent_sessions_limit",
-        "sort",
-        "source",
-        "role",
-        "start_time",
-        "end_time"
-      ],
-      "type": "object"
-    },
     "SettingsAvailabilityV1": {
       "properties": {
         "available": {
@@ -16965,38 +16731,6 @@
         "growth_bytes",
         "previous_observed_at",
         "current_observed_at"
-      ],
-      "type": "object"
-    },
-    "SkillWriterRunInputV1": {
-      "additionalProperties": false,
-      "properties": {
-        "evidence_limit": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "include_recent_sessions": {
-          "type": "boolean"
-        },
-        "provider": {
-          "type": "string"
-        },
-        "query": {
-          "type": "string"
-        },
-        "recent_sessions_limit": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "provider",
-        "query",
-        "evidence_limit",
-        "include_recent_sessions",
-        "recent_sessions_limit"
       ],
       "type": "object"
     },
@@ -18712,18 +18446,6 @@
     "UseCaseId": {
       "description": "Stable, canonical catalog identity for `UseCaseId`.",
       "type": "string"
-    },
-    "UserJobRunInputV1": {
-      "additionalProperties": false,
-      "properties": {
-        "job_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "job_id"
-      ],
-      "type": "object"
     },
     "UserProfileId": {
       "description": "Strongly typed canonical identity: `UserProfileId`.",
@@ -26748,9 +26470,6 @@
     "automation_run": {
       "$ref": "#/$defs/AutomationRunResultV1"
     },
-    "automation_run_request": {
-      "$ref": "#/$defs/AutomationRunRequestV1"
-    },
     "automation_scheduler_status": {
       "$ref": "#/$defs/AutomationSchedulerStatusV1",
       "description": "Served identically by `GET /api/automation/scheduler/status` and by the\n`pause`/`resume` controls, which re-read rather than acknowledge."
@@ -26778,6 +26497,9 @@
     },
     "explorer_session_size": {
       "$ref": "#/$defs/DashboardEnvelopeV12"
+    },
+    "fact_store_curate_request": {
+      "$ref": "#/$defs/FactStoreCurateRequestV1"
     },
     "feedback_status": {
       "$ref": "#/$defs/DashboardEnvelopeV126"
@@ -27159,7 +26881,7 @@
     "multi_root_execute_request",
     "multi_root_query",
     "automation_scheduler_status",
-    "automation_run_request",
+    "fact_store_curate_request",
     "automation_run",
     "automation_problem"
   ],
