@@ -95,6 +95,14 @@ fn yaml_document_markers_do_not_hide_sensitive_fields_from_the_format_probe() {
 }
 
 #[test]
+fn yaml_tags_reach_the_canonical_parser_before_sensitive_field_scanning() {
+    assert_detected_only_by_parsing(
+        &format!("---\nprovider: !ProviderConfig\n  vault_passphrase: {PLACEHOLDER}\n"),
+        StructuredTextFormatV1::Yaml,
+    );
+}
+
+#[test]
 fn toml_sensitive_field_is_detected_only_after_parsing() {
     assert_detected_only_by_parsing(
         &format!("[vault]\nregion = \"us-east\"\nvault_passphrase = \"{PLACEHOLDER}\"\n"),

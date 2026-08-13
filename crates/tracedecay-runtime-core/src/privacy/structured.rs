@@ -413,39 +413,6 @@ fn parse_json_document(
         .map(Some)
 }
 
-/// Walks a YAML document through the same structural preflight the JSON path
-/// uses.
-///
-/// A YAML mapping repeats keys as freely as a JSON object does, and a
-/// materialized `serde_json::Value` keeps only the last of them -- so an
-/// earlier sensitive value would never reach the field scanner. The preflight
-/// seed only ever sees serde's data model, so it applies unchanged here rather
-/// than existing as a second, separately-maintained copy of the rule.
-fn preflight_yaml_structure(text: &str) -> Result<(), StructuredTextParseFailureV1> {
-    let policy = ParseLimits::default_policy();
-    let mut budget = JsonStructureBudget {
-        max_depth: policy.depth,
-        max_values: policy.values,
-        values: 0,
-    };
-    let mut failure = None;
-    let walked = JsonStructurePreflight {
-        budget: &mut budget,
-        failure: &mut failure,
-        depth: 1,
-    }
-    .deserialize(serde_yaml_ng::Deserializer::from_str(text));
-    if walked.is_ok() {
-        return Ok(());
-    }
-    Err(match failure {
-        Some(
-            JsonPreflightFailureV1::DepthExceeded | JsonPreflightFailureV1::ValueCountExceeded,
-        ) => StructuredTextParseFailureV1::LimitsExceeded,
-        _ => StructuredTextParseFailureV1::Malformed,
-    })
-}
-
 /// Walks the JSON stream with serde before `Value` materializes it. `Value`
 /// normally keeps the final duplicate member and loses the earlier bytes,
 /// which would let an earlier sensitive value survive the span sanitizer.
@@ -664,9 +631,16 @@ fn parse_yaml_document(
         return Err(StructuredTextParseFailureV1::Malformed);
     }
     preflight_tree_document(text)?;
-    preflight_yaml_structure(text)?;
-    let value: Value =
+    // Parse through YAML's own value authority before converting to the common
+    // JSON-shaped tree. In particular, YAML tags arrive through serde's enum
+    // data model, which the JSON duplicate-key preflight cannot accept. The
+    // YAML mapping implementation rejects duplicate keys while materializing,
+    // so this preserves the fail-closed ambiguity fence without rejecting
+    // valid YAML-specific syntax ahead of the canonical parser.
+    let yaml_value: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(text).map_err(|_| StructuredTextParseFailureV1::Malformed)?;
+    let value =
+        serde_json::to_value(yaml_value).map_err(|_| StructuredTextParseFailureV1::Malformed)?;
     (value.is_object() || value.is_array())
         .then(|| parsed(StructuredTextFormatV1::Yaml, value))
         .ok_or(StructuredTextParseFailureV1::Malformed)
