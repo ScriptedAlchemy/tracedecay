@@ -19,10 +19,9 @@ use std::collections::BTreeSet;
 
 use serde_json::json;
 use tracedecay::application_surface::{
-    APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
-    parse_application_surface_request, resolve_application_surface_dispatch,
-    resolve_catalog_tool_binding,
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, NativeIntegrationSurfaceResultV1,
+    NativeIntegrationSurfaceUnavailableV1, parse_application_surface_request,
+    resolve_application_surface_dispatch, resolve_catalog_tool_binding,
 };
 use tracedecay::daemon_client::RequestedOutputFormat;
 use tracedecay::mcp::tools::get_tool_definitions;
@@ -71,7 +70,7 @@ fn every_journey_operation_has_canonical_identity() {
             "{name} does not resolve from its MCP tool name"
         );
         assert!(
-            APPLICATION_SURFACE_OPERATIONS.contains(&operation),
+            ApplicationSurfaceOperation::ALL.contains(&operation),
             "{name} is missing from the canonical operation authority"
         );
     }

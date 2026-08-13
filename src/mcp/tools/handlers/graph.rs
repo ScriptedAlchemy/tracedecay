@@ -520,7 +520,12 @@ pub(super) async fn handle_context(
     let memory_options = context_memory_options(&args);
     let memory_read_control =
         context_memory_read_control(&memory_options, deadline.as_ref(), cancellation.as_ref())?;
-    let outcome = execute_code_index_search(
+    // The two reads are independent: the code-index search depends on the task
+    // and the search authority, the memory read on the task and the memory
+    // options. Awaiting them in sequence would pay both latencies for a single
+    // response, so they are driven together the way the sibling search handler
+    // drives its two independent futures.
+    let search = execute_code_index_search(
         search_executor,
         crate::mcp::server::CodeIndexSearchRequestV1 {
             project_root: cg.project_root().to_path_buf(),
@@ -535,8 +540,9 @@ pub(super) async fn handle_context(
             deadline,
             cancellation,
         },
-    )
-    .await;
+    );
+    let memory = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref());
+    let (outcome, memory_outcome) = tokio::join!(search, memory);
     let complete = match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => complete,
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
@@ -600,7 +606,7 @@ pub(super) async fn handle_context(
         hits: memory_matches,
         graph_coverage: memory_graph_coverage,
         error: memory_matches_error,
-    } = context_memory_outcome(cg, task, &memory_options, memory_read_control.as_ref()).await;
+    } = memory_outcome;
     let mut all_symbols = selected.clone();
     all_symbols.extend(related.iter().cloned());
     let touched_files = graph_symbol_paths(&all_symbols)?;

@@ -42,7 +42,7 @@ const PROBE_TRAIT: &str = "ApplicationPaginationProbeBehavior";
 const PROBE_HIERARCHY_LEAF: &str = "ApplicationPaginationProbeLeafTrait";
 /// Takes one parameter of every `ApplicationPaginationProbeTypeNN`.
 const PROBE_TYPE_ANCHOR: &str = "application_pagination_probe_type_anchor";
-/// Size of `operation_carries_callable_code_meta` in `application_surface`: the
+/// Size of the `HttpPageProjection::MetaCursor` family in `application_surface`: the
 /// operations whose decoded request carries a `CallableCodeSurfaceMeta`, and so
 /// can be handed a continuation cursor.
 const CURSOR_CARRYING_CODE_OPERATIONS: usize = 14;
@@ -944,8 +944,7 @@ fn symbol_graph_scope() -> Value {
     serde_json::json!({ "path_prefix": Value::Null })
 }
 
-/// Every operation in the surface's `operation_carries_callable_code_meta`
-/// list, paired with a request that reaches a result set big enough to page.
+/// Every operation the surface projects as `HttpPageProjection::MetaCursor`, paired with a request that reaches a result set big enough to page.
 fn continuation_cases() -> Vec<ContinuationCase> {
     vec![
         ContinuationCase {
@@ -1180,9 +1179,9 @@ async fn every_cursor_carrying_code_operation_mints_and_spends_a_continuation() 
     let anchors = ProbeAnchors::resolve(&fixture).await;
     let cases = continuation_cases();
 
-    // The surface lists fourteen operations in
-    // `operation_carries_callable_code_meta`, and each is covered once. The
-    // predicate is private, so the size is restated here; every case still
+    // The surface projects fourteen operations as
+    // `HttpPageProjection::MetaCursor`, and each is covered once. The
+    // mapping is private, so the size is restated here; every case still
     // proves its own membership when its request decodes, in
     // `continuation_page`.
     let declared = cases

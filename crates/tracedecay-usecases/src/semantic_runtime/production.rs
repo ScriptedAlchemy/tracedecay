@@ -173,6 +173,25 @@ pub struct ProductionSemanticRuntimeV1 {
     resources: SemanticResourceCeilings,
 }
 
+/// The handles every stage of one scheduled projection shares.
+///
+/// A scheduled generation runs as four callbacks — load, resume, per-batch
+/// commit, and stage/publish — and each of them needs the same graph provider,
+/// writer lane, scheduled generation, batch commit state, and lifecycle owner.
+/// Holding them in one `Arc` keeps each callback to a single clone instead of
+/// one clone per handle per stage, and keeps "what a stage may touch" stated in
+/// one place.
+struct ScheduledProjectionHandlesV1 {
+    graph: Arc<dyn SemanticVectorGraphProviderV1>,
+    /// Runtime-owned writer lane shared across clones.
+    writer: Arc<tokio::sync::Mutex<()>>,
+    /// The generation this schedule is projecting.
+    generation: Arc<CodeIndexPublishedGenerationV1>,
+    /// Build, store, and checkpoint carried across batch commits.
+    commit_state: Arc<tokio::sync::Mutex<BatchCommitStateV1>>,
+    lifecycle: Arc<SemanticModelLifecycleOwnerV1>,
+}
+
 #[derive(Clone, Debug)]
 pub struct SemanticCompatibleCurrentGenerationSnapshotV1 {
     pub executable: SemanticExecutableGenerationV1,
@@ -1219,12 +1238,6 @@ impl ProductionSemanticRuntimeV1 {
             .map(|chunk| chunk.id.clone())
             .collect::<Vec<_>>();
         let base_generation = None;
-        let graph = Arc::clone(&self.graph);
-        let writer = Arc::clone(&self.vector_writer);
-        let scheduled_generation = Arc::new(generation.clone());
-        let lifecycle_for_load = Arc::clone(&self.lifecycle);
-        let lifecycle_for_stage = Arc::clone(&self.lifecycle);
-        let lifecycle_for_commit = Arc::clone(&self.lifecycle);
         let manifest = generation.manifest().clone();
         let resources = self.resources;
         let total_units = request.changes.added_or_changed.len().max(1) as u64;
@@ -1248,21 +1261,27 @@ impl ProductionSemanticRuntimeV1 {
             expected_chunk_ids: expected_chunk_ids.into(),
             base_generation: base_generation.clone(),
         };
-        let commit_state = Arc::new(tokio::sync::Mutex::new(BatchCommitStateV1::default()));
+        // Every stage of one scheduled projection — load, resume, per-batch
+        // commit, stage, publish — reaches the same five handles. Bundling them
+        // once means each closure clones a single `Arc` instead of restating the
+        // same five clones under a stage-specific prefix.
+        let handles = Arc::new(ScheduledProjectionHandlesV1 {
+            graph: Arc::clone(&self.graph),
+            writer: Arc::clone(&self.vector_writer),
+            generation: Arc::new(generation.clone()),
+            commit_state: Arc::new(tokio::sync::Mutex::new(BatchCommitStateV1::default())),
+            lifecycle: Arc::clone(&self.lifecycle),
+        });
         let publication_failure = SemanticPublicationFailureRecorderV1::default();
         let resume_failure = publication_failure.clone();
         let commit_failure = publication_failure.clone();
         let publish_failure = publication_failure.clone();
         let fair_lease = fair_lease.map(Arc::new);
-        let resume_state = Arc::clone(&commit_state);
-        let resume_graph = Arc::clone(&graph);
-        let resume_writer = Arc::clone(&writer);
-        let resume_generation = Arc::clone(&scheduled_generation);
+        let load_handles = Arc::clone(&handles);
+        let resume_handles = Arc::clone(&handles);
+        let commit_handles = Arc::clone(&handles);
+        let stage_handles = handles;
         let commit_lease = fair_lease.clone();
-        let commit_graph = Arc::clone(&graph);
-        let commit_writer = Arc::clone(&writer);
-        let commit_generation = Arc::clone(&scheduled_generation);
-        let stage_state = Arc::clone(&commit_state);
         let _ = self.lifecycle.mark_loading();
         let _ = self.lifecycle.mark_indexing(0, total_units);
         let request = match FastEmbedSemanticGenerationRequestV1::new(
@@ -1271,12 +1290,17 @@ impl ProductionSemanticRuntimeV1 {
             canonical_chunks,
             SEMANTIC_EMBEDS_PER_COMMIT,
             move || {
-                LoadedSemanticArtifactV1::from_lifecycle(&lifecycle_for_load, &manifest, resources)
+                LoadedSemanticArtifactV1::from_lifecycle(
+                    &load_handles.lifecycle,
+                    &manifest,
+                    resources,
+                )
             },
             move || async move {
-                let _writer = resume_writer.lock().await;
-                let retained = resume_graph
-                    .graph_for_generation(resume_generation.as_ref())
+                let _writer = resume_handles.writer.lock().await;
+                let retained = resume_handles
+                    .graph
+                    .graph_for_generation(resume_handles.generation.as_ref())
                     .await
                     .map_err(|error| resume_failure.retain_for_resume(&error))?;
                 let cancellation = Arc::clone(retained.cancellation());
@@ -1294,7 +1318,7 @@ impl ProductionSemanticRuntimeV1 {
                     .begin_generation(plan, Arc::clone(&cancellation))
                     .await
                     .map_err(|error| resume_failure.begin_generation(&error))?;
-                let mut state = resume_state.lock().await;
+                let mut state = resume_handles.commit_state.lock().await;
                 state.build = Some(resume.build_id().clone());
                 state.store = Some(store);
                 state.checkpoint = None;
@@ -1315,10 +1339,7 @@ impl ProductionSemanticRuntimeV1 {
                 })
             },
             move |prepared| {
-                let state = Arc::clone(&commit_state);
-                let graph = Arc::clone(&commit_graph);
-                let writer = Arc::clone(&commit_writer);
-                let generation = Arc::clone(&commit_generation);
+                let handles = Arc::clone(&commit_handles);
                 let lease = commit_lease.clone();
                 let failure = commit_failure.clone();
                 async move {
@@ -1328,7 +1349,7 @@ impl ProductionSemanticRuntimeV1 {
                     {
                         return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
                     }
-                    let mut state = state.lock().await;
+                    let mut state = handles.commit_state.lock().await;
                     let build = state
                         .build
                         .clone()
@@ -1338,9 +1359,10 @@ impl ProductionSemanticRuntimeV1 {
                         .as_ref()
                         .cloned()
                         .ok_or_else(|| failure.missing_commit_store())?;
-                    let _writer = writer.lock().await;
-                    let retained = graph
-                        .graph_for_generation(generation.as_ref())
+                    let _writer = handles.writer.lock().await;
+                    let retained = handles
+                        .graph
+                        .graph_for_generation(handles.generation.as_ref())
                         .await
                         .map_err(|error| failure.retain_for_batch(&error))?;
                     let cancellation = Arc::clone(retained.cancellation());
@@ -1354,7 +1376,7 @@ impl ProductionSemanticRuntimeV1 {
             },
             move || async move {
                 let (build, store, published) = {
-                    let state = stage_state.lock().await;
+                    let state = stage_handles.commit_state.lock().await;
                     (
                         state
                             .build
@@ -1368,16 +1390,19 @@ impl ProductionSemanticRuntimeV1 {
                         state.published.clone(),
                     )
                 };
-                let _ = lifecycle_for_stage.mark_indexing(total_units, total_units);
+                let _ = stage_handles
+                    .lifecycle
+                    .mark_indexing(total_units, total_units);
                 Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
                     let _publication_lease = fair_lease
                         .as_deref()
                         .map(SemanticProjectionLeaseV1::try_begin_publication)
                         .transpose()
                         .map_err(fair_schedule_failure)?;
-                    let _writer = writer.lock().await;
-                    let retained = graph
-                        .graph_for_generation(scheduled_generation.as_ref())
+                    let _writer = stage_handles.writer.lock().await;
+                    let retained = stage_handles
+                        .graph
+                        .graph_for_generation(stage_handles.generation.as_ref())
                         .await
                         .map_err(|error| publish_failure.retain_for_publish(&error))?;
                     let cancellation = Arc::clone(retained.cancellation());
@@ -1388,7 +1413,7 @@ impl ProductionSemanticRuntimeV1 {
                             .await
                             .map_err(|error| publish_failure.publish_generation(&error))?,
                     };
-                    let _ = lifecycle_for_commit.mark_ready();
+                    let _ = stage_handles.lifecycle.mark_ready();
                     Ok(SemanticGenerationPointerV1 {
                         generation: publication.generation_id,
                         source_generation: published_source_generation,

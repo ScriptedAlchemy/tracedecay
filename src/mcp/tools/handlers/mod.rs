@@ -157,8 +157,6 @@ use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
 };
 use super::{LegacyToolCompatibilityOwner, ToolResult};
-#[cfg(test)]
-use crate::application_surface::APPLICATION_SURFACE_OPERATIONS;
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;

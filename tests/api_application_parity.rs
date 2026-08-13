@@ -5,11 +5,11 @@ use axum::extract::Extension;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 use tracedecay::application_surface::{
-    APPLICATION_SURFACE_OPERATIONS, AffectedTestsSurfaceRequest, ApplicationSurfaceOperation,
-    ApplicationSurfaceRequest, FeedbackImpactSurfaceRequest, FeedbackSurfaceRequest,
-    GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
-    TestResultsSurfaceRequest, parse_application_surface_request,
-    resolve_application_surface_dispatch, resolve_http_application_surface_dispatch,
+    AffectedTestsSurfaceRequest, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
+    FeedbackImpactSurfaceRequest, FeedbackSurfaceRequest, GitApplySurfaceRequest,
+    GitPreviewSurfaceRequest, GitReadSurfaceRequest, TestResultsSurfaceRequest,
+    parse_application_surface_request, resolve_application_surface_dispatch,
+    resolve_http_application_surface_dispatch,
 };
 use tracedecay::daemon_client::{
     BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
@@ -39,7 +39,8 @@ const PARITY_FIXTURE: &str =
 /// The operations whose decoded surface request carries a
 /// `CallableCodeSurfaceMeta`, and therefore a `cursor` continuation that every
 /// transport must accept identically. Mirrors
-/// `operation_carries_callable_code_meta` in `src/application_surface.rs`; the
+/// the `HttpPageProjection::MetaCursor` arm of `http_page_projection` in
+/// `src/application_surface.rs`; the
 /// drift guard below fails as soon as one of them stops being pinned, stops
 /// binding a surface, or stops advertising its cursor over MCP.
 const CURSOR_CARRYING_CODE_OPERATIONS: [ApplicationSurfaceOperation; 14] = [
@@ -221,7 +222,7 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
         .expect("application catalog");
     let resolver = CatalogBindingResolver::new(&catalog);
 
-    for operation in APPLICATION_SURFACE_OPERATIONS {
+    for operation in ApplicationSurfaceOperation::ALL {
         let expected = &fixture["operations"][operation.as_str()];
         if !expected.is_object() {
             assert!(
@@ -313,7 +314,7 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
 #[test]
 fn the_parity_golden_accounts_for_every_catalog_operation() {
     let fixture = parity_fixture();
-    let catalog: BTreeSet<&str> = APPLICATION_SURFACE_OPERATIONS
+    let catalog: BTreeSet<&str> = ApplicationSurfaceOperation::ALL
         .iter()
         .map(|operation| operation.as_str())
         .collect();

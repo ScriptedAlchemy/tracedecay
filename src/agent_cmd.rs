@@ -144,6 +144,7 @@ pub(crate) async fn handle_host_bundle_component_command(
                 &options,
                 &home,
                 &lifecycle_root,
+                &ComponentSetApplyContext::resolved(),
             )?;
         }
     }
@@ -684,6 +685,49 @@ fn recover_pending_component_set_journal(
         .map_err(|error| host_bundle_error_for_agent(agent_id, error))
 }
 
+/// How one component-set apply reaches the outside world: which `tracedecay`
+/// binary the written registrations invoke, and whether the dashboard component
+/// is registered alongside them.
+///
+/// Both knobs were previously spelled as a telescoping chain of forwarding
+/// overloads (`_with_dashboard`, `_with_tracedecay_bin`,
+/// `_with_tracedecay_bin_and_dashboard`), so every caller had to know which rung
+/// defaulted which knob. Naming them once keeps
+/// [`apply_canonical_component_set`] a single entry point whose defaults are
+/// chosen by the constructor the caller names.
+#[derive(Clone, Debug)]
+struct ComponentSetApplyContext {
+    tracedecay_bin: String,
+    dashboard: bool,
+}
+
+impl ComponentSetApplyContext {
+    /// The production context: the resolved installed binary, dashboard on.
+    fn resolved() -> Self {
+        Self::resolved_with_dashboard(true)
+    }
+
+    /// The production binary with the dashboard registration decided by the
+    /// caller, which is what the lifecycle commands pass through from
+    /// `--no-dashboard` and the per-agent dashboard policy.
+    fn resolved_with_dashboard(dashboard: bool) -> Self {
+        Self {
+            tracedecay_bin: tracedecay::agents::which_tracedecay()
+                .unwrap_or_else(|| "tracedecay".to_string()),
+            dashboard,
+        }
+    }
+
+    /// A pinned fixture binary, dashboard on exactly as in production.
+    #[cfg(test)]
+    fn with_tracedecay_bin(tracedecay_bin: &str) -> Self {
+        Self {
+            tracedecay_bin: tracedecay_bin.to_string(),
+            dashboard: true,
+        }
+    }
+}
+
 fn apply_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
@@ -691,73 +735,13 @@ fn apply_canonical_component_set(
     options: &crate::cli::HostBundleCliOptions,
     home: &Path,
     lifecycle_root: &Path,
+    context: &ComponentSetApplyContext,
 ) -> tracedecay::errors::Result<()> {
-    apply_canonical_component_set_with_dashboard(
-        agent_id,
-        operation,
-        component_set,
-        options,
-        home,
-        lifecycle_root,
-        true,
-    )
-}
-
-fn apply_canonical_component_set_with_dashboard(
-    agent_id: &str,
-    operation: HostBundleCliOperation,
-    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
-    options: &crate::cli::HostBundleCliOptions,
-    home: &Path,
-    lifecycle_root: &Path,
-    dashboard: bool,
-) -> tracedecay::errors::Result<()> {
-    let tracedecay_bin =
-        tracedecay::agents::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
-    apply_canonical_component_set_with_tracedecay_bin_and_dashboard(
-        agent_id,
-        operation,
-        component_set,
-        options,
-        home,
-        lifecycle_root,
-        &tracedecay_bin,
-        dashboard,
-    )
-}
-
-#[cfg(test)]
-fn apply_canonical_component_set_with_tracedecay_bin(
-    agent_id: &str,
-    operation: HostBundleCliOperation,
-    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
-    options: &crate::cli::HostBundleCliOptions,
-    home: &Path,
-    lifecycle_root: &Path,
-    tracedecay_bin: &str,
-) -> tracedecay::errors::Result<()> {
-    apply_canonical_component_set_with_tracedecay_bin_and_dashboard(
-        agent_id,
-        operation,
-        component_set,
-        options,
-        home,
-        lifecycle_root,
+    let ComponentSetApplyContext {
         tracedecay_bin,
-        true,
-    )
-}
-
-fn apply_canonical_component_set_with_tracedecay_bin_and_dashboard(
-    agent_id: &str,
-    operation: HostBundleCliOperation,
-    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
-    options: &crate::cli::HostBundleCliOptions,
-    home: &Path,
-    lifecycle_root: &Path,
-    tracedecay_bin: &str,
-    dashboard: bool,
-) -> tracedecay::errors::Result<()> {
+        dashboard,
+    } = context;
+    let dashboard = *dashboard;
     let request = component_set_request(
         component_set,
         operation,
@@ -849,15 +833,10 @@ fn apply_canonical_component_set_with_tracedecay_bin_and_dashboard(
     Ok(())
 }
 
+/// Apply the agent's default component set. `dashboard` decides whether the
+/// dashboard component is registered with it; uninstall paths pass `true`
+/// because removal must cover everything an install could have written.
 fn apply_default_canonical_component_set(
-    agent_id: &str,
-    operation: HostBundleCliOperation,
-    home: &Path,
-) -> tracedecay::errors::Result<()> {
-    apply_default_canonical_component_set_with_dashboard(agent_id, operation, home, true)
-}
-
-fn apply_default_canonical_component_set_with_dashboard(
     agent_id: &str,
     operation: HostBundleCliOperation,
     home: &Path,
@@ -879,7 +858,7 @@ fn apply_default_canonical_component_set_with_dashboard(
         .map_err(|error| tracedecay::errors::TraceDecayError::Config {
             message: format!("could not resolve host lifecycle root: {error}"),
         })?;
-    apply_canonical_component_set_with_dashboard(
+    apply_canonical_component_set(
         agent_id,
         operation,
         &component_set,
@@ -891,7 +870,7 @@ fn apply_default_canonical_component_set_with_dashboard(
         },
         home,
         &lifecycle_root,
-        dashboard,
+        &ComponentSetApplyContext::resolved_with_dashboard(dashboard),
     )?;
     Ok(())
 }
@@ -2717,7 +2696,7 @@ pub(crate) async fn handle_install_command(
             dashboard: !no_dashboard,
         };
         prepare_native_activation_if_needed(ag.as_ref(), &context)?;
-        apply_default_canonical_component_set_with_dashboard(
+        apply_default_canonical_component_set(
             &id,
             HostBundleCliOperation::Install,
             &home,
@@ -2746,7 +2725,12 @@ pub(crate) async fn handle_install_command(
 
         for id in &to_uninstall {
             let ag = tracedecay::agents::get_integration(id)?;
-            apply_default_canonical_component_set(id, HostBundleCliOperation::Uninstall, &home)?;
+            apply_default_canonical_component_set(
+                id,
+                HostBundleCliOperation::Uninstall,
+                &home,
+                true,
+            )?;
             removed_names.push(ag.name().to_string());
             user_cfg.installed_agents.retain(|a| a != id);
             user_cfg.agent_dashboard_enabled.remove(id);
@@ -2761,7 +2745,7 @@ pub(crate) async fn handle_install_command(
                 dashboard: !no_dashboard,
             };
             prepare_native_activation_if_needed(ag.as_ref(), &context)?;
-            apply_default_canonical_component_set_with_dashboard(
+            apply_default_canonical_component_set(
                 id,
                 HostBundleCliOperation::Install,
                 &home,
@@ -2899,7 +2883,7 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
             dashboard,
         };
         prepare_native_activation_if_needed(integration.as_ref(), &context)?;
-        apply_default_canonical_component_set_with_dashboard(
+        apply_default_canonical_component_set(
             id,
             HostBundleCliOperation::Update,
             &home,
@@ -3166,7 +3150,7 @@ async fn reinstall_agent_integrations_with_dashboard_policies(
             results.push((id.clone(), Err(error)));
             continue;
         }
-        match apply_default_canonical_component_set_with_dashboard(
+        match apply_default_canonical_component_set(
             id,
             HostBundleCliOperation::Repair,
             home,
@@ -3196,7 +3180,7 @@ pub(crate) async fn handle_uninstall_command(
     let mut user_cfg = load_host_lifecycle_user_config()?;
 
     if let Some(id) = agent {
-        apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)?;
+        apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home, true)?;
         user_cfg.installed_agents.retain(|a| a != &id);
         user_cfg.agent_dashboard_enabled.remove(&id);
         user_cfg
@@ -3206,7 +3190,12 @@ pub(crate) async fn handle_uninstall_command(
             })?;
     } else {
         for id in user_cfg.installed_agents.clone() {
-            apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)?;
+            apply_default_canonical_component_set(
+                &id,
+                HostBundleCliOperation::Uninstall,
+                &home,
+                true,
+            )?;
         }
         user_cfg.installed_agents.clear();
         user_cfg.agent_dashboard_enabled.clear();
@@ -3230,12 +3219,12 @@ mod tests {
     };
 
     use super::{
-        AgentReinstallOutcome, CatalogHostComponentRegistrationAuthority, HostBundleCliOperation,
-        apply_canonical_component_set, apply_canonical_component_set_with_tracedecay_bin,
-        apply_default_canonical_component_set_with_dashboard,
-        broker_codex_daemon_automation_project, canonical_host_component_set,
-        canonical_host_component_set_with_tracedecay_bin, component_set_request,
-        reinstall_agent_integrations, reinstall_agent_integrations_with_dashboard_policies,
+        AgentReinstallOutcome, CatalogHostComponentRegistrationAuthority, ComponentSetApplyContext,
+        HostBundleCliOperation, apply_canonical_component_set,
+        apply_default_canonical_component_set, broker_codex_daemon_automation_project,
+        canonical_host_component_set, canonical_host_component_set_with_tracedecay_bin,
+        component_set_request, reinstall_agent_integrations,
+        reinstall_agent_integrations_with_dashboard_policies,
     };
     use tracedecay::agents::host_bundle_v2::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
@@ -3959,6 +3948,7 @@ esac
             &options,
             home.path(),
             lifecycle.path(),
+            &ComponentSetApplyContext::resolved(),
         )
         .unwrap();
 
@@ -4020,6 +4010,7 @@ esac
             &options,
             home.path(),
             lifecycle.path(),
+            &ComponentSetApplyContext::resolved(),
         )
         .unwrap();
         assert_opencode_non_context_state(&preserved);
@@ -4031,6 +4022,7 @@ esac
             &options,
             home.path(),
             lifecycle.path(),
+            &ComponentSetApplyContext::resolved(),
         )
         .unwrap();
         assert_opencode_non_context_state(&preserved);
@@ -4073,14 +4065,14 @@ esac
             HostBundleCliOperation::Repair,
             HostBundleCliOperation::Repair,
         ] {
-            apply_canonical_component_set_with_tracedecay_bin(
+            apply_canonical_component_set(
                 "kiro",
                 operation,
                 &component_set,
                 &options,
                 home.path(),
                 lifecycle.path(),
-                KIRO_FIXTURE_BIN,
+                &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
             )
             .unwrap_or_else(|error| panic!("kiro {operation:?} must apply cleanly: {error}"));
         }
@@ -4164,14 +4156,14 @@ esac
         );
 
         // The next non-interactive run must clear the residue by itself.
-        apply_canonical_component_set_with_tracedecay_bin(
+        apply_canonical_component_set(
             "kiro",
             HostBundleCliOperation::Repair,
             &component_set,
             &options,
             home.path(),
             lifecycle.path(),
-            KIRO_FIXTURE_BIN,
+            &ComponentSetApplyContext::with_tracedecay_bin(KIRO_FIXTURE_BIN),
         )
         .expect("a leftover journal must be recovered, not turned into a permanent refusal");
 
@@ -4739,14 +4731,14 @@ esac
             HostBundleCliOperation::Repair,
             HostBundleCliOperation::Uninstall,
         ] {
-            apply_canonical_component_set_with_tracedecay_bin(
+            apply_canonical_component_set(
                 "opencode",
                 operation,
                 &core_set,
                 &options,
                 home.path(),
                 lifecycle.path(),
-                &tracedecay_bin,
+                &ComponentSetApplyContext::with_tracedecay_bin(&tracedecay_bin),
             )
             .unwrap();
             let config: serde_json::Value =
@@ -4826,14 +4818,14 @@ esac
                 HostBundleCliOperation::Update,
                 HostBundleCliOperation::Repair,
             ] {
-                apply_canonical_component_set_with_tracedecay_bin(
+                apply_canonical_component_set(
                     "kiro",
                     operation,
                     &component_set,
                     &options,
                     home.path(),
                     lifecycle.path(),
-                    &tracedecay_bin,
+                    &ComponentSetApplyContext::with_tracedecay_bin(&tracedecay_bin),
                 )
                 .unwrap_or_else(|error| {
                     panic!(
@@ -4866,14 +4858,14 @@ esac
                 );
             }
 
-            apply_canonical_component_set_with_tracedecay_bin(
+            apply_canonical_component_set(
                 "kiro",
                 HostBundleCliOperation::Uninstall,
                 &component_set,
                 &options,
                 home.path(),
                 lifecycle.path(),
-                &tracedecay_bin,
+                &ComponentSetApplyContext::with_tracedecay_bin(&tracedecay_bin),
             )
             .unwrap();
             match &existing {
@@ -5004,14 +4996,14 @@ esac
         // Fail the transaction after registration has already been applied, so
         // it rolls back and leaves the journal exactly as the live defect did.
         let failure = EnvVarGuard::set("TRACEDECAY_TEST_FAIL_HOST_REGISTRATION_VERIFY", "1");
-        apply_canonical_component_set_with_tracedecay_bin(
+        apply_canonical_component_set(
             "kiro",
             HostBundleCliOperation::Install,
             &component_set,
             &options,
             home.path(),
             lifecycle.path(),
-            &tracedecay_bin,
+            &ComponentSetApplyContext::with_tracedecay_bin(&tracedecay_bin),
         )
         .unwrap_err();
         drop(failure);
@@ -5020,14 +5012,14 @@ esac
             "the failed apply must leave its reconciliation boundary behind"
         );
 
-        apply_canonical_component_set_with_tracedecay_bin(
+        apply_canonical_component_set(
             "kiro",
             HostBundleCliOperation::Install,
             &component_set,
             &options,
             home.path(),
             lifecycle.path(),
-            &tracedecay_bin,
+            &ComponentSetApplyContext::with_tracedecay_bin(&tracedecay_bin),
         )
         .expect("the next apply must recover the wedged journal before mutating");
         assert!(pending_journal().is_none());
@@ -5069,6 +5061,7 @@ esac
             &options,
             home.path(),
             lifecycle.path(),
+            &ComponentSetApplyContext::resolved(),
         )
         .unwrap_err();
 
@@ -5334,28 +5327,28 @@ esac
             yes: true,
             adopt: false,
         };
-        apply_canonical_component_set_with_tracedecay_bin(
+        apply_canonical_component_set(
             "codex",
             HostBundleCliOperation::Install,
             &component_set,
             &options,
             home.path(),
             lifecycle.path(),
-            tracedecay_bin,
+            &ComponentSetApplyContext::with_tracedecay_bin(tracedecay_bin),
         )
         .unwrap();
         assert!(source_manifest.is_file());
 
         std::fs::remove_file(config_path).unwrap();
         std::fs::remove_dir_all(cache_root).unwrap();
-        apply_canonical_component_set_with_tracedecay_bin(
+        apply_canonical_component_set(
             "codex",
             HostBundleCliOperation::Uninstall,
             &component_set,
             &options,
             home.path(),
             lifecycle.path(),
-            tracedecay_bin,
+            &ComponentSetApplyContext::with_tracedecay_bin(tracedecay_bin),
         )
         .unwrap();
         assert!(
@@ -5403,6 +5396,7 @@ esac
                 &options,
                 home.path(),
                 lifecycle.path(),
+                &ComponentSetApplyContext::resolved(),
             )
             .unwrap_err()
             .to_string();
@@ -5562,14 +5556,14 @@ esac
             .into_owned();
         let plugin = home.path().join(".hermes/plugins/tracedecay");
 
-        apply_default_canonical_component_set_with_dashboard(
+        apply_default_canonical_component_set(
             "hermes",
             HostBundleCliOperation::Install,
             home.path(),
             false,
         )
         .unwrap();
-        apply_default_canonical_component_set_with_dashboard(
+        apply_default_canonical_component_set(
             "hermes",
             HostBundleCliOperation::Update,
             home.path(),

@@ -138,12 +138,6 @@ const MAX_REQUEST_HANDLE_BYTES: usize = 256;
 /// family; surface bindings decide which transports expose each operation.
 pub use tracedecay_api::HttpApplicationOperation as ApplicationSurfaceOperation;
 
-/// Compatibility export for existing callers. The array is the canonical
-/// operation authority's list, not a second root-owned registry.
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation;
-    tracedecay_api::HttpApplicationOperation::ALL.len()] =
-    tracedecay_api::HttpApplicationOperation::ALL;
-
 /// Transport keys every surface adapter accepts but no reviewed application
 /// request schema declares. `format` selects the rendered output and
 /// `__mcp_request_id` carries protocol identity; both are stripped here so
@@ -831,52 +825,33 @@ fn application_invoker_for_surface(
             .any(is_configuration_operation))
     .then(|| build_configuration_wire_schema_registry(composition.snapshot()))
     .transpose()?;
-    if surface == BindingSurface::Http {
-        for operation in HttpApplicationOperation::ALL {
-            if !operation.is_http_exposed() {
-                continue;
-            }
-            let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
-                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-            };
-            if is_configuration_operation(operation)
-                && configuration_schemas
-                    .as_ref()
-                    .and_then(|schemas| schemas.get(&binding.binding_id))
-                    .is_none()
-            {
-                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-            }
-        }
+    // The HTTP mount is the whole canonical operation family by definition, so
+    // it validates the authority's own list and ignores the caller's; every
+    // other surface validates exactly the operations its caller declared.
+    let operations: &[ApplicationSurfaceOperation] = if surface == BindingSurface::Http {
+        &HttpApplicationOperation::ALL
     } else {
-        for operation in required_operations {
-            let Some(binding) = resolve_application_binding(&resolver, surface, *operation) else {
-                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-            };
-            if is_configuration_operation(*operation)
-                && configuration_schemas
-                    .as_ref()
-                    .and_then(|schemas| schemas.get(&binding.binding_id))
-                    .is_none()
-            {
-                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
-            }
+        required_operations
+    };
+    for &operation in operations {
+        // Only the HTTP enumeration walks operations the mount is not meant to
+        // publish; a caller-supplied list is required exactly as it was given.
+        if surface == BindingSurface::Http && !operation.is_http_exposed() {
+            continue;
+        }
+        let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+        };
+        if is_configuration_operation(operation)
+            && configuration_schemas
+                .as_ref()
+                .and_then(|schemas| schemas.get(&binding.binding_id))
+                .is_none()
+        {
+            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         }
     }
     Ok(move |request| invoke_catalog_bound_application_request(request, surface, &composition))
-}
-
-pub fn http_application_invoker(
-    client: crate::daemon_client::DaemonInvocationClient,
-) -> Result<
-    impl Fn(HttpApplicationRequest) -> HttpApplicationInvocationFuture + Clone + Send + Sync + 'static,
-    ApplicationSurfaceAdapterError,
-> {
-    application_invoker_for_surface(
-        Arc::new(client),
-        BindingSurface::Http,
-        &APPLICATION_SURFACE_OPERATIONS,
-    )
 }
 
 pub(crate) async fn invoke_multi_root_surface_request(
@@ -1281,19 +1256,6 @@ const DASHBOARD_FEEDBACK_OPERATIONS: [ApplicationSurfaceOperation; 3] = [
     ApplicationSurfaceOperation::FeedbackList,
 ];
 
-pub fn dashboard_configuration_application_invoker(
-    client: crate::daemon_client::DaemonInvocationClient,
-) -> Result<
-    impl Fn(HttpApplicationRequest) -> HttpApplicationInvocationFuture + Clone + Send + Sync + 'static,
-    ApplicationSurfaceAdapterError,
-> {
-    application_invoker_for_surface(
-        Arc::new(client),
-        BindingSurface::Dashboard,
-        &CONFIGURATION_WIRE_OPERATIONS,
-    )
-}
-
 pub fn http_application_router(
     client: crate::daemon_client::DaemonInvocationClient,
     operation_events: OperationEventAuthority,
@@ -1318,7 +1280,7 @@ pub fn http_application_router_with_executor(
         tracedecay_api::application_router(application_invoker_for_surface(
             executor,
             BindingSurface::Http,
-            &APPLICATION_SURFACE_OPERATIONS,
+            &HttpApplicationOperation::ALL,
         )?)
         .merge(work_router)
         .merge(workflow_router)
@@ -1355,12 +1317,6 @@ pub fn dashboard_work_application_router_with_executor(
     )
 }
 
-pub fn dashboard_configuration_application_router(
-    client: crate::daemon_client::DaemonInvocationClient,
-) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
-    dashboard_configuration_application_router_with_executor(Arc::new(client))
-}
-
 pub fn dashboard_configuration_application_router_with_executor(
     executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
@@ -1376,12 +1332,6 @@ pub fn dashboard_configuration_application_router_with_executor(
             application_http_context,
         )),
     )
-}
-
-pub fn dashboard_feedback_application_router(
-    client: crate::daemon_client::DaemonInvocationClient,
-) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
-    dashboard_feedback_application_router_with_executor(Arc::new(client))
 }
 
 pub fn dashboard_feedback_application_router_with_executor(
@@ -2395,24 +2345,6 @@ pub(crate) fn application_surface_catalog_ref()
 
 pub fn application_surface_catalog() -> Result<CatalogSnapshotV1, ApplicationSurfaceAdapterError> {
     application_surface_catalog_ref().cloned()
-}
-
-pub fn application_surface_dispatch_input(
-    operation: ApplicationSurfaceOperation,
-    request_id: RequestId,
-    request: ApplicationSurfaceRequest,
-    requested_format: RequestedOutputFormat,
-) -> Result<DispatchInput<ApplicationSurfaceRequest>, ApplicationSurfaceAdapterError> {
-    let cancellation = CancellationSignal::active(format!("cancellation.{}", request_id.as_str()))?;
-    application_surface_dispatch_input_with_controls(
-        operation,
-        request_id,
-        request,
-        PageRequest::first(DEFAULT_PAGE_SIZE)?,
-        None,
-        cancellation,
-        requested_format,
-    )
 }
 
 pub fn application_surface_dispatch_input_with_controls(
@@ -4044,25 +3976,49 @@ async fn invoke_application_adapter_request(
     )
 }
 
-/// Operations whose decoded surface request carries a [`CallableCodeSurfaceMeta`].
-fn operation_carries_callable_code_meta(operation: ApplicationSurfaceOperation) -> bool {
-    matches!(
-        operation,
+/// Where an HTTP page request lands inside an operation's request body.
+///
+/// The projection follows the request family the operation decodes into in
+/// [`parse_application_surface_request`], which is what decides where the page
+/// controls are readable at all: the callable- and primitive-code families
+/// decode into requests carrying a [`CallableCodeSurfaceMeta`], so a
+/// continuation cursor rides in `meta`; the diagnostics read decodes into a
+/// request whose page controls are plain body fields; nothing else takes page
+/// input from the transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpPageProjection {
+    /// The continuation cursor is written into the request's `meta` object.
+    MetaCursor,
+    /// The page size and cursor are written as top-level body fields.
+    BodyPageControls,
+    /// The operation accepts no page input.
+    Unpaged,
+}
+
+/// The single authority for how an operation receives an HTTP page request.
+///
+/// [`apply_http_page_to_surface_body`] asks this and nothing else, so the
+/// cursor-carrying family and the diagnostics body-field case are stated in one
+/// place instead of a boolean allowlist plus a stray operation comparison.
+fn http_page_projection(operation: ApplicationSurfaceOperation) -> HttpPageProjection {
+    match operation {
         ApplicationSurfaceOperation::CodeExactOccurrence
-            | ApplicationSurfaceOperation::CodePhraseSearch
-            | ApplicationSurfaceOperation::CodeSymbolSearch
-            | ApplicationSurfaceOperation::CodeSignatureSearch
-            | ApplicationSurfaceOperation::CodeImplementations
-            | ApplicationSurfaceOperation::CodeTypeHierarchy
-            | ApplicationSurfaceOperation::CodeCallers
-            | ApplicationSurfaceOperation::CodeCallees
-            | ApplicationSurfaceOperation::CodeFacets
-            | ApplicationSurfaceOperation::CodeTimeline
-            | ApplicationSurfaceOperation::CodeDeclaration
-            | ApplicationSurfaceOperation::CodeDefinition
-            | ApplicationSurfaceOperation::CodeTypeDefinition
-            | ApplicationSurfaceOperation::CodeReferences
-    )
+        | ApplicationSurfaceOperation::CodePhraseSearch
+        | ApplicationSurfaceOperation::CodeSymbolSearch
+        | ApplicationSurfaceOperation::CodeSignatureSearch
+        | ApplicationSurfaceOperation::CodeImplementations
+        | ApplicationSurfaceOperation::CodeTypeHierarchy
+        | ApplicationSurfaceOperation::CodeCallers
+        | ApplicationSurfaceOperation::CodeCallees
+        | ApplicationSurfaceOperation::CodeFacets
+        | ApplicationSurfaceOperation::CodeTimeline
+        | ApplicationSurfaceOperation::CodeDeclaration
+        | ApplicationSurfaceOperation::CodeDefinition
+        | ApplicationSurfaceOperation::CodeTypeDefinition
+        | ApplicationSurfaceOperation::CodeReferences => HttpPageProjection::MetaCursor,
+        ApplicationSurfaceOperation::DiagnosticsRead => HttpPageProjection::BodyPageControls,
+        _ => HttpPageProjection::Unpaged,
+    }
 }
 
 fn apply_http_page_to_surface_body(
@@ -4070,28 +4026,29 @@ fn apply_http_page_to_surface_body(
     mut body: Value,
     page: &PageRequest,
 ) -> Value {
-    if operation_carries_callable_code_meta(operation) {
-        if let Some(meta) = body.get_mut("meta").and_then(Value::as_object_mut)
-            && let Some(cursor) = page.cursor.as_ref()
-        {
-            meta.insert("cursor".to_owned(), Value::from(cursor.as_str()));
+    match http_page_projection(operation) {
+        HttpPageProjection::MetaCursor => {
+            if let Some(meta) = body.get_mut("meta").and_then(Value::as_object_mut)
+                && let Some(cursor) = page.cursor.as_ref()
+            {
+                meta.insert("cursor".to_owned(), Value::from(cursor.as_str()));
+            }
         }
-        return body;
-    }
-    if operation != ApplicationSurfaceOperation::DiagnosticsRead {
-        return body;
-    }
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "maximum_diagnostics".to_owned(),
-            Value::from(page.page_size),
-        );
-        object.insert(
-            "cursor".to_owned(),
-            page.cursor
-                .as_ref()
-                .map_or(Value::Null, |cursor| Value::from(cursor.as_str())),
-        );
+        HttpPageProjection::BodyPageControls => {
+            if let Some(object) = body.as_object_mut() {
+                object.insert(
+                    "maximum_diagnostics".to_owned(),
+                    Value::from(page.page_size),
+                );
+                object.insert(
+                    "cursor".to_owned(),
+                    page.cursor
+                        .as_ref()
+                        .map_or(Value::Null, |cursor| Value::from(cursor.as_str())),
+                );
+            }
+        }
+        HttpPageProjection::Unpaged => {}
     }
     body
 }

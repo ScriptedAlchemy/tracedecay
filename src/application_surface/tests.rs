@@ -21,13 +21,13 @@ use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 use super::handoff::validate_catalog_bindings as validate_handoff_catalog_bindings;
 use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bindings;
 use super::{
-    APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ActiveHttpRequest,
-    ApplicationSurfaceAdapterError, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    CallableCodeSurfaceRequest, ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest,
-    ContextScoutClaimSurfaceRequest, ContextScoutClaimWindowSurfaceV1,
-    ContextScoutControlSurfaceRequest, ContextScoutSurfaceRequest, FeedbackSurfaceRequest,
-    HttpCancellationRegistry, HttpOperationEventState, NativeIntegrationSurfaceRequest,
-    PrimitiveCodeSurfaceRequest, application_http_context, application_negotiated_features,
+    APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, ApplicationSurfaceAdapterError,
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, CallableCodeSurfaceRequest,
+    ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest, ContextScoutClaimSurfaceRequest,
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+    ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
+    HttpOperationEventState, NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
+    application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, invocation_problem,
     normalize_application_tool_args, parse_application_surface_request,
@@ -370,7 +370,7 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
         tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
     )
     .expect("application profile");
-    for operation in APPLICATION_SURFACE_OPERATIONS {
+    for operation in ApplicationSurfaceOperation::ALL {
         let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
             .expect("operation name");
         let resolution_profile = &profile_id;
@@ -418,7 +418,7 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
 #[test]
 fn root_surface_operation_authority_is_the_http_catalog_authority() {
     assert_eq!(
-        APPLICATION_SURFACE_OPERATIONS,
+        ApplicationSurfaceOperation::ALL,
         tracedecay_api::HttpApplicationOperation::ALL
     );
     assert_eq!(

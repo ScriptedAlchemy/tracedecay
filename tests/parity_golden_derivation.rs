@@ -234,7 +234,7 @@ fn dump_code_operation_contracts() {
     .into_iter()
     .chain(out.keys().map(String::as_str))
     .collect();
-    let unpinned: Vec<&str> = tracedecay::application_surface::APPLICATION_SURFACE_OPERATIONS
+    let unpinned: Vec<&str> = tracedecay::application_surface::ApplicationSurfaceOperation::ALL
         .iter()
         .map(|operation| operation.as_str())
         .filter(|operation| !pinned.contains(operation))

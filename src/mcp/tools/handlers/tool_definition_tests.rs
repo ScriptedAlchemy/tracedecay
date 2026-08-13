@@ -366,7 +366,7 @@ fn format_capable_tools_advertise_markdown_json_without_tables() {
 #[test]
 fn every_advertised_application_surface_uses_canonical_output_formats() {
     let tools = get_tool_definitions().expect("tool definitions");
-    for operation in APPLICATION_SURFACE_OPERATIONS {
+    for operation in ApplicationSurfaceOperation::ALL {
         let tool_name = format!("tracedecay_{}", operation.as_str());
         let tool = tools
             .iter()

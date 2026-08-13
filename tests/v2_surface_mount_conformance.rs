@@ -91,7 +91,7 @@ const SANCTIONED_UNMOUNTED: &[(&str, &str)] = &[
 ];
 
 /// The callable-code operations, mirroring the set that
-/// `operation_carries_callable_code_meta` classifies in
+/// `http_page_projection` classifies as `HttpPageProjection::MetaCursor` in
 /// `src/application_surface.rs`.
 ///
 /// These are the operations whose decoded surface request carries callable-code
