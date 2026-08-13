@@ -36,6 +36,8 @@ mod common;
 
 #[path = "work_route_exposure_conformance/work_evidence.rs"]
 mod work_evidence;
+#[path = "work_route_exposure_conformance/work_task_session.rs"]
+mod work_task_session;
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -223,6 +225,41 @@ impl ProductionDaemon {
             self.base_url, self.project_id, route_path
         )
     }
+
+    /// Kills the daemon process and starts a new one over the same profile.
+    ///
+    /// This is a physical restart, not a handle reset: the old process is
+    /// reaped and the published authority record is removed first, so the new
+    /// endpoint and token are the ones this daemon minted rather than a stale
+    /// read of its predecessor's. Everything a journey asserts afterwards was
+    /// therefore reconstructed from durable state.
+    fn restart(&mut self) {
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+        let authority_path = common::daemon_authority_path(&self.profile);
+        let _ = fs::remove_file(&authority_path);
+        let mut daemon = isolated(self.home.path(), &self.profile)
+            .args(["daemon", "run"])
+            .current_dir(&self.project)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("daemon should restart");
+        let authority = wait_for_authority(&mut daemon, &authority_path);
+        let endpoint = authority["http_application_endpoint"]
+            .as_str()
+            .expect("republished HTTP application endpoint")
+            .to_owned();
+        let token = authority["auth_token"]
+            .as_str()
+            .expect("republished auth token")
+            .to_owned();
+        self.daemon = daemon;
+        self.base_url = format!("http://{endpoint}");
+        self.origin = self.base_url.clone();
+        self.authorization = format!("Bearer {token}");
+    }
 }
 
 impl Drop for ProductionDaemon {
@@ -260,6 +297,18 @@ impl DashboardProcess {
         let base_url = read_listening_url(stdout, &mut process);
         Self { process, base_url }
     }
+
+    /// Rebinds the dashboard to a daemon that has just been restarted.
+    ///
+    /// The dashboard resolves the daemon's authority record when it starts, so
+    /// a restarted daemon publishes credentials the running dashboard has
+    /// never seen. Restarting it here keeps the mount honest instead of
+    /// letting a stale forward masquerade as a passing assertion.
+    fn restart(&mut self, fixture: &ProductionDaemon) {
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+        *self = Self::start(fixture);
+    }
 }
 
 impl Drop for DashboardProcess {
@@ -276,6 +325,7 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
     let mut reader = BufReader::new(stdout);
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut seen = String::new();
+    let mut listening = None;
     while Instant::now() < deadline {
         let mut line = String::new();
         match reader.read_line(&mut line) {
@@ -285,11 +335,25 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
                 if let Some(rest) = line.split_once("listening on ")
                     && let Some(url) = rest.1.split_whitespace().next()
                 {
-                    return url.trim_end_matches('/').to_owned();
+                    listening = Some(url.trim_end_matches('/').to_owned());
+                    break;
                 }
             }
             Err(error) => panic!("dashboard stdout failed: {error}\nseen:\n{seen}"),
         }
+    }
+    if let Some(url) = listening {
+        // Keep draining the pipe for the server's whole life. Dropping the read
+        // end here would turn the dashboard's next stdout write into SIGPIPE,
+        // killing the very mount the journey is about to exercise — a failure
+        // that surfaces later as a connection refusal with no cause attached.
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            while matches!(reader.read_line(&mut line), Ok(read) if read > 0) {
+                line.clear();
+            }
+        });
+        return url;
     }
     let mut stderr = String::new();
     if let Some(mut piped) = process.stderr.take() {
@@ -872,6 +936,35 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
             "{label} must not alias product graph tasks into executor topology: {body}"
         );
     }
+}
+
+/// The dashboard Work journey past its verified task root.
+///
+/// `the_work_surface_answers_real_requests_on_both_published_mounts` proves the
+/// TaskId-rooted read at its floor: a task with no accepted attempt, whose only
+/// truthful answer is zero selected sources. The question a dashboard user
+/// actually opens a task to ask — *who worked on this, and in which provider
+/// session* — was never driven on either mount. This runs one real pinned
+/// provider through the production spawn path, links the accepted attempt,
+/// imports the provider transcript, and grades the answer on the daemon mount
+/// and the dashboard mount, in all four temporal modes, across a physical
+/// daemon restart.
+#[cfg(unix)]
+#[test]
+fn the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mounts() {
+    let mut fixture = ProductionDaemon::start();
+    let mut dashboard = DashboardProcess::start(&fixture);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into();
+
+    work_task_session::assert_provider_qualified_task_session_evidence(
+        &agent,
+        &mut fixture,
+        &mut dashboard,
+    );
 }
 
 #[test]
