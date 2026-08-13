@@ -26,6 +26,8 @@ use tracedecay_store::{
     StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
+pub(super) mod mismatch;
+
 #[derive(Debug)]
 struct BenchmarkGraphLease {
     binding: StoreRuntimeBindingV1,
