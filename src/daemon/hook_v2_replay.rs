@@ -973,4 +973,86 @@ mod tests {
             replay_receipt_id(&record, HookSpoolAckDispositionV1::TerminalTombstone)
         );
     }
+
+    /// Drive an actual replay rather than the receipt function alone: a pass
+    /// that never acknowledges (the crash-before-ACK shape) must re-offer the
+    /// identical record identities on the next pass, and an acknowledged
+    /// record must never be offered a third time.
+    #[tokio::test]
+    async fn retained_records_replay_under_the_same_identity_without_double_delivery() {
+        let root = TestRoot::new("replay-identity");
+        let now = UtcMicros(1_000);
+        let binding = binding(7);
+        publish_binding(root.path(), &binding, now);
+        spool_envelopes(
+            root.path(),
+            &binding,
+            &[envelope(9, &binding), envelope(10, &binding)],
+            now,
+        );
+
+        let offered = |seen: &Arc<StdMutex<Vec<[u8; 16]>>>| seen.lock().unwrap().clone();
+
+        // Pass 1: the daemon is unavailable, so nothing is acknowledged.
+        let first_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
+        let recorder = Arc::clone(&first_seen);
+        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+            let recorder = Arc::clone(&recorder);
+            async move {
+                recorder.lock().unwrap().push(envelope.event_id);
+                HookV2AdmissionOutcomeV1::Unavailable
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            report.retained, 2,
+            "an unavailable daemon acknowledges nothing"
+        );
+        assert_eq!(report.committed, 0);
+        assert_eq!(pending_records(root.path(), now), 2);
+
+        // Pass 2: the replay re-offers the same identities and commits them.
+        let second_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
+        let recorder = Arc::clone(&second_seen);
+        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+            let recorder = Arc::clone(&recorder);
+            async move {
+                recorder.lock().unwrap().push(envelope.event_id);
+                admitted()
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(report.committed, 2);
+        assert_eq!(pending_records(root.path(), now), 0);
+
+        assert_eq!(
+            offered(&first_seen),
+            offered(&second_seen),
+            "replay must re-offer the same record identities in the same order"
+        );
+        assert_eq!(offered(&second_seen).len(), 2);
+
+        // Pass 3: an acknowledged record is never redelivered.
+        let third_seen: Arc<StdMutex<Vec<[u8; 16]>>> = Arc::new(StdMutex::new(Vec::new()));
+        let recorder = Arc::clone(&third_seen);
+        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+            let recorder = Arc::clone(&recorder);
+            async move {
+                recorder.lock().unwrap().push(envelope.event_id);
+                admitted()
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            report.committed, 0,
+            "an acknowledged record must never replay a second time"
+        );
+        assert!(
+            offered(&third_seen).is_empty(),
+            "a settled spool offers nothing to admission"
+        );
+    }
 }

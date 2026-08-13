@@ -865,4 +865,160 @@ mod peer_close_tests {
         assert_eq!(fanout.dropped, 0);
         assert_eq!(fanout.unknown, 0);
     }
+
+    /// The peer vanishes after the daemon accepted a Work request but before
+    /// the response reaches the wire. The attempt must settle as a typed drop
+    /// rather than being stranded as unknown or reported as delivered.
+    #[tokio::test]
+    async fn rmcp_peer_disconnect_mid_delivery_settles_dropped_rather_than_unknown() {
+        let fixture = delivery_settlement_fixture().await;
+        let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
+            .with_rmcp_work_delivery_settlement(
+                crate::mcp::server::RmcpWorkDeliverySettlement::new(
+                    Some(Arc::clone(&fixture.recorder)),
+                    "rmcp-transport-disconnect-test".to_owned(),
+                ),
+            );
+        let (client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tracedecay_work_start_attempt","arguments":{}}}
+"#,
+            )
+            .await
+            .expect("Work request");
+        client_writer.flush().await.expect("flush Work request");
+        assert!(
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport
+            )
+            .await
+            .is_some(),
+            "RMCP transport must retain the pending Work response"
+        );
+
+        // The client is gone before the daemon can write its response.
+        drop(client_reader);
+        drop(client_writer);
+
+        let response = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {"content": [{"type": "text", "text": "never observed"}]}
+        }))
+        .expect("typed RMCP Work response");
+        let write = <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
+            &mut transport,
+            response,
+        )
+        .await;
+        assert!(
+            write.is_err(),
+            "a disconnected peer must fail the response write instead of reporting delivery"
+        );
+
+        drop(transport);
+        let fanout = settled_fanout(fixture).await;
+        assert_eq!(
+            fanout.delivered, 0,
+            "a response the client never observed is never delivered"
+        );
+        assert_eq!(
+            fanout.dropped, 1,
+            "disconnect settles the attempt as dropped"
+        );
+        assert_eq!(
+            fanout.unknown, 0,
+            "disconnect settles a typed terminal rather than stranding the attempt"
+        );
+    }
+
+    /// A client cancels an in-flight Work request. The transport must settle
+    /// the pending attempt as a cancelled drop and hand the client a typed
+    /// cancellation, never leaving the attempt open for a later response.
+    #[tokio::test]
+    async fn rmcp_client_cancellation_settles_dropped_without_stranding_the_attempt() {
+        let fixture = delivery_settlement_fixture().await;
+        let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
+            .with_rmcp_work_delivery_settlement(
+                crate::mcp::server::RmcpWorkDeliverySettlement::new(
+                    Some(Arc::clone(&fixture.recorder)),
+                    "rmcp-transport-cancellation-test".to_owned(),
+                ),
+            );
+        let (client_reader, mut client_writer) = client.into_split();
+
+        client_writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tracedecay_work_start_attempt","arguments":{}}}
+"#,
+            )
+            .await
+            .expect("Work request");
+        client_writer.flush().await.expect("flush Work request");
+        assert!(
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport
+            )
+            .await
+            .is_some(),
+            "RMCP transport must retain the pending Work response"
+        );
+
+        client_writer
+            .write_all(
+                br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2,"reason":"client cancelled"}}
+"#,
+            )
+            .await
+            .expect("cancellation notification");
+        client_writer.flush().await.expect("flush cancellation");
+
+        // Settlement happens while the transport observes the notification,
+        // before the message itself is handed to `rmcp`.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
+                &mut transport,
+            ),
+        )
+        .await;
+
+        let mut client_reader = tokio::io::BufReader::new(client_reader);
+        let mut line = String::new();
+        client_reader
+            .read_line(&mut line)
+            .await
+            .expect("flushed cancellation response");
+        let cancelled =
+            serde_json::from_str::<serde_json::Value>(&line).expect("cancellation response JSON");
+        assert_eq!(
+            cancelled["id"],
+            serde_json::json!(2),
+            "the cancelled request must receive its own typed terminal"
+        );
+        assert_eq!(
+            cancelled["error"]["data"]["reason_code"],
+            serde_json::json!("request_cancelled"),
+            "the client must observe a typed cancellation reason"
+        );
+
+        drop(transport);
+        let fanout = settled_fanout(fixture).await;
+        assert_eq!(
+            fanout.delivered, 0,
+            "a cancelled request is never reported as delivered"
+        );
+        assert_eq!(
+            fanout.dropped, 1,
+            "cancellation settles the pending attempt as dropped"
+        );
+        assert_eq!(
+            fanout.unknown, 0,
+            "cancellation settles a typed terminal rather than stranding the attempt"
+        );
+    }
 }
