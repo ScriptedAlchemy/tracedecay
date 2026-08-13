@@ -434,11 +434,18 @@ the commit as attribution evidence.
   broad fact-store router from the tree, so the stale-binary finding is
   code-fixed; the fresh binary build and the eight-check stock rerun remain
   open.
-- Finish the uncommitted provider decoding/materialization work in
-  `github_runtime/stack.rs` using the restored V3 coordinator. Re-run the
-  saturation, restart delivery, identity tamper, authorization, drift,
-  preflight cancellation/bounds, circuit transition, and anchored corpus
-  journeys after the central compile is green.
+- DONE 2026-08-13: the provider decoding/materialization work in
+  `github_runtime/stack.rs` landed committed in `74ebfe3cc` (canonical stack
+  identities) and `92d1d7225` (verified V2 authorities — the restored V3
+  coordinator identity this lane's resume invariants name). Verified: zero
+  stubs, decoded fields materialize through the typed domain snapshot with
+  fail-closed bounds, the production mount runs owner refresh through the
+  daemon advisory runtime, and all eight named journeys pass (13 tests across
+  `github_stack_coordinator`, `github_stack_drift_observability`,
+  `github_stack_anchor_authority`; `advisory` lib suite 84/84). Open
+  decision handed to the daemon lane: `StackSignalKindV1::PotentialConflict`
+  and `::AuthorizationLost` (plus four `StackDriftKindV1` variants) have no
+  producer — decide intended emission scope or retire the variants.
 - Checkpoint the canonical-parent cutover that removes remaining
   `crate::application` facade imports from daemon, project runtime, session
   sync/registry, MCP session retrieval, and root composition. Complete the
@@ -475,6 +482,10 @@ the commit as attribution evidence.
   scoped, and opencode. Do not add Cursor Cloud or expand Kiro scope.
 - Complete the default package/install/start journey. npm OIDC setup is the
   explicit remaining operator-owned publication action.
+- Recorded gap (2026-08-13, non-blocking): `src/doctor.rs:953` self-reports
+  that domain symbol extraction is unimplemented — a loud, safe degradation
+  on the doctor surface, previously untracked here. Decide implement-or-retire
+  before the doctor journey is called complete.
 
 ### Backend performance and final verification
 

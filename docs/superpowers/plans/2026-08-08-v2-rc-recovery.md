@@ -1,5 +1,12 @@
 # TraceDecay V2 RC Recovery Implementation Plan
 
+> **RECONCILED INTO NEXT.md (2026-08-13).** This recovery plan's checkboxes
+> were never ticked here; its live remainder is carried by
+> `docs/plans/tracedecay-v2/NEXT.md` ("Remaining work by lane"), which has
+> been kept current through 2026-08-13. Do not treat the 55 unchecked boxes
+> below as independently open work — consult NEXT.md for what actually
+> remains.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Convert the interrupted Claude checkout into a fully wired, truthfully typed V2 release-candidate branch with direct production-journey and aggregate test evidence.

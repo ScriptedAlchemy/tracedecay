@@ -1,5 +1,15 @@
 # Embedded Grafeo Graph Database Implementation Plan
 
+> **SUPERSEDED BY LANDING (2026-08-13).** The checklist below predates the
+> cutover and was never ticked; the work shipped regardless. Evidence:
+> `crates/tracedecay-graph-db` is a workspace member pinned to Grafeo
+> `=0.5.42` with `generation_runtime.rs` and the sealed-graph state digest;
+> the daemon consumes it through
+> `src/daemon/code_index_scheduler/graph_activation.rs`; and the SQLite graph
+> authority was deleted in `79683eb527`. Treat the unchecked boxes as
+> historical planning, not open work. Residual graph work is tracked in
+> `NEXT.md` (Grafeo memory-relations restart/isolation journey).
+
 **Goal:** Replace custom adjacency structures and graph-shaped SQLite storage with one embedded Grafeo runtime boundary while retaining SQLite only for genuinely relational, transactional, and content-bearing records.
 
 **Architecture:** `tracedecay-graph-db` is the only workspace crate allowed
