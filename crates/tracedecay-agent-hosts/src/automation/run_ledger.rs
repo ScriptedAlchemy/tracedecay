@@ -889,6 +889,12 @@ pub async fn load_run_records_for_task_key(
 /// Loads the complete-ledger scheduler summary for one exact task identity.
 /// The scan retains at most five row projections and fully decodes only their
 /// unique selected records.
+///
+/// Summaries are memoized per `(ledger path, task, task_key)` and validated by
+/// the ledger's length plus a digest of its final bytes, both read while the
+/// exclusive ledger lock is held. Scheduler ticks and dashboard status requests
+/// therefore rescan the ledger only after it actually changed; see
+/// `RUN_LEDGER_SUMMARY_MEMO` for the append-only invariant this relies on.
 pub async fn load_run_ledger_task_summary(
     dashboard_root: &Path,
     task: AgentTaskKind,
@@ -1049,6 +1055,146 @@ fn read_run_records_tail_page_with_filter(
     read_any_run_records_page(&file, path, limit)
 }
 
+/// Maximum distinct `(ledger, task, task_key)` identities retained by the
+/// scheduler summary memo. Bounded so unbounded `user_job:` task keys cannot
+/// grow the process-wide map without limit.
+const RUN_LEDGER_SUMMARY_MEMO_CAPACITY: usize = 64;
+/// Tail window hashed as the memo's content witness alongside the file length.
+const RUN_LEDGER_SUMMARY_TAIL_DIGEST_BYTES: u64 = 4096;
+
+/// Memo key: canonical ledger path, canonical task-kind name, exact task key.
+///
+/// `AgentTaskKind` is defined in `tracedecay-automation` and does not derive
+/// `Hash`, so the kind is keyed by [`canonical_task_key`], which is injective
+/// over the kind enum and therefore carries the same identity.
+type RunLedgerSummaryMemoKey = (PathBuf, &'static str, String);
+
+/// One memoized summary plus the ledger fingerprint it was computed from.
+#[derive(Clone)]
+struct CachedTaskSummary {
+    file_len: u64,
+    tail_digest: String,
+    summary: AutomationRunLedgerTaskSummary,
+}
+
+/// Process-wide memo for [`read_run_ledger_task_summary`].
+///
+/// The scheduler asks for one summary per task on every tick, and the
+/// dashboard scheduler-status endpoint asks several times per request. Each
+/// answer previously walked the entire append-only ledger twice while holding
+/// the exclusive ledger lock, so per-tick cost and lock-hold time grew with
+/// ledger size forever. The memo makes a repeated summary of an unchanged
+/// ledger O(1).
+///
+/// Validation is `(file length, sha256 of the final <= 4 KiB)`:
+/// * Every production mutation of `automation_runs.jsonl` either appends bytes
+///   (`append_jsonl_line_locked`, `exact_publication::publish_under_ledger_lock`
+///   writing from `pre_append_eof`, `scheduler_diagnostic::append_or_reuse_blocking`)
+///   or truncates (`recover_matching_append_intent`'s `set_len(pre_append_eof)`,
+///   `repair_corrupt_append_intent`'s `set_len(clean_eof)`). No path rewrites
+///   bytes in place, and the ledger file is never atomically replaced, so a
+///   changed ledger always changes its length.
+/// * Length alone would still be defeated by a truncate-then-re-append that
+///   happened to land on the same total length across two separate locked
+///   flows, so the tail digest is compared too: a false hit would require an
+///   equal-length ledger whose final 4 KiB are byte-identical yet whose
+///   selected rows differ, which append-only framing does not produce.
+/// * Both the length and the digest are read from the same open handle while
+///   the caller holds the exclusive ledger lock (`with_run_ledger_read_lock`),
+///   which also serializes cross-process writers, so there is no TOCTOU window
+///   between validating the fingerprint and returning the memoized summary.
+static RUN_LEDGER_SUMMARY_MEMO: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<RunLedgerSummaryMemoKey, CachedTaskSummary>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+thread_local! {
+    /// Memo hits observed on the calling thread. Thread-local so tests running
+    /// in parallel only ever observe their own summary reads.
+    static RUN_LEDGER_SUMMARY_MEMO_HITS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn run_ledger_summary_memo() -> std::sync::MutexGuard<
+    'static,
+    std::collections::HashMap<RunLedgerSummaryMemoKey, CachedTaskSummary>,
+> {
+    let memo = RUN_LEDGER_SUMMARY_MEMO
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    // The map holds only plain data, so a poisoned lock leaves no broken
+    // invariant to recover from.
+    match memo.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Memo hits observed by this thread so far; tests compare the value across a
+/// pair of reads to assert that an unchanged ledger is answered without a scan.
+#[cfg(test)]
+fn run_ledger_summary_memo_hits() -> u64 {
+    RUN_LEDGER_SUMMARY_MEMO_HITS.with(std::cell::Cell::get)
+}
+
+fn run_ledger_summary_memo_key(
+    path: &Path,
+    task: AgentTaskKind,
+    requested_task_key: &str,
+) -> RunLedgerSummaryMemoKey {
+    let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    (
+        canonical_path,
+        canonical_task_key(task),
+        requested_task_key.to_owned(),
+    )
+}
+
+/// Hashes the final `min(len, 4 KiB)` bytes of the ledger. Readers always seek
+/// before reading, so moving this handle's cursor is safe for later scans.
+fn run_ledger_summary_tail_digest(file: &std::fs::File, file_len: u64) -> Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let window = file_len.min(RUN_LEDGER_SUMMARY_TAIL_DIGEST_BYTES);
+    let Ok(window_len) = usize::try_from(window) else {
+        return Err(config_error(
+            "automation run ledger tail window exceeds addressable memory",
+        ));
+    };
+    let mut handle = file;
+    handle
+        .seek(SeekFrom::Start(file_len.saturating_sub(window)))
+        .map_err(TraceDecayError::from)?;
+    let mut tail = vec![0_u8; window_len];
+    handle
+        .read_exact(&mut tail)
+        .map_err(TraceDecayError::from)?;
+    Ok(super::artifact_refs::sha256_bytes(&tail))
+}
+
+fn cached_run_ledger_task_summary(
+    key: &RunLedgerSummaryMemoKey,
+    file_len: u64,
+    tail_digest: &str,
+) -> Option<AutomationRunLedgerTaskSummary> {
+    let memo = run_ledger_summary_memo();
+    let cached = memo.get(key)?;
+    (cached.file_len == file_len && cached.tail_digest == tail_digest).then(|| {
+        #[cfg(test)]
+        RUN_LEDGER_SUMMARY_MEMO_HITS.with(|hits| hits.set(hits.get().saturating_add(1)));
+        cached.summary.clone()
+    })
+}
+
+fn store_run_ledger_task_summary(key: RunLedgerSummaryMemoKey, cached: CachedTaskSummary) {
+    let mut memo = run_ledger_summary_memo();
+    if memo.len() >= RUN_LEDGER_SUMMARY_MEMO_CAPACITY && !memo.contains_key(&key) {
+        // Arbitrary eviction: every entry is equally cheap to recompute.
+        if let Some(evicted) = memo.keys().next().cloned() {
+            memo.remove(&evicted);
+        }
+    }
+    memo.insert(key, cached);
+}
+
 #[derive(Default)]
 struct TaskSummarySpans {
     latest_logical_activity: Option<exact_lookup::RunLedgerRowProjection>,
@@ -1066,6 +1212,15 @@ fn read_run_ledger_task_summary(
     let Some(file) = exact_lookup::open_stabilized_run_ledger(path, false)? else {
         return Ok(AutomationRunLedgerTaskSummary::default());
     };
+    // Answer an unchanged ledger from the memo instead of rescanning it. See
+    // `RUN_LEDGER_SUMMARY_MEMO` for why `(len, tail digest)` read under the
+    // exclusive ledger lock is a sound witness of unchanged content.
+    let file_len = file.metadata().map_err(TraceDecayError::from)?.len();
+    let tail_digest = run_ledger_summary_tail_digest(&file, file_len)?;
+    let memo_key = run_ledger_summary_memo_key(path, task, requested_task_key);
+    if let Some(summary) = cached_run_ledger_task_summary(&memo_key, file_len, &tail_digest) {
+        return Ok(summary);
+    }
     let mut rows = exact_lookup::ForwardJsonlScanner::new(&file, path)?;
     let mut selected = TaskSummarySpans::default();
     while let Some(line) = rows.next_span()? {
@@ -1110,7 +1265,17 @@ fn read_run_ledger_task_summary(
     .collect::<std::collections::HashSet<_>>();
     let lifecycles =
         exact_lookup::read_logical_run_lifecycles(&file, path, &selected_run_ids, true)?;
-    decode_task_summary(&file, path, task, requested_task_key, selected, &lifecycles)
+    let summary =
+        decode_task_summary(&file, path, task, requested_task_key, selected, &lifecycles)?;
+    store_run_ledger_task_summary(
+        memo_key,
+        CachedTaskSummary {
+            file_len,
+            tail_digest,
+            summary: summary.clone(),
+        },
+    );
+    Ok(summary)
 }
 
 fn select_summary_projection(
@@ -1627,6 +1792,97 @@ mod tests {
     }
 
     #[test]
+    fn blank_line_between_rows_is_skipped_across_tail_page_append_and_summary() {
+        // A blank line between two committed rows must not be fatal:
+        // consecutive newlines (e.g. from an operator edit or a legacy
+        // writer) are benign and the pre-rewrite parser explicitly skipped
+        // them. Regression coverage for the scan_jsonl_row fix (Finding 1).
+        let row1 = ledger_line("run-blank-between-a", 100);
+        let row2 = ledger_line("run-blank-between-b", 200);
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        std::fs::write(&path, format!("{row1}\n\n{row2}\n")).unwrap();
+
+        let page = read_run_records_tail_page_with_window(&path, 8, 64).unwrap();
+        let ids: Vec<&str> = page.records.iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, ["run-blank-between-b", "run-blank-between-a"]);
+
+        let appended = ledger_line("run-blank-between-c", 300);
+        append_jsonl_line_locked(&path, &appended).unwrap();
+        let ledger = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(ledger.matches("run-blank-between-c").count(), 1);
+
+        let summary =
+            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
+                .unwrap();
+        assert_eq!(
+            summary.latest_logical_activity().unwrap().run_id,
+            "run-blank-between-c"
+        );
+    }
+
+    #[test]
+    fn trailing_blank_line_is_skipped_across_tail_page_append_and_summary() {
+        // A ledger ending in a trailing blank line ("{row}\n\n") must not
+        // permanently break every scan. Regression coverage for the
+        // scan_jsonl_row fix (Finding 1).
+        let row = ledger_line("run-blank-trailing-a", 100);
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        std::fs::write(&path, format!("{row}\n\n")).unwrap();
+
+        let page = read_run_records_tail_page_with_window(&path, 8, 64).unwrap();
+        let ids: Vec<&str> = page.records.iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, ["run-blank-trailing-a"]);
+
+        let appended = ledger_line("run-blank-trailing-b", 200);
+        append_jsonl_line_locked(&path, &appended).unwrap();
+        let ledger = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(ledger.matches("run-blank-trailing-b").count(), 1);
+
+        let summary =
+            read_run_ledger_task_summary(&path, AgentTaskKind::MemoryCurator, "memory_curator")
+                .unwrap();
+        assert_eq!(
+            summary.latest_logical_activity().unwrap().run_id,
+            "run-blank-trailing-b"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_line_is_skipped_by_the_reverse_page_scan() {
+        // A pure "\n\n" blank line is absorbed by ReverseJsonlScanner's
+        // newline trimming and never reaches scan_jsonl_row, so the two
+        // blank-line tests above exercise the Finding-1 fix only through
+        // ForwardJsonlScanner (append + summary). A whitespace-only line
+        // with non-newline bytes ("   \n") DOES reach scan_jsonl_row from
+        // the reverse scanner; it must be skipped as benign, not counted
+        // as malformed and not treated as fatal.
+        let row1 = ledger_line("run-ws-line-a", 100);
+        let row2 = ledger_line("run-ws-line-b", 200);
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        std::fs::write(&path, format!("{row1}\n   \n{row2}\n")).unwrap();
+
+        let page = read_run_records_tail_page_with_window(&path, 8, 64).unwrap();
+        let ids: Vec<&str> = page.records.iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, ["run-ws-line-b", "run-ws-line-a"]);
+        assert_eq!(page.malformed_row_count, 0);
+        assert!(!page.has_more);
+
+        // The filtered (two-pass) reader also traverses the whitespace row
+        // through both scanners and must stay fail-open for it.
+        let filtered = read_run_records_tail_with_filter(
+            &path,
+            8,
+            64,
+            &RunRecordFilter::TaskKey("memory_curator".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
     fn page_counts_projection_valid_malformed_duplicate_before_limit() {
         let malformed_duplicate = "{\"schema_version\":2,\"run_id\":\"duplicate\",\"trigger\":\"scheduler\",\"task\":\"memory_curator\",\"status\":\"succeeded\"}";
         let lines = vec![
@@ -1951,6 +2207,118 @@ mod tests {
         let path = temp.path().join(RUN_LEDGER_FILENAME);
         append_jsonl_line_locked(&path, &queued).unwrap();
         assert!(append_jsonl_line_locked(&path, &running).is_err());
+    }
+
+    /// Reads a summary and reports whether the memo answered it.
+    fn summary_with_memo_hit(
+        path: &Path,
+        task: AgentTaskKind,
+        task_key: &str,
+    ) -> (AutomationRunLedgerTaskSummary, bool) {
+        let before = run_ledger_summary_memo_hits();
+        let summary = read_run_ledger_task_summary(path, task, task_key).unwrap();
+        (summary, run_ledger_summary_memo_hits() > before)
+    }
+
+    #[test]
+    fn task_summary_memo_answers_unchanged_ledger_without_rescanning() {
+        let (_temp, path) = write_ledger(&[ledger_line("memo-a", 100)]);
+
+        let (first, first_hit) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+        let (second, second_hit) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+
+        assert!(!first_hit, "first read must compute the summary");
+        assert!(
+            second_hit,
+            "unchanged ledger must be answered from the memo"
+        );
+        assert_eq!(first.records().len(), second.records().len());
+        assert_eq!(
+            first.latest_successful().unwrap().run_id,
+            second.latest_successful().unwrap().run_id
+        );
+        assert_eq!(second.latest_successful().unwrap().run_id, "memo-a");
+    }
+
+    #[test]
+    fn task_summary_memo_is_invalidated_by_an_append() {
+        let (_temp, path) = write_ledger(&[ledger_line("memo-old", 100)]);
+
+        let (before, _) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+        assert_eq!(before.latest_successful().unwrap().run_id, "memo-old");
+        append_jsonl_line_locked(&path, &ledger_line("memo-new", 200)).unwrap();
+        let (after, after_hit) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+
+        assert!(!after_hit, "an appended row must invalidate the memo");
+        assert_eq!(after.latest_successful().unwrap().run_id, "memo-new");
+        assert_eq!(after.latest_logical_activity().unwrap().run_id, "memo-new");
+    }
+
+    #[test]
+    fn task_summary_memo_is_invalidated_by_a_truncation() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let kept = ledger_line("memo-kept", 100);
+        let dropped = ledger_line("memo-dropped", 200);
+        std::fs::write(&path, format!("{kept}\n{dropped}\n")).unwrap();
+
+        let (before, _) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+        assert_eq!(before.latest_successful().unwrap().run_id, "memo-dropped");
+        // Recovery truncates the ledger back to a durable prefix.
+        std::fs::write(&path, format!("{kept}\n")).unwrap();
+        let (after, after_hit) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+
+        assert!(!after_hit, "a truncated ledger must invalidate the memo");
+        assert_eq!(after.latest_successful().unwrap().run_id, "memo-kept");
+    }
+
+    #[test]
+    fn task_summary_memo_is_invalidated_by_an_equal_length_rewrite() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join(RUN_LEDGER_FILENAME);
+        let original = ledger_line("memo-rewrite-a", 100);
+        let rewritten = ledger_line("memo-rewrite-b", 100);
+        assert_eq!(original.len(), rewritten.len());
+        std::fs::write(&path, format!("{original}\n")).unwrap();
+
+        let (before, _) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+        assert_eq!(before.latest_successful().unwrap().run_id, "memo-rewrite-a");
+        std::fs::write(&path, format!("{rewritten}\n")).unwrap();
+        let (after, after_hit) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+
+        assert!(
+            !after_hit,
+            "an equal-length rewrite must be caught by the tail digest"
+        );
+        assert_eq!(after.latest_successful().unwrap().run_id, "memo-rewrite-b");
+    }
+
+    #[test]
+    fn task_summary_memo_keys_distinguish_task_identities() {
+        let curator = ledger_line("memo-curator", 100);
+        let reflector = ledger_line("memo-reflector", 200)
+            .replace("\"memory_curator\"", "\"session_reflector\"");
+        let (_temp, path) = write_ledger(&[curator, reflector]);
+
+        let (first, _) =
+            summary_with_memo_hit(&path, AgentTaskKind::MemoryCurator, "memory_curator");
+        let (second, second_hit) =
+            summary_with_memo_hit(&path, AgentTaskKind::SessionReflector, "session_reflector");
+
+        assert!(
+            !second_hit,
+            "a different task identity must not reuse another memo entry"
+        );
+        assert_eq!(first.latest_successful().unwrap().run_id, "memo-curator");
+        assert_eq!(second.latest_successful().unwrap().run_id, "memo-reflector");
     }
 
     #[test]
