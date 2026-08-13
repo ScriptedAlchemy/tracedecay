@@ -172,6 +172,15 @@ impl CredentialPattern {
     /// sanitizer must not leave secret bytes behind, and the context a rule
     /// matched on is itself worth removing.
     pub fn ranges(&self, text: &str) -> Vec<Range<usize>> {
+        // Same keyword gate as `is_match`, and for the same reason: some
+        // rules (`sourcegraph-access-token` among them) accept a bare match
+        // that is only safe when their keyword precondition holds.
+        // `redact_text` calls `ranges` directly, bypassing `is_match`, so the
+        // gate has to live here too or a keyword-gated rule fires unguarded
+        // on every caller that doesn't separately check `is_match` first.
+        if !self.keywords_present(text) {
+            return Vec::new();
+        }
         if let Some(min_len) = self.assignment_min_len {
             return credential_assignment_ranges(
                 text,
@@ -1267,6 +1276,24 @@ mod tests {
 
         assert!(!sourcegraph.is_match("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"));
         assert!(sourcegraph.is_match("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5"));
+    }
+
+    /// `redact_text` calls `ranges` directly, never `is_match`, so the
+    /// keyword gate has to be enforced inside `ranges` itself — not just in
+    /// `is_match` — or a bare git SHA gets redacted (and, via
+    /// `redact_sensitive_values`, can quarantine whole records keyed by
+    /// commit ids) without its keyword precondition ever holding.
+    #[test]
+    fn keywords_gate_ranges_directly_not_only_is_match() {
+        let compiled = patterns(CredentialPatternProfile::Observation);
+        let sourcegraph = rule(&compiled, "sourcegraph-access-token");
+
+        assert!(sourcegraph
+            .ranges("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
+            .is_empty());
+        assert!(!sourcegraph
+            .ranges("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
+            .is_empty());
     }
 
     /// `regexTarget` steers the allowlist regexes only. A stopword read from the
