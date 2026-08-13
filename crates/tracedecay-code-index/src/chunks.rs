@@ -1758,7 +1758,14 @@ fn resolve_same_file_references(unresolved: &[UnresolvedRef], symbols: &[SymbolR
         let Some(candidates) = by_name.get(reference.reference_name.as_str()) else {
             continue;
         };
-        let [target] = candidates.as_slice() else {
+        let compatible = candidates
+            .iter()
+            .copied()
+            .filter(|target| {
+                reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
+            })
+            .collect::<Vec<_>>();
+        let [target] = compatible.as_slice() else {
             continue;
         };
         resolved.push(Edge {
@@ -1769,6 +1776,19 @@ fn resolve_same_file_references(unresolved: &[UnresolvedRef], symbols: &[SymbolR
         });
     }
     resolved
+}
+
+fn reference_target_kind_is_compatible(reference_kind: EdgeKind, target_kind: &str) -> bool {
+    let Some(target_kind) = NodeKind::from_str(target_kind) else {
+        return false;
+    };
+    match reference_kind {
+        EdgeKind::Implements => matches!(
+            target_kind,
+            NodeKind::Trait | NodeKind::Interface | NodeKind::InterfaceType
+        ),
+        _ => true,
+    }
 }
 
 fn canonical_relation_edges(
@@ -3005,6 +3025,48 @@ pub fn real_symbol() {}
             &unsupported_kind.reason,
             CodeIndexEdgeAbstentionReasonV1::UnsupportedRelationKind
         ));
+    }
+
+    #[test]
+    fn implements_reference_rejects_leaf_symbol_target_but_keeps_trait_target() {
+        let source = "pub enum Token { Default }\npub trait Default {}\n";
+        let mut enum_variant = fixture_function_row(
+            source,
+            "node.variant.default",
+            "sym.variant.default",
+            "Token::Default",
+            'd',
+            SourceSpan {
+                start_byte: 17,
+                end_byte: 24,
+            },
+        );
+        enum_variant.kind = "enum_variant".to_owned();
+        let mut trait_target = fixture_function_row(
+            source,
+            "node.trait.default",
+            "sym.trait.default",
+            "Default",
+            'e',
+            SourceSpan {
+                start_byte: 37,
+                end_byte: 44,
+            },
+        );
+        trait_target.kind = "trait".to_owned();
+        let reference = UnresolvedRef {
+            from_node_id: "node.implementor".to_owned(),
+            reference_name: "Default".to_owned(),
+            reference_kind: EdgeKind::Implements,
+            line: 3,
+            column: 6,
+            file_path: "src/lib.rs".to_owned(),
+        };
+
+        let resolved = resolve_same_file_references(&[reference], &[enum_variant, trait_target]);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].kind, EdgeKind::Implements);
+        assert_eq!(resolved[0].target, "node.trait.default");
     }
 
     #[test]

@@ -2365,8 +2365,11 @@ async fn implements_refs_dont_resolve_to_enum_variants() {
         r#"
 pub enum Token { Default, Plus }
 
+pub trait Renderable {}
+
 pub struct A;
 impl Default for A { fn default() -> Self { A } }
+impl Renderable for A {}
 
 pub struct B;
 impl Default for B { fn default() -> Self { B } }
@@ -2378,7 +2381,7 @@ impl Default for B { fn default() -> Self { B } }
     let result = handle_tool_call(
         &cg,
         "tracedecay_rank",
-        json!({"edge_kind": "implements", "direction": "incoming"}),
+        json!({"edge_kind": "implements", "direction": "incoming", "limit": 100}),
         None,
         None,
     )
@@ -2387,14 +2390,21 @@ impl Default for B { fn default() -> Self { B } }
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).unwrap();
     let ranking = output["ranking"].as_array().unwrap();
-    for entry in ranking {
-        let kind = entry["kind"].as_str().unwrap_or("");
-        let name = entry["name"].as_str().unwrap_or("");
-        assert!(
-            kind != "enum_variant" && kind != "field",
-            "implements edges must not target {kind} (got name={name})"
-        );
-    }
+    let enum_variant = ranking
+        .iter()
+        .find(|entry| entry["kind"] == "enum_variant" && entry["name"] == "Default")
+        .expect("the poisoned Default enum variant remains a typed graph identity");
+    assert_eq!(enum_variant["count"].as_u64(), Some(0));
+    let trait_target = ranking
+        .iter()
+        .find(|entry| entry["kind"] == "trait" && entry["name"] == "Renderable")
+        .expect("ordinary trait target remains ranked");
+    assert!(
+        trait_target["count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "ordinary Implements edge must survive compatible target filtering"
+    );
 }
 
 /// Regression for bug #10: `tracedecay_circular` must report one entry per
