@@ -895,7 +895,10 @@ impl AgentTaskBackend for CombinedJsonBackend {
         // The combined prompt must compose both per-task prompts.
         assert!(request.prompt.contains("durable memory facts"));
         assert!(request.prompt.contains("managed skill creates or updates"));
-        assert_eq!(request.context["apply"], json!(false));
+        // The agentic curation cutover removed the human-approval gate:
+        // combined review dispatches with apply=true and terminal effects
+        // commit automatically (e76d8c237, 17dbee838, ed3775692).
+        assert_eq!(request.context["apply"], json!(true));
         assert!(request.context["activation_policy"].is_string());
         assert!(
             request.context["session_reflection_evidence"]["hits"]
