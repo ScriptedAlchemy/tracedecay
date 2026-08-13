@@ -344,6 +344,18 @@ pub struct RetainedCombinedReviewRun {
     skill_guard: AutomationRunSettlementGuard,
 }
 
+/// Opaque ownership of both scheduler locks admitted for one retained
+/// combined review.
+///
+/// The guards cannot be separated by downstream settlement code. A paired
+/// blocking owner keeps this value alive until both task authorities have
+/// reached an exact durable terminal or abandoned their reservations.
+#[must_use = "dropping the combined settlement guards releases both task locks"]
+pub struct RetainedCombinedReviewSettlementGuards {
+    _reflector_guard: AutomationRunSettlementGuard,
+    _skill_guard: AutomationRunSettlementGuard,
+}
+
 impl RetainedCombinedReviewRun {
     fn new(
         result: Result<CombinedReviewDispatch>,
@@ -357,14 +369,20 @@ impl RetainedCombinedReviewRun {
         }
     }
 
-    pub fn into_parts(
+    /// Transfers the dispatch and its inseparable lock authority directly to
+    /// a settlement owner. Production callers start that owner inside this
+    /// callback before returning the dispatch to fallible projection code.
+    pub fn handoff_settlement<R>(
         self,
-    ) -> (
-        Result<CombinedReviewDispatch>,
-        AutomationRunSettlementGuard,
-        AutomationRunSettlementGuard,
-    ) {
-        (self.result, self.reflector_guard, self.skill_guard)
+        owner: impl FnOnce(Result<CombinedReviewDispatch>, RetainedCombinedReviewSettlementGuards) -> R,
+    ) -> R {
+        owner(
+            self.result,
+            RetainedCombinedReviewSettlementGuards {
+                _reflector_guard: self.reflector_guard,
+                _skill_guard: self.skill_guard,
+            },
+        )
     }
 }
 

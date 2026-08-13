@@ -2984,6 +2984,7 @@ fn retained_settlement_waiter_is_send_and_static() {
         >,
     >();
     assert_send_static::<super::super::RetainedSettlementPairWaiter>();
+    assert_send_static::<super::super::DeferredSettlementPairSubmission<()>>();
     assert_send_static::<
         super::super::RetainedSettlementWaiter<
             crate::errors::Result<super::super::RetainedAutomationSettlementOutcome>,
@@ -3736,6 +3737,190 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
     }
 }
 
+struct RequestWaitingPairFixture {
+    submission: Option<super::super::DeferredSettlementPairSubmission<()>>,
+    journal_paths: [std::path::PathBuf; 2],
+    admissions: [DurableAutomationAdmission; 2],
+    run_ids: [String; 2],
+    job_ids: [String; 2],
+}
+
+async fn request_waiting_pair_fixture(
+    dashboard_root: &std::path::Path,
+    label: &str,
+) -> RequestWaitingPairFixture {
+    let run_ids = [format!("run.{label}.first"), format!("run.{label}.second")];
+    let job_ids = [format!("{label}-first"), format!("{label}-second")];
+    let (_, first_guard) =
+        retained_disabled_user_job(dashboard_root, &run_ids[0], &job_ids[0]).await;
+    let (_, second_guard) =
+        retained_disabled_user_job(dashboard_root, &run_ids[1], &job_ids[1]).await;
+    let (first_authority, first_journal, first_admission) = retained_external_authority(
+        dashboard_root,
+        external_admission_for_job(&run_ids[0], &format!("request.{label}.first"), &job_ids[0]),
+    );
+    let (second_authority, second_journal, second_admission) = retained_external_authority(
+        dashboard_root,
+        external_admission_for_job(&run_ids[1], &format!("request.{label}.second"), &job_ids[1]),
+    );
+    recovery_index::add_pending_blocking(dashboard_root, &first_journal, &first_admission)
+        .expect("retain first request-waiting pair authority");
+    recovery_index::add_pending_blocking(dashboard_root, &second_journal, &second_admission)
+        .expect("retain second request-waiting pair authority");
+    let submission =
+        super::super::AutomationEffectAuthority::start_request_waiting_settlement_pair_with_phase_hooks(
+            (first_authority, first_guard),
+            (second_authority, second_guard),
+            None,
+            None,
+        );
+    RequestWaitingPairFixture {
+        submission: Some(submission),
+        journal_paths: [first_journal, second_journal],
+        admissions: [first_admission, second_admission],
+        run_ids,
+        job_ids,
+    }
+}
+
+async fn assert_request_waiting_pair_abandoned_cleanly(
+    dashboard_root: &std::path::Path,
+    fixture: &RequestWaitingPairFixture,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let journals_absent = fixture.journal_paths.iter().all(|path| !path.exists());
+        let pending_absent = fixture.admissions.iter().all(|admission| {
+            recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
+                .is_ok_and(|pending| pending.is_empty())
+        });
+        let locks_released = !task_lock_is_denied(dashboard_root, &fixture.job_ids[0]).await
+            && !task_lock_is_denied(dashboard_root, &fixture.job_ids[1]).await;
+        if journals_absent && pending_absent && locks_released {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "request-waiting pair did not abandon both authorities before releasing its locks"
+        );
+        tokio::task::yield_now().await;
+    }
+    for (journal_path, admission) in fixture.journal_paths.iter().zip(&fixture.admissions) {
+        assert!(!journal_path.exists(), "abandoned journal remained present");
+        assert!(
+            !terminal_sidecar_path(journal_path)
+                .expect("abandoned terminal sidecar path")
+                .exists(),
+            "abandonment fabricated a terminal sidecar"
+        );
+        assert!(
+            recovery_index::indexed_journals_blocking(dashboard_root, &admission.scope)
+                .expect("post-abandonment recovery index")
+                .is_empty(),
+            "abandoned pair left recovery-index debris"
+        );
+    }
+    assert!(
+        exact_spool_files(dashboard_root).is_empty(),
+        "abandoned pair left exact-publication spool debris"
+    );
+    for run_id in &fixture.run_ids {
+        assert!(
+            tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+                dashboard_root,
+                run_id,
+            )
+            .expect("abandoned pair exact ledger lookup")
+            .is_none(),
+            "abandoned pair fabricated an exact ledger row"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_request_waiting_pair_before_submit_abandons_both_authorities() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let mut fixture = request_waiting_pair_fixture(dashboard_root, "pair-launch-drop").await;
+    assert!(task_lock_is_denied(dashboard_root, &fixture.job_ids[0]).await);
+    assert!(task_lock_is_denied(dashboard_root, &fixture.job_ids[1]).await);
+    drop(
+        fixture
+            .submission
+            .take()
+            .expect("request-waiting pair submission"),
+    );
+    assert_request_waiting_pair_abandoned_cleanly(dashboard_root, &fixture).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partial_pair_submit_abandons_the_closed_sibling_under_shared_guard_ownership() {
+    use fs2::FileExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let mut fixture = request_waiting_pair_fixture(dashboard_root, "pair-partial-submit").await;
+    let second_journal_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(crate::storage::append_lock_path(&fixture.journal_paths[1]))
+        .expect("open second request-waiting journal lock");
+    second_journal_lock
+        .lock_exclusive()
+        .expect("block closed sibling abandonment");
+    let submission = fixture
+        .submission
+        .take()
+        .expect("request-waiting pair submission");
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _waiter = submission
+            .submit_with_hook(
+                super::super::DeferredSettlementRequest::Abandon,
+                super::super::DeferredSettlementRequest::Abandon,
+                || panic!("injected unwind after first pair request submission"),
+            )
+            .expect("unreachable pair submission result");
+    }));
+    assert!(unwind.is_err(), "partial-submit fixture did not unwind");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while fixture.journal_paths[0].exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "submitted first abandonment did not finish"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        task_lock_is_denied(dashboard_root, &fixture.job_ids[0]).await,
+        "finished first leg released its lock before the closed sibling finished"
+    );
+    assert!(
+        task_lock_is_denied(dashboard_root, &fixture.job_ids[1]).await,
+        "closed sibling released its lock before durable abandonment"
+    );
+    FileExt::unlock(&second_journal_lock).expect("release closed sibling abandonment");
+    assert_request_waiting_pair_abandoned_cleanly(dashboard_root, &fixture).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn panic_before_pair_projection_closes_both_request_channels_and_abandons() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let mut fixture = request_waiting_pair_fixture(dashboard_root, "pair-projection-panic").await;
+    let mut submission = fixture
+        .submission
+        .take()
+        .expect("request-waiting pair submission");
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        submission
+            .take_payload()
+            .expect("take retained pair dispatch payload");
+        panic!("injected unwind before projecting pair settlement requests");
+    }));
+    assert!(unwind.is_err(), "pre-projection fixture did not unwind");
+    assert_request_waiting_pair_abandoned_cleanly(dashboard_root, &fixture).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_finish() {
     use std::sync::{Arc, Mutex};
@@ -3777,37 +3962,35 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
         }
     });
     let (second_observed_tx, second_observed_rx) = std::sync::mpsc::channel();
-    let waiter =
-        super::super::AutomationEffectAuthority::start_deferred_settlement_pair_with_phase_hooks(
-            (
-                first_authority,
-                super::super::DeferredSettlementRequest::Run(Box::new(
-                    super::super::DeferredRunSettlementRequest {
-                        ledger: first_run.ledger_record,
-                        committed: first_run.committed_receipt,
-                        observer: None,
-                    },
-                )),
-                first_guard,
-            ),
-            (
-                second_authority,
-                super::super::DeferredSettlementRequest::Run(Box::new(
-                    super::super::DeferredRunSettlementRequest {
-                        ledger: second_run.ledger_record,
-                        committed: second_run.committed_receipt,
-                        observer: Some(Box::new(move |record| {
-                            second_observed_tx
-                                .send(record.clone())
-                                .expect("second exact observation");
-                        })),
-                    },
-                )),
-                second_guard,
-            ),
+    let submission =
+        super::super::AutomationEffectAuthority::start_request_waiting_settlement_pair_with_phase_hooks(
+            (first_authority, first_guard),
+            (second_authority, second_guard),
             None,
             Some(second_phase_hook),
         );
+    let waiter = submission
+        .submit(
+            super::super::DeferredSettlementRequest::Run(Box::new(
+                super::super::DeferredRunSettlementRequest {
+                    ledger: first_run.ledger_record,
+                    committed: first_run.committed_receipt,
+                    observer: None,
+                },
+            )),
+            super::super::DeferredSettlementRequest::Run(Box::new(
+                super::super::DeferredRunSettlementRequest {
+                    ledger: second_run.ledger_record,
+                    committed: second_run.committed_receipt,
+                    observer: Some(Box::new(move |record| {
+                        second_observed_tx
+                            .send(record.clone())
+                            .expect("second exact observation");
+                    })),
+                },
+            )),
+        )
+        .expect("submit both pair terminals");
 
     assert_eq!(
         phase_rx
@@ -3815,7 +3998,7 @@ async fn retained_pair_attempts_second_leg_and_keeps_both_guards_until_both_fini
             .expect("second pair leg attempted"),
         super::super::RetainedSettlementPhase::Prepared
     );
-    let super::super::RetainedSettlementPairWaiter { first, second } = waiter;
+    let super::super::RetainedSettlementPairWaiter { first, second, .. } = waiter;
     let first_result = tokio::time::timeout(Duration::from_secs(5), first.wait())
         .await
         .expect("first pair owner must finish while second remains paused");

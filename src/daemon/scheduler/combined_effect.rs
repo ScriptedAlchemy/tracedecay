@@ -1300,8 +1300,17 @@ async fn run_execute_pair(
         &run_control,
     )
     .await;
-    let (result, reflector_guard, skill_guard) = retained.into_parts();
+    let mut settlement = AutomationEffectAuthority::start_retained_combined_settlement_pair(
+        retained, reflector, skill,
+    );
     super::synchronize_scheduler_effect_control(&run_control);
+    let result = match settlement.take_payload() {
+        Ok(result) => result,
+        Err(error) => {
+            first_error.get_or_insert(error);
+            return CombinedEffectOutcome::Handled;
+        }
+    };
     let (reflector_terminal, skill_terminal, result_order, result_mode) = match result {
         Ok(CombinedReviewDispatch::Ran(run)) => (
             DeferredLegTerminal::Run(Box::new(DeferredRunTerminal {
@@ -1534,10 +1543,13 @@ async fn run_execute_pair(
         deferred_settlement_request(reflector_terminal, engine, project_id, project_path);
     let skill_request =
         deferred_settlement_request(skill_terminal, engine, project_id, project_path);
-    let settlement = AutomationEffectAuthority::start_deferred_settlement_pair(
-        (reflector, reflector_request, reflector_guard),
-        (skill, skill_request, skill_guard),
-    );
+    let settlement = match settlement.submit(reflector_request, skill_request) {
+        Ok(settlement) => settlement,
+        Err(error) => {
+            first_error.get_or_insert(error);
+            return CombinedEffectOutcome::Handled;
+        }
+    };
     let (reflector_result, skill_result) = settlement.wait().await;
 
     let (reflector_outcome, skill_outcome) = match result_order {

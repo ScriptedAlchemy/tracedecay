@@ -215,7 +215,8 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
         &run_control,
     )
     .await;
-    let (result, reflector_guard, skill_guard) = retained.into_parts();
+    let (result, settlement_guards) =
+        retained.handoff_settlement(|result, guards| (result, guards));
     let dispatch = result.unwrap();
     assert!(matches!(dispatch, CombinedReviewDispatch::Ran(_)));
     assert!(
@@ -236,8 +237,7 @@ async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks(
             "{task:?} lock must remain held until outer settlement"
         );
     }
-    drop(reflector_guard);
-    drop(skill_guard);
+    drop(settlement_guards);
 
     for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
         let reacquired =
@@ -276,7 +276,8 @@ async fn retained_combined_review_defers_recorded_failures_until_settlement() {
         &run_control,
     )
     .await;
-    let (result, reflector_guard, skill_guard) = retained.into_parts();
+    let (result, settlement_guards) =
+        retained.handoff_settlement(|result, guards| (result, guards));
     let dispatch = result.unwrap();
     assert!(matches!(
         dispatch,
@@ -289,8 +290,7 @@ async fn retained_combined_review_defers_recorded_failures_until_settlement() {
             .is_empty(),
         "retained failure must not publish either admitted ledger before settlement"
     );
-    drop(reflector_guard);
-    drop(skill_guard);
+    drop(settlement_guards);
 }
 
 #[tokio::test]
