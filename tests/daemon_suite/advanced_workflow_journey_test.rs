@@ -492,18 +492,35 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         tracedecay_application::work_executable_catalog_digest().expect("Work catalog digest");
     let definition_id: WorkflowDefinitionId = id("workflow.advanced-production-journey");
     let step_id: WorkflowStepId = id("fan-out");
+    let downstream_step_id: WorkflowStepId = id("collect-results");
     let definition = WorkflowDefinition::new(
         definition_id.clone(),
         1,
         project_id.clone(),
-        vec![WorkflowStep {
-            step_id: step_id.clone(),
-            operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
-            predecessors: BTreeSet::new(),
-            inputs: Vec::new(),
-            outputs: vec![id::<WorkflowOutputName>("finding")],
-            fan_out: Some(WorkflowFanOut { max_width: 3 }),
-        }],
+        vec![
+            // Keep the dependent step first so production admission must use
+            // the verified workflow topology, not caller-controlled Vec order,
+            // to select the runnable entry step.
+            WorkflowStep {
+                step_id: downstream_step_id.clone(),
+                operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+                predecessors: BTreeSet::from([step_id.clone()]),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                // This blocked step is deliberately fan-out-capable too: an
+                // order scan for the first fan-out step would select it, so
+                // only the verified ready-set can choose the runnable root.
+                fan_out: Some(WorkflowFanOut { max_width: 3 }),
+            },
+            WorkflowStep {
+                step_id: step_id.clone(),
+                operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
+                predecessors: BTreeSet::new(),
+                inputs: Vec::new(),
+                outputs: vec![id::<WorkflowOutputName>("finding")],
+                fan_out: Some(WorkflowFanOut { max_width: 3 }),
+            },
+        ],
         policy_digest,
         resolved.effective_behavior_digest.clone(),
         catalog_digest,
@@ -607,6 +624,16 @@ fn mounted_fan_out_recovers_then_synthesizes_and_hands_off() {
         .flat_map(|plan| &plan.children)
         .map(|child| child.attempt_identity.clone())
         .collect::<Vec<_>>();
+    assert!(
+        started_run.fan_out_plans().contains_key(&step_id),
+        "the mounted verified workflow topology must select the ready fan-out root"
+    );
+    assert!(
+        !started_run
+            .fan_out_plans()
+            .contains_key(&downstream_step_id),
+        "caller-controlled definition order must not select a blocked step"
+    );
     assert_eq!(fan_out_identities.len(), 3, "three fan-out children");
 
     let first_generation_deadline = Instant::now() + Duration::from_secs(20);

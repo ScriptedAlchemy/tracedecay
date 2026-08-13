@@ -1,7 +1,9 @@
 //! Workflow-run admission, state transitions, and fan-out reconciliation.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tracedecay_application::{RequestContext, WorkflowRunStoragePort};
 use tracedecay_domain::{ManifestDigest, UtcMicros};
@@ -79,28 +81,44 @@ pub(super) fn start_workflow_run(
         vec![request.provider],
     )
     .map_err(workflow_placement_problem)?;
+    let topology_cancellation = Arc::new(AtomicBool::new(context.cancellation().is_cancelled()));
+    let workflow_topology = services
+        .topology()
+        .verified_snapshot(
+            &request.definition_id,
+            request.definition_version,
+            topology_cancellation,
+        )
+        .map_err(workflow_topology_problem)?;
+    let ready_steps = workflow_topology
+        .ready_steps(
+            &BTreeSet::new(),
+            definition.steps().len(),
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .map_err(workflow_topology_problem)?;
+    if ready_steps.is_empty() {
+        return Err(DaemonInvocationProblem::ResetRequired);
+    }
     let topology = &registered.work_topology_policy;
     let topology_digest = topology
         .compute_digest()
         .map_err(|_| DaemonInvocationProblem::Unavailable)?
         .0;
-    let entry_step = definition
-        .steps()
-        .first()
-        .ok_or(DaemonInvocationProblem::InvalidRequest)?
-        .step_id
-        .clone();
-    tracedecay_application::WorkflowProviderPlacementService::new(registry.clone())
-        .place(
-            &tracedecay_application::WorkflowTopologyPlacementRequest {
-                run_id: request.run_id.clone(),
-                step_id: entry_step.clone(),
-                configuration_digest: registered.configuration_digest.clone(),
-                topology_digest: topology_digest.clone(),
-            },
-            topology,
-        )
-        .map_err(workflow_placement_problem)?;
+    let placement = tracedecay_application::WorkflowProviderPlacementService::new(registry.clone());
+    for step_id in &ready_steps {
+        placement
+            .place(
+                &tracedecay_application::WorkflowTopologyPlacementRequest {
+                    run_id: request.run_id.clone(),
+                    step_id: step_id.clone(),
+                    configuration_digest: registered.configuration_digest.clone(),
+                    topology_digest: topology_digest.clone(),
+                },
+                topology,
+            )
+            .map_err(workflow_placement_problem)?;
+    }
     let admission = tracedecay_application::WorkflowAdmissionSnapshot {
         policy_digest: registered.policy_digest.clone(),
         configuration_digest: registered.configuration_digest.clone(),
@@ -123,6 +141,20 @@ pub(super) fn start_workflow_run(
                 topology,
             )
             .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+            let mut fan_out_steps = ready_steps.iter().filter(|step_id| {
+                definition
+                    .steps()
+                    .iter()
+                    .find(|step| &step.step_id == *step_id)
+                    .is_some_and(|step| step.fan_out.is_some())
+            });
+            let entry_step = fan_out_steps
+                .next()
+                .cloned()
+                .ok_or(DaemonInvocationProblem::InvalidRequest)?;
+            if fan_out_steps.next().is_some() {
+                return Err(DaemonInvocationProblem::InvalidRequest);
+            }
             let provider = tracedecay_application::WorkflowProviderAdmission {
                 execution_snapshot: fan_out.execution_snapshot,
                 topology_digest: topology_digest.clone(),
@@ -343,5 +375,20 @@ fn workflow_placement_problem(
         tracedecay_application::WorkflowProviderPlacementError::Unavailable => {
             DaemonInvocationProblem::Unavailable
         }
+    }
+}
+
+fn workflow_topology_problem(
+    error: tracedecay_runtime_core::workflow_topology::WorkflowTopologyError,
+) -> DaemonInvocationProblem {
+    use tracedecay_runtime_core::workflow_topology::WorkflowTopologyError;
+    match error {
+        WorkflowTopologyError::Contract(_) => DaemonInvocationProblem::InvalidRequest,
+        WorkflowTopologyError::GenerationMismatch | WorkflowTopologyError::Corrupt(_) => {
+            DaemonInvocationProblem::ResetRequired
+        }
+        WorkflowTopologyError::Cancelled
+        | WorkflowTopologyError::BudgetExhausted
+        | WorkflowTopologyError::Unavailable(_) => DaemonInvocationProblem::Unavailable,
     }
 }
