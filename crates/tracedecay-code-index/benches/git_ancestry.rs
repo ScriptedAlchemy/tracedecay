@@ -112,6 +112,25 @@ impl GitFixture {
             merge_base: oid(DIVERGENCE_DEPTH),
         }
     }
+
+    fn expected_ancestors(&self) -> Vec<GitOidV1> {
+        let mut expected = (0..=MAIN_DEPTH)
+            .map(oid)
+            .chain((1..=SIDE_DEPTH).map(|depth| oid(SIDE_OID_BASE + depth)))
+            .collect::<Vec<_>>();
+        expected.sort();
+        expected
+    }
+
+    fn expected_descendants(&self) -> Vec<GitOidV1> {
+        let mut expected = (1..=MAIN_DEPTH)
+            .map(oid)
+            .chain((1..=SIDE_DEPTH).map(|depth| oid(SIDE_OID_BASE + depth)))
+            .chain([self.merge.clone()])
+            .collect::<Vec<_>>();
+        expected.sort();
+        expected
+    }
 }
 
 fn oid(value: usize) -> GitOidV1 {
@@ -150,7 +169,7 @@ fn store(
 }
 
 fn preflight(store: &GitTopologyProjectionStore, fixture: &GitFixture) {
-    let ancestors = store
+    let mut ancestors = store
         .ancestors(
             &fixture.merge,
             MAX_DEPTH,
@@ -158,9 +177,10 @@ fn preflight(store: &GitTopologyProjectionStore, fixture: &GitFixture) {
             Arc::new(NeverCancelled),
         )
         .expect("benchmark ancestors preflight succeeds");
-    assert_eq!(ancestors.len(), TOTAL_COMMITS - 1);
+    ancestors.sort();
+    assert_eq!(ancestors, fixture.expected_ancestors());
 
-    let descendants = store
+    let mut descendants = store
         .descendants(
             &fixture.root,
             MAX_DEPTH,
@@ -168,7 +188,8 @@ fn preflight(store: &GitTopologyProjectionStore, fixture: &GitFixture) {
             Arc::new(NeverCancelled),
         )
         .expect("benchmark descendants preflight succeeds");
-    assert_eq!(descendants.len(), TOTAL_COMMITS - 1);
+    descendants.sort();
+    assert_eq!(descendants, fixture.expected_descendants());
 
     let merge_base = store
         .merge_base(
@@ -229,17 +250,17 @@ fn git_ancestry(criterion: &mut Criterion) {
     group.throughput(Throughput::Elements(2));
     group.bench_function(BenchmarkId::new("merge_base", TOTAL_COMMITS), |bencher| {
         bencher.iter(|| {
-            let observed = published
-                .merge_base(
-                    black_box(&fixture.main_tip),
-                    black_box(&fixture.side_tip),
-                    MAX_DEPTH,
-                    TOTAL_COMMITS,
-                    Arc::new(NeverCancelled),
-                )
-                .expect("benchmark merge-base traversal succeeds");
-            assert_eq!(observed.as_ref(), Some(&fixture.merge_base));
-            black_box(observed)
+            black_box(
+                published
+                    .merge_base(
+                        black_box(&fixture.main_tip),
+                        black_box(&fixture.side_tip),
+                        MAX_DEPTH,
+                        TOTAL_COMMITS,
+                        Arc::new(NeverCancelled),
+                    )
+                    .expect("benchmark merge-base traversal succeeds"),
+            )
         });
     });
     group.finish();
@@ -248,27 +269,30 @@ fn git_ancestry(criterion: &mut Criterion) {
     digest_group.throughput(Throughput::Elements(TOTAL_COMMITS as u64));
     digest_group.bench_function("full_recovered_state", |bencher| {
         bencher.iter(|| {
-            let observed = fixture
-                .manifest
-                .expected_recovered_digest(&|| Ok(()))
-                .expect("benchmark recovered digest recomputes");
-            assert_eq!(observed, expected_digest);
-            black_box(observed)
+            black_box(
+                fixture
+                    .manifest
+                    .expected_recovered_digest(&|| Ok(()))
+                    .expect("benchmark recovered digest recomputes"),
+            )
         });
     });
     digest_group.finish();
 
     drop(published);
+    let recovered = persistent.recover_snapshot();
+    assert_eq!(recovered.generation(), &expected_generation);
+    assert_eq!(recovered.verified_head().recovered_digest, expected_digest);
+    let recovered_store = store(recovered, &fixture.projection);
+    preflight(&recovered_store, &fixture);
+    drop(recovered_store);
+
     let mut reopen_group = criterion.benchmark_group("git_ancestry/reopen_verified_snapshot");
     reopen_group.throughput(Throughput::Elements(TOTAL_COMMITS as u64));
     reopen_group.bench_function("close_reopen_verify_digest", |bencher| {
         bencher.iter(|| {
             let recovered = persistent.recover_snapshot();
-            assert_eq!(recovered.generation(), &expected_generation);
-            assert_eq!(recovered.verified_head().recovered_digest, expected_digest);
-            let recovered_store = store(recovered, &fixture.projection);
-            assert_eq!(recovered_store.generation(), &expected_generation);
-            black_box(recovered_store)
+            black_box(store(recovered, &fixture.projection))
         });
     });
     reopen_group.finish();
@@ -277,7 +301,7 @@ fn git_ancestry(criterion: &mut Criterion) {
 criterion_group! {
     name = benches;
     config = Criterion::default()
-        .sample_size(10)
+        .sample_size(100)
         .measurement_time(Duration::from_secs(20));
     targets = git_ancestry
 }
