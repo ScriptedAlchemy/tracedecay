@@ -60,7 +60,6 @@ pub(super) async fn finalize_terminal_housekeeping(
                 )
             }
         },
-        move || recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission),
     )
     .await
     .map_err(|error| {
@@ -74,10 +73,9 @@ fn spawn_terminal_housekeeping<T: Send + 'static>(
     finalize: impl FnOnce() -> Result<Option<T>> + Send + 'static,
     remove_pending: impl FnOnce(Option<&T>) -> Result<()> + Send + 'static,
     complete: impl FnOnce(T) -> Result<()> + Send + 'static,
-    retain_pending: impl FnMut() -> Result<()> + Send + 'static,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::task::spawn_blocking(move || {
-        run_terminal_housekeeping(finalize, remove_pending, complete, retain_pending)
+        run_terminal_housekeeping(finalize, remove_pending, complete)
     })
 }
 
@@ -85,30 +83,13 @@ fn run_terminal_housekeeping<T>(
     finalize: impl FnOnce() -> Result<Option<T>>,
     remove_pending: impl FnOnce(Option<&T>) -> Result<()>,
     complete: impl FnOnce(T) -> Result<()>,
-    mut retain_pending: impl FnMut() -> Result<()>,
 ) -> Result<()> {
     let closure = finalize()?;
-    if let Err(error) = remove_pending(closure.as_ref()) {
-        return retain_after_error(error, &mut retain_pending);
-    }
-    if let Some(closure) = closure
-        && let Err(error) = complete(closure)
-    {
-        return retain_after_error(error, &mut retain_pending);
+    remove_pending(closure.as_ref())?;
+    if let Some(closure) = closure {
+        complete(closure)?;
     }
     Ok(())
-}
-
-fn retain_after_error(
-    error: crate::errors::TraceDecayError,
-    retain_pending: &mut impl FnMut() -> Result<()>,
-) -> Result<()> {
-    match retain_pending() {
-        Ok(()) => Err(error),
-        Err(retain_error) => Err(contract_error(format!(
-            "{error}; additionally failed to retain retirement recovery authority: {retain_error}"
-        ))),
-    }
 }
 
 #[cfg(test)]
@@ -127,8 +108,6 @@ mod tests {
         let (removed_sender, removed_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
         let (completed_sender, completed_receiver) = std::sync::mpsc::channel();
-        let retained = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let retained_for_owner = std::sync::Arc::clone(&retained);
         let caller = tokio::spawn(async move {
             spawn_terminal_housekeeping(
                 || Ok(Some(())),
@@ -139,10 +118,6 @@ mod tests {
                 },
                 move |()| {
                     completed_sender.send(()).expect("completion signal");
-                    Ok(())
-                },
-                move || {
-                    retained_for_owner.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     Ok(())
                 },
             )
@@ -156,26 +131,25 @@ mod tests {
         receive_boundary(completed_receiver, "witness completion").await;
 
         assert!(caller.await.expect_err("caller was aborted").is_cancelled());
-        assert_eq!(retained.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn abort_during_failed_witness_completion_still_restores_pending_authority() {
+    async fn abort_during_failed_witness_completion_leaves_transition_authority_untouched() {
         let (completion_sender, completion_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
-        let (retained_sender, retained_receiver) = std::sync::mpsc::channel();
+        let transition = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let transition_for_owner = std::sync::Arc::clone(&transition);
         let caller = tokio::spawn(async move {
             spawn_terminal_housekeeping(
                 || Ok(Some(())),
-                |_| Ok(()),
+                move |_| {
+                    transition_for_owner.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
                 move |()| {
                     completion_sender.send(()).expect("completion boundary");
                     release_receiver.recv().expect("completion release");
                     Err(contract_error("injected witness completion failure"))
-                },
-                move || {
-                    retained_sender.send(()).expect("pending retention signal");
-                    Ok(())
                 },
             )
             .await
@@ -185,8 +159,8 @@ mod tests {
         receive_boundary(completion_receiver, "witness completion boundary").await;
         caller.abort();
         release_sender.send(()).expect("release witness completion");
-        receive_boundary(retained_receiver, "pending authority restoration").await;
 
         assert!(caller.await.expect_err("caller was aborted").is_cancelled());
+        assert!(transition.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

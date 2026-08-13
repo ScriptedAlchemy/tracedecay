@@ -254,6 +254,50 @@ pub(super) fn complete_after_pending_removal(closure: &RetirementClosure) -> Res
     complete_after_pending_removal_with(closure, |_| Ok(()))
 }
 
+pub(super) fn closure_for_durable_transition(
+    dashboard_root: &Path,
+    binding: &RetirementBinding,
+    capture_expected: bool,
+) -> Result<RetirementClosure> {
+    validate_binding(binding)?;
+    let digest = canonical_digest_body(&binding.source_digest)?;
+    let source_path = dashboard_root.join("fact_proposals.json");
+    let archive_path = archive_path(dashboard_root, binding)?;
+    let archived = read_retirement_bytes(&archive_path, "transition archive")?
+        .ok_or_else(|| contract_error("retirement transition has no exact durable archive"))?;
+    require_digest(&archived, &binding.source_digest)?;
+
+    let digest_bytes = hex::decode(digest)
+        .map_err(|error| contract_error(format!("retirement digest decode failed: {error}")))?;
+    let capture_path = capture_path_for_digest(dashboard_root, &digest_bytes);
+    let retired_path = retired_path_for_digest(dashboard_root, digest);
+    let captured = read_retirement_bytes(&capture_path, "transition captured source")?;
+    let retired = read_retirement_bytes(&retired_path, "transition retired source")?;
+    if captured.is_some() && retired.is_some() {
+        return Err(contract_error(
+            "retirement transition has both captured and retired witnesses",
+        ));
+    }
+    for witness in captured.iter().chain(retired.iter()) {
+        require_digest(witness, &binding.source_digest)?;
+        if witness != &archived {
+            return Err(contract_error(
+                "retirement transition witness conflicts with its durable archive",
+            ));
+        }
+    }
+    if !capture_expected && (captured.is_some() || retired.is_some()) {
+        return Err(contract_error(
+            "retirement transition unexpectedly owns a source witness",
+        ));
+    }
+    Ok(RetirementClosure {
+        source_path,
+        source_digest: binding.source_digest.clone(),
+        capture_path: capture_expected.then_some(capture_path),
+    })
+}
+
 fn complete_after_pending_removal_with(
     closure: &RetirementClosure,
     after_retirement: impl FnOnce(&Path) -> Result<()>,
@@ -310,11 +354,12 @@ fn complete_after_pending_removal_with(
                         "captured shipped proposal source remained after retirement",
                     ));
                 }
-                Ok(())
+                remove_retired_witness(&retired_path, &closure.source_path)
             }
             (None, Some(retired)) => {
                 require_digest(&retired, &closure.source_digest)?;
-                Ok(())
+                after_retirement(&retired_path)?;
+                remove_retired_witness(&retired_path, &closure.source_path)
             }
             (None, None) => Ok(()),
             (Some(_), Some(_)) => Err(contract_error(
@@ -334,67 +379,14 @@ fn complete_after_pending_removal_with(
     }
 }
 
-pub(super) fn reconcile_orphaned_retirement_capture(dashboard_root: &Path) -> Result<()> {
-    let source_path = dashboard_root.join("fact_proposals.json");
-    let lock_path = crate::storage::append_lock_path(&source_path);
-    crate::storage::reject_symlink_components(&lock_path, "shipped proposal retirement lock")
-        .map_err(contract_error)?;
-    let lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path).map_err(|error| {
-        contract_error(format!("shipped proposal retirement lock failed: {error}"))
-    })?;
-    let result = (|| {
-        let Some((witness_path, kind)) = orphaned_retirement_witness(dashboard_root)? else {
-            return Ok(());
-        };
-        let digest = retirement_witness_digest(&witness_path)?;
-        let archived_path = dashboard_root
-            .join("fact_proposals.archive")
-            .join(format!("fact_proposals.{digest}.json"));
-        let captured = read_retirement_bytes(&witness_path, "orphaned retirement witness")?
-            .ok_or_else(|| contract_error("orphaned retirement witness disappeared"))?;
-        let archived = read_retirement_bytes(&archived_path, "orphaned capture archive")?
-            .ok_or_else(|| contract_error("orphaned retirement capture has no exact archive"))?;
-        if captured != archived {
-            return Err(contract_error(
-                "orphaned retirement capture conflicts with its archive",
-            ));
-        }
-        require_digest(&captured, &format!("sha256:{digest}"))?;
-        let retired_path = retired_path_for_digest(dashboard_root, digest);
-        if kind == RetirementWitnessKind::Captured {
-            let parent =
-                Dir::open_ambient_dir(dashboard_root, ambient_authority()).map_err(|error| {
-                    contract_error(format!(
-                        "shipped proposal retirement parent open failed: {error}"
-                    ))
-                })?;
-            let captured_name = witness_path
-                .file_name()
-                .ok_or_else(|| contract_error("orphaned captured source has no filename"))?;
-            let retired_name = retired_path
-                .file_name()
-                .ok_or_else(|| contract_error("orphaned retired witness has no filename"))?;
-            rename_noreplace(&parent, captured_name, retired_name).map_err(|error| {
-                contract_error(format!("orphaned retirement witness move failed: {error}"))
-            })?;
-            tracedecay_application::sync_parent_directory(
-                &source_path,
-                DirectorySyncPolicy::Strict,
-            )
-            .map_err(contract_error)?;
-        }
-        remove_retired_witness(&retired_path, &source_path)
-    })();
-    let unlock = fs2::FileExt::unlock(&lock).map_err(|error| {
-        contract_error(format!(
-            "shipped proposal retirement unlock failed: {error}"
-        ))
-    });
-    match (result, unlock) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+pub(super) fn reject_unbound_retirement_witness(dashboard_root: &Path) -> Result<()> {
+    if let Some((witness_path, _)) = orphaned_retirement_witness(dashboard_root)? {
+        return Err(contract_error(format!(
+            "retirement witness '{}' has no durable journal transition authority",
+            witness_path.display()
+        )));
     }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -440,14 +432,6 @@ fn orphaned_retirement_witness(
         }
     }
     Ok(witness)
-}
-
-fn retirement_witness_digest(path: &Path) -> Result<&str> {
-    let name = path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or_else(|| contract_error("retirement capture name is not UTF-8"))?;
-    retirement_witness_digest_name(name).map(|(digest, _)| digest)
 }
 
 fn retirement_witness_digest_name(name: &str) -> Result<(&str, RetirementWitnessKind)> {
@@ -1405,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn orphaned_capture_requires_an_exact_archive_and_preserves_replacement_bytes() {
+    fn unbound_capture_is_never_retired_even_with_an_exact_archive() {
         let root = tempfile::tempdir().unwrap();
         let admitted = br#"{"schema_version":1,"proposals":[]}"#;
         let replacement = br#"{"schema_version":1,"proposals":[{"state":"pending_approval"}]}"#;
@@ -1415,9 +1399,13 @@ mod tests {
         write_private_file(&captured_path, admitted);
         write_private_file(&plan.source_path, replacement);
 
-        let missing = reconcile_orphaned_retirement_capture(root.path())
-            .expect_err("an orphaned capture without its archive must fail closed");
-        assert!(missing.to_string().contains("no exact archive"));
+        let missing = reject_unbound_retirement_witness(root.path())
+            .expect_err("an unbound capture without its journal marker must fail closed");
+        assert!(
+            missing
+                .to_string()
+                .contains("no durable journal transition")
+        );
         assert_eq!(
             read_retirement_bytes(&captured_path, "capture").unwrap(),
             Some(admitted.to_vec())
@@ -1429,9 +1417,13 @@ mod tests {
 
         std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
         write_private_file(&archive, replacement);
-        let mismatch = reconcile_orphaned_retirement_capture(root.path())
-            .expect_err("an orphaned capture with a mismatched archive must fail closed");
-        assert!(mismatch.to_string().contains("conflicts with its archive"));
+        let mismatch = reject_unbound_retirement_witness(root.path())
+            .expect_err("an unbound capture with a mismatched archive must remain untouched");
+        assert!(
+            mismatch
+                .to_string()
+                .contains("no durable journal transition")
+        );
         assert_eq!(
             read_retirement_bytes(&captured_path, "capture").unwrap(),
             Some(admitted.to_vec())
@@ -1442,8 +1434,9 @@ mod tests {
         );
 
         write_private_file(&archive, admitted);
-        reconcile_orphaned_retirement_capture(root.path()).unwrap();
-        assert!(!captured_path.exists());
+        reject_unbound_retirement_witness(root.path())
+            .expect_err("even exact bytes require journal-bound transition authority");
+        assert!(captured_path.exists());
         assert_eq!(
             read_retirement_bytes(&plan.source_path, "replacement").unwrap(),
             Some(replacement.to_vec())
@@ -1458,11 +1451,44 @@ mod tests {
             .join(".fact_proposals.retirement-not-a-digest.captured");
         write_private_file(&malformed, b"captured");
 
-        let error = reconcile_orphaned_retirement_capture(root.path())
+        let error = reject_unbound_retirement_witness(root.path())
             .expect_err("a malformed capture name must fail closed");
 
         assert!(error.to_string().contains("canonical SHA-256"));
         assert_eq!(std::fs::read(&malformed).unwrap(), b"captured");
+    }
+
+    #[test]
+    fn retired_witness_uncertainty_replays_to_durable_absence_and_preserves_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let admitted = br#"{"schema_version":1,"proposals":[]}"#;
+        let replacement = br#"{"schema_version":1,"proposals":[{"state":"pending_approval"}]}"#;
+        let plan = plan(root.path(), admitted);
+        write_private_file(&plan.source_path, admitted);
+        let closure = finalize_after_terminal(root.path(), &plan.binding, Some(&plan)).unwrap();
+        write_private_file(&plan.source_path, replacement);
+
+        let error = complete_after_pending_removal_with(&closure, |retired| {
+            assert_eq!(
+                read_retirement_bytes(retired, "retired uncertainty witness")?,
+                Some(admitted.to_vec())
+            );
+            Err(contract_error(
+                "injected retired witness deletion uncertainty",
+            ))
+        })
+        .expect_err("retired witness uncertainty must remain recoverable");
+        assert!(error.to_string().contains("deletion uncertainty"));
+        assert_eq!(retirement_capture_count(root.path()), 1);
+
+        let recovered = closure_for_durable_transition(root.path(), &plan.binding, true).unwrap();
+        complete_after_pending_removal(&recovered).unwrap();
+
+        assert_eq!(retirement_capture_count(root.path()), 0);
+        assert_eq!(
+            read_retirement_bytes(&plan.source_path, "replacement").unwrap(),
+            Some(replacement.to_vec())
+        );
     }
 
     #[test]

@@ -246,6 +246,9 @@ fn retirement_admission_for_recovery_project(
 }
 
 fn write_private_test_file(path: &std::path::Path, bytes: &[u8]) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create private test file parent");
+    }
     std::fs::write(path, bytes).expect("write private test file");
     #[cfg(unix)]
     {
@@ -2078,6 +2081,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     );
     super::super::retirement::complete_after_pending_removal(&pending_retirement)
         .expect("complete retirement witness after pending removal");
+    assert_eq!(retirement_capture_count(&dashboard_root), 0);
     recovery_index::finish_retirement_transition_blocking(
         &dashboard_root,
         &journal_path,
@@ -2085,9 +2089,8 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
         &pending_retirement,
     )
     .expect("close durable retirement transition");
-    assert_eq!(retirement_capture_count(&dashboard_root), 1);
-    recovery_index::reconcile_orphaned_retirement_capture_if_index_empty(&dashboard_root)
-        .expect("remove completed retirement witness after transition closure");
+    recovery_index::reject_unbound_retirement_witness_if_index_empty(&dashboard_root)
+        .expect("completed retirement leaves no unbound witness");
     assert!(source_path.is_dir());
     assert_eq!(retirement_capture_count(&dashboard_root), 0);
     assert!(
@@ -2106,11 +2109,16 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
         Some(&plan),
     )
     .expect("capture exact source before pending-absent crash");
-    drop(orphaned_retirement);
     assert!(!source_path.exists());
     assert_eq!(retirement_capture_count(&dashboard_root), 1);
-    recovery_index::remove_pending_blocking(&dashboard_root, &journal_path)
-        .expect("simulate crash after pending removal but before witness deletion");
+    recovery_index::remove_pending_for_retirement_blocking(
+        &dashboard_root,
+        &journal_path,
+        &admission,
+        &orphaned_retirement,
+    )
+    .expect("durably hand off pending recovery before simulated crash");
+    drop(orphaned_retirement);
     assert!(
         recovery_index::indexed_journals_blocking(&dashboard_root, &admission.scope)
             .expect("crash-state pending index")
@@ -2119,6 +2127,18 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     let replacement_source =
         br#"{"schema_version":1,"proposals":[{"state":"pending_approval"}]}"#.to_vec();
     write_private_test_file(&source_path, &replacement_source);
+    let pending_index_path = dashboard_root
+        .join("automation_effects")
+        .join("pending-index.json");
+    let exact_transition_index = std::fs::read(&pending_index_path).expect("transition index");
+    let mut mismatched_transition: serde_json::Value =
+        serde_json::from_slice(&exact_transition_index).expect("transition index JSON");
+    mismatched_transition["retirement_transitions"][0]["source_digest"] =
+        serde_json::Value::String(format!("sha256:{}", "f".repeat(64)));
+    write_private_test_file(
+        &pending_index_path,
+        &serde_json::to_vec_pretty(&mismatched_transition).expect("mismatched transition bytes"),
+    );
     cg.close();
     let reopened = crate::tracedecay::TraceDecay::init_with_options(
         &project_root,
@@ -2129,6 +2149,25 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     )
     .await
     .expect("reopen retirement recovery project");
+    let rejected = recovery_index::reconcile_reserved_automation_effects_for_project(
+        &reopened,
+        &dashboard_root,
+        &tracedecay_application::CancellationSignal::active(
+            "cancellation.terminal-retirement-mismatch",
+        )
+        .expect("mismatch cancellation"),
+    )
+    .await
+    .expect("mismatched transition remains deferred");
+    assert_eq!(rejected.inspected, 1);
+    assert_eq!(rejected.deferred, 1);
+    assert_eq!(retirement_capture_count(&dashboard_root), 1);
+    assert_eq!(
+        std::fs::read(&source_path).expect("replacement source retained across mismatch"),
+        replacement_source
+    );
+
+    write_private_test_file(&pending_index_path, &exact_transition_index);
     let recovered = recovery_index::reconcile_reserved_automation_effects_for_project(
         &reopened,
         &dashboard_root,
@@ -2139,8 +2178,8 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     )
     .await
     .expect("recover exact retirement Terminal");
-    assert_eq!(recovered.inspected, 0);
-    assert_eq!(recovered.already_terminal, 0);
+    assert_eq!(recovered.inspected, 1);
+    assert_eq!(recovered.already_terminal, 1);
     assert_eq!(
         std::fs::read(&archive_path).expect("retirement archive"),
         source_bytes
@@ -2153,6 +2192,50 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     assert!(
         recovery_index::indexed_journals_blocking(&dashboard_root, &admission.scope)
             .expect("closed retirement index")
+            .is_empty()
+    );
+
+    write_private_test_file(&source_path, &source_bytes);
+    recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
+        .expect("re-index Terminal before entry-plus-marker restart");
+    let entry_plus_marker_retirement = super::super::retirement::finalize_after_terminal(
+        &dashboard_root,
+        &plan.binding,
+        Some(&plan),
+    )
+    .expect("capture exact source before entry-plus-marker restart");
+    recovery_index::remove_pending_for_retirement_blocking(
+        &dashboard_root,
+        &journal_path,
+        &admission,
+        &entry_plus_marker_retirement,
+    )
+    .expect("publish exact transition before entry-plus-marker restart");
+    recovery_index::add_pending_blocking(&dashboard_root, &journal_path, &admission)
+        .expect("simulate crash-visible entry plus exact marker");
+    drop(entry_plus_marker_retirement);
+    write_private_test_file(&source_path, &replacement_source);
+
+    let entry_plus_marker = recovery_index::reconcile_reserved_automation_effects_for_project(
+        &reopened,
+        &dashboard_root,
+        &tracedecay_application::CancellationSignal::active(
+            "cancellation.terminal-retirement-entry-plus-marker",
+        )
+        .expect("entry-plus-marker cancellation"),
+    )
+    .await
+    .expect("entry-plus-marker restart converges through its marker first");
+    assert_eq!(entry_plus_marker.inspected, 1);
+    assert_eq!(entry_plus_marker.already_terminal, 1);
+    assert_eq!(retirement_capture_count(&dashboard_root), 0);
+    assert_eq!(
+        std::fs::read(&source_path).expect("entry-plus-marker replacement preserved"),
+        replacement_source
+    );
+    assert!(
+        recovery_index::indexed_journals_blocking(&dashboard_root, &admission.scope)
+            .expect("entry-plus-marker index closed")
             .is_empty()
     );
     assert_eq!(

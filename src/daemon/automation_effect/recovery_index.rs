@@ -58,16 +58,6 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             "automation run append-intent repair failed to join: {error}"
         ))
     })??;
-    let retirement_root = dashboard_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        reconcile_orphaned_retirement_capture_if_index_empty(&retirement_root)
-    })
-    .await
-    .map_err(|error| {
-        contract_error(format!(
-            "automation retirement witness reconciliation failed to join: {error}"
-        ))
-    })??;
     let owner = memory.project_memory_owner()?;
     let tracedecay_domain::FactOwnerV1::Project { project_id } = &owner else {
         return Err(contract_error(
@@ -79,6 +69,46 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
         project_id,
     )
     .map_err(|error| contract_error(format!("automation recovery scope is invalid: {error:?}")))?;
+    let operation =
+        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
+            .map_err(contract_error)?;
+    let mut report = AutomationEffectRecoveryReport::default();
+    let transition_root = dashboard_root.to_path_buf();
+    let transitions = tokio::task::spawn_blocking(move || {
+        indexed_retirement_transitions_blocking(&transition_root)
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!(
+            "automation retirement transition reader failed: {error}"
+        ))
+    })??;
+    for transition in transitions {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        report.inspected += 1;
+        match reconcile_indexed_retirement_transition(
+            dashboard_root,
+            &owner,
+            &scope,
+            project_id,
+            &operation,
+            &transition,
+        )
+        .await
+        {
+            Ok(()) => report.already_terminal += 1,
+            Err(error) => {
+                tracing::warn!(
+                    event = "automation_retirement_transition_deferred",
+                    journal = %transition.path.display(),
+                    error = %error,
+                );
+                report.deferred += 1;
+            }
+        }
+    }
     let root = dashboard_root.to_path_buf();
     let indexed_scope = scope.clone();
     let indexed =
@@ -87,10 +117,6 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             .map_err(|error| {
                 contract_error(format!("automation recovery index reader failed: {error}"))
             })??;
-    let operation =
-        retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
-            .map_err(contract_error)?;
-    let mut report = AutomationEffectRecoveryReport::default();
     for indexed in indexed {
         if cancellation.is_cancelled() {
             break;
@@ -126,16 +152,29 @@ pub(crate) async fn reconcile_reserved_automation_effects_for_project(
             }
         }
     }
+    if !cancellation.is_cancelled() {
+        let retirement_root = dashboard_root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            reject_unbound_retirement_witness_if_index_empty(&retirement_root)
+        })
+        .await
+        .map_err(|error| {
+            contract_error(format!(
+                "automation retirement witness audit failed to join: {error}"
+            ))
+        })??;
+    }
     Ok(report)
 }
 
-pub(super) fn reconcile_orphaned_retirement_capture_if_index_empty(
+pub(super) fn reject_unbound_retirement_witness_if_index_empty(
     dashboard_root: &Path,
 ) -> Result<()> {
     let path = index_path(dashboard_root);
     with_index_lock(&path, || {
-        if read_index(&path)?.entries.is_empty() {
-            super::retirement::reconcile_orphaned_retirement_capture(dashboard_root)?;
+        let index = read_index(&path)?;
+        if index.entries.is_empty() && index.retirement_transitions.is_empty() {
+            super::retirement::reject_unbound_retirement_witness(dashboard_root)?;
         }
         Ok(())
     })
@@ -150,6 +189,86 @@ enum EntryRecoveryOutcome {
     Deferred,
     Dormant,
     Cancelled,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_indexed_retirement_transition(
+    dashboard_root: &Path,
+    owner: &tracedecay_domain::FactOwnerV1,
+    scope: &ResolvedScope,
+    project_id: &ProjectId,
+    operation: &tracedecay_application::ApplicationOperation,
+    indexed: &IndexedRetirementTransition,
+) -> Result<()> {
+    if indexed.project_id != *project_id || indexed.scope_digest != scope.scope_digest {
+        return Err(contract_error(
+            "automation retirement transition escaped its exact project scope",
+        ));
+    }
+    let path = indexed.path.clone();
+    let record = tokio::task::spawn_blocking(move || journal::read_indexed_record_blocking(&path))
+        .await
+        .map_err(|error| {
+            contract_error(format!(
+                "automation retirement transition journal reader failed: {error}"
+            ))
+        })??
+        .ok_or_else(|| {
+            contract_error("automation retirement transition lost its exact durable journal")
+        })?;
+    let admission = record.admission().clone();
+    let binding = admission.retirement().ok_or_else(|| {
+        contract_error("automation retirement transition journal has no source binding")
+    })?;
+    if !record.is_terminal()
+        || record.publication().is_some()
+        || admission.schema_version != INDEX_SCHEMA_VERSION
+        || !admission.request.validate()
+        || admission.memory_owner() != Some(owner)
+        || admission.scope != *scope
+        || indexed.path.file_name().and_then(|name| name.to_str())
+            != Some(&automation_journal_filename(&admission.request.run_id)?)
+        || binding.source_digest != indexed.source_digest
+        || !admission_has_exact_authority(&admission, operation)?
+    {
+        return Err(contract_error(
+            "automation retirement transition conflicts with its exact journal authority",
+        ));
+    }
+    let binding = binding.clone();
+    let terminal_path = indexed.path.clone();
+    let terminal = tokio::task::spawn_blocking(move || {
+        journal::read_indexed_terminal_blocking(&terminal_path)
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!(
+            "automation retirement transition terminal reader failed: {error}"
+        ))
+    })??
+    .ok_or_else(|| contract_error("automation retirement transition lost its terminal sidecar"))?;
+    if !terminal.is_retirement_terminal() {
+        return Err(contract_error(
+            "automation retirement transition journal is not its exact retirement terminal",
+        ));
+    }
+
+    let root = dashboard_root.to_path_buf();
+    let path = indexed.path.clone();
+    let capture_expected = indexed.capture_expected;
+    tokio::task::spawn_blocking(move || {
+        let closure =
+            super::retirement::closure_for_durable_transition(&root, &binding, capture_expected)?;
+        remove_pending_for_retirement_blocking(&root, &path, &admission, &closure)?;
+        super::retirement::complete_after_pending_removal(&closure)?;
+        finish_retirement_transition_blocking(&root, &path, &admission, &closure)
+    })
+    .await
+    .map_err(|error| {
+        contract_error(format!(
+            "automation retirement transition settlement failed to join: {error}"
+        ))
+    })?
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -603,6 +722,15 @@ pub(super) struct IndexedJournal {
     pub(super) scope_digest: ManifestDigest,
 }
 
+#[derive(Clone)]
+struct IndexedRetirementTransition {
+    path: PathBuf,
+    project_id: ProjectId,
+    scope_digest: ManifestDigest,
+    source_digest: String,
+    capture_expected: bool,
+}
+
 pub(super) fn add_pending_blocking(
     dashboard_root: &Path,
     journal_path: &Path,
@@ -671,70 +799,112 @@ fn remove_pending_for_retirement_with_writer(
     let transition = retirement_transition_for(&expected, admission, closure)?;
     let path = index_path(dashboard_root);
     with_index_lock(&path, || {
-        let mut protected = read_index(&path)?;
-        if protected.entries.iter().any(|candidate| {
+        let original = read_index(&path)?;
+        if original.entries.iter().any(|candidate| {
             candidate.journal_file == expected.journal_file && candidate != &expected
         }) {
             return Err(contract_error(
                 "automation pending index journal identity conflicts with its project binding",
             ));
         }
-        if protected.retirement_transitions.iter().any(|candidate| {
+        if original.retirement_transitions.iter().any(|candidate| {
             candidate.journal_file == transition.journal_file && candidate != &transition
         }) {
             return Err(contract_error(
                 "automation retirement transition conflicts with its durable journal binding",
             ));
         }
-        if !protected.entries.contains(&expected)
-            && !protected.retirement_transitions.contains(&transition)
+        if !original.entries.contains(&expected)
+            && !original.retirement_transitions.contains(&transition)
         {
             return Ok(());
         }
-        if !protected.retirement_transitions.contains(&transition) {
-            protected.retirement_transitions.push(transition.clone());
-            protected.retirement_transitions.sort_by(|left, right| {
-                left.journal_file.cmp(&right.journal_file)
-            });
-            publish_index_state(&path, &protected, &mut write_index).map_err(|error| {
-                contract_error(format!(
-                    "automation retirement transition publication failed before pending removal: {error}"
-                ))
-            })?;
-        }
+        let protected = publish_retirement_transition_with_writer(
+            &path,
+            &original,
+            &transition,
+            &mut write_index,
+        )?;
         if !protected.entries.contains(&expected) {
             return Ok(());
         }
+        remove_pending_after_transition_with_writer(&path, &protected, &expected, &mut write_index)
+    })
+}
 
-        let mut removed = protected.clone();
-        removed.entries.retain(|candidate| candidate != &expected);
-        let removed_bytes = encode_pending_index(&removed)?;
-        let Err(removal_error) = write_index(&path, &removed_bytes) else {
-            return require_index_state(&path, &removed);
-        };
-
-        if read_index(&path).is_ok_and(|visible| visible == protected) {
-            return Err(removal_error);
-        }
-
-        let protected_bytes = encode_pending_index(&protected)?;
-        let restore_result = write_index(&path, &protected_bytes);
-        match read_index(&path) {
-            Ok(restored) if restored == protected => Err(removal_error),
-            Ok(_) => Err(contract_error(format!(
-                "{removal_error}; additionally failed to restore the marker-protected pending recovery index after uncertain removal"
-            ))),
+fn publish_retirement_transition_with_writer(
+    path: &Path,
+    original: &PendingIndex,
+    transition: &PendingRetirementTransition,
+    write_index: &mut impl FnMut(&Path, &[u8]) -> Result<()>,
+) -> Result<PendingIndex> {
+    if original.retirement_transitions.iter().any(|candidate| {
+        candidate.journal_file == transition.journal_file && candidate != transition
+    }) {
+        return Err(contract_error(
+            "automation retirement transition conflicts with its durable journal binding",
+        ));
+    }
+    if original.retirement_transitions.contains(transition) {
+        return Ok(original.clone());
+    }
+    if original.retirement_transitions.len() >= MAX_PENDING_AUTOMATION_EFFECTS {
+        return Err(contract_error(
+            "automation retirement transition index reached its bounded capacity",
+        ));
+    }
+    let mut protected = original.clone();
+    protected.retirement_transitions.push(transition.clone());
+    protected
+        .retirement_transitions
+        .sort_by(|left, right| left.journal_file.cmp(&right.journal_file));
+    if let Err(error) = publish_index_state(path, &protected, write_index) {
+        match read_index(path) {
+            Ok(visible) if visible == protected => {}
+            Ok(visible) if visible == *original => {
+                return Err(contract_error(format!(
+                    "automation retirement transition publication failed before pending removal: {error}"
+                )));
+            }
+            Ok(_) => {
+                return Err(contract_error(format!(
+                    "automation retirement transition publication left an unrecognized durable index state: {error}"
+                )));
+            }
             Err(read_error) => {
-                let restore_error = restore_result
-                    .err()
-                    .map(|error| format!("; restoration write failed: {error}"))
-                    .unwrap_or_default();
-                Err(contract_error(format!(
-                    "{removal_error}; additionally could not verify pending recovery index restoration{restore_error}: {read_error}"
-                )))
+                return Err(contract_error(format!(
+                    "automation retirement transition publication is uncertain: {error}; readback failed: {read_error}"
+                )));
             }
         }
-    })
+    }
+    Ok(protected)
+}
+
+fn remove_pending_after_transition_with_writer(
+    path: &Path,
+    protected: &PendingIndex,
+    expected: &PendingIndexEntry,
+    write_index: &mut impl FnMut(&Path, &[u8]) -> Result<()>,
+) -> Result<()> {
+    let mut removed = protected.clone();
+    removed.entries.retain(|candidate| candidate != expected);
+    let removed_bytes = encode_pending_index(&removed)?;
+    match write_index(path, &removed_bytes) {
+        Ok(()) => require_index_state(path, &removed),
+        Err(removal_error) => match read_index(path) {
+            Ok(visible) if visible == removed => Ok(()),
+            Ok(visible) if visible == *protected => Err(contract_error(format!(
+                "automation pending removal retained its marker-protected prior state: {removal_error}"
+            ))),
+            Ok(_) => Err(contract_error(format!(
+                "automation pending removal left an unrecognized marker-protected index state: {removal_error}"
+            ))),
+            Err(read_error) => Err(contract_error(format!(
+                "automation pending removal is uncertain while its transition marker remains required: {removal_error}; readback failed: {read_error}"
+            ))),
+        },
+    }
 }
 
 pub(super) fn finish_retirement_transition_blocking(
@@ -748,15 +918,41 @@ pub(super) fn finish_retirement_transition_blocking(
     let path = index_path(dashboard_root);
     with_index_lock(&path, || {
         let original = read_index(&path)?;
-        if !original.retirement_transitions.contains(&transition) {
-            return Ok(());
-        }
-        let mut completed = original.clone();
-        completed
-            .retirement_transitions
-            .retain(|candidate| candidate != &transition);
-        publish_index_state(&path, &completed, &mut write_pending_index)
+        finish_retirement_transition_with_writer(
+            &path,
+            &original,
+            &transition,
+            &mut write_pending_index,
+        )
     })
+}
+
+fn finish_retirement_transition_with_writer(
+    path: &Path,
+    original: &PendingIndex,
+    transition: &PendingRetirementTransition,
+    write_index: &mut impl FnMut(&Path, &[u8]) -> Result<()>,
+) -> Result<()> {
+    if !original.retirement_transitions.contains(transition) {
+        return Ok(());
+    }
+    let mut completed = original.clone();
+    completed
+        .retirement_transitions
+        .retain(|candidate| candidate != transition);
+    match publish_index_state(path, &completed, write_index) {
+        Ok(()) => Ok(()),
+        Err(error) => match read_index(path) {
+            Ok(visible) if visible == completed => Ok(()),
+            Ok(visible) if visible == *original => Err(error),
+            Ok(_) => Err(contract_error(format!(
+                "automation retirement transition removal left an unrecognized durable index state: {error}"
+            ))),
+            Err(read_error) => Err(contract_error(format!(
+                "automation retirement transition removal is uncertain: {error}; readback failed: {read_error}"
+            ))),
+        },
+    }
 }
 
 fn retirement_transition_for(
@@ -829,6 +1025,27 @@ pub(super) fn indexed_journals_blocking(
                 path: automation_root.join(&entry.journal_file),
                 project_id: entry.project_id,
                 scope_digest: entry.scope_digest,
+            })
+            .collect())
+    })
+}
+
+fn indexed_retirement_transitions_blocking(
+    dashboard_root: &Path,
+) -> Result<Vec<IndexedRetirementTransition>> {
+    let index_path = index_path(dashboard_root);
+    with_index_lock(&index_path, || {
+        let index = read_index(&index_path)?;
+        let automation_root = automation_root(dashboard_root);
+        Ok(index
+            .retirement_transitions
+            .into_iter()
+            .map(|transition| IndexedRetirementTransition {
+                path: automation_root.join(&transition.journal_file),
+                project_id: transition.project_id,
+                scope_digest: transition.scope_digest,
+                source_digest: transition.source_digest,
+                capture_expected: transition.capture_expected,
             })
             .collect())
     })
@@ -1237,6 +1454,166 @@ mod tests {
                 .expect("durable removal")
                 .entries
                 .is_empty()
+        );
+    }
+
+    fn pending_entry(label: char) -> PendingIndexEntry {
+        let scope_label = match label {
+            'a' => 'e',
+            'b' => 'f',
+            _ => label,
+        };
+        PendingIndexEntry {
+            journal_file: format!("{}.json", label.to_string().repeat(64)),
+            project_id: ProjectId::new(format!("project.retirement-{label}")).expect("project"),
+            scope_digest: ManifestDigest::new(format!(
+                "sha256:{}",
+                scope_label.to_string().repeat(64)
+            ))
+            .expect("scope digest"),
+        }
+    }
+
+    fn retirement_transition(
+        entry: &PendingIndexEntry,
+        digest_label: char,
+    ) -> PendingRetirementTransition {
+        PendingRetirementTransition {
+            journal_file: entry.journal_file.clone(),
+            project_id: entry.project_id.clone(),
+            scope_digest: entry.scope_digest.clone(),
+            source_digest: format!("sha256:{}", digest_label.to_string().repeat(64)),
+            capture_expected: true,
+        }
+    }
+
+    fn pending_index(
+        entries: Vec<PendingIndexEntry>,
+        retirement_transitions: Vec<PendingRetirementTransition>,
+    ) -> PendingIndex {
+        PendingIndex {
+            schema_version: INDEX_SCHEMA_VERSION,
+            entries,
+            retirement_transitions,
+        }
+    }
+
+    #[test]
+    fn retirement_handoff_resolves_visible_write_uncertainty_and_preserves_other_transitions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = index_path(temp.path());
+        std::fs::create_dir_all(path.parent().expect("pending index parent"))
+            .expect("create automation root");
+        let entry_a = pending_entry('a');
+        let entry_b = pending_entry('b');
+        let transition_a = retirement_transition(&entry_a, 'c');
+        let transition_b = retirement_transition(&entry_b, 'd');
+        let original = pending_index(
+            vec![entry_a.clone(), entry_b.clone()],
+            vec![transition_b.clone()],
+        );
+        write_pending_index(
+            &path,
+            &encode_pending_index(&original).expect("original bytes"),
+        )
+        .expect("original index");
+
+        let protected = publish_retirement_transition_with_writer(
+            &path,
+            &original,
+            &transition_a,
+            &mut |path, bytes| {
+                write_pending_index(path, bytes)?;
+                Err(contract_error(
+                    "injected error after visible transition publication",
+                ))
+            },
+        )
+        .expect("visible marker publication is resolved by exact readback");
+        assert_eq!(
+            protected.retirement_transitions,
+            vec![transition_a.clone(), transition_b.clone()]
+        );
+        assert_eq!(
+            indexed_retirement_transitions_blocking(temp.path())
+                .expect("bounded transition inventory")
+                .len(),
+            2
+        );
+
+        remove_pending_after_transition_with_writer(
+            &path,
+            &protected,
+            &entry_a,
+            &mut |path, bytes| {
+                write_pending_index(path, bytes)?;
+                Err(contract_error(
+                    "injected error after visible pending removal",
+                ))
+            },
+        )
+        .expect("visible pending removal is resolved by exact readback");
+        let marker_only = read_index(&path).expect("marker-only index");
+        assert_eq!(marker_only.entries, vec![entry_b]);
+        assert_eq!(
+            marker_only.retirement_transitions,
+            vec![transition_a.clone(), transition_b.clone()]
+        );
+
+        finish_retirement_transition_with_writer(
+            &path,
+            &marker_only,
+            &transition_a,
+            &mut |path, bytes| {
+                write_pending_index(path, bytes)?;
+                Err(contract_error(
+                    "injected error after visible transition removal",
+                ))
+            },
+        )
+        .expect("visible marker removal is resolved by exact readback");
+        let completed = read_index(&path).expect("completed index");
+        assert_eq!(completed.retirement_transitions, vec![transition_b]);
+    }
+
+    #[test]
+    fn retirement_handoff_preserves_prepublication_state_and_rejects_mismatched_marker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = index_path(temp.path());
+        std::fs::create_dir_all(path.parent().expect("pending index parent"))
+            .expect("create automation root");
+        let entry = pending_entry('a');
+        let transition = retirement_transition(&entry, 'c');
+        let original = pending_index(vec![entry.clone()], Vec::new());
+        write_pending_index(
+            &path,
+            &encode_pending_index(&original).expect("original bytes"),
+        )
+        .expect("original index");
+
+        let error = publish_retirement_transition_with_writer(
+            &path,
+            &original,
+            &transition,
+            &mut |_path, _bytes| Err(contract_error("injected publication failure")),
+        )
+        .expect_err("an invisible marker publication must not authorize pending removal");
+        assert!(error.to_string().contains("before pending removal"));
+        assert_eq!(read_index(&path).expect("unchanged index"), original);
+
+        let conflicting = retirement_transition(&entry, 'd');
+        let mismatched = pending_index(vec![entry], vec![conflicting]);
+        let error = publish_retirement_transition_with_writer(
+            &path,
+            &mismatched,
+            &transition,
+            &mut |_path, _bytes| panic!("mismatched marker must not be overwritten"),
+        )
+        .expect_err("a marker with a foreign source digest must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with its durable journal binding")
         );
     }
 }
