@@ -36,8 +36,17 @@ import {
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
+  type DeliveryCiTimelineV1,
+  type DeliveryCommitTimelineV1,
+  type DeliveryFailureLocalizationTimelineV1,
+  type DeliveryGenerationFreshnessV1,
+  type DeliveryGitHubOperationSnapshotV1,
+  type DeliveryGitStatusV1,
   type DeliveryOverviewV1,
   DeliveryOverviewV1Schema,
+  type DeliveryPullRequestTimelineV1,
+  type DeliveryReleaseTimelineV1,
+  type DeliveryReviewTimelineV1,
   type ProjectRepoGroup,
   type ProjectsPayloadV1,
 } from '../../contracts/generated.ts';
@@ -47,10 +56,10 @@ import {
  * a list.
  *
  * `/api/projects` provides the repository field. `/api/delivery/overview`
- * provides bounded active-checkout changes, commit history, and generation
- * comparison plus typed unavailable states for authorities that are not
- * mounted. The page never converts an unavailable projection into an empty
- * timeline.
+ * provides independently typed local Git, provider, CI, localization, release,
+ * and generation projections. Retained evidence remains visible when its
+ * source is partial, stale, rate-limited, failed, or unavailable; none
+ * of those states are converted into an empty timeline.
  *
  * The one word that has to stay exact everywhere on this page: `last_seen_at`
  * is when TraceDecay last INDEXED the checkout, not when anyone last committed
@@ -300,126 +309,456 @@ function PipelineOverview({
       />
     );
   }
-  const payload = result.envelope.payload;
-  const changesDetail =
-    payload.changes.state === 'ready' && payload.commits.state === 'ready'
-      ? `${commitCountDetail(payload.commits.value)} · ${countLabel(payload.changes.value.changed_paths.length, 'changed path')}`
-      : null;
-  const pullRequestDetail =
-    payload.pull_requests.state === 'ready' && payload.review_comments.state === 'ready'
-      ? `${payload.pull_requests.value.items.length} pull requests · ${payload.review_comments.value.items.length} review comments`
-      : null;
-  const ciDetail =
-    payload.ci_checks.state === 'ready' && payload.failure_localization.state === 'ready'
-      ? `${payload.ci_checks.value.items.length} checks · ${payload.failure_localization.value.items.length} localized failures`
-      : null;
+  const { authorization, domain_state: domainState, payload } = result.envelope;
+  if (authorization.outcome !== 'authorized') {
+    return (
+      <StateChip
+        kind={authorization.outcome}
+        detail="delivery evidence was not disclosed"
+      />
+    );
+  }
+  if (domainState === 'denied' || domainState === 'unauthorized' || domainState === 'redacted') {
+    return <StateChip kind={domainState} detail="delivery evidence was not disclosed" />;
+  }
 
   return (
     <div className="flex flex-col gap-2.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <StateChip kind={domainState} detail="delivery overview" />
+        <EvidencePattern
+          quality={domainState === 'ready' ? 'measured' : 'unknown'}
+        />
+      </div>
       <p className="text-2xs leading-relaxed text-text-muted">
-        Active-checkout Git reads are bounded and live. External provider
-        projections stay explicitly unavailable until their read authorities
-        are mounted.
+        Active-checkout Git and retained provider evidence are independent.
+        Each source keeps its reported state; retained rows remain inspectable
+        through partial, stale, failed, rate-limited, and unavailable reads.
       </p>
       <PipelineStage icon={GitCommitHorizontal} label="Changes & commits">
-        {changesDetail ? (
-          <StateChip kind="ready" detail={changesDetail} />
-        ) : (
-          <ProjectionState projection={firstMissing(payload.changes, payload.commits)} />
-        )}
+        <ProjectionSource
+          label="Working tree changes"
+          projection={payload.changes}
+          renderValue={renderGitStatus}
+        />
+        <ProjectionSource
+          label="Commit history"
+          projection={payload.commits}
+          renderValue={renderCommitTimeline}
+        />
       </PipelineStage>
       <PipelineStage icon={GitPullRequest} label="Pull requests & review">
-        {pullRequestDetail ? (
-          <StateChip kind="ready" detail={pullRequestDetail} />
-        ) : (
-          <ProjectionState
-            projection={firstMissing(payload.pull_requests, payload.review_comments)}
-          />
-        )}
+        <ProjectionSource
+          label="Pull requests"
+          projection={payload.pull_requests}
+          renderValue={renderPullRequests}
+        />
+        <ProjectionSource
+          label="Review observations"
+          projection={payload.review_comments}
+          renderValue={renderReviews}
+        />
       </PipelineStage>
       <PipelineStage icon={Server} label="Continuous integration">
-        {ciDetail ? (
-          <StateChip kind="ready" detail={ciDetail} />
-        ) : (
-          <ProjectionState
-            projection={firstMissing(payload.ci_checks, payload.failure_localization)}
-          />
-        )}
+        <ProjectionSource
+          label="CI checks"
+          projection={payload.ci_checks}
+          renderValue={renderCiChecks}
+        />
+        <ProjectionSource
+          label="Failure localization"
+          projection={payload.failure_localization}
+          renderValue={renderFailureLocalization}
+        />
       </PipelineStage>
       <PipelineStage icon={Package} label="Releases">
-        {payload.releases.state === 'ready' ? (
-          <StateChip
-            kind="ready"
-            detail={`${payload.releases.value.items.length} releases`}
-          />
-        ) : (
-          <ProjectionState projection={payload.releases} />
-        )}
+        <ProjectionSource
+          label="Release history"
+          projection={payload.releases}
+          renderValue={renderReleases}
+        />
       </PipelineStage>
       <PipelineStage icon={ScrollText} label="Index freshness">
-        {payload.generation_freshness.state === 'ready' ? (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <StateChip
-              kind={payload.generation_freshness.value.comparison === 'current' ? 'ready' : 'stale'}
-              detail={`${payload.generation_freshness.value.comparison} · HEAD ${shortOid(payload.generation_freshness.value.head_commit)} · indexed ${shortOid(payload.generation_freshness.value.indexed_commit)}`}
-            />
-            <EvidencePattern
-              quality={
-                payload.generation_freshness.value.comparison === 'current'
-                  ? 'measured'
-                  : 'unknown'
-              }
-            />
-          </div>
-        ) : (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <ProjectionState projection={payload.generation_freshness} />
-            <EvidencePattern quality="unknown" />
-          </div>
-        )}
+        <ProjectionSource
+          label="Generation comparison"
+          projection={payload.generation_freshness}
+          renderValue={renderGenerationFreshness}
+        />
       </PipelineStage>
     </div>
   );
 }
 
-type ProjectionStateValue = {
-  state?: 'ready' | 'unavailable' | 'unsupported';
-  reason?: string;
-  required_authority?: string;
-};
+type DeliveryProjection = DeliveryOverviewV1[keyof DeliveryOverviewV1];
+type DeliveryProjectionValue<P extends DeliveryProjection> = P extends {
+  value: infer V;
+}
+  ? NonNullable<V>
+  : never;
 
-function firstMissing(
-  first: ProjectionStateValue,
-  second: ProjectionStateValue,
-): ProjectionStateValue {
-  return first.state === 'ready' ? second : first;
+function ProjectionSource<P extends DeliveryProjection>({
+  label,
+  projection,
+  renderValue,
+}: {
+  label: string;
+  projection: P;
+  renderValue: (value: DeliveryProjectionValue<P>) => React.ReactNode;
+}) {
+  const value = projectionValue(projection);
+  return (
+    <section
+      aria-label={label}
+      data-projection-state={projection.state}
+      className="flex min-w-0 flex-col gap-1.5 border-l border-edge-subtle pl-2"
+    >
+      <span className="td-legend text-text-secondary">{label}</span>
+      <ProjectionState projection={projection} />
+      {value == null ? null : renderValue(value)}
+    </section>
+  );
 }
 
-function ProjectionState({ projection }: { projection: ProjectionStateValue }) {
+function projectionValue<P extends DeliveryProjection>(
+  projection: P,
+): DeliveryProjectionValue<P> | null {
   switch (projection.state) {
     case 'ready':
-      return <StateChip kind="ready" detail="projection ready" />;
+    case 'partial':
+    case 'stale':
+    case 'failed':
+    case 'empty_measured':
+      return projection.value as DeliveryProjectionValue<P>;
+    case 'rate_limited':
     case 'unavailable':
-      return (
-        <StateChip
-          kind="unknown"
-          detail={`unavailable · ${projection.reason ?? projection.required_authority ?? 'authority absent'}`}
-        />
-      );
-    case 'unsupported':
+      return projection.value as DeliveryProjectionValue<P> | null;
+    case 'denied':
+    case 'not_published':
+      return null;
+  }
+}
+
+function ProjectionState({ projection }: { projection: DeliveryProjection }) {
+  switch (projection.state) {
+    case 'ready':
+      return <StateChip kind="ready" detail="ready" />;
+    case 'partial':
+      return <StateChip kind="partial" detail="partial · retained evidence shown" />;
+    case 'stale':
+      return <StateChip kind="stale" detail="stale · retained evidence shown" />;
+    case 'failed':
+      return <StateChip kind="error" detail="failed · retained evidence shown" />;
+    case 'denied':
+      return <StateChip kind="denied" detail="denied · evidence suppressed" />;
+    case 'not_published':
       return (
         <StateChip
           kind="unsupported"
-          detail={projection.reason ?? projection.required_authority ?? 'source unsupported'}
+          detail={`not published · ${projection.reason} · requires ${projection.required_authority}`}
         />
       );
-    case undefined:
-      return <StateChip kind="unsupported_schema" detail="projection state is missing" />;
-    default: {
-      const exhaustive: never = projection.state;
-      return <StateChip kind="unsupported_schema" detail={String(exhaustive)} />;
+    case 'empty_measured':
+      return <StateChip kind="complete_zero_findings" detail="measured empty" />;
+    case 'unavailable':
+      return (
+        <StateChip
+          kind="unavailable"
+          detail={`unavailable · ${projection.reason} · requires ${projection.required_authority}`}
+        />
+      );
+    case 'rate_limited': {
+      const checkpoint = projection.checkpoint
+        ? `${projection.checkpoint.remaining}/${projection.checkpoint.limit} remaining · reset ${projection.checkpoint.reset_at_micros} µs`
+        : null;
+      const retry = projection.retry_at_micros == null
+        ? null
+        : `retry ${projection.retry_at_micros} µs`;
+      return (
+        <StateChip
+          kind="partial"
+          detail={['rate limited', checkpoint, retry].filter(Boolean).join(' · ')}
+        />
+      );
     }
   }
+}
+
+function renderGitStatus(status: DeliveryGitStatusV1) {
+  return (
+    <div className="flex flex-col gap-1 text-3xs text-text-muted">
+      <span>
+        {countLabel(status.changed_paths.length, 'changed path')} · {status.staged} staged ·{' '}
+        {status.unstaged} unstaged · {status.conflicted} conflicted
+      </span>
+      {status.changed_paths.length > 0 ? (
+        <ul aria-label="Changed paths" className="max-h-24 overflow-auto border border-edge-subtle">
+          {status.changed_paths.map((path) => (
+            <li key={path} className="truncate border-b border-edge-subtle px-1.5 py-0.5 last:border-b-0">
+              {path}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function renderCommitTimeline(timeline: DeliveryCommitTimelineV1) {
+  return (
+    <TimelineItems
+      count={timeline.items.length}
+      singular="commit"
+      truncated={timeline.truncated}
+    >
+      {timeline.items.map((commit) => (
+        <li key={commit.commit} className="border-b border-edge-subtle px-1.5 py-1 last:border-b-0">
+          <span className="block truncate text-text-secondary">{commit.subject}</span>
+          <span className="td-value text-text-muted">{shortOid(commit.commit)}</span>
+        </li>
+      ))}
+    </TimelineItems>
+  );
+}
+
+function renderPullRequests(timeline: DeliveryPullRequestTimelineV1) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <HeadComparison
+        expected={timeline.expected_head_commit}
+        retained={timeline.retained_head_commit}
+      />
+      <TimelineItems
+        count={timeline.items.length}
+        singular="pull request"
+        truncated={timeline.truncated}
+      >
+        {timeline.items.map((pullRequest) => (
+          <li
+            key={`${pullRequest.provider}:${pullRequest.pull_request_id}`}
+            className="flex flex-col gap-1.5 border-b border-edge-subtle px-1.5 py-1 last:border-b-0"
+          >
+            <span className="font-medium text-text-secondary">
+              {pullRequest.provider} · PR {pullRequest.pull_request_id}
+            </span>
+            {pullRequest.operations.map((operation) => (
+              <div key={operation.operation} className="flex flex-col gap-1 border-l border-edge-subtle pl-1.5">
+                <span className="td-legend text-text-muted">{humanize(operation.operation)}</span>
+                {operation.latest_attempt ? (
+                  <OperationSnapshot label="latest attempt" snapshot={operation.latest_attempt} />
+                ) : null}
+                {operation.last_complete ? (
+                  <OperationSnapshot label="last complete" snapshot={operation.last_complete} />
+                ) : null}
+              </div>
+            ))}
+          </li>
+        ))}
+      </TimelineItems>
+    </div>
+  );
+}
+
+function OperationSnapshot({
+  label,
+  snapshot,
+}: {
+  label: string;
+  snapshot: DeliveryGitHubOperationSnapshotV1;
+}) {
+  return (
+    <dl aria-label={label} className="grid grid-cols-2 gap-x-2 text-3xs text-text-muted">
+      <Fact label={label} value={`${humanize(snapshot.outcome)} · ${humanize(snapshot.coverage)}`} />
+      <Fact label="provider head" value={shortOid(snapshot.provider_head_commit_id)} />
+      <Fact label="provider base" value={shortOid(snapshot.provider_base_commit_id)} />
+      <Fact label="merge base" value={shortOid(snapshot.merge_base_commit_id)} />
+      <Fact label="fetched at" value={`${snapshot.fetched_at_micros} µs`} />
+    </dl>
+  );
+}
+
+function renderReviews(timeline: DeliveryReviewTimelineV1) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <HeadComparison
+        expected={timeline.expected_head_commit}
+        retained={timeline.retained_head_commit}
+      />
+      <TimelineItems
+        count={timeline.items.length}
+        singular="review comment"
+        truncated={timeline.truncated}
+      >
+        {timeline.items.map((item) => (
+          <li
+            key={`${item.provider}:${item.pull_request_id}:${item.comment_id}`}
+            className="flex flex-col gap-1 border-b border-edge-subtle px-1.5 py-1 last:border-b-0"
+          >
+            <span className="font-medium text-text-secondary">
+              {item.provider} · PR {item.pull_request_id} · comment {item.comment_id}
+            </span>
+            {item.observations.map((observation) => (
+              <dl
+                key={`${observation.operation}:${observation.kind}:${observation.version_digest}`}
+                className="grid grid-cols-2 gap-x-2 border-l border-edge-subtle pl-1.5 text-3xs text-text-muted"
+              >
+                <Fact label={humanize(observation.kind)} value={humanize(observation.operation)} />
+                <Fact label="state" value={`${humanize(observation.review_state)} · ${humanize(observation.lifecycle)}`} />
+                <Fact label="provider outcome" value={humanize(observation.provider_outcome)} />
+                <Fact label="author class" value={humanize(observation.author_class)} />
+                <Fact label="repository" value={observation.repository_id} />
+                <Fact label="version" value={shortOpaque(observation.version_digest)} />
+                <Fact label="observed at" value={`${observation.observed_at_micros} µs`} />
+                {observation.review_id ? <Fact label="review" value={observation.review_id} /> : null}
+                {observation.thread_id ? <Fact label="thread" value={observation.thread_id} /> : null}
+                {observation.reply_to_comment_id ? <Fact label="reply to" value={observation.reply_to_comment_id} /> : null}
+              </dl>
+            ))}
+          </li>
+        ))}
+      </TimelineItems>
+    </div>
+  );
+}
+
+function renderCiChecks(timeline: DeliveryCiTimelineV1) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <HeadComparison
+        expected={timeline.expected_head_commit}
+        retained={timeline.retained_head_commit}
+      />
+      <TimelineItems count={timeline.items.length} singular="CI check" truncated={timeline.truncated}>
+        {timeline.items.map((check) => (
+          <li
+            key={check.observation_id}
+            className="flex flex-col gap-1 border-b border-edge-subtle px-1.5 py-1 last:border-b-0"
+          >
+            <span className="truncate font-medium text-text-secondary">{check.workflow_path}</span>
+            <dl className="grid grid-cols-2 gap-x-2 text-3xs text-text-muted">
+              <Fact label="workflow" value={statusAndConclusion(check.workflow_status, check.workflow_conclusion)} />
+              <Fact label="job" value={statusAndConclusion(check.job_status, check.job_conclusion)} />
+              <Fact label="check" value={statusAndConclusion(check.check_status, check.check_conclusion)} />
+              <Fact label="failure kind" value={humanize(check.failure_kind)} />
+              <Fact label="observation" value={check.observation_id} />
+              <Fact label="provider head" value={shortOid(check.provider_head_commit)} />
+              <Fact label="workflow ID" value={check.run.workflow_id} />
+              <Fact label="run ID" value={check.run.run_id} />
+              <Fact label="attempt ID" value={check.run.attempt_id} />
+              <Fact label="suite ID" value={check.run.check_suite_id} />
+              <Fact label="job ID" value={check.run.job_id} />
+              <Fact label="check run ID" value={check.run.check_run_id} />
+              {check.failed_step ? <Fact label="failed step" value={check.failed_step} /> : null}
+              <Fact label="annotations" value={String(check.annotation_count)} />
+              <Fact label="observed at" value={`${check.observed_at_micros} µs`} />
+            </dl>
+          </li>
+        ))}
+      </TimelineItems>
+    </div>
+  );
+}
+
+function renderFailureLocalization(timeline: DeliveryFailureLocalizationTimelineV1) {
+  return (
+    <TimelineItems count={timeline.items.length} singular="localized failure" truncated={timeline.truncated}>
+      {timeline.items.map((item) => (
+        <li key={item.id} className="border-b border-edge-subtle px-1.5 py-1 last:border-b-0">
+          <span className="text-text-secondary">{item.label}</span>{' '}
+          <span className="td-value text-text-muted">{item.id}</span>
+        </li>
+      ))}
+    </TimelineItems>
+  );
+}
+
+function renderReleases(timeline: DeliveryReleaseTimelineV1) {
+  return (
+    <TimelineItems count={timeline.items.length} singular="release" truncated={timeline.truncated}>
+      {timeline.items.map((release) => (
+        <li key={release.id} className="flex flex-col gap-1 border-b border-edge-subtle px-1.5 py-1 last:border-b-0">
+          <span className="font-medium text-text-secondary">
+            {release.tag}{release.name ? ` · ${release.name}` : ''}
+          </span>
+          <span className="text-3xs text-text-muted">
+            release {release.release_id} · {release.draft ? 'draft' : 'not draft'} ·{' '}
+            {release.prerelease ? 'prerelease' : 'not prerelease'} · created{' '}
+            {release.created_at_micros} µs
+          </span>
+          {release.published_at_micros == null ? null : (
+            <span className="text-3xs text-text-muted">published {release.published_at_micros} µs</span>
+          )}
+          {release.assets.length > 0 ? (
+            <ul aria-label={`Assets for ${release.tag}`} className="border-l border-edge-subtle pl-1.5">
+              {release.assets.map((asset) => (
+                <li key={asset.asset_id} className="text-3xs text-text-muted">
+                  <span className="text-text-secondary">{asset.name}</span> · {asset.content_type} ·{' '}
+                  {asset.size_bytes} bytes · {asset.download_count} downloads
+                  {asset.digest ? ` · ${shortOpaque(asset.digest)}` : ''} · created{' '}
+                  {asset.created_at_micros} µs · updated {asset.updated_at_micros} µs
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </li>
+      ))}
+    </TimelineItems>
+  );
+}
+
+function renderGenerationFreshness(value: DeliveryGenerationFreshnessV1) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <StateChip
+        kind={value.comparison === 'current' ? 'ready' : 'stale'}
+        detail={`${humanize(value.comparison)} · HEAD ${shortOid(value.head_commit)} · indexed ${shortOid(value.indexed_commit)}`}
+      />
+      <EvidencePattern quality={value.comparison === 'current' ? 'measured' : 'unknown'} />
+    </div>
+  );
+}
+
+function HeadComparison({ expected, retained }: { expected: string; retained: string }) {
+  return (
+    <div className="grid grid-cols-2 gap-x-2 text-3xs text-text-muted">
+      <Fact label="live head" value={shortOid(expected)} />
+      <Fact label="retained head" value={shortOid(retained)} />
+    </div>
+  );
+}
+
+function TimelineItems({
+  count,
+  singular,
+  truncated,
+  children,
+}: {
+  count: number;
+  singular: string;
+  truncated: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-3xs text-text-muted">
+        {countLabel(count, singular)}{truncated ? ' shown · more evidence not shown' : ''}
+      </span>
+      {count > 0 ? (
+        <ul className="max-h-52 overflow-auto border border-edge-subtle">{children}</ul>
+      ) : null}
+    </div>
+  );
+}
+
+function statusAndConclusion(status: string, conclusion: string | null): string {
+  return conclusion ? `${humanize(status)} · ${humanize(conclusion)}` : humanize(status);
+}
+
+function humanize(value: string): string {
+  return value.replaceAll('_', ' ');
+}
+
+function shortOpaque(value: string): string {
+  return value.length > 16 ? `${value.slice(0, 16)}…` : value;
 }
 
 function shortOid(value: string): string {
@@ -428,17 +767,6 @@ function shortOid(value: string): string {
 
 function countLabel(count: number, singular: string): string {
   return `${count} ${singular}${count === 1 ? '' : 's'}`;
-}
-
-function commitCountDetail(commits: {
-  items?: readonly unknown[];
-  truncated?: boolean;
-}): string {
-  if (!commits.items || commits.truncated == null) {
-    return 'commit projection incomplete';
-  }
-  const count = countLabel(commits.items.length, 'commit');
-  return commits.truncated ? `${count} shown · more commits not shown` : count;
 }
 
 /** The axes, printed. Both of them are easy to misread — one looks like commit

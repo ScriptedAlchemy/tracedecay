@@ -2,6 +2,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  DeliveryOverviewV1,
+  DeliveryPullRequestV1,
+} from '../../contracts/generated.ts';
 import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { DeliveryPage } from './DeliveryPage.tsx';
 
@@ -171,6 +175,65 @@ const INDEX_FRESHNESS = {
   },
 };
 
+const SNAPSHOT = {
+  coverage: 'complete' as const,
+  fetched_at_micros: 101,
+  merge_base_commit_id: 'd'.repeat(40),
+  outcome: 'complete' as const,
+  provider_base_commit_id: 'b'.repeat(40),
+  provider_head_commit_id: 'a'.repeat(40),
+};
+
+function pullRequest(provider: string, pullRequestId = '42'): DeliveryPullRequestV1 {
+  return {
+    id: `${provider}:${pullRequestId}`,
+    label: `${provider} PR ${pullRequestId}`,
+    provider,
+    pull_request_id: pullRequestId,
+    operations: [
+      {
+        operation: 'pull_request' as const,
+        latest_attempt: SNAPSHOT,
+        last_complete: { ...SNAPSHOT, fetched_at_micros: 99 },
+      },
+    ],
+  };
+}
+
+const RELEASE = {
+  assets: [
+    {
+      asset_id: 9007199254740001,
+      content_type: 'application/octet-stream',
+      created_at_micros: 104,
+      digest: 'sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+      download_count: 7,
+      download_url: 'javascript:alert(2)',
+      label: null,
+      name: 'tracedecay-linux.tar.zst',
+      size_bytes: 2048,
+      updated_at_micros: 105,
+    },
+  ],
+  created_at_micros: 102,
+  draft: false,
+  id: 'github:release:9007199254740000',
+  label: 'v2.0.0',
+  name: null,
+  prerelease: false,
+  published_at_micros: null,
+  release_id: 9007199254740000,
+  source_url: 'javascript:alert(1)',
+  tag: 'v2.0.0',
+};
+
+function overviewWith(payload: Partial<DeliveryOverviewV1>) {
+  return {
+    ...DELIVERY_OVERVIEW,
+    payload: { ...DELIVERY_OVERVIEW.payload, ...payload },
+  };
+}
+
 const DELIVERY_OVERVIEW = {
   ...INDEX_FRESHNESS,
   coverage: {
@@ -233,26 +296,30 @@ const DELIVERY_OVERVIEW = {
       state: 'unavailable',
       required_authority: 'ProjectGitHubReviewStoreV1 in DashboardState',
       reason: 'GitHub review authority is not mounted',
+      value: null,
     },
     review_comments: {
       state: 'unavailable',
       required_authority: 'ProjectGitHubReviewStoreV1 in DashboardState',
       reason: 'GitHub review authority is not mounted',
+      value: null,
     },
     ci_checks: {
       state: 'unavailable',
       required_authority: 'CiReadOnlyProviderArchiveV1 in DashboardState',
       reason: 'CI archive is not mounted',
+      value: null,
     },
     failure_localization: {
       state: 'unavailable',
       required_authority: 'CiExactEvidenceAuthorityV1 in DashboardState',
-      reason: 'CI exact evidence authority is not mounted',
+      reason: 'failure localization is not configured',
+      value: null,
     },
     releases: {
-      state: 'unsupported',
+      state: 'not_published',
       required_authority: 'read-only release authority in DashboardState',
-      reason: 'no reusable read-only release authority is implemented',
+      reason: 'release history has not been published',
     },
     generation_freshness: {
       state: 'ready',
@@ -262,7 +329,7 @@ const DELIVERY_OVERVIEW = {
         indexed_commit: 'a'.repeat(40),
       },
     },
-  },
+  } satisfies DeliveryOverviewV1,
 };
 
 function serve(routes: Record<string, { status: number; body: unknown }>) {
@@ -328,7 +395,7 @@ describe('DeliveryPage', () => {
       ),
     ).toBeTruthy();
     // ...and the table agrees with the field.
-    expect(screen.getByText('unknown')).toBeTruthy();
+    expect(screen.getAllByText('unknown').length).toBeGreaterThan(0);
   });
 
   it('renders real Git projections and typed external authority gaps', async () => {
@@ -338,10 +405,270 @@ describe('DeliveryPage', () => {
     expect(screen.getByText('Continuous integration')).toBeTruthy();
     expect(screen.getByText('Releases')).toBeTruthy();
     expect(screen.getByText('Index freshness')).toBeTruthy();
-    expect(screen.getByText(/2 commits · 1 changed path/)).toBeTruthy();
-    expect(screen.getByText(/unavailable · GitHub review authority is not mounted/)).toBeTruthy();
-    expect(screen.getByText(/no reusable read-only release authority is implemented/)).toBeTruthy();
+    expect(screen.getByText('2 commits')).toBeTruthy();
+    expect(screen.getByText(/1 changed path/)).toBeTruthy();
+    expect(
+      screen.getAllByText(/unavailable · GitHub review authority is not mounted/),
+    ).toHaveLength(2);
+    expect(screen.getByText(/release history has not been published/)).toBeTruthy();
     expect(screen.getByText('measured')).toBeTruthy();
+  });
+
+  it('keeps stale provider-qualified PR evidence visible at its retained head', async () => {
+    renderDelivery(PROJECTS, 200, overviewWith({
+      pull_requests: {
+        state: 'stale',
+        value: {
+          expected_head_commit: 'c'.repeat(40),
+          retained_head_commit: 'a'.repeat(40),
+          truncated: false,
+          items: [pullRequest('github'), pullRequest('gitlab')],
+        },
+      },
+    }));
+
+    const projection = await screen.findByRole('region', { name: 'Pull requests' });
+    expect(projection.getAttribute('data-projection-state')).toBe('stale');
+    expect(within(projection).getByText('github · PR 42')).toBeTruthy();
+    expect(within(projection).getByText('gitlab · PR 42')).toBeTruthy();
+    expect(within(projection).getByText('cccccccc')).toBeTruthy();
+    expect(within(projection).getAllByText('aaaaaaaa').length).toBeGreaterThan(0);
+    expect(within(projection).getAllByLabelText('latest attempt')).toHaveLength(2);
+    expect(within(projection).getAllByLabelText('last complete')).toHaveLength(2);
+  });
+
+  it('preserves every review observation and suppresses absent optional identities', async () => {
+    renderDelivery(PROJECTS, 200, overviewWith({
+      review_comments: {
+        state: 'partial',
+        value: {
+          expected_head_commit: 'a'.repeat(40),
+          retained_head_commit: 'a'.repeat(40),
+          truncated: true,
+          items: [
+            {
+              comment_id: 'comment-7',
+              id: 'github:42:comment-7',
+              label: 'review comment 7',
+              provider: 'github',
+              pull_request_id: '42',
+              observations: [
+                {
+                  author_class: 'maintainer',
+                  kind: 'latest_attempt',
+                  lifecycle: 'edited',
+                  observed_at_micros: 108,
+                  operation: 'review_comments',
+                  provider_outcome: 'partial',
+                  reply_to_comment_id: null,
+                  repository_id: 'repo-1',
+                  review_id: 'review-9',
+                  review_state: 'changes_requested',
+                  source_url: null,
+                  thread_id: null,
+                  version_digest: 'sha256:latest-review-version',
+                },
+                {
+                  author_class: 'bot',
+                  kind: 'last_complete',
+                  lifecycle: 'resolved',
+                  observed_at_micros: 100,
+                  operation: 'review_comments',
+                  provider_outcome: 'complete',
+                  reply_to_comment_id: 'comment-1',
+                  repository_id: 'repo-1',
+                  review_id: null,
+                  review_state: 'approved',
+                  source_url: 'javascript:alert(1)',
+                  thread_id: 'thread-3',
+                  version_digest: 'sha256:complete-review-version',
+                },
+              ],
+            },
+          ],
+        },
+      },
+    }));
+
+    const projection = await screen.findByRole('region', { name: 'Review observations' });
+    expect(projection.getAttribute('data-projection-state')).toBe('partial');
+    expect(within(projection).getByText('github · PR 42 · comment comment-7')).toBeTruthy();
+    expect(within(projection).getByText('latest attempt')).toBeTruthy();
+    expect(within(projection).getByText('last complete')).toBeTruthy();
+    expect(within(projection).getByText('review-9')).toBeTruthy();
+    expect(within(projection).getByText('thread-3')).toBeTruthy();
+    expect(within(projection).getByText('comment-1')).toBeTruthy();
+    expect(within(projection).getByText(/more evidence not shown/)).toBeTruthy();
+    expect(within(projection).queryByText('null')).toBeNull();
+    expect(within(projection).queryByText(/javascript:/)).toBeNull();
+    expect(within(projection).queryByRole('link')).toBeNull();
+  });
+
+  it('keeps opaque CI identities and nullable conclusions exact', async () => {
+    renderDelivery(PROJECTS, 200, overviewWith({
+      ci_checks: {
+        state: 'ready',
+        value: {
+          expected_head_commit: 'a'.repeat(40),
+          retained_head_commit: 'a'.repeat(40),
+          truncated: false,
+          items: [
+            {
+              annotation_count: 3,
+              check_conclusion: 'failure',
+              check_status: 'completed',
+              failed_step: null,
+              failure_kind: 'test_failure',
+              id: 'ci-secondary-label',
+              job_conclusion: null,
+              job_status: 'in_progress',
+              label: 'unit tests',
+              observation_id: 'observation-ci-1',
+              observed_at_micros: 106,
+              provider_head_commit: 'a'.repeat(40),
+              run: {
+                attempt_id: 'attempt-001-alpha',
+                check_run_id: 'check-009-z',
+                check_suite_id: 'suite-007-x',
+                job_id: 'job-0004-y',
+                run_id: 'run-0002-beta',
+                workflow_id: 'workflow-0001-alpha',
+              },
+              workflow_conclusion: null,
+              workflow_path: '.github/workflows/ci.yml',
+              workflow_status: 'queued',
+            },
+          ],
+        },
+      },
+      failure_localization: {
+        state: 'unavailable',
+        required_authority: 'retained exact graph localization authority',
+        reason: 'failure localization is not configured',
+        value: null,
+      },
+    }));
+
+    const checks = await screen.findByRole('region', { name: 'CI checks' });
+    expect(within(checks).getByText('workflow-0001-alpha')).toBeTruthy();
+    expect(within(checks).getByText('run-0002-beta')).toBeTruthy();
+    expect(within(checks).getByText('attempt-001-alpha')).toBeTruthy();
+    expect(within(checks).getByText('suite-007-x')).toBeTruthy();
+    expect(within(checks).getByText('job-0004-y')).toBeTruthy();
+    expect(within(checks).getByText('check-009-z')).toBeTruthy();
+    expect(within(checks).getByText('queued')).toBeTruthy();
+    expect(within(checks).getByText('in progress')).toBeTruthy();
+    expect(within(checks).getByText('completed · failure')).toBeTruthy();
+    expect(within(checks).queryByText(/success/)).toBeNull();
+
+    const localization = screen.getByRole('region', { name: 'Failure localization' });
+    expect(localization.getAttribute('data-projection-state')).toBe('unavailable');
+    expect(within(localization).getByText(/not configured/)).toBeTruthy();
+    expect(within(localization).queryByText('observation-ci-1')).toBeNull();
+  });
+
+  it.each([
+    ['ready', { state: 'ready', value: { items: [RELEASE], truncated: false } }, true],
+    ['partial', { state: 'partial', value: { items: [RELEASE], truncated: false } }, true],
+    ['stale', { state: 'stale', value: { items: [RELEASE], truncated: false } }, true],
+    ['failed', { state: 'failed', value: { items: [RELEASE], truncated: false } }, true],
+    [
+      'rate_limited',
+      {
+        state: 'rate_limited',
+        checkpoint: { limit: 60, remaining: 0, reset_at_micros: 111 },
+        retry_at_micros: 112,
+        value: { items: [RELEASE], truncated: false },
+      },
+      true,
+    ],
+    [
+      'unavailable',
+      {
+        state: 'unavailable',
+        reason: 'provider read interrupted',
+        required_authority: 'release read authority',
+        value: { items: [RELEASE], truncated: false },
+      },
+      true,
+    ],
+    ['denied', { state: 'denied', value: { items: [RELEASE], truncated: false } }, false],
+    [
+      'not_published',
+      {
+        state: 'not_published',
+        reason: 'no release page retained',
+        required_authority: 'release read authority',
+      },
+      false,
+    ],
+    ['empty_measured', { state: 'empty_measured', value: { items: [], truncated: false } }, false],
+  ] satisfies Array<[string, DeliveryOverviewV1['releases'], boolean]>)(
+    'renders the %s release projection without changing its state',
+    async (state, releases, showsRetainedValue) => {
+      renderDelivery(PROJECTS, 200, overviewWith({ releases }));
+      const projection = await screen.findByRole('region', { name: 'Release history' });
+      expect(projection.getAttribute('data-projection-state')).toBe(state);
+      if (showsRetainedValue) {
+        expect(within(projection).getByText('v2.0.0')).toBeTruthy();
+      } else {
+        expect(within(projection).queryByText('v2.0.0')).toBeNull();
+      }
+    },
+  );
+
+  it('renders release assets as inert evidence and suppresses null fields and URLs', async () => {
+    renderDelivery(PROJECTS, 200, overviewWith({
+      releases: { state: 'ready', value: { items: [RELEASE], truncated: true } },
+    }));
+
+    const projection = await screen.findByRole('region', { name: 'Release history' });
+    expect(within(projection).getByText('tracedecay-linux.tar.zst')).toBeTruthy();
+    expect(within(projection).getByText(/2048 bytes · 7 downloads/)).toBeTruthy();
+    expect(within(projection).getByText(/more evidence not shown/)).toBeTruthy();
+    expect(within(projection).queryByText('null')).toBeNull();
+    expect(within(projection).queryByText(/javascript:/)).toBeNull();
+    expect(within(projection).queryByRole('link')).toBeNull();
+  });
+
+  it('suppresses a non-authorized envelope even when it carries a payload', async () => {
+    renderDelivery(PROJECTS, 200, {
+      ...overviewWith({
+        releases: { state: 'ready', value: { items: [RELEASE], truncated: false } },
+      }),
+      authorization: { outcome: 'denied' },
+      domain_state: 'denied',
+    });
+
+    await screen.findByText(/delivery evidence was not disclosed/);
+    expect(screen.queryByRole('region', { name: 'Release history' })).toBeNull();
+    expect(screen.queryByText('v2.0.0')).toBeNull();
+  });
+
+  it('suppresses a null latest snapshot without backfilling it from last complete', async () => {
+    const item = pullRequest('github');
+    const operation = item.operations[0];
+    if (!operation) throw new Error('pull request fixture has no operation');
+    item.operations[0] = {
+      ...operation,
+      latest_attempt: null,
+    };
+    renderDelivery(PROJECTS, 200, overviewWith({
+      pull_requests: {
+        state: 'partial',
+        value: {
+          expected_head_commit: 'c'.repeat(40),
+          retained_head_commit: 'a'.repeat(40),
+          items: [item],
+          truncated: true,
+        },
+      },
+    }));
+
+    const projection = await screen.findByRole('region', { name: 'Pull requests' });
+    expect(within(projection).queryByLabelText('latest attempt')).toBeNull();
+    expect(within(projection).getByLabelText('last complete')).toBeTruthy();
+    expect(within(projection).getByText(/more evidence not shown/)).toBeTruthy();
   });
 
   it('discloses when the commit timeline is truncated', async () => {
@@ -360,7 +687,7 @@ describe('DeliveryPage', () => {
     });
 
     expect(
-      await screen.findByText(/2 commits shown · more commits not shown/),
+      await screen.findByText(/2 commits shown · more evidence not shown/),
     ).toBeTruthy();
   });
 
@@ -372,7 +699,7 @@ describe('DeliveryPage', () => {
         generation_freshness: {
           state: 'ready',
           value: {
-            comparison: 'behind',
+            comparison: 'mismatch',
             head_commit: 'c'.repeat(40),
             indexed_commit: 'a'.repeat(40),
           },
@@ -381,7 +708,7 @@ describe('DeliveryPage', () => {
     });
 
     await screen.findByText('Stale');
-    const staleRead = screen.getByText(/behind · HEAD cccccccc · indexed aaaaaaaa/);
+    const staleRead = screen.getByText(/mismatch · HEAD cccccccc · indexed aaaaaaaa/);
     expect(staleRead).toBeTruthy();
     expect(
       within(staleRead.parentElement?.parentElement ?? document.body).getByText('unknown'),
