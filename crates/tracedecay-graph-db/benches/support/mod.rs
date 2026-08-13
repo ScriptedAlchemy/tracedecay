@@ -26,8 +26,6 @@ use tracedecay_store::{
     StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
-pub(super) mod mismatch;
-
 #[derive(Debug)]
 struct BenchmarkGraphLease {
     binding: StoreRuntimeBindingV1,
@@ -83,7 +81,7 @@ impl ExactSqlWriteAuthority for AlwaysAuthorized {
     }
 }
 
-struct BenchmarkProbe {
+pub(super) struct BenchmarkProbe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
 }
@@ -106,7 +104,7 @@ impl RuntimeRequestProbeV1 for BenchmarkProbe {
     }
 }
 
-fn operation_control(sequence: usize) -> (RuntimeRequestControlV1, BenchmarkProbe) {
+pub(super) fn operation_control(sequence: usize) -> (RuntimeRequestControlV1, BenchmarkProbe) {
     let cancellation = RuntimeCancellationIdentityV1 {
         cancellation_id: RuntimeCancellationIdV1::new(format!("benchmark-cancel:{sequence}"))
             .expect("benchmark cancellation identity is valid"),
@@ -132,13 +130,13 @@ fn operation_control(sequence: usize) -> (RuntimeRequestControlV1, BenchmarkProb
 pub struct PersistentBenchmarkGraph {
     _writer: PersistentWriter,
     _readers: ReaderPool<NoReads>,
-    registry: GraphDbRegistry,
-    binding: StoreRuntimeBindingV1,
+    pub(super) registry: GraphDbRegistry,
+    pub(super) binding: StoreRuntimeBindingV1,
     graph_path: PathBuf,
-    authority: GraphPublicationExactSqlStorage,
-    latest_head: Option<tracedecay_store::GraphVerifiedHeadV1>,
+    pub(super) authority: GraphPublicationExactSqlStorage,
+    pub(super) latest_head: Option<tracedecay_store::GraphVerifiedHeadV1>,
     latest_projection: Option<GraphProjectionIdentityV1>,
-    sequence: usize,
+    pub(super) sequence: usize,
     _root: TempDir,
 }
 
@@ -294,7 +292,7 @@ impl PersistentBenchmarkGraph {
             .expect("benchmark verified snapshot recovers")
     }
 
-    fn registration(&self) -> GraphDbRegistration {
+    pub(super) fn registration(&self) -> GraphDbRegistration {
         let canonical_path = self.graph_path.clone();
         let verified_locator = VerifiedStoreLocatorV1::new(
             self.binding.shard_id.clone(),

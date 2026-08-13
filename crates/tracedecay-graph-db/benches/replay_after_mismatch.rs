@@ -4,10 +4,12 @@ use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main
 
 #[path = "support/code.rs"]
 mod code_fixture;
+#[path = "support/mismatch.rs"]
+mod mismatch;
 mod support;
 
 use code_fixture::code_manifest;
-use support::mismatch::ExactMismatchReplay;
+use mismatch::ExactMismatchReplay;
 
 const BRANCHING: usize = 6;
 const DEPTH: usize = 4;
@@ -17,10 +19,15 @@ fn replay_after_exact_recovered_digest_mismatch(criterion: &mut Criterion) {
         "recovery/replay_after_exact_recovered_digest_mismatch",
         |bencher| {
             bencher.iter_batched(
-                || ExactMismatchReplay::prepare(code_manifest(BRANCHING, DEPTH, 1)),
+                || {
+                    ExactMismatchReplay::prepare(
+                        code_manifest(BRANCHING, DEPTH, 1),
+                        code_manifest(BRANCHING, DEPTH, 2),
+                    )
+                },
                 |prepared| {
                     let snapshot = prepared.replay();
-                    assert_eq!(snapshot.generation().as_str(), "generation:1");
+                    assert_eq!(snapshot.generation().as_str(), "generation:2");
                     assert_eq!(snapshot.projection().namespace.as_str(), "benchmark-code");
                     black_box(snapshot)
                 },

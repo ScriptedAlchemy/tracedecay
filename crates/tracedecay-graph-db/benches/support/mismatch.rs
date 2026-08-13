@@ -15,11 +15,11 @@ use tracedecay_store::{
     GraphVerifiedHeadCompareAndSwapV1, GraphVerifiedHeadV1,
 };
 
-use super::{PersistentBenchmarkGraph, operation_control};
+use crate::support::{PersistentBenchmarkGraph, operation_control};
 
-/// A persistent graph whose exact durable replay survived a rejected
-/// recovered-digest CAS. The native generation is retained for ordinary
-/// replay; no destructive recovery is performed.
+/// A persistent graph whose next-generation replay survived a rejected
+/// recovered-digest CAS. The verified baseline and native replacement are
+/// retained; no destructive recovery is performed.
 pub struct ExactMismatchReplay {
     graph: PersistentBenchmarkGraph,
     manifest: GraphGenerationManifest,
@@ -27,8 +27,18 @@ pub struct ExactMismatchReplay {
 }
 
 impl ExactMismatchReplay {
-    pub fn prepare(manifest: GraphGenerationManifest) -> Self {
+    pub fn prepare(
+        baseline_manifest: GraphGenerationManifest,
+        manifest: GraphGenerationManifest,
+    ) -> Self {
         let mut graph = PersistentBenchmarkGraph::new();
+        drop(graph.publish(baseline_manifest, None));
+        drop(graph.recover_snapshot());
+        let prior_head = graph
+            .latest_head
+            .clone()
+            .expect("benchmark baseline has a verified head");
+
         graph.sequence += 1;
         let (append_control, append_probe) = operation_control(graph.sequence);
         let append_context =
@@ -47,7 +57,7 @@ impl ExactMismatchReplay {
                 GraphIdempotencyKey::new("benchmark-publication:mismatch")
                     .expect("benchmark idempotency identity is valid"),
                 input_digest,
-                None,
+                Some(prior_head.clone()),
                 &|| Ok(()),
             )
             .expect("benchmark replay is valid");
@@ -82,13 +92,13 @@ impl ExactMismatchReplay {
             mismatch.injected,
             "the benchmark setup must reach the exact verified-head CAS"
         );
-        assert!(
+        assert_eq!(
             graph
                 .authority
                 .verified_head(&key.projection, &publish_context)
-                .expect("benchmark verified head remains readable")
-                .is_none(),
-            "a rejected recovered digest must leave the verified head absent"
+                .expect("benchmark verified head remains readable"),
+            Some(prior_head),
+            "a rejected recovered digest must preserve the verified baseline"
         );
         assert!(matches!(
             graph
