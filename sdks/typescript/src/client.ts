@@ -7,6 +7,13 @@ import {
   type ResponseFor,
   type ResultFor,
 } from "./operations";
+import { factStoreCurateTerminalMatches } from "./automation-terminal";
+import {
+  applyHttpRequestControls,
+  type OperationRequestOptions,
+  type PageOptions,
+} from "./request-control";
+export type { OperationRequestOptions, PageOptions } from "./request-control";
 import type {
   ApplicationProblemRecord,
   HttpProblemEnvelope,
@@ -33,18 +40,6 @@ export interface McpToolAdapter {
     request: unknown,
     options: { signal?: AbortSignal },
   ): Promise<unknown>;
-}
-
-export interface PageOptions {
-  size?: number;
-  cursor?: string;
-}
-
-export interface OperationRequestOptions {
-  page?: PageOptions;
-  signal?: AbortSignal;
-  /** Absolute UTC deadline in microseconds, forwarded to daemon admission. */
-  deadlineMicros?: number;
 }
 
 export type OperationMethod<Name extends OperationName> = (
@@ -972,6 +967,7 @@ export class TraceDecayClient {
   private async readJson(
     response: Response,
     expectedBinding?: string,
+    expectedRequestId?: string,
   ): Promise<unknown> {
     if (response.status === 401 || response.status === 403) {
       throw new TraceDecayAuthenticationError(response.status);
@@ -1000,6 +996,7 @@ export class TraceDecayClient {
       if (
         response.ok ||
         !validBinding ||
+        (expectedRequestId !== undefined && problemEnvelope.request_id !== expectedRequestId) ||
         !statusMatchesProblem(response.status, problemEnvelope.problem.kind)
       ) {
         throw new TraceDecayMalformedResponseError(
@@ -1019,7 +1016,10 @@ export class TraceDecayClient {
   ): Promise<HttpSuccessEnvelope<Result> | Result> {
     const decodedRequest = descriptor.decodeRequest(request);
     if (!isHttpOperationDescriptor(descriptor)) {
-      if (options.page !== undefined || options.deadlineMicros !== undefined) {
+      if (
+        options.page !== undefined || options.deadlineMicros !== undefined ||
+        options.requestId !== undefined
+      ) {
         throw new TraceDecayProtocolError(
           `${descriptor.operation} does not accept HTTP transport options`,
         );
@@ -1064,19 +1064,9 @@ export class TraceDecayClient {
     }
     const headers = this.headers("application/json");
     headers.set("content-type", "application/json");
-    if (options.deadlineMicros !== undefined) {
-      if (
-        !Number.isSafeInteger(options.deadlineMicros) ||
-        options.deadlineMicros <= 0
-      ) {
-        throw new TraceDecayProtocolError(
-          "deadlineMicros must be a positive safe integer",
-        );
-      }
-      headers.set(
-        "x-tracedecay-deadline-micros",
-        String(options.deadlineMicros),
-      );
+    const requestControlError = applyHttpRequestControls(headers, descriptor, options);
+    if (requestControlError !== undefined) {
+      throw new TraceDecayProtocolError(requestControlError);
     }
     const response = await this.fetchResponse(
       url,
@@ -1088,7 +1078,11 @@ export class TraceDecayClient {
       },
       options.signal,
     );
-    const envelope = await this.readJson(response, descriptor.bindingId);
+    const envelope = await this.readJson(
+      response,
+      descriptor.bindingId,
+      options.requestId,
+    );
     if (!isRecord(envelope) || envelope.kind !== "success") {
       throw new TraceDecayMalformedResponseError(
         "the daemon returned an unknown HTTP envelope",
@@ -1105,6 +1099,18 @@ export class TraceDecayClient {
       const decoded = descriptor.decodeSuccess(envelope.value);
       if (!isDecodedSuccessEnvelope(decoded)) {
         throw new TypeError("decoded application success invariants are invalid");
+      }
+      if (
+        options.requestId !== undefined &&
+        decoded.request_id !== options.requestId
+      ) {
+        throw new TypeError("daemon returned a different application request ID");
+      }
+      if (
+        descriptor.resultSemantics === "fact_store_curate_terminal" &&
+        !await factStoreCurateTerminalMatches(decodedRequest, decoded)
+      ) {
+        throw new TypeError("automatic curation terminal invariants are invalid");
       }
       return decoded;
     } catch (cause) {

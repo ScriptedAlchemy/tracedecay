@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_domain::{ManifestDigest, RunId, UtcMicros, canonical_sha256};
 
 use super::{LcmGrepSortV1, LcmRoleV1, LcmSearchScopeV1};
-use crate::ApplicationContractError;
+use crate::{ApplicationContractError, RequestId};
 
 const MAX_AUTOMATION_REVIEW_LIMIT: u32 = 1_000;
 pub const DEFAULT_FACT_STORE_CURATE_REVIEW_LIMIT: u32 = 24;
@@ -40,6 +40,28 @@ impl FactStoreCurateRequestV1 {
     pub fn validate(&self) -> bool {
         (1..=MAX_AUTOMATION_REVIEW_LIMIT).contains(&self.fact_review_limit)
             && self.min_confidence_millionths <= 1_000_000
+    }
+
+    /// Project the bounds-only launcher plus its transport replay identity into
+    /// the exact durable automation admission used by the daemon.
+    pub fn automation_request(
+        &self,
+        request_id: &RequestId,
+    ) -> Result<AutomationRunRequestV1, ApplicationContractError> {
+        let request = AutomationRunRequestV1 {
+            run_id: RunId::new(request_id.as_str().to_owned())?,
+            task: AutomationTaskRequestV1::MemoryCurator(MemoryCuratorRunInputV1 {
+                fact_review_limit: self.fact_review_limit,
+                min_confidence_millionths: self.min_confidence_millionths,
+            }),
+        };
+        if request.validate() {
+            Ok(request)
+        } else {
+            Err(ApplicationContractError::Inconsistent {
+                field: "fact store curate request",
+            })
+        }
     }
 }
 
@@ -259,6 +281,18 @@ mod tests {
                 .expect("structurally valid bounds");
             assert!(!request.validate());
         }
+    }
+
+    #[test]
+    fn public_curator_projects_transport_identity_into_the_durable_admission() {
+        let request = FactStoreCurateRequestV1::default();
+        let request_id = crate::RequestId::new("request.sdk.curate").expect("request id");
+        let admission = request
+            .automation_request(&request_id)
+            .expect("curator admission");
+        assert_eq!(admission.run_id.as_str(), request_id.as_str());
+        assert_eq!(admission.task_kind(), AutomationTaskV1::MemoryCurator);
+        assert!(admission.validate());
     }
 
     fn reflector_request() -> serde_json::Value {

@@ -71,6 +71,36 @@ pub enum RetainedSurfaceOperation {
     LcmExpandQuery,
 }
 
+/// Whether an SDK caller must supply a stable transport request identity.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SdkRequestIdControlV1 {
+    ServerMinted,
+    Required,
+}
+
+/// Semantic validation applied after structural result decoding.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SdkResultSemanticsV1 {
+    SchemaOnly,
+    FactStoreCurateTerminal,
+}
+
+/// SDK-only transport and terminal controls derived from the application owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetainedSdkOperationContractV1 {
+    pub request_id: SdkRequestIdControlV1,
+    pub result_semantics: SdkResultSemanticsV1,
+}
+
+impl RetainedSdkOperationContractV1 {
+    pub const DEFAULT: Self = Self {
+        request_id: SdkRequestIdControlV1::ServerMinted,
+        result_semantics: SdkResultSemanticsV1::SchemaOnly,
+    };
+}
+
 impl RetainedSurfaceOperation {
     /// Canonical catalog operations. The broad `session_refresh` translator is
     /// intentionally not a catalog operation.
@@ -167,6 +197,17 @@ impl RetainedSurfaceOperation {
 
     pub const fn is_callable(self) -> bool {
         !matches!(self, Self::SessionRefresh)
+    }
+
+    /// Additional SDK controls that cannot live in the bounds-only operation body.
+    pub const fn sdk_operation_contract(self) -> RetainedSdkOperationContractV1 {
+        match self {
+            Self::FactStoreCurate => RetainedSdkOperationContractV1 {
+                request_id: SdkRequestIdControlV1::Required,
+                result_semantics: SdkResultSemanticsV1::FactStoreCurateTerminal,
+            },
+            _ => RetainedSdkOperationContractV1::DEFAULT,
+        }
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -903,6 +944,13 @@ mod tests {
         assert_eq!(
             RetainedSurfaceOperation::from_tool_name("tracedecay_fact_store_curate"),
             Some(operation)
+        );
+        assert_eq!(
+            operation.sdk_operation_contract(),
+            RetainedSdkOperationContractV1 {
+                request_id: SdkRequestIdControlV1::Required,
+                result_semantics: SdkResultSemanticsV1::FactStoreCurateTerminal,
+            }
         );
         retained_surface_application_operation(operation).expect("registered application use case");
     }

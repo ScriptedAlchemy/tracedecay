@@ -19,11 +19,31 @@ use crate::identity::application_identifier;
 
 const RESOLVED_SCOPE_DIGEST_DOMAIN: &str = "tracedecay.application.scope.v1";
 
+/// Canonical HTTP transport control for a caller-owned application request ID.
+///
+/// Reusing this value re-enters the owning durable idempotency authority. It is
+/// deliberately a header rather than an operation-body field so closed public
+/// request DTOs do not acquire caller-owned execution authority.
+pub const APPLICATION_REQUEST_ID_HEADER: &str = "x-tracedecay-request-id";
+
 application_identifier!(
     RequestId => ("request id", 512),
     CapabilityGrantId => ("capability grant id", 512),
     CancellationTokenId => ("cancellation token id", 512),
 );
+
+/// Typed caller-owned replay identity accepted by application transports.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationRequestControlV1 {
+    pub request_id: RequestId,
+}
+
+impl ApplicationRequestControlV1 {
+    pub fn new(request_id: RequestId) -> Self {
+        Self { request_id }
+    }
+}
 
 /// The resolved configuration scope is one exact project/repository/worktree root.
 ///

@@ -107,6 +107,7 @@ mod configuration_wire;
 mod handoff;
 mod multi_root_http;
 mod registered_http;
+mod request_control;
 pub(crate) mod retained;
 mod work;
 mod workflow;
@@ -119,6 +120,10 @@ use handoff::router_with_executor as handoff_application_router_with_executor;
 use multi_root_http::router_with_executor as multi_root_application_router_with_executor;
 pub(crate) use registered_http::RegisteredHttpOperation;
 use registered_http::validated_daemon_outcome;
+use request_control::{
+    ActiveHttpRequest, HttpCancellationRegistry, RequestControlError, accepts_supplied_request_id,
+    supplied_request_id,
+};
 pub(crate) use workflow::invoke_workflow_operation;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
@@ -1393,15 +1398,31 @@ pub fn dashboard_feedback_application_router_with_executor(
     ))
 }
 
-type HttpCancellationRegistry = Arc<Mutex<BTreeMap<RequestId, CancellationSignal>>>;
-
 async fn application_http_context(
     State(cancellations): State<HttpCancellationRegistry>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let Ok(request_id) = mint_global_request_id(GlobalRequestSurface::Http) else {
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    let supplied_request_id = match supplied_request_id(request.headers()) {
+        Ok(request_id) => request_id,
+        Err(RequestControlError::DuplicateHeader | RequestControlError::InvalidHeader) => {
+            return invalid_http_request_control_response();
+        }
+        Err(RequestControlError::ActiveCollision | RequestControlError::RegistryUnavailable) => {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if supplied_request_id.is_some() && !accepts_supplied_request_id(request.uri().path()) {
+        return invalid_http_request_control_response();
+    }
+    let request_id = match supplied_request_id {
+        Some(request_id) => request_id,
+        None => {
+            let Ok(request_id) = mint_global_request_id(GlobalRequestSurface::Http) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            request_id
+        }
     };
     let Ok(cancellation) =
         CancellationSignal::active(format!("cancellation.http.{}", request_id.as_str()))
@@ -1427,51 +1448,32 @@ async fn application_http_context(
     let Ok(deadline) = Deadline::new(UtcMicros(effective_expires_at)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    let active = match ActiveHttpRequest::register(
+        Arc::clone(&cancellations),
+        request_id.clone(),
+        cancellation.clone(),
+    ) {
+        Ok(active) => active,
+        Err(RequestControlError::ActiveCollision) => {
+            return retained::active_request_conflict_response(request_id);
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
     request.extensions_mut().insert(request_id.clone());
     request.extensions_mut().insert(cancellation.clone());
     request.extensions_mut().insert(HttpApplicationControls {
         deadline,
         cancellation: cancellation.clone(),
     });
-    if let Ok(mut active) = cancellations.lock() {
-        active.insert(request_id.clone(), cancellation.clone());
-    }
-    let mut disconnect = HttpDisconnectCancellation::new(cancellations, request_id);
     let response = next.run(request).await;
-    disconnect.disarm();
+    active.finish();
     response
 }
 
-struct HttpDisconnectCancellation {
-    registry: HttpCancellationRegistry,
-    request_id: RequestId,
-    armed: bool,
-}
-
-impl HttpDisconnectCancellation {
-    fn new(registry: HttpCancellationRegistry, request_id: RequestId) -> Self {
-        Self {
-            registry,
-            request_id,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-        if let Ok(mut active) = self.registry.lock() {
-            active.remove(&self.request_id);
-        }
-    }
-}
-
-impl Drop for HttpDisconnectCancellation {
-    fn drop(&mut self) {
-        if self.armed
-            && let Ok(mut active) = self.registry.lock()
-        {
-            active.remove(&self.request_id);
-        }
+fn invalid_http_request_control_response() -> Response {
+    match mint_global_request_id(GlobalRequestSurface::Http) {
+        Ok(request_id) => tracedecay_api::retained_invalid_request_response(request_id),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

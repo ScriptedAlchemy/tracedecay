@@ -5,15 +5,16 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tracedecay_application::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
 use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, McpToolTransport,
     OperationRequestOptions, StreamOptions, StreamResume,
 };
 use tracedecay_sdk::operation::DeadlineBehavior;
 use tracedecay_sdk::operations::{
-    ApplicationGitStatus, CodeExactOccurrence, MultiRootExecute, MultiRootScopeSetCompareAndSwap,
-    MultiRootScopeSetRead, OperationTransport, TypedOperation, WorkRetrieveEvidence,
-    WorkflowListDefinitions, WorkflowRegisterDefinition,
+    ApplicationFactStoreCurate, ApplicationGitStatus, CodeExactOccurrence, MultiRootExecute,
+    MultiRootScopeSetCompareAndSwap, MultiRootScopeSetRead, OperationTransport, TypedOperation,
+    WorkRetrieveEvidence, WorkflowListDefinitions, WorkflowRegisterDefinition,
 };
 
 #[derive(Debug, Default)]
@@ -205,6 +206,7 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
             &request,
             OperationRequestOptions {
                 deadline_micros: Some(1_800_000_000_000_001),
+                ..OperationRequestOptions::default()
             },
         )
         .unwrap();
@@ -213,6 +215,7 @@ fn local_and_remote_clients_preserve_auth_origin_without_query_paging() {
             &request,
             OperationRequestOptions {
                 deadline_micros: Some(1_800_000_000_000_002),
+                ..OperationRequestOptions::default()
             },
         )
         .unwrap();
@@ -334,11 +337,157 @@ fn invalid_typed_deadline_is_rejected_before_transport() {
             &request,
             OperationRequestOptions {
                 deadline_micros: Some(0),
+                ..OperationRequestOptions::default()
             },
         )
         .unwrap_err();
 
     assert!(matches!(error, ClientError::InvalidRequest(_)));
+}
+
+#[test]
+fn curate_requires_and_sends_the_stable_replay_handle() {
+    let client = Client::builder(ConnectionMode::local(
+        "http://127.0.0.1:1",
+        "project.sdk",
+        "sdk-token",
+    ))
+    .build()
+    .unwrap();
+    let request =
+        tracedecay_sdk::application::retained_surfaces::FactStoreCurateRequestV1::default();
+
+    assert!(matches!(
+        client.execute::<ApplicationFactStoreCurate>(&request),
+        Err(ClientError::InvalidRequest(_))
+    ));
+
+    let response = json_response("200 OK", json!({}));
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let error = client
+        .execute_with_options::<ApplicationFactStoreCurate>(
+            &request,
+            OperationRequestOptions {
+                request_id: Some(
+                    tracedecay_sdk::application::RequestId::new("request.sdk.curate")
+                        .expect("request id"),
+                ),
+                ..OperationRequestOptions::default()
+            },
+        )
+        .expect_err("malformed response");
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    assert!(server.join().unwrap()[0].contains("x-tracedecay-request-id: request.sdk.curate"));
+}
+
+#[test]
+fn curate_rejects_a_problem_bound_to_a_foreign_replay_handle() {
+    let response = json_response(
+        "409 Conflict",
+        json!({
+            "kind": "problem",
+            "value": {
+                "binding_id": "binding.http.fact_store_curate.v1",
+                "contract": {"schema_id": "schema.application.problem", "schema_revision": 1},
+                "request_id": "request.foreign",
+                "problem": {
+                    "revision": 1, "kind": "conflict", "code": "retained.request_already_active",
+                    "message": "conflict", "diagnostic": {"code": "retained.request_already_active", "message": "conflict"},
+                    "committed_receipt": null, "owning_layer": "adapter", "terminality": "pre_admission",
+                    "retryable": true, "retry": "same_request", "retry_scope": "same_request",
+                    "retry_after_millis": null, "cancellation_stage": null,
+                    "unavailable_classification": null, "execution_failure_classification": null,
+                    "request_id": "request.foreign", "trace_id": "trace.foreign", "details": [],
+                    "legal_actions": ["retry"], "coverage": null
+                }
+            }
+        }),
+    );
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let request =
+        tracedecay_sdk::application::retained_surfaces::FactStoreCurateRequestV1::default();
+    let error = client
+        .execute_with_options::<ApplicationFactStoreCurate>(
+            &request,
+            OperationRequestOptions {
+                request_id: Some(
+                    tracedecay_sdk::application::RequestId::new("request.sdk.curate")
+                        .expect("request id"),
+                ),
+                ..OperationRequestOptions::default()
+            },
+        )
+        .expect_err("foreign problem identity");
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    assert_eq!(server.join().unwrap().len(), 1);
+}
+
+#[test]
+fn curate_accepts_a_terminal_bound_to_the_public_replay_handle() {
+    let request =
+        tracedecay_sdk::application::retained_surfaces::FactStoreCurateRequestV1::default();
+    let request_id =
+        tracedecay_sdk::application::RequestId::new("request.sdk.curate").expect("request id");
+    let admission = request
+        .automation_request(&request_id)
+        .expect("automation admission");
+    let request_digest = admission.input_digest().expect("request digest");
+    let response = json_response(
+        "200 OK",
+        json!({
+            "kind": "success",
+            "value": {
+                "binding_id": "binding.http.fact_store_curate.v1",
+                "contract": {
+                    "schema_id": "schema.application.retained.fact-store-curate.result",
+                    "schema_revision": 1
+                },
+                "request_id": request_id.as_str(),
+                "scope": {},
+                "outcome": {"outcome": "effect", "value": {
+                    "effect_id": "effect.sdk.curate", "effect_class": "administrative",
+                    "idempotency_key": request_id.as_str(), "authority": {},
+                    "expected_state": "state.sdk.curate", "reconciliation": "required",
+                    "receipt": {},
+                    "execution": {"started_at": 1, "ended_at": 2,
+                        "effective_deadline": {"expires_at": 3}, "cancellation": null,
+                        "budget": {"units_consumed": 1, "bytes_consumed": 1,
+                            "elapsed_micros": 1}, "termination": "completed"},
+                    "payload": {
+                        "run_id": request_id.as_str(), "task": "memory_curator",
+                        "request_digest": request_digest.as_str(),
+                        "terminal": {"status": "completed", "summary": {
+                            "reviewed_count": 0, "accepted_count": 0,
+                            "rejected_count": 0, "skipped_count": 0
+                        }},
+                        "committed_receipts": []
+                    }
+                }}
+            }
+        }),
+    );
+    let (base_url, server) = serve(vec![response]);
+    let client = Client::builder(ConnectionMode::local(&base_url, "project.sdk", "sdk-token"))
+        .build()
+        .unwrap();
+    let terminal = client
+        .execute_with_options::<ApplicationFactStoreCurate>(
+            &request,
+            OperationRequestOptions {
+                request_id: Some(request_id.clone()),
+                ..OperationRequestOptions::default()
+            },
+        )
+        .expect("bound curator terminal");
+    assert_eq!(terminal.request_id, request_id.as_str());
+    assert_eq!(terminal.result.run_id.as_str(), request_id.as_str());
+    assert_eq!(server.join().unwrap().len(), 1);
 }
 
 #[test]
@@ -498,6 +647,8 @@ impl TypedOperation for NonSdkHttpOperation {
         MultiRootScopeSetRead::TERMINAL_STATES;
     const RESULT_SCHEMA_ID: &'static str = MultiRootScopeSetRead::RESULT_SCHEMA_ID;
     const RESULT_SCHEMA_REVISION: u32 = MultiRootScopeSetRead::RESULT_SCHEMA_REVISION;
+    const REQUEST_ID_CONTROL: SdkRequestIdControlV1 = MultiRootScopeSetRead::REQUEST_ID_CONTROL;
+    const RESULT_SEMANTICS: SdkResultSemanticsV1 = MultiRootScopeSetRead::RESULT_SEMANTICS;
 }
 
 #[test]

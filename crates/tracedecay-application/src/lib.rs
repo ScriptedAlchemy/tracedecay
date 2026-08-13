@@ -102,9 +102,10 @@ pub use configuration::{
 };
 pub use configuration_wire::{ConfigurationWireSchemaRegistryV1, ConfigurationWireSchemaV1};
 pub use context::{
-    CancellationContext, CancellationSignal, CancellationState, CancellationTokenId,
-    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestAdmission,
-    RequestContext, RequestId, ResolvedScope,
+    APPLICATION_REQUEST_ID_HEADER, ApplicationRequestControlV1, CancellationContext,
+    CancellationSignal, CancellationState, CancellationTokenId, CapabilityGrantId,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestAdmission, RequestContext,
+    RequestId, ResolvedScope,
 };
 pub use context_scout::{
     context_scout_executable_binding_registry, context_scout_surface_catalog_contribution,

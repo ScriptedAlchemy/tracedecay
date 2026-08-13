@@ -20,18 +20,10 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::operations::{OperationTransport, TypedOperation};
+pub use crate::request_control::OperationRequestOptions;
 
 const MAX_OPAQUE_BYTES: usize = 4_096;
 const MAX_REQUEST_ID_BYTES: usize = 512;
-const DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
-
-/// Per-invocation transport controls accepted by typed operations.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct OperationRequestOptions {
-    /// Absolute UTC deadline in microseconds, forwarded to daemon admission.
-    pub deadline_micros: Option<i64>,
-}
-
 /// Selects loopback or remote HTTP policy without changing operation semantics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionMode {
@@ -250,12 +242,14 @@ impl Client {
                 transport: "mcp_tool",
             });
         };
+        let expected_request_id = crate::request_control::admit::<Operation>(&options)?;
         let response = self.request_route(
             Operation::OPERATION_ID,
             Operation::BINDING_ID,
             route,
             &request,
             options,
+            expected_request_id.as_ref(),
         )?;
         let binding = response
             .envelope()
@@ -397,13 +391,6 @@ impl Client {
                     Operation::OPERATION_ID
                 ),
             })?;
-        let result = serde_json::from_value(payload).map_err(|error| ClientError::Protocol {
-            status: Some(response.status()),
-            message: format!(
-                "daemon returned a malformed {} result: {error}",
-                Operation::OPERATION_ID
-            ),
-        })?;
         let request_id = response
             .envelope()
             .get("request_id")
@@ -413,6 +400,28 @@ impl Client {
                 message: "daemon omitted the application request ID".into(),
             })?
             .to_owned();
+        if !crate::semantic::response_matches(
+            Operation::RESULT_SEMANTICS,
+            &request_id,
+            expected_request_id.as_ref(),
+            &request,
+            &payload,
+        ) {
+            return Err(ClientError::Protocol {
+                status: Some(response.status()),
+                message: format!(
+                    "daemon returned a semantically invalid {} result",
+                    Operation::OPERATION_ID
+                ),
+            });
+        }
+        let result = serde_json::from_value(payload).map_err(|error| ClientError::Protocol {
+            status: Some(response.status()),
+            message: format!(
+                "daemon returned a malformed {} result: {error}",
+                Operation::OPERATION_ID
+            ),
+        })?;
         Ok(TypedResponse {
             request_id,
             result,
@@ -427,6 +436,7 @@ impl Client {
         route: &str,
         request: &Value,
         options: OperationRequestOptions,
+        expected_request_id: Option<&tracedecay_application::RequestId>,
     ) -> Result<ApplicationResponse, ClientError> {
         admit_canonical_sdk_http_binding(operation_id, binding_id, route)?;
         let route = route.strip_prefix("/application").ok_or_else(|| {
@@ -437,16 +447,7 @@ impl Client {
         let url = reqwest::Url::parse(&format!("{}{}", self.application_root, route))
             .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
         let mut headers = self.headers("application/json");
-        if let Some(deadline_micros) = options.deadline_micros {
-            if deadline_micros <= 0 {
-                return Err(ClientError::InvalidRequest(
-                    "deadline_micros must be positive".into(),
-                ));
-            }
-            let value = HeaderValue::from_str(&deadline_micros.to_string())
-                .map_err(|error| ClientError::InvalidConfiguration(error.to_string()))?;
-            headers.insert(DEADLINE_HEADER, value);
-        }
+        crate::request_control::apply_http_headers(&mut headers, options)?;
         let response = self
             .http
             .post(url)
@@ -454,7 +455,7 @@ impl Client {
             .json(request)
             .send()
             .map_err(ClientError::transport)?;
-        self.decode_application_response(response)
+        self.decode_application_response(response, expected_request_id)
     }
 
     /// Requests cancellation of a previously accepted operation.
@@ -554,6 +555,7 @@ impl Client {
     fn decode_application_response(
         &self,
         response: Response,
+        expected_request_id: Option<&tracedecay_application::RequestId>,
     ) -> Result<ApplicationResponse, ClientError> {
         let status = response.status();
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
@@ -580,11 +582,25 @@ impl Client {
                     })?;
                 ApplicationResponse::new(value, status.as_u16())
             }
-            Some("problem") if !status.is_success() => Err(problem_error(
-                &body,
-                status.as_u16(),
-                "problem envelope has no value",
-            )),
+            Some("problem") if !status.is_success() => {
+                let response_request_id = body
+                    .get("value")
+                    .and_then(|value| value.get("request_id"))
+                    .and_then(Value::as_str);
+                if expected_request_id
+                    .is_some_and(|expected| response_request_id != Some(expected.as_str()))
+                {
+                    return Err(ClientError::Protocol {
+                        status: Some(status.as_u16()),
+                        message: "daemon returned a different application request ID".into(),
+                    });
+                }
+                Err(problem_error(
+                    &body,
+                    status.as_u16(),
+                    "problem envelope has no value",
+                ))
+            }
             _ => Err(ClientError::Protocol {
                 status: Some(status.as_u16()),
                 message: "daemon returned an inconsistent HTTP envelope".into(),

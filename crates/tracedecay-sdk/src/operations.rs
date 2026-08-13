@@ -2,10 +2,14 @@
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tracedecay_application::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
 use tracedecay_tool_catalog::{
     CancellationPoint, DeadlineBehavior, EffectClass, ExecutableUnavailableDispositionV1,
     IdempotencyContract, ReceiptContract, ReconciliationContract, TerminalState,
 };
+
+pub const APPLICATION_REQUEST_ID_HEADER: &str =
+    tracedecay_application::APPLICATION_REQUEST_ID_HEADER;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnavailableOperationCapability {
@@ -29,6 +33,8 @@ pub trait TypedOperation {
     const BINDING_ID: &'static str;
     const EFFECT: EffectClass;
     const IDEMPOTENCY: IdempotencyContract;
+    const REQUEST_ID_CONTROL: SdkRequestIdControlV1;
+    const RESULT_SEMANTICS: SdkResultSemanticsV1;
     const CANCELLABLE: bool;
     const CANCELLATION_POINTS: &'static [CancellationPoint];
     const MAXIMUM_DEADLINE_MILLIS: u64;
@@ -41,7 +47,7 @@ pub trait TypedOperation {
 }
 
 macro_rules! typed_operation {
-    ($name:ident, $module:ident, $operation:literal, $transport:expr, $binding:literal, $effect:expr, $idempotency:expr, $cancellable:literal, $cancellation_points:expr, $maximum_deadline:literal, $deadline_behavior:expr, $reconciliation:expr, $receipt:expr, $terminal_states:expr, $schema:literal, $revision:literal) => {
+    ($name:ident, $module:ident, $operation:literal, $transport:expr, $binding:literal, $effect:expr, $idempotency:expr, $request_id_control:expr, $result_semantics:expr, $cancellable:literal, $cancellation_points:expr, $maximum_deadline:literal, $deadline_behavior:expr, $reconciliation:expr, $receipt:expr, $terminal_states:expr, $schema:literal, $revision:literal) => {
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
         pub struct $name;
         impl TypedOperation for $name {
@@ -52,6 +58,8 @@ macro_rules! typed_operation {
             const BINDING_ID: &'static str = $binding;
             const EFFECT: EffectClass = $effect;
             const IDEMPOTENCY: IdempotencyContract = $idempotency;
+            const REQUEST_ID_CONTROL: SdkRequestIdControlV1 = $request_id_control;
+            const RESULT_SEMANTICS: SdkResultSemanticsV1 = $result_semantics;
             const CANCELLABLE: bool = $cancellable;
             const CANCELLATION_POINTS: &'static [CancellationPoint] = $cancellation_points;
             const MAXIMUM_DEADLINE_MILLIS: u64 = $maximum_deadline;
@@ -81,6 +89,8 @@ typed_operation!(
     "binding.http.affected_tests.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -117,6 +127,8 @@ typed_operation!(
     "binding.mcp.apply_native_integration.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -154,6 +166,8 @@ typed_operation!(
     "binding.mcp.approve_native_integration.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -191,6 +205,8 @@ typed_operation!(
     "binding.mcp.ast_grep_rewrite.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -228,6 +244,8 @@ typed_operation!(
     "binding.http.call_chain.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -264,6 +282,8 @@ typed_operation!(
     "binding.mcp.callees.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -300,6 +320,8 @@ typed_operation!(
     "binding.mcp.cancel_native_integration.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -339,6 +361,8 @@ typed_operation!(
     "binding.http.code_callees.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -377,6 +401,8 @@ typed_operation!(
     "binding.http.code_callers.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -415,6 +441,8 @@ typed_operation!(
     "binding.http.code_declaration.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -453,6 +481,8 @@ typed_operation!(
     "binding.http.code_definition.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -491,6 +521,8 @@ typed_operation!(
     "binding.http.code_exact_occurrence.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -529,6 +561,8 @@ typed_operation!(
     "binding.http.code_facets.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -567,6 +601,8 @@ typed_operation!(
     "binding.http.code_implementations.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -605,6 +641,8 @@ typed_operation!(
     "binding.http.code_phrase_search.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -643,6 +681,8 @@ typed_operation!(
     "binding.http.code_references.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -681,6 +721,8 @@ typed_operation!(
     "binding.http.code_signature_search.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -719,6 +761,8 @@ typed_operation!(
     "binding.http.code_symbol_search.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -757,6 +801,8 @@ typed_operation!(
     "binding.http.code_timeline.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -795,6 +841,8 @@ typed_operation!(
     "binding.http.code_type_definition.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -833,6 +881,8 @@ typed_operation!(
     "binding.http.code_type_hierarchy.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -869,6 +919,8 @@ typed_operation!(
     "binding.http.configuration_audit.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -904,6 +956,8 @@ typed_operation!(
     "binding.http.configuration_batch.v1",
     EffectClass::ConfigurationWrite,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -935,6 +989,8 @@ typed_operation!(
     "binding.http.configuration_explain.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -970,6 +1026,8 @@ typed_operation!(
     "binding.http.configuration_get.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1006,6 +1064,8 @@ typed_operation!(
     "binding.http.configuration_list.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1043,6 +1103,8 @@ typed_operation!(
     "binding.http.configuration_observed_state.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1078,6 +1140,8 @@ typed_operation!(
     "binding.http.configuration_protected_apply.v1",
     EffectClass::ConfigurationWrite,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1110,6 +1174,8 @@ typed_operation!(
     "binding.http.configuration_protected_preview.v1",
     EffectClass::Preview,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1145,6 +1211,8 @@ typed_operation!(
     "binding.http.configuration_rollback_apply.v1",
     EffectClass::ConfigurationWrite,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1176,6 +1244,8 @@ typed_operation!(
     "binding.http.configuration_rollback_preview.v1",
     EffectClass::Preview,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1211,6 +1281,8 @@ typed_operation!(
     "binding.http.configuration_set.v1",
     EffectClass::ConfigurationWrite,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1242,6 +1314,8 @@ typed_operation!(
     "binding.http.configuration_unset.v1",
     EffectClass::ConfigurationWrite,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1273,6 +1347,8 @@ typed_operation!(
     "binding.http.configuration_write_credential.v1",
     EffectClass::ConfigurationWrite,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1304,6 +1380,8 @@ typed_operation!(
     "binding.mcp.context.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1340,6 +1418,8 @@ typed_operation!(
     "binding.http.context_scout_budget.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1375,6 +1455,8 @@ typed_operation!(
     "binding.http.context_scout_cancel.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1406,6 +1488,8 @@ typed_operation!(
     "binding.http.context_scout_capability.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1441,6 +1525,8 @@ typed_operation!(
     "binding.http.context_scout_claim.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1472,6 +1558,8 @@ typed_operation!(
     "binding.http.context_scout_delivery.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1503,6 +1591,8 @@ typed_operation!(
     "binding.http.context_scout_explain.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1538,6 +1628,8 @@ typed_operation!(
     "binding.http.context_scout_feedback.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1569,6 +1661,8 @@ typed_operation!(
     "binding.http.context_scout_pause.v1",
     EffectClass::ConfigurationWrite,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1600,6 +1694,8 @@ typed_operation!(
     "binding.http.context_scout_recent.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1635,6 +1731,8 @@ typed_operation!(
     "binding.http.context_scout_resume.v1",
     EffectClass::ConfigurationWrite,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     15000,
@@ -1666,6 +1764,8 @@ typed_operation!(
     "binding.http.context_scout_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1701,6 +1801,8 @@ typed_operation!(
     "binding.http.diagnostics_read.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1737,6 +1839,8 @@ typed_operation!(
     "binding.http.fact_feedback.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1776,6 +1880,8 @@ typed_operation!(
     "binding.http.fact_store_add.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1815,6 +1921,8 @@ typed_operation!(
     "binding.http.fact_store_contradict.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1851,6 +1959,8 @@ typed_operation!(
     "binding.http.fact_store_curate.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::Required,
+    SdkResultSemanticsV1::FactStoreCurateTerminal,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1890,6 +2000,8 @@ typed_operation!(
     "binding.http.fact_store_get.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1926,6 +2038,8 @@ typed_operation!(
     "binding.http.fact_store_list.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1962,6 +2076,8 @@ typed_operation!(
     "binding.http.fact_store_probe.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -1998,6 +2114,8 @@ typed_operation!(
     "binding.http.fact_store_reason.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2034,6 +2152,8 @@ typed_operation!(
     "binding.http.fact_store_related.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2070,6 +2190,8 @@ typed_operation!(
     "binding.http.fact_store_remove.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2109,6 +2231,8 @@ typed_operation!(
     "binding.http.fact_store_search.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2145,6 +2269,8 @@ typed_operation!(
     "binding.http.fact_store_update.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2184,6 +2310,8 @@ typed_operation!(
     "binding.http.feedback_advisory_cycle.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2220,6 +2348,8 @@ typed_operation!(
     "binding.http.feedback_diagnostics.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2256,6 +2386,8 @@ typed_operation!(
     "binding.http.feedback_expand.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2292,6 +2424,8 @@ typed_operation!(
     "binding.http.feedback_get.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2328,6 +2462,8 @@ typed_operation!(
     "binding.http.feedback_impact.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2364,6 +2500,8 @@ typed_operation!(
     "binding.http.feedback_list.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2400,6 +2538,8 @@ typed_operation!(
     "binding.http.file_dependents.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2436,6 +2576,8 @@ typed_operation!(
     "binding.http.file_metadata.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2472,6 +2614,8 @@ typed_operation!(
     "binding.mcp.git_apply.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2509,6 +2653,8 @@ typed_operation!(
     "binding.http.git_blame.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2544,6 +2690,8 @@ typed_operation!(
     "binding.http.git_diff.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2579,6 +2727,8 @@ typed_operation!(
     "binding.http.git_history.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2614,6 +2764,8 @@ typed_operation!(
     "binding.http.git_hunks.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2649,6 +2801,8 @@ typed_operation!(
     "binding.mcp.git_preview.v1",
     EffectClass::Preview,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2684,6 +2838,8 @@ typed_operation!(
     "binding.http.git_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2719,6 +2875,8 @@ typed_operation!(
     "binding.http.github_stack_signal_expand.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2754,6 +2912,8 @@ typed_operation!(
     "binding.http.health_delta.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2790,6 +2950,8 @@ typed_operation!(
     "binding.http.health_read.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2826,6 +2988,8 @@ typed_operation!(
     "binding.mcp.impact.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2862,6 +3026,8 @@ typed_operation!(
     "binding.mcp.insert_at.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2899,6 +3065,8 @@ typed_operation!(
     "binding.mcp.insert_at_symbol.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2936,6 +3104,8 @@ typed_operation!(
     "binding.http.lcm_describe.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -2972,6 +3142,8 @@ typed_operation!(
     "binding.http.lcm_doctor.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3008,6 +3180,8 @@ typed_operation!(
     "binding.http.lcm_expand.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3044,6 +3218,8 @@ typed_operation!(
     "binding.http.lcm_expand_query.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3080,6 +3256,8 @@ typed_operation!(
     "binding.http.lcm_grep.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3116,6 +3294,8 @@ typed_operation!(
     "binding.http.lcm_load_session.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3152,6 +3332,8 @@ typed_operation!(
     "binding.http.lcm_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3188,6 +3370,8 @@ typed_operation!(
     "binding.http.memory_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3224,6 +3408,8 @@ typed_operation!(
     "binding.http.message_search.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3260,6 +3446,8 @@ typed_operation!(
     "binding.http.module_api.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3296,6 +3484,8 @@ typed_operation!(
     "binding.mcp.move_symbol.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3333,6 +3523,8 @@ typed_operation!(
     "binding.mcp.multi_str_replace.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3370,6 +3562,8 @@ typed_operation!(
     "binding.mcp.native_integration_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3405,6 +3599,8 @@ typed_operation!(
     "binding.mcp.node.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3441,6 +3637,8 @@ typed_operation!(
     "binding.mcp.observatory_read.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3477,6 +3675,8 @@ typed_operation!(
     "binding.mcp.port_order.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3513,6 +3713,8 @@ typed_operation!(
     "binding.mcp.port_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3549,6 +3751,8 @@ typed_operation!(
     "binding.mcp.preflight_native_integration.v1",
     EffectClass::Preview,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3584,6 +3788,8 @@ typed_operation!(
     "binding.http.qualified_name.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3620,6 +3826,8 @@ typed_operation!(
     "binding.mcp.redundancy.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3656,6 +3864,8 @@ typed_operation!(
     "binding.mcp.rename_preview.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3692,6 +3902,8 @@ typed_operation!(
     "binding.mcp.rename_symbol.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3729,6 +3941,8 @@ typed_operation!(
     "binding.mcp.replace_symbol.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3766,6 +3980,8 @@ typed_operation!(
     "binding.mcp.session_lookup.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3802,6 +4018,8 @@ typed_operation!(
     "binding.http.session_refresh_begin.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3841,6 +4059,8 @@ typed_operation!(
     "binding.http.session_refresh_cancel.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3880,6 +4100,8 @@ typed_operation!(
     "binding.http.session_refresh_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3916,6 +4138,8 @@ typed_operation!(
     "binding.http.sessions_for.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3952,6 +4176,8 @@ typed_operation!(
     "binding.mcp.similar.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -3988,6 +4214,8 @@ typed_operation!(
     "binding.http.source_body.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4024,6 +4252,8 @@ typed_operation!(
     "binding.mcp.source-edit-reconcile.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4061,6 +4291,8 @@ typed_operation!(
     "binding.mcp.source-edit-rollback.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4098,6 +4330,8 @@ typed_operation!(
     "binding.http.source_lines.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4134,6 +4368,8 @@ typed_operation!(
     "binding.http.source_outline.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4170,6 +4406,8 @@ typed_operation!(
     "binding.mcp.stack_snapshot.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4205,6 +4443,8 @@ typed_operation!(
     "binding.http.storage_status.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4241,6 +4481,8 @@ typed_operation!(
     "binding.mcp.str_replace.v1",
     EffectClass::SourceEdit,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4278,6 +4520,8 @@ typed_operation!(
     "binding.http.test_results.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4314,6 +4558,8 @@ typed_operation!(
     "binding.mcp.todos.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4350,6 +4596,8 @@ typed_operation!(
     "binding.http.workflows.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4386,6 +4634,8 @@ typed_operation!(
     "binding.http.worktree_cleanup_confirm.v1",
     EffectClass::Preview,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4421,6 +4671,8 @@ typed_operation!(
     "binding.http.worktree_cleanup_inspect.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4456,6 +4708,8 @@ typed_operation!(
     "binding.http.worktree_cleanup_reconcile.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4491,6 +4745,8 @@ typed_operation!(
     "binding.http.worktree_cleanup_remove.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4528,6 +4784,8 @@ typed_operation!(
     "binding.http.worktree_inventory.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4563,6 +4821,8 @@ typed_operation!(
     "binding.http.handoff.issue_task_handoff",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -4594,6 +4854,8 @@ typed_operation!(
     "binding.http.handoff.open_investigation_handoff",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -4625,6 +4887,8 @@ typed_operation!(
     "binding.http.handoff.open_task_handoff",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -4656,6 +4920,8 @@ typed_operation!(
     "binding.http.multi_root.execute.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4691,6 +4957,8 @@ typed_operation!(
     "binding.http.multi_root.scope_set_compare_and_swap.v1",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4728,6 +4996,8 @@ typed_operation!(
     "binding.http.multi_root.scope_set_read.v1",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4763,6 +5033,8 @@ typed_operation!(
     "binding.http.work.accept_proposal",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4800,6 +5072,8 @@ typed_operation!(
     "binding.http.work.adjudicate_duplicate",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4837,6 +5111,8 @@ typed_operation!(
     "binding.http.work.adjudicate_leak",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4874,6 +5150,8 @@ typed_operation!(
     "binding.http.work.admit_execution",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4911,6 +5189,8 @@ typed_operation!(
     "binding.http.work.admit_placement",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4948,6 +5228,8 @@ typed_operation!(
     "binding.http.work.attempt_status",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -4983,6 +5265,8 @@ typed_operation!(
     "binding.http.work.cancel_attempt",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5020,6 +5304,8 @@ typed_operation!(
     "binding.http.work.compare_proposal",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5055,6 +5341,8 @@ typed_operation!(
     "binding.http.work.create",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5092,6 +5380,8 @@ typed_operation!(
     "binding.http.work.execution_history",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5127,6 +5417,8 @@ typed_operation!(
     "binding.http.work.experience",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5162,6 +5454,8 @@ typed_operation!(
     "binding.http.work.generate_proposal",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5197,6 +5491,8 @@ typed_operation!(
     "binding.http.work.hydrate_artifacts",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5232,6 +5528,8 @@ typed_operation!(
     "binding.http.work.list_attempts",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5267,6 +5565,8 @@ typed_operation!(
     "binding.http.work.mutate_graph",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5304,6 +5604,8 @@ typed_operation!(
     "binding.http.work.pause_run",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5341,6 +5643,8 @@ typed_operation!(
     "binding.http.work.placement_preflight",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5376,6 +5680,8 @@ typed_operation!(
     "binding.http.work.placement_status",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5411,6 +5717,8 @@ typed_operation!(
     "binding.http.work.prepare_duplicate_adjudication",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5446,6 +5754,8 @@ typed_operation!(
     "binding.http.work.prepare_graph_mutation",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5481,6 +5791,8 @@ typed_operation!(
     "binding.http.work.release_placement",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5518,6 +5830,8 @@ typed_operation!(
     "binding.http.work.resume_attempts",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5555,6 +5869,8 @@ typed_operation!(
     "binding.http.work.resume_run",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5592,6 +5908,8 @@ typed_operation!(
     "binding.http.work.retrieve_evidence",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5627,6 +5945,8 @@ typed_operation!(
     "binding.http.work.retry_attempt",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5664,6 +5984,8 @@ typed_operation!(
     "binding.http.work.review_proposal",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5701,6 +6023,8 @@ typed_operation!(
     "binding.http.work.run_control",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5736,6 +6060,8 @@ typed_operation!(
     "binding.http.work.start_attempt",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5773,6 +6099,8 @@ typed_operation!(
     "binding.http.work.synthesize",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5810,6 +6138,8 @@ typed_operation!(
     "binding.http.work.topology",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5845,6 +6175,8 @@ typed_operation!(
     "binding.http.work.topology_metrics",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5880,6 +6212,8 @@ typed_operation!(
     "binding.http.work.views",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -5915,6 +6249,8 @@ typed_operation!(
     "binding.http.workflow.activate_definition",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -5946,6 +6282,8 @@ typed_operation!(
     "binding.http.workflow.cancel_run",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -5978,6 +6316,8 @@ typed_operation!(
     "binding.http.workflow.definition_history",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -6013,6 +6353,8 @@ typed_operation!(
     "binding.http.workflow.diff_definition",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -6048,6 +6390,8 @@ typed_operation!(
     "binding.http.workflow.get_definition",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -6083,6 +6427,8 @@ typed_operation!(
     "binding.http.workflow.get_run",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -6118,6 +6464,8 @@ typed_operation!(
     "binding.http.workflow.handoff_issue",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -6149,6 +6497,8 @@ typed_operation!(
     "binding.http.workflow.handoff_redeem",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -6181,6 +6531,8 @@ typed_operation!(
     "binding.http.workflow.list_definitions",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,
@@ -6216,6 +6568,8 @@ typed_operation!(
     "binding.http.workflow.pause_run",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -6247,6 +6601,8 @@ typed_operation!(
     "binding.http.workflow.register_definition",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -6278,6 +6634,8 @@ typed_operation!(
     "binding.http.workflow.reject_definition",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -6309,6 +6667,8 @@ typed_operation!(
     "binding.http.workflow.resume_run",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -6340,6 +6700,8 @@ typed_operation!(
     "binding.http.workflow.retire_definition",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -6371,6 +6733,8 @@ typed_operation!(
     "binding.http.workflow.start_run",
     EffectClass::Administrative,
     IdempotencyContract::Required,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     false,
     &[],
     30000,
@@ -6402,6 +6766,8 @@ typed_operation!(
     "binding.http.workflow.validate_definition",
     EffectClass::Read,
     IdempotencyContract::NotRequired,
+    SdkRequestIdControlV1::ServerMinted,
+    SdkResultSemanticsV1::SchemaOnly,
     true,
     &[
         CancellationPoint::BeforeAdmission,

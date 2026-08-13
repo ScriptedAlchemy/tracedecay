@@ -5,6 +5,8 @@
 pub mod client;
 pub mod operations;
 pub mod remote_client;
+mod request_control;
+mod semantic;
 
 /// Canonical HTTP/SSE presentation contracts.
 pub use tracedecay_api as api;

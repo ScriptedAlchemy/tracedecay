@@ -43,7 +43,10 @@ pub(crate) async fn execute_retained_memory_curator(
             &pinned.snapshot.resolution_provenance_digest,
         )
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    let run_id = context.request_context.request_id().as_str().to_owned();
+    let automation_request = request
+        .automation_request(context.request_context.request_id())
+        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?;
+    let run_id = automation_request.run_id.as_str().to_owned();
     let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
         invocation_service,
         cg,
@@ -54,12 +57,7 @@ pub(crate) async fn execute_retained_memory_curator(
         context.cancellation_signal,
         context.observed_at,
         configuration_digest,
-        crate::daemon::automation_effect::memory_curator_run_request(
-            &run_id,
-            request.fact_review_limit as usize,
-            min_confidence,
-        )
-        .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?,
+        automation_request,
     )
     .await
     .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
@@ -67,6 +65,9 @@ pub(crate) async fn execute_retained_memory_curator(
         crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => effect,
         crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
             return terminal.into_outcome().map_err(automation_problem);
+        }
+        crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+            return Err(RetainedSurfaceExecutionErrorV1::Conflict);
         }
         crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
             problem,

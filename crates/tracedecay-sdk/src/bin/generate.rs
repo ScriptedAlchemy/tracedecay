@@ -6,7 +6,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tracedecay_application::sdk_executable_binding_registry;
+use tracedecay_application::retained_surfaces::{
+    RetainedSdkOperationContractV1, RetainedSurfaceOperation, SdkRequestIdControlV1,
+    SdkResultSemanticsV1,
+};
+use tracedecay_application::{APPLICATION_REQUEST_ID_HEADER, sdk_executable_binding_registry};
 use tracedecay_tool_catalog::{
     CancellationContract, CancellationPoint, DeadlineBehavior, EffectClass,
     ExecutableUnavailableDispositionV1, IdempotencyContract, ReceiptContract,
@@ -39,6 +43,8 @@ struct Operation {
     binding: String,
     effect: EffectClass,
     idempotency: IdempotencyContract,
+    request_id_control: SdkRequestIdControlV1,
+    result_semantics: SdkResultSemanticsV1,
     request_schema: Schema,
     result_schema: Schema,
     cancellation: Value,
@@ -150,6 +156,11 @@ const fn unavailable_disposition(disposition: ExecutableUnavailableDispositionV1
 
 fn operation_from_binding(binding: &SdkExecutableBindingV1) -> Result<Operation, Box<dyn Error>> {
     let operation_id = binding.operation_id().as_str();
+    let sdk_contract = operation_id
+        .strip_prefix("operation.application.")
+        .and_then(RetainedSurfaceOperation::from_operation_name)
+        .map(RetainedSurfaceOperation::sdk_operation_contract)
+        .unwrap_or(RetainedSdkOperationContractV1::DEFAULT);
     let transport = match binding.transport() {
         SdkTransportBindingV1::Http { route_path } => OperationTransport::Http {
             route: route_path.clone(),
@@ -166,6 +177,8 @@ fn operation_from_binding(binding: &SdkExecutableBindingV1) -> Result<Operation,
         binding: binding.binding_id().as_str().to_owned(),
         effect: binding.effect(),
         idempotency: binding.idempotency(),
+        request_id_control: sdk_contract.request_id,
+        result_semantics: sdk_contract.result_semantics,
         request_schema: Schema {
             id: binding
                 .request_schema()
@@ -489,11 +502,18 @@ fn render_operations(
     unavailable: &[UnavailableOperation],
 ) -> Result<String, Box<dyn Error>> {
     let mut out = String::from(HEADER);
+    out.push_str("import { decodeCanonicalSchema, decodeHttpSuccessEnvelope, type CanonicalCancellation, type CanonicalJsonSchema, type Decoder, type HttpSuccessEnvelope } from \"./types\";\n\n");
+    emit!(
+        out,
+        "export const APPLICATION_REQUEST_ID_HEADER = {};",
+        quote(APPLICATION_REQUEST_ID_HEADER)
+    );
     out.push_str(
-        "import { decodeCanonicalSchema, decodeHttpSuccessEnvelope, type CanonicalCancellation, type CanonicalJsonSchema, type Decoder, type HttpSuccessEnvelope } from \"./types\";\n\n\
-         export interface OperationDescriptor<Name extends string, Request, Result> {\n\
+        "export interface OperationDescriptor<Name extends string, Request, Result> {\n\
          \x20 readonly operation: Name; readonly operationId: string;\n\
          \x20 readonly effect: string; readonly idempotency: string;\n\
+         \x20 readonly requestIdControl: \"server_minted\" | \"required\";\n\
+         \x20 readonly resultSemantics: \"schema_only\" | \"fact_store_curate_terminal\";\n\
          \x20 readonly bindingId: string;\n\
          \x20 readonly requestSchema: { schemaId: string; revision: number };\n\
          \x20 readonly resultSchema: { schemaId: string; revision: number };\n\
@@ -585,7 +605,7 @@ fn render_operations(
         };
         emit!(
             out,
-            "  {{ operation: {0}, operationId: {1}, transport: {2}, effect: {3}, idempotency: {4}, bindingId: {5},\n\
+            "  {{ operation: {0}, operationId: {1}, transport: {2}, effect: {3}, idempotency: {4}, requestIdControl: {17}, resultSemantics: {18}, bindingId: {5},\n\
              \x20   requestSchema: {{ schemaId: {6}, revision: {7} }}, resultSchema: {{ schemaId: {8}, revision: {9} }},\n\
              \x20   cancellation: {10}, deadline: {11}, reconciliation: {12}, receipt: {13}, terminalStates: {14},\n\
              \x20   decodeRequest: decode{15}Request, decodeResult: decode{15}Result{16} }},",
@@ -606,6 +626,8 @@ fn render_operations(
             serde_json::to_string(&operation.terminal_states)?,
             operation.type_name,
             success_decoder,
+            serde_json::to_string(&operation.request_id_control)?,
+            serde_json::to_string(&operation.result_semantics)?,
         );
     }
     if !operations.is_empty() {
@@ -653,7 +675,9 @@ fn render_rust_operations(
         "//! Generated typed public operation descriptors. DO NOT EDIT.\n\n\
          use serde::Serialize;\n\
          use serde::de::DeserializeOwned;\n\
+         use tracedecay_application::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};\n\
          use tracedecay_tool_catalog::{CancellationPoint, DeadlineBehavior, EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract, ReceiptContract, ReconciliationContract, TerminalState};\n\n\
+         pub const APPLICATION_REQUEST_ID_HEADER: &str = tracedecay_application::APPLICATION_REQUEST_ID_HEADER;\n\n\
          #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
          pub struct UnavailableOperationCapability {\n\
          \x20   pub operation: &'static str,\n\
@@ -673,6 +697,8 @@ fn render_rust_operations(
          \x20   const BINDING_ID: &'static str;\n\
          \x20   const EFFECT: EffectClass;\n\
          \x20   const IDEMPOTENCY: IdempotencyContract;\n\
+         \x20   const REQUEST_ID_CONTROL: SdkRequestIdControlV1;\n\
+         \x20   const RESULT_SEMANTICS: SdkResultSemanticsV1;\n\
          \x20   const CANCELLABLE: bool;\n\
          \x20   const CANCELLATION_POINTS: &'static [CancellationPoint];\n\
          \x20   const MAXIMUM_DEADLINE_MILLIS: u64;\n\
@@ -684,7 +710,7 @@ fn render_rust_operations(
          \x20   const RESULT_SCHEMA_REVISION: u32;\n\
          }\n\n\
          macro_rules! typed_operation {\n\
-         \x20   ($name:ident, $module:ident, $operation:literal, $transport:expr, $binding:literal, $effect:expr, $idempotency:expr, $cancellable:literal, $cancellation_points:expr, $maximum_deadline:literal, $deadline_behavior:expr, $reconciliation:expr, $receipt:expr, $terminal_states:expr, $schema:literal, $revision:literal) => {\n\
+         \x20   ($name:ident, $module:ident, $operation:literal, $transport:expr, $binding:literal, $effect:expr, $idempotency:expr, $request_id_control:expr, $result_semantics:expr, $cancellable:literal, $cancellation_points:expr, $maximum_deadline:literal, $deadline_behavior:expr, $reconciliation:expr, $receipt:expr, $terminal_states:expr, $schema:literal, $revision:literal) => {\n\
          \x20       #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\n\
          \x20       pub struct $name;\n\
          \x20       impl TypedOperation for $name {\n\
@@ -695,6 +721,8 @@ fn render_rust_operations(
          \x20           const BINDING_ID: &'static str = $binding;\n\
          \x20           const EFFECT: EffectClass = $effect;\n\
          \x20           const IDEMPOTENCY: IdempotencyContract = $idempotency;\n\
+         \x20           const REQUEST_ID_CONTROL: SdkRequestIdControlV1 = $request_id_control;\n\
+         \x20           const RESULT_SEMANTICS: SdkResultSemanticsV1 = $result_semantics;\n\
          \x20           const CANCELLABLE: bool = $cancellable;\n\
          \x20           const CANCELLATION_POINTS: &'static [CancellationPoint] = $cancellation_points;\n\
          \x20           const MAXIMUM_DEADLINE_MILLIS: u64 = $maximum_deadline;\n\
@@ -756,7 +784,7 @@ fn render_rust_operations(
              \x20   pub type Result = {result_type};\n\
              }}\n\
              typed_operation!(\n\
-             \x20   {marker}, {module}, {operation_id:?}, {transport}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, {cancellable}, &[{cancellation_points}], {maximum_deadline}, DeadlineBehavior::{deadline_behavior:?}, ReconciliationContract::{reconciliation:?}, ReceiptContract::{receipt:?}, &[{terminal_states}], {schema:?}, {revision}\n\
+             \x20   {marker}, {module}, {operation_id:?}, {transport}, {binding:?}, EffectClass::{effect:?}, IdempotencyContract::{idempotency:?}, SdkRequestIdControlV1::{request_id_control:?}, SdkResultSemanticsV1::{result_semantics:?}, {cancellable}, &[{cancellation_points}], {maximum_deadline}, DeadlineBehavior::{deadline_behavior:?}, ReconciliationContract::{reconciliation:?}, ReceiptContract::{receipt:?}, &[{terminal_states}], {schema:?}, {revision}\n\
              );\n",
             marker = type_name(&operation.name),
             alloc_import = alloc_import,
@@ -765,6 +793,8 @@ fn render_rust_operations(
             binding = operation.binding,
             effect = operation.effect,
             idempotency = operation.idempotency,
+            request_id_control = operation.request_id_control,
+            result_semantics = operation.result_semantics,
             cancellable = operation.cancellable,
             cancellation_points = cancellation_points,
             maximum_deadline = operation.maximum_deadline_millis,
@@ -910,6 +940,7 @@ mod tests {
         canonical_operations, canonical_unavailable_operations, render_operations,
         render_rust_operations, render_schema_type,
     };
+    use tracedecay_application::retained_surfaces::{SdkRequestIdControlV1, SdkResultSemanticsV1};
 
     fn http_route(operation: &super::Operation) -> Option<&str> {
         match &operation.transport {
@@ -970,6 +1001,8 @@ mod tests {
             binding: "binding.http.multi-root.scope-set-read".to_owned(),
             effect: EffectClass::Read,
             idempotency: IdempotencyContract::NotRequired,
+            request_id_control: SdkRequestIdControlV1::ServerMinted,
+            result_semantics: SdkResultSemanticsV1::SchemaOnly,
             request_schema: Schema {
                 id: "schema.multi-root.scope-set-read.request".to_owned(),
                 revision: 1,
@@ -1106,6 +1139,15 @@ mod tests {
                     OperationTransport::Http { route } => !route.is_empty(),
                     OperationTransport::McpTool { tool_name } => !tool_name.is_empty(),
                 })
+        );
+        let curate = operations
+            .iter()
+            .find(|operation| operation.operation_id == "operation.application.fact_store_curate")
+            .expect("automatic curator operation");
+        assert_eq!(curate.request_id_control, SdkRequestIdControlV1::Required);
+        assert_eq!(
+            curate.result_semantics,
+            SdkResultSemanticsV1::FactStoreCurateTerminal
         );
     }
 
