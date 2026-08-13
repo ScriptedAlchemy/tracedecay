@@ -101,6 +101,9 @@ fn only_foreground_daemon_installs_the_global_cpu_pool() {
         action: DaemonAction::Run {
             socket: None,
             profile_root: None,
+            remote_listen: None,
+            remote_tls_cert: None,
+            remote_tls_key: None,
         },
     };
     assert!(is_daemon_run(Some(&daemon)));

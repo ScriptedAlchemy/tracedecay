@@ -355,7 +355,7 @@ pub(crate) use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
     parse_daemon_invocation_request,
 };
-pub use bootstrap::run_foreground;
+pub use bootstrap::{RemoteBrainTlsConfig, run_foreground};
 pub(crate) use service::invocation::{
     DaemonConfigurationRuntimeRegistrar, DaemonContextScoutRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrar,
@@ -372,8 +372,8 @@ pub use service::{
     quiesce_installed_service_before_lease, refresh_installed_service,
     refresh_installed_service_under_lease, refresh_installed_service_under_lease_with_state,
     refresh_service, restore_installed_service_after_update, restore_scoop_package_service,
-    service_spec, service_status, socket_path_or_default, start_service, stop_service,
-    uninstall_service, verify_installed_service_quiesced_under_lease,
+    service_spec, service_spec_with_remote_tls, service_status, socket_path_or_default,
+    start_service, stop_service, uninstall_service, verify_installed_service_quiesced_under_lease,
     wait_for_installed_service_state, with_exclusive_maintenance_window,
     with_quiesced_installed_service,
 };

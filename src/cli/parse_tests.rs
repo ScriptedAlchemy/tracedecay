@@ -678,9 +678,53 @@ fn daemon_install_service_command_parses_socket_and_no_start() {
     assert!(matches!(
         cli.command,
         Some(Commands::Daemon {
-            action: DaemonAction::InstallService { socket, no_start }
+            action: DaemonAction::InstallService {
+                socket,
+                no_start,
+                remote_listen: None,
+                remote_tls_cert: None,
+                remote_tls_key: None,
+            }
         }) if socket.as_deref() == Some("/tmp/tracedecay.sock") && no_start
     ));
+
+    let remote = Cli::try_parse_from([
+        "tracedecay",
+        "daemon",
+        "install-service",
+        "--remote-listen",
+        "192.0.2.10:7443",
+        "--remote-tls-cert",
+        "/run/tracedecay/remote.crt",
+        "--remote-tls-key",
+        "/run/tracedecay/remote.key",
+    ])
+    .expect("managed Remote Brain TLS service should parse");
+    assert!(matches!(
+        remote.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::InstallService {
+                remote_listen: Some(listen),
+                remote_tls_cert: Some(certificate),
+                remote_tls_key: Some(private_key),
+                ..
+            }
+        }) if listen.to_string() == "192.0.2.10:7443"
+            && certificate == "/run/tracedecay/remote.crt"
+            && private_key == "/run/tracedecay/remote.key"
+    ));
+
+    assert!(
+        Cli::try_parse_from([
+            "tracedecay",
+            "daemon",
+            "install-service",
+            "--remote-tls-cert",
+            "/run/tracedecay/remote.crt",
+        ])
+        .is_err(),
+        "partial managed Remote Brain TLS configuration must fail admission"
+    );
 }
 
 #[test]
@@ -699,9 +743,50 @@ fn daemon_run_start_and_stop_commands_parse_lifecycle_options() {
             action: DaemonAction::Run {
                 socket: None,
                 profile_root: Some(profile_root),
+                remote_listen: None,
+                remote_tls_cert: None,
+                remote_tls_key: None,
             }
         }) if profile_root == r"C:\Users\trace\AppData\Local\TraceDecay"
     ));
+
+    let remote = Cli::try_parse_from([
+        "tracedecay",
+        "daemon",
+        "run",
+        "--remote-listen",
+        "192.0.2.10:7443",
+        "--remote-tls-cert",
+        "/run/tracedecay/remote.crt",
+        "--remote-tls-key",
+        "/run/tracedecay/remote.key",
+    ])
+    .expect("complete Remote Brain TLS listener should parse");
+    assert!(matches!(
+        remote.command,
+        Some(Commands::Daemon {
+            action: DaemonAction::Run {
+                remote_listen: Some(listen),
+                remote_tls_cert: Some(certificate),
+                remote_tls_key: Some(private_key),
+                ..
+            }
+        }) if listen.to_string() == "192.0.2.10:7443"
+            && certificate == "/run/tracedecay/remote.crt"
+            && private_key == "/run/tracedecay/remote.key"
+    ));
+
+    assert!(
+        Cli::try_parse_from([
+            "tracedecay",
+            "daemon",
+            "run",
+            "--remote-listen",
+            "192.0.2.10:7443",
+        ])
+        .is_err(),
+        "partial Remote Brain TLS configuration must fail during argument admission"
+    );
 
     let start =
         Cli::try_parse_from(["tracedecay", "daemon", "start"]).expect("daemon start should parse");

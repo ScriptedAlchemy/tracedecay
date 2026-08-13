@@ -5,9 +5,7 @@
 //! signatures, or behavior changed. `use super::*` re-exposes every name the
 //! parent `daemon` module had in scope so the moved code resolves unchanged.
 
-#[cfg(unix)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::task::JoinSet;
@@ -21,13 +19,73 @@ use super::*;
 pub(super) const DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE: tokio::time::Duration =
     tokio::time::Duration::from_millis(100);
 
+/// Explicit network boundary for serving the canonical enrolled Remote Brain
+/// protocol over TLS. Local daemon application traffic keeps its independent
+/// loopback-only HTTP listener.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteBrainTlsConfig {
+    listen: std::net::SocketAddr,
+    certificate_chain: PathBuf,
+    private_key: PathBuf,
+}
+
+impl RemoteBrainTlsConfig {
+    pub fn from_optional_parts(
+        listen: Option<std::net::SocketAddr>,
+        certificate_chain: Option<PathBuf>,
+        private_key: Option<PathBuf>,
+    ) -> Result<Option<Self>> {
+        match (listen, certificate_chain, private_key) {
+            (None, None, None) => Ok(None),
+            (Some(listen), Some(certificate_chain), Some(private_key)) => {
+                if listen.ip().is_unspecified() {
+                    return Err(TraceDecayError::Config {
+                        message: "Remote Brain TLS listener requires an explicit interface address; wildcard addresses are refused".to_owned(),
+                    });
+                }
+                if certificate_chain.as_os_str().is_empty() || private_key.as_os_str().is_empty() {
+                    return Err(TraceDecayError::Config {
+                        message: "Remote Brain TLS certificate and private-key paths must be non-empty".to_owned(),
+                    });
+                }
+                Ok(Some(Self {
+                    listen,
+                    certificate_chain,
+                    private_key,
+                }))
+            }
+            _ => Err(TraceDecayError::Config {
+                message: "Remote Brain TLS listener requires --remote-listen, --remote-tls-cert, and --remote-tls-key together".to_owned(),
+            }),
+        }
+    }
+
+    pub(super) fn listen(&self) -> std::net::SocketAddr {
+        self.listen
+    }
+
+    pub(super) fn certificate_chain(&self) -> &Path {
+        &self.certificate_chain
+    }
+
+    pub(super) fn private_key(&self) -> &Path {
+        &self.private_key
+    }
+}
+
 #[cfg(unix)]
-pub async fn run_foreground(socket_path: PathBuf) -> Result<()> {
-    run_foreground_unix(socket_path).await
+pub async fn run_foreground(
+    socket_path: PathBuf,
+    remote_tls: Option<RemoteBrainTlsConfig>,
+) -> Result<()> {
+    run_foreground_unix(socket_path, remote_tls).await
 }
 
 #[cfg(not(unix))]
-pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
+pub async fn run_foreground(
+    _socket_path: PathBuf,
+    remote_tls: Option<RemoteBrainTlsConfig>,
+) -> Result<()> {
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
@@ -83,16 +141,27 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         &invocation,
     )
     .await?;
-    let http_application_service = http_application::DaemonHttpApplicationService::bind(
-        http_application_registry.clone(),
-        authority.auth_token(),
-    )
-    .await?;
+    let http_application_service =
+        http_application::DaemonHttpApplicationService::bind_with_remote_tls(
+            http_application_registry.clone(),
+            authority.auth_token(),
+            remote_tls.as_ref(),
+        )
+        .await?;
     authority.publish_http_application_endpoint(http_application_service.endpoint())?;
+    if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
+        authority.publish_remote_brain_tls_endpoint(endpoint)?;
+    }
     log_daemon_event(
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
+    if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
+        log_daemon_event(
+            "daemon_remote_brain_tls_listening",
+            &[("endpoint", format!("https://{endpoint}/remote/"))],
+        );
+    }
     let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
 
     let lifecycle = DaemonLifecycle::default();
@@ -347,7 +416,10 @@ fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskRec
 }
 
 #[cfg(unix)]
-async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
+async fn run_foreground_unix(
+    socket_path: PathBuf,
+    remote_tls: Option<RemoteBrainTlsConfig>,
+) -> Result<()> {
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
@@ -428,16 +500,27 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         &engine.invocation,
     )
     .await?;
-    let http_application_service = http_application::DaemonHttpApplicationService::bind(
-        http_application_registry.clone(),
-        authority.auth_token(),
-    )
-    .await?;
+    let http_application_service =
+        http_application::DaemonHttpApplicationService::bind_with_remote_tls(
+            http_application_registry.clone(),
+            authority.auth_token(),
+            remote_tls.as_ref(),
+        )
+        .await?;
     authority.publish_http_application_endpoint(http_application_service.endpoint())?;
+    if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
+        authority.publish_remote_brain_tls_endpoint(endpoint)?;
+    }
     log_daemon_event(
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
+    if let Some(endpoint) = http_application_service.remote_tls_endpoint() {
+        log_daemon_event(
+            "daemon_remote_brain_tls_listening",
+            &[("endpoint", format!("https://{endpoint}/remote/"))],
+        );
+    }
     let semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
     let sync_config = crate::config::SyncConfig::default().with_env_overrides();
     let profile_database = engine

@@ -278,6 +278,8 @@ path = "tests/work_loop_journey.rs"
 required-features = ["test-transport"]
 [dependencies]
 axum = "0.8"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service", "tokio"] }
 tower = "0.5"
 tree-sitter = "0.26"
 constant_time_eq = "0.5.0"
@@ -296,6 +298,7 @@ tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-global-db = { path = "crates/tracedecay-global-db", version = "0.1.0" }
 tracedecay-graph-db = { path = "crates/tracedecay-graph-db", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
+tracedecay-private-fs = { path = "crates/tracedecay-private-fs", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core", version = "0.1.0" }
 tracedecay-search-eval = { path = "crates/tracedecay-search-eval", version = "0.1.0" }
@@ -353,6 +356,8 @@ schemars = "1.2.1"
 futures-util = "0.3.33"
 tokio-util = { version = "0.7.19", features = ["codec"] }
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"

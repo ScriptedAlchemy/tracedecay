@@ -864,19 +864,42 @@ async fn dispatch_daemon_command(action: DaemonAction) -> tracedecay::errors::Re
         DaemonAction::Run {
             socket,
             profile_root: _,
+            remote_listen,
+            remote_tls_cert,
+            remote_tls_key,
         } => {
             // Long-lived host: allowed to run the structured-row sweep.
             tracedecay::daemon::mark_process_long_lived_for_session_maintenance();
             let socket_path = tracedecay::daemon::socket_path_or_default(socket)?;
-            tracedecay::daemon::run_foreground(socket_path).await?;
+            let remote_tls = tracedecay::daemon::RemoteBrainTlsConfig::from_optional_parts(
+                remote_listen,
+                remote_tls_cert.map(PathBuf::from),
+                remote_tls_key.map(PathBuf::from),
+            )?;
+            tracedecay::daemon::run_foreground(socket_path, remote_tls).await?;
         }
-        DaemonAction::InstallService { socket, no_start } => {
+        DaemonAction::InstallService {
+            socket,
+            no_start,
+            remote_listen,
+            remote_tls_cert,
+            remote_tls_key,
+        } => {
             let tracedecay_bin = tracedecay::agents::which_tracedecay_path().ok_or_else(|| {
                 tracedecay::errors::TraceDecayError::Config {
                     message: "tracedecay not found on PATH".to_string(),
                 }
             })?;
-            let spec = tracedecay::daemon::service_spec(tracedecay_bin, socket)?;
+            let remote_tls = tracedecay::daemon::RemoteBrainTlsConfig::from_optional_parts(
+                remote_listen,
+                remote_tls_cert.map(PathBuf::from),
+                remote_tls_key.map(PathBuf::from),
+            )?;
+            let spec = tracedecay::daemon::service_spec_with_remote_tls(
+                tracedecay_bin,
+                socket,
+                remote_tls,
+            )?;
             let service_path = tracedecay::daemon::install_service(&spec, !no_start)?;
             eprintln!(
                 "Installed TraceDecay daemon service at {}",

@@ -773,6 +773,15 @@ pub enum DaemonAction {
         /// Profile data root owned by this daemon process
         #[arg(long = "profile-root")]
         profile_root: Option<String>,
+        /// Explicit TCP address for the enrolled Remote Brain HTTPS listener
+        #[arg(long = "remote-listen", requires_all = ["remote_tls_cert", "remote_tls_key"])]
+        remote_listen: Option<std::net::SocketAddr>,
+        /// PEM certificate chain for the enrolled Remote Brain HTTPS listener
+        #[arg(long = "remote-tls-cert", requires_all = ["remote_listen", "remote_tls_key"])]
+        remote_tls_cert: Option<String>,
+        /// PEM private key for the enrolled Remote Brain HTTPS listener
+        #[arg(long = "remote-tls-key", requires_all = ["remote_listen", "remote_tls_cert"])]
+        remote_tls_key: Option<String>,
     },
     /// Install the daemon as a user service
     #[command(name = "install-service")]
@@ -783,6 +792,15 @@ pub enum DaemonAction {
         /// Write the service file but do not start/enable it
         #[arg(long)]
         no_start: bool,
+        /// Explicit TCP address for the enrolled Remote Brain HTTPS listener
+        #[arg(long = "remote-listen", requires_all = ["remote_tls_cert", "remote_tls_key"])]
+        remote_listen: Option<std::net::SocketAddr>,
+        /// PEM certificate chain for the enrolled Remote Brain HTTPS listener
+        #[arg(long = "remote-tls-cert", requires_all = ["remote_listen", "remote_tls_key"])]
+        remote_tls_cert: Option<String>,
+        /// PEM private key for the enrolled Remote Brain HTTPS listener
+        #[arg(long = "remote-tls-key", requires_all = ["remote_listen", "remote_tls_cert"])]
+        remote_tls_key: Option<String>,
     },
     /// Remove the installed daemon user service
     #[command(name = "uninstall-service")]

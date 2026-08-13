@@ -789,7 +789,8 @@ async fn daemon_http_outer_router_admits_only_one_valid_curate_request_identity(
         json_body(&duplicate)["value"]["problem"]["kind"],
         "invalid_request"
     );
-    let duplicate_request_id = json_body(&duplicate)["value"]["request_id"]
+    let duplicate_body = json_body(&duplicate);
+    let duplicate_request_id = duplicate_body["value"]["request_id"]
         .as_str()
         .expect("server-owned duplicate-header request identity");
     assert_ne!(duplicate_request_id, supplied);
@@ -811,7 +812,8 @@ async fn daemon_http_outer_router_admits_only_one_valid_curate_request_identity(
         json_body(&invalid)["value"]["problem"]["kind"],
         "invalid_request"
     );
-    let invalid_request_id = json_body(&invalid)["value"]["request_id"]
+    let invalid_body = json_body(&invalid);
+    let invalid_request_id = invalid_body["value"]["request_id"]
         .as_str()
         .expect("server-owned invalid-header request identity");
     assert_ne!(invalid_request_id, supplied);
@@ -833,7 +835,8 @@ async fn daemon_http_outer_router_admits_only_one_valid_curate_request_identity(
         json_body(&disallowed)["value"]["problem"]["kind"],
         "invalid_request"
     );
-    let disallowed_request_id = json_body(&disallowed)["value"]["request_id"]
+    let disallowed_body = json_body(&disallowed);
+    let disallowed_request_id = disallowed_body["value"]["request_id"]
         .as_str()
         .expect("server-owned disallowed-header request identity");
     assert_ne!(disallowed_request_id, supplied);
@@ -856,7 +859,8 @@ async fn daemon_http_outer_router_admits_only_one_valid_curate_request_identity(
     )
     .await;
     assert_eq!(status(&without_header), StatusCode::NOT_FOUND);
-    let minted_request_id = json_body(&without_header)["value"]["request_id"]
+    let without_header_body = json_body(&without_header);
+    let minted_request_id = without_header_body["value"]["request_id"]
         .as_str()
         .expect("server-minted request identity");
     assert_ne!(minted_request_id, supplied);
@@ -1167,3 +1171,5 @@ async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admis
     assert_eq!(status(&response), StatusCode::NOT_FOUND);
     service.shutdown().await.expect("shutdown HTTP service");
 }
+
+mod remote_tls;
