@@ -1352,26 +1352,40 @@ fn assert_legal_host_response(provider: &str, state: &str, expected: &Value, out
         let mut document: Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
             panic!("{provider}/{state} emitted illegal JSON stdout: {error}: {stdout:?}")
         });
-        let context = if provider == "cursor" {
-            &mut document["additional_context"]
+        let expected: Value = serde_json::from_str(expected["stdout"].as_str().unwrap())
+            .expect("fixture response stdout is legal JSON");
+        let context_pointer = if provider == "cursor" {
+            "/additional_context"
         } else {
-            &mut document["hookSpecificOutput"]["additionalContext"]
+            "/hookSpecificOutput/additionalContext"
         };
-        assert!(
-            context.is_string(),
-            "{provider}/{state} context response: {document}"
-        );
-        *context = Value::String("<REDACTED_CONTEXT>".to_string());
+        match (
+            document.pointer_mut(context_pointer),
+            expected.pointer(context_pointer),
+        ) {
+            (Some(context), Some(expected_context)) => {
+                assert!(
+                    context.is_string() && expected_context.is_string(),
+                    "{provider}/{state} context response must be a string"
+                );
+                *context = Value::String("<REDACTED_CONTEXT>".to_string());
+            }
+            (None, None) => {}
+            (Some(context), None) => {
+                panic!("{provider}/{state} emitted unexpected context: {context}")
+            }
+            (None, Some(_)) => panic!("{provider}/{state} omitted expected context"),
+        }
         if provider == "cursor" {
-            let project_root = &mut document["env"]["TRACEDECAY_PROJECT_ROOT"];
+            let project_root = document
+                .pointer_mut("/env/TRACEDECAY_PROJECT_ROOT")
+                .unwrap_or_else(|| panic!("{provider}/{state} omitted project-root response"));
             assert!(
                 project_root.is_string(),
                 "{provider}/{state} project-root response"
             );
             *project_root = Value::String("<PROJECT_ROOT>".to_string());
         }
-        let expected: Value = serde_json::from_str(expected["stdout"].as_str().unwrap())
-            .expect("fixture response stdout is legal JSON");
         assert_eq!(document, expected, "{provider}/{state} stdout");
     } else {
         assert_eq!(

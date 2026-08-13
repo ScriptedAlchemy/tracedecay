@@ -7,28 +7,28 @@
       "admission_provider": "codex",
       "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "source": "startup"},
       "admission": {"status": "supported", "retryable": false},
-      "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
     },
     {
       "state": "degraded",
       "admission_provider": "codex",
       "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "source": "startup"},
       "admission": {"status": "degraded", "retryable": false, "reason_code": "spool_record_too_large"},
-      "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
     },
     {
       "state": "unavailable",
       "admission_provider": "codex",
       "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "source": "startup"},
       "admission": {"status": "unavailable", "retryable": false, "reason_code": "project_authority_unbound"},
-      "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
     },
     {
       "state": "unknown",
       "admission_provider": "codex-future",
       "request": {"hook_event_name": "SessionStart", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "source": "startup"},
       "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
-      "response": {"exit_code": 0, "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"<REDACTED_CONTEXT>\"}}", "stderr": ""}
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
     }
   ]
 }
