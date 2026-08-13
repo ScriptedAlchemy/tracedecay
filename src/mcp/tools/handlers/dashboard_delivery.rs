@@ -208,6 +208,7 @@ fn request_context(
     )
 }
 
+#[cfg(test)]
 fn request_context_from_parts(
     request_id: tracedecay_application::RequestId,
     deadline: Deadline,
