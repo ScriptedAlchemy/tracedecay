@@ -39,6 +39,10 @@ from benchmarks.runtime.lifecycle import (
     RunWorkspace,
     run_host,
 )
+from benchmarks.runtime.graph_measurements import (
+    GraphMeasurementError,
+    register_subcommands as register_graph_measurement_subcommands,
+)
 from benchmarks.runtime.incident_workloads import incident_catalog_document
 from benchmarks.runtime.policy import (
     PolicyViolation,
@@ -73,6 +77,8 @@ SUBCOMMANDS = (
     "incident",
     "incidents",
     "smoke",
+    "graph-capture",
+    "graph-paired",
 )
 FORBIDDEN_REPORT_FIELDS = frozenset({"pr_stage", "milestone_budget_ns"})
 
@@ -1994,6 +2000,11 @@ def parser() -> argparse.ArgumentParser:
     smoke_parser.add_argument("--output", required=True)
     smoke_parser.add_argument("--prepared")
     smoke_parser.set_defaults(handler=capture)
+    register_graph_measurement_subcommands(
+        subparsers,
+        capture_name="graph-capture",
+        paired_name="graph-paired",
+    )
     return argument_parser
 
 
@@ -2001,7 +2012,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser().parse_args(argv)
     try:
         return int(arguments.handler(arguments))
-    except HarnessError as exc:
+    except (HarnessError, GraphMeasurementError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

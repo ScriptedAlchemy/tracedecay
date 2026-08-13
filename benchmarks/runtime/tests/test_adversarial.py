@@ -20,11 +20,24 @@ ROOT = Path(__file__).resolve().parents[3]
 RUNNER = ROOT / "benchmarks" / "runtime" / "run.py"
 WRAPPER = ROOT / "scripts" / "run-runtime-performance.sh"
 DOCUMENTATION = ROOT / "docs" / "development" / "runtime-performance.md"
-SUBCOMMANDS = ("prepare", "capture", "paired", "compare", "smoke")
+SUBCOMMANDS = (
+    "prepare",
+    "capture",
+    "paired",
+    "compare",
+    "smoke",
+    "graph-capture",
+    "graph-paired",
+)
 OPERATOR_PROFILE_VARIABLES = (
     "TRACEDECAY_HOME",
     "TRACEDECAY_PROFILE",
     "TRACEDECAY_PROFILE_DIR",
+)
+
+sys.path.insert(0, os.fspath(ROOT))
+from benchmarks.runtime.graph_measurements import (  # noqa: E402
+    EXECUTABLE_SNAPSHOT_SUPPORTED,
 )
 
 
@@ -83,7 +96,9 @@ class RuntimePerformanceAdversarialTest(unittest.TestCase):
             self.assertFalse(output.parent.exists())
             self.assertIn("binary", result.stderr.lower())
 
-    def test_non_executable_binary_is_rejected_before_output_profile_creation(self) -> None:
+    def test_non_executable_binary_is_rejected_before_output_profile_creation(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
             output = temporary / "must not exist" / "capture.json"
@@ -105,6 +120,67 @@ class RuntimePerformanceAdversarialTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(output.parent.exists())
             self.assertIn("executable", result.stderr.lower())
+
+    def test_graph_capture_reports_invalid_executable_without_traceback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            binary = temporary / "invalid executable"
+            binary.write_text("not an executable format\n", encoding="utf-8")
+            binary.chmod(0o700)
+            output = temporary / "graph.json"
+
+            result = run_command(
+                (
+                    sys.executable,
+                    RUNNER,
+                    "graph-capture",
+                    "--criterion-binary",
+                    f"invalid={binary}",
+                    "--output",
+                    output,
+                )
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertFalse(output.exists())
+            self.assertRegex(
+                result.stderr,
+                r"cannot (?:execute|launch) measurement binary|"
+                r"requires sealed-memory descriptor snapshots",
+            )
+            self.assertNotIn("traceback", result.stderr.casefold())
+
+    def test_graph_capture_reports_unsupported_snapshot_platform_truthfully(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            binary = temporary / "valid executable"
+            make_executable(binary, "#!/bin/sh\nexit 0\n")
+            result = run_command(
+                (
+                    sys.executable,
+                    RUNNER,
+                    "graph-capture",
+                    "--criterion-binary",
+                    f"valid={binary}",
+                    "--output",
+                    temporary / "graph.json",
+                )
+            )
+
+            if EXECUTABLE_SNAPSHOT_SUPPORTED:
+                self.assertNotIn(
+                    "requires sealed-memory descriptor snapshots",
+                    result.stderr,
+                )
+            else:
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(
+                    "requires sealed-memory descriptor snapshots",
+                    result.stderr,
+                )
+                self.assertNotIn("traceback", result.stderr.casefold())
 
     def test_paired_rejects_identical_baseline_and_treatment_binaries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -396,7 +472,9 @@ class RuntimePerformanceAdversarialTest(unittest.TestCase):
                     arguments = json.loads(line)
                     self.assertNotIn("daemon", arguments)
 
-    def test_prepare_uses_explicit_output_without_operator_profile_leakage(self) -> None:
+    def test_prepare_uses_explicit_output_without_operator_profile_leakage(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary = Path(directory)
             operator_home = temporary / "operator home"
