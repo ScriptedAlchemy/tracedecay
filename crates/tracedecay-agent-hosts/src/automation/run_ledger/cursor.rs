@@ -62,7 +62,7 @@ fn read_latest_task_validation_pointer(
         if task_key != requested_task_key {
             continue;
         }
-        let Some(validation_report) = row.validation_report else {
+        let Some(validation_report) = row.validation_report.clone() else {
             continue;
         };
         if !json_pointer_exists(&file, path, validation_report, pointer)? {

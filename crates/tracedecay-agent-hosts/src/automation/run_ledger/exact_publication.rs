@@ -1453,7 +1453,7 @@ fn exact_prefix_matches(
 fn discard_unbound_spools_for_run(dashboard_root: &Path, run_id: &str) -> Result<()> {
     validate_run_id_component(run_id)?;
     let directory = dashboard_root.join(EXACT_RUN_SPOOL_DIR);
-    visit_spool_rows(&directory, |_| Ok(()))?;
+    visit_spool_rows(&directory, |_, _| Ok(()))?;
     visit_spool_rows(&directory, |path, identity| {
         if identity.run_id == run_id {
             crate::storage::PrivateStoreIo::remove_file_durable(path)

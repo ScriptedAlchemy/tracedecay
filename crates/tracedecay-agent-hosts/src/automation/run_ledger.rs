@@ -1248,7 +1248,7 @@ fn read_any_run_records_page(
     let mut lines = exact_lookup::ReverseJsonlScanner::new(file, path)?;
     let mut selected_run_order = Vec::new();
     let mut selected_run_ids = std::collections::HashSet::new();
-    let mut malformed_row_count = 0;
+    let mut malformed_row_count: usize = 0;
     let mut has_more = false;
     while let Some(line) = lines.next_span()? {
         let projection = match exact_lookup::scan_jsonl_row(file, path, line) {
