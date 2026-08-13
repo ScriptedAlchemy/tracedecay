@@ -111,6 +111,7 @@ enum TaskLockPublicationError {
 
 enum TaskLockStagingCreationError {
     Definite(std::io::Error),
+    #[cfg(windows)]
     CommitUncertain {
         error: std::io::Error,
         staging_path: PathBuf,
@@ -638,6 +639,7 @@ fn publish_task_lock_file(
                 TaskLockStagingCreationError::Definite(error) => {
                     TaskLockPublicationError::Definite(error)
                 }
+                #[cfg(windows)]
                 TaskLockStagingCreationError::CommitUncertain {
                     error,
                     staging_path,
@@ -671,6 +673,7 @@ fn publish_task_lock_file_after_committed_link_error(
                 TaskLockStagingCreationError::Definite(error) => {
                     TaskLockPublicationError::Definite(error)
                 }
+                #[cfg(windows)]
                 TaskLockStagingCreationError::CommitUncertain {
                     error,
                     staging_path,
