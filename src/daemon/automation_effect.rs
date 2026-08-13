@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -10,8 +11,9 @@ use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, ExactRunPublication, ExactRunPublishOutcome,
 };
 use tracedecay_agent_hosts::automation::runner::{
-    AutomationRunSettlementGuard, RetainedAutomationRun, RetainedAutomationSettlementDisposition,
-    ReusedSchedulerSkip,
+    AutomationRunSettlementGuard, CombinedReviewDispatch, RetainedAutomationRun,
+    RetainedAutomationSettlementDisposition, RetainedCombinedReviewRun,
+    RetainedCombinedReviewSettlementGuards, ReusedSchedulerSkip,
 };
 use tracedecay_agent_hosts::automation::{AutomationCommittedReceipt, AutomationRunError};
 use tracedecay_application::retained_surfaces::{
@@ -247,8 +249,30 @@ impl
 }
 
 struct PairSettlementGuards {
-    _first: AutomationRunSettlementGuard,
-    _second: AutomationRunSettlementGuard,
+    _combined: Option<RetainedCombinedReviewSettlementGuards>,
+    #[cfg(test)]
+    _test_pair: Option<(AutomationRunSettlementGuard, AutomationRunSettlementGuard)>,
+}
+
+impl PairSettlementGuards {
+    fn combined(guards: RetainedCombinedReviewSettlementGuards) -> Self {
+        Self {
+            _combined: Some(guards),
+            #[cfg(test)]
+            _test_pair: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn test_pair(
+        first: AutomationRunSettlementGuard,
+        second: AutomationRunSettlementGuard,
+    ) -> Self {
+        Self {
+            _combined: None,
+            _test_pair: Some((first, second)),
+        }
+    }
 }
 
 enum RetainedSettlementGuardOwner {
@@ -270,6 +294,8 @@ struct RetainedPairOwnerOutcome {
 pub(crate) struct RetainedSettlementPairWaiter {
     first: RetainedSettlementWaiter<Result<RetainedPairOwnerOutcome>>,
     second: RetainedSettlementWaiter<Result<RetainedPairOwnerOutcome>>,
+    first_submission_error: Option<crate::errors::TraceDecayError>,
+    second_submission_error: Option<crate::errors::TraceDecayError>,
 }
 
 impl RetainedSettlementPairWaiter {
@@ -280,7 +306,96 @@ impl RetainedSettlementPairWaiter {
         Result<DeferredSettlementOutcome>,
     ) {
         let (first, second) = tokio::join!(self.first.wait(), self.second.wait());
-        (pair_join_result(first), pair_join_result(second))
+        (
+            self.first_submission_error
+                .map_or_else(|| pair_join_result(first), Err),
+            self.second_submission_error
+                .map_or_else(|| pair_join_result(second), Err),
+        )
+    }
+}
+
+/// A pair of already-running blocking owners waiting for their settlement
+/// requests. Until both requests are submitted, dropping this value closes
+/// the corresponding channels and makes each owner durably abandon its exact
+/// reservation.
+#[must_use = "dropping an unsubmitted pair durably abandons both retained reservations"]
+pub(crate) struct DeferredSettlementPairSubmission<T> {
+    payload: Option<T>,
+    first_sender: Option<SyncSender<DeferredSettlementRequest>>,
+    second_sender: Option<SyncSender<DeferredSettlementRequest>>,
+    waiter: Option<RetainedSettlementPairWaiter>,
+}
+
+impl<T> DeferredSettlementPairSubmission<T> {
+    pub(crate) fn take_payload(&mut self) -> Result<T> {
+        self.payload
+            .take()
+            .ok_or_else(|| contract_error("retained settlement pair payload was already taken"))
+    }
+
+    pub(crate) fn submit(
+        self,
+        first: DeferredSettlementRequest,
+        second: DeferredSettlementRequest,
+    ) -> Result<RetainedSettlementPairWaiter> {
+        self.submit_inner(first, second, || {})
+    }
+
+    fn submit_inner(
+        mut self,
+        first: DeferredSettlementRequest,
+        second: DeferredSettlementRequest,
+        between_submissions: impl FnOnce(),
+    ) -> Result<RetainedSettlementPairWaiter> {
+        let first_submission_error = submit_pair_request(self.first_sender.take(), first, "first");
+        between_submissions();
+        let second_submission_error =
+            submit_pair_request(self.second_sender.take(), second, "second");
+        let Some(mut waiter) = self.waiter.take() else {
+            return Err(contract_error(
+                "retained settlement pair waiter was already transferred",
+            ));
+        };
+        waiter.first_submission_error = first_submission_error;
+        waiter.second_submission_error = second_submission_error;
+        Ok(waiter)
+    }
+
+    #[cfg(test)]
+    fn submit_with_hook(
+        self,
+        first: DeferredSettlementRequest,
+        second: DeferredSettlementRequest,
+        between_submissions: impl FnOnce(),
+    ) -> Result<RetainedSettlementPairWaiter> {
+        self.submit_inner(first, second, between_submissions)
+    }
+}
+
+fn submit_pair_request(
+    sender: Option<SyncSender<DeferredSettlementRequest>>,
+    request: DeferredSettlementRequest,
+    leg: &'static str,
+) -> Option<crate::errors::TraceDecayError> {
+    let Some(sender) = sender else {
+        return Some(contract_error(format!(
+            "retained settlement pair {leg} request channel was already transferred"
+        )));
+    };
+    sender.send(request).err().map(|_| {
+        contract_error(format!(
+            "retained settlement pair {leg} blocking owner stopped before accepting its request"
+        ))
+    })
+}
+
+fn receive_pair_request(
+    receiver: Receiver<DeferredSettlementRequest>,
+) -> DeferredSettlementRequest {
+    match receiver.recv() {
+        Ok(request) => request,
+        Err(_) => DeferredSettlementRequest::Abandon,
     }
 }
 
@@ -644,51 +759,40 @@ impl AutomationEffectAuthority {
         )
     }
 
-    pub(crate) fn start_deferred_settlement_pair(
-        first: (
-            Self,
-            DeferredSettlementRequest,
-            AutomationRunSettlementGuard,
-        ),
-        second: (
-            Self,
-            DeferredSettlementRequest,
-            AutomationRunSettlementGuard,
-        ),
-    ) -> RetainedSettlementPairWaiter {
-        Self::start_deferred_settlement_pair_inner(
-            first,
-            second,
-            #[cfg(test)]
-            None,
-            #[cfg(test)]
-            None,
-        )
+    pub(crate) fn start_retained_combined_settlement_pair(
+        retained: RetainedCombinedReviewRun,
+        first_authority: Self,
+        second_authority: Self,
+    ) -> DeferredSettlementPairSubmission<Result<CombinedReviewDispatch>> {
+        retained.handoff_settlement(move |result, guards| {
+            Self::start_request_waiting_pair_inner(
+                result,
+                first_authority,
+                second_authority,
+                PairSettlementGuards::combined(guards),
+                #[cfg(test)]
+                None,
+                #[cfg(test)]
+                None,
+            )
+        })
     }
 
-    fn start_deferred_settlement_pair_inner(
-        first: (
-            Self,
-            DeferredSettlementRequest,
-            AutomationRunSettlementGuard,
-        ),
-        second: (
-            Self,
-            DeferredSettlementRequest,
-            AutomationRunSettlementGuard,
-        ),
+    fn start_request_waiting_pair_inner<T>(
+        payload: T,
+        first_authority: Self,
+        second_authority: Self,
+        guards: PairSettlementGuards,
         #[cfg(test)] first_phase_hook: Option<SettlementPhaseHook>,
         #[cfg(test)] second_phase_hook: Option<SettlementPhaseHook>,
-    ) -> RetainedSettlementPairWaiter {
-        let (first_authority, first_request, first_guard) = first;
-        let (second_authority, second_request, second_guard) = second;
-        let guards = Arc::new(PairSettlementGuards {
-            _first: first_guard,
-            _second: second_guard,
-        });
+    ) -> DeferredSettlementPairSubmission<T> {
+        let guards = Arc::new(guards);
+        let (first_sender, first_receiver) = sync_channel(1);
+        let (second_sender, second_receiver) = sync_channel(1);
         let first_guards = Arc::clone(&guards);
         let first = RetainedSettlementWaiter {
             task: tokio::task::spawn_blocking(move || {
+                let first_request = receive_pair_request(first_receiver);
                 first_authority.settle_pair_leg_blocking(
                     first_request,
                     first_guards,
@@ -700,6 +804,7 @@ impl AutomationEffectAuthority {
         let second_guards = Arc::clone(&guards);
         let second = RetainedSettlementWaiter {
             task: tokio::task::spawn_blocking(move || {
+                let second_request = receive_pair_request(second_receiver);
                 second_authority.settle_pair_leg_blocking(
                     second_request,
                     second_guards,
@@ -709,27 +814,33 @@ impl AutomationEffectAuthority {
             }),
         };
         drop(guards);
-        RetainedSettlementPairWaiter { first, second }
+        DeferredSettlementPairSubmission {
+            payload: Some(payload),
+            first_sender: Some(first_sender),
+            second_sender: Some(second_sender),
+            waiter: Some(RetainedSettlementPairWaiter {
+                first,
+                second,
+                first_submission_error: None,
+                second_submission_error: None,
+            }),
+        }
     }
 
     #[cfg(test)]
-    fn start_deferred_settlement_pair_with_phase_hooks(
-        first: (
-            Self,
-            DeferredSettlementRequest,
-            AutomationRunSettlementGuard,
-        ),
-        second: (
-            Self,
-            DeferredSettlementRequest,
-            AutomationRunSettlementGuard,
-        ),
+    fn start_request_waiting_settlement_pair_with_phase_hooks(
+        first: (Self, AutomationRunSettlementGuard),
+        second: (Self, AutomationRunSettlementGuard),
         first_phase_hook: Option<SettlementPhaseHook>,
         second_phase_hook: Option<SettlementPhaseHook>,
-    ) -> RetainedSettlementPairWaiter {
-        Self::start_deferred_settlement_pair_inner(
-            first,
-            second,
+    ) -> DeferredSettlementPairSubmission<()> {
+        let (first_authority, first_guard) = first;
+        let (second_authority, second_guard) = second;
+        Self::start_request_waiting_pair_inner(
+            (),
+            first_authority,
+            second_authority,
+            PairSettlementGuards::test_pair(first_guard, second_guard),
             first_phase_hook,
             second_phase_hook,
         )
