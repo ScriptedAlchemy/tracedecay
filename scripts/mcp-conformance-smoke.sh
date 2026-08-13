@@ -110,7 +110,7 @@ run_smoke() {
   fi
 
   # 4. Installed analysis tools execute through the official SDK client.
-  local diagnostics_out affected_out test_map_out search_json impact_out node_id
+  local diagnostics_out affected_out test_map_out symbol_json impact_out node_id
   diagnostics_out="$work_dir/diagnostics.json"
   if inspect --method tools/call --tool-name tracedecay_diagnostics >"$diagnostics_out" 2>/dev/null &&
     json_assert "$diagnostics_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
@@ -135,46 +135,54 @@ run_smoke() {
     fail "tools/call tracedecay_test_map returns typed evidence"
   fi
 
-  search_json="$work_dir/search-json.json"
-  if inspect --method tools/call --tool-name tracedecay_search --tool-arg query=main --tool-arg format=json >"$search_json" 2>/dev/null; then
-    node_id=$(node - "$search_json" <<'NODE'
+  symbol_json="$work_dir/find-exact-symbol.json"
+  impact_out="$work_dir/impact.json"
+  extract_exact_symbol_id() {
+    node - "$1" <<'NODE'
 const fs = require("fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-function findNodeId(value) {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findNodeId(item);
-      if (found) return found;
-    }
-  } else if (value && typeof value === "object") {
-    if (typeof value.node_id === "string" && value.node_id) return value.node_id;
-    for (const item of Object.values(value)) {
-      const found = findNodeId(item);
-      if (found) return found;
-    }
-  }
-  return null;
-}
 for (const content of response.content || []) {
   if (content.type !== "text") continue;
   try {
-    const found = findNodeId(JSON.parse(content.text));
-    if (found) {
-      process.stdout.write(found);
+    const parsed = JSON.parse(content.text);
+    const match = Array.isArray(parsed.matches) ? parsed.matches[0] : null;
+    if (match && typeof match.id === "string" && match.id) {
+      process.stdout.write(match.id);
       process.exit(0);
     }
   } catch {}
 }
 process.exit(1);
 NODE
-    ) || true
-  fi
-  impact_out="$work_dir/impact.json"
+  }
+  # Search races the verified graph and omits node_id when lexical results
+  # arrive first. find_exact_symbol waits for graph admission, then impact
+  # can use the occurrence id. Retry while the first generation is still
+  # sealing symbols into that graph.
+  node_id=""
+  for _ in $(seq 1 30); do
+    if inspect --method tools/call --tool-name tracedecay_find_exact_symbol --tool-arg name=main --tool-arg format=json >"$symbol_json" 2>/dev/null; then
+      node_id=$(extract_exact_symbol_id "$symbol_json") || true
+      if [[ -n ${node_id:-} ]]; then
+        break
+      fi
+    fi
+    sleep 1
+  done
   if [[ -n ${node_id:-} ]] &&
     inspect --method tools/call --tool-name tracedecay_impact --tool-arg "node_id=$node_id" >"$impact_out" 2>/dev/null &&
     json_assert "$impact_out" 'Array.isArray(j.content) && j.content.some(c => c.type === "text" && c.text.length > 0)'; then
     ok "tools/call tracedecay_impact returns typed evidence"
   else
+    echo "mcp-conformance-smoke: impact node_id='${node_id:-}'" >&2
+    if [[ -s "$symbol_json" ]]; then
+      echo "----- tracedecay_find_exact_symbol format=json -----" >&2
+      cat "$symbol_json" >&2 || true
+    fi
+    if [[ -s "$impact_out" ]]; then
+      echo "----- tracedecay_impact -----" >&2
+      cat "$impact_out" >&2 || true
+    fi
     fail "tools/call tracedecay_impact returns typed evidence"
   fi
 

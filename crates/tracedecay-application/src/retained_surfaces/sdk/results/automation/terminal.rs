@@ -85,7 +85,7 @@ impl AutomationSkipReasonV1 {
             "session_cursor_manifest_limit_exceeded" => Reason::SessionCursorManifestLimitExceeded,
             "session_evidence_budget_exhausted" => Reason::SessionEvidenceBudgetExhausted,
             "session_evidence_cancelled" => Reason::SessionEvidenceCancelled,
-            "no_session_evidence" => Reason::NoSessionEvidence,
+            "no_session_evidence" | "no_skill_writer_evidence" => Reason::NoSessionEvidence,
             "shipped_fact_proposal_history_retired" => Reason::ShippedFactProposalHistoryRetired,
             _ => return None,
         })
@@ -101,7 +101,13 @@ impl AutomationSkipReasonV1 {
             | Reason::NothingToReview => task == AutomationTaskV1::MemoryCurator,
             Reason::SessionReflectorDisabled
             | Reason::NoNewSessionActivity
-            | Reason::SessionEvidenceFilterUnavailable
+            | Reason::ShippedFactProposalHistoryRetired => {
+                task == AutomationTaskV1::SessionReflector
+            }
+            // Skill writer and combined review retrieve the same session
+            // evidence surface as the reflector. A typed evidence skip must
+            // remain a skip for those tasks instead of failing settlement.
+            Reason::SessionEvidenceFilterUnavailable
             | Reason::SessionEvidenceRetrievalUnavailable
             | Reason::SessionEvidenceUnavailable
             | Reason::SessionEvidencePartial
@@ -112,10 +118,12 @@ impl AutomationSkipReasonV1 {
             | Reason::SessionCursorManifestLimitExceeded
             | Reason::SessionEvidenceBudgetExhausted
             | Reason::SessionEvidenceCancelled
-            | Reason::NoSessionEvidence
-            | Reason::ShippedFactProposalHistoryRetired => {
-                task == AutomationTaskV1::SessionReflector
-            }
+            | Reason::NoSessionEvidence => matches!(
+                task,
+                AutomationTaskV1::SessionReflector
+                    | AutomationTaskV1::SkillWriter
+                    | AutomationTaskV1::CombinedReview
+            ),
             Reason::SkillWriterDisabled => task == AutomationTaskV1::SkillWriter,
             Reason::CombinedReviewDisabled => task == AutomationTaskV1::CombinedReview,
             Reason::UserJobDisabled | Reason::JobCommandsDisabled => {

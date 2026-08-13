@@ -48,6 +48,7 @@ function isolatedEnvironment(home: string): NodeJS.ProcessEnv {
     XDG_CONFIG_HOME: join(home, ".config"),
     TRACEDECAY_DATA_DIR: profile,
     TRACEDECAY_GLOBAL_DB: join(profile, "global.db"),
+    TRACEDECAY_DAEMON_SOCKET: join(profile, "daemon.sock"),
     TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN: "1",
   };
 }
@@ -154,7 +155,6 @@ it(
       );
       run("git", ["init", "--quiet"], { cwd: project, env });
 
-      run(binary, ["init"], { cwd: project, env });
       daemon = spawn(binary, ["daemon", "run", "--socket", socket], {
         cwd: project,
         env,
@@ -165,6 +165,7 @@ it(
         daemonStderr += chunk;
       });
       const authority = await waitForAuthority(daemon, authorityPath);
+      run(binary, ["init"], { cwd: project, env });
       const context = JSON.parse(
         run(binary, ["projects", "context", project, "--json"], {
           cwd: project,
