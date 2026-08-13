@@ -270,6 +270,75 @@ fn duplicate_yaml_sensitive_keys_are_quarantined_before_value_materialization() 
 }
 
 #[test]
+fn yaml_decoy_comment_mentioning_the_key_does_not_redirect_the_redaction_span() {
+    // Line 1 is a decoy: it mentions the key name in a comment, well before
+    // the real `vault_passphrase:` assignment. An unanchored `raw.find(key)`
+    // would match the decoy and redact its (harmless) comment line while the
+    // real value — a YAML folded scalar spread across the following two
+    // lines — sails through untouched. A folded scalar's decoded value
+    // differs from its raw bytes (folding turns newlines into spaces), so
+    // byte-for-byte value location also fails and the key-line-tail
+    // fallback is the only thing standing between this secret and the
+    // sanitized output. The fallback cannot redact content that lives on
+    // lines after the key's own line, so the correct outcome is quarantine,
+    // never a silent redaction of the wrong (decoy) span.
+    let raw = "# rotate the vault_passphrase monthly\nvault_passphrase: >\n  line-one-of-secret\n  line-two-of-secret\nregion: us-east\n";
+
+    let scanned = sanitize_structured_text(raw).expect("structured scan runs");
+    assert!(
+        scanned
+            .quarantine_findings()
+            .iter()
+            .any(|finding| finding.detector() == PrivacyDetectorV1::SensitiveField),
+        "an unlocatable sensitive field must be quarantined, not silently marked redacted"
+    );
+    assert!(
+        !scanned.findings().iter().any(|finding| finding.action()
+            == SanitizationActionV1::Redacted
+            && finding.detector() == PrivacyDetectorV1::SensitiveField),
+        "the decoy must never be reported as a successful redaction of the real field"
+    );
+    assert!(
+        sanitize_provider_metadata_text(raw).is_none(),
+        "a field the parser cannot precisely locate must fail closed, not leak the folded secret"
+    );
+}
+
+#[test]
+fn json_decoy_key_mentioned_in_an_earlier_string_value_does_not_redirect_the_redaction_span() {
+    // "note" is a decoy: it mentions the key name inside an earlier string
+    // value, well before the real `"vault_passphrase"` assignment. JSON
+    // escapes the real value's embedded newline as `\n` (two ASCII bytes),
+    // so the decoded value never matches the raw bytes byte-for-byte and
+    // location falls back to the key-line-tail heuristic. An unanchored
+    // search would match the decoy inside "note" and redact only that line,
+    // leaving the real secret on the next line completely untouched.
+    let raw = "{\n  \"note\": \"remember to rotate the vault_passphrase weekly\",\n  \"vault_passphrase\": \"line-one-marker\\nline-two-marker\"\n}\n";
+
+    let scanned = sanitize_structured_text(raw).expect("structured scan runs");
+    assert_eq!(scanned.format(), Some(StructuredTextFormatV1::Json));
+    assert!(
+        !scanned.sanitized_text().contains("line-one-marker"),
+        "the decoy key mention must not redirect redaction away from the real secret: {}",
+        scanned.sanitized_text()
+    );
+    assert!(
+        scanned
+            .sanitized_text()
+            .contains("rotate the vault_passphrase weekly"),
+        "the decoy string is not itself sensitive and must survive sanitization: {}",
+        scanned.sanitized_text()
+    );
+    assert!(
+        scanned
+            .findings()
+            .iter()
+            .any(|finding| finding.detector() == PrivacyDetectorV1::SensitiveField),
+        "the real field must still be reported as a sensitive-field finding"
+    );
+}
+
+#[test]
 fn lcm_json_duplicate_keys_are_rejected_before_value_materialization() {
     let raw =
         format!(r#"{{"vault_passphrase":"{PLACEHOLDER}","vault_passphrase":"safe-replacement"}}"#);

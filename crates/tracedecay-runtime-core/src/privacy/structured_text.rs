@@ -512,8 +512,15 @@ fn locate_value(raw: &str, key: &str, value: &str) -> Option<Vec<Range<usize>>> 
 /// Fail-closed fallback when a parsed value cannot be matched byte-for-byte in
 /// the original text — an escaped JSON string, a folded YAML block. Redacting
 /// the rest of the key's line cannot leave the value behind.
+///
+/// The key must be *anchored* to an occurrence that syntactically looks like
+/// a key — an unanchored `raw.find(key)` would happily match a decoy, e.g. a
+/// comment mentioning the key name above the real assignment. Redacting a
+/// decoy's line while the real value sails through untouched is a redaction
+/// fail-open, so a candidate with no qualifying key occurrence returns `None`
+/// here and is quarantined by the caller instead of guessing.
 fn locate_key_line_tail(raw: &str, key: &str) -> Option<Range<usize>> {
-    let index = raw.find(key)?;
+    let index = find_key_occurrence(raw, key)?;
     let after = index + key.len();
     let line_end = raw[after..]
         .find('\n')
@@ -529,6 +536,47 @@ fn locate_key_line_tail(raw: &str, key: &str) -> Option<Range<usize>> {
         start += 1;
     }
     (start < line_end && raw.is_char_boundary(start)).then_some(start..line_end)
+}
+
+/// First occurrence of `key` in `raw` that is actually a key, not incidental
+/// text mentioning the key's name.
+///
+/// A qualifying occurrence sits at the start of its line, modulo leading
+/// whitespace or quote characters, and is followed — after an optional
+/// closing quote and whitespace — by a `:` or `=` separator. A bare
+/// substring match inside a comment ("# rotate the api_key monthly") or an
+/// earlier string value ("remember to rotate the api_key weekly") does not
+/// qualify, so it can never redirect the redaction span away from the real
+/// key's line.
+fn find_key_occurrence(raw: &str, key: &str) -> Option<usize> {
+    if key.is_empty() {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    for (index, _) in raw.match_indices(key) {
+        let line_start = raw[..index].rfind('\n').map_or(0, |position| position + 1);
+        let prefix_is_key_position = raw[line_start..index]
+            .chars()
+            .all(|c| c == ' ' || c == '\t' || c == '"' || c == '\'');
+        if !prefix_is_key_position {
+            continue;
+        }
+        let after = index + key.len();
+        let line_end = raw[after..]
+            .find('\n')
+            .map_or(raw.len(), |position| after + position);
+        let mut cursor = after;
+        if cursor < line_end && matches!(bytes[cursor], b'"' | b'\'') {
+            cursor += 1;
+        }
+        while cursor < line_end && matches!(bytes[cursor], b' ' | b'\t') {
+            cursor += 1;
+        }
+        if cursor < line_end && matches!(bytes[cursor], b':' | b'=') {
+            return Some(index);
+        }
+    }
+    None
 }
 
 /// Sanitizes free-form provider metadata through the structured parse-first
