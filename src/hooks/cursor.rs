@@ -25,7 +25,10 @@ use super::{
 /// Oversized backlogs stay queued instead of blocking hook execution.
 pub const CURSOR_CATCH_UP_INGEST_MAX_BYTES: u64 =
     tracedecay_sessions::runtime::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
-/// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
+/// Budget for the end-of-turn `stop` catch-up ingest. `stop` and `sessionEnd`
+/// (see `hook_cursor_session_completion`) both share this budget and are
+/// registered with a 30s hook timeout in `plugin/hooks/hooks-cursor.json`,
+/// leaving 5s of headroom for the rest of the handler.
 const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
 
 fn paths_same(a: &Path, b: &Path) -> bool {

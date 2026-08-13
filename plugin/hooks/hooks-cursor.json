@@ -10,7 +10,7 @@
     "sessionEnd": [
       {
         "command": "tracedecay hook-cursor-session-end",
-        "timeout": 5
+        "timeout": 30
       }
     ],
     "postToolUse": [
@@ -46,7 +46,7 @@
     "stop": [
       {
         "command": "tracedecay hook-cursor-stop",
-        "timeout": 5
+        "timeout": 30
       }
     ]
   }
