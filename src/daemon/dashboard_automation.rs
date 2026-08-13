@@ -439,29 +439,30 @@ async fn execute_dashboard_automation_run(
                     },
                 )
                 .await;
-            let (run, settlement_guard) = retained_run.into_parts();
-            let run = match run {
-                Ok(run) => run,
-                Err(error) => {
-                    let waiter = effect.start_deferred_problem_settlement_observed(
-                        error,
-                        settlement_guard,
-                        Some(observer),
-                    );
-                    return match waiter.wait().await {
-                        Ok((problem, _ledger_record)) => Err(automation_problem(problem)),
-                        Err(settlement_error) => Err(automation_failed(settlement_error)),
-                    };
+            let waiter =
+                effect.start_retained_automation_settlement(retained_run, Some(observer), |run| {
+                    (run.ledger_record, run.committed_receipt)
+                });
+            match waiter.wait().await.map_err(automation_failed)? {
+                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Run {
+                    terminal,
+                    record: _record,
+                } => automation_terminal_run(&terminal)?,
+                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Problem {
+                    problem,
+                    record: _record,
+                } => return Err(automation_problem(problem)),
+                crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::Reused {
+                    record: _record,
                 }
-            };
-            let waiter = effect.start_deferred_run_settlement_observed(
-                run.ledger_record,
-                run.committed_receipt,
-                settlement_guard,
-                Some(observer),
-            );
-            let (terminal, _ledger_record) = waiter.wait().await.map_err(automation_failed)?;
-            automation_terminal_run(&terminal)?
+                | crate::daemon::automation_effect::RetainedAutomationSettlementOutcome::AbandonedObserved {
+                    record: _record,
+                } => {
+                    return Err(automation_failed(
+                        "dashboard automation cannot reuse a scheduler-only skip",
+                    ));
+                }
+            }
         }
     };
     Ok(run)

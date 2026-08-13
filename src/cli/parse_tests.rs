@@ -1,8 +1,8 @@
 use super::{
-    AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
-    AutomationRunsAction, AutomationSkillsAction, BranchAction, Cli, Commands, DaemonAction,
-    FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction, PackageHookAction,
-    ProfileStorageAction, ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
+    AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunsAction,
+    AutomationSkillsAction, BranchAction, Cli, Commands, DaemonAction, FeedbackRollbackAction,
+    HostBundleAction, LspAction, MemoryAction, PackageHookAction, ProfileStorageAction,
+    ScoopPackageHookAction, SessionsAction, SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -1270,148 +1270,14 @@ fn automation_facts_help_describes_terminal_automatic_fact_receipts() {
 }
 
 #[test]
-fn automation_run_session_reflection_parses_manual_flags() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "automation",
-        "run",
-        "session-reflection",
-        "--provider",
-        "codex",
-        "--query",
-        "remember decisions",
-        "--evidence-limit",
-        "12",
-        "--scope",
-        "session",
-        "--session-id",
-        "session-123",
-        "--include-summaries",
-        "false",
-        "--sort",
-        "hybrid",
-        "--source",
-        "hermes",
-        "--role",
-        "assistant",
-        "--start-time",
-        "1715100000",
-        "--end-time",
-        "1715100100",
-        "--path",
-        "/tmp/project",
-    ])
-    .expect("automation session-reflection run should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Automation {
-            action:
-                AutomationAction::Run {
-                    action:
-                        AutomationRunAction::SessionReflection {
-                            provider,
-                            query,
-                            evidence_limit,
-                            scope,
-                            session_id,
-                            include_summaries,
-                            sort,
-                            source,
-                            role,
-                            start_time,
-                            end_time,
-                            path,
-                        }
-                }
-        }) if provider == "codex"
-            && query == "remember decisions"
-            && evidence_limit == 12
-            && scope == "session"
-            && session_id.as_deref() == Some("session-123")
-            && !include_summaries
-            && sort == "hybrid"
-            && source.as_deref() == Some("hermes")
-            && role.as_deref() == Some("assistant")
-            && start_time == Some(1_715_100_000)
-            && end_time == Some(1_715_100_100)
-            && path.as_deref() == Some("/tmp/project")
-    ));
-}
-
-#[test]
-fn automation_run_skill_writing_parses_manual_flags() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "automation",
-        "run",
-        "skill-writing",
-        "--provider",
-        "cursor",
-        "--query",
-        "workflow corrections",
-        "--evidence-limit",
-        "9",
-        "--path",
-        "/tmp/project",
-    ])
-    .expect("automation skill-writing run should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Automation {
-            action:
-                AutomationAction::Run {
-                    action:
-                        AutomationRunAction::SkillWriting {
-                            provider,
-                            query,
-                            evidence_limit,
-                            path,
-                        }
-                }
-        }) if provider == "cursor"
-            && query == "workflow corrections"
-            && evidence_limit == 9
-            && path.as_deref() == Some("/tmp/project")
-    ));
-}
-
-#[test]
-fn automation_run_skill_writing_defaults_to_all_providers() {
-    let cli = Cli::try_parse_from(["tracedecay", "automation", "run", "skill-writing"])
-        .expect("automation skill-writing run should parse with defaults");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Automation {
-            action:
-                AutomationAction::Run {
-                    action:
-                        AutomationRunAction::SkillWriting { provider, .. }
-                }
-        }) if provider == "all"
-    ));
-}
-
-#[test]
-fn automation_skill_writing_help_describes_automatic_activation() {
-    let help = Cli::try_parse_from(["tracedecay", "automation", "run", "skill-writing", "--help"])
-        .err()
-        .expect("help exits through clap")
-        .to_string()
-        .to_ascii_lowercase();
-
-    for behavior in ["validat", "activat", "deploy", "automatic"] {
-        assert!(
-            help.contains(behavior),
-            "skill-writing help must describe {behavior} behavior:\n{help}"
-        );
+fn automation_rejects_removed_raw_run_launchers() {
+    for task in ["session-reflection", "skill-writing"] {
+        let error = match Cli::try_parse_from(["tracedecay", "automation", "run", task]) {
+            Ok(_) => panic!("raw automation run launcher must remain absent: {task}"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }
-    assert!(
-        !help.contains("without activating") && !help.contains("inactive draft"),
-        "skill-writing help must not advertise an inactive draft lifecycle:\n{help}"
-    );
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use super::*;
 
 use serde_json::json;
+use tracedecay_agent_hosts::automation::AutomationCommittedReceipt;
 use tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord;
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationRunProblemV1, AutomationRunRequestV1,
@@ -372,6 +373,18 @@ async fn retained_disabled_user_job(
     tracedecay_agent_hosts::automation::jobs::UserJobAutomationRun,
     tracedecay_agent_hosts::automation::runner::AutomationRunSettlementGuard,
 ) {
+    let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
+    let (result, guard) = retained.into_parts();
+    (result.expect("disabled retained job terminal"), guard)
+}
+
+async fn retained_disabled_user_job_run(
+    dashboard_root: &std::path::Path,
+    run_id: &str,
+    job_id: &str,
+) -> tracedecay_agent_hosts::automation::runner::RetainedAutomationRun<
+    tracedecay_agent_hosts::automation::jobs::UserJobAutomationRun,
+> {
     use tracedecay_agent_hosts::automation::config::{
         AutomationBackend, AutomationConfig, AutomationHostMode,
     };
@@ -401,7 +414,7 @@ async fn retained_disabled_user_job(
         updated_at: 1,
         extra: Default::default(),
     };
-    let retained = run_user_job_with_backend_for_retained_settlement(
+    run_user_job_with_backend_for_retained_settlement(
         dashboard_root,
         &config,
         &NeverAutomationBackend,
@@ -411,9 +424,7 @@ async fn retained_disabled_user_job(
             ..UserJobRunOptions::default()
         },
     )
-    .await;
-    let (result, guard) = retained.into_parts();
-    (result.expect("disabled retained job terminal"), guard)
+    .await
 }
 
 fn now_secs() -> i64 {
@@ -479,16 +490,38 @@ async fn retained_repeated_memory_curator(
     tracedecay_agent_hosts::automation::runner::ReusedSchedulerSkip,
     tracedecay_agent_hosts::automation::runner::AutomationRunSettlementGuard,
 ) {
+    use tracedecay_agent_hosts::automation::runner::RetainedAutomationSettlementDisposition;
+
+    let retained =
+        retained_repeated_memory_curator_run(cg, config, configuration_revision, run_id).await;
+    match retained.into_settlement_disposition() {
+        RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
+            reused,
+            settlement_guard,
+        } => (reused, settlement_guard),
+        RetainedAutomationSettlementDisposition::Current { .. } => {
+            panic!("fixed-task scheduler repeat must retain its exact prior skip")
+        }
+    }
+}
+
+async fn retained_repeated_memory_curator_run(
+    cg: &crate::tracedecay::TraceDecay,
+    config: &tracedecay_agent_hosts::automation::config::AutomationConfig,
+    configuration_revision: &tracedecay_domain::configuration::ConfigurationRevisionId,
+    run_id: &str,
+) -> tracedecay_agent_hosts::automation::runner::RetainedAutomationRun<
+    tracedecay_agent_hosts::automation::runner::MemoryCuratorAutomationRun,
+> {
     use std::sync::Arc;
     use tracedecay_agent_hosts::automation::AutomationRunControl;
     use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
     use tracedecay_agent_hosts::automation::runner::{
-        MemoryCuratorAutomationOptions, RetainedAutomationSettlementDisposition,
-        run_memory_curator_with_backend_for_retained_settlement,
+        MemoryCuratorAutomationOptions, run_memory_curator_with_backend_for_retained_settlement,
     };
 
     let run_control = AutomationRunControl::from_interrupted(Arc::new(|| false));
-    let retained = run_memory_curator_with_backend_for_retained_settlement(
+    run_memory_curator_with_backend_for_retained_settlement(
         cg,
         config,
         configuration_revision,
@@ -500,16 +533,7 @@ async fn retained_repeated_memory_curator(
         },
         &run_control,
     )
-    .await;
-    match retained.into_settlement_disposition() {
-        RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
-            reused,
-            settlement_guard,
-        } => (reused, settlement_guard),
-        RetainedAutomationSettlementDisposition::Current { .. } => {
-            panic!("fixed-task scheduler repeat must retain its exact prior skip")
-        }
-    }
+    .await
 }
 
 fn exact_spool_files(dashboard_root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -2960,6 +2984,11 @@ fn retained_settlement_waiter_is_send_and_static() {
         >,
     >();
     assert_send_static::<super::super::RetainedSettlementPairWaiter>();
+    assert_send_static::<
+        super::super::RetainedSettlementWaiter<
+            crate::errors::Result<super::super::RetainedAutomationSettlementOutcome>,
+        >,
+    >();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3188,14 +3217,9 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
     recovery_index::remove_pending_blocking(dashboard_root, &wrong_reason_journal)
         .expect("clean wrong-reason pending authority");
 
-    let (current_reused, current_guard) =
-        retained_repeated_memory_curator(&cg, &config, &configuration_revision, current_run_id)
+    let current_retained =
+        retained_repeated_memory_curator_run(&cg, &config, &configuration_revision, current_run_id)
             .await;
-    assert_eq!(current_reused.prior_record, prior_record);
-    assert_eq!(
-        current_reused.task_key,
-        task_key(AgentTaskKind::MemoryCurator)
-    );
     let (current_authority, current_journal, current_admission) = retained_external_authority(
         dashboard_root,
         admission(current_run_id, "request.reused-scheduler-skip.current"),
@@ -3211,18 +3235,21 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         .expect("current journal lock");
     journal_lock.lock_exclusive().expect("block abandonment");
     let (observed_tx, observed_rx) = std::sync::mpsc::channel();
-    let waiter = match current_authority.start_reused_scheduler_skip_abandonment_observed(
-        current_reused,
-        current_guard,
+    let (projected_tx, projected_rx) = std::sync::mpsc::channel();
+    let waiter = current_authority.start_retained_automation_settlement(
+        current_retained,
         Some(Box::new(move |record| {
             observed_tx
                 .send(record.clone())
                 .expect("observe reused scheduler skip");
         })),
-    ) {
-        Ok(waiter) => waiter,
-        Err(error) => panic!("valid reused scheduler skip: {error}"),
-    };
+        move |run| {
+            projected_tx
+                .send(())
+                .expect("project current retained automation run");
+            (run.ledger_record, run.committed_receipt)
+        },
+    );
     drop(waiter);
 
     assert!(
@@ -3250,6 +3277,10 @@ async fn reused_scheduler_skip_abandons_current_effect_before_observing_exact_pr
         prior_record
     );
     assert!(observed_rx.try_recv().is_err(), "prior is observed once");
+    assert!(
+        projected_rx.try_recv().is_err(),
+        "reused scheduler skip must not project a current run"
+    );
     assert!(!current_journal.exists());
     assert!(
         !terminal_sidecar_path(&current_journal)
@@ -3312,8 +3343,7 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
     let dashboard_root = &cg.store_layout().dashboard_root;
     let run_id = "run.retained-user-job-drop";
     let job_id = "retained-drop";
-    let (run, guard) = retained_disabled_user_job(dashboard_root, run_id, job_id).await;
-    let expected_record = run.ledger_record.clone();
+    let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
     let owner = cg.project_memory_owner().expect("project memory owner");
     let FactOwnerV1::Project { project_id } = owner else {
         panic!("retained cleanup recovery requires a project owner")
@@ -3369,18 +3399,27 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         Ok(())
     });
     let (observed_tx, observed_rx) = std::sync::mpsc::channel();
-    let waiter = authority.start_deferred_run_settlement_with_phase_hook(
-        run.ledger_record,
-        run.committed_receipt,
-        guard,
+    let (projected_tx, projected_rx) = std::sync::mpsc::channel();
+    let waiter = authority.start_retained_automation_settlement_with_phase_hooks(
+        retained,
         Some(Box::new(move |record| {
             observed_tx
                 .send(record.clone())
                 .expect("exact row observation");
         })),
+        move |run| {
+            projected_tx
+                .send(run.ledger_record.clone())
+                .expect("project exact retained row");
+            (run.ledger_record, run.committed_receipt)
+        },
         phase_hook,
         Some(prepared_write_hook),
     );
+    drop(waiter);
+    let expected_record = projected_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("projector executed inside detached owner");
 
     assert_eq!(
         phase_rx
@@ -3388,7 +3427,6 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
             .expect("unbound retry phase"),
         super::super::RetainedSettlementPhase::PreparedWriteFailed
     );
-    drop(waiter);
     let reserved = read_indexed_record_blocking(&journal_path)
         .expect("reserved journal read")
         .expect("reserved journal");
@@ -3597,6 +3635,105 @@ async fn retained_user_job_rebinds_and_recovery_retires_only_terminal_corrupt_sp
         .expect("exact lookup after canonical recovery"),
         Some(expected_record)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock() {
+    use fs2::FileExt;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let run_id = "run.retained-projector-panic";
+    let job_id = "retained-projector-panic";
+    let retained = retained_disabled_user_job_run(dashboard_root, run_id, job_id).await;
+    let admission = external_admission_for_job(run_id, "request.retained-projector-panic", job_id);
+    let (authority, journal_path, expected_admission) =
+        retained_external_authority(dashboard_root, admission);
+    recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
+        .expect("retain projector-panic authority");
+
+    let journal_lock_path = crate::storage::append_lock_path(&journal_path);
+    let journal_lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&journal_lock_path)
+        .expect("projector-panic journal lock");
+    journal_lock
+        .lock_exclusive()
+        .expect("block projector-panic recovery terminal");
+
+    let (projected_tx, projected_rx) = std::sync::mpsc::channel();
+    let waiter = authority.start_retained_automation_settlement(
+        retained,
+        None,
+        move |_| -> (
+            AutomationRunLedgerRecord,
+            Option<AutomationCommittedReceipt>,
+        ) {
+            projected_tx
+                .send(())
+                .expect("signal projector execution inside owner");
+            panic!("injected retained settlement projector panic");
+        },
+    );
+    drop(waiter);
+    projected_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("detached owner executed projector");
+
+    let reserved = read_indexed_record_blocking(&journal_path)
+        .expect("projector-panic reserved journal read")
+        .expect("projector-panic reserved journal");
+    assert!(!reserved.is_terminal());
+    assert_eq!(reserved.admission(), &expected_admission);
+    assert!(task_lock_is_denied(dashboard_root, job_id).await);
+
+    FileExt::unlock(&journal_lock).expect("release projector-panic recovery terminal");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let terminal = read_indexed_record_blocking(&journal_path)
+            .expect("projector-panic terminal journal read")
+            .is_some_and(|record| record.is_terminal());
+        if terminal {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "projector-panic recovery terminal did not become durable"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        tracedecay_agent_hosts::automation::run_ledger::find_run_record_exact_bounded_blocking(
+            dashboard_root,
+            run_id,
+        )
+        .expect("projector-panic exact lookup")
+        .is_none(),
+        "projector panic must not fabricate a successful ledger row"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock::try_acquire_keyed(
+            dashboard_root,
+            &format!("user_job_{job_id}"),
+            None,
+            now_secs(),
+        )
+        .await
+        .expect("post-projector-panic task lock")
+        .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "projector-panic task lock was not released after durable recovery"
+        );
+        tokio::task::yield_now().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -9,7 +9,7 @@ mod work;
 mod workflow;
 pub use automation::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationFactsAction,
-    AutomationRunAction, AutomationRunsAction, AutomationSkillsAction,
+    AutomationRunsAction, AutomationSkillsAction,
 };
 use help::*;
 pub use package_hook::{PackageHookAction, ScoopPackageHookAction};
@@ -684,7 +684,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
-    /// Self-improvement automation config and manual runs
+    /// Self-improvement automation configuration and run inspection
     #[command(long_about = AUTOMATION_LONG_ABOUT, after_help = AUTOMATION_AFTER_HELP)]
     Automation {
         #[command(subcommand)]

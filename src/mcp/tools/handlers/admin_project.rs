@@ -1,9 +1,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use tracedecay_agent_hosts::automation::{AutomationRunControl, run_ledger::AutomationTrigger};
+use tracedecay_agent_hosts::automation::AutomationRunControl;
 use tracedecay_application::{CancellationSignal, Deadline, RequestId, now_micros};
 use tracedecay_domain::ProvenanceId;
 use tracedecay_store::{ProjectMemoryAutomaticFactReceiptV1, ProjectMemoryAutomaticFactStateV1};
@@ -16,14 +16,6 @@ use tracedecay_usecases::memory::{MemoryApplication, MemoryApplicationError};
 
 use super::super::ToolResult;
 use super::json_result;
-
-mod automation_terminal;
-use automation_terminal::{
-    admission_conflict_value, automation_run_observer, decode_options, pre_admission_problem_value,
-    require_observation, run_skill_writer as run_admitted_skill_writer,
-    settle_retained_run as automation_run_value,
-    terminal_response_value as automation_terminal_response,
-};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -44,46 +36,9 @@ enum AdminProjectAction {
     AutomaticFactReceiptView {
         id: String,
     },
-    AutomationRun {
-        task: AutomationRunTask,
-        options: Value,
-        #[serde(default)]
-        trigger: AutomationTrigger,
-    },
     AutomationReconcile {
         scope: crate::dashboard::AutomationReconcileScope,
     },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum AutomationRunTask {
-    SessionReflection,
-    SkillWriting,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct SessionReflectionOptions {
-    provider: String,
-    query: String,
-    evidence_limit: usize,
-    scope: tracedecay_agent_hosts::ports::session_evidence::LcmScope,
-    session_id: Option<String>,
-    include_summaries: bool,
-    sort: tracedecay_agent_hosts::ports::session_evidence::LcmGrepSort,
-    source: Option<String>,
-    role: Option<String>,
-    start_time: Option<i64>,
-    end_time: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SkillWritingOptions {
-    provider: String,
-    query: String,
-    evidence_limit: usize,
 }
 
 fn project_memory_application<'a>(
@@ -188,9 +143,9 @@ pub(super) async fn handle_admin_project(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
-    profile_root: Option<&Path>,
-    daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
-    application_request_id: Option<RequestId>,
+    _profile_root: Option<&Path>,
+    _daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
+    _application_request_id: Option<RequestId>,
     application_deadline: Deadline,
     application_cancellation: CancellationSignal,
 ) -> Result<ToolResult> {
@@ -318,223 +273,13 @@ pub(super) async fn handle_admin_project(
                 })?;
             json!({ "receipt": automatic_fact_receipt_json(&receipt) })
         }
-        AdminProjectAction::AutomationRun {
-            task,
-            options,
-            trigger,
-        } => {
-            run_automation(
-                cg,
-                profile_root,
-                task,
-                options,
-                trigger,
-                daemon_invocation_service,
-                application_request_id,
-                application_deadline,
-                application_cancellation,
-                &run_control,
-            )
-            .await?
-        }
     };
-    let semantic_error = automation_response_is_semantic_error(&value);
-    Ok(json_result(&value).with_semantic_error(semantic_error))
-}
-
-fn automation_response_is_semantic_error(value: &Value) -> bool {
-    matches!(
-        value.get("kind").and_then(Value::as_str),
-        Some("problem" | "conflict")
-    )
-}
-
-async fn run_automation(
-    cg: &TraceDecay,
-    profile_root: Option<&Path>,
-    task: AutomationRunTask,
-    options: Value,
-    trigger: AutomationTrigger,
-    daemon_invocation_service: Option<&crate::daemon::DaemonInvocationService>,
-    application_request_id: Option<RequestId>,
-    application_deadline: Deadline,
-    application_cancellation: CancellationSignal,
-    run_control: &AutomationRunControl,
-) -> Result<Value> {
-    use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
-    use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
-    use tracedecay_agent_hosts::automation::runner::{
-        SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-        run_session_reflector_with_backend_for_retained_settlement,
-    };
-
-    let invocation_service = require_observation(daemon_invocation_service)?;
-    let producer = crate::daemon::project_automation_observation_producer(
-        invocation_service,
-        cg.project_root(),
-    )
-    .await
-    .ok_or_else(|| TraceDecayError::Config {
-        message: "manual automation observation authority is unavailable".to_owned(),
-    })?;
-
-    let pinned = cg
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("automation configuration authority is unavailable: {error}"),
-        })?;
-    let config = from_configuration_snapshot(&pinned.snapshot)?;
-    let configuration_digest =
-        crate::daemon::automation_effect::pinned_automation_configuration_digest(
-            &pinned.revision_id,
-            &pinned.snapshot.effective_behavior_digest,
-            &pinned.snapshot.resolution_provenance_digest,
-        )?;
-    let backend = CodexAppServerBackend::from_automation_config(&config);
-    let request_id = application_request_id.ok_or_else(|| TraceDecayError::Config {
-        message: "manual automation application request identity is unavailable".to_owned(),
-    })?;
-
-    let run = match task {
-        AutomationRunTask::SessionReflection => {
-            let options = decode_options::<SessionReflectionOptions>(options)?;
-            let run_id = request_id.as_str().to_owned();
-            let run_options = SessionReflectorAutomationOptions {
-                trigger,
-                run_id: Some(run_id.clone()),
-                provider: options.provider,
-                query: options.query,
-                scope: options.scope,
-                session_id: options.session_id,
-                include_summaries: options.include_summaries,
-                evidence_limit: options.evidence_limit,
-                sort: options.sort,
-                source: options.source,
-                role: options.role,
-                start_time: options.start_time,
-                end_time: options.end_time,
-                ..SessionReflectorAutomationOptions::default()
-            };
-            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
-                invocation_service,
-                cg,
-                cg.project_root(),
-                &cg.store_layout().dashboard_root,
-                request_id,
-                application_deadline,
-                &application_cancellation,
-                now_micros(),
-                configuration_digest,
-                crate::daemon::automation_effect::session_reflector_run_request(
-                    &run_id,
-                    &run_options,
-                )?,
-            )
-            .await?;
-            let effect = match admission {
-                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => {
-                    effect
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
-                    return automation_terminal_response(&terminal);
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
-                    return Ok(admission_conflict_value());
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
-                    problem,
-                ) => return pre_admission_problem_value(problem),
-            };
-            let (run, ledger_record) = automation_run_value(
-                run_session_reflector_with_backend_for_retained_settlement(
-                    cg,
-                    &config,
-                    run_control,
-                    &pinned.revision_id,
-                    &backend,
-                    run_options,
-                )
-                .await,
-                effect,
-                automation_run_observer(
-                    Arc::clone(&producer),
-                    cg.project_root().to_path_buf(),
-                    "manual_mcp",
-                ),
-            )
-            .await?;
-            if run.get("kind").and_then(Value::as_str) == Some("problem") {
-                return Ok(run);
-            }
-            if ledger_record.is_none() {
-                return Err(TraceDecayError::Config {
-                    message: "settled session reflector run lost its observation ledger".to_owned(),
-                });
-            }
-            run
-        }
-        AutomationRunTask::SkillWriting => {
-            let options = decode_options::<SkillWritingOptions>(options)?;
-            let profile_root = profile_root.ok_or_else(|| TraceDecayError::Config {
-                message: "automation skill writing requires exact daemon profile authority"
-                    .to_owned(),
-            })?;
-            let run_id = request_id.as_str().to_owned();
-            let run_options = SkillWriterAutomationOptions {
-                trigger,
-                run_id: Some(run_id.clone()),
-                provider: options.provider,
-                query: options.query,
-                evidence_limit: options.evidence_limit,
-                profile_root: Some(profile_root.to_path_buf()),
-                ..SkillWriterAutomationOptions::default()
-            };
-            let (run, ledger_record) = run_admitted_skill_writer(
-                invocation_service,
-                cg,
-                request_id,
-                application_deadline,
-                &application_cancellation,
-                configuration_digest,
-                &config,
-                &pinned.revision_id,
-                &backend,
-                run_options,
-                automation_run_observer(
-                    Arc::clone(&producer),
-                    cg.project_root().to_path_buf(),
-                    "manual_mcp",
-                ),
-            )
-            .await?;
-            if run.get("kind").and_then(Value::as_str) == Some("problem") {
-                return Ok(run);
-            }
-            if ledger_record.is_none() {
-                return Ok(run);
-            }
-            run
-        }
-    };
-    Ok(json!({ "run": run }))
+    Ok(json_result(&value))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn automation_conflict_is_reported_as_an_mcp_semantic_error() {
-        assert!(automation_response_is_semantic_error(
-            &admission_conflict_value()
-        ));
-        assert!(!automation_response_is_semantic_error(
-            &json!({ "run": { "status": "completed" } })
-        ));
-    }
 
     fn test_application_control() -> (Deadline, CancellationSignal) {
         (
@@ -740,6 +485,32 @@ mod tests {
             }),
             json!({ "action": "fact_list", "state": "applied", "limit": 50 }),
             json!({ "action": "fact_view", "id": "fact_1" }),
+            json!({
+                "action": "automation_run",
+                "task": "session_reflection",
+                "options": {
+                    "provider": "claude",
+                    "query": "decisions",
+                    "evidence_limit": 11,
+                    "scope": "session",
+                    "session_id": "session-3",
+                    "include_summaries": false,
+                    "sort": "hybrid",
+                    "source": "assistant",
+                    "role": "user",
+                    "start_time": 10,
+                    "end_time": 20
+                }
+            }),
+            json!({
+                "action": "automation_run",
+                "task": "skill_writing",
+                "options": {
+                    "provider": "all",
+                    "query": "repeated workflow",
+                    "evidence_limit": 13
+                }
+            }),
         ] {
             assert!(serde_json::from_value::<AdminProjectAction>(retired_action).is_err());
         }
@@ -805,58 +576,5 @@ mod tests {
             parse_automatic_fact_state(" quarantined ").unwrap(),
             ProjectMemoryAutomaticFactStateV1::Quarantined
         );
-
-        assert!(
-            serde_json::from_value::<AdminProjectAction>(json!({
-                "action": "automation_run",
-                "task": "memory_curation",
-                "options": { "fact_review_limit": 12, "min_confidence": 0.75 }
-            }))
-            .is_err()
-        );
-
-        let session = decode_options::<SessionReflectionOptions>(json!({
-            "provider": "claude",
-            "query": "decisions",
-            "evidence_limit": 11,
-            "scope": "session",
-            "session_id": "session-3",
-            "include_summaries": false,
-            "sort": "hybrid",
-            "source": "assistant",
-            "role": "user",
-            "start_time": 10,
-            "end_time": 20
-        }))
-        .unwrap();
-        assert_eq!(
-            session.scope,
-            tracedecay_agent_hosts::ports::session_evidence::LcmScope::Session
-        );
-        assert_eq!(
-            session.sort,
-            tracedecay_agent_hosts::ports::session_evidence::LcmGrepSort::Hybrid
-        );
-
-        let skill = decode_options::<SkillWritingOptions>(json!({
-            "provider": "all",
-            "query": "repeated workflow",
-            "evidence_limit": 13
-        }))
-        .unwrap();
-        assert_eq!(skill.evidence_limit, 13);
-    }
-
-    #[test]
-    fn manual_automation_without_observation_authority_fails_closed() {
-        let Err(error) = require_observation(None) else {
-            panic!("manual automation must not run without observation authority");
-        };
-
-        assert!(matches!(
-            error,
-            TraceDecayError::Config { message }
-                if message == "manual automation observation authority is unavailable"
-        ));
     }
 }
