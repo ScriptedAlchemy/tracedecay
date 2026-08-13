@@ -1,27 +1,53 @@
 import { constants } from 'node:fs';
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
+import { createRslib } from '@rslib/core';
 
 const extensionRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const embeddedPath = join(extensionRoot, 'embedded', 'extension.js');
 const check = process.argv.slice(2).includes('--check');
 
-const result = await build({
-  absWorkingDir: extensionRoot,
-  bundle: true,
-  entryPoints: ['src/extension.ts'],
-  external: ['vscode'],
-  format: 'cjs',
-  outfile: 'embedded/extension.js',
-  platform: 'node',
-  target: 'node20',
-  write: false,
-});
-const compiled = result.outputFiles[0]?.contents;
-if (compiled === undefined) {
-  throw new Error('esbuild produced no Cursor extension JavaScript');
+// Build into a throwaway directory so --check never touches the committed
+// bytes, then byte-compare/copy. Output must stay deterministic: no minify,
+// no source maps, no content hashes, only `vscode` external (the language
+// client is bundled so the embedded asset is self-contained).
+const outDir = await mkdtemp(join(tmpdir(), 'tracedecay-cursor-ext-'));
+let compiled;
+try {
+  const rslib = await createRslib({
+    cwd: extensionRoot,
+    config: {
+      root: extensionRoot,
+      lib: [
+        {
+          format: 'cjs',
+          syntax: ['node 20'],
+          bundle: true,
+          autoExternal: false,
+          source: {
+            entry: { extension: join(extensionRoot, 'src', 'extension.ts') },
+          },
+          output: {
+            target: 'node',
+            distPath: { root: outDir },
+            filename: { js: '[name].js' },
+            externals: { vscode: 'commonjs vscode' },
+            minify: false,
+            sourceMap: false,
+          },
+        },
+      ],
+    },
+  });
+  await rslib.build();
+  compiled = await readFile(join(outDir, 'extension.js'));
+} finally {
+  await rm(outDir, { recursive: true, force: true });
+}
+if (compiled.length === 0) {
+  throw new Error('rslib produced no Cursor extension JavaScript');
 }
 
 if (check) {

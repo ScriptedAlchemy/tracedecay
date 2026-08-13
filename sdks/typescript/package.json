@@ -33,7 +33,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "rslib build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --exclude test/installed-package.test.ts",
     "test:installed": "vitest run test/installed-package.test.ts",
@@ -42,8 +42,8 @@
     "pack": "npm pack --dry-run --ignore-scripts"
   },
   "devDependencies": {
+    "@rslib/core": "^0.23.2",
     "@types/node": "^26.1.2",
-    "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
   },

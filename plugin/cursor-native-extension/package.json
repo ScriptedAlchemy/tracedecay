@@ -37,9 +37,9 @@
     "vscode-languageclient": "^10.1.0"
   },
   "devDependencies": {
+    "@rslib/core": "^0.23.2",
     "@types/node": "^26.1.1",
     "@types/vscode": "^1.125.0",
-    "esbuild": "^0.28.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"
   }
