@@ -184,6 +184,11 @@ pub struct ShardRuntimeObservation {
 #[derive(Debug)]
 pub struct ShardRuntime {
     binding: StoreRuntimeBindingV1,
+    /// Monotonic per-process instance number. Distinguishes a runtime that was
+    /// closed and rebuilt from its predecessor even when the allocator reuses
+    /// the predecessor's address — pointer identity is ABA-prone the moment
+    /// the old `Arc` is dropped.
+    instance_id: u64,
     state: Mutex<ShardRuntimeState>,
 }
 
@@ -209,8 +214,11 @@ struct ShardRuntimeState {
 
 impl ShardRuntime {
     pub fn new(binding: StoreRuntimeBindingV1, pinned_profile: bool) -> Self {
+        static NEXT_INSTANCE_ID: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         Self {
             binding,
+            instance_id: NEXT_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             state: Mutex::new(ShardRuntimeState {
                 maintenance_state: RuntimeMaintenanceStateV1::Closed,
                 pinned_profile,
@@ -230,6 +238,11 @@ impl ShardRuntime {
                 health: ShardRuntimeHealth::Unknown,
             }),
         }
+    }
+
+    /// Monotonic per-process instance number; see the field doc.
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {

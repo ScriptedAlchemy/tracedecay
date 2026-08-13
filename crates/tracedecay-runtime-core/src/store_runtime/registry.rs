@@ -227,9 +227,12 @@ impl StoreRuntimeHandle {
     }
 
     /// Stable identity of the underlying physical runtime, so two facades can
-    /// be compared for attachment sharing.
+    /// be compared for attachment sharing. A monotonic instance number rather
+    /// than the `Arc` address: once the old runtime is dropped, the allocator
+    /// can hand its address to the replacement, so pointer identity cannot
+    /// distinguish a rebuilt runtime from its predecessor.
     pub fn runtime_identity(&self) -> usize {
-        Arc::as_ptr(self.runtime()).cast::<()>() as usize
+        self.runtime().instance_id() as usize
     }
 
     pub fn opened_file_identity(&self) -> Option<u64> {
