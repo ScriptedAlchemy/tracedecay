@@ -808,8 +808,14 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
+    fs::create_dir_all(project).unwrap();
 
-    fs::write(project.join("style.css"), ".foo {\n\tfont-size: 14px;\n}\n").unwrap();
+    let stylesheet = project.join("style.css");
+    fs::write(&stylesheet, ".foo {\n\tfont-size: 14px;\n}\n").unwrap();
+    assert!(
+        stylesheet.is_file(),
+        "stylesheet fixture must exist before dispatch"
+    );
 
     let (cg, _env) = init_test_project(project).await;
 
@@ -962,12 +968,18 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     let dir = test_temp_dir();
     let project_root = dir.path().join("project");
     let project = project_root.as_path();
+    fs::create_dir_all(project).unwrap();
 
+    let stylesheet = project.join("style.css");
     fs::write(
-        project.join("style.css"),
+        &stylesheet,
         ".foo {\n\tfont-size: 14px;\n}\n.bar {\n\tfont-size: 16px;\n}\n",
     )
     .unwrap();
+    assert!(
+        stylesheet.is_file(),
+        "stylesheet fixture must exist before dispatch"
+    );
 
     let (cg, _env) = init_test_project(project).await;
 
