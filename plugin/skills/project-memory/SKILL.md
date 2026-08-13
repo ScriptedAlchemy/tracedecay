@@ -46,9 +46,11 @@ read-only inventory → `tracedecay_fact_store_curate` (or `tracedecay tool
 fact_store_curate`) → `tracedecay_automation_run_list` →
 `tracedecay_automation_run_view` → advertised artifact inspection →
 read-only fact verification. The curator validates and applies supported
-operations during that one run. Its public trigger accepts only review bounds,
-never caller-supplied operations or effect authority. Hard rules that always
-apply:
+operations during that one run. `fact_store_curate` is the one public semantic
+launcher; its MCP, generic CLI, and HTTP spellings are adapters for the same
+retained operation. Its request accepts only review bounds, never
+caller-supplied task, run identity, operations, validation, policy, or effect
+authority. Hard rules that always apply:
 
 - Deletion is permanent (no soft-delete, no undo). A direct fact deletion is
   separate exact administration. If the user's target is ambiguous, show the

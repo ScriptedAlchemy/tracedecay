@@ -2,237 +2,122 @@ use crate::dashboard_api_support::*;
 use tracedecay_agent_hosts::automation::backend::AgentTaskRetryAttempt;
 
 #[test]
-fn dashboard_automation_runs_skip_when_backend_disabled_and_record_history() {
+fn fact_store_curate_is_the_only_public_manual_automation_launcher() {
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
-        let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
-        let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-
-        let (cg, host_runtime) = setup_project(&project_root).await;
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
+        let mut fixture = start_dashboard_configuration_fixture().await;
+        let project_id = "dashboard_fixture_project";
         let agent = http_agent();
-        let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_with_host_runtime(
-            cg,
-            host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
-            port,
-        );
-        wait_for_dashboard(&agent, &base_url).await;
+        let base_url = fixture.base_url.clone();
 
         let config_url = format!("{base_url}/api/plugins/holographic/curation/config");
+        let (status, current_config) = get_json(&agent, &config_url);
+        assert_eq!(status, 200, "config read should succeed: {current_config}");
+        let expected_revision_id = current_config["configuration_revision_id"]
+            .as_str()
+            .expect("config read must return the pinned revision");
         let (status, saved_config) = patch_json_body(
             &agent,
             &config_url,
             &serde_json::json!({
+                "expected_revision_id": expected_revision_id,
+                "idempotency_key": "dashboard-automation-single-public-launcher",
                 "enabled": false,
                 "backend": "disabled"
             }),
         );
         assert_eq!(status, 200, "config patch should succeed: {saved_config}");
         assert_eq!(saved_config["effective"]["backend"], "disabled");
-        assert_eq!(saved_config["effective"]["host_mode"], "standalone");
-        assert!(saved_config["effective"]["model"].is_null());
 
-        let (status, memory_payload) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/application/retained/fact_store_curate"),
-            &serde_json::json!({
-                "fact_review_limit": 24,
-                "min_confidence_millionths": 720_000
-            }),
+        let curate_url = format!("{base_url}/api/application/retained/fact_store_curate");
+        let response = crate::common::http_call_with_retry("POST fact_store_curate", || {
+            agent
+                .post(&curate_url)
+                .header(
+                    tracedecay_application::APPLICATION_REQUEST_ID_HEADER,
+                    "request.dashboard.fact-store-curate-single-launcher",
+                )
+                .send_json(&serde_json::json!({
+                    "fact_review_limit": 24,
+                    "min_confidence_millionths": 720_000
+                }))
+        });
+        let status = response.status().as_u16();
+        let mut response = response;
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .expect("fact_store_curate response body");
+        assert!(
+            !body.is_empty(),
+            "fact_store_curate returned status {status} without a body"
         );
+        let memory_payload: serde_json::Value =
+            serde_json::from_str(&body).expect("fact_store_curate JSON response");
         assert_eq!(status, 200);
         let memory_run = &memory_payload["value"]["outcome"]["value"]["payload"];
         assert_eq!(memory_run["terminal"]["status"], "skipped");
         assert_eq!(memory_run["task"], "memory_curator");
         assert_eq!(memory_run["terminal"]["reason"], "backend_disabled");
 
-        let (status, rejected_manual_surface) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/application/retained/fact_store_curate"),
-            &serde_json::json!({
-                "fact_review_limit": 24,
-                "operations": []
-            }),
+        let response = crate::common::http_call_with_retry(
+            "POST fact_store_curate with caller-selected operations",
+            || {
+                agent
+                    .post(&curate_url)
+                    .header(
+                        tracedecay_application::APPLICATION_REQUEST_ID_HEADER,
+                        "request.dashboard.fact-store-curate-reject-operations",
+                    )
+                    .send_json(&serde_json::json!({
+                        "fact_review_limit": 24,
+                        "operations": []
+                    }))
+            },
         );
+        let (status, rejected_manual_surface) = response_to_json(response);
         assert_eq!(status, 400);
         assert_eq!(rejected_manual_surface["kind"], "problem");
 
-        let (status, _) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/automation/run/memory-curator"),
-            &serde_json::json!({}),
-        );
+        let retired_curator_url = format!("{base_url}/api/automation/run/memory-curator");
+        let response =
+            crate::common::http_call_with_retry(&format!("POST {retired_curator_url}"), || {
+                agent
+                    .post(&retired_curator_url)
+                    .send_json(&serde_json::json!({}))
+            });
+        let status = response.status().as_u16();
         assert_eq!(
             status, 404,
             "retired duplicate curator route must stay absent"
         );
 
-        let (status, session_payload) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/automation/run/session-reflection"),
-            &serde_json::json!({}),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(
-            session_payload["run"]["ledger_record"]["trigger"],
-            "dashboard"
-        );
-        assert_eq!(
-            session_payload["run"]["ledger_record"]["task"],
-            "session_reflector"
-        );
-        assert_eq!(
-            session_payload["run"]["ledger_record"]["backend"],
-            "disabled"
-        );
-        assert_eq!(
-            session_payload["run"]["ledger_record"]["host_mode"],
-            "standalone"
-        );
-        assert!(session_payload["run"]["ledger_record"]["model"].is_null());
-
-        let (status, skill_payload) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/automation/run/skill-writing"),
-            &serde_json::json!({
-                "provider": "cursor",
-                "query": "workflow corrections",
-                "evidence_limit": 7
-            }),
-        );
-        assert_eq!(status, 200);
-        assert_eq!(
-            skill_payload["run"]["ledger_record"]["trigger"],
-            "dashboard"
-        );
-        assert_eq!(
-            skill_payload["run"]["ledger_record"]["task"],
-            "skill_writer"
-        );
-        assert_eq!(skill_payload["run"]["ledger_record"]["backend"], "disabled");
-        assert_eq!(
-            skill_payload["run"]["ledger_record"]["host_mode"],
-            "standalone"
-        );
-        assert!(skill_payload["run"]["ledger_record"]["model"].is_null());
-
-        let mut rejected_skill_shape = agent
-            .post(&format!("{base_url}/api/automation/run/skill-writing"))
-            .send_json(serde_json::json!({
-                "unsupported_field": true
-            }))
-            .expect("skill-writing request with unsupported field should receive response");
-        let rejected_skill_status = rejected_skill_shape.status().as_u16();
-        let rejected_skill_body = rejected_skill_shape
-            .body_mut()
-            .read_to_string()
-            .expect("skill-writing rejection body should be readable");
-        assert_eq!(rejected_skill_status, 422);
-        assert!(
-            rejected_skill_body.contains("unsupported_field"),
-            "rejection should name the unsupported field: {rejected_skill_body}"
-        );
-        for (field, value) in [
-            ("storage_scope", serde_json::json!("hermes_profile")),
-            ("hermes_home", serde_json::json!("/tmp/hermes")),
-        ] {
-            let mut body = serde_json::Map::new();
-            body.insert(field.to_string(), value);
-            let mut response = agent
-                .post(&format!("{base_url}/api/automation/run/skill-writing"))
-                .send_json(serde_json::Value::Object(body))
-                .expect("removed storage selector should receive response");
-            let status = response.status().as_u16();
-            let response_body = response
-                .body_mut()
-                .read_to_string()
-                .expect("storage selector rejection should be readable");
-            assert_eq!(status, 422);
-            assert!(
-                response_body.contains(field),
-                "rejection should name removed {field}: {response_body}"
-            );
-        }
-
-        let run_ids = [
-            memory_run["run_id"].as_str().unwrap().to_string(),
-            session_payload["run"]["run_id"]
-                .as_str()
-                .unwrap()
-                .to_string(),
-            skill_payload["run"]["run_id"].as_str().unwrap().to_string(),
-        ];
-        let records =
-            tracedecay_agent_hosts::automation::run_ledger::load_run_records(&dashboard_root, 10)
-                .await
-                .unwrap();
-        let terminal_count = records
-            .iter()
-            .filter(|record| {
-                run_ids.contains(&record.run_id)
-                    && record.status.is_terminal()
-                    && record.error.as_deref() == Some("backend_disabled")
-            })
-            .count();
-        assert_eq!(
-            terminal_count,
-            run_ids.len(),
-            "dashboard automation runs did not return terminal skipped records: {records:#?}"
-        );
-        assert_eq!(records.len(), 3);
-        let tasks: Vec<_> = records.iter().map(|record| record.task).collect();
-        assert_eq!(
-            tasks,
-            [
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SkillWriter,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::SessionReflector,
-                tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator,
-            ]
-        );
-        for record in &records {
-            let expected_trigger = if record.task
-                == tracedecay_agent_hosts::automation::backend::AgentTaskKind::MemoryCurator
-            {
-                tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Application
-            } else {
-                tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger::Dashboard
-            };
-            assert_eq!(record.trigger, expected_trigger);
-            assert_eq!(
-                record.status,
-                tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
-            );
-            assert_eq!(record.error.as_deref(), Some("backend_disabled"));
-            assert_eq!(record.backend, "disabled");
-            assert_eq!(record.host_mode.as_deref(), Some("standalone"));
-            assert_eq!(record.model.as_deref(), None);
+        for route in ["session-reflection", "skill-writing"] {
+            for url in [
+                format!("{base_url}/api/automation/run/{route}"),
+                format!("{base_url}/api/projects/{project_id}/automation/run/{route}"),
+            ] {
+                let response = crate::common::http_call_with_retry(&format!("POST {url}"), || {
+                    agent.post(&url).send_json(&serde_json::json!({}))
+                });
+                assert_eq!(response.status().as_u16(), 404, "retired launcher: {url}");
+            }
         }
 
         let (status, runs) = get_json(&agent, &format!("{base_url}/api/automation/runs?limit=5"));
         assert_eq!(status, 200);
-        assert_eq!(runs["count"], 3);
+        assert_eq!(runs["count"], 1);
         assert_eq!(runs["limit"], 5);
-        assert_eq!(runs["runs"][0]["trigger"], "dashboard");
+        assert_eq!(runs["runs"][0]["trigger"], "application");
         assert_eq!(runs["runs"][0]["status"], "skipped");
         assert_eq!(runs["runs"][0]["error"], "backend_disabled");
 
         let (status, runs) = get_json(&agent, &format!("{base_url}/api/automation/runs"));
         assert_eq!(status, 200);
-        assert_eq!(runs["count"], 3);
+        assert_eq!(runs["count"], 1);
         assert!(
             runs["runs"].as_array().is_some_and(|records| records
                 .iter()
@@ -241,105 +126,7 @@ fn dashboard_automation_runs_skip_when_backend_disabled_and_record_history() {
             "memory-curator run should remain visible in newest-first history: {runs}"
         );
         drop(agent);
-        server.stop();
-    });
-}
-
-#[test]
-fn dashboard_session_and_skill_runs_return_terminal_evidence_skips() {
-    let _env_lock = GLOBAL_DB_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let runtime = create_runtime();
-    runtime.block_on(async {
-        let tmp = tempdir_or_panic();
-        let tmp_root = tmp
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
-        let project_root = tmp_root.join("project");
-        let global_db_path = tmp_root.join("global").join("global.db");
-        let profile_root = tmp_root.join("profile").join(".tracedecay");
-        let _env_guard = EnvVarGuard::set(GLOBAL_DB_ENV, &global_db_path);
-        let _data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-
-        let (cg, host_runtime) = setup_project(&project_root).await;
-        let dashboard_root = cg.store_layout().dashboard_root.clone();
-        let agent = http_agent();
-        let port = pick_free_port();
-        let base_url = format!("http://127.0.0.1:{port}");
-        let mut server = spawn_dashboard_server_with_host_runtime(
-            cg,
-            host_runtime,
-            dashboard::DashboardTestProjectGraphsV1::default(),
-            port,
-        );
-        wait_for_dashboard(&agent, &base_url).await;
-
-        let (status, config) = patch_json_body(
-            &agent,
-            &format!("{base_url}/api/plugins/holographic/curation/config"),
-            &serde_json::json!({
-                "enabled": true,
-                "backend": "codex_app_server",
-                "host_mode": "standalone",
-                "session_reflector": { "enabled": true, "schedule": "manual" },
-                "skill_writer": { "enabled": true, "schedule": "manual" }
-            }),
-        );
-        assert_eq!(status, 200, "automation config patch failed: {config}");
-
-        let (status, session_payload) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/automation/run/session-reflection"),
-            &serde_json::json!({}),
-        );
-        assert_eq!(
-            status, 200,
-            "session run should complete: {session_payload}"
-        );
-        let session_terminal = serde_json::from_value::<
-            tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
-        >(session_payload["run"]["ledger_record"].clone())
-        .unwrap_or_else(|error| panic!("invalid session terminal ledger: {error}"));
-
-        let (status, skill_payload) = post_json_body(
-            &agent,
-            &format!("{base_url}/api/automation/run/skill-writing"),
-            &serde_json::json!({}),
-        );
-        assert_eq!(status, 200, "skill run should complete: {skill_payload}");
-        let skill_terminal = serde_json::from_value::<
-            tracedecay_agent_hosts::automation::run_ledger::AutomationRunLedgerRecord,
-        >(skill_payload["run"]["ledger_record"].clone())
-        .unwrap_or_else(|error| panic!("invalid skill terminal ledger: {error}"));
-
-        let records =
-            tracedecay_agent_hosts::automation::run_ledger::load_run_records(&dashboard_root, 10)
-                .await
-                .unwrap();
-        for terminal in [&session_terminal, &skill_terminal] {
-            assert_eq!(
-                terminal.status,
-                tracedecay_agent_hosts::automation::run_ledger::AutomationRunStatus::Skipped
-            );
-            assert!(
-                terminal
-                    .error
-                    .as_deref()
-                    .is_some_and(|reason| reason == "lcm_not_ingested"
-                        || reason == "no_session_evidence"
-                        || reason == "no_skill_writer_evidence"
-                        || reason == "session_evidence_retrieval_unavailable"),
-                "unexpected evidence skip reason: {terminal:#?}"
-            );
-            assert!(
-                records.iter().any(|record| record == terminal),
-                "returned terminal ledger must be durably visible: {records:#?}"
-            );
-        }
-
-        server.stop();
+        fixture.server.stop();
     });
 }
 

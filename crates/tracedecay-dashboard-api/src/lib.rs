@@ -1412,14 +1412,6 @@ fn project_api_router() -> Router<DashboardState> {
             get(automation_fact_receipts_api::view),
         )
         .route(
-            "/api/automation/run/session-reflection",
-            post(automation_run_api::session_reflection),
-        )
-        .route(
-            "/api/automation/run/skill-writing",
-            post(automation_run_api::skill_writing),
-        )
-        .route(
             "/api/automation/jobs",
             get(automation_jobs_api::list).post(automation_jobs_api::create),
         )
@@ -1900,32 +1892,12 @@ mod authority_tests {
             DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
         );
         assert_eq!(
-            dashboard_http_request_deadline_micros("/api/automation/run/session-reflection"),
-            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
-        );
-        assert_eq!(
-            dashboard_http_request_deadline_micros("/api/automation/run/skill-writing"),
-            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
-        );
-        assert_eq!(
             dashboard_http_request_deadline_micros("/api/automation/jobs/nightly-review/run"),
             DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
         );
         assert_eq!(
             dashboard_http_request_deadline_micros(
                 "/api/projects/project-7/application/retained/fact_store_curate"
-            ),
-            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
-        );
-        assert_eq!(
-            dashboard_http_request_deadline_micros(
-                "/api/projects/project-7/automation/run/session-reflection"
-            ),
-            DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
-        );
-        assert_eq!(
-            dashboard_http_request_deadline_micros(
-                "/api/projects/project-7/automation/run/skill-writing"
             ),
             DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS,
         );
@@ -1942,6 +1914,10 @@ mod authority_tests {
             "/api/application/retained/fact_store_curateish",
             "/api/projects//application/retained/fact_store_curate",
             "/api/projects/project-7/application/retained/fact_store_curate/extra",
+            "/api/automation/run/session-reflection",
+            "/api/automation/run/skill-writing",
+            "/api/projects/project-7/automation/run/session-reflection",
+            "/api/projects/project-7/automation/run/skill-writing",
             "/api/projects/project-7/automation/run/skill-writer",
             "/api/projects/project-7/automation/runs",
         ] {

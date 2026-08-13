@@ -1,4 +1,3 @@
-use axum::Extension;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::Json;
@@ -6,109 +5,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::util::http_detail;
-use super::{
-    DashboardAutomationRunRequestV1, DashboardHttpRequestControlV1, DashboardState,
-    automation_authority_error_response, exact_automation_authority,
-};
+use super::DashboardState;
 use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord, find_run_record,
     read_published_artifact_chain, read_run_artifact_payload,
 };
-use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionReflectionRunBody {
-    provider: Option<String>,
-    query: Option<String>,
-    evidence_limit: Option<usize>,
-    scope: Option<LcmScope>,
-    session_id: Option<String>,
-    include_summaries: Option<bool>,
-    sort: Option<LcmGrepSort>,
-    source: Option<String>,
-    role: Option<String>,
-    start_time: Option<i64>,
-    end_time: Option<i64>,
-}
-
-impl From<SessionReflectionRunBody> for DashboardAutomationRunRequestV1 {
-    fn from(body: SessionReflectionRunBody) -> Self {
-        Self::SessionReflection {
-            provider: body.provider,
-            query: body.query,
-            evidence_limit: body.evidence_limit,
-            scope: body.scope,
-            session_id: body.session_id,
-            include_summaries: body.include_summaries,
-            sort: body.sort,
-            source: body.source,
-            role: body.role,
-            start_time: body.start_time,
-            end_time: body.end_time,
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SkillWritingRunBody {
-    provider: Option<String>,
-    query: Option<String>,
-    evidence_limit: Option<usize>,
-}
-
-impl From<SkillWritingRunBody> for DashboardAutomationRunRequestV1 {
-    fn from(body: SkillWritingRunBody) -> Self {
-        Self::SkillWriting {
-            provider: body.provider,
-            query: body.query,
-            evidence_limit: body.evidence_limit,
-        }
-    }
-}
-
-pub async fn session_reflection(
-    State(state): State<DashboardState>,
-    Extension(control): Extension<DashboardHttpRequestControlV1>,
-    body: Option<axum::extract::Json<SessionReflectionRunBody>>,
-) -> (StatusCode, Json<Value>) {
-    let body = body.map(|body| body.0).unwrap_or_default();
-    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body), control).await
-}
-
-pub async fn skill_writing(
-    State(state): State<DashboardState>,
-    Extension(control): Extension<DashboardHttpRequestControlV1>,
-    body: Option<axum::extract::Json<SkillWritingRunBody>>,
-) -> (StatusCode, Json<Value>) {
-    let body = body.map(|body| body.0).unwrap_or_default();
-    run_dashboard_task_endpoint(state, DashboardAutomationRunRequestV1::from(body), control).await
-}
-
-async fn run_dashboard_task_endpoint(
-    state: DashboardState,
-    request: DashboardAutomationRunRequestV1,
-    control: DashboardHttpRequestControlV1,
-) -> (StatusCode, Json<Value>) {
-    let authority = match exact_automation_authority(&state) {
-        Ok(authority) => authority,
-        Err(error) => return automation_authority_error_response(error),
-    };
-    execute_dashboard_task(authority, &state.project_root, request, control).await
-}
-
-async fn execute_dashboard_task(
-    authority: &super::DashboardAutomationAuthorityV1,
-    project_root: &std::path::Path,
-    request: DashboardAutomationRunRequestV1,
-    control: DashboardHttpRequestControlV1,
-) -> (StatusCode, Json<Value>) {
-    match authority.run(project_root, request, control).await {
-        Ok(payload) => (StatusCode::OK, Json(json!({ "run": payload }))),
-        Err(error) => automation_authority_error_response(error),
-    }
-}
 
 #[derive(Debug, Default, Deserialize)]
 pub struct RunListParams {
@@ -299,7 +200,7 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
 
 #[cfg(test)]
 mod run_list_tests {
-    use super::super::DashboardAutomationAuthorityErrorV1;
+    use super::super::{DashboardAutomationAuthorityErrorV1, automation_authority_error_response};
     use super::*;
 
     #[test]
@@ -314,33 +215,6 @@ mod run_list_tests {
             payload["detail"],
             json!("dashboard automation run authority is not mounted")
         );
-    }
-
-    #[test]
-    fn manual_run_options_cross_the_daemon_port_without_loss() {
-        let request = DashboardAutomationRunRequestV1::from(SessionReflectionRunBody {
-            provider: Some("claude".to_owned()),
-            query: Some("scheduler authority".to_owned()),
-            evidence_limit: Some(17),
-            scope: Some(LcmScope::Current),
-            session_id: Some("session-1".to_owned()),
-            include_summaries: Some(true),
-            sort: Some(LcmGrepSort::Recency),
-            source: Some("transcript".to_owned()),
-            role: Some("assistant".to_owned()),
-            start_time: Some(10),
-            end_time: Some(20),
-        });
-
-        assert!(matches!(
-            request,
-            DashboardAutomationRunRequestV1::SessionReflection {
-                provider: Some(provider),
-                evidence_limit: Some(17),
-                session_id: Some(session_id),
-                ..
-            } if provider == "claude" && session_id == "session-1"
-        ));
     }
 
     #[test]

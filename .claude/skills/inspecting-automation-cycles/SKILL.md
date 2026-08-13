@@ -14,12 +14,14 @@ analytics prove whether generated output was adopted.
 1. Start with `tracedecay automation config get` to identify enabled tasks,
    schedules, locks, and profile paths.
 2. When the operator requests an immediate memory-curation cycle, use the sole
-   public launcher: MCP `tracedecay_fact_store_curate` with optional
-   `fact_review_limit` and `min_confidence_millionths` bounds, generic CLI
-   `tracedecay tool fact_store_curate`, or
-   `POST /api/application/retained/fact_store_curate`. All three invoke the
-   same daemon-owned run. The daemon derives run identity, task selection,
-   operations, validation, policy, and effect settlement.
+   public semantic launcher, `fact_store_curate`, through its MCP adapter
+   `tracedecay_fact_store_curate`, generic CLI adapter `tracedecay tool
+   fact_store_curate`, or HTTP adapter `POST
+   /api/application/retained/fact_store_curate`. Its request accepts only the
+   optional `fact_review_limit` and `min_confidence_millionths` bounds. Each
+   adapter invokes the same daemon-owned operation; the daemon derives run
+   identity, task selection, operations, validation, policy, and effect
+   settlement.
 3. List recent runs with `tracedecay automation runs list --limit 100`; group
    by task and status before opening individual artifacts.
 4. Inspect one exact run with `tracedecay automation runs view <run_id>`.
@@ -61,6 +63,6 @@ analytics prove whether generated output was adopted.
 
 ## Deliverable
 
-Report the launcher used, task/status counts, exact run or artifact ids,
+Report the launcher adapter used, task/status counts, exact run or artifact ids,
 terminal automatic application/deployment receipts, read-only verification,
 and adoption gaps.

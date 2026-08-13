@@ -16,7 +16,6 @@ use tracedecay_agent_hosts::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillUpdate,
 };
 use tracedecay_agent_hosts::automation::skill_writer::ManagedSkillDeploymentReceipt;
-use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
 use tracedecay_application::ApplicationProblemEnvelope;
 use tracedecay_application::retained_surfaces::{AutomationRunProblemV1, AutomationRunResultV1};
 
@@ -122,28 +121,7 @@ pub(crate) fn exact_automation_authority(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DashboardAutomationRunRequestV1 {
-    SessionReflection {
-        provider: Option<String>,
-        query: Option<String>,
-        evidence_limit: Option<usize>,
-        scope: Option<LcmScope>,
-        session_id: Option<String>,
-        include_summaries: Option<bool>,
-        sort: Option<LcmGrepSort>,
-        source: Option<String>,
-        role: Option<String>,
-        start_time: Option<i64>,
-        end_time: Option<i64>,
-    },
-    SkillWriting {
-        provider: Option<String>,
-        query: Option<String>,
-        evidence_limit: Option<usize>,
-    },
-    UserJob {
-        job_id: String,
-        run_id: String,
-    },
+    UserJob { job_id: String, run_id: String },
 }
 
 #[derive(Clone, Debug)]
@@ -380,10 +358,9 @@ mod tests {
         let result = authority
             .run(
                 std::path::Path::new("ambient-project"),
-                DashboardAutomationRunRequestV1::SkillWriting {
-                    provider: None,
-                    query: None,
-                    evidence_limit: None,
+                DashboardAutomationRunRequestV1::UserJob {
+                    job_id: "nightly-summary".to_owned(),
+                    run_id: "dashboard_user_job_nightly-summary_1000000".to_owned(),
                 },
                 request_control(),
             )
@@ -457,9 +434,9 @@ mod tests {
                 Some(invocation.control.cancellation().clone());
             Box::pin(async {
                 serde_json::from_value(serde_json::json!({
-                    "run_id": "run.skill-writer.signal",
-                    "task": "skill_writer",
-                    "request_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "run_id": "dashboard_user_job_nightly-summary_1000000",
+                    "task": "user_job",
+                    "request_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "terminal": {
                         "status": "completed",
                         "summary": {
@@ -493,18 +470,9 @@ mod tests {
         authority
             .run(
                 &project_root,
-                DashboardAutomationRunRequestV1::SessionReflection {
-                    provider: None,
-                    query: None,
-                    evidence_limit: None,
-                    scope: None,
-                    session_id: None,
-                    include_summaries: None,
-                    sort: None,
-                    source: None,
-                    role: None,
-                    start_time: None,
-                    end_time: None,
+                DashboardAutomationRunRequestV1::UserJob {
+                    job_id: "nightly-summary".to_owned(),
+                    run_id: "dashboard_user_job_nightly-summary_1000000".to_owned(),
                 },
                 control.clone(),
             )

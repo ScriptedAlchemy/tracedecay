@@ -924,19 +924,71 @@ mod tests {
     #[test]
     fn fact_store_curate_is_the_only_public_automation_launcher() {
         let contribution = retained_surface_catalog_contribution().expect("contribution");
+        let registry = retained_surface_executable_binding_registry().expect("registry");
         let operation = RetainedSurfaceOperation::FactStoreCurate;
         let capability = CapabilityId::new(capability_id(operation)).expect("capability id");
+        let request_type = "tracedecay_application::retained_surfaces::FactStoreCurateRequestV1";
+        let result_type = "tracedecay_application::retained_surfaces::AutomationRunResultV1";
 
         assert!(RetainedSurfaceOperation::ALL.contains(&operation));
         assert!(RetainedSurfaceOperation::CALLABLE.contains(&operation));
         assert!(RetainedSurfaceOperation::SDK_EXECUTABLE.contains(&operation));
-        assert!(
-            contribution
-                .capabilities()
-                .iter()
-                .any(|entry| entry.capability_id() == &capability)
+        let catalog_launchers = contribution
+            .executable_schemas()
+            .iter()
+            .filter(|authority| authority.result_schema().rust_type_path() == result_type)
+            .collect::<Vec<_>>();
+        assert_eq!(catalog_launchers.len(), 1);
+        assert_eq!(catalog_launchers[0].capability_id(), &capability);
+        assert_eq!(
+            catalog_launchers[0].request_schema().rust_type_path(),
+            request_type
         );
-        assert!(contribution.executable_schema(&capability).is_some());
+        assert_eq!(
+            catalog_launchers[0].request_schema().body()["properties"]
+                .as_object()
+                .expect("curator request properties")
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["fact_review_limit", "min_confidence_millionths"]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            catalog_launchers[0].request_schema().body()["additionalProperties"],
+            serde_json::Value::Bool(false)
+        );
+        let executable_launchers = registry
+            .iter()
+            .filter_map(ExecutableBindingAvailabilityV1::binding)
+            .filter(|binding| binding.result_schema().rust_type_path() == result_type)
+            .collect::<Vec<_>>();
+        assert_eq!(executable_launchers.len(), 1);
+        assert_eq!(
+            executable_launchers[0].operation_id().as_str(),
+            "operation.application.fact_store_curate"
+        );
+        assert_eq!(
+            executable_launchers[0].request_schema().rust_type_path(),
+            request_type
+        );
+        assert_eq!(
+            contribution
+                .bindings()
+                .iter()
+                .filter(|binding| binding.capability_id() == &capability)
+                .map(SurfaceBindingV1::surface)
+                .collect::<std::collections::BTreeSet<_>>(),
+            CURRENT_SURFACES.iter().copied().collect()
+        );
+        assert_eq!(
+            automation::SPECS
+                .iter()
+                .map(|spec| spec.operation)
+                .collect::<Vec<_>>(),
+            [operation]
+        );
         assert_eq!(
             RetainedSurfaceOperation::from_operation_name("fact_store_curate"),
             Some(operation)

@@ -3,8 +3,8 @@
 ## Purpose
 
 This guide describes the single final-V2 memory-curation authority. It applies
-to project and profile memory, the automation runner, its dashboard and CLI
-launchers, and its durable terminal receipts.
+to project and profile memory, the automation runner, its dashboard
+observation, its transport adapters, and its durable terminal receipts.
 
 The curator mines bounded canonical facts, asks the configured agent backend
 for supported operations, validates them, and automatically commits only
@@ -29,6 +29,12 @@ and `tracedecay automation run memory-curation` were removed. They are not
 aliases: every caller must use `fact_store_curate`, while the existing
 automation run list, view, and artifact reads remain unchanged.
 
+`fact_store_curate` is one public semantic launcher. MCP, generic CLI, and HTTP
+are adapters for that same retained application operation, not three launchers.
+Its request accepts only `fact_review_limit` and
+`min_confidence_millionths`; callers cannot supply task, run identity,
+operations, validation, policy, or effect authority.
+
 Use existing TraceDecay surfaces before inventing a new plan format:
 
 - Canonical fact tools: direct reads through `tracedecay_fact_store_get`,
@@ -41,15 +47,15 @@ Use existing TraceDecay surfaces before inventing a new plan format:
   use only when health/counts are part of the task. Similarity and dedupe
   evidence comes from the bounded verified Grafeo projection, not an alternate
   derived structure.
-- Canonical application launch:
+- HTTP adapter:
   `POST /api/application/retained/fact_store_curate` runs the autonomous app-server
   memory curator. Accepted operations are committed according to automation
   policy and every phase is logged to the run ledger and curation activity
   stream.
-- CLI launch: `tracedecay tool fact_store_curate --args
+- Generic CLI adapter: `tracedecay tool fact_store_curate --args
   '{"fact_review_limit":24,"min_confidence_millionths":720000}'` invokes the
   same retained application operation as HTTP and MCP.
-- MCP launch: `tracedecay_fact_store_curate` accepts only
+- MCP adapter: `tracedecay_fact_store_curate` accepts only
   `fact_review_limit` and `min_confidence_millionths` bounds. The daemon owns run identity,
   task selection, operations, validation, and effect settlement.
 - Read-only inspection: `tracedecay_automation_run_list`,
@@ -149,7 +155,7 @@ daemon restart boundaries unchanged.
 
 For each completed run, produce this compact report:
 
-- `scope`: project/profile identity and the automation launcher used.
+- `scope`: project/profile identity and the launcher adapter used.
 - `evidence`: bounded coverage, unavailable facts, and counterevidence.
 - `terminal`: committed receipts, rejections, or typed partial
   effect with reconciliation action.

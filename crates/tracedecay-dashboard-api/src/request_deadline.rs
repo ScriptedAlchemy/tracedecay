@@ -1,10 +1,6 @@
 pub(super) fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
-    if matches!(
-        path,
-        "/api/application/retained/fact_store_curate"
-            | "/api/automation/run/session-reflection"
-            | "/api/automation/run/skill-writing"
-    ) || is_project_scoped_automation_run_path(path)
+    if path == "/api/application/retained/fact_store_curate"
+        || is_project_scoped_automation_run_path(path)
         || is_user_job_run_path(path)
     {
         super::DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS
@@ -30,11 +26,5 @@ fn is_project_scoped_automation_run_path(path: &str) -> bool {
     let Some((project_id, tail)) = project_and_tail.split_once('/') else {
         return false;
     };
-    !project_id.is_empty()
-        && matches!(
-            tail,
-            "application/retained/fact_store_curate"
-                | "automation/run/session-reflection"
-                | "automation/run/skill-writing"
-        )
+    !project_id.is_empty() && tail == "application/retained/fact_store_curate"
 }

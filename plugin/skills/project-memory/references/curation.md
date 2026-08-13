@@ -26,13 +26,16 @@ result, but there is no second per-operation action.
    canonical fact/entity/trust/feedback/holographic-algebra status snapshot.
    Use `tracedecay_dashboard` (`action: "start"`) only when they want visual
    curation.
-3. **Run the canonical curator:** use `tracedecay_fact_store_curate`
-   (`fact_review_limit`, `min_confidence_millionths`), `tracedecay tool
-   fact_store_curate`, or `POST /api/application/retained/fact_store_curate`. The runner
-   reads bounded canonical facts, validates backend output, automatically
-   applies supported policy-valid operations, and returns a run id. The MCP
-   trigger accepts only its two optional review bounds; run identity, task,
-   operations, validation, and effect authority remain daemon-owned.
+3. **Run the canonical curator:** `fact_store_curate` is the sole public
+   semantic launcher. Invoke it through the MCP adapter
+   `tracedecay_fact_store_curate`, generic CLI adapter `tracedecay tool
+   fact_store_curate`, or HTTP adapter `POST
+   /api/application/retained/fact_store_curate`, supplying only the optional
+   `fact_review_limit` and `min_confidence_millionths` bounds. The runner reads
+   bounded canonical facts, validates backend output, automatically applies
+   supported policy-valid operations, and returns a run id. Run identity,
+   task, operations, validation, policy, and effect authority remain
+   daemon-owned.
 4. **Inspect the run read-only:** use `tracedecay_automation_run_list`
    (`limit?`) and then `tracedecay_automation_run_view` (`run_id`), or their CLI
    equivalents `tracedecay automation runs list --json` and `tracedecay

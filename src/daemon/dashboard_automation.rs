@@ -16,11 +16,6 @@ use tracedecay_agent_hosts::automation::managed_skills::{
 use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationTrigger,
 };
-use tracedecay_agent_hosts::automation::runner::{
-    SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-    run_session_reflector_with_backend_for_retained_settlement,
-    run_skill_writer_with_backend_for_retained_settlement,
-};
 use tracedecay_agent_hosts::automation::skill_writer::deploy_managed_skills_to_project;
 use tracedecay_application::now_micros;
 use tracedecay_automation::managed_skills::validate_skill_id;
@@ -47,8 +42,7 @@ type DashboardAutomationProjectFuture = std::pin::Pin<
 type DashboardAutomationProjectResolver =
     Arc<dyn Fn(PathBuf) -> DashboardAutomationProjectFuture + Send + Sync + 'static>;
 
-const SESSION_REFLECTOR_REQUEST_TIMEOUT_SECS: u64 = 120;
-const SKILL_WRITER_REQUEST_TIMEOUT_SECS: u64 = 120;
+const USER_JOB_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 fn automation_run_observer(
     producer: Arc<tracedecay_usecases::observability::BoundedObservabilityProducerV1>,
@@ -71,18 +65,9 @@ struct DashboardAutomationRequestRuntime {
 }
 
 impl DashboardAutomationRequestRuntime {
-    fn new(configured: &AutomationConfig, request: &DashboardAutomationRunRequestV1) -> Self {
-        let timeout_cap = match request {
-            DashboardAutomationRunRequestV1::SessionReflection { .. } => {
-                SESSION_REFLECTOR_REQUEST_TIMEOUT_SECS
-            }
-            DashboardAutomationRunRequestV1::SkillWriting { .. } => {
-                SKILL_WRITER_REQUEST_TIMEOUT_SECS
-            }
-            DashboardAutomationRunRequestV1::UserJob { .. } => SKILL_WRITER_REQUEST_TIMEOUT_SECS,
-        };
+    fn new(configured: &AutomationConfig) -> Self {
         let mut config = configured.clone();
-        config.timeout_secs = config.timeout_secs.min(timeout_cap);
+        config.timeout_secs = config.timeout_secs.min(USER_JOB_REQUEST_TIMEOUT_SECS);
         let backend = CodexAppServerBackend::from_automation_config(&config);
         Self { config, backend }
     }
@@ -368,7 +353,7 @@ async fn execute_dashboard_automation_run(
     profile_root: PathBuf,
     request: DashboardAutomationRunRequestV1,
     request_control: DashboardHttpRequestControlV1,
-    run_control: &AutomationRunControl,
+    _run_control: &AutomationRunControl,
     invocation_service: &crate::daemon::service::invocation::DaemonInvocationService,
 ) -> DashboardAutomationResult<DashboardAutomationRunOutcomeV1> {
     let producer = crate::daemon::project_automation_observation_producer(
@@ -395,213 +380,9 @@ async fn execute_dashboard_automation_run(
             &pinned.snapshot.resolution_provenance_digest,
         )
         .map_err(automation_failed)?;
-    let runtime = DashboardAutomationRequestRuntime::new(&config, &request);
+    let runtime = DashboardAutomationRequestRuntime::new(&config);
     let (config, backend) = runtime.execution();
     let run = match request {
-        DashboardAutomationRunRequestV1::SessionReflection {
-            provider,
-            query,
-            evidence_limit,
-            scope,
-            session_id,
-            include_summaries,
-            sort,
-            source,
-            role,
-            start_time,
-            end_time,
-        } => {
-            let mut options = SessionReflectorAutomationOptions {
-                trigger: AutomationTrigger::Dashboard,
-                run_id: None,
-                session_id,
-                source,
-                role,
-                start_time,
-                end_time,
-                ..SessionReflectorAutomationOptions::default()
-            };
-            if let Some(provider) = provider {
-                options.provider = provider;
-            }
-            if let Some(query) = query {
-                options.query = query;
-            }
-            if let Some(evidence_limit) = evidence_limit {
-                options.evidence_limit = evidence_limit;
-            }
-            if let Some(scope) = scope {
-                options.scope = scope;
-            }
-            if let Some(include_summaries) = include_summaries {
-                options.include_summaries = include_summaries;
-            }
-            if let Some(sort) = sort {
-                options.sort = sort;
-            }
-            let run_id = request_control.request_id().as_str().to_owned();
-            options.run_id = Some(run_id.clone());
-            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
-                invocation_service,
-                cg,
-                cg.project_root(),
-                &cg.store_layout().dashboard_root,
-                request_control.request_id(),
-                request_control.deadline(),
-                request_control.cancellation(),
-                request_control.observed_at(),
-                configuration_digest,
-                crate::daemon::automation_effect::session_reflector_run_request(&run_id, &options)
-                    .map_err(automation_failed)?,
-            )
-            .await
-            .map_err(automation_failed)?;
-            let effect = match admission {
-                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => {
-                    effect
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
-                    envelope,
-                ) => {
-                    return Err(DashboardAutomationAuthorityErrorV1::ApplicationProblem(envelope));
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
-                    let run = automation_terminal_run(&terminal)?;
-                    return Ok(run);
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
-                    return Err(automation_admission_conflict());
-                }
-            };
-            let observer = automation_run_observer(
-                Arc::clone(&producer),
-                cg.project_root().to_path_buf(),
-                "dashboard",
-            );
-            let retained_run = run_session_reflector_with_backend_for_retained_settlement(
-                cg,
-                config,
-                run_control,
-                &pinned.revision_id,
-                backend,
-                options,
-            )
-            .await;
-            let (run, settlement_guard) = retained_run.into_parts();
-            let run = match run {
-                Ok(run) => run,
-                Err(error) => {
-                    let waiter = effect.start_deferred_problem_settlement_observed(
-                        error,
-                        settlement_guard,
-                        Some(observer),
-                    );
-                    return Err(match waiter.wait().await {
-                        Ok((problem, _ledger_record)) => automation_problem(problem),
-                        Err(settlement_error) => automation_failed(settlement_error),
-                    });
-                }
-            };
-            let waiter = effect.start_deferred_run_settlement_observed(
-                run.ledger_record,
-                run.committed_receipt,
-                settlement_guard,
-                Some(observer),
-            );
-            let (terminal, _ledger_record) = waiter.wait().await.map_err(automation_failed)?;
-            automation_terminal_run(&terminal)?
-        }
-        DashboardAutomationRunRequestV1::SkillWriting {
-            provider,
-            query,
-            evidence_limit,
-        } => {
-            let mut options = SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::Dashboard,
-                run_id: None,
-                profile_root: Some(profile_root),
-                ..SkillWriterAutomationOptions::default()
-            };
-            if let Some(provider) = provider {
-                options.provider = provider;
-            }
-            if let Some(query) = query {
-                options.query = query;
-            }
-            if let Some(evidence_limit) = evidence_limit {
-                options.evidence_limit = evidence_limit;
-            }
-            let run_id = request_control.request_id().as_str().to_owned();
-            options.run_id = Some(run_id.clone());
-            let admission = crate::daemon::automation_effect::AutomationEffectAuthority::prepare(
-                invocation_service,
-                cg,
-                cg.project_root(),
-                &cg.store_layout().dashboard_root,
-                request_control.request_id(),
-                request_control.deadline(),
-                request_control.cancellation(),
-                request_control.observed_at(),
-                configuration_digest,
-                crate::daemon::automation_effect::skill_writer_run_request(&run_id, &options)
-                    .map_err(automation_failed)?,
-            )
-            .await
-            .map_err(automation_failed)?;
-            let effect = match admission {
-                crate::daemon::automation_effect::AutomationEffectAdmission::Execute(effect) => {
-                    effect
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
-                    envelope,
-                ) => {
-                    return Err(DashboardAutomationAuthorityErrorV1::ApplicationProblem(envelope));
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
-                    let run = automation_terminal_run(&terminal)?;
-                    return Ok(run);
-                }
-                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
-                    return Err(automation_admission_conflict());
-                }
-            };
-            let observer = automation_run_observer(
-                Arc::clone(&producer),
-                cg.project_root().to_path_buf(),
-                "dashboard",
-            );
-            let retained_run = run_skill_writer_with_backend_for_retained_settlement(
-                cg,
-                config,
-                &pinned.revision_id,
-                backend,
-                options,
-            )
-            .await;
-            let (run, settlement_guard) = retained_run.into_parts();
-            let run = match run {
-                Ok(run) => run,
-                Err(error) => {
-                    let waiter = effect.start_deferred_problem_settlement_observed(
-                        error,
-                        settlement_guard,
-                        Some(observer),
-                    );
-                    return Err(match waiter.wait().await {
-                        Ok((problem, _ledger_record)) => automation_problem(problem),
-                        Err(settlement_error) => automation_failed(settlement_error),
-                    });
-                }
-            };
-            let waiter = effect.start_deferred_run_settlement_observed(
-                run.ledger_record,
-                run.committed_receipt,
-                settlement_guard,
-                Some(observer),
-            );
-            let (terminal, _ledger_record) = waiter.wait().await.map_err(automation_failed)?;
-            automation_terminal_run(&terminal)?
-        }
         DashboardAutomationRunRequestV1::UserJob { job_id, run_id } => {
             let job = tracedecay_agent_hosts::automation::jobs::find_job(
                 &cg.store_layout().dashboard_root,
@@ -838,51 +619,17 @@ fn automation_problem(
 
 #[cfg(test)]
 mod tests {
-    use super::{DashboardAutomationRequestRuntime, DashboardAutomationRunRequestV1};
+    use super::DashboardAutomationRequestRuntime;
     use tracedecay_agent_hosts::automation::config::AutomationConfig;
 
-    fn session_reflection_request() -> DashboardAutomationRunRequestV1 {
-        DashboardAutomationRunRequestV1::SessionReflection {
-            provider: None,
-            query: None,
-            evidence_limit: None,
-            scope: None,
-            session_id: None,
-            include_summaries: None,
-            sort: None,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-        }
-    }
-
     #[test]
-    fn dashboard_session_reflector_caps_initial_and_repair_calls_for_the_wall_budget() {
+    fn dashboard_user_job_caps_backend_calls_for_the_wall_budget() {
         let configured = AutomationConfig {
             timeout_secs: 300,
             ..AutomationConfig::default()
         };
 
-        let runtime =
-            DashboardAutomationRequestRuntime::new(&configured, &session_reflection_request());
-
-        assert_eq!(runtime.execution().0.timeout_secs, 120);
-    }
-
-    #[test]
-    fn dashboard_skill_writer_caps_initial_and_repair_calls_for_the_wall_budget() {
-        let configured = AutomationConfig {
-            timeout_secs: 300,
-            ..AutomationConfig::default()
-        };
-        let skill_writing = DashboardAutomationRunRequestV1::SkillWriting {
-            provider: None,
-            query: None,
-            evidence_limit: None,
-        };
-
-        let runtime = DashboardAutomationRequestRuntime::new(&configured, &skill_writing);
+        let runtime = DashboardAutomationRequestRuntime::new(&configured);
 
         assert_eq!(runtime.execution().0.timeout_secs, 120);
     }
@@ -894,8 +641,7 @@ mod tests {
             ..AutomationConfig::default()
         };
 
-        let runtime =
-            DashboardAutomationRequestRuntime::new(&configured, &session_reflection_request());
+        let runtime = DashboardAutomationRequestRuntime::new(&configured);
 
         assert_eq!(runtime.execution().0.timeout_secs, 45);
     }
