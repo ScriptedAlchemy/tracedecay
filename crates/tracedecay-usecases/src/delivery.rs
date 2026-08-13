@@ -219,6 +219,15 @@ pub enum ProjectDeliveryCiSourceV1 {
 /// The retained CI index does not own localization state/coverage or exact
 /// graph evidence. Delivery therefore reports this source as unconfigured
 /// until that canonical owner is explicitly retained by this composition.
+///
+/// Owner decision (2026-08-13, RESOLVED-BY-DECISION): failure-localization
+/// evidence belongs to a future CI-annotation ingestion source, not to the
+/// retained CI index this composition already owns. This composition
+/// intentionally reports `NotConfigured` until that ingestion source exists
+/// and is explicitly retained here; it is not a placeholder pending
+/// same-source enrichment. Consumers must render `NotConfigured` as a typed
+/// unavailable projection (the dashboard already does this) rather than
+/// inferring or fabricating localization evidence.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ProjectDeliveryFailureLocalizationSourceV1 {

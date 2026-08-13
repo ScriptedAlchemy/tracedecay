@@ -31,19 +31,17 @@ pub(super) struct DriftInterval {
 pub enum StackSignalKindV1 {
     DependencyReady,
     ActualConflict,
-    PotentialConflict,
     StackTipDrift,
     PullRequestDrift,
     CiEvaluatedCommitDrift,
     IntegrationCommitted,
     IntegrationNeedsInspection,
-    AuthorizationLost,
 }
 
 impl StackSignalKindV1 {
     pub(super) const fn debounce_micros(self) -> i64 {
         match self {
-            Self::DependencyReady | Self::PotentialConflict => 250_000,
+            Self::DependencyReady => 250_000,
             Self::StackTipDrift | Self::PullRequestDrift | Self::CiEvaluatedCommitDrift => {
                 1_000_000
             }
@@ -54,10 +52,7 @@ impl StackSignalKindV1 {
     pub const fn is_material(self) -> bool {
         matches!(
             self,
-            Self::ActualConflict
-                | Self::IntegrationCommitted
-                | Self::IntegrationNeedsInspection
-                | Self::AuthorizationLost
+            Self::ActualConflict | Self::IntegrationCommitted | Self::IntegrationNeedsInspection
         )
     }
 }

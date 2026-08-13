@@ -8042,12 +8042,8 @@
         "head_advanced",
         "base_advanced",
         "merge_base_changed",
-        "dependency_missing",
-        "ref_deleted",
-        "worktree_generation_changed",
         "retargeted",
-        "superseded",
-        "unknown"
+        "superseded"
       ],
       "type": "string"
     },

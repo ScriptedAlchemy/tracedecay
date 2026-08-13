@@ -419,13 +419,16 @@ the commit as attribution evidence.
   identity, cancellation, and terminal CLI ACK behavior.
 - Run execution-topology metrics, rollup, compaction, retry, cancellation, and
   restart journeys rather than contract inventories.
-- Wire a canonical CI failure-localization owner into the delivery-evidence
-  composition. `ProjectDeliveryFailureLocalizationSourceV1` is intentionally
-  only `NotConfigured` (`crates/tracedecay-usecases/src/delivery.rs:219-226`)
-  because the retained CI index does not own localization state; the dashboard
-  renders it as a typed unavailable projection. Either retain the owner in
-  this composition or record its explicit owner; do not fabricate localization
-  evidence.
+- RESOLVED-BY-DECISION (2026-08-13): CI failure-localization owner. Ruling —
+  do not build a localization source; the retained CI index does not own
+  localization state. `ProjectDeliveryFailureLocalizationSourceV1` stays
+  `NotConfigured`-only (`crates/tracedecay-usecases/src/delivery.rs:219-235`)
+  with its doc comment now naming the explicit owner: failure-localization
+  evidence belongs to a future CI-annotation ingestion source, and this
+  composition intentionally reports `NotConfigured` until that source exists
+  and is explicitly retained here. Consumers must render it as typed
+  unavailable (the dashboard already does). No further action pending the
+  ingestion source landing.
 
 ### Additional wound-down lane handoffs
 
@@ -447,10 +450,20 @@ the commit as attribution evidence.
   fail-closed bounds, the production mount runs owner refresh through the
   daemon advisory runtime, and all eight named journeys pass (13 tests across
   `github_stack_coordinator`, `github_stack_drift_observability`,
-  `github_stack_anchor_authority`; `advisory` lib suite 84/84). Open
-  decision handed to the daemon lane: `StackSignalKindV1::PotentialConflict`
-  and `::AuthorizationLost` (plus four `StackDriftKindV1` variants) have no
-  producer — decide intended emission scope or retire the variants.
+  `github_stack_anchor_authority`; `advisory` lib suite 84/84).
+  RESOLVED (2026-08-13): the open decision handed to the daemon lane —
+  `StackSignalKindV1::PotentialConflict` and `::AuthorizationLost` (plus
+  `StackDriftKindV1::{DependencyMissing, RefDeleted,
+  WorktreeGenerationChanged, Unknown}`) had no producer anywhere and no
+  persisted analytics/rollup data could contain them (each was introduced,
+  never wired to a producer, and verified by full-repo grep before removal).
+  Ruling was retire, not implement: the variants and their match arms were
+  removed from `crates/tracedecay-usecases/src/stack_coordinator/transition.rs`
+  and `crates/tracedecay-domain/src/observability/execution.rs` (plus the
+  mirrored `ExecutionStackDriftKindV1` projection in
+  `crates/tracedecay-application/src/execution_topology_metrics/mod.rs`). Note
+  `GitHubStackDeliveryStateV1::AuthorizationLost` (the delivery layer) is a
+  separate, fully-wired enum and was not touched.
 - DONE 2026-08-12 (verified 2026-08-13): the canonical-parent cutover landed
   — `src/application.rs` was removed in `540b6a605` and `05924ecdf`, and the
   tree carries zero `crate::application` facade imports in `src/`. Residual
@@ -488,10 +501,14 @@ the commit as attribution evidence.
   scoped, and opencode. Do not add Cursor Cloud or expand Kiro scope.
 - Complete the default package/install/start journey. npm OIDC setup is the
   explicit remaining operator-owned publication action.
-- Recorded gap (2026-08-13, non-blocking): `src/doctor.rs:953` self-reports
-  that domain symbol extraction is unimplemented — a loud, safe degradation
-  on the doctor surface, previously untracked here. Decide implement-or-retire
-  before the doctor journey is called complete.
+- RESOLVED-BY-DECISION (2026-08-13): `src/doctor.rs:953` domain symbol
+  extraction self-report. Ruling — keep the safe degradation, retire the
+  "unimplemented" wording. `domain_symbol_rules_warning` now reports domain
+  symbol extraction as a truthful typed capability-unavailable statement
+  ("Domain symbol extraction is unavailable: no extractor reads {path}...",
+  consistent with neighboring Doctor unavailable-surface wording), with
+  identical pass/fail (`dc.warn`) semantics. No implement-or-retire decision
+  remains open.
 
 ### Backend performance and final verification
 

@@ -1694,7 +1694,7 @@ export type ExecutionRerunSourceV1 = z.infer<typeof ExecutionRerunSourceV1Schema
 
 /** Exact reason a stack became stale. The enum is bounded and never
 carries a branch, ref, worktree, repository, or provider identity. */
-export const ExecutionStackDriftKindV1Schema = z.enum(["base_advanced", "dependency_missing", "head_advanced", "merge_base_changed", "ref_deleted", "retargeted", "superseded", "unknown", "worktree_generation_changed"]);
+export const ExecutionStackDriftKindV1Schema = z.enum(["base_advanced", "head_advanced", "merge_base_changed", "retargeted", "superseded"]);
 export type ExecutionStackDriftKindV1 = z.infer<typeof ExecutionStackDriftKindV1Schema>;
 
 /** Delivery surface family. Addresses, payloads, principals, and

@@ -228,12 +228,8 @@ mirrored_enum!(
         HeadAdvanced,
         BaseAdvanced,
         MergeBaseChanged,
-        DependencyMissing,
-        RefDeleted,
-        WorktreeGenerationChanged,
         Retargeted,
         Superseded,
-        Unknown,
     }
 );
 
