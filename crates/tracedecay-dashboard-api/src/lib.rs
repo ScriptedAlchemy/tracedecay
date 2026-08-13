@@ -78,6 +78,7 @@ pub mod config;
 #[doc(hidden)]
 pub mod contract_schema;
 mod delivery_api;
+pub use delivery_api::{DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1};
 mod doctor_findings_api;
 mod events_api;
 mod events_delivery;
@@ -253,6 +254,10 @@ pub struct DashboardStateCompositionV1 {
     /// Daemon-owned typed read over the verified session-git-evidence graph
     /// projection. Loom's git sources report unavailable without it.
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
+    /// Daemon-owned exact-project Delivery projection. The adapter owns
+    /// application admission and provider/store access; HTTP receives only
+    /// bounded typed source outcomes.
+    pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
     pub registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     /// Exact daemon-selected profile plus its canonical automation run and
     /// managed-skill materialization capabilities. Standalone states leave it
@@ -351,6 +356,8 @@ pub struct DashboardState {
     /// Daemon-owned typed read over the verified session-git-evidence graph
     /// projection, serving Loom's session↔commit and branch/worktree sources.
     pub git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
+    /// Daemon-owned exact-project Delivery projection.
+    pub delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
     /// Global accounting DB for the savings ledger and lifetime counters used
     /// by the Savings & Cost tab. Provider usage lives in the retained project
     /// session store exposed separately through `lcm_db`.
@@ -415,6 +422,7 @@ pub struct DashboardHostAdmissionTestAuthorityV1 {
     code_graph_read_admission: Option<Arc<dyn crate::graph::CodeGraphReadAdmissionPort>>,
     code_graph_projection_read_port: Option<Arc<dyn crate::graph::CodeGraphProjectionReadPort>>,
     git_correlation_read_authority: Option<Arc<dyn DashboardGitCorrelationReadPortV1>>,
+    delivery_read_authority: Option<Arc<dyn DashboardDeliveryReadPortV1>>,
     application_invocation_executor: Option<Arc<dyn DashboardApplicationRuntime>>,
 }
 
@@ -437,6 +445,7 @@ impl DashboardHostAdmissionTestAuthorityV1 {
             code_graph_read_admission: None,
             code_graph_projection_read_port: None,
             git_correlation_read_authority: None,
+            delivery_read_authority: None,
             application_invocation_executor: None,
         }
     }
@@ -497,6 +506,17 @@ impl DashboardHostAdmissionTestAuthorityV1 {
         git_correlation_read_authority: Arc<dyn DashboardGitCorrelationReadPortV1>,
     ) -> Self {
         self.git_correlation_read_authority = Some(git_correlation_read_authority);
+        self
+    }
+
+    /// Attaches the daemon-owned Delivery read adapter used by the production
+    /// route. Tests retain the same request-control and admission boundary.
+    #[must_use]
+    pub fn with_delivery_read_authority(
+        mut self,
+        delivery_read_authority: Arc<dyn DashboardDeliveryReadPortV1>,
+    ) -> Self {
+        self.delivery_read_authority = Some(delivery_read_authority);
         self
     }
 }
@@ -631,6 +651,7 @@ async fn build_state_inner(
         registered_project_session_db,
         lcm_read_authority,
         git_correlation_read_authority,
+        delivery_read_authority,
         registered_savings_db,
         automation_authority,
         automation_observation,
@@ -699,6 +720,7 @@ async fn build_state_inner(
         lcm_scope: lcm.scope,
         lcm_read_authority,
         git_correlation_read_authority,
+        delivery_read_authority,
         savings_db: registered_savings_db,
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
@@ -757,6 +779,7 @@ pub async fn build_selected_project_state(
             registered_project_session_db: None,
             lcm_read_authority: None,
             git_correlation_read_authority: None,
+            delivery_read_authority: None,
             registered_savings_db: active.savings_db.clone(),
             automation_authority: active.automation_authority.clone(),
             automation_observation: active.automation_observation.clone(),
@@ -950,6 +973,8 @@ where
                 .and_then(|authority| authority.lcm_read_authority.clone()),
             git_correlation_read_authority: test_authority
                 .and_then(|authority| authority.git_correlation_read_authority.clone()),
+            delivery_read_authority: test_authority
+                .and_then(|authority| authority.delivery_read_authority.clone()),
             registered_savings_db: test_authority
                 .map(|authority| Arc::clone(&authority.profile_database)),
             automation_authority: test_authority
@@ -2129,6 +2154,7 @@ mod authority_tests {
                 lcm_scope: "unavailable".to_owned(),
                 lcm_read_authority: None,
                 git_correlation_read_authority: None,
+                delivery_read_authority: None,
                 savings_db: None,
                 savings_db_path: String::new(),
                 project_root: project_root.clone(),
