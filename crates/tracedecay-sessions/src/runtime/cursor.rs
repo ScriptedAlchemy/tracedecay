@@ -1976,7 +1976,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session-redacted.jsonl");
         let event = json!({"session_id": "session-redacted"});
-        std::fs::write(&path, "{\"role\":\"user\",\"content\":\"first generation\"}\n").unwrap();
+        std::fs::write(
+            &path,
+            "{\"role\":\"user\",\"content\":\"first generation\"}\n",
+        )
+        .unwrap();
 
         let first = parse_cursor_jsonl(
             &event,

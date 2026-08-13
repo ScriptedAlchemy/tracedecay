@@ -293,9 +293,11 @@ fn yaml_decoy_comment_mentioning_the_key_does_not_redirect_the_redaction_span() 
         "an unlocatable sensitive field must be quarantined, not silently marked redacted"
     );
     assert!(
-        !scanned.findings().iter().any(|finding| finding.action()
-            == SanitizationActionV1::Redacted
-            && finding.detector() == PrivacyDetectorV1::SensitiveField),
+        !scanned
+            .findings()
+            .iter()
+            .any(|finding| finding.action() == SanitizationActionV1::Redacted
+                && finding.detector() == PrivacyDetectorV1::SensitiveField),
         "the decoy must never be reported as a successful redaction of the real field"
     );
     assert!(

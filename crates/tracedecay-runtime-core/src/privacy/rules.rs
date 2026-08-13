@@ -1288,12 +1288,16 @@ mod tests {
         let compiled = patterns(CredentialPatternProfile::Observation);
         let sourcegraph = rule(&compiled, "sourcegraph-access-token");
 
-        assert!(sourcegraph
-            .ranges("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
-            .is_empty());
-        assert!(!sourcegraph
-            .ranges("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
-            .is_empty());
+        assert!(
+            sourcegraph
+                .ranges("commit 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
+                .is_empty()
+        );
+        assert!(
+            !sourcegraph
+                .ranges("sourcegraph token 3bc562b8a1f0d9e7c6b5a4d3e2f1a0b9c8d7e6f5")
+                .is_empty()
+        );
     }
 
     /// `regexTarget` steers the allowlist regexes only. A stopword read from the

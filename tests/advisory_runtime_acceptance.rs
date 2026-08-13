@@ -82,10 +82,10 @@ use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackCycleId, FeedbackCycleRequestV1,
     FeedbackCycleRuntimeSnapshotV1, FeedbackDiagnosticBaselineIdentityV1,
     FeedbackDiagnosticBaselineV1, FeedbackDiagnosticProducerV1, FeedbackDiagnosticV1,
-    FeedbackEvaluationInputV1,
-    FeedbackFindingLifecycleV1, FeedbackImpactStateV1, FeedbackImpactV1, FeedbackTargetV1,
-    FeedbackTriggerV1, ProximityBranchWorktreeIncompatibilityV1, ProximityCoverageV1,
-    ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityWarningClassV1,
+    FeedbackEvaluationInputV1, FeedbackFindingLifecycleV1, FeedbackImpactStateV1, FeedbackImpactV1,
+    FeedbackTargetV1, FeedbackTriggerV1, ProximityBranchWorktreeIncompatibilityV1,
+    ProximityCoverageV1, ProximityRelationStrengthV1, ProximityRiskInputsV1,
+    ProximityWarningClassV1,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_domain::{

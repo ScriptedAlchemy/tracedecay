@@ -103,7 +103,8 @@ async fn insert_message(
 ) -> Result<i64, String> {
     let message_id = format!("msg-{ordinal}");
     let timestamp = NOW - age_days * DAY;
-    let sanitization = sanitize_lcm_payload_text(content).map_err(|err| format!("sanitize: {err}"))?;
+    let sanitization =
+        sanitize_lcm_payload_text(content).map_err(|err| format!("sanitize: {err}"))?;
     let content = sanitization.sanitized_text();
     let hash = crate::runtime::lcm::util::sha256_hex(content.as_bytes());
     let metadata = serde_json::json!({
@@ -341,7 +342,10 @@ async fn expansion_survives_sources_dropped_by_retention() -> Result<(), String>
     assert_eq!(before.sources[0].content, "durable old content");
 
     let report = run_apply(conn, &store.storage_root, &drop_config(30)).await?;
-    assert_eq!(report.dropped.acted, 1, "the summary's source row is dropped");
+    assert_eq!(
+        report.dropped.acted, 1,
+        "the summary's source row is dropped"
+    );
     assert_eq!(count(conn, "lcm_raw_messages").await?, 0);
     assert_eq!(
         count(conn, "lcm_summary_sources").await?,
@@ -353,7 +357,10 @@ async fn expansion_survives_sources_dropped_by_retention() -> Result<(), String>
         .await
         .map_err(|error| format!("expansion must survive retention: {error}"))?;
 
-    assert_eq!(after.summary.node_id, node_id, "the summary itself survives");
+    assert_eq!(
+        after.summary.node_id, node_id,
+        "the summary itself survives"
+    );
     assert_eq!(after.summary.summary_text, SUMMARY_TEXT);
     assert_eq!(
         after.sources.len(),

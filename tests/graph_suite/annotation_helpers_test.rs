@@ -48,7 +48,11 @@ fn annotates_edges(result: &ExtractionResult) -> Vec<&Edge> {
 
 /// Assert the `Annotates` edge emitted for `annotation` points from the
 /// annotation-usage node to the node actually declaring `expected_target_name`.
-fn assert_annotates_target(result: &ExtractionResult, annotation: &Node, expected_target_name: &str) {
+fn assert_annotates_target(
+    result: &ExtractionResult,
+    annotation: &Node,
+    expected_target_name: &str,
+) {
     let edge = annotates_edges(result)
         .into_iter()
         .find(|edge| edge.source == annotation.id)
