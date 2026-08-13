@@ -132,7 +132,7 @@ mod tests {
         let caller = tokio::spawn(async move {
             spawn_terminal_housekeeping(
                 || Ok(Some(())),
-                move || {
+                move |_| {
                     removed_sender.send(()).expect("removed signal");
                     release_receiver.recv().expect("remove release");
                     Ok(())
@@ -167,7 +167,7 @@ mod tests {
         let caller = tokio::spawn(async move {
             spawn_terminal_housekeeping(
                 || Ok(Some(())),
-                || Ok(()),
+                |_| Ok(()),
                 move |()| {
                     completion_sender.send(()).expect("completion boundary");
                     release_receiver.recv().expect("completion release");

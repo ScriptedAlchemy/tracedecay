@@ -1956,7 +1956,7 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
     )
     .await;
     drop(anchor_guard);
-    let anchor_publication =
+    let (anchor_publication, _) =
         tracedecay_agent_hosts::automation::run_ledger::bind_staged_run_record_exact(
             &dashboard_root,
             &anchor.ledger_record,
@@ -2059,113 +2059,35 @@ async fn terminal_retirement_recovery_keeps_pending_until_source_is_exactly_arch
         Some(&plan),
     )
     .expect("finalize exact retirement through source capture");
-    drop(pending_retirement);
     assert!(!source_path.exists());
     assert_eq!(retirement_capture_count(&dashboard_root), 1);
 
     std::fs::create_dir(&source_path).expect("nonregular replacement source");
-    let (visible_sender, visible_receiver) = std::sync::mpsc::channel();
-    let (release_sender, release_receiver) = std::sync::mpsc::channel();
-    let removal_root = dashboard_root.clone();
-    let removal_journal = journal_path.clone();
-    let removal_admission = admission.clone();
-    let removal = std::thread::spawn(move || {
-        let mut writes = 0usize;
-        recovery_index::remove_pending_with_compensation_with_writer(
-            &removal_root,
-            &removal_journal,
-            &removal_admission,
-            move |path, bytes| {
-                writes += 1;
-                recovery_index::write_pending_index_with_publisher(
-                    path,
-                    bytes,
-                    |temporary, destination| {
-                        replace_automation_file_atomically(
-                            temporary,
-                            destination,
-                            "automation pending recovery index",
-                        )
-                    },
-                )?;
-                if writes == 1 {
-                    visible_sender.send(()).expect("visible empty-index signal");
-                    release_receiver
-                        .recv()
-                        .expect("release uncertain pending removal");
-                    return Err(contract_error(
-                        "injected error after visible pending-index removal",
-                    ));
-                }
-                Ok(())
-            },
-        )
-    });
-    visible_receiver
-        .recv()
-        .expect("visible empty pending index");
-
-    let (contender_started_sender, contender_started_receiver) = std::sync::mpsc::channel();
-    let (contender_done_sender, contender_done_receiver) = std::sync::mpsc::channel();
-    let contender_root = dashboard_root.clone();
-    let contender = std::thread::spawn(move || {
-        contender_started_sender
-            .send(())
-            .expect("orphan contender started");
-        let result =
-            recovery_index::reconcile_orphaned_retirement_capture_if_index_empty(&contender_root);
-        contender_done_sender
-            .send(())
-            .expect("orphan contender completed");
-        result
-    });
-    contender_started_receiver
-        .recv()
-        .expect("orphan contender attempted reconciliation");
-    assert!(matches!(
-        contender_done_receiver.try_recv(),
-        Err(std::sync::mpsc::TryRecvError::Empty)
-    ));
-
-    release_sender
-        .send(())
-        .expect("release uncertain pending removal");
-    let removal_error = removal
-        .join()
-        .expect("uncertain removal thread")
-        .expect_err("uncertain removal must surface after exact compensation");
-    assert!(
-        removal_error
-            .to_string()
-            .contains("visible pending-index removal")
-    );
-    contender
-        .join()
-        .expect("orphan contender thread")
-        .expect("orphan contender sees compensated pending entry");
-    contender_done_receiver
-        .recv()
-        .expect("orphan contender completion signal");
-    assert_eq!(retirement_capture_count(&dashboard_root), 1);
-    assert_eq!(
-        recovery_index::indexed_journals_blocking(&dashboard_root, &admission.scope)
-            .expect("compensated pending retirement")
-            .len(),
-        1
-    );
-
-    let pending_recovery = recovery_index::reconcile_reserved_automation_effects_for_project(
-        &cg,
+    recovery_index::remove_pending_for_retirement_blocking(
         &dashboard_root,
-        &tracedecay_application::CancellationSignal::active(
-            "cancellation.terminal-retirement-pending-witness",
-        )
-        .expect("pending-witness cancellation"),
+        &journal_path,
+        &admission,
+        &pending_retirement,
     )
-    .await
-    .expect("pending Terminal protects its witness from orphan cleanup");
-    assert_eq!(pending_recovery.inspected, 1);
-    assert_eq!(pending_recovery.already_terminal, 1);
+    .expect("publish retirement transition before pending removal");
+    assert_eq!(retirement_capture_count(&dashboard_root), 1);
+    assert!(
+        recovery_index::indexed_journals_blocking(&dashboard_root, &admission.scope)
+            .expect("retirement transition removes pending entry")
+            .is_empty()
+    );
+    super::super::retirement::complete_after_pending_removal(&pending_retirement)
+        .expect("complete retirement witness after pending removal");
+    recovery_index::finish_retirement_transition_blocking(
+        &dashboard_root,
+        &journal_path,
+        &admission,
+        &pending_retirement,
+    )
+    .expect("close durable retirement transition");
+    assert_eq!(retirement_capture_count(&dashboard_root), 1);
+    recovery_index::reconcile_orphaned_retirement_capture_if_index_empty(&dashboard_root)
+        .expect("remove completed retirement witness after transition closure");
     assert!(source_path.is_dir());
     assert_eq!(retirement_capture_count(&dashboard_root), 0);
     assert!(
@@ -2656,9 +2578,12 @@ async fn post_write_reservation_error_retains_reserved_journal_and_pending_recov
             Err(contract_error("injected error after exact Reserved write"))
         },
     );
+    let reservation_error = match reservation {
+        Ok(_) => panic!("post-write error must remain uncertain"),
+        Err(error) => error,
+    };
     assert!(
-        reservation
-            .expect_err("post-write error must remain uncertain")
+        reservation_error
             .to_string()
             .contains("after exact Reserved write")
     );
@@ -2714,9 +2639,12 @@ async fn prewrite_reservation_error_retains_index_until_missing_journal_recovery
         || recovery_index::add_pending_blocking(dashboard_root, &path, &admission),
         |_path, _record| Err(contract_error("injected error before Reserved write")),
     );
+    let reservation_error = match reservation {
+        Ok(_) => panic!("prewrite error must retain recovery authority"),
+        Err(error) => error,
+    };
     assert!(
-        reservation
-            .expect_err("prewrite error must retain recovery authority")
+        reservation_error
             .to_string()
             .contains("before Reserved write")
     );
@@ -2808,12 +2736,13 @@ async fn project_open_truncates_unique_spool_partial_with_empty_pending_index() 
         retained_disabled_user_job(dashboard_root, run_id, "project-open-corrupt-intent").await;
     drop(guard);
     let expected_record = run.ledger_record;
-    let publication = tracedecay_agent_hosts::automation::run_ledger::bind_staged_run_record_exact(
-        dashboard_root,
-        &expected_record,
-        |publication| Ok(publication.clone()),
-    )
-    .expect("stage exact recovery spool");
+    let (publication, _) =
+        tracedecay_agent_hosts::automation::run_ledger::bind_staged_run_record_exact(
+            dashboard_root,
+            &expected_record,
+            |publication| Ok(publication.clone()),
+        )
+        .expect("stage exact recovery spool");
     let spool_files = exact_spool_files(dashboard_root);
     assert_eq!(spool_files.len(), 1);
     let spool = std::fs::read(&spool_files[0]).expect("exact spool payload");
