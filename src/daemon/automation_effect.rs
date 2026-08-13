@@ -62,6 +62,23 @@ use projection::{
     project_skip_reason,
 };
 
+/// Total wall-clock budget for a retained-settlement blocking-pool retry
+/// loop before it gives up and returns an error instead of retrying
+/// forever.
+///
+/// These loops run on a `spawn_blocking` thread while the caller's
+/// `RetainedSettlementWaiter::wait().await` is parked on them and the held
+/// `AutomationRunSettlementGuard` keeps the task lock. A persistent,
+/// non-self-healing failure (stale append-intent from a different run's
+/// crashed publication, a read-only filesystem, ...) must not pin that
+/// thread and hang the daemon request forever. 120s is long enough to ride
+/// out transient filesystem contention, short enough that a wedged
+/// settlement surfaces as an error instead of a hung request. On
+/// exhaustion the journal state is left exactly as it was
+/// (Reserved/Prepared); that is the durable recovery path and
+/// `reconcile_reserved_automation_effects_for_project` picks it up later.
+const RETAINED_SETTLEMENT_RETRY_BUDGET: Duration = Duration::from_secs(120);
+
 pub(crate) struct AutomationEffectAuthority {
     context: RequestContext,
     cancellation: CancellationSignal,
@@ -1691,36 +1708,59 @@ impl AutomationEffectAuthority {
 }
 
 fn settle_bound_owner(
-    mut state: RetainedBoundSettlement,
+    state: RetainedBoundSettlement,
 ) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
+    settle_bound_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
+}
+
+fn settle_bound_owner_with_budget(
+    mut state: RetainedBoundSettlement,
+    budget: Duration,
+) -> Result<RetainedOwnerValue<(AutomationSettledTerminal, AutomationRunLedgerRecord)>> {
+    let started = std::time::Instant::now();
     let mut delay = Duration::from_millis(25);
     loop {
-        match settle_bound_once(&mut state) {
+        let error = match settle_bound_once(&mut state) {
             Ok(()) => return Ok(complete_bound_settlement(state)),
-            Err(error) => match classify_bound_settlement(&state) {
-                Ok(classification)
-                    if classification.is_terminal() && state.publication.is_some() =>
-                {
-                    tracing::warn!(
+            Err(error) => {
+                match classify_bound_settlement(&state) {
+                    Ok(classification)
+                        if classification.is_terminal() && state.publication.is_some() =>
+                    {
+                        tracing::warn!(
+                            run_id = %state.ledger.run_id,
+                            error = %error,
+                            "automation settlement reached its exact terminal with deferred housekeeping"
+                        );
+                        cleanup_bound_terminal(&state);
+                        return Ok(complete_bound_settlement(state));
+                    }
+                    Ok(_) => tracing::warn!(
                         run_id = %state.ledger.run_id,
                         error = %error,
-                        "automation settlement reached its exact terminal with deferred housekeeping"
-                    );
-                    cleanup_bound_terminal(&state);
-                    return Ok(complete_bound_settlement(state));
+                        "automation finalization remains pending under its blocking owner"
+                    ),
+                    Err(classification_error) => tracing::warn!(
+                        run_id = %state.ledger.run_id,
+                        error = %error,
+                        classification_error = %classification_error,
+                        "automation finalization remains uncertain under its blocking owner"
+                    ),
                 }
-                Ok(_) => tracing::warn!(
-                    run_id = %state.ledger.run_id,
-                    error = %error,
-                    "automation finalization remains pending under its blocking owner"
-                ),
-                Err(classification_error) => tracing::warn!(
-                    run_id = %state.ledger.run_id,
-                    error = %error,
-                    classification_error = %classification_error,
-                    "automation finalization remains uncertain under its blocking owner"
-                ),
-            },
+                error
+            }
+        };
+        if state.authority.cancellation.is_cancelled() {
+            return Err(contract_error(format!(
+                "retained automation settlement for run '{}' was cancelled while its blocking owner retried; state remains recoverable: {error}",
+                state.ledger.run_id
+            )));
+        }
+        if started.elapsed() >= budget {
+            return Err(contract_error(format!(
+                "retained automation settlement for run '{}' exceeded its retry budget; state remains recoverable: {error}",
+                state.ledger.run_id
+            )));
         }
         std::thread::sleep(delay);
         delay = delay.saturating_mul(2).min(Duration::from_secs(5));
@@ -1897,32 +1937,55 @@ fn observe_automation_ledger(
 }
 
 fn settle_direct_owner(
-    mut state: RetainedDirectSettlement,
+    state: RetainedDirectSettlement,
 ) -> Result<RetainedOwnerValue<AutomationSettledTerminal>> {
+    settle_direct_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
+}
+
+fn settle_direct_owner_with_budget(
+    mut state: RetainedDirectSettlement,
+    budget: Duration,
+) -> Result<RetainedOwnerValue<AutomationSettledTerminal>> {
+    let started = std::time::Instant::now();
     let mut delay = Duration::from_millis(25);
     loop {
-        match settle_direct_once(&mut state) {
+        let error = match settle_direct_once(&mut state) {
             Ok(()) => return Ok(complete_direct_settlement(state)),
-            Err(error) => match classify_durable_settlement_blocking(
-                &state.authority.journal_path,
-                &state.authority.admission,
-                &state.terminal,
-                None,
-            ) {
-                Ok(classification) if classification.is_terminal() => {
-                    tracing::warn!(error = %error, "direct automation terminal committed with deferred housekeeping");
-                    cleanup_direct_terminal(&state);
-                    return Ok(complete_direct_settlement(state));
+            Err(error) => {
+                match classify_durable_settlement_blocking(
+                    &state.authority.journal_path,
+                    &state.authority.admission,
+                    &state.terminal,
+                    None,
+                ) {
+                    Ok(classification) if classification.is_terminal() => {
+                        tracing::warn!(error = %error, "direct automation terminal committed with deferred housekeeping");
+                        cleanup_direct_terminal(&state);
+                        return Ok(complete_direct_settlement(state));
+                    }
+                    Ok(_) => {
+                        tracing::warn!(error = %error, "direct automation finalization remains pending under its blocking owner")
+                    }
+                    Err(classification_error) => tracing::warn!(
+                        error = %error,
+                        classification_error = %classification_error,
+                        "direct automation finalization remains uncertain under its blocking owner"
+                    ),
                 }
-                Ok(_) => {
-                    tracing::warn!(error = %error, "direct automation finalization remains pending under its blocking owner")
-                }
-                Err(classification_error) => tracing::warn!(
-                    error = %error,
-                    classification_error = %classification_error,
-                    "direct automation finalization remains uncertain under its blocking owner"
-                ),
-            },
+                error
+            }
+        };
+        if state.authority.cancellation.is_cancelled() {
+            return Err(contract_error(format!(
+                "direct automation settlement for run '{}' was cancelled while its blocking owner retried; state remains recoverable: {error}",
+                state.authority.admission.request.run_id
+            )));
+        }
+        if started.elapsed() >= budget {
+            return Err(contract_error(format!(
+                "direct automation settlement for run '{}' exceeded its retry budget; state remains recoverable: {error}",
+                state.authority.admission.request.run_id
+            )));
         }
         std::thread::sleep(delay);
         delay = delay.saturating_mul(2).min(Duration::from_secs(5));
@@ -1974,7 +2037,15 @@ fn complete_direct_settlement(
     }
 }
 
-fn abandon_retained_owner(mut state: RetainedAbandonment) -> Result<RetainedOwnerValue<()>> {
+fn abandon_retained_owner(state: RetainedAbandonment) -> Result<RetainedOwnerValue<()>> {
+    abandon_retained_owner_with_budget(state, RETAINED_SETTLEMENT_RETRY_BUDGET)
+}
+
+fn abandon_retained_owner_with_budget(
+    mut state: RetainedAbandonment,
+    budget: Duration,
+) -> Result<RetainedOwnerValue<()>> {
+    let started = std::time::Instant::now();
     let mut delay = Duration::from_millis(25);
     loop {
         match abandon_retained_once(&mut state) {
@@ -1997,10 +2068,24 @@ fn abandon_retained_owner(mut state: RetainedAbandonment) -> Result<RetainedOwne
                     pair_keepalive,
                 });
             }
-            Err(error) => tracing::warn!(
-                error = %error,
-                "automation abandonment remains pending under its blocking owner"
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "automation abandonment remains pending under its blocking owner"
+                );
+                if state.authority.cancellation.is_cancelled() {
+                    return Err(contract_error(format!(
+                        "automation abandonment for run '{}' was cancelled while its blocking owner retried; state remains recoverable: {error}",
+                        state.authority.admission.request.run_id
+                    )));
+                }
+                if started.elapsed() >= budget {
+                    return Err(contract_error(format!(
+                        "automation abandonment for run '{}' exceeded its retry budget; state remains recoverable: {error}",
+                        state.authority.admission.request.run_id
+                    )));
+                }
+            }
         }
         std::thread::sleep(delay);
         delay = delay.saturating_mul(2).min(Duration::from_secs(5));

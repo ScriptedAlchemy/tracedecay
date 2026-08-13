@@ -3805,3 +3805,91 @@ fn durable_settlement_classifier_requires_terminal_before_release() {
     );
     drop(claim);
 }
+
+/// A `PreparedWriteHook` that always fails never lets `settle_bound_once`
+/// reach a terminal classification, so the blocking-pool retry loop in
+/// `settle_bound_owner` used to spin forever. With a bounded retry budget
+/// it must instead resolve with an error that names the exceeded budget,
+/// while leaving the journal in its recoverable Reserved state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retained_settlement_exceeds_retry_budget_instead_of_hanging_forever() {
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_root = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project_root.join("src")).expect("project source directory");
+    std::fs::write(project_root.join("src/lib.rs"), "pub fn fixture() {}\n")
+        .expect("project source");
+    let cg = crate::tracedecay::TraceDecay::init_with_options(
+        &project_root,
+        crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    .expect("initialize retry-budget fixture project");
+    let dashboard_root = &cg.store_layout().dashboard_root;
+    let run_id = "run.retry-budget-exhausted";
+    let job_id = "retry-budget-exhausted";
+    let (run, guard) = retained_disabled_user_job(dashboard_root, run_id, job_id).await;
+
+    let mut cleanup_admission =
+        external_admission_for_job(run_id, "request.retry-budget-exhausted", job_id);
+    cleanup_admission.recovery = AutomationRecoveryBinding::External {
+        recovery_problem: reset_problem(
+            &cleanup_admission.request_id,
+            &cleanup_admission.scope,
+            &cleanup_admission.request,
+        ),
+    };
+    let cleanup_admission = seal_effect_authority(cleanup_admission);
+    let (authority, journal_path, expected_admission) =
+        retained_external_authority(dashboard_root, cleanup_admission);
+    recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
+        .expect("retain retry-budget cleanup authority");
+
+    let terminal = authority
+        .terminal_for_run(&run.ledger_record, run.committed_receipt.as_ref())
+        .expect("terminal for retry-budget fixture");
+    let always_fails_write_hook = super::super::PreparedWriteHook::new(|_publication| {
+        Err(super::super::contract_error(
+            "injected prepared journal write failure (always fails, for retry-budget test)",
+        ))
+    });
+    let state = super::super::RetainedBoundSettlement {
+        authority,
+        guard: super::super::RetainedSettlementGuardOwner::Single(guard),
+        terminal,
+        ledger: run.ledger_record,
+        publication: None,
+        observer: None,
+        phase_hook: None,
+        prepared_write_hook: Some(always_fails_write_hook),
+    };
+
+    let waiter = super::super::RetainedSettlementWaiter {
+        task: tokio::task::spawn_blocking(move || {
+            super::super::settle_bound_owner_with_budget(state, Duration::from_millis(200))
+                .map(|owned| owned.value)
+        }),
+    };
+    let error = waiter.wait().await.expect_err(
+        "settlement must resolve with an error, not hang, once its retry budget is exhausted",
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("retry budget"),
+        "expected the error to name the exceeded retry budget, got: {message}"
+    );
+
+    let reserved = read_indexed_record_blocking(&journal_path)
+        .expect("reserved journal read after retry-budget exhaustion")
+        .expect("reserved journal remains present");
+    assert!(
+        !reserved.is_terminal(),
+        "budget exhaustion must not fabricate a terminal; recovery relies on the Reserved state"
+    );
+    assert_eq!(reserved.admission(), &expected_admission);
+}
