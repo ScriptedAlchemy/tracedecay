@@ -17,7 +17,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{Json, Path, Request, State};
 use axum::http::header::{AUTHORIZATION, ORIGIN};
-use axum::http::{HeaderValue, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, post};
@@ -27,7 +27,10 @@ use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use tracedecay_application::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
-use tracedecay_application::{ApplicationProblem, LegalAction, RetryDirective, SafeDiagnostic};
+use tracedecay_application::{
+    APPLICATION_REQUEST_ID_HEADER, ApplicationProblem, LegalAction, RequestId, RetryDirective,
+    SafeDiagnostic,
+};
 use tracedecay_domain::{EnrollmentGrantV1, ProjectId};
 
 use crate::errors::{Result, TraceDecayError};
@@ -46,6 +49,21 @@ enum ProjectRouterResolutionError {
     Saturated,
     TimedOut,
     Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectRouterProblem {
+    NotFoundOrNotAuthorized,
+    Saturated,
+    TimedOut,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OuterApplicationRequestIdError {
+    DuplicateHeader,
+    InvalidHeader,
+    DisallowedOperation,
 }
 
 #[derive(Default)]
@@ -344,37 +362,26 @@ async fn dispatch_project_application(
     Path((project_id, tail)): Path<(String, String)>,
     mut request: Request<Body>,
 ) -> Response {
+    let request_id = match outer_application_request_id(&tail, request.headers()) {
+        Ok(request_id) => request_id,
+        Err(_) => return invalid_request_control_response(),
+    };
     let router = match registry.resolve(&project_id).await {
         Ok(Some(router)) => router,
         Ok(None) => {
-            return transport_problem_response(ApplicationProblem::not_found_or_not_authorized(
-                RetryDirective::Never,
-            ));
+            return project_router_problem_response(
+                request_id,
+                ProjectRouterProblem::NotFoundOrNotAuthorized,
+            );
         }
         Err(ProjectRouterResolutionError::Saturated) => {
-            let Ok(diagnostic) = SafeDiagnostic::new(
-                "http.project_router_saturated",
-                "Project route resolution is saturated",
-            ) else {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            };
-            return transport_problem_response(ApplicationProblem::Saturated {
-                diagnostic,
-                retry: RetryDirective::AfterDelay,
-                legal_actions: vec![LegalAction::Retry],
-            });
+            return project_router_problem_response(request_id, ProjectRouterProblem::Saturated);
         }
         Err(ProjectRouterResolutionError::TimedOut) => {
-            return transport_problem_response(ApplicationProblem::timed_out_before_admission());
+            return project_router_problem_response(request_id, ProjectRouterProblem::TimedOut);
         }
         Err(ProjectRouterResolutionError::Unavailable) => {
-            let Ok(diagnostic) = SafeDiagnostic::new(
-                "http.project_router_unavailable",
-                "Project route resolution is unavailable",
-            ) else {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            };
-            return transport_problem_response(ApplicationProblem::unavailable(diagnostic));
+            return project_router_problem_response(request_id, ProjectRouterProblem::Unavailable);
         }
     };
     let query = request
@@ -392,9 +399,85 @@ async fn dispatch_project_application(
     }
 }
 
-fn transport_problem_response(problem: ApplicationProblem) -> Response {
+fn outer_application_request_id(
+    tail: &str,
+    headers: &HeaderMap,
+) -> std::result::Result<Option<RequestId>, OuterApplicationRequestIdError> {
+    let mut values = headers.get_all(APPLICATION_REQUEST_ID_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(OuterApplicationRequestIdError::DuplicateHeader);
+    }
+    let curate_path = tracedecay_api::retained_route_path(
+        tracedecay_application::retained_surfaces::RetainedSurfaceOperation::FactStoreCurate,
+    );
+    if curate_path.strip_prefix('/') != Some(tail) {
+        return Err(OuterApplicationRequestIdError::DisallowedOperation);
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| OuterApplicationRequestIdError::InvalidHeader)?;
+    RequestId::new(value.to_owned())
+        .map(Some)
+        .map_err(|_| OuterApplicationRequestIdError::InvalidHeader)
+}
+
+fn invalid_request_control_response() -> Response {
     let Ok(request_id) = mint_global_request_id(GlobalRequestSurface::Http) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    tracedecay_api::retained_invalid_request_response(request_id)
+}
+
+fn project_router_problem_response(
+    request_id: Option<RequestId>,
+    problem: ProjectRouterProblem,
+) -> Response {
+    let problem = match problem {
+        ProjectRouterProblem::NotFoundOrNotAuthorized => {
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+        }
+        ProjectRouterProblem::Saturated => {
+            let Ok(diagnostic) = SafeDiagnostic::new(
+                "http.project_router_saturated",
+                "Project route resolution is saturated",
+            ) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            ApplicationProblem::Saturated {
+                diagnostic,
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+            }
+        }
+        ProjectRouterProblem::TimedOut => ApplicationProblem::timed_out_before_admission(),
+        ProjectRouterProblem::Unavailable => {
+            let Ok(diagnostic) = SafeDiagnostic::new(
+                "http.project_router_unavailable",
+                "Project route resolution is unavailable",
+            ) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            ApplicationProblem::unavailable(diagnostic)
+        }
+    };
+    transport_problem_response(request_id, problem)
+}
+
+fn transport_problem_response(
+    request_id: Option<RequestId>,
+    problem: ApplicationProblem,
+) -> Response {
+    let request_id = match request_id {
+        Some(request_id) => request_id,
+        None => {
+            let Ok(request_id) = mint_global_request_id(GlobalRequestSurface::Http) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            request_id
+        }
     };
     tracedecay_api::adapter_problem_response(request_id, problem)
 }

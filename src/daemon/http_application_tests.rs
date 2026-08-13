@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,10 +8,11 @@ use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::post;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tracedecay_application::{
-    CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, RequestContext, RequestId, ResolvedScope,
+    APPLICATION_REQUEST_ID_HEADER, CancellationContext, CancellationObservation, CancellationStage,
+    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage,
+    OperationReceipt, OperationTermination, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, BrainId, BrainNodeId, ManifestDigest, ProjectId, RefId, RepositoryId, UserProfileId,
@@ -80,7 +82,55 @@ async fn request_path_with_body(
     content_type: Option<&str>,
     body: &[u8],
 ) -> String {
-    let mut stream = tokio::net::TcpStream::connect(service.endpoint())
+    request_path_with_headers(
+        service,
+        method,
+        path,
+        authorization,
+        origin,
+        content_type,
+        &[],
+        body,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn request_path_with_headers(
+    service: &DaemonHttpApplicationService,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    origin: Option<&str>,
+    content_type: Option<&str>,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> String {
+    request_path_with_headers_at(
+        service.endpoint(),
+        method,
+        path,
+        authorization,
+        origin,
+        content_type,
+        headers,
+        body,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn request_path_with_headers_at(
+    endpoint: SocketAddr,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    origin: Option<&str>,
+    content_type: Option<&str>,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> String {
+    let mut stream = tokio::net::TcpStream::connect(endpoint)
         .await
         .expect("connect daemon HTTP application service");
     let mut request = format!(
@@ -88,7 +138,7 @@ async fn request_path_with_body(
          Host: {}\r\n\
          Content-Length: {}\r\n\
          Connection: close\r\n",
-        service.endpoint(),
+        endpoint,
         body.len(),
     );
     if let Some(content_type) = content_type {
@@ -104,6 +154,12 @@ async fn request_path_with_body(
     if let Some(origin) = origin {
         request.push_str("Origin: ");
         request.push_str(origin);
+        request.push_str("\r\n");
+    }
+    for (name, value) in headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
         request.push_str("\r\n");
     }
     request.push_str("\r\n");
@@ -675,6 +731,299 @@ async fn daemon_http_unknown_project_returns_a_concealed_typed_problem() {
     assert_eq!(status(&response), StatusCode::NOT_FOUND);
     assert!(response.contains("\"kind\":\"problem\""));
     assert!(response.contains("\"kind\":\"not_found_or_not_authorized\""));
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn daemon_http_outer_router_admits_only_one_valid_curate_request_identity() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let observed_resolver_calls = Arc::clone(&resolver_calls);
+    registry
+        .install_resolver(move |_| {
+            let resolver_calls = Arc::clone(&observed_resolver_calls);
+            async move {
+                resolver_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(None)
+            }
+        })
+        .expect("install counting project resolver");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+    let curate_path = format!("/projects/{PROJECT_ID}/application/retained/fact_store_curate");
+    let supplied = "request.sdk.curate.cold-not-found";
+
+    let preserved = request_path_with_headers(
+        &service,
+        "POST",
+        &curate_path,
+        Some(&authorization),
+        Some(&origin),
+        Some("application/json"),
+        &[(APPLICATION_REQUEST_ID_HEADER, supplied)],
+        b"{}",
+    )
+    .await;
+    assert_eq!(status(&preserved), StatusCode::NOT_FOUND);
+    assert_eq!(json_body(&preserved)["value"]["request_id"], supplied);
+
+    let duplicate = request_path_with_headers(
+        &service,
+        "POST",
+        &curate_path,
+        Some(&authorization),
+        Some(&origin),
+        Some("application/json"),
+        &[
+            (APPLICATION_REQUEST_ID_HEADER, supplied),
+            (APPLICATION_REQUEST_ID_HEADER, "request.sdk.curate.other"),
+        ],
+        b"{}",
+    )
+    .await;
+    assert_eq!(status(&duplicate), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(&duplicate)["value"]["problem"]["kind"],
+        "invalid_request"
+    );
+    let duplicate_request_id = json_body(&duplicate)["value"]["request_id"]
+        .as_str()
+        .expect("server-owned duplicate-header request identity");
+    assert_ne!(duplicate_request_id, supplied);
+    RequestId::new(duplicate_request_id).expect("valid server-owned request identity");
+
+    let invalid = request_path_with_headers(
+        &service,
+        "POST",
+        &curate_path,
+        Some(&authorization),
+        Some(&origin),
+        Some("application/json"),
+        &[(APPLICATION_REQUEST_ID_HEADER, "")],
+        b"{}",
+    )
+    .await;
+    assert_eq!(status(&invalid), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(&invalid)["value"]["problem"]["kind"],
+        "invalid_request"
+    );
+    let invalid_request_id = json_body(&invalid)["value"]["request_id"]
+        .as_str()
+        .expect("server-owned invalid-header request identity");
+    assert_ne!(invalid_request_id, supplied);
+    RequestId::new(invalid_request_id).expect("valid server-owned request identity");
+
+    let disallowed = request_path_with_headers(
+        &service,
+        "POST",
+        &format!("/projects/{PROJECT_ID}/application/tests/results"),
+        Some(&authorization),
+        Some(&origin),
+        Some("application/json"),
+        &[(APPLICATION_REQUEST_ID_HEADER, supplied)],
+        b"{}",
+    )
+    .await;
+    assert_eq!(status(&disallowed), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        json_body(&disallowed)["value"]["problem"]["kind"],
+        "invalid_request"
+    );
+    let disallowed_request_id = json_body(&disallowed)["value"]["request_id"]
+        .as_str()
+        .expect("server-owned disallowed-header request identity");
+    assert_ne!(disallowed_request_id, supplied);
+    RequestId::new(disallowed_request_id).expect("valid server-owned request identity");
+    assert_eq!(
+        resolver_calls.load(Ordering::Relaxed),
+        1,
+        "only the valid curate request may begin cold resolution"
+    );
+
+    let without_header = request_path_with_headers(
+        &service,
+        "POST",
+        &curate_path,
+        Some(&authorization),
+        Some(&origin),
+        Some("application/json"),
+        &[],
+        b"{}",
+    )
+    .await;
+    assert_eq!(status(&without_header), StatusCode::NOT_FOUND);
+    let minted_request_id = json_body(&without_header)["value"]["request_id"]
+        .as_str()
+        .expect("server-minted request identity");
+    assert_ne!(minted_request_id, supplied);
+    RequestId::new(minted_request_id).expect("valid server-minted request identity");
+    assert_eq!(resolver_calls.load(Ordering::Relaxed), 2);
+
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn daemon_http_unavailable_cold_resolution_preserves_curate_request_identity() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_resolver(|_| async {
+            Err(crate::errors::TraceDecayError::Config {
+                message: "resolver unavailable".to_owned(),
+            })
+        })
+        .expect("install unavailable project resolver");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+    let supplied = "request.sdk.curate.cold-unavailable";
+    let response = request_path_with_headers(
+        &service,
+        "POST",
+        &format!("/projects/{PROJECT_ID}/application/retained/fact_store_curate"),
+        Some(&authorization),
+        Some(&origin),
+        Some("application/json"),
+        &[(APPLICATION_REQUEST_ID_HEADER, supplied)],
+        b"{}",
+    )
+    .await;
+
+    assert_eq!(status(&response), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(json_body(&response)["value"]["request_id"], supplied);
+    assert_eq!(
+        json_body(&response)["value"]["problem"]["kind"],
+        "unavailable"
+    );
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_http_saturated_cold_resolution_preserves_curate_request_identity() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Semaphore::new(0));
+    let observed_resolver_calls = Arc::clone(&resolver_calls);
+    let resolver_release = Arc::clone(&release);
+    registry
+        .install_resolver(move |_| {
+            let resolver_calls = Arc::clone(&observed_resolver_calls);
+            let release = Arc::clone(&resolver_release);
+            async move {
+                resolver_calls.fetch_add(1, Ordering::Relaxed);
+                let _permit = release.acquire().await.expect("resolver release permit");
+                Ok(None)
+            }
+        })
+        .expect("install parked project resolver");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let endpoint = service.endpoint();
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+    let path = format!("/projects/{PROJECT_ID}/application/retained/fact_store_curate");
+    let mut parked = Vec::new();
+    for index in 0..8 {
+        let authorization = authorization.clone();
+        let origin = origin.clone();
+        let path = path.clone();
+        parked.push(tokio::spawn(async move {
+            let request_id = format!("request.sdk.curate.parked-{index}");
+            request_path_with_headers_at(
+                endpoint,
+                "POST",
+                &path,
+                Some(&authorization),
+                Some(&origin),
+                Some("application/json"),
+                &[(APPLICATION_REQUEST_ID_HEADER, request_id.as_str())],
+                b"{}",
+            )
+            .await
+        }));
+    }
+    while resolver_calls.load(Ordering::Relaxed) < 8 {
+        tokio::task::yield_now().await;
+    }
+
+    let supplied = "request.sdk.curate.cold-saturated";
+    let response = request_path_with_headers(
+        &service,
+        "POST",
+        &path,
+        Some(&authorization),
+        Some(&origin),
+        Some("application/json"),
+        &[(APPLICATION_REQUEST_ID_HEADER, supplied)],
+        b"{}",
+    )
+    .await;
+    assert_eq!(status(&response), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(json_body(&response)["value"]["request_id"], supplied);
+    assert_eq!(
+        json_body(&response)["value"]["problem"]["kind"],
+        "saturated"
+    );
+
+    release.add_permits(8);
+    for task in parked {
+        task.await.expect("parked cold-resolution request");
+    }
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test(start_paused = true)]
+async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let observed_resolver_calls = Arc::clone(&resolver_calls);
+    registry
+        .install_resolver(move |_| {
+            let resolver_calls = Arc::clone(&observed_resolver_calls);
+            async move {
+                resolver_calls.fetch_add(1, Ordering::Relaxed);
+                std::future::pending::<crate::errors::Result<Option<Router>>>().await
+            }
+        })
+        .expect("install parked project resolver");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let endpoint = service.endpoint();
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+    let supplied = "request.sdk.curate.cold-timed-out";
+    let request = tokio::spawn(async move {
+        request_path_with_headers_at(
+            endpoint,
+            "POST",
+            &format!("/projects/{PROJECT_ID}/application/retained/fact_store_curate"),
+            Some(&authorization),
+            Some(&origin),
+            Some("application/json"),
+            &[(APPLICATION_REQUEST_ID_HEADER, supplied)],
+            b"{}",
+        )
+        .await
+    });
+    while resolver_calls.load(Ordering::Relaxed) < 1 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    let response = request.await.expect("timed-out cold-resolution request");
+
+    assert_eq!(status(&response), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(json_body(&response)["value"]["request_id"], supplied);
+    assert_eq!(
+        json_body(&response)["value"]["problem"]["kind"],
+        "timed_out"
+    );
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
