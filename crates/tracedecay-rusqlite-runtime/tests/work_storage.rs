@@ -3,11 +3,11 @@ use std::collections::BTreeSet;
 use tracedecay_application::{
     AcceptProposalCommand, CancellationContext, CapabilityGrantSnapshot, CreateWorkCommand,
     Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, ReviewProposalCommand,
-    WorkService,
+    WorkProjectionPortError, WorkProjectionReadPort, WorkService,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProposalId, RepositoryId, TaskId, UtcMicros, WorkAuthority,
-    WorkCommandId, WorkVersion, WorktreeId,
+    WorkCommandId, WorkProjectionResumeCursorV1, WorkVersion, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -293,6 +293,80 @@ fn failed_event_insert_cannot_advance_owner_cursor() {
             "{table} must roll back with the event"
         );
     }
+}
+
+/// A capped snapshot page is only honest if its cursor leads somewhere. This
+/// follows that cursor through `delta` until coverage reports completion and
+/// checks the pages together name every task in the authority: a cursor minted
+/// at the journal head rather than at the page's own event boundary is stale
+/// the moment it is used, which silently strands every task past the cap.
+#[test]
+fn capped_work_projection_snapshot_pages_every_task_through_delta() {
+    let store = RegisteredWorkStore::start("projection-paging");
+    let storage = store.storage().clone();
+    let service = WorkService::new(storage.clone());
+    let owner = context("project.work.projection-paging", "actor.work.owner");
+    let task_ids = ["a", "b", "c", "d", "e"]
+        .map(|suffix| id::<TaskId>(&format!("task.work.projection-paging.{suffix}")));
+    for task_id in &task_ids {
+        create(&service, &owner, task_id.as_str());
+    }
+    let owner_authority = authority(&owner);
+    let page_size = 2;
+
+    let snapshot = WorkProjectionReadPort::snapshot(&storage, &owner_authority, page_size).unwrap();
+    assert_eq!(snapshot.coverage().returned(), page_size);
+    assert_eq!(
+        snapshot.coverage().total(),
+        u32::try_from(task_ids.len()).unwrap()
+    );
+    let mut covered = snapshot
+        .projections()
+        .iter()
+        .map(|projection| projection.task_id().clone())
+        .collect::<BTreeSet<_>>();
+
+    let mut cursor = snapshot.coverage().resume_cursor().cloned();
+    let mut pages = 0usize;
+    while let Some(resume) = cursor {
+        pages += 1;
+        assert!(
+            pages <= task_ids.len(),
+            "a page must advance the walk, not repeat it"
+        );
+        let delta =
+            WorkProjectionReadPort::delta(&storage, &owner_authority, &resume, page_size).unwrap();
+        if pages == 1 {
+            // The first continuation must line up with the snapshot it
+            // continues, so a follower can prove the two are one read.
+            delta.validate_after(&snapshot).unwrap();
+        }
+        for projection in delta.changed() {
+            covered.insert(projection.task_id().clone());
+        }
+        cursor = delta.coverage().resume_cursor().cloned();
+    }
+    assert_eq!(covered, BTreeSet::from(task_ids.clone()));
+
+    // A cursor already at the journal head has nothing to hand back.
+    let head = WorkProjectionResumeCursorV1::new(
+        snapshot.generation_id().clone(),
+        format!("work-projection-sequence.v1:{}", task_ids.len()),
+    )
+    .unwrap();
+    assert_eq!(
+        WorkProjectionReadPort::delta(&storage, &owner_authority, &head, page_size).unwrap_err(),
+        WorkProjectionPortError::StaleCursor
+    );
+
+    // A page wide enough for the whole authority is complete and offers no
+    // continuation to follow.
+    let whole = WorkProjectionReadPort::snapshot(&storage, &owner_authority, 1_000).unwrap();
+    assert_eq!(
+        whole.coverage().returned(),
+        u32::try_from(task_ids.len()).unwrap()
+    );
+    assert!(whole.coverage().resume_cursor().is_none());
 }
 
 #[test]

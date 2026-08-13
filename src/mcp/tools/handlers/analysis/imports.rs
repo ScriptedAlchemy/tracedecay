@@ -109,6 +109,11 @@ fn identifier_from_segment(seg: &str) -> String {
         .to_string()
 }
 /// Default and ceiling for the unused imports reported in one page.
+///
+/// The limit is a soft cap read at file granularity: a page stops after the
+/// file that reaches it rather than cutting that file's findings in half. The
+/// cursor names a finished file, so a mid-file cut would strand the rest of
+/// that file's imports behind a cursor that has already moved past them.
 const UNUSED_IMPORTS_DEFAULT_LIMIT: usize = 50;
 const UNUSED_IMPORTS_MAX_LIMIT: usize = 500;
 
@@ -174,7 +179,9 @@ fn identifiers_in_line(line: &str) -> Vec<String> {
 ///
 /// Walks candidate files in path order, so `cursor` resumes the walk exactly
 /// where the previous page stopped and `complete` reports whether the answer
-/// covers the whole scope.
+/// covers the whole scope. `limit` cuts the walk between files rather than
+/// between one file's findings, so a page can exceed it by the last file's
+/// remainder and no finding is stranded behind the cursor.
 pub(crate) async fn handle_unused_imports(
     cg: &TraceDecay,
     graph: &crate::tracedecay::queries::graph::VerifiedGraphQuery,
@@ -233,7 +240,10 @@ pub(crate) async fn handle_unused_imports(
         unused.extend(file_unused);
         last_scanned = Some(file_path);
         if unused.len() >= limit {
-            unused.truncate(limit);
+            // The page may overshoot `limit`, and must: truncating here would
+            // drop the tail of the file `last_scanned` names, and the exclusive
+            // cursor would then skip that file forever. Whole files in, whole
+            // files out.
             partial_reason = Some("limit_reached");
             break;
         }

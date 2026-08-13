@@ -90,7 +90,7 @@ pub(super) fn def_unused_imports() -> ToolDefinition {
             "properties": {
                 "limit": {
                     "type": "number",
-                    "description": "Maximum unused imports to report in one page (default: 100, max: 500)"
+                    "description": "Soft cap on unused imports per page (default: 50, max: 500). The page stops after the file that reaches it, so a page never splits one file's findings and may slightly exceed the cap"
                 },
                 "cursor": {
                     "type": "string",
