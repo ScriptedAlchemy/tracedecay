@@ -222,37 +222,78 @@ impl AutomationTaskLock {
     }
 }
 
+/// Runs a synchronous task-lock cleanup body without starving the tokio worker
+/// that happens to own the guard.
+///
+/// Task-lock release is deliberately synchronous: callers (and tests such as
+/// `retained_settlement_guard_owns_task_lock_until_drop`) rely on the lock file
+/// being gone the instant `drop` returns. The cleanup itself is genuinely
+/// blocking though — an fs2 coordination lock, `sync_all`/parent-directory
+/// fsyncs, and `std::thread::sleep` backoff between retries — and guards are
+/// routinely dropped when an async fn's future completes on a runtime worker
+/// (`_run_lock`, `_reflector_lock`, `_skill_lock`, `_task_lock`). Blocking
+/// inline there stalls every unrelated task queued on that worker.
+///
+/// `block_in_place` lets tokio hand this worker's run queue to another thread
+/// for the duration, but it panics outside a multi-thread runtime, so the
+/// flavor is checked first. Empirically verified against tokio 1.53.1:
+/// - multi-thread worker: `Handle` present, flavor `MultiThread`, offload works;
+/// - `spawn_blocking` thread on a multi-thread runtime (the settlement-owner
+///   pattern in `daemon::automation_effect`): `Handle` present, flavor
+///   `MultiThread`, `block_in_place` is a no-op passthrough and does *not*
+///   panic;
+/// - current-thread runtime: `Handle` present, flavor `CurrentThread`,
+///   `block_in_place` panics — hence the inline fallback;
+/// - no runtime at all: no `Handle`, inline fallback.
+///
+/// The remaining `block_in_place` panic case is a `LocalSet` on a multi-thread
+/// runtime; this workspace has none, and introducing one would need this guard
+/// revisited.
+fn run_blocking_cleanup(cleanup: impl FnOnce()) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(cleanup);
+        }
+        _ => cleanup(),
+    }
+}
+
 impl Drop for AutomationTaskLock {
     fn drop(&mut self) {
-        match retry_exact_task_lock_cleanup(|| {
-            remove_owned_task_lock_blocking(&self.path, &self.ownership_token)
-        }) {
-            Ok(()) => {
-                if let Some(staging_path) = self.staging_path.take()
-                    && let Err(error) = retry_exact_task_lock_cleanup(|| {
-                        tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
-                            &staging_path,
-                        )
-                        .map(|_| ())
-                    })
-                {
+        let path = &self.path;
+        let ownership_token = &self.ownership_token;
+        let staging_slot = &mut self.staging_path;
+        run_blocking_cleanup(move || {
+            match retry_exact_task_lock_cleanup(|| {
+                remove_owned_task_lock_blocking(path, ownership_token)
+            }) {
+                Ok(()) => {
+                    if let Some(staging_path) = staging_slot.take()
+                        && let Err(error) = retry_exact_task_lock_cleanup(|| {
+                            tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(
+                                &staging_path,
+                            )
+                            .map(|_| ())
+                        })
+                    {
+                        tracing::warn!(
+                            path = %path.display(),
+                            staging_path = %staging_path.display(),
+                            error = %error,
+                            "failed to retire exact automation task-lock staging ownership"
+                        );
+                    }
+                }
+                Err(error) => {
                     tracing::warn!(
-                        path = %self.path.display(),
-                        staging_path = %staging_path.display(),
+                        path = %path.display(),
+                        staging_path = ?staging_slot.as_deref(),
                         error = %error,
-                        "failed to retire exact automation task-lock staging ownership"
+                        "failed to release exact automation task-lock ownership; preserving retained staging evidence"
                     );
                 }
             }
-            Err(error) => {
-                tracing::warn!(
-                    path = %self.path.display(),
-                    staging_path = ?self.staging_path.as_deref(),
-                    error = %error,
-                    "failed to release exact automation task-lock ownership; preserving retained staging evidence"
-                );
-            }
-        }
+        });
     }
 }
 
@@ -1043,15 +1084,31 @@ fn task_lock_is_reclaimable(
     let Some(stale_after_secs) = stale_after_secs else {
         return false;
     };
-    let Some(pid) = snapshot.pid else {
-        return false;
-    };
-    if process_state(pid) != ProcessState::Dead {
-        return false;
+    match snapshot.pid {
+        Some(pid) => match process_state(pid) {
+            // A live (or unknown-liveness, kept conservative) owner still
+            // holds the lock regardless of age.
+            ProcessState::Live | ProcessState::Unknown => false,
+            // A confirmed-dead owner's lock is reclaimable once it is stale.
+            ProcessState::Dead => snapshot
+                .created_at
+                .is_some_and(|created_at| elapsed_secs(created_at, now_secs) >= stale_after_secs),
+        },
+        // The payload could not yield a pid (missing, oversized, non-UTF-8,
+        // or duplicate `pid=` lines). Fall back to age-based staleness using
+        // `created_at`, which `read_task_lock_snapshot` already backfills
+        // from the file's mtime when the payload has no parseable
+        // `created_at=` field.
+        None => match snapshot.created_at {
+            Some(created_at) => elapsed_secs(created_at, now_secs) >= stale_after_secs,
+            // Crash-debris escape hatch: no parseable pid AND no readable
+            // creation time (payload and mtime both unavailable) means the
+            // lock can never be aged by any other path, so treat it as
+            // reclaimable rather than permanently wedging the scheduler
+            // tick behind garbage lock contents.
+            None => true,
+        },
     }
-    snapshot
-        .created_at
-        .is_some_and(|created_at| elapsed_secs(created_at, now_secs) >= stale_after_secs)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1331,5 +1388,211 @@ mod tests {
 
         drop(replacement);
         assert!(!lock_path.exists());
+    }
+
+    #[test]
+    fn task_lock_is_reclaimable_with_unparseable_pid_and_stale_created_at() {
+        let snapshot = AutomationTaskLockSnapshot {
+            pid: None,
+            created_at: Some(100),
+            ownership_token: None,
+        };
+        assert!(
+            task_lock_is_reclaimable(&snapshot, Some(10), 200),
+            "an unparseable pid must fall back to created_at staleness"
+        );
+    }
+
+    #[test]
+    fn task_lock_is_reclaimable_with_unparseable_pid_and_fresh_created_at() {
+        let snapshot = AutomationTaskLockSnapshot {
+            pid: None,
+            created_at: Some(195),
+            ownership_token: None,
+        };
+        assert!(
+            !task_lock_is_reclaimable(&snapshot, Some(10), 200),
+            "a fresh created_at must not be reclaimable even without a pid"
+        );
+    }
+
+    #[test]
+    fn task_lock_is_reclaimable_with_no_pid_and_no_created_at_is_crash_debris() {
+        let snapshot = AutomationTaskLockSnapshot {
+            pid: None,
+            created_at: None,
+            ownership_token: None,
+        };
+        assert!(
+            task_lock_is_reclaimable(&snapshot, Some(10), 200),
+            "a lock with neither a parseable pid nor any created_at (payload \
+             and mtime both unavailable) must not be permanently wedged"
+        );
+    }
+
+    #[test]
+    fn task_lock_is_reclaimable_denies_live_process_regardless_of_age() {
+        let snapshot = AutomationTaskLockSnapshot {
+            pid: Some(std::process::id()),
+            created_at: Some(0),
+            ownership_token: None,
+        };
+        assert!(
+            !task_lock_is_reclaimable(&snapshot, Some(10), 200),
+            "a live owner must never be reclaimed, no matter how old the lock is"
+        );
+    }
+
+    #[test]
+    fn task_lock_is_reclaimed_end_to_end_when_payload_is_garbage_and_stale_after_is_zero() {
+        let temp = tempdir().unwrap();
+        let lock_dir = temp.path().join("automation_locks");
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(&lock_dir)
+            .unwrap();
+        let lock_path = lock_dir.join("garbage_payload.lock");
+
+        // A payload larger than MAX_AUTOMATION_TASK_LOCK_BYTES (and not even
+        // valid `key=value` text) means read_task_lock_snapshot can parse no
+        // pid at all. With stale_after_secs = Some(0), the created_at
+        // fallback (the file's own mtime) always qualifies as stale, so the
+        // lock must still be reclaimable on the retry attempt inside
+        // try_acquire_task_lock_blocking rather than wedging forever.
+        let garbage = vec![0xFFu8; 2000];
+        assert!(garbage.len() as u64 > MAX_AUTOMATION_TASK_LOCK_BYTES);
+        std::fs::write(&lock_path, &garbage).unwrap();
+
+        let contender_token = "9".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2);
+        let acquired = try_acquire_task_lock_blocking(&lock_path, &contender_token, Some(0), 200)
+            .unwrap()
+            .expect("a garbage-payload lock with stale_after_secs=0 must be reclaimable");
+
+        let snapshot = read_task_lock_snapshot(&lock_path).unwrap().unwrap();
+        assert_eq!(
+            snapshot.ownership_token.as_deref(),
+            Some(contender_token.as_str()),
+            "the contender's fresh token must now own the lock"
+        );
+
+        drop(acquired);
+        assert!(!lock_path.exists());
+    }
+
+    /// Acquires a real task lock off-runtime so each release-path test starts
+    /// from the same live-owner state.
+    fn acquire_lock_for_release_test(lock_path: &Path) -> AutomationTaskLock {
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all_durable(
+            lock_path.parent().unwrap(),
+        )
+        .unwrap();
+        try_acquire_task_lock_blocking(
+            lock_path,
+            &"c".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2),
+            Some(10),
+            100,
+        )
+        .unwrap()
+        .expect("a fresh lock path must be acquirable")
+    }
+
+    /// A contender must be able to take the lock the instant the guard's drop
+    /// returns — the release stays synchronous even when it is offloaded.
+    fn assert_lock_released(lock_path: &Path) {
+        assert!(
+            !lock_path.exists(),
+            "guard drop must remove the lock file synchronously"
+        );
+        let contender = try_acquire_task_lock_blocking(
+            lock_path,
+            &"d".repeat(AUTOMATION_TASK_LOCK_TOKEN_BYTES * 2),
+            Some(10),
+            200,
+        )
+        .unwrap()
+        .expect("a released lock must be immediately acquirable by a contender");
+        drop(contender);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_lock_release_offloads_from_a_multi_thread_worker() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp
+            .path()
+            .join("automation_locks")
+            .join("multi_thread_worker.lock");
+
+        // Acquire the way production does (spawn_blocking), then move the guard
+        // back onto an async worker so its drop runs on the runtime.
+        let acquire_path = lock_path.clone();
+        let guard =
+            tokio::task::spawn_blocking(move || acquire_lock_for_release_test(&acquire_path))
+                .await
+                .unwrap();
+        assert!(lock_path.exists());
+
+        // Drop directly on the async worker thread; block_in_place must let
+        // tokio migrate this worker's queue instead of stalling it.
+        drop(guard);
+        assert_lock_released(&lock_path);
+    }
+
+    #[test]
+    fn task_lock_release_works_with_no_tokio_runtime() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp.path().join("automation_locks").join("no_runtime.lock");
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "this test must run without a runtime handle so the inline path is exercised"
+        );
+
+        let guard = acquire_lock_for_release_test(&lock_path);
+        assert!(lock_path.exists());
+        drop(guard);
+        assert_lock_released(&lock_path);
+    }
+
+    #[tokio::test]
+    async fn task_lock_release_falls_back_inline_on_a_current_thread_runtime() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp
+            .path()
+            .join("automation_locks")
+            .join("current_thread.lock");
+        assert_eq!(
+            tokio::runtime::Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread,
+            "#[tokio::test] must default to the current-thread flavor for this case"
+        );
+
+        // block_in_place panics on a current-thread runtime, so the guard has to
+        // fall back to inline cleanup rather than aborting the process.
+        let guard = acquire_lock_for_release_test(&lock_path);
+        assert!(lock_path.exists());
+        drop(guard);
+        assert_lock_released(&lock_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn task_lock_release_from_spawn_blocking_owner_does_not_panic() {
+        let temp = tempdir().unwrap();
+        let lock_path = temp
+            .path()
+            .join("automation_locks")
+            .join("settlement_owner.lock");
+
+        // The settlement-owner pattern in daemon::automation_effect acquires and
+        // drops the guard entirely inside spawn_blocking. A blocking-pool thread
+        // still reports a MultiThread handle, so this exercises block_in_place
+        // from outside a worker context.
+        let owned_path = lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = acquire_lock_for_release_test(&owned_path);
+            assert!(owned_path.exists());
+            drop(guard);
+            assert!(!owned_path.exists());
+        })
+        .await
+        .expect("dropping the guard inside spawn_blocking must not panic");
+
+        assert_lock_released(&lock_path);
     }
 }
