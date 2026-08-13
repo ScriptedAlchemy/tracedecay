@@ -22,6 +22,7 @@ pub mod memory;
 pub mod native_integration;
 pub mod observation;
 pub mod projection;
+pub mod provider_descriptor;
 pub mod remote;
 pub mod retrieval_anchor;
 pub mod runtime;
@@ -161,6 +162,10 @@ pub use projection::{
     SESSION_MESSAGE_PROJECTOR_VERSION_V1, SESSION_MESSAGE_PROJECTOR_VERSION_V2,
     SESSION_MESSAGE_PROJECTOR_VERSION_V3, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
     SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
+};
+pub use provider_descriptor::{
+    CompatibilityMetadataHook, compatibility_metadata_hook, metadata_namespace,
+    synthesizes_native_record_id,
 };
 pub use remote::{RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1};
 pub use retrieval_anchor::{

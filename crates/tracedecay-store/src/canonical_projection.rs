@@ -8,6 +8,9 @@ use tracedecay_domain::{
 };
 
 use crate::cursor_dispatch::{cursor_dispatch_model, dispatch_text, is_subagent_dispatch_tool};
+use crate::provider_descriptor::{
+    compatibility_metadata_hook, metadata_namespace, synthesizes_native_record_id,
+};
 use crate::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SessionMessageRecord, SessionRecord, WorkflowFactRecord,
@@ -24,7 +27,7 @@ pub fn derive_canonical_projection(
         .validate()
         .map_err(ProjectionStoreError::Contract)?;
     let native_record_matches = observation.identity().native_record_id().map_or_else(
-        || envelope.provider().as_str() == "claude",
+        || synthesizes_native_record_id(envelope.provider().as_str()),
         |native_record_id| envelope.stable_record_id() == native_record_id,
     );
     if envelope.provider() != observation.source().provider()
@@ -243,12 +246,7 @@ fn canonical_session_metadata(
         if let Some(native_source) = &session.native_source {
             metadata.insert(format!("{provider}_source"), native_source.clone().into());
         }
-        let location_namespace =
-            if provider == "cursor" && session.source.as_deref() == Some("cursor_transcript") {
-                "cursor_event".to_owned()
-            } else {
-                format!("{provider}_session")
-            };
+        let location_namespace = metadata_namespace(provider, session.source.as_deref());
         if let Some(location_path) = session
             .location_path
             .as_ref()
@@ -297,60 +295,13 @@ fn canonical_message_metadata(
             })?;
         metadata.extend(session_metadata);
     }
-    if metadata.get("source").and_then(serde_json::Value::as_str) == Some("cursor_transcript") {
-        append_cursor_compatibility_metadata(&mut metadata, envelope.facts())?;
+    if let Some(hook) =
+        compatibility_metadata_hook(metadata.get("source").and_then(serde_json::Value::as_str))
+    {
+        hook(&mut metadata, envelope.facts())?;
     }
     serde_json::to_string(&metadata)
         .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
-}
-
-fn append_cursor_compatibility_metadata(
-    metadata: &mut serde_json::Map<String, serde_json::Value>,
-    facts: &[CanonicalObservationFactV1],
-) -> ProjectionStoreResult<()> {
-    let mut tool_calls = Vec::new();
-    let mut tool_events = Vec::new();
-    let mut first_dispatch_id = None;
-    for fact in facts {
-        let CanonicalObservationFactV1::ToolInvocation {
-            invocation_id,
-            name,
-            arguments,
-        } = fact
-        else {
-            continue;
-        };
-        tool_calls.push(serde_json::json!({
-            "id": invocation_id.as_str(),
-            "type": "function",
-            "function": {
-                "name": name,
-                "arguments": arguments,
-            },
-        }));
-        let input_bytes = serde_json::to_vec(arguments)
-            .map_err(|_| {
-                ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding)
-            })?
-            .len();
-        tool_events.push(serde_json::json!({
-            "type": "tool_use",
-            "tool_name": name,
-            "call_id": invocation_id.as_str(),
-            "input_bytes": input_bytes,
-        }));
-        if first_dispatch_id.is_none() && is_subagent_dispatch_tool(name) {
-            first_dispatch_id = Some(invocation_id.as_str());
-        }
-    }
-    if !tool_calls.is_empty() {
-        metadata.insert("tool_calls".to_owned(), tool_calls.into());
-        metadata.insert("tool_events".to_owned(), tool_events.into());
-    }
-    if let Some(tool_use_id) = first_dispatch_id {
-        metadata.insert("tool_use_id".to_owned(), tool_use_id.into());
-    }
-    Ok(())
 }
 
 fn canonical_workflow_facts(
@@ -923,8 +874,11 @@ mod tests {
     use serde_json::json;
     use tracedecay_domain::{
         CanonicalBoundaryKindV1, CanonicalObservationEvidenceV1, CanonicalObservationRelationsV1,
-        ObservationId, ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId,
-        SessionId,
+        ComponentVersion, ObservationId, ObservationIdentityMaterialV1,
+        ObservationOrderingDomainV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
+        ObservationSourceRangeV1, PayloadReferenceV1, ProviderId, RetentionClass,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, SessionId,
     };
 
     use super::*;
@@ -942,6 +896,198 @@ mod tests {
             ),
         )
         .unwrap()
+    }
+
+    /// Envelope in the legacy file-bytes ordering domain, so identity material
+    /// built by `ObservationIdentityMaterialV1::new` — the only constructor that
+    /// omits a native record id — agrees with it.
+    fn provider_envelope(
+        provider: &str,
+        facts: Vec<CanonicalObservationFactV1>,
+    ) -> CanonicalObservationEnvelopeV1 {
+        CanonicalObservationEnvelopeV1::new(
+            ProviderId::new(provider).unwrap(),
+            "fixture",
+            ObservationId::new("record.fixture").unwrap(),
+            CanonicalObservationRelationsV1::new(SessionId::new("session.fixture").unwrap()),
+            facts,
+            CanonicalObservationEvidenceV1::new(
+                ObservationOrderingDomainV1::FileBytes,
+                ObservationSourceRangeV1::new(1, 2).unwrap(),
+            ),
+        )
+        .unwrap()
+    }
+
+    fn observation_without_native_record_id(
+        envelope: &CanonicalObservationEnvelopeV1,
+    ) -> DurableObservationV1 {
+        let payload = serde_json::to_value(envelope).unwrap();
+        let payload_reference = PayloadReferenceV1::for_payload(&payload).unwrap();
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.fixture").unwrap(),
+                ComponentVersion::new("sanitizer.fixture.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(payload_reference),
+        )
+        .unwrap();
+        DurableObservationV1::new(
+            ObservationIdentityMaterialV1::new(
+                ObservationSourceIdentityV1::for_provider(
+                    envelope.provider().clone(),
+                    envelope.relations().session_id().clone(),
+                )
+                .unwrap(),
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(7).unwrap(),
+                envelope.evidence().range(),
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.fixture").unwrap(),
+            payload,
+        )
+        .unwrap()
+    }
+
+    fn cursor_transcript_session_fields() -> CanonicalSessionFields {
+        CanonicalSessionFields {
+            project_path: Some("/workspace/project".to_owned()),
+            location_path: Some("/workspace/project/.worktrees/feature".to_owned()),
+            transcript_path: Some("/transcripts/session.jsonl".to_owned()),
+            title: None,
+            started_at: None,
+            ended_at: None,
+            source: Some("cursor_transcript".to_owned()),
+            native_source: Some("cursor".to_owned()),
+            profile: None,
+            location_provenance: Some("hook_event".to_owned()),
+        }
+    }
+
+    #[test]
+    fn only_claude_may_omit_the_native_record_id_on_identity_material() {
+        let facts = vec![CanonicalObservationFactV1::Message {
+            role: CanonicalMessageRoleV1::Assistant,
+            content: json!({"text": "authored"}),
+            model: None,
+            timestamp: Some(42),
+        }];
+
+        let claude = provider_envelope("claude", facts.clone());
+        let projection =
+            derive_canonical_projection(&observation_without_native_record_id(&claude)).unwrap();
+        assert_eq!(
+            projection.messages().count(),
+            1,
+            "claude synthesizes its record id, so a missing native id still projects"
+        );
+
+        let generic = provider_envelope("codex", facts);
+        assert!(
+            matches!(
+                derive_canonical_projection(&observation_without_native_record_id(&generic)),
+                Err(ProjectionStoreError::Contract(
+                    ObservationContractError::InvalidCanonicalPayload
+                ))
+            ),
+            "a provider that does not synthesize record ids must carry a native one"
+        );
+    }
+
+    #[test]
+    fn cursor_event_namespace_requires_both_the_provider_and_the_transcript_source() {
+        let mut fields = cursor_transcript_session_fields();
+
+        let transcript: serde_json::Value = serde_json::from_str(
+            canonical_session_metadata("cursor", Some(&fields))
+                .unwrap()
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            transcript["cursor_event_cwd"],
+            "/workspace/project/.worktrees/feature"
+        );
+
+        let other_provider: serde_json::Value = serde_json::from_str(
+            canonical_session_metadata("codex", Some(&fields))
+                .unwrap()
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            other_provider["codex_session_cwd"],
+            "/workspace/project/.worktrees/feature",
+            "the event namespace is cursor-only even for a cursor_transcript source"
+        );
+        assert!(other_provider.get("cursor_event_cwd").is_none());
+
+        fields.source = Some("cursor_composer".to_owned());
+        let other_source: serde_json::Value = serde_json::from_str(
+            canonical_session_metadata("cursor", Some(&fields))
+                .unwrap()
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            other_source["cursor_session_cwd"],
+            "/workspace/project/.worktrees/feature",
+            "cursor falls back to its session namespace outside the transcript source"
+        );
+        assert!(other_source.get("cursor_event_cwd").is_none());
+    }
+
+    #[test]
+    fn cursor_transcript_message_metadata_appends_tool_compatibility_fields() {
+        let envelope = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
+            invocation_id: ObservationId::new("tool.dispatch").unwrap(),
+            name: "Task".to_owned(),
+            arguments: json!({"prompt": "explore"}),
+        }]);
+        let session_metadata =
+            canonical_session_metadata("cursor", Some(&cursor_transcript_session_fields())).unwrap();
+
+        let metadata: serde_json::Value = serde_json::from_str(
+            &canonical_message_metadata(&envelope, session_metadata.as_deref()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["tool_calls"][0]["id"], "tool.dispatch");
+        assert_eq!(metadata["tool_calls"][0]["type"], "function");
+        assert_eq!(metadata["tool_calls"][0]["function"]["name"], "Task");
+        assert_eq!(metadata["tool_events"][0]["type"], "tool_use");
+        assert_eq!(metadata["tool_events"][0]["call_id"], "tool.dispatch");
+        assert_eq!(
+            metadata["tool_events"][0]["input_bytes"],
+            serde_json::to_vec(&json!({"prompt": "explore"})).unwrap().len()
+        );
+        assert_eq!(metadata["tool_use_id"], "tool.dispatch");
+
+        let mut other_source = cursor_transcript_session_fields();
+        other_source.source = Some("provider_store".to_owned());
+        let other_metadata: serde_json::Value = serde_json::from_str(
+            &canonical_message_metadata(
+                &envelope,
+                canonical_session_metadata("cursor", Some(&other_source))
+                    .unwrap()
+                    .as_deref(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            other_metadata.get("tool_calls").is_none(),
+            "compatibility fields belong to the cursor transcript source only"
+        );
+        assert!(other_metadata.get("tool_events").is_none());
+        assert!(other_metadata.get("tool_use_id").is_none());
     }
 
     #[test]
