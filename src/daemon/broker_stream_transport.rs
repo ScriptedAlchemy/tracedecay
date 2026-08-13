@@ -18,7 +18,14 @@ use super::transport::{BrokerReadHalf, BrokerWriteHalf};
 use super::*;
 
 pub(super) struct BrokerStreamTransport {
-    reader: tokio::io::BufReader<BrokerReadHalf>,
+    // Every daemon read of this transport races something else in a
+    // `tokio::select!` — draining, an owner open, a completed handler. The
+    // bounded reader owns the partial-frame accumulator so a read dropped by a
+    // lost race resumes instead of restarting mid-frame and desynchronizing
+    // JSON-RPC framing for the rest of the connection.
+    reader: tracedecay_usecases::host_admission::BoundedLineReader<
+        tokio::io::BufReader<BrokerReadHalf>,
+    >,
     writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
     active_requests: Arc<
         std::sync::Mutex<HashMap<String, Option<tracedecay_domain::DeliverySettlementAttemptV1>>>,
@@ -55,7 +62,9 @@ impl BrokerStreamTransport {
     pub(super) fn new(stream: BrokerStream) -> Self {
         let (reader, writer) = stream.into_owned_split();
         Self {
-            reader: tokio::io::BufReader::new(reader),
+            reader: tracedecay_usecases::host_admission::BoundedLineReader::new(
+                tokio::io::BufReader::new(reader),
+            ),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
             active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
             replay: VecDeque::new(),
@@ -260,7 +269,7 @@ impl crate::mcp::McpTransport for BrokerStreamTransport {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
         }
-        tracedecay_usecases::host_admission::read_bounded_mcp_line(&mut self.reader).await
+        self.reader.read_mcp_line().await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {

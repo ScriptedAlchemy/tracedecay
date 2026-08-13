@@ -141,6 +141,13 @@ impl ErrorCode {
 /// Implementations are monomorphized at each call site — no dyn dispatch.
 pub trait McpTransport {
     /// Read the next line from the transport. Returns `None` on EOF.
+    ///
+    /// Implementations MUST be cancellation-safe: every server read loop races
+    /// this future against shutdown, cancellation, and handler completion in a
+    /// `tokio::select!`, so a dropped read must not lose bytes it already
+    /// consumed. Buffered implementations satisfy this by keeping the
+    /// partial-frame accumulator in the transport (see
+    /// `host_admission::BoundedLineReader`) rather than in the future.
     fn read_line(
         &mut self,
     ) -> impl std::future::Future<Output = std::io::Result<Option<String>>> + Send;

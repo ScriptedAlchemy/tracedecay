@@ -555,6 +555,13 @@ pub(super) async fn await_project_owner_or_disconnect<T>(
     tokio::pin!(open);
     let mut pending_lines = VecDeque::new();
     loop {
+        // This loop continues after the read branch, so unlike the one-shot
+        // selects below it drops an in-flight read every time `open` wins the
+        // race — and the same transport is then handed to the routed server.
+        // That is only safe because the transport's read half keeps its
+        // partial-frame accumulator (`host_admission::BoundedLineReader`), so a
+        // dropped read resumes mid-frame instead of losing the bytes it already
+        // consumed and desynchronizing JSON-RPC framing for the connection.
         tokio::select! {
             result = &mut open => return result.map(|owner| Some((owner, pending_lines))),
             incoming = transport.read_line() => {

@@ -111,16 +111,26 @@ impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
     }
 }
 
+/// Read half of the stdio transport.
+///
+/// The frame accumulator lives in the reader, not in the `read_line` future, so
+/// a read dropped by a lost `tokio::select!` race resumes rather than truncating
+/// the frame. See [`tracedecay_usecases::host_admission::BoundedLineReader`].
+type StdinLineReader =
+    tracedecay_usecases::host_admission::BoundedLineReader<tokio::io::BufReader<tokio::io::Stdin>>;
+
 /// Real stdio transport — reads from stdin, writes to stdout.
 pub struct StdioTransport {
-    reader: tokio::io::BufReader<tokio::io::Stdin>,
+    reader: StdinLineReader,
     writer: tokio::io::Stdout,
 }
 
 impl Default for StdioTransport {
     fn default() -> Self {
         Self {
-            reader: tokio::io::BufReader::new(tokio::io::stdin()),
+            reader: tracedecay_usecases::host_admission::BoundedLineReader::new(
+                tokio::io::BufReader::new(tokio::io::stdin()),
+            ),
             writer: tokio::io::stdout(),
         }
     }
@@ -134,7 +144,7 @@ impl StdioTransport {
 
 impl McpTransport for StdioTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        tracedecay_usecases::host_admission::read_bounded_mcp_line(&mut self.reader).await
+        self.reader.read_mcp_line().await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -148,9 +158,16 @@ impl McpTransport for StdioTransport {
     }
 }
 
-impl McpTransportReader for &mut tokio::io::BufReader<tokio::io::Stdin> {
+/// Any resumable bounded reader is a transport read half. The blanket impl
+/// keeps the split read path on the same cancellation-safe accumulator the
+/// unsplit transport uses; a bare `&mut BufReader` would put the partial frame
+/// back on the future's stack.
+impl<R> McpTransportReader for &mut tracedecay_usecases::host_admission::BoundedLineReader<R>
+where
+    R: tokio::io::AsyncBufRead + Unpin + Send,
+{
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        tracedecay_usecases::host_admission::read_bounded_mcp_line(&mut **self).await
+        (**self).read_mcp_line().await
     }
 }
 
@@ -165,7 +182,7 @@ impl McpTransportWriter for &mut tokio::io::Stdout {
 }
 
 impl McpDuplexTransport for StdioTransport {
-    type Reader<'a> = &'a mut tokio::io::BufReader<tokio::io::Stdin>;
+    type Reader<'a> = &'a mut StdinLineReader;
     type Writer<'a> = &'a mut tokio::io::Stdout;
 
     fn split(&mut self) -> (Self::Reader<'_>, Self::Writer<'_>) {

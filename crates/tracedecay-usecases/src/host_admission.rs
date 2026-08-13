@@ -184,10 +184,10 @@ pub(crate) use spool::{
 };
 pub use spool::{SpoolBounds, SpoolOpenReport, SpoolRecord, TerminalReason};
 pub use wire::{
-    MAX_MCP_JSONRPC_FRAME_BYTES, MAX_WIRE_MESSAGE_BYTES, MCP_OVERSIZE_ID_INSPECT_BYTES,
-    WIRE_RECORD_TOO_LARGE, WireReadOutcome, is_wire_oversized_io_error, read_bounded_mcp_line,
-    read_bounded_to_string, wire_oversized_inspect_prefix, wire_oversized_io_error,
-    wire_oversized_io_error_with_prefix,
+    BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MAX_WIRE_MESSAGE_BYTES,
+    MCP_OVERSIZE_ID_INSPECT_BYTES, WIRE_RECORD_TOO_LARGE, WireReadOutcome,
+    is_wire_oversized_io_error, read_bounded_mcp_line, read_bounded_to_string,
+    wire_oversized_inspect_prefix, wire_oversized_io_error, wire_oversized_io_error_with_prefix,
 };
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use wire::{line_outcome_to_io, read_bounded_line};
