@@ -19,7 +19,7 @@ use super::json_result;
 
 mod automation_terminal;
 use automation_terminal::{
-    decode_options, pre_admission_problem_value, require_observation,
+    admission_conflict_value, decode_options, pre_admission_problem_value, require_observation,
     run_skill_writer as run_admitted_skill_writer, settle_run as automation_run_value,
     terminal_response_value as automation_terminal_response,
 };
@@ -337,8 +337,15 @@ pub(super) async fn handle_admin_project(
             .await?
         }
     };
-    let semantic_error = value.get("kind").and_then(Value::as_str) == Some("problem");
+    let semantic_error = automation_response_is_semantic_error(&value);
     Ok(json_result(&value).with_semantic_error(semantic_error))
+}
+
+fn automation_response_is_semantic_error(value: &Value) -> bool {
+    matches!(
+        value.get("kind").and_then(Value::as_str),
+        Some("problem" | "conflict")
+    )
 }
 
 async fn run_automation(
@@ -433,6 +440,9 @@ async fn run_automation(
                 crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
                     return automation_terminal_response(&terminal);
                 }
+                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+                    return Ok(admission_conflict_value());
+                }
                 crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
                     problem,
                 ) => return pre_admission_problem_value(problem),
@@ -520,6 +530,16 @@ async fn run_automation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_conflict_is_reported_as_an_mcp_semantic_error() {
+        assert!(automation_response_is_semantic_error(
+            &admission_conflict_value()
+        ));
+        assert!(!automation_response_is_semantic_error(
+            &json!({ "run": { "status": "completed" } })
+        ));
+    }
 
     fn test_application_control() -> (Deadline, CancellationSignal) {
         (

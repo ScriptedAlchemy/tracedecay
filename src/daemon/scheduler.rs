@@ -22,8 +22,8 @@ mod run_control;
 mod termination;
 pub(super) use effect_admission::run_automation_scheduler_tick;
 use effect_admission::{
-    log_scheduler_pre_admission_problem, scheduler_automation_effect,
-    synchronize_scheduler_effect_control,
+    log_scheduler_admission_conflict, log_scheduler_pre_admission_problem,
+    scheduler_automation_effect, synchronize_scheduler_effect_control,
 };
 use host_receipt_review::run_host_receipt_review;
 use run_control::AutomationSchedulerStop;
@@ -1541,6 +1541,10 @@ async fn run_user_jobs_scheduler_pass(
         let (admission, run_id, effect_run_control) = effect;
         let effect = match admission {
             AutomationEffectAdmission::Execute(effect) => effect,
+            AutomationEffectAdmission::Conflict => {
+                log_scheduler_admission_conflict(project_path, AgentTaskKind::UserJob);
+                continue;
+            }
             AutomationEffectAdmission::Replay(terminal) => {
                 log_scheduler_automation_replay(project_path, AgentTaskKind::UserJob, &terminal);
                 continue;

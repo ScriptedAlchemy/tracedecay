@@ -112,6 +112,13 @@ fn external_admission(run_id: &str, request_id: &str) -> DurableAutomationAdmiss
     admission
 }
 
+fn assert_admission_conflict(result: crate::errors::Result<ReservationResult>) {
+    assert!(matches!(
+        result.expect("valid durable mismatch"),
+        ReservationResult::Conflict { .. }
+    ));
+}
+
 fn partial_receipt_template(request_id: &RequestId, scope: &ResolvedScope) -> EffectReceipt {
     let operation =
         retained_surface_application_operation(RetainedSurfaceOperation::FactStoreCurate)
@@ -343,7 +350,7 @@ fn foreign_external_reservation_closes_indeterminate_without_a_second_execution(
 }
 
 #[test]
-fn durable_journal_rejects_changed_request_identity() {
+fn durable_journal_reports_changed_request_identity_as_a_conflict() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     reserve_or_replay_blocking(
@@ -352,11 +359,11 @@ fn durable_journal_rejects_changed_request_identity() {
     )
     .expect("reserve");
     let changed = admission("run.memory-journal", "request.memory-journal.changed");
-    assert!(reserve_or_replay_blocking(&path, changed).is_err());
+    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
 }
 
 #[test]
-fn durable_journal_rejects_changed_task_identity() {
+fn durable_journal_reports_changed_task_identity_as_a_conflict() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let original = admission("run.memory-journal", "request.memory-journal");
@@ -379,11 +386,11 @@ fn durable_journal_rejects_changed_task_identity() {
             end_time: None,
         },
     );
-    assert!(reserve_or_replay_blocking(&path, changed).is_err());
+    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
 }
 
 #[test]
-fn durable_journal_rejects_changed_scope_identity() {
+fn durable_journal_reports_changed_scope_identity_as_a_conflict() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let original = admission("run.memory-journal", "request.memory-journal");
@@ -396,22 +403,22 @@ fn durable_journal_rejects_changed_scope_identity() {
         None,
     )
     .expect("scope");
-    assert!(reserve_or_replay_blocking(&path, changed).is_err());
+    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
 }
 
 #[test]
-fn durable_journal_rejects_changed_effect_authority() {
+fn durable_journal_reports_changed_effect_authority_as_a_conflict() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let original = admission("run.memory-journal", "request.memory-journal");
     reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
     let mut changed = original;
     changed.effect_authority_digest = digest('b');
-    assert!(reserve_or_replay_blocking(&path, changed).is_err());
+    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
 }
 
 #[test]
-fn durable_journal_rejects_changed_project_owner() {
+fn durable_journal_reports_changed_project_owner_as_a_conflict() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let original = admission("run.memory-journal", "request.memory-journal");
@@ -423,7 +430,20 @@ fn durable_journal_rejects_changed_project_owner() {
     *owner = FactOwnerV1::Project {
         project_id: ProjectId::new("project.memory-journal.other").expect("project"),
     };
-    assert!(reserve_or_replay_blocking(&path, changed).is_err());
+    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
+}
+
+#[test]
+fn identical_same_process_reservation_remains_an_in_flight_contract_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("terminal.json");
+    let original = admission("run.memory-journal", "request.memory-journal");
+    reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
+
+    let Err(error) = reserve_or_replay_blocking(&path, original) else {
+        panic!("an identical live reservation must remain a contract error")
+    };
+    assert!(error.to_string().contains("already in flight"));
 }
 
 #[test]
@@ -683,6 +703,104 @@ fn scheduler_stable_request_identity_reopens_the_same_terminal() {
         panic!("scheduler terminal must replay")
     };
     assert_eq!(replay, terminal);
+}
+
+#[test]
+fn pending_index_project_binding_conflict_remains_a_contract_error() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let path = dashboard_root
+        .join("automation_effects")
+        .join(format!("{}.json", "a".repeat(64)));
+    let original = admission("indexed_binding", "request.indexed-binding");
+    recovery_index::add_pending_blocking(dashboard_root, &path, &original)
+        .expect("original pending binding");
+
+    let mut changed = original;
+    changed.scope = ResolvedScope::new(
+        ProjectId::new("project.memory-journal.other").expect("project"),
+        RepositoryId::new("repository.memory-journal").expect("repository"),
+        WorktreeId::new("worktree.memory-journal").expect("worktree"),
+        None,
+    )
+    .expect("scope");
+    let Err(error) = recovery_index::add_pending_blocking(dashboard_root, &path, &changed) else {
+        panic!("pending index must preserve its original project binding")
+    };
+    assert!(error.to_string().contains("project binding"));
+}
+
+#[tokio::test]
+async fn reserved_admission_conflict_preserves_recovery_index() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let path = dashboard_root
+        .join("automation_effects")
+        .join(format!("{}.json", "b".repeat(64)));
+    let original = admission("indexed_conflict", "request.indexed-conflict");
+    recovery_index::add_pending_blocking(dashboard_root, &path, &original)
+        .expect("pending reservation");
+    reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
+    let mut changed = original;
+    changed.configuration_digest = digest('c');
+    let ReservationResult::Conflict { terminal } =
+        reserve_or_replay_blocking(&path, changed).expect("typed conflict")
+    else {
+        panic!("stable mismatch must be a conflict")
+    };
+    assert!(!terminal);
+    let admission = super::super::reservation_conflict_admission(dashboard_root, &path, terminal)
+        .await
+        .expect("map conflict");
+    assert!(matches!(
+        admission,
+        super::super::AutomationEffectAdmission::Conflict
+    ));
+    assert_eq!(
+        recovery_index::indexed_journals_blocking(dashboard_root, &scope())
+            .expect("pending index")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn terminal_admission_conflict_removes_recreated_pending_index() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let dashboard_root = temp.path();
+    let path = dashboard_root
+        .join("automation_effects")
+        .join(format!("{}.json", "c".repeat(64)));
+    let original = admission("terminal_conflict", "request.terminal-conflict");
+    reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
+    persist_terminal_blocking(
+        &path,
+        &original,
+        success_terminal(&original, "terminal_conflict"),
+    )
+    .expect("terminal");
+    let mut changed = original;
+    changed.configuration_digest = digest('d');
+    recovery_index::add_pending_blocking(dashboard_root, &path, &changed)
+        .expect("prepare recreates pending entry before reservation lookup");
+    let ReservationResult::Conflict { terminal } =
+        reserve_or_replay_blocking(&path, changed).expect("typed conflict")
+    else {
+        panic!("terminal mismatch must be a conflict")
+    };
+    assert!(terminal);
+    let admission = super::super::reservation_conflict_admission(dashboard_root, &path, terminal)
+        .await
+        .expect("map conflict");
+    assert!(matches!(
+        admission,
+        super::super::AutomationEffectAdmission::Conflict
+    ));
+    assert!(
+        recovery_index::indexed_journals_blocking(dashboard_root, &scope())
+            .expect("pending index")
+            .is_empty()
+    );
 }
 
 #[test]

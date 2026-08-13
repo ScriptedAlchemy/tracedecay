@@ -451,6 +451,9 @@ async fn execute_dashboard_automation_run(
                     let run = automation_terminal_run(&terminal)?;
                     return Ok(run);
                 }
+                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+                    return Err(automation_admission_conflict());
+                }
             };
             let run = match run_session_reflector_with_backend(
                 cg,
@@ -528,6 +531,9 @@ async fn execute_dashboard_automation_run(
                     let run = automation_terminal_run(&terminal)?;
                     return Ok(run);
                 }
+                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+                    return Err(automation_admission_conflict());
+                }
             };
             let run = match run_skill_writer_with_backend(
                 cg,
@@ -586,6 +592,9 @@ async fn execute_dashboard_automation_run(
                 }
                 crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(envelope) => {
                     return Err(DashboardAutomationAuthorityErrorV1::ApplicationProblem(envelope));
+                }
+                crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+                    return Err(automation_admission_conflict());
                 }
             };
             let run = match tracedecay_agent_hosts::automation::jobs::run_user_job_with_backend(
@@ -742,6 +751,12 @@ fn automation_invalid(error: impl std::fmt::Display) -> DashboardAutomationAutho
 fn automation_failed(error: impl std::fmt::Display) -> DashboardAutomationAuthorityErrorV1 {
     DashboardAutomationAuthorityErrorV1::Failed {
         detail: error.to_string(),
+    }
+}
+
+fn automation_admission_conflict() -> DashboardAutomationAuthorityErrorV1 {
+    DashboardAutomationAuthorityErrorV1::Conflict {
+        detail: "automation run identity conflicts with its durable admission".to_owned(),
     }
 }
 

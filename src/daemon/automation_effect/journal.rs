@@ -148,6 +148,10 @@ pub(super) enum ReservationResult {
     Recover {
         retirement: Option<RetirementBinding>,
     },
+    /// The run identity already has a valid durable record, but the newly
+    /// prepared admission does not match the authority bound to that record.
+    /// This is an idempotency conflict, not a journal I/O or shape failure.
+    Conflict { terminal: bool },
 }
 
 pub(super) fn retained_source_bindings(
@@ -184,7 +188,11 @@ pub(super) fn reserve_or_replay_blocking(
                 Ok(ReservationResult::Execute { retirement })
             }
             Some(record) => {
-                validate_stable_admission(&record.admission, &requested)?;
+                if !stable_admission_matches(&record.admission, &requested) {
+                    return Ok(ReservationResult::Conflict {
+                        terminal: matches!(record.state, DurableAutomationState::Terminal(_)),
+                    });
+                }
                 match &record.state {
                     DurableAutomationState::Terminal(terminal) => Ok(ReservationResult::Replay {
                         terminal: terminal.clone(),
@@ -487,24 +495,30 @@ fn validate_stable_admission(
     stored: &DurableAutomationAdmission,
     requested: &DurableAutomationAdmission,
 ) -> Result<()> {
-    if stored.schema_version != 1
-        || stored.request != requested.request
-        || stored.input_digest != requested.input_digest
-        || stored.configuration_digest != requested.configuration_digest
-        || stored.effect_authority_digest != requested.effect_authority_digest
-        || stored.grant_id != requested.grant_id
-        || stored.grant_revision != requested.grant_revision
-        || stored.grant_digest != requested.grant_digest
-        || stored.disclosure != requested.disclosure
-        || stored.effect_receipt_template != requested.effect_receipt_template
-        || stored.actor != requested.actor
-        || stored.scope != requested.scope
-        || stored.request_id != requested.request_id
-        || stored.recovery != requested.recovery
-    {
+    if !stable_admission_matches(stored, requested) {
         return Err(contract_error(
             "memory automation replay conflicts with the persisted admission",
         ));
     }
     Ok(())
+}
+
+fn stable_admission_matches(
+    stored: &DurableAutomationAdmission,
+    requested: &DurableAutomationAdmission,
+) -> bool {
+    stored.schema_version == 1
+        && stored.request == requested.request
+        && stored.input_digest == requested.input_digest
+        && stored.configuration_digest == requested.configuration_digest
+        && stored.effect_authority_digest == requested.effect_authority_digest
+        && stored.grant_id == requested.grant_id
+        && stored.grant_revision == requested.grant_revision
+        && stored.grant_digest == requested.grant_digest
+        && stored.disclosure == requested.disclosure
+        && stored.effect_receipt_template == requested.effect_receipt_template
+        && stored.actor == requested.actor
+        && stored.scope == requested.scope
+        && stored.request_id == requested.request_id
+        && stored.recovery == requested.recovery
 }

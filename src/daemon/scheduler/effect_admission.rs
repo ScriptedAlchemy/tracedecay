@@ -36,6 +36,24 @@ pub(super) fn log_scheduler_pre_admission_problem(
     log_daemon_event("scheduler_task_application_pre_admission_problem", &fields);
 }
 
+pub(super) fn log_scheduler_admission_conflict(
+    project_path: &Path,
+    task: tracedecay_agent_hosts::automation::backend::AgentTaskKind,
+) {
+    log_daemon_event(
+        "scheduler_task_automation_admission_conflict",
+        &[
+            ("project", project_path.display().to_string()),
+            (
+                "task",
+                tracedecay_agent_hosts::automation::backend::task_key(task).to_owned(),
+            ),
+            ("outcome", "skipped".to_owned()),
+            ("reason", "durable_admission_conflict".to_owned()),
+        ],
+    );
+}
+
 pub(super) async fn scheduler_automation_effect(
     engine: &DaemonEngine,
     memory: &crate::tracedecay::TraceDecay,
@@ -210,6 +228,9 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
     .await
     {
         Ok((admission, run_id, effect_run_control)) => match admission {
+            AutomationEffectAdmission::Conflict => {
+                log_scheduler_admission_conflict(project_path, AgentTaskKind::MemoryCurator);
+            }
             AutomationEffectAdmission::PreAdmissionProblem(problem) => {
                 log_scheduler_pre_admission_problem(
                     project_path,
@@ -358,6 +379,9 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                 log_scheduler_task_error(project_path, AgentTaskKind::SessionReflector, &error);
                 first_error.get_or_insert(error);
             }
+            Ok((AutomationEffectAdmission::Conflict, _, _)) => {
+                log_scheduler_admission_conflict(project_path, AgentTaskKind::SessionReflector);
+            }
             Ok((AutomationEffectAdmission::PreAdmissionProblem(problem), _, _)) => {
                 log_scheduler_pre_admission_problem(
                     project_path,
@@ -450,6 +474,9 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
             Err(error) => {
                 log_scheduler_task_error(project_path, AgentTaskKind::SkillWriter, &error);
                 first_error.get_or_insert(error);
+            }
+            Ok((AutomationEffectAdmission::Conflict, _, _)) => {
+                log_scheduler_admission_conflict(project_path, AgentTaskKind::SkillWriter);
             }
             Ok((AutomationEffectAdmission::PreAdmissionProblem(problem), _, _)) => {
                 log_scheduler_pre_admission_problem(

@@ -180,6 +180,9 @@ impl AutomationSettledTerminal {
 pub(crate) enum AutomationEffectAdmission {
     Execute(AutomationEffectAuthority),
     Replay(AutomationSettledTerminal),
+    /// A valid durable record already owns this run identity under a different
+    /// stable admission. Callers must not execute or settle a second effect.
+    Conflict,
     /// The registered application request was cancelled or timed out before
     /// the durable automation admission. This is deliberately not written to
     /// the automation journal: it is a pre-admission application problem.
@@ -523,6 +526,9 @@ impl AutomationEffectAuthority {
                     finalize_retirement(dashboard_root, binding, live_retirement).await?;
                 }
                 Ok(AutomationEffectAdmission::Replay(terminal))
+            }
+            ReservationResult::Conflict { terminal } => {
+                reservation_conflict_admission(dashboard_root, &journal_path, terminal).await
             }
         }
     }
@@ -909,4 +915,15 @@ impl AutomationEffectAuthority {
             ))
         })?
     }
+}
+
+async fn reservation_conflict_admission(
+    dashboard_root: &Path,
+    journal_path: &Path,
+    terminal: bool,
+) -> Result<AutomationEffectAdmission> {
+    if terminal {
+        remove_pending_index(dashboard_root, journal_path).await?;
+    }
+    Ok(AutomationEffectAdmission::Conflict)
 }

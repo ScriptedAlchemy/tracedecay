@@ -39,6 +39,7 @@ pub(super) enum CombinedEffectAdmission {
         reflector: AutomationSettledTerminal,
         skill: AutomationSettledTerminal,
     },
+    Conflict,
     PreAdmissionProblem(Vec<tracedecay_application::ApplicationProblemEnvelope>),
 }
 
@@ -46,6 +47,7 @@ pub(super) enum CombinedEffectAdmission {
 enum AdmissionState {
     Execute,
     Replay,
+    Conflict,
     Problem,
 }
 
@@ -58,6 +60,9 @@ enum PairMode {
     ProblemAbandonSkill,
     ProblemAbandonReflector,
     ProblemNoAbandon,
+    ConflictAbandonSkill,
+    ConflictAbandonReflector,
+    ConflictNoAbandon,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +87,11 @@ fn pair_mode(reflector: AdmissionState, skill: AdmissionState) -> PairMode {
         (AdmissionState::Replay, AdmissionState::Replay) => PairMode::Replayed,
         (AdmissionState::Problem, AdmissionState::Execute) => PairMode::ProblemAbandonSkill,
         (AdmissionState::Execute, AdmissionState::Problem) => PairMode::ProblemAbandonReflector,
+        (AdmissionState::Conflict, AdmissionState::Execute) => PairMode::ConflictAbandonSkill,
+        (AdmissionState::Execute, AdmissionState::Conflict) => PairMode::ConflictAbandonReflector,
+        (AdmissionState::Conflict, _) | (_, AdmissionState::Conflict) => {
+            PairMode::ConflictNoAbandon
+        }
         _ => PairMode::ProblemNoAbandon,
     }
 }
@@ -90,6 +100,7 @@ fn admission_state(admission: &AutomationEffectAdmission) -> AdmissionState {
     match admission {
         AutomationEffectAdmission::Execute(_) => AdmissionState::Execute,
         AutomationEffectAdmission::Replay(_) => AdmissionState::Replay,
+        AutomationEffectAdmission::Conflict => AdmissionState::Conflict,
         AutomationEffectAdmission::PreAdmissionProblem(_) => AdmissionState::Problem,
     }
 }
@@ -187,6 +198,18 @@ mod tests {
             pair_mode(AdmissionState::Problem, AdmissionState::Replay),
             PairMode::ProblemNoAbandon
         );
+        assert_eq!(
+            pair_mode(AdmissionState::Conflict, AdmissionState::Execute),
+            PairMode::ConflictAbandonSkill
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Execute, AdmissionState::Conflict),
+            PairMode::ConflictAbandonReflector
+        );
+        assert_eq!(
+            pair_mode(AdmissionState::Conflict, AdmissionState::Replay),
+            PairMode::ConflictNoAbandon
+        );
     }
 
     #[test]
@@ -225,6 +248,13 @@ pub(super) async fn run_combined_scheduler_effect(
     first_error: &mut Option<crate::errors::TraceDecayError>,
 ) -> CombinedEffectOutcome {
     match admission {
+        CombinedEffectAdmission::Conflict => {
+            super::log_scheduler_admission_conflict(
+                project_path,
+                tracedecay_agent_hosts::automation::backend::AgentTaskKind::CombinedReview,
+            );
+            CombinedEffectOutcome::Handled
+        }
         CombinedEffectAdmission::PreAdmissionProblem(problems) => {
             for problem in problems {
                 super::log_scheduler_pre_admission_problem(
@@ -822,6 +852,26 @@ pub(super) async fn prepare_combined_effects(
             AutomationEffectAdmission::Replay(_),
             AutomationEffectAdmission::PreAdmissionProblem(problem),
         ) => Ok(CombinedEffectAdmission::PreAdmissionProblem(vec![problem])),
+        (
+            PairMode::ConflictAbandonSkill,
+            AutomationEffectAdmission::Conflict,
+            AutomationEffectAdmission::Execute(skill),
+        ) => {
+            skill.abandon_uncommitted().await?;
+            Ok(CombinedEffectAdmission::Conflict)
+        }
+        (
+            PairMode::ConflictAbandonReflector,
+            AutomationEffectAdmission::Execute(reflector),
+            AutomationEffectAdmission::Conflict,
+        ) => {
+            reflector.abandon_uncommitted().await?;
+            Ok(CombinedEffectAdmission::Conflict)
+        }
+        (PairMode::ConflictNoAbandon, AutomationEffectAdmission::Conflict, _)
+        | (PairMode::ConflictNoAbandon, _, AutomationEffectAdmission::Conflict) => {
+            Ok(CombinedEffectAdmission::Conflict)
+        }
         _ => Err(crate::errors::TraceDecayError::Config {
             message: "combined automation admission matrix was internally inconsistent".to_owned(),
         }),

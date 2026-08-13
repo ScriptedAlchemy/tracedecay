@@ -60,6 +60,9 @@ pub(super) async fn run_skill_writer(
         crate::daemon::automation_effect::AutomationEffectAdmission::Replay(terminal) => {
             return Ok((terminal_response_value(&terminal)?, None));
         }
+        crate::daemon::automation_effect::AutomationEffectAdmission::Conflict => {
+            return Ok((admission_conflict_value(), None));
+        }
         crate::daemon::automation_effect::AutomationEffectAdmission::PreAdmissionProblem(
             problem,
         ) => {
@@ -171,6 +174,13 @@ pub(super) fn pre_admission_problem_value(
     }))
 }
 
+pub(super) fn admission_conflict_value() -> Value {
+    json!({
+        "kind": "conflict",
+        "detail": "automation run identity conflicts with its durable admission",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use tracedecay_application::{
@@ -198,5 +208,13 @@ mod tests {
         assert_eq!(value["value"]["request_id"], request_id.as_str());
         assert_eq!(value["value"]["problem"]["kind"], "cancelled");
         assert!(value["value"].get("run_id").is_none());
+    }
+
+    #[test]
+    fn admission_conflict_is_a_distinct_terminal_without_a_run() {
+        let value = admission_conflict_value();
+        assert_eq!(value["kind"], "conflict");
+        assert!(value.get("run").is_none());
+        assert!(value.get("value").is_none());
     }
 }
