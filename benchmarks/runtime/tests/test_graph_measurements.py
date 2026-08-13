@@ -288,9 +288,10 @@ receipt.write_text(json.dumps({
             source = temporary / "replace-self.py"
             source.write_text(
                 """#!/usr/bin/env python3
+import sys
 from pathlib import Path
 
-current = Path(__file__)
+current = Path(sys.argv[1])
 replacement = current.with_name(current.name + ".replacement")
 replacement.write_text("#!/bin/sh\\nexit 0\\n", encoding="utf-8")
 replacement.chmod(0o500)
@@ -305,7 +306,7 @@ replacement.replace(current)
             )
 
             process = _run_process(
-                (os.fspath(source),),
+                (os.fspath(source), os.fspath(source)),
                 executable=snapshot,
                 environment=os.environ,
                 log_path=temporary / "replacement.log",
