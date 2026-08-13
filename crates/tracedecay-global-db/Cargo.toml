@@ -61,5 +61,10 @@ name = "session_activity_reads"
 harness = false
 required-features = ["test-helpers"]
 
+[[bench]]
+name = "lcm_expansion"
+harness = false
+required-features = ["test-helpers"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tracedecay_observation_fault_harness)"] }
