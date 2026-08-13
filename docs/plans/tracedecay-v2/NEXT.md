@@ -2,7 +2,9 @@
 
 **Status:** active product delivery; local reboot recovery, the live Work
 product journey, and the verified dashboard code-graph cutover are complete as
-of 2026-08-09.
+of 2026-08-09. Checkpoints below are current through 2026-08-13, including the
+typed delivery-evidence slice, external TLS listener hardening, and the
+runtime-identity ABA repair.
 
 `00-plan-set-index.md` remains the sole roadmap and acceptance authority. This
 file is the current operational handoff updated from direct branch, test, and
@@ -11,7 +13,8 @@ reconstruct intent from commit subjects alone.
 
 ## Resume invariants
 
-- Branch: `codex/tracedecay-total-redesign-plan`.
+- Branch: `codex/tracedecay-total-redesign-plan`, continued since 2026-08-12
+  as `codex/final-v2-closeout` (the current branch; same tip lineage).
 - Preserve the current shared worktree. It contains substantial unfinished
   peer work. Do not run `git clean`, `git reset`, `git read-tree -u`, checkout
   paths from another revision, or otherwise sweep tracked or untracked files.
@@ -296,6 +299,63 @@ the commit as attribution evidence.
   1,920 records; all-root hydration completed on every repetition. The
   Cargo-free contract check, focused 64-session regression, two host-policy
   tests, and two black-box runner tests are green.
+- The 2026-08-11/12 integration window is on the branch: the old broad MCP
+  fact-store router is removed in `c061d3b883`; code-index import evidence is
+  parser-backed in `0a38113ca9` and verified ignored dependencies are admitted
+  in `8b5b0fb8c2`; the final-V2 memory floor is integrated in `ed37756924`
+  (376 files) with automatic fact-store curation exposed in `83e495e839`,
+  curator results authenticated in `4816851f13`, and curation contracts
+  regenerated through the canonical generators in `ebc0dc1b71` and
+  `309db960a6`; the production feedback/advisory runtime is mounted in
+  `c2c11956d6`.
+- The external remote-brain TLS listener is hardened as of 2026-08-12.
+  `2b5b61c378` retains the TLS service authority in the daemon authority and
+  service owners; `8c87d2a28d` defines `RemoteBrainTlsConfig`
+  (`src/daemon/bootstrap.rs:26`, re-exported at `src/daemon.rs:358`), wires it
+  through `src/main.rs` and CLI parsing, and lands nine focused listener
+  journeys in `src/daemon/http_application_tests/remote_tls.rs` with
+  checked-in localhost PEM fixtures: partial/wildcard admission rejection,
+  invalid-identity and occupied-address startup refusal, non-private
+  key-handle refusal, remote-only route serving with credential-authority
+  isolation, connection bounds and incomplete-header expiry, ingress timeout
+  excluded from slow handlers, bounded shutdown under stalled and saturated
+  conditions, and expiry of saturated non-reading responses. `56fb459a1d`
+  closes the same landing window by pointing the sealed-graph measurement
+  bench's memfd replacement probe at a public path.
+- The typed delivery-evidence vertical slice is mounted end to end across
+  2026-08-12/13. `7f95e3f17c` indexes retained provider state, and
+  `6af4a34d89` adds `crates/tracedecay-usecases/src/delivery.rs`:
+  `ProjectDeliveryReadAuthorityV1` composes exact-scope reads over the
+  retained GitHub review store, CI observation store, and release read
+  authority under caller-independent bounds (4 PRs, 256 review items, 16 CI
+  checks, 256 releases, 16 point reads, 16 MiB source bytes; no provider URL,
+  database key, or source identity is caller-selectable) with per-source typed
+  states and five direct usecase tests covering stale-head retention, CI
+  manifest-replacement rejection, grant-gated release denial, non-GitHub
+  credential-destination rejection, and latest/last-complete ownership.
+  `4490c37847` projects it in
+  `crates/tracedecay-dashboard-api/src/delivery_api.rs`; `fa02db0662` mounts
+  the authority in the daemon project runtime and adds the grant-gated MCP
+  handler `src/mcp/tools/handlers/dashboard_delivery.rs`; `7f8e2e61c5`
+  preserves outer request identity; `4fe37520fd` regenerates the dashboard
+  contracts through the canonical generator. `8c570994ba` renders
+  `dashboard/src/workspaces/delivery/DeliveryPage.tsx` on the lazy `delivery`
+  route, and `0328e58d88` registers the fixture authorities in the
+  dashboard-api test harness so the two `tests/dashboard_api_test/delivery.rs`
+  journeys exercise real Git reads plus typed unmounted external authority.
+  The DeliveryPage DOM suite passed 29/29 on the current tree on 2026-08-13.
+  One honest gap remains: `ProjectDeliveryFailureLocalizationSourceV1` is a
+  truthful `NotConfigured` stub (`delivery.rs:219-226`) rendered as a typed
+  unavailable projection; wiring a canonical failure-localization owner is
+  recorded in the observability and delivery lane below.
+- Runtime identity is ABA-proof in `43c3911cf3` (2026-08-13).
+  `runtime_identity` compared `Arc` addresses, so a runtime rebuilt after
+  destructive maintenance could alias its dropped predecessor when the
+  allocator reused the address; each `ShardRuntime` now carries a monotonic
+  per-process instance number and identity comparisons use it, preserving
+  shared-attachment equality while a rebuilt runtime can never alias its
+  predecessor
+  (`crates/tracedecay-runtime-core/src/store_runtime/{registry,shard}.rs`).
 
 ## Remaining work by lane
 
@@ -345,6 +405,13 @@ the commit as attribution evidence.
   identity, cancellation, and terminal CLI ACK behavior.
 - Run execution-topology metrics, rollup, compaction, retry, cancellation, and
   restart journeys rather than contract inventories.
+- Wire a canonical CI failure-localization owner into the delivery-evidence
+  composition. `ProjectDeliveryFailureLocalizationSourceV1` is intentionally
+  only `NotConfigured` (`crates/tracedecay-usecases/src/delivery.rs:219-226`)
+  because the retained CI index does not own localization state; the dashboard
+  renders it as a typed unavailable projection. Either retain the owner in
+  this composition or record its explicit owner; do not fabricate localization
+  evidence.
 
 ### Additional wound-down lane handoffs
 
@@ -354,8 +421,10 @@ the commit as attribution evidence.
   required; do not replace it with the already-passing narrow registry test.
 - Finish and checkpoint the exact-route Hermes plugin, unit, and stock changes
   described by the host lane, then build a fresh binary. `c635423a56` contains
-  the retained Hermes surface, but the stale binary still emitted the old
-  broad fact-store tool during the eight-check stock run.
+  the retained Hermes surface, and `c061d3b883` (2026-08-11) removed the old
+  broad fact-store router from the tree, so the stale-binary finding is
+  code-fixed; the fresh binary build and the eight-check stock rerun remain
+  open.
 - Finish the uncommitted provider decoding/materialization work in
   `github_runtime/stack.rs` using the restored V3 coordinator. Re-run the
   saturation, restart delivery, identity tamper, authorization, drift,
