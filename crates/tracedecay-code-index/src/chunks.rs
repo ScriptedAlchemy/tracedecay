@@ -701,7 +701,7 @@ fn byte_offset(offsets: &[u64], len: u64, row: u32, column: u32) -> u64 {
 }
 
 /// Snap an offset down to the nearest UTF-8 char boundary.
-fn snap_down(source: &str, mut offset: usize) -> usize {
+pub(crate) fn snap_down(source: &str, mut offset: usize) -> usize {
     let len = source.len();
     if offset > len {
         offset = len;

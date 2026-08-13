@@ -454,10 +454,8 @@ impl LanguageExtractor for TreeSitterExtractor {
                 detail: format!("sanitized bytes are not valid UTF-8: {error}"),
             }
         })?;
-        let mut parsed_len = source.len().min(MAX_EXTRACTION_SOURCE_BYTES);
-        while !source.is_char_boundary(parsed_len) {
-            parsed_len -= 1;
-        }
+        let parsed_len =
+            crate::chunks::snap_down(source, source.len().min(MAX_EXTRACTION_SOURCE_BYTES));
         let extraction_source = &source[..parsed_len];
         let source_was_capped = parsed_len < source.len();
 

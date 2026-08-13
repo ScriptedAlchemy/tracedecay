@@ -952,14 +952,7 @@ fn valid_retrieval_handle(handle: Option<&str>) -> bool {
 }
 
 fn bounded_context_text(mut value: String, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value;
-    }
-    let mut boundary = max_bytes;
-    while !value.is_char_boundary(boundary) {
-        boundary -= 1;
-    }
-    value.truncate(boundary);
+    crate::diagnostics::truncate_utf8(&mut value, max_bytes);
     value
 }
 

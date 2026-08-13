@@ -51,8 +51,9 @@ use tracedecay_lsp::{
     LspRange, LspRequestId, LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
     MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES, ManagedDiagnosticSnapshot,
     ManagedDiagnosticSnapshotPort, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
-    UpstreamCapabilities, byte_offset_to_utf16_position, percent_hex_nibble,
+    UpstreamCapabilities, byte_offset_to_utf16_position, strict_file_uri_path, strict_file_url,
 };
+
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
 use url::Url;
 
@@ -349,12 +350,8 @@ impl RegisteredProjectLspAuthority {
         if root.scope_digest() != Some(&self.feedback.scope().scope_digest) {
             return Err(LspRuntimeFailure::new("registered-project-root-mismatch"));
         }
-        let path = strict_file_url(root.uri())
-            .and_then(|url| {
-                url.to_file_path()
-                    .map_err(|()| LspRuntimeFailure::new("registered-project-root-mismatch"))
-            })
-            .map_err(|_| LspRuntimeFailure::new("registered-project-root-mismatch"))?;
+        let (_, path) = strict_file_uri_path(root.uri())
+            .ok_or_else(|| LspRuntimeFailure::new("registered-project-root-mismatch"))?;
         let same_root = same_file::is_same_file(path, &self.project_root).unwrap_or(false);
         same_root
             .then_some(())
@@ -2558,13 +2555,11 @@ fn projection_omission_reasons(
 
 fn bounded_test_run_summary(test: &str, passed: bool) -> String {
     let prefix = if passed { "passed: " } else { "failed: " };
-    let mut end = test
-        .len()
-        .min(MAX_CONTEXT_SUMMARY_BYTES.saturating_sub(prefix.len()));
-    while !test.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    format!("{prefix}{}", &test[..end])
+    let truncated = tracedecay_runtime_core::text::utf8_prefix_at_or_before(
+        test,
+        MAX_CONTEXT_SUMMARY_BYTES.saturating_sub(prefix.len()),
+    );
+    format!("{prefix}{truncated}")
 }
 
 fn finding_item(finding: &FeedbackFindingV1) -> Option<ContextProjectionItem> {
@@ -2875,95 +2870,14 @@ struct ValidatedDocumentPath {
     relative: PathBuf,
 }
 
-fn strict_file_url(uri: &str) -> Result<Url, LspRuntimeFailure> {
-    let (_, after_scheme) = uri
-        .split_once(':')
-        .ok_or_else(|| LspRuntimeFailure::new("document-uri-invalid"))?;
-    if after_scheme.contains('\\') {
-        return Err(LspRuntimeFailure::new("document-uri-invalid"));
-    }
-    let raw_path = if let Some(authority_and_path) = after_scheme.strip_prefix("//") {
-        authority_and_path
-            .find('/')
-            .map_or("", |path_start| &authority_and_path[path_start..])
-    } else {
-        after_scheme
-    };
-    validate_raw_uri_path(raw_path)?;
-
-    let url = Url::parse(uri).map_err(|_| LspRuntimeFailure::new("document-uri-invalid"))?;
-    if url.scheme() != "file"
-        || url.cannot_be_a_base()
-        || url.path().is_empty()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(LspRuntimeFailure::new("document-uri-invalid"));
-    }
-    Ok(url)
-}
-
-fn validate_raw_uri_path(raw_path: &str) -> Result<(), LspRuntimeFailure> {
-    if raw_path.is_empty() || raw_path.as_bytes().contains(&0) {
-        return Err(LspRuntimeFailure::new("document-uri-invalid"));
-    }
-    let segments = raw_path.split('/').collect::<Vec<_>>();
-    for (index, segment) in segments.iter().enumerate() {
-        if segment.is_empty() {
-            let is_leading = index == 0;
-            let is_trailing = index + 1 == segments.len();
-            if !is_leading && !is_trailing {
-                return Err(LspRuntimeFailure::new("document-uri-invalid"));
-            }
-            continue;
-        }
-        let decoded = decode_uri_segment(segment)?;
-        if decoded == b"."
-            || decoded == b".."
-            || decoded.iter().any(|byte| matches!(*byte, b'/' | b'\\' | 0))
-        {
-            return Err(LspRuntimeFailure::new("document-uri-invalid"));
-        }
-    }
-    Ok(())
-}
-
-fn decode_uri_segment(segment: &str) -> Result<Vec<u8>, LspRuntimeFailure> {
-    let source = segment.as_bytes();
-    let mut decoded = Vec::with_capacity(source.len());
-    let mut index = 0;
-    while index < source.len() {
-        if source[index] != b'%' {
-            decoded.push(source[index]);
-            index += 1;
-            continue;
-        }
-        let high = source
-            .get(index + 1)
-            .copied()
-            .and_then(percent_hex_nibble)
-            .ok_or_else(|| LspRuntimeFailure::new("document-uri-invalid"))?;
-        let low = source
-            .get(index + 2)
-            .copied()
-            .and_then(percent_hex_nibble)
-            .ok_or_else(|| LspRuntimeFailure::new("document-uri-invalid"))?;
-        decoded.push((high << 4) | low);
-        index += 3;
-    }
-    Ok(decoded)
-}
-
 fn validated_document_path(
     project_root: &Path,
     root_uri: &Url,
     project_dir: &Dir,
     document_uri: &str,
 ) -> Result<ValidatedDocumentPath, LspRuntimeFailure> {
-    let url = strict_file_url(document_uri)?;
+    let url = strict_file_url(document_uri)
+        .ok_or_else(|| LspRuntimeFailure::new("document-uri-invalid"))?;
     let relative_uri = root_uri
         .make_relative(&url)
         .ok_or_else(|| LspRuntimeFailure::new("document-outside-registered-root"))?;
@@ -3077,7 +2991,7 @@ mod path_tests {
     // The symlink-escape test that exercises open_project_file is unix-only.
     #[cfg(unix)]
     use super::open_project_file;
-    use super::{strict_file_url, validated_document_path};
+    use super::validated_document_path;
 
     fn admitted_root() -> (TempDir, std::path::PathBuf, Url, Dir) {
         let temp = TempDir::new().expect("temporary directory");
@@ -3163,19 +3077,6 @@ mod path_tests {
         symlink(&outside, temp.path().join("root").join("escape.rs")).expect("create escape");
 
         assert!(open_project_file(&root_dir, Path::new("escape.rs")).is_err());
-    }
-
-    #[test]
-    fn strict_file_uris_preserve_windows_drive_unc_and_path_case() {
-        let drive = strict_file_url("FILE:///C:/Workspace/Src/Lib.rs").expect("drive URI");
-        let unc = strict_file_url("file://Server/Share/Src/Lib.rs").expect("UNC URI");
-
-        assert!(drive.path().contains("/C:/Workspace/Src/Lib.rs"));
-        assert_eq!(unc.host_str(), Some("server"));
-        assert!(unc.path().contains("/Share/Src/Lib.rs"));
-        assert!(strict_file_url("https://server/Share/Src/Lib.rs").is_err());
-        assert!(strict_file_url("file:///C:/Workspace/../escape.rs").is_err());
-        assert!(strict_file_url(r"file:///C:\Workspace\Src\Lib.rs").is_err());
     }
 }
 

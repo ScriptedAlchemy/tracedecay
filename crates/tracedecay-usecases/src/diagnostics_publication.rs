@@ -895,14 +895,7 @@ pub fn bounded_notice(message: &str) -> String {
         return "diagnostic reported without a message".to_owned();
     }
     let limit = tracedecay_domain::MAX_DIAGNOSTIC_MESSAGE_BYTES;
-    if collapsed.len() <= limit {
-        return collapsed.to_owned();
-    }
-    let mut end = limit;
-    while end > 0 && !collapsed.is_char_boundary(end) {
-        end -= 1;
-    }
-    collapsed[..end].to_owned()
+    tracedecay_runtime_core::text::utf8_prefix_at_or_before(collapsed, limit).to_owned()
 }
 
 #[cfg(test)]

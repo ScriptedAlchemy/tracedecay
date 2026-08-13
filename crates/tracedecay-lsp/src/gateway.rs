@@ -130,7 +130,13 @@ impl AdmittedRoot {
     }
 }
 
-fn strict_file_uri_path(uri: &str) -> Option<(Url, PathBuf)> {
+/// Validates a `file:` URI at the URL level, rejecting any ambiguous,
+/// non-canonical, or traversal-prone form. Deliberately stops short of
+/// `to_file_path()`: a UNC-host URI (`file://server/share/…`) is a valid URL
+/// on every platform even though only Windows can convert it to a local
+/// path. Shared so a URI and an HTTP path can never disagree on which forms
+/// are admitted.
+pub fn strict_file_url(uri: &str) -> Option<Url> {
     let (_, after_scheme) = uri.split_once(':')?;
     if after_scheme.contains('\\') {
         return None;
@@ -158,6 +164,14 @@ fn strict_file_uri_path(uri: &str) -> Option<(Url, PathBuf)> {
     {
         return None;
     }
+    Some(url)
+}
+
+/// Parses a `file:` URI into its `(Url, PathBuf)` form: the URL-level rules
+/// of [`strict_file_url`] plus a platform-local path conversion and a
+/// traversal-component check on the converted path.
+pub fn strict_file_uri_path(uri: &str) -> Option<(Url, PathBuf)> {
+    let url = strict_file_url(uri)?;
     let path = url.to_file_path().ok()?;
     if path
         .components()
@@ -168,7 +182,12 @@ fn strict_file_uri_path(uri: &str) -> Option<(Url, PathBuf)> {
     Some((url, path))
 }
 
-fn valid_raw_uri_path(raw_path: &str) -> bool {
+/// Validates a raw (pre-percent-decoded) URI path: rejects an empty path,
+/// NUL bytes, interior empty segments (`a//b`), and any segment that decodes
+/// to `.`, `..`, or an encoded separator; a leading or trailing empty segment
+/// (the root slash, a directory's trailing slash) is allowed. Shared so a URI
+/// and an HTTP path can never disagree on which forms are admitted.
+pub fn valid_raw_uri_path(raw_path: &str) -> bool {
     if raw_path.is_empty() || raw_path.as_bytes().contains(&0) {
         return false;
     }
@@ -195,7 +214,10 @@ fn valid_raw_uri_path(raw_path: &str) -> bool {
     true
 }
 
-fn decode_uri_segment(segment: &str) -> Option<Vec<u8>> {
+/// Percent-decodes one URI path segment, or `None` for a malformed escape.
+/// Shared so a URI and an HTTP path can never disagree on which escapes are
+/// well formed.
+pub fn decode_uri_segment(segment: &str) -> Option<Vec<u8>> {
     let source = segment.as_bytes();
     let mut decoded = Vec::with_capacity(source.len());
     let mut index = 0;
@@ -3002,6 +3024,22 @@ mod tests {
                 "unexpectedly admitted {document_uri}"
             );
         }
+    }
+
+    #[test]
+    fn strict_file_uris_preserve_windows_drive_unc_and_path_case() {
+        // URL-level rules: UNC hosts are valid URLs on every platform even
+        // though only Windows can convert them to a local path, so these
+        // assertions target strict_file_url, not the path-producing wrapper.
+        let drive = strict_file_url("FILE:///C:/Workspace/Src/Lib.rs").expect("drive URI");
+        let unc = strict_file_url("file://Server/Share/Src/Lib.rs").expect("UNC URI");
+
+        assert!(drive.path().contains("/C:/Workspace/Src/Lib.rs"));
+        assert_eq!(unc.host_str(), Some("server"));
+        assert!(unc.path().contains("/Share/Src/Lib.rs"));
+        assert!(strict_file_url("https://server/Share/Src/Lib.rs").is_none());
+        assert!(strict_file_url("file:///C:/Workspace/../escape.rs").is_none());
+        assert!(strict_file_url(r"file:///C:\Workspace\Src\Lib.rs").is_none());
     }
 
     #[test]

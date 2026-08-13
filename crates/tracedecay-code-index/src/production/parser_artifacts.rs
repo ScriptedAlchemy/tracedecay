@@ -30,12 +30,12 @@ pub(super) fn parse_for_indexing(
             "admitted sanitized source is not UTF-8: {error}"
         ))
     })?;
-    let mut parsed_len = source
-        .len()
-        .min(crate::extract::MAX_EXTRACTION_SOURCE_BYTES);
-    while !source.is_char_boundary(parsed_len) {
-        parsed_len = parsed_len.saturating_sub(1);
-    }
+    let parsed_len = crate::chunks::snap_down(
+        source,
+        source
+            .len()
+            .min(crate::extract::MAX_EXTRACTION_SOURCE_BYTES),
+    );
     let (report, mut extraction) = retained_parses.parse_and_extract_artifact(
         ParseDocumentIdentity::Repository {
             project_id: config.project_id.clone(),

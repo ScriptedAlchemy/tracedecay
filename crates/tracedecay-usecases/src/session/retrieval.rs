@@ -1,7 +1,6 @@
 use std::fmt;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tracedecay_application::RequestContext;
 use tracedecay_domain::{
     ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
@@ -868,7 +867,10 @@ fn sha256_json(value: &impl Serialize) -> String {
 }
 
 fn sha256_binding(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+    format!(
+        "sha256:{}",
+        tracedecay_domain::canonical_text::sha256_hex(bytes)
+    )
 }
 
 #[cfg(test)]
