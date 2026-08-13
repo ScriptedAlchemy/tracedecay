@@ -477,7 +477,7 @@ pub(super) async fn handle_dashboard(
                 daemon_profile_root,
                 daemon_user_profile_id.clone(),
                 retained_project_server_resolver.clone(),
-                daemon_invocation_service,
+                daemon_invocation_service.clone(),
             ) {
                 (
                     Some(profile_root),
@@ -530,6 +530,13 @@ pub(super) async fn handle_dashboard(
                     )
                         as Arc<dyn crate::dashboard::DashboardGitCorrelationReadPortV1>
                 });
+            let delivery_read_authority = daemon_invocation_service.map(|service| {
+                let adapter = super::dashboard_delivery::DashboardDeliveryReadAdapter::new(
+                    service,
+                    retained_cg.project_root().to_path_buf(),
+                );
+                Arc::new(adapter) as Arc<dyn crate::dashboard::DashboardDeliveryReadPortV1>
+            });
             crate::hooks::install_dashboard_hook_readiness_projection()?;
             let state = build_state_with_automation_reconciler(
                 retained_cg.clone(),
@@ -540,6 +547,7 @@ pub(super) async fn handle_dashboard(
                     registered_project_session_db,
                     lcm_read_authority,
                     git_correlation_read_authority,
+                    delivery_read_authority,
                     registered_savings_db,
                     automation_scheduler_reconciler,
                     automation_authority,

@@ -406,11 +406,75 @@ pub(crate) struct ProjectRuntimeAlreadyRegistered;
 #[derive(Clone)]
 pub(crate) struct RegisteredAdvisoryRuntimeV1 {
     _owner: Arc<dyn Any + Send + Sync>,
+    delivery_read: Option<RegisteredDeliveryReadAuthorityV1>,
 }
 
 impl RegisteredAdvisoryRuntimeV1 {
-    pub(crate) fn new(owner: Arc<dyn Any + Send + Sync>) -> Self {
-        Self { _owner: owner }
+    pub(crate) fn new(
+        owner: Arc<dyn Any + Send + Sync>,
+        delivery_read: Option<RegisteredDeliveryReadAuthorityV1>,
+    ) -> Self {
+        Self {
+            _owner: owner,
+            delivery_read,
+        }
+    }
+
+    pub(crate) fn delivery_read(&self) -> Option<RegisteredDeliveryReadAuthorityV1> {
+        self.delivery_read.clone()
+    }
+}
+
+/// Exact project Delivery authority retained for the advisory runtime's whole
+/// published lifetime. Request admission is refreshed from current
+/// configuration instead of retaining project-open's bounded grant snapshot.
+#[derive(Clone)]
+pub(crate) struct RegisteredDeliveryReadAuthorityV1 {
+    project_root: PathBuf,
+    scope: tracedecay_application::ResolvedScope,
+    configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+    handle: tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1,
+}
+
+impl RegisteredDeliveryReadAuthorityV1 {
+    pub(crate) fn new(
+        project_root: PathBuf,
+        scope: tracedecay_application::ResolvedScope,
+        configuration: Arc<tracedecay_usecases::configuration::ProjectConfigurationRuntime>,
+        handle: tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1,
+    ) -> Self {
+        Self {
+            project_root,
+            scope,
+            configuration,
+            handle,
+        }
+    }
+
+    pub(crate) fn scope(&self) -> &tracedecay_application::ResolvedScope {
+        &self.scope
+    }
+
+    pub(crate) fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    pub(crate) fn handle(&self) -> tracedecay_usecases::delivery::ProjectDeliveryReadHandleV1 {
+        Arc::clone(&self.handle)
+    }
+
+    pub(crate) async fn source_access_at(
+        &self,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Option<tracedecay_usecases::source_authorization::ProjectSourceAccessSnapshot> {
+        let current = self.configuration.client().current().await.ok()?;
+        crate::daemon::project_open_owners::daemon_owned_project_source_access_at(
+            &self.scope,
+            &self.project_root,
+            &current,
+            observed_at,
+        )
+        .ok()
     }
 }
 

@@ -17,6 +17,7 @@ mod application_surface;
 pub mod ast_grep_search;
 mod automation_runs;
 pub mod dashboard;
+mod dashboard_delivery;
 mod dashboard_git_correlation;
 // Only reached by the test-transport dashboard git-correlation fixture
 // (`dashboard::dashboard_git_correlation_read_authority_for_test`); gate it

@@ -41,6 +41,10 @@ use tracedecay_usecases::advisory::{
     unregister_advisory_hook_notice_queue,
 };
 use tracedecay_usecases::context::MonotonicDeadline;
+use tracedecay_usecases::delivery::{
+    ProjectDeliveryReadAuthorityOpenOutcomeV1, ProjectDeliveryReadOpenV1,
+    open_project_delivery_read_authority_v1,
+};
 use tracedecay_usecases::feedback::{
     FeedbackCycleLspInput, FeedbackCycleRuntime, ProductionFeedbackCycleAuthorizationFuture,
     ProductionFeedbackCycleAuthorizationPort, ProductionFeedbackCycleOpenV1,
@@ -58,6 +62,7 @@ use crate::daemon::service::invocation::{
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
     advisory_cycle_invocation_result, daemon_operation_event_authority,
 };
+use crate::daemon::service::project_runtime::RegisteredDeliveryReadAuthorityV1;
 use crate::errors::{Result, TraceDecayError};
 
 mod deferred;
@@ -505,6 +510,26 @@ async fn register_production_advisory_owner(
     let remote =
         resolve_production_github_provider_config(invocation, project_root, state, &feedback_scope)
             .await;
+    let delivery_read = remote.as_ref().and_then(|remote| {
+        match open_project_delivery_read_authority_v1(ProjectDeliveryReadOpenV1 {
+            database: state.database.clone(),
+            profile_id: state.session_db.binding().shard_id.profile_id.clone(),
+            resolved_scope: state.scope.clone(),
+            feedback_scope: feedback_scope.clone(),
+            github_target: remote.target.clone(),
+            github_http: remote.http.clone(),
+        }) {
+            ProjectDeliveryReadAuthorityOpenOutcomeV1::Ready(handle) => {
+                Some(RegisteredDeliveryReadAuthorityV1::new(
+                    project_root.to_path_buf(),
+                    state.scope.clone(),
+                    Arc::clone(state.graph.configuration_runtime()),
+                    handle,
+                ))
+            }
+            ProjectDeliveryReadAuthorityOpenOutcomeV1::Unavailable => None,
+        }
+    });
     let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
         (remote.github, Some(remote.github_source_access), remote.ci)
     });
@@ -592,6 +617,7 @@ async fn register_production_advisory_owner(
         .publish(
             project_root,
             published_registration,
+            delivery_read,
             invocation_owner,
             advisory_cycle as Arc<dyn FeedbackCycleRuntimePort>,
         )
@@ -602,6 +628,8 @@ async fn register_production_advisory_owner(
 }
 
 struct ProductionGitHubProviderConfigV1 {
+    target: GitHubCiRepositoryTargetV1,
+    http: GitHubHttpReadConfigV1,
     github: Option<GitHubReviewRuntimeOwnerConfigV1>,
     github_source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
     ci: Option<ProductionCiProviderConfigV1>,
@@ -645,6 +673,11 @@ async fn resolve_production_github_provider_config(
     )?);
     let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = configured_source_access.clone();
     let ci_source_access: Arc<dyn CiSourceAccessAuthorityV1> = configured_source_access;
+    let target = GitHubCiRepositoryTargetV1 {
+        owner: owner.clone(),
+        repository: repository.clone(),
+    };
+    let http = GitHubHttpReadConfigV1::default();
     let ci = if credential.permits(GitHubReadPermissionV1::Actions)
         && credential.permits(GitHubReadPermissionV1::Checks)
     {
@@ -654,12 +687,9 @@ async fn resolve_production_github_provider_config(
                 parser_id: "parser.github-actions.v1".to_owned(),
                 parser_version: "1".to_owned(),
             },
-            target: GitHubCiRepositoryTargetV1 {
-                owner: owner.clone(),
-                repository: repository.clone(),
-            },
+            target: target.clone(),
             credential: credential.clone(),
-            http: GitHubHttpReadConfigV1::default(),
+            http: http.clone(),
             source_access: ci_source_access,
         })
     } else {
@@ -717,6 +747,8 @@ async fn resolve_production_github_provider_config(
         _ => None,
     };
     Some(ProductionGitHubProviderConfigV1 {
+        target,
+        http,
         github,
         github_source_access: source_access,
         ci,
