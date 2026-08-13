@@ -15,7 +15,8 @@ use super::backend::{
 use super::config::AutomationConfig;
 use super::lifecycle::{
     AgentTaskRunContext, AutomationCommittedReceipt, AutomationRunControl, AutomationRunError,
-    AutomationRunResult, SchedulerGate, failed_backend_fallback_report,
+    AutomationRunLedgerPublication, AutomationRunResult, AutomationRunSettlementGuard,
+    RetainedAutomationRun, SchedulerGate, failed_backend_fallback_report,
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::errors::{Result, TraceDecayError};
@@ -87,15 +88,47 @@ pub async fn run_memory_curator_with_backend(
     run_control: &AutomationRunControl,
 ) -> AutomationRunResult<MemoryCuratorAutomationRun> {
     let sessions_db = super::runner::project_automation_sessions(cg).await?;
-    run_memory_curator_for_store(
+    run_memory_curator_for_store_with_publication(
         MemoryCuratorStore::Project { cg, sessions_db },
         config,
         configuration_revision_id,
         backend,
         options,
         run_control,
+        AutomationRunLedgerPublication::Immediate,
+        None,
     )
     .await
+}
+
+/// Runs one admitted retained Memory Curator effect without publishing its
+/// ledger terminal before the daemon accepts the outer application terminal.
+pub async fn run_memory_curator_with_backend_for_retained_settlement(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
+    backend: &dyn AgentTaskBackend,
+    options: MemoryCuratorAutomationOptions,
+    run_control: &AutomationRunControl,
+) -> RetainedAutomationRun<MemoryCuratorAutomationRun> {
+    let settlement_guard = AutomationRunSettlementGuard::new();
+    let result = match super::runner::project_automation_sessions(cg).await {
+        Ok(sessions_db) => {
+            run_memory_curator_for_store_with_publication(
+                MemoryCuratorStore::Project { cg, sessions_db },
+                config,
+                configuration_revision_id,
+                backend,
+                options,
+                run_control,
+                AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
+                Some(&settlement_guard),
+            )
+            .await
+        }
+        Err(error) => Err(error.into()),
+    };
+    RetainedAutomationRun::new(result, settlement_guard)
 }
 
 /// Runs autonomous curation against profile-level user memory.
@@ -109,7 +142,7 @@ pub(crate) async fn run_user_memory_curator_with_backend(
     run_control: &AutomationRunControl,
 ) -> AutomationRunResult<MemoryCuratorAutomationRun> {
     let sessions_db = session_registry.profile_sessions().await?;
-    run_memory_curator_for_store(
+    run_memory_curator_for_store_with_publication(
         MemoryCuratorStore::User {
             profile_root,
             runtime: session_registry.as_ref(),
@@ -120,6 +153,8 @@ pub(crate) async fn run_user_memory_curator_with_backend(
         backend,
         options,
         run_control,
+        AutomationRunLedgerPublication::Immediate,
+        None,
     )
     .await
 }
@@ -194,13 +229,15 @@ impl MemoryCuratorStore<'_> {
     }
 }
 
-async fn run_memory_curator_for_store(
+async fn run_memory_curator_for_store_with_publication(
     store: MemoryCuratorStore<'_>,
     config: &AutomationConfig,
     configuration_revision_id: &ConfigurationRevisionId,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
     run_control: &AutomationRunControl,
+    ledger_publication: AutomationRunLedgerPublication,
+    settlement_guard: Option<&AutomationRunSettlementGuard>,
 ) -> AutomationRunResult<MemoryCuratorAutomationRun> {
     let curation_authority = store.curation_authority(configuration_revision_id)?;
     let sessions_db = store.sessions_db();
@@ -212,7 +249,9 @@ async fn run_memory_curator_for_store(
         options.trigger,
         config,
         AgentTaskKind::MemoryCurator,
-    );
+    )
+    .with_ledger_publication(ledger_publication)
+    .with_settlement_guard(settlement_guard);
     let fact_review_limit = options.fact_review_limit.clamp(1, 1_000);
     if !options.min_confidence.is_finite() {
         return Err(TraceDecayError::Config {
@@ -312,7 +351,7 @@ async fn run_memory_curator_for_store(
                 message: "memory curator validation repair budget exhausted; output quarantined"
                     .to_string(),
             };
-            finalizer
+            let ledger_record = finalizer
                 .append_failed_record(
                     response.model.clone(),
                     evidence_hash,
@@ -321,7 +360,10 @@ async fn run_memory_curator_for_store(
                     &retry_report,
                 )
                 .await?;
-            return Err(error.into());
+            return Err(AutomationRunError::RecordedFailure {
+                error,
+                ledger_record,
+            });
         }
 
         let repair_request = AgentTaskRequest::new(
@@ -349,7 +391,7 @@ async fn run_memory_curator_for_store(
             Ok(response) => response,
             Err(error) => {
                 retry_report.append(repair_retry_report);
-                finalizer
+                let ledger_record = finalizer
                     .append_failed_record(
                         None,
                         evidence_hash,
@@ -358,7 +400,10 @@ async fn run_memory_curator_for_store(
                         &retry_report,
                     )
                     .await?;
-                return Err(error.into());
+                return Err(AutomationRunError::RecordedFailure {
+                    error,
+                    ledger_record,
+                });
             }
         };
         retry_report.append(repair_retry_report);
@@ -392,7 +437,7 @@ async fn run_memory_curator_for_store(
         let (settled_count, mutation_count, receipts, committed_receipt) = match result {
             Ok(result) => result,
             Err(MemoryCurationApplyFailure::Application(error)) => {
-                finalizer
+                let ledger_record = finalizer
                     .append_failed_record(
                         response.model.clone(),
                         evidence_hash,
@@ -401,7 +446,10 @@ async fn run_memory_curator_for_store(
                         &retry_report,
                     )
                     .await?;
-                return Err(error.into());
+                return Err(AutomationRunError::RecordedFailure {
+                    error,
+                    ledger_record,
+                });
             }
             Err(MemoryCurationApplyFailure::Settled {
                 error,

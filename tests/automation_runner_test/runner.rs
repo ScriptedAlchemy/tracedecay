@@ -373,7 +373,7 @@ async fn scheduler_memory_curator_ledgers_active_lock_skip() {
 }
 
 #[tokio::test]
-async fn manual_memory_curator_run_ignores_scheduler_lock() {
+async fn manual_memory_curator_ledgers_active_lock_skip() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
     seed_duplicate_facts(&cg).await;
@@ -407,7 +407,15 @@ async fn manual_memory_curator_run_ignores_scheduler_lock() {
     .await
     .unwrap();
 
-    assert_eq!(backend.calls(), 1);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
+    assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
+    assert_eq!(
+        run.ledger_record.error.as_deref(),
+        Some("scheduler_lock_active")
+    );
     assert!(lock_path.exists());
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(records, vec![run.ledger_record]);
 }

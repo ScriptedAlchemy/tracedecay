@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tracedecay_agent_hosts::automation::run_ledger::{
-    AutomationRunLedgerRecord, AutomationRunStatus,
+    AutomationRunLedgerRecord, AutomationRunStatus, canonical_record_completion_micros,
 };
 use tracedecay_domain::{
     AutomationFunnelObservedV1, AutomationTerminalV1, CoverageStateV1, ObservedTernaryV1,
@@ -22,16 +22,8 @@ fn automation_funnel_observation_from_record(
     if record.run_id.is_empty() {
         return Err("missing_run_id");
     }
-    let completed_at_seconds = record
-        .completed_at
-        .parse::<i64>()
-        .map_err(|_| "invalid_completed_at")?;
-    let observed_at = UtcMicros(match record.completed_at_micros {
-        Some(completed_at_micros) => completed_at_micros,
-        None => completed_at_seconds
-            .checked_mul(1_000_000)
-            .ok_or("invalid_completed_at")?,
-    });
+    let observed_at =
+        UtcMicros(canonical_record_completion_micros(record).map_err(|_| "invalid_completed_at")?);
     let terminal = match record.status {
         AutomationRunStatus::Succeeded => AutomationTerminalV1::Succeeded,
         AutomationRunStatus::Failed => AutomationTerminalV1::Failed,
@@ -148,26 +140,6 @@ fn record_run_with_producer(
             ("surface", surface.to_owned()),
             ("outcome", outcome.to_owned()),
         ],
-    );
-}
-
-pub(super) fn record_combined_scheduler_run(
-    engine: &DaemonEngine,
-    project_id: &ProjectId,
-    project_path: &Path,
-    run: &tracedecay_agent_hosts::automation::runner::CombinedReviewAutomationRun,
-) {
-    record_scheduler_run(
-        engine,
-        project_id,
-        project_path,
-        &run.session_reflector.ledger_record,
-    );
-    record_scheduler_run(
-        engine,
-        project_id,
-        project_path,
-        &run.skill_writer.ledger_record,
     );
 }
 
@@ -288,13 +260,34 @@ mod tests {
     }
 
     #[test]
-    fn invalid_ledger_completion_time_is_rejected_instead_of_retimed() {
+    fn schema_v2_rfc3339_completion_time_is_rejected_instead_of_retimed() {
         let mut record = ledger_record(AutomationRunStatus::Succeeded);
-        record.completed_at = "not-a-timestamp".to_owned();
+        record.completed_at = "1970-01-01T00:00:01Z".to_owned();
+        record.completed_at_micros = Some(1_000_000);
 
         assert_eq!(
             automation_funnel_observation_from_record(&record),
             Err("invalid_completed_at")
         );
+    }
+
+    #[test]
+    fn legacy_reused_scheduler_skip_keeps_its_exact_rfc3339_observation_time() {
+        let mut record = ledger_record(AutomationRunStatus::Skipped);
+        record.schema_version = 1;
+        record.run_id = "legacy-reused-scheduler-skip".to_owned();
+        record.started_at = "1970-01-01T00:00:00Z".to_owned();
+        record.completed_at = "1970-01-01T00:00:01.123456Z".to_owned();
+        record.completed_at_micros = None;
+        record.error = Some("scheduler_interval_not_elapsed".to_owned());
+
+        // Reused scheduler skips pass their exact prior row through this same
+        // mapper after durable abandonment; no second timestamp path exists.
+        let (observation, observed_at) =
+            automation_funnel_observation_from_record(&record).expect("valid legacy exact row");
+
+        assert_eq!(observed_at, UtcMicros(1_123_456));
+        assert_eq!(observation.run_ref, "legacy-reused-scheduler-skip");
+        assert_eq!(observation.terminal, AutomationTerminalV1::Skipped);
     }
 }

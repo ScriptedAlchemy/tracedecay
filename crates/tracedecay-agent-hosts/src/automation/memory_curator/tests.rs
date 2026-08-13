@@ -14,6 +14,13 @@ where
     T::try_from(value.to_owned()).unwrap()
 }
 
+fn assert_send_static<T: Send + 'static>() {}
+
+#[test]
+fn retained_memory_curator_run_is_send_and_static() {
+    assert_send_static::<RetainedAutomationRun<MemoryCuratorAutomationRun>>();
+}
+
 fn settled_curation_receipt() -> ProjectMemoryFactCurationReceiptV1 {
     let owner = FactOwnerV1::Profile;
     let operation_id = domain_id::<ProvenanceId>("operation.curator.settled");

@@ -247,6 +247,18 @@ fn terminal_shipped_sidecar() -> serde_json::Value {
     sidecar
 }
 
+fn write_private_file(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(windows)]
+    drop(tracedecay_runtime_core::windows_security::make_private_file(path).unwrap());
+}
+
 #[tokio::test]
 async fn shipped_pending_proposals_require_reset_without_mutation_or_archive() {
     let temp = tempfile::tempdir().unwrap();
@@ -265,7 +277,7 @@ async fn shipped_pending_proposals_require_reset_without_mutation_or_archive() {
         serde_json::json!("automatic-fact-test")
     );
     assert!(shipped_request.get("source_label").is_none());
-    tokio::fs::write(&source_path, &source_bytes).await.unwrap();
+    write_private_file(&source_path, &source_bytes);
     let db = database(
         &temp.path().join("memory.db"),
         TestDatabaseRuntimeMode::Initialize,
@@ -300,7 +312,7 @@ async fn shipped_pending_record_without_request_still_requires_reset_without_eff
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
     let source_path = dashboard_root.join("fact_proposals.json");
     let source_bytes = serde_json::to_vec(&shipped_sidecar(None)).unwrap();
-    tokio::fs::write(&source_path, &source_bytes).await.unwrap();
+    write_private_file(&source_path, &source_bytes);
     let db = database(
         &temp.path().join("memory.db"),
         TestDatabaseRuntimeMode::Initialize,
@@ -329,7 +341,7 @@ async fn terminal_shipped_records_are_classified_without_mutation() {
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
     let source_path = dashboard_root.join("fact_proposals.json");
     let source_bytes = serde_json::to_vec_pretty(&terminal_shipped_sidecar()).unwrap();
-    tokio::fs::write(&source_path, &source_bytes).await.unwrap();
+    write_private_file(&source_path, &source_bytes);
     let db = database(
         &temp.path().join("memory.db"),
         TestDatabaseRuntimeMode::Initialize,
@@ -348,6 +360,147 @@ async fn terminal_shipped_records_are_classified_without_mutation() {
     assert_eq!(tokio::fs::read(&source_path).await.unwrap(), source_bytes);
     assert_eq!(canonical_fact_count(&memory, &run_control).await, 0);
     assert!(!dashboard_root.join("fact_proposals.archive").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shipped_sidecar_symlink_is_rejected_without_reading_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    std::fs::create_dir_all(&dashboard_root).unwrap();
+    let target_path = temp.path().join("private-terminal-target.json");
+    let target_bytes = serde_json::to_vec(&terminal_shipped_sidecar()).unwrap();
+    write_private_file(&target_path, &target_bytes);
+    let source_path = dashboard_root.join("fact_proposals.json");
+    symlink(&target_path, &source_path).unwrap();
+
+    let error = inspect_shipped_fact_proposals(&dashboard_root)
+        .await
+        .expect_err("the shipped source must never follow a symbolic link");
+
+    assert!(error.to_string().contains("failed to open"));
+    assert_eq!(std::fs::read(&target_path).unwrap(), target_bytes);
+    assert!(
+        std::fs::symlink_metadata(&source_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[tokio::test]
+async fn nonregular_shipped_sidecar_is_rejected_before_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    std::fs::create_dir_all(&dashboard_root).unwrap();
+    let source_path = dashboard_root.join("fact_proposals.json");
+    std::fs::create_dir(&source_path).unwrap();
+
+    let error = inspect_shipped_fact_proposals(&dashboard_root)
+        .await
+        .expect_err("a directory cannot become shipped proposal bytes");
+
+    assert!(error.to_string().contains("failed to open"));
+    assert!(std::fs::metadata(source_path).unwrap().is_dir());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shipped_sidecar_requires_exact_unix_private_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    std::fs::create_dir_all(&dashboard_root).unwrap();
+    let source_path = dashboard_root.join("fact_proposals.json");
+    let source_bytes = serde_json::to_vec(&terminal_shipped_sidecar()).unwrap();
+    write_private_file(&source_path, &source_bytes);
+    std::fs::set_permissions(&source_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+    let error = inspect_shipped_fact_proposals(&dashboard_root)
+        .await
+        .expect_err("a group-readable shipped sidecar must fail closed");
+
+    assert!(error.to_string().contains("not private"));
+    assert_eq!(std::fs::read(source_path).unwrap(), source_bytes);
+}
+
+#[tokio::test]
+async fn oversized_sparse_shipped_sidecar_is_rejected_before_allocation() {
+    let temp = tempfile::tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    std::fs::create_dir_all(&dashboard_root).unwrap();
+    let source_path = dashboard_root.join("fact_proposals.json");
+    write_private_file(&source_path, b"");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source_path)
+        .unwrap()
+        .set_len(MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64 + 1)
+        .unwrap();
+
+    let error = inspect_shipped_fact_proposals(&dashboard_root)
+        .await
+        .expect_err("an oversized sparse legacy sidecar must fail closed");
+
+    assert!(error.to_string().contains("byte limit"));
+    assert_eq!(
+        std::fs::metadata(source_path).unwrap().len(),
+        MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64 + 1
+    );
+}
+
+#[test]
+fn shipped_sidecar_growth_after_metadata_is_rejected_by_bounded_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_path = temp.path().join("fact_proposals.json");
+    write_private_file(&source_path, b"bounded");
+    let file = open_shipped_fact_proposal_file(&source_path).unwrap();
+    let initial = file.metadata().unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source_path)
+        .unwrap()
+        .set_len(MAX_SHIPPED_FACT_PROPOSAL_BYTES as u64 + 1)
+        .unwrap();
+
+    let error = read_opened_shipped_fact_proposal_bytes(&source_path, file, initial)
+        .expect_err("growth after the initial metadata check must hit the bounded sentinel");
+
+    assert!(error.to_string().contains("grew beyond"));
+}
+
+#[tokio::test]
+async fn exact_maximum_shipped_sidecar_remains_a_valid_terminal_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let dashboard_root = temp.path().join("dashboard");
+    std::fs::create_dir_all(&dashboard_root).unwrap();
+    let source_path = dashboard_root.join("fact_proposals.json");
+    let mut sidecar = terminal_shipped_sidecar();
+    sidecar["proposals"][0]["proposal"]["bounded_padding"] = serde_json::json!("");
+    let base = serde_json::to_vec(&sidecar).unwrap();
+    assert!(base.len() < MAX_SHIPPED_FACT_PROPOSAL_BYTES);
+    sidecar["proposals"][0]["proposal"]["bounded_padding"] =
+        serde_json::json!("x".repeat(MAX_SHIPPED_FACT_PROPOSAL_BYTES - base.len()));
+    let source_bytes = serde_json::to_vec(&sidecar).unwrap();
+    assert_eq!(source_bytes.len(), MAX_SHIPPED_FACT_PROPOSAL_BYTES);
+    write_private_file(&source_path, &source_bytes);
+
+    let disposition = inspect_shipped_fact_proposals(&dashboard_root)
+        .await
+        .expect("the exact byte ceiling remains admitted");
+
+    let ShippedFactProposalDisposition::TerminalHistory {
+        source_bytes: observed,
+        ..
+    } = disposition
+    else {
+        panic!("the bounded terminal sidecar must remain terminal history")
+    };
+    assert_eq!(observed.len(), MAX_SHIPPED_FACT_PROPOSAL_BYTES);
+    assert_eq!(observed, source_bytes);
 }
 
 #[tokio::test]
@@ -716,7 +869,7 @@ async fn terminal_sidecar_never_touches_an_existing_archive_path() {
     tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
     let source_path = dashboard_root.join("fact_proposals.json");
     let source_bytes = serde_json::to_vec(&terminal_shipped_sidecar()).unwrap();
-    tokio::fs::write(&source_path, &source_bytes).await.unwrap();
+    write_private_file(&source_path, &source_bytes);
     let archive_blocker = dashboard_root.join("fact_proposals.archive");
     tokio::fs::write(&archive_blocker, b"not a directory")
         .await

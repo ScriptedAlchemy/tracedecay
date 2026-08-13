@@ -5,10 +5,10 @@ use tracedecay_agent_hosts::automation::backend::AgentTaskKind;
 
 use super::super::{DaemonEngine, DaemonHandshake, log_daemon_event};
 use super::{
-    automation_scheduler_has_work, effective_automation_config_for_project,
-    log_scheduler_automation_replay, log_scheduler_task_error, log_scheduler_task_start,
-    maybe_run_global_retention, record_scheduler_run, run_user_jobs_scheduler_pass,
-    settle_scheduler_automation_error,
+    automation_scheduler_has_work, await_scheduler_automation_problem,
+    effective_automation_config_for_project, log_scheduler_automation_replay,
+    log_scheduler_task_error, log_scheduler_task_start, maybe_run_global_retention,
+    run_user_jobs_scheduler_pass, scheduler_run_observer,
 };
 use crate::daemon::automation_effect::AutomationEffectAdmission;
 use crate::errors::{Result, TraceDecayError};
@@ -126,6 +126,37 @@ pub(super) fn synchronize_scheduler_effect_control(run_control: &AutomationRunCo
     run_control.read_control().interrupted();
 }
 
+pub(super) async fn abandon_reused_scheduler_skip(
+    engine: &DaemonEngine,
+    project_id: &tracedecay_domain::ProjectId,
+    project_path: &Path,
+    task: AgentTaskKind,
+    run_control: &AutomationRunControl,
+    effect: crate::daemon::automation_effect::AutomationEffectAuthority,
+    reused: tracedecay_agent_hosts::automation::runner::ReusedSchedulerSkip,
+    settlement_guard: tracedecay_agent_hosts::automation::runner::AutomationRunSettlementGuard,
+) -> Option<TraceDecayError> {
+    synchronize_scheduler_effect_control(run_control);
+    let settlement = match effect.start_reused_scheduler_skip_abandonment_observed(
+        reused,
+        settlement_guard,
+        Some(scheduler_run_observer(engine, project_id, project_path)),
+    ) {
+        Ok(settlement) => settlement,
+        Err(error) => {
+            log_scheduler_task_error(project_path, task, &error);
+            return Some((*error).into_error());
+        }
+    };
+    match settlement.wait().await {
+        Ok(_) => None,
+        Err(error) => {
+            log_scheduler_task_error(project_path, task, &error);
+            Some(error)
+        }
+    }
+}
+
 pub(in crate::daemon) async fn run_automation_scheduler_tick(
     project_path: &Path,
     cg: &TraceDecay,
@@ -137,10 +168,11 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
     use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
     use tracedecay_agent_hosts::automation::runner::{
         CombinedReviewAutomationOptions, MemoryCuratorAutomationOptions,
-        SessionReflectorAutomationOptions, SkillWriterAutomationOptions,
-        registered_project_automation_retrieval, run_memory_curator_with_backend,
-        run_session_reflector_with_backend_and_retrieval,
-        run_skill_writer_with_backend_and_retrieval,
+        RetainedAutomationSettlementDisposition, SessionReflectorAutomationOptions,
+        SkillWriterAutomationOptions, registered_project_automation_retrieval,
+        run_memory_curator_with_backend_for_retained_settlement,
+        run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
+        run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
     };
 
     let control = tracedecay_agent_hosts::automation::scheduler::load_scheduler_control(
@@ -248,7 +280,7 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
             AutomationEffectAdmission::Execute(effect) => {
                 let mut options = memory_curator_options;
                 options.run_id = Some(run_id);
-                match run_memory_curator_with_backend(
+                let retained_run = run_memory_curator_with_backend_for_retained_settlement(
                     cg,
                     config,
                     &configuration.configuration_revision_id,
@@ -256,39 +288,61 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                     options,
                     &effect_run_control,
                 )
-                .await
-                {
-                    Ok(run) => {
+                .await;
+                match retained_run.into_settlement_disposition() {
+                    RetainedAutomationSettlementDisposition::Current {
+                        result: Ok(run),
+                        settlement_guard,
+                    } => {
                         synchronize_scheduler_effect_control(&effect_run_control);
-                        match effect
-                            .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
-                            .await
-                        {
-                            Ok(_) => record_scheduler_run(
-                                engine,
-                                &project_id,
+                        let settlement = effect.start_deferred_run_settlement_observed(
+                            run.ledger_record,
+                            run.committed_receipt,
+                            settlement_guard,
+                            Some(scheduler_run_observer(engine, &project_id, project_path)),
+                        );
+                        if let Err(error) = settlement.wait().await {
+                            log_scheduler_task_error(
                                 project_path,
-                                &run.ledger_record,
-                            ),
-                            Err(error) => {
-                                log_scheduler_task_error(
-                                    project_path,
-                                    AgentTaskKind::MemoryCurator,
-                                    &error,
-                                );
-                                first_error.get_or_insert(error);
-                            }
+                                AgentTaskKind::MemoryCurator,
+                                &error,
+                            );
+                            first_error.get_or_insert(error);
                         }
                     }
-                    Err(error) => {
-                        if let Some(error) = settle_scheduler_automation_error(
+                    RetainedAutomationSettlementDisposition::Current {
+                        result: Err(error),
+                        settlement_guard,
+                    } => {
+                        synchronize_scheduler_effect_control(&effect_run_control);
+                        let settlement = effect.start_deferred_problem_settlement_observed(
+                            error,
+                            settlement_guard,
+                            Some(scheduler_run_observer(engine, &project_id, project_path)),
+                        );
+                        if let Some(error) = await_scheduler_automation_problem(
+                            project_path,
+                            AgentTaskKind::MemoryCurator,
+                            settlement,
+                        )
+                        .await
+                        {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                    RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
+                        reused,
+                        settlement_guard,
+                    } => {
+                        if let Some(error) = abandon_reused_scheduler_skip(
                             engine,
                             &project_id,
                             project_path,
                             AgentTaskKind::MemoryCurator,
                             &effect_run_control,
                             effect,
-                            error,
+                            reused,
+                            settlement_guard,
                         )
                         .await
                         {
@@ -397,51 +451,74 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
                 );
             }
             Ok((AutomationEffectAdmission::Execute(effect), run_id, effect_run_control)) => {
-                match run_session_reflector_with_backend_and_retrieval(
-                    cg,
-                    config,
-                    &effect_run_control,
-                    &configuration.configuration_revision_id,
-                    &backend,
-                    retrieval.as_ref(),
-                    SessionReflectorAutomationOptions {
-                        run_id: Some(run_id),
-                        ..session_options
-                    },
-                )
-                .await
-                {
-                    Ok(run) => {
+                let retained_run =
+                    run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
+                        cg,
+                        config,
+                        &effect_run_control,
+                        &configuration.configuration_revision_id,
+                        &backend,
+                        retrieval.as_ref(),
+                        SessionReflectorAutomationOptions {
+                            run_id: Some(run_id),
+                            ..session_options
+                        },
+                    )
+                    .await;
+                match retained_run.into_settlement_disposition() {
+                    RetainedAutomationSettlementDisposition::Current {
+                        result: Ok(run),
+                        settlement_guard,
+                    } => {
                         synchronize_scheduler_effect_control(&effect_run_control);
-                        match effect
-                            .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
-                            .await
-                        {
-                            Ok(_) => record_scheduler_run(
-                                engine,
-                                &project_id,
+                        let settlement = effect.start_deferred_run_settlement_observed(
+                            run.ledger_record,
+                            run.committed_receipt,
+                            settlement_guard,
+                            Some(scheduler_run_observer(engine, &project_id, project_path)),
+                        );
+                        if let Err(error) = settlement.wait().await {
+                            log_scheduler_task_error(
                                 project_path,
-                                &run.ledger_record,
-                            ),
-                            Err(error) => {
-                                log_scheduler_task_error(
-                                    project_path,
-                                    AgentTaskKind::SessionReflector,
-                                    &error,
-                                );
-                                first_error.get_or_insert(error);
-                            }
+                                AgentTaskKind::SessionReflector,
+                                &error,
+                            );
+                            first_error.get_or_insert(error);
                         }
                     }
-                    Err(error) => {
-                        if let Some(error) = settle_scheduler_automation_error(
+                    RetainedAutomationSettlementDisposition::Current {
+                        result: Err(error),
+                        settlement_guard,
+                    } => {
+                        synchronize_scheduler_effect_control(&effect_run_control);
+                        let settlement = effect.start_deferred_problem_settlement_observed(
+                            error,
+                            settlement_guard,
+                            Some(scheduler_run_observer(engine, &project_id, project_path)),
+                        );
+                        if let Some(error) = await_scheduler_automation_problem(
+                            project_path,
+                            AgentTaskKind::SessionReflector,
+                            settlement,
+                        )
+                        .await
+                        {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                    RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
+                        reused,
+                        settlement_guard,
+                    } => {
+                        if let Some(error) = abandon_reused_scheduler_skip(
                             engine,
                             &project_id,
                             project_path,
                             AgentTaskKind::SessionReflector,
                             &effect_run_control,
                             effect,
-                            error,
+                            reused,
+                            settlement_guard,
                         )
                         .await
                         {
@@ -495,42 +572,65 @@ pub(in crate::daemon) async fn run_automation_scheduler_tick(
             Ok((AutomationEffectAdmission::Execute(effect), run_id, effect_run_control)) => {
                 let mut options = skill_options;
                 options.run_id = Some(run_id);
-                match run_skill_writer_with_backend_and_retrieval(
-                    cg,
-                    config,
-                    &configuration.configuration_revision_id,
-                    &backend,
-                    retrieval.as_ref(),
-                    options,
-                )
-                .await
-                {
-                    Ok(run) => {
+                let retained_run =
+                    run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+                        cg,
+                        config,
+                        &configuration.configuration_revision_id,
+                        &backend,
+                        retrieval.as_ref(),
+                        options,
+                    )
+                    .await;
+                match retained_run.into_settlement_disposition() {
+                    RetainedAutomationSettlementDisposition::Current {
+                        result: Ok(run),
+                        settlement_guard,
+                    } => {
                         synchronize_scheduler_effect_control(&effect_run_control);
-                        match effect
-                            .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
-                            .await
-                        {
-                            Ok(_) => record_scheduler_run(
-                                engine,
-                                &project_id,
-                                project_path,
-                                &run.ledger_record,
-                            ),
-                            Err(error) => {
-                                first_error.get_or_insert(error);
-                            }
+                        let settlement = effect.start_deferred_run_settlement_observed(
+                            run.ledger_record,
+                            run.committed_receipt,
+                            settlement_guard,
+                            Some(scheduler_run_observer(engine, &project_id, project_path)),
+                        );
+                        if let Err(error) = settlement.wait().await {
+                            first_error.get_or_insert(error);
                         }
                     }
-                    Err(error) => {
-                        if let Some(error) = settle_scheduler_automation_error(
+                    RetainedAutomationSettlementDisposition::Current {
+                        result: Err(error),
+                        settlement_guard,
+                    } => {
+                        synchronize_scheduler_effect_control(&effect_run_control);
+                        let settlement = effect.start_deferred_problem_settlement_observed(
+                            error,
+                            settlement_guard,
+                            Some(scheduler_run_observer(engine, &project_id, project_path)),
+                        );
+                        if let Some(error) = await_scheduler_automation_problem(
+                            project_path,
+                            AgentTaskKind::SkillWriter,
+                            settlement,
+                        )
+                        .await
+                        {
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                    RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
+                        reused,
+                        settlement_guard,
+                    } => {
+                        if let Some(error) = abandon_reused_scheduler_skip(
                             engine,
                             &project_id,
                             project_path,
                             AgentTaskKind::SkillWriter,
                             &effect_run_control,
                             effect,
-                            error,
+                            reused,
+                            settlement_guard,
                         )
                         .await
                         {

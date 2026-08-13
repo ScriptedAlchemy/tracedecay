@@ -1,5 +1,44 @@
 use crate::support::*;
 
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn retained_skill_writer_preserves_retrieval_and_defers_ledger_publication() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
+    let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
+    let backend = SkillJsonBackend::new(json!({"skills": []}));
+    let retained = tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+        &cg,
+        &enabled_skill_writer_config(),
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Dashboard,
+            run_id: Some("retained-skill-writer".to_owned()),
+            profile_root: Some(profile_root),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await;
+    let (result, guard) = retained.into_parts();
+    let run = result.unwrap();
+
+    assert_eq!(run.run_id, "retained-skill-writer");
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an admitted retained run must not publish ahead of outer settlement"
+    );
+    drop(guard);
+}
+
 #[test]
 fn skill_writer_options_have_no_storage_selector() {
     let options = serde_json::to_value(SkillWriterAutomationOptions::default()).unwrap();

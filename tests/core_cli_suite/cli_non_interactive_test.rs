@@ -56,6 +56,43 @@ fn profile_shard_root(home: &Path) -> PathBuf {
     profile_root(home).join("projects/proj_cli")
 }
 
+fn assert_automation_run_published_immediately(home: &Path, returned_run: &serde_json::Value) {
+    let returned_record = &returned_run["ledger_record"];
+    let run_id = returned_record["run_id"]
+        .as_str()
+        .expect("automation run should return its exact ledger identity");
+    let mut matching_records = Vec::new();
+    for entry in std::fs::read_dir(profile_root(home).join("projects"))
+        .expect("automation run should create the project store root")
+    {
+        let ledger_path = entry
+            .expect("project store entry should be readable")
+            .path()
+            .join("dashboard/automation_runs.jsonl");
+        if !ledger_path.is_file() {
+            continue;
+        }
+        let ledger = std::fs::read_to_string(&ledger_path)
+            .expect("automation run ledger should be readable after command completion");
+        for line in ledger.lines().filter(|line| !line.trim().is_empty()) {
+            let record: serde_json::Value = serde_json::from_str(line)
+                .expect("automation run ledger should contain valid JSONL records");
+            if record["run_id"] == run_id {
+                matching_records.push(record);
+            }
+        }
+    }
+    assert_eq!(
+        matching_records.len(),
+        1,
+        "standalone automation run {run_id} should publish exactly one immediate ledger terminal"
+    );
+    assert_eq!(
+        matching_records[0], *returned_record,
+        "published standalone terminal should exactly match the returned ledger record"
+    );
+}
+
 fn tracedecay_command_without_daemon(home: &std::path::Path, project: &std::path::Path) -> Command {
     let home = canonical_temp_path(home);
     let profile_root = profile_root(&home);
@@ -1109,6 +1146,7 @@ fn automation_run_session_reflection_skips_without_backend_when_disabled() {
     assert_eq!(payload["ledger_record"]["error"], "backend_disabled");
     assert_eq!(payload["report"]["reason"], "backend_disabled");
     assert!(payload.get("backend_response").is_none());
+    assert_automation_run_published_immediately(home.path(), &payload);
 }
 
 #[test]
@@ -1137,6 +1175,7 @@ fn automation_run_skill_writing_skips_without_backend_when_disabled() {
     assert_eq!(payload["ledger_record"]["error"], "backend_disabled");
     assert_eq!(payload["report"]["reason"], "backend_disabled");
     assert!(payload.get("backend_response").is_none());
+    assert_automation_run_published_immediately(home.path(), &payload);
 }
 
 #[test]

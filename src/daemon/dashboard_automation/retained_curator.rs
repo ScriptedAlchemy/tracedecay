@@ -8,7 +8,7 @@ use tracedecay_agent_hosts::automation::backend::CodexAppServerBackend;
 use tracedecay_agent_hosts::automation::config::from_configuration_snapshot;
 use tracedecay_agent_hosts::automation::run_ledger::AutomationTrigger;
 use tracedecay_agent_hosts::automation::runner::{
-    MemoryCuratorAutomationOptions, run_memory_curator_with_backend,
+    MemoryCuratorAutomationOptions, run_memory_curator_with_backend_for_retained_settlement,
 };
 use tracedecay_application::ApplicationOutcome;
 use tracedecay_application::now_micros;
@@ -82,7 +82,16 @@ pub(crate) async fn execute_retained_memory_curator(
         let deadline = context.request_context.deadline().clone();
         move || cancellation.is_cancelled() || deadline.is_elapsed_at(now_micros())
     }));
-    let run = match run_memory_curator_with_backend(
+    let observation_producer = crate::daemon::project_automation_observation_producer(
+        invocation_service,
+        cg.project_root(),
+    )
+    .await;
+    let project_root = cg.project_root().to_path_buf();
+    let observer = observation_producer.map(|producer| {
+        super::automation_run_observer(producer, project_root, "fact_store_curate")
+    });
+    let retained_run = run_memory_curator_with_backend_for_retained_settlement(
         cg,
         &config,
         &pinned.revision_id,
@@ -95,34 +104,33 @@ pub(crate) async fn execute_retained_memory_curator(
         },
         &control,
     )
-    .await
-    {
+    .await;
+    let (run, settlement_guard) = retained_run.into_parts();
+    let run = match run {
         Ok(run) => run,
         Err(error) => {
-            let problem = effect
-                .settle_problem(&error)
+            let waiter = effect.start_deferred_problem_settlement_observed(
+                error,
+                settlement_guard,
+                observer,
+            );
+            let (problem, _ledger_record) = waiter
+                .wait()
                 .await
                 .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
             return Err(automation_problem(problem));
         }
     };
-    let terminal = effect
-        .settle_run(&run.ledger_record, run.committed_receipt.as_ref())
+    let waiter = effect.start_deferred_run_settlement_observed(
+        run.ledger_record,
+        run.committed_receipt,
+        settlement_guard,
+        observer,
+    );
+    let (terminal, _ledger_record) = waiter
+        .wait()
         .await
         .map_err(|_| RetainedSurfaceExecutionErrorV1::Unavailable)?;
-    if let Some(producer) = crate::daemon::project_automation_observation_producer(
-        invocation_service,
-        cg.project_root(),
-    )
-    .await
-    {
-        crate::daemon::record_project_automation_run(
-            producer.as_ref(),
-            cg.project_root(),
-            &run.ledger_record,
-            "fact_store_curate",
-        );
-    }
     terminal.into_outcome().map_err(automation_problem)
 }
 

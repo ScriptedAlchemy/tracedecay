@@ -39,14 +39,73 @@ use super::retrieval::{
 use super::{
     AuthorizedAutomationSessionRetrieval, AutomationRunControl, AutomationSessionRetrieval,
     AutomationSessionRetrievalFuture, AutomationTemporalEvidence, AutomationTemporalEvidenceItem,
-    AutomationTemporalRetrieval, canonical_evidence_hash, combined_reflector_failure_projection,
-    combined_skill_failure_projection, validate_session_fact_candidates,
+    AutomationTemporalRetrieval, CombinedReviewDispatch, canonical_evidence_hash,
+    combined_asymmetric_failure, combined_reflector_failure_projection,
+    combined_skill_failure_projection, split_skill_runtime_failure,
+    validate_session_fact_candidates,
 };
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 use crate::ports::session_evidence::{LcmGrepSort, LcmScope};
 use crate::store::memory::DatabaseFactStore;
 
 mod early_gate;
+
+#[test]
+fn combined_skill_runtime_failure_preserves_both_error_causes() {
+    let runtime_error = crate::errors::TraceDecayError::Config {
+        message: "skill runtime failed".to_owned(),
+    };
+    let record_error = crate::errors::TraceDecayError::Config {
+        message: "skill failed-record publication failed".to_owned(),
+    };
+
+    let (record, error, record_error) =
+        split_skill_runtime_failure(runtime_error, Err(record_error));
+
+    assert!(record.is_none());
+    assert!(error.to_string().contains("skill runtime failed"));
+    assert!(
+        record_error
+            .expect("failed-record cause")
+            .to_string()
+            .contains("skill failed-record publication failed")
+    );
+}
+
+#[test]
+fn asymmetric_combined_failure_preserves_the_successful_sibling_record() {
+    let record = serde_json::from_value(json!({
+        "schema_version": 2,
+        "run_id": "combined-asymmetric",
+        "trigger": "scheduler",
+        "task": "session_reflector",
+        "task_key": "session_reflector",
+        "backend": "codex_app_server",
+        "status": "failed",
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "error": "original failure",
+        "started_at": "1",
+        "completed_at": "2"
+    }))
+    .expect("failed record");
+    let append_error = crate::errors::TraceDecayError::Config {
+        message: "skill terminal construction failed".to_owned(),
+    };
+    let original_error = crate::errors::TraceDecayError::Config {
+        message: "combined output failed".to_owned(),
+    };
+
+    let dispatch =
+        combined_asymmetric_failure(Ok(record.clone()), Err(append_error), original_error);
+    let CombinedReviewDispatch::FailureTerminals(failure) = dispatch else {
+        panic!("asymmetric construction must retain each leg independently");
+    };
+    assert_eq!(failure.reflector_record, Some(record));
+    assert!(failure.reflector_error.is_none());
+    assert!(failure.skill_writer_record.is_none());
+    assert!(failure.skill_writer_error.is_some());
+}
 
 #[test]
 fn combined_reflector_failure_projection_is_payload_free() {

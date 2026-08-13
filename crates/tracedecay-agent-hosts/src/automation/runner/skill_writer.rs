@@ -5,7 +5,10 @@ use serde_json::Value;
 
 use crate::automation::backend::{AgentTaskKind, AgentTaskResponse};
 use crate::automation::config::AutomationConfig;
-use crate::automation::lifecycle::AgentTaskRunContext;
+use crate::automation::lifecycle::{
+    AgentTaskRunContext, AutomationRunLedgerPublication, AutomationRunSettlementGuard,
+    RetainedAutomationRun,
+};
 use crate::automation::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
 use crate::errors::{Result, TraceDecayError};
 
@@ -56,6 +59,53 @@ pub async fn run_skill_writer_with_backend(
     .await
 }
 
+/// Runs one already-admitted retained application effect without publishing
+/// its ledger terminal ahead of outer settlement. The retained settlement
+/// authority must bind and publish the returned exact record.
+pub async fn run_skill_writer_with_backend_for_retained_settlement(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
+    backend: &dyn AgentTaskBackend,
+    options: SkillWriterAutomationOptions,
+) -> RetainedAutomationRun<SkillWriterAutomationRun> {
+    let retrieval = production_project_automation_retrieval(cg).await;
+    run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+        cg,
+        config,
+        configuration_revision_id,
+        backend,
+        retrieval.as_ref(),
+        options,
+    )
+    .await
+}
+
+/// Retained-settlement variant that preserves the caller's canonical session
+/// retrieval authority instead of silently reopening the production route.
+pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
+    backend: &dyn AgentTaskBackend,
+    retrieval: &dyn AutomationSessionRetrieval,
+    options: SkillWriterAutomationOptions,
+) -> RetainedAutomationRun<SkillWriterAutomationRun> {
+    let settlement_guard = AutomationRunSettlementGuard::new();
+    let result = run_skill_writer_with_backend_and_retrieval_publication(
+        cg,
+        config,
+        configuration_revision_id,
+        backend,
+        retrieval,
+        options,
+        AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
+        Some(&settlement_guard),
+    )
+    .await;
+    RetainedAutomationRun::new(result, settlement_guard)
+}
+
 pub async fn run_skill_writer_with_backend_and_retrieval(
     cg: &TraceDecay,
     config: &AutomationConfig,
@@ -64,10 +114,33 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
     retrieval: &dyn AutomationSessionRetrieval,
     options: SkillWriterAutomationOptions,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
+    run_skill_writer_with_backend_and_retrieval_publication(
+        cg,
+        config,
+        configuration_revision_id,
+        backend,
+        retrieval,
+        options,
+        AutomationRunLedgerPublication::Immediate,
+        None,
+    )
+    .await
+}
+
+async fn run_skill_writer_with_backend_and_retrieval_publication(
+    cg: &TraceDecay,
+    config: &AutomationConfig,
+    configuration_revision_id: &ConfigurationRevisionId,
+    backend: &dyn AgentTaskBackend,
+    retrieval: &dyn AutomationSessionRetrieval,
+    options: SkillWriterAutomationOptions,
+    ledger_publication: AutomationRunLedgerPublication,
+    settlement_guard: Option<&AutomationRunSettlementGuard>,
+) -> AutomationRunResult<SkillWriterAutomationRun> {
     let authority =
         project_curation_authority(cg, "automation:skill-writer", configuration_revision_id)?;
     let sessions_db = project_automation_sessions(cg).await?;
-    run_skill_writer_for_store(
+    run_skill_writer_for_store_with_publication(
         SkillWriterStoreRuntime {
             dashboard_root: cg.store_layout().dashboard_root.clone(),
             sessions_db,
@@ -80,6 +153,8 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
         backend,
         options,
         None,
+        ledger_publication,
+        settlement_guard,
     )
     .await
 }
@@ -158,6 +233,29 @@ pub(super) async fn run_skill_writer_for_store(
     options: SkillWriterAutomationOptions,
     prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
 ) -> AutomationRunResult<SkillWriterAutomationRun> {
+    run_skill_writer_for_store_with_publication(
+        runtime,
+        retrieval,
+        config,
+        backend,
+        options,
+        prebuilt_evidence,
+        AutomationRunLedgerPublication::Immediate,
+        None,
+    )
+    .await
+}
+
+async fn run_skill_writer_for_store_with_publication(
+    runtime: SkillWriterStoreRuntime<'_>,
+    retrieval: &dyn AutomationSessionRetrieval,
+    config: &AutomationConfig,
+    backend: &dyn AgentTaskBackend,
+    options: SkillWriterAutomationOptions,
+    prebuilt_evidence: Option<SkillWriterEvidenceBundle>,
+    ledger_publication: AutomationRunLedgerPublication,
+    settlement_guard: Option<&AutomationRunSettlementGuard>,
+) -> AutomationRunResult<SkillWriterAutomationRun> {
     let SkillWriterStoreRuntime {
         dashboard_root,
         sessions_db,
@@ -173,7 +271,9 @@ pub(super) async fn run_skill_writer_for_store(
         options.trigger,
         config,
         AgentTaskKind::SkillWriter,
-    );
+    )
+    .with_ledger_publication(ledger_publication)
+    .with_settlement_guard(settlement_guard);
     let _run_lock = match run.gate().await? {
         SchedulerGate::Proceed(lock) => lock,
         SchedulerGate::Skip(reason) => {
@@ -282,7 +382,7 @@ pub(super) async fn run_skill_writer_for_store(
                 message: "skill proposal validation repair budget exhausted; output quarantined"
                     .to_string(),
             };
-            finalizer
+            let ledger_record = finalizer
                 .append_failed_record(
                     response.model.clone(),
                     evidence_hash,
@@ -291,7 +391,10 @@ pub(super) async fn run_skill_writer_for_store(
                     &retry_report,
                 )
                 .await?;
-            return Err(error.into());
+            return Err(AutomationRunError::RecordedFailure {
+                error,
+                ledger_record,
+            });
         }
         let repair_request = AgentTaskRequest::new(
             run.run_id.clone(),
@@ -321,7 +424,7 @@ pub(super) async fn run_skill_writer_for_store(
             Ok(response) => response,
             Err(error) => {
                 retry_report.append(repair_retry_report);
-                finalizer
+                let ledger_record = finalizer
                     .append_failed_record(
                         None,
                         evidence_hash,
@@ -330,7 +433,10 @@ pub(super) async fn run_skill_writer_for_store(
                         &retry_report,
                     )
                     .await?;
-                return Err(error.into());
+                return Err(AutomationRunError::RecordedFailure {
+                    error,
+                    ledger_record,
+                });
             }
         };
         retry_report.append(repair_retry_report);
@@ -368,9 +474,14 @@ pub(super) async fn run_skill_writer_for_store(
             record,
             committed_receipt,
         }) => (report, record, committed_receipt),
-        Ok(SkillWriterFinalization::FailedRecorded { error, .. }) => return Err(error.into()),
+        Ok(SkillWriterFinalization::FailedRecorded { error, record }) => {
+            return Err(AutomationRunError::RecordedFailure {
+                error,
+                ledger_record: record,
+            });
+        }
         Err(AutomationRunError::Runtime(err)) => {
-            finalizer
+            let ledger_record = finalizer
                 .append_failed_record(
                     response.model.clone(),
                     evidence_hash,
@@ -379,8 +490,12 @@ pub(super) async fn run_skill_writer_for_store(
                     &retry_report,
                 )
                 .await?;
-            return Err(err.into());
+            return Err(AutomationRunError::RecordedFailure {
+                error: err,
+                ledger_record,
+            });
         }
+        Err(error @ AutomationRunError::RecordedFailure { .. }) => return Err(error),
         Err(error @ AutomationRunError::PartialEffect { .. }) => return Err(error),
     };
     let record = finalizer

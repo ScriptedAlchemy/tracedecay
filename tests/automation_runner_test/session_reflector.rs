@@ -23,6 +23,45 @@ fn session_reflector_options_have_no_storage_selector() {
     );
 }
 
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn retained_session_reflector_preserves_retrieval_and_defers_ledger_publication() {
+    let temp = tempdir().unwrap();
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
+    let backend = SessionJsonBackend::new(json!({"facts": []}));
+    let retained = tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend_and_retrieval_for_retained_settlement(
+        &cg,
+        &scheduler_config(Some(3600), None),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        SessionReflectorAutomationOptions {
+            trigger: AutomationTrigger::Dashboard,
+            run_id: Some("retained-session-reflector".to_owned()),
+            provider: "cursor".to_owned(),
+            query: "durable session reflection".to_owned(),
+            evidence_limit: 5,
+            ..SessionReflectorAutomationOptions::default()
+        },
+    )
+    .await;
+    let (result, guard) = retained.into_parts();
+    let run = result.unwrap();
+
+    assert_eq!(run.run_id, "retained-session-reflector");
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an admitted retained run must not publish ahead of outer settlement"
+    );
+    drop(guard);
+}
+
 use tracedecay_agent_hosts::automation::automatic_facts::record_session_automatic_facts;
 
 #[tokio::test]

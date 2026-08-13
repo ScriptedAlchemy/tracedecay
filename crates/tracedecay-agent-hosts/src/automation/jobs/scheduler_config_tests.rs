@@ -4,7 +4,7 @@ use super::{
     AutomationJob, JOBS_SCHEMA_VERSION, JobDelivery, job_schedule_decision,
     jobs_configured_for_scheduler, jobs_path, latest_effectful_scheduler_job_record,
 };
-use crate::automation::backend::AgentTaskKind;
+use crate::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use crate::automation::config::AutomationConfig;
 use crate::automation::run_ledger::{
     AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger, append_run_record,
@@ -86,9 +86,83 @@ fn time_relative_skips_do_not_advance_the_next_due_occurrence() {
     records.push(first_skip);
     records.push(repeated_skip);
     let anchor = latest_effectful_scheduler_job_record(&records, "user_job:nightly")
+        .expect("scheduler history is valid")
         .expect("the last effectful terminal remains the occurrence anchor");
     assert_eq!(anchor.run_id, success.run_id);
     assert_eq!(job_schedule_decision(&job, &records, 160), None);
+}
+
+#[test]
+fn job_scheduler_ranks_same_second_terminal_records_by_micros_then_run_id() {
+    let job = interval_job();
+    let mut later_failure = ledger_record(
+        "z-failure",
+        AutomationRunStatus::Failed,
+        Some("the request is permanently invalid"),
+        100,
+    );
+    later_failure.completed_at_micros = Some(100_000_900);
+    later_failure.error_classification = Some(AgentTaskFailureClass::Permanent);
+    later_failure.error_retryable = Some(false);
+    let mut older_success = ledger_record("a-success", AutomationRunStatus::Succeeded, None, 100);
+    older_success.completed_at_micros = None;
+    let mut records = vec![later_failure, older_success];
+
+    assert_eq!(
+        job_schedule_decision(&job, &records, 150),
+        Some("scheduler_non_retryable_failure")
+    );
+
+    records.reverse();
+    assert_eq!(
+        job_schedule_decision(&job, &records, 150),
+        Some("scheduler_non_retryable_failure")
+    );
+
+    records
+        .iter_mut()
+        .for_each(|record| record.completed_at_micros = Some(100_000_100));
+    assert_eq!(
+        job_schedule_decision(&job, &records, 150),
+        Some("scheduler_non_retryable_failure")
+    );
+    records.reverse();
+    assert_eq!(
+        job_schedule_decision(&job, &records, 150),
+        Some("scheduler_non_retryable_failure")
+    );
+}
+
+#[test]
+fn job_scheduler_fails_closed_on_invalid_completion_history() {
+    let job = interval_job();
+    let mut inconsistent = ledger_record("inconsistent", AutomationRunStatus::Succeeded, None, 100);
+    inconsistent.completed_at_micros = Some(101_000_000);
+    assert_eq!(
+        job_schedule_decision(&job, &[inconsistent], 150),
+        Some("scheduler_history_invalid")
+    );
+
+    let mut malformed = ledger_record("malformed", AutomationRunStatus::Succeeded, None, 100);
+    malformed.completed_at = "not-a-timestamp".to_string();
+    assert_eq!(
+        job_schedule_decision(&job, &[malformed], 150),
+        Some("scheduler_history_invalid")
+    );
+
+    let mut overflow = ledger_record("overflow", AutomationRunStatus::Succeeded, None, 100);
+    overflow.completed_at = i64::MAX.to_string();
+    overflow.completed_at_micros = None;
+    assert_eq!(
+        job_schedule_decision(&job, &[overflow], 150),
+        Some("scheduler_history_invalid")
+    );
+
+    let pre_epoch = ledger_record("pre-epoch", AutomationRunStatus::Succeeded, None, -1);
+    assert_eq!(
+        job_schedule_decision(&job, &[pre_epoch], 150),
+        Some("scheduler_history_invalid")
+    );
 }
 
 #[tokio::test]

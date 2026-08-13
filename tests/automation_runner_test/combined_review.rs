@@ -4,10 +4,46 @@
 //! dashboard scheduler status stay coherent.
 
 use crate::support::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval;
 #[cfg(feature = "test-transport")]
-use std::sync::atomic::Ordering;
+use tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend_and_retrieval_for_retained_settlement;
+use tracedecay_agent_hosts::automation::scheduler::AutomationTaskLock;
 #[cfg(feature = "test-transport")]
 use tracedecay_agent_hosts::automation::scheduler::{SessionActivity, schedule_decision};
+use tracedecay_domain::SessionId;
+
+struct CountingAutomationSessionRetrieval {
+    inner: FixtureAutomationSessionRetrieval,
+    calls: AtomicUsize,
+}
+
+impl CountingAutomationSessionRetrieval {
+    fn new(cg: &TraceDecay) -> Self {
+        Self {
+            inner: FixtureAutomationSessionRetrieval::new(cg),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AutomationSessionRetrieval for CountingAutomationSessionRetrieval {
+    fn anchor_session_id(&self) -> &SessionId {
+        self.inner.anchor_session_id()
+    }
+
+    fn retrieve(
+        &self,
+        query: tracedecay_usecases::session::SessionTemporalQuery,
+    ) -> AutomationSessionRetrievalFuture<'_> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.retrieve(query)
+    }
+}
 
 fn combined_options(profile_root: &Path) -> CombinedReviewAutomationOptions {
     CombinedReviewAutomationOptions {
@@ -61,18 +97,26 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review_with_backend_and_retrieval(
         &cg,
         &config,
-        &run_control,
+        &test_configuration_revision(),
         &backend,
+        &retrieval,
         combined_options(&profile_root),
+        &run_control,
     )
     .await
     .unwrap();
 
     assert_eq!(backend.calls(), 1, "both tasks must share one backend call");
+    assert_eq!(
+        retrieval.calls(),
+        2,
+        "a due combined run must retrieve one evidence bundle per task"
+    );
     let CombinedReviewDispatch::Ran(run) = dispatch else {
         panic!("expected combined dispatch to run, got {dispatch:?}");
     };
@@ -145,6 +189,108 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
             "{task:?} must count the combined run as its last scheduler run"
         );
     }
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
+    let config = scheduler_config(Some(3600), None);
+    let backend = CombinedJsonBackend::new(json!({"facts": [], "skills": []}));
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
+
+    let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
+        &cg,
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+        &run_control,
+    )
+    .await;
+    let (result, reflector_guard, skill_guard) = retained.into_parts();
+    let dispatch = result.unwrap();
+    assert!(matches!(dispatch, CombinedReviewDispatch::Ran(_)));
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "retained dispatch must not publish either admitted ledger before settlement"
+    );
+
+    let now = current_timestamp();
+    for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
+        assert!(
+            AutomationTaskLock::try_acquire(&cg.store_layout().dashboard_root, task, None, now,)
+                .await
+                .unwrap()
+                .is_none(),
+            "{task:?} lock must remain held until outer settlement"
+        );
+    }
+    drop(reflector_guard);
+    drop(skill_guard);
+
+    for task in [AgentTaskKind::SessionReflector, AgentTaskKind::SkillWriter] {
+        let reacquired =
+            AutomationTaskLock::try_acquire(&cg.store_layout().dashboard_root, task, None, now)
+                .await
+                .unwrap();
+        assert!(
+            reacquired.is_some(),
+            "{task:?} lock must release with its guard"
+        );
+        drop(reacquired);
+    }
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
+async fn retained_combined_review_defers_recorded_failures_until_settlement() {
+    let _env_lock = ENV_LOCK.lock().await;
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let _global_db = isolate_global_db(&cg);
+    let config = scheduler_config(Some(3600), None);
+    let backend = CombinedJsonBackend::new(json!({"facts": []}));
+    let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
+    let retrieval = FixtureAutomationSessionRetrieval::new(&cg);
+
+    let retained = run_combined_review_with_backend_and_retrieval_for_retained_settlement(
+        &cg,
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+        &run_control,
+    )
+    .await;
+    let (result, reflector_guard, skill_guard) = retained.into_parts();
+    let dispatch = result.unwrap();
+    assert!(matches!(
+        dispatch,
+        CombinedReviewDispatch::RecordedFailure(_) | CombinedReviewDispatch::FailureTerminals(_)
+    ));
+    assert!(
+        load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "retained failure must not publish either admitted ledger before settlement"
+    );
+    drop(reflector_guard);
+    drop(skill_guard);
 }
 
 #[tokio::test]
@@ -231,17 +377,21 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
     .await
     .unwrap();
     let backend = CombinedJsonBackend::new(combined_output_fixture());
+    let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review_with_backend_and_retrieval(
         &cg,
         &config,
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &test_configuration_revision(),
         &backend,
+        &retrieval,
         combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
     )
     .await
     .unwrap();
 
+    assert_eq!(retrieval.calls(), 0, "not-due work must not read evidence");
     assert_eq!(backend.calls(), 0);
     let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
         panic!("expected combined dispatch to fall back, got {dispatch:?}");
@@ -272,22 +422,127 @@ async fn combined_review_not_dispatched_when_skill_writer_is_not_due() {
     .await
     .unwrap();
     let backend = CombinedJsonBackend::new(combined_output_fixture());
+    let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review_with_backend_and_retrieval(
         &cg,
         &config,
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &test_configuration_revision(),
         &backend,
+        &retrieval,
         combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
     )
     .await
     .unwrap();
 
+    assert_eq!(retrieval.calls(), 0, "not-due work must not read evidence");
     assert_eq!(backend.calls(), 0);
     let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
         panic!("expected combined dispatch to fall back, got {dispatch:?}");
     };
     assert_eq!(reason, "skill_writer_not_due");
+}
+
+#[tokio::test]
+async fn combined_review_task_configuration_skips_before_retrieval_or_backend() {
+    let _env_lock = ENV_LOCK.lock().await;
+    for (disabled_task, expected_reason) in [
+        (AgentTaskKind::SessionReflector, "session_reflector_not_due"),
+        (AgentTaskKind::SkillWriter, "skill_writer_not_due"),
+    ] {
+        let temp = tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let cg = init_project(temp.path()).await;
+        let mut config = scheduler_config(Some(3600), None);
+        if disabled_task == AgentTaskKind::SessionReflector {
+            config.tasks.session_reflector.enabled = false;
+        } else {
+            config.tasks.skill_writer.enabled = false;
+        }
+        let backend = CombinedJsonBackend::new(combined_output_fixture());
+        let retrieval = CountingAutomationSessionRetrieval::new(&cg);
+
+        let dispatch = run_combined_review_with_backend_and_retrieval(
+            &cg,
+            &config,
+            &test_configuration_revision(),
+            &backend,
+            &retrieval,
+            combined_options(&profile_root),
+            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            retrieval.calls(),
+            0,
+            "disabled {disabled_task:?} must not read evidence"
+        );
+        assert_eq!(
+            backend.calls(),
+            0,
+            "disabled {disabled_task:?} must not invoke the backend"
+        );
+        assert!(matches!(
+            dispatch,
+            CombinedReviewDispatch::NotCombined { reason } if reason == expected_reason
+        ));
+    }
+}
+
+#[tokio::test]
+async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
+    let _env_lock = ENV_LOCK.lock().await;
+    for (locked_task, expected_reason) in [
+        (AgentTaskKind::SessionReflector, "session_reflector_not_due"),
+        (AgentTaskKind::SkillWriter, "skill_writer_not_due"),
+    ] {
+        let temp = tempdir().unwrap();
+        let profile_root = temp.path().join("profile");
+        let cg = init_project(temp.path()).await;
+        let config = scheduler_config(Some(3600), None);
+        let active_lock = AutomationTaskLock::try_acquire(
+            &cg.store_layout().dashboard_root,
+            locked_task,
+            None,
+            current_timestamp(),
+        )
+        .await
+        .unwrap()
+        .expect("fixture must own the task lock");
+        let backend = CombinedJsonBackend::new(combined_output_fixture());
+        let retrieval = CountingAutomationSessionRetrieval::new(&cg);
+
+        let dispatch = run_combined_review_with_backend_and_retrieval(
+            &cg,
+            &config,
+            &test_configuration_revision(),
+            &backend,
+            &retrieval,
+            combined_options(&profile_root),
+            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            retrieval.calls(),
+            0,
+            "locked {locked_task:?} must not read evidence"
+        );
+        assert_eq!(
+            backend.calls(),
+            0,
+            "locked {locked_task:?} must not invoke the backend"
+        );
+        assert!(matches!(
+            dispatch,
+            CombinedReviewDispatch::NotCombined { reason } if reason == expected_reason
+        ));
+        drop(active_lock);
+    }
 }
 
 #[tokio::test]
@@ -299,17 +554,25 @@ async fn combined_review_respects_escape_hatch_flag() {
     let mut config = scheduler_config(Some(3600), None);
     config.combine_due_tasks = false;
     let backend = CombinedJsonBackend::new(combined_output_fixture());
+    let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review_with_backend_and_retrieval(
         &cg,
         &config,
-        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &test_configuration_revision(),
         &backend,
+        &retrieval,
         combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
     )
     .await
     .unwrap();
 
+    assert_eq!(
+        retrieval.calls(),
+        0,
+        "disabled combined mode must not read evidence"
+    );
     assert_eq!(backend.calls(), 0);
     let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
         panic!("expected combined dispatch to fall back, got {dispatch:?}");
@@ -454,9 +717,11 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     .unwrap();
 
     assert_eq!(backend.calls(), 1);
-    let CombinedReviewDispatch::RecordedFailure { run, error } = dispatch else {
+    let CombinedReviewDispatch::RecordedFailure(failure) = dispatch else {
         panic!("expected combined dispatch to record failures, got {dispatch:?}");
     };
+    let run = failure.run;
+    let error = failure.error;
     let err = error.to_string();
     assert!(
         err.contains("must include facts and skills arrays"),
@@ -518,14 +783,15 @@ async fn combined_skill_failure_preserves_the_completed_memory_authority() {
     .await
     .unwrap();
 
-    let CombinedReviewDispatch::MemoryCompletedSkillFailure {
-        session_reflector,
-        skill_writer_record,
-        error: _,
-    } = dispatch
-    else {
+    let CombinedReviewDispatch::MemoryCompletedSkillFailure(failure) = dispatch else {
         panic!("skill failure must not become a memory partial effect: {dispatch:?}");
     };
+    assert!(
+        failure.skill_writer_record_error.is_none(),
+        "a published failed skill terminal must not report a second publication failure"
+    );
+    let session_reflector = failure.session_reflector;
+    let skill_writer_record = failure.skill_writer_record;
     assert_eq!(
         session_reflector.ledger_record.status,
         AutomationRunStatus::Succeeded
@@ -582,9 +848,26 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
     // record, not retry semantics (covered by backend.rs retry tests) —
     // timeout_secs: 1 short-circuits the backoff so the test stays fast.
     assert_eq!(backend.calls(), 1);
-    let CombinedReviewDispatch::Ran(run) = dispatch else {
+    let CombinedReviewDispatch::RecordedFailure(failure) = dispatch else {
         panic!("expected combined dispatch to record fallbacks, got {dispatch:?}");
     };
+    assert!(
+        matches!(
+            &failure.error,
+            tracedecay::errors::TraceDecayError::Automation(_)
+        ),
+        "backend failure must retain its typed automation error: {}",
+        failure.error
+    );
+    assert!(
+        failure
+            .error
+            .to_string()
+            .contains("executable 'codex' was not found"),
+        "backend failure must retain its exact cause: {}",
+        failure.error
+    );
+    let run = failure.run;
     assert_noop_fallback_record(
         &run.session_reflector.ledger_record,
         AgentTaskKind::SessionReflector,
