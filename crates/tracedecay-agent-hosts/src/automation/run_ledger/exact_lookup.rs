@@ -457,10 +457,13 @@ pub(super) fn scan_jsonl_row(
     path: &Path,
     line: Range<u64>,
 ) -> Result<Option<RunLedgerRowProjection>> {
+    // A blank/whitespace-only span is not corruption: consecutive newlines
+    // (a trailing blank line, an operator edit, or a legacy writer) are
+    // benign and must be skipped rather than treated as a fatal error.
+    // Callers that scan a spool file expecting exactly one canonical row
+    // (e.g. open_bound_spool) still treat `None` as an error themselves.
     let Some(row) = JsonRangeReader::new(file, path, line).parse_ledger_row()? else {
-        return Err(config_error(
-            "automation run ledger contains an empty committed row",
-        ));
+        return Ok(None);
     };
     validate_jsonl_row_schema(file, path, &row.span)?;
     validate_ledger_row_semantics(&row)?;
@@ -2600,11 +2603,17 @@ mod tests {
     }
 
     #[test]
-    fn exact_lookup_rejects_empty_committed_rows() {
+    fn exact_lookup_skips_blank_committed_rows() {
+        // Renamed from exact_lookup_rejects_empty_committed_rows: a blank
+        // committed row is benign (Finding 1's scan_jsonl_row fix) and must
+        // be skipped, not treated as ledger corruption.
         let (_temp, path) =
             write_ledger(&[ledger_line("target", "succeeded", 1), "   ".to_owned()]);
 
-        assert!(read_exact_run_record_bounded(&path, "target").is_err());
+        let record = read_exact_run_record_bounded(&path, "target")
+            .expect("blank trailing row must not block exact lookup")
+            .expect("target row must still be found");
+        assert_eq!(record.run_id, "target");
     }
 
     #[test]

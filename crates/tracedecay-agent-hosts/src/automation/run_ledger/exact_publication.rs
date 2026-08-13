@@ -1402,10 +1402,11 @@ fn last_committed_boundary(ledger: &mut std::fs::File, len: u64) -> Result<u64> 
 fn validate_committed_ledger(ledger: &std::fs::File, path: &Path) -> Result<()> {
     let mut rows = super::exact_lookup::ForwardJsonlScanner::new(ledger, path)?;
     while let Some(span) = rows.next_span()? {
+        // A blank/whitespace-only span is benign (see scan_jsonl_row) and
+        // must be skipped here too: this validates the main ledger, not a
+        // single-row spool file, so an empty span is not corruption.
         if super::exact_lookup::scan_jsonl_row(ledger, path, span)?.is_none() {
-            return Err(config_error(
-                "automation run ledger contains an empty committed row",
-            ));
+            continue;
         }
     }
     Ok(())
@@ -1418,10 +1419,10 @@ fn validate_committed_ledger_prefix(
 ) -> Result<()> {
     let mut rows = super::exact_lookup::ForwardJsonlScanner::new_bounded(ledger, path, clean_eof)?;
     while let Some(span) = rows.next_span()? {
+        // See validate_committed_ledger: blank spans in the main ledger are
+        // benign and must be skipped, not treated as corruption.
         if super::exact_lookup::scan_jsonl_row(ledger, path, span)?.is_none() {
-            return Err(config_error(
-                "automation run ledger contains an empty committed row",
-            ));
+            continue;
         }
     }
     Ok(())
