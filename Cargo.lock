@@ -5800,10 +5800,12 @@ name = "tracedecay-code-index"
 version = "0.1.0"
 dependencies = [
  "ast-grep-core",
+ "criterion",
  "hex",
  "ignore",
  "rayon",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -5813,6 +5815,8 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-rusqlite-runtime",
+ "tracedecay-store",
  "tree-sitter",
 ]
 
@@ -6213,6 +6217,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "criterion",
  "fs2",
  "getrandom 0.2.17",
  "gix",
