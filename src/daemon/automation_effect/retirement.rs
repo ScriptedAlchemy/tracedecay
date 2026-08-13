@@ -258,7 +258,7 @@ fn complete_after_pending_removal_with(
     closure: &RetirementClosure,
     after_retirement: impl FnOnce(&Path) -> Result<()>,
 ) -> Result<()> {
-    let Some(capture_path) = closure.capture_path else {
+    let Some(capture_path) = closure.capture_path.as_ref() else {
         return Ok(());
     };
     let lock_path = crate::storage::append_lock_path(&closure.source_path);
@@ -362,19 +362,18 @@ pub(super) fn reconcile_orphaned_retirement_capture(dashboard_root: &Path) -> Re
         require_digest(&captured, &format!("sha256:{digest}"))?;
         let retired_path = retired_path_for_digest(dashboard_root, digest);
         if kind == RetirementWitnessKind::Captured {
-            let parent = Dir::open_ambient_dir(dashboard_root, ambient_authority()).map_err(
-                |error| {
+            let parent =
+                Dir::open_ambient_dir(dashboard_root, ambient_authority()).map_err(|error| {
                     contract_error(format!(
                         "shipped proposal retirement parent open failed: {error}"
                     ))
-                },
-            )?;
-            let captured_name = witness_path.file_name().ok_or_else(|| {
-                contract_error("orphaned captured source has no filename")
-            })?;
-            let retired_name = retired_path.file_name().ok_or_else(|| {
-                contract_error("orphaned retired witness has no filename")
-            })?;
+                })?;
+            let captured_name = witness_path
+                .file_name()
+                .ok_or_else(|| contract_error("orphaned captured source has no filename"))?;
+            let retired_name = retired_path
+                .file_name()
+                .ok_or_else(|| contract_error("orphaned retired witness has no filename"))?;
             rename_noreplace(&parent, captured_name, retired_name).map_err(|error| {
                 contract_error(format!("orphaned retirement witness move failed: {error}"))
             })?;
@@ -451,16 +450,6 @@ fn retirement_witness_digest(path: &Path) -> Result<&str> {
     retirement_witness_digest_name(name).map(|(digest, _)| digest)
 }
 
-fn capture_digest_name(name: &str) -> Result<&str> {
-    retirement_witness_digest_name(name).and_then(|(digest, kind)| {
-        if kind == RetirementWitnessKind::Captured {
-            Ok(digest)
-        } else {
-            Err(contract_error("retirement capture name is not canonical"))
-        }
-    })
-}
-
 fn retirement_witness_digest_name(name: &str) -> Result<(&str, RetirementWitnessKind)> {
     let value = name
         .strip_prefix(".fact_proposals.retirement-")
@@ -470,9 +459,7 @@ fn retirement_witness_digest_name(name: &str) -> Result<(&str, RetirementWitness
     } else if let Some(digest) = value.strip_suffix(".retired") {
         (digest, RetirementWitnessKind::Retired)
     } else {
-        return Err(contract_error(
-            "retirement witness name is not canonical",
-        ));
+        return Err(contract_error("retirement witness name is not canonical"));
     };
     if digest.len() == 64
         && digest
@@ -489,11 +476,9 @@ fn retirement_witness_digest_name(name: &str) -> Result<(&str, RetirementWitness
 
 fn remove_retired_witness(retired_path: &Path, source_path: &Path) -> Result<()> {
     let removal = std::fs::remove_file(retired_path);
-    let sync = tracedecay_application::sync_parent_directory(
-        source_path,
-        DirectorySyncPolicy::Strict,
-    )
-    .map_err(contract_error);
+    let sync =
+        tracedecay_application::sync_parent_directory(source_path, DirectorySyncPolicy::Strict)
+            .map_err(contract_error);
     let absent = read_retirement_bytes(retired_path, "retired source witness")?.is_none();
     if absent && sync.is_ok() {
         return Ok(());
@@ -791,9 +776,7 @@ fn capture_path_for_digest(parent: &Path, digest: &[u8]) -> PathBuf {
 }
 
 fn retired_path_for_digest(parent: &Path, digest: &str) -> PathBuf {
-    parent.join(format!(
-        ".fact_proposals.retirement-{digest}.retired"
-    ))
+    parent.join(format!(".fact_proposals.retirement-{digest}.retired"))
 }
 
 fn restore_captured_source(
