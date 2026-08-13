@@ -8,6 +8,8 @@ mod support;
 pub mod symbol_graph;
 #[cfg(test)]
 mod symbol_graph_ignored_dependency_tests;
+#[cfg(test)]
+mod symbol_graph_implementation_tests;
 
 pub use concrete::{
     AuthenticatedSymbolGraphCursorAdapter, SourceReadAdapter, SymbolGraphCursorSnapshot,
