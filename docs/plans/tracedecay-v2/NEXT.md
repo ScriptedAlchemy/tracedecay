@@ -629,8 +629,19 @@ the commit as attribution evidence.
   stay silent until `~/.kimi-code` / `~/.kiro` exist; Kiro's typed absence is
   wrapped by a secondary `StorageFailure` at
   `host_component_registration.rs:197`.
-- Complete the default package/install/start journey. npm OIDC setup is the
-  explicit remaining operator-owned publication action.
+- DONE 2026-08-14: local default package/install/start journey is green on
+  this branch (isolated `CARGO_TARGET_DIR=/tmp/package-smoke-target`).
+  Validated existing `dashboard/app-dist`; built the production release
+  binary (`--no-default-features --features production --locked`);
+  `package-release-archive.py` produced `tracedecay-v0.0.73-x86_64-linux.tar.gz`
+  (109M); installed into a temp prefix; daemon-first `tracedecay init` +
+  `projects context` against a temp fixture; `mcp-conformance-smoke.sh` and
+  packaged LSP-bridge initialize both passed on the installed binary.
+  `check-release-drift.sh` aligned at 0.0.73; last 12 commits commitlint-clean;
+  workspace `cargo package --allow-dirty --no-verify --exclude-lockfile`
+  produced 29 crates; SDK `npm pack --ignore-scripts` produced
+  `@tracedecay/sdk@0.1.0`. npm OIDC setup is the explicit remaining
+  operator-owned publication action.
 - The npm publish WORKFLOW side is complete: `92d701086` (2026-08-07) rewired
   the release publish job to tokenless OIDC trusted publishing — no NPM_TOKEN
   anywhere, a policy gate forbidding token/.npmrc/registry-url auth, and
