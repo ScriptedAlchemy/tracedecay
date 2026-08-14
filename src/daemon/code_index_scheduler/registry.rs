@@ -742,8 +742,9 @@ impl CodeIndexSchedulerRegistryV1 {
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
-        // Cold mount publishes only the exact route. Sealed bytes remain
-        // unverified and unavailable until the retained owner activates them.
+        // Cold mount publishes only the exact route. The worker may seat a
+        // complete identity-valid generation as stale serving before refresh
+        // claims freshness; missing Git authority still leaves this empty.
         let serving_generation = Arc::new(RwLock::new(None));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
@@ -791,6 +792,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
+                let serving_generation = Arc::clone(&worker_serving_generation);
                 // Cover wake claim through failed-arrival restoration so admission
                 // never misreads in-flight owner work as plain unavailability.
                 let _reconcile_pass =
@@ -802,13 +804,70 @@ impl CodeIndexSchedulerRegistryV1 {
                     &worker_pending_wake_trigger,
                     CodeIndexCadenceTriggerV1::Mount,
                 );
+                // Serve-during-refresh: seat the last complete compatible
+                // generation before rebuild. A cancelled refresh or branch
+                // split must not hide a sealed generation for the duration
+                // of reconcile. Stale is truthful; do not mark_reconciled.
+                if serving_generation
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_none()
+                {
+                    let remount_scheduler = Arc::clone(&scheduler);
+                    let remount = tokio::task::spawn_blocking(move || {
+                        let mut scheduler = remount_scheduler
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let retained = scheduler.servable_retained_generation()?;
+                        let replay_binding = scheduler
+                            .code_graph_replay_binding(
+                                &retained.generation().manifest().generation_id,
+                            )
+                            .ok();
+                        Some((retained, replay_binding))
+                    })
+                    .await;
+                    if let Ok(Some((retained, replay_binding))) = remount {
+                        if let Some(replay_binding) = replay_binding {
+                            let _ = worker_graph_activation
+                                .activate(
+                                    &worker_project_id,
+                                    &worker_repository_id,
+                                    &worker_worktree_id,
+                                    retained.clone(),
+                                    replay_binding,
+                                    Arc::clone(&worker_shutting_down),
+                                )
+                                .await;
+                        }
+                        let swap_scheduler = Arc::clone(&scheduler);
+                        let swap_serving = Arc::clone(&serving_generation);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let scheduler = swap_scheduler
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if scheduler
+                                .active_publication_matches(&retained)
+                                .unwrap_or(false)
+                            {
+                                *swap_serving
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    Some(retained.clone());
+                                let _ =
+                                    scheduler.schedule_semantic_generation(retained.generation());
+                            }
+                        })
+                        .await;
+                    }
+                }
                 let mut result = tokio::task::spawn_blocking(move || {
                     let mut scheduler = scheduler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let mut result = scheduler.activate_or_reconcile();
-                    // Decoding a retained seal alone cannot mint serving state;
-                    // activation/reconcile must reach a terminal outcome.
+                    // A terminal outcome may publish a newer complete generation;
+                    // swap serving to that after graph activation below.
                     let mut latest = result
                         .as_ref()
                         .ok()

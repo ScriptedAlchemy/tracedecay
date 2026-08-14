@@ -1932,6 +1932,26 @@ impl CodeIndexWorktreeSchedulerV1 {
         )))
     }
 
+    /// Load a complete identity-valid generation for stale serving.
+    ///
+    /// This does not claim freshness: a cancelled refresh or live ref switch
+    /// leaves the worktree ahead of the sealed generation, and that split is a
+    /// truthful stale serving state. Worktree identity must still resolve so a
+    /// missing Git authority stays unverified rather than a stale answer.
+    pub(super) fn servable_retained_generation(&mut self) -> Option<LatestCompleteCodeIndexV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
+        let resolved = identity::IndexingIdentityV1::resolve(&self.project_root).ok()?;
+        if !resolved.authorizes_reuse_of(&self.identity) {
+            return None;
+        }
+        let generation = self.publication.load_active_shared().ok().flatten()?;
+        self.validate_generation_identity(&generation).ok()?;
+        self.adopt_ignored_source_roster(&generation);
+        Some(self.bind_latest_complete(generation))
+    }
+
     /// Retained-owner activation entry point. Foreground reads never call this.
     pub(super) fn activate_or_reconcile(
         &mut self,
