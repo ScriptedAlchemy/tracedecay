@@ -456,6 +456,7 @@ mod tests {
             deadline: None,
             cancellation: None,
         };
+        let read_timeout = std::time::Duration::from_secs(5);
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
@@ -479,64 +480,45 @@ mod tests {
             std::fs::rename(&target, &backup).expect("move exact generation behind symlink");
             symlink(&backup, &target).expect("replace exact generation with symlink");
             assert!(matches!(
-                registry
-                    .generations_for_revisions(
-                        &scope,
-                        &reference,
-                        &base_revision,
-                        &base_tree,
-                        &reference,
-                        &head_revision,
-                        &head_tree,
-                        control.clone(),
-                    )
-                    .await,
+                settled_pair(
+                    &registry,
+                    &scope,
+                    (&reference, &base_revision, &base_tree),
+                    (&reference, &head_revision, &head_tree),
+                    &control,
+                    read_timeout,
+                )
+                .await,
                 Err(CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired)
             ));
             std::fs::remove_file(&target).expect("remove exact-generation symlink");
             std::fs::rename(&backup, &target).expect("restore exact generation");
         }
-        let pair = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                match registry
-                    .generations_for_revisions(
-                        &scope,
-                        &reference,
-                        &base_revision,
-                        &base_tree,
-                        &reference,
-                        &head_revision,
-                        &head_tree,
-                        control.clone(),
-                    )
-                    .await
-                {
-                    Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable) => {
-                        tokio::task::yield_now().await;
-                    }
-                    result => break result,
-                }
-            }
-        })
+        let pair = settled_pair(
+            &registry,
+            &scope,
+            (&reference, &base_revision, &base_tree),
+            (&reference, &head_revision, &head_tree),
+            &control,
+            read_timeout,
+        )
         .await
-        .expect("bounded exact-generation read")
         .expect("both clean commit generations");
         let base_generation_id = pair.base.generation().manifest().generation_id.clone();
         // A revision paired with a tree that is not its own names no commit in
         // this repository, so neither the index nor a capture can serve it.
-        let mismatched_tree = registry
-            .generations_for_revisions(
-                &scope,
-                &reference,
-                &base_revision,
-                &head_tree,
-                &reference,
-                &base_revision,
-                &head_tree,
-                control.clone(),
-            )
-            .await
-            .map(|_| "sealed pair");
+        // The mount worker may claim the scheduler between exact reads, so
+        // settle only its documented transient lock-contention response.
+        let mismatched_tree = settled_pair(
+            &registry,
+            &scope,
+            (&reference, &base_revision, &head_tree),
+            (&reference, &base_revision, &head_tree),
+            &control,
+            read_timeout,
+        )
+        .await
+        .map(|_| "sealed pair");
         assert!(
             matches!(
                 mismatched_tree,
@@ -546,19 +528,17 @@ mod tests {
         );
         let wrong_reference =
             tracedecay_domain::RefId::new("refs/heads/not-main").expect("wrong reference");
+        let wrong_reference_result = settled_pair(
+            &registry,
+            &scope,
+            (&wrong_reference, &base_revision, &base_tree),
+            (&reference, &head_revision, &head_tree),
+            &control,
+            read_timeout,
+        )
+        .await;
         assert!(matches!(
-            registry
-                .generations_for_revisions(
-                    &scope,
-                    &wrong_reference,
-                    &base_revision,
-                    &base_tree,
-                    &reference,
-                    &head_revision,
-                    &head_tree,
-                    control.clone(),
-                )
-                .await,
+            wrong_reference_result,
             Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
         ));
         let base =
@@ -580,19 +560,16 @@ mod tests {
                     && base.content_digest != head.content_digest
         ));
 
-        let large_pair = registry
-            .generations_for_revisions(
-                &scope,
-                &reference,
-                &large_revision,
-                &large_tree,
-                &reference,
-                &large_revision,
-                &large_tree,
-                control.clone(),
-            )
-            .await
-            .expect("large exact generation");
+        let large_pair = settled_pair(
+            &registry,
+            &scope,
+            (&reference, &large_revision, &large_tree),
+            (&reference, &large_revision, &large_tree),
+            &control,
+            read_timeout,
+        )
+        .await
+        .expect("large exact generation");
         let started = std::time::Instant::now();
         let outcome = bounded_diff(
             large_pair.base.generation(),
@@ -661,18 +638,15 @@ mod tests {
         )
         .expect("tamper durable generation index");
         assert!(matches!(
-            registry
-                .generations_for_revisions(
-                    &scope,
-                    &reference,
-                    &base_revision,
-                    &base_tree,
-                    &reference,
-                    &head_revision,
-                    &head_tree,
-                    control,
-                )
-                .await,
+            settled_pair(
+                &registry,
+                &scope,
+                (&reference, &base_revision, &base_tree),
+                (&reference, &head_revision, &head_tree),
+                &control,
+                read_timeout,
+            )
+            .await,
             Err(CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired)
         ));
         assert!(matches!(
@@ -993,8 +967,9 @@ mod tests {
         base: (&RefId, &GitOidV1, &GitOidV1),
         head: (&RefId, &GitOidV1, &GitOidV1),
         control: &BranchGenerationReadControlV1,
+        timeout: std::time::Duration,
     ) -> Result<BranchGenerationPairV1, CodeIndexSearchUnavailableReasonV1> {
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::time::timeout(timeout, async {
             loop {
                 match registry
                     .generations_for_revisions(
@@ -1098,6 +1073,7 @@ mod tests {
             (&reference, &base_revision, &base_tree),
             (&reference, &head_revision, &head_tree),
             &control,
+            std::time::Duration::from_secs(30),
         )
         .await
         .expect("the superseded commit is minted from its immutable tree");
@@ -1216,6 +1192,7 @@ mod tests {
             (&base_reference, &base_revision, &base_tree),
             (&head_reference, &head_revision, &head_tree),
             &control,
+            std::time::Duration::from_secs(30),
         )
         .await
         .expect("a truncated index miss is minted, not reported as capacity");
