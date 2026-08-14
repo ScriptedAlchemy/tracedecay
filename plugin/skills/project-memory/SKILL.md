@@ -35,6 +35,18 @@ you should get `tracedecay_fact_feedback` (`helpful`/`unhelpful`) the moment you
 act on it — proactively, without waiting for the user, since recalled facts are
 almost never rated and feedback is how trust is earned.
 
+## Read, probe, and reason
+
+| Need | Call |
+|---|---|
+| One fact plus trust history | `tracedecay_fact_store_get` |
+| Filtered inventory | `tracedecay_fact_store_list` |
+| Facts for one entity | `tracedecay_fact_store_probe` |
+| Related entities | `tracedecay_fact_store_related` |
+| Multi-entity reasoning | `tracedecay_fact_store_reason` |
+| Contradictions | `tracedecay_fact_store_contradict` |
+| Store health (counts, trust, funnel) | `tracedecay_memory_status` |
+
 Do NOT capture: secrets/credentials/PII, transient errors,
 environment-specific failures, one-off narratives, task progress, or
 soon-stale session outcomes — those belong to session transcripts.
@@ -64,7 +76,7 @@ authority. Hard rules that always apply:
 ## If tools are deferred or MCP fails
 
 - Deferred: one ToolSearch call —
-  `select:tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_message_search,tracedecay_fact_feedback,tracedecay_fact_store_curate,tracedecay_automation_run_list,tracedecay_automation_run_view,tracedecay_automation_run_artifact_view`.
+  `select:tracedecay_fact_store_search,tracedecay_fact_store_add,tracedecay_fact_store_get,tracedecay_fact_store_list,tracedecay_fact_store_probe,tracedecay_memory_status,tracedecay_message_search,tracedecay_fact_feedback,tracedecay_fact_store_curate`.
 - MCP error: `tracedecay tool tracedecay_fact_store_search --query …` (see
   `tracedecay:using-the-cli`). An MCP failure is not a reason to write
   MEMORY.md — the CLI reaches the same store.

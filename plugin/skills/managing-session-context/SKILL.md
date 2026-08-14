@@ -82,13 +82,13 @@ before assuming the compacted summary is complete.
 ## Freshness is explicit
 
 Recall never performs catch-up. If a read returns `refresh_required`, get clear
-host or user lifecycle intent before invoking
-`tracedecay_session_refresh_begin`. It returns an opaque handle for
-`tracedecay_session_refresh_status` and `tracedecay_session_refresh_cancel`.
-The CLI equivalents are `tracedecay sessions refresh begin`, `status`, and
-`cancel`, using the same selectors and returned handle.
-Use the authoritative selectors provided by the host/runtime; do not
-reconstruct refresh identity from chat text or a filesystem path.
+host or user lifecycle intent before invoking `tracedecay_session_refresh`
+(`action`: `start` / `join` / `resume` / `begin` for the same idempotent
+begin-or-join, then `status` or `cancel` with the returned handle). The CLI
+equivalents are `tracedecay sessions refresh begin`, `status`, and `cancel`,
+using the same selectors and returned handle. Use the authoritative
+selectors provided by the host/runtime; do not reconstruct refresh identity
+from chat text or a filesystem path.
 
 ## LCM status and diagnosis
 
@@ -125,7 +125,7 @@ chat content.
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_describe,tracedecay_lcm_expand,tracedecay_lcm_expand_query,tracedecay_lcm_status,tracedecay_sessions_for,tracedecay_workflows,tracedecay_session_refresh_begin,tracedecay_session_refresh_status,tracedecay_session_refresh_cancel,tracedecay_project_search,tracedecay_project_context`
+  `select:tracedecay_message_search,tracedecay_lcm_grep,tracedecay_lcm_load_session,tracedecay_lcm_describe,tracedecay_lcm_expand,tracedecay_lcm_expand_query,tracedecay_lcm_status,tracedecay_sessions_for,tracedecay_workflows,tracedecay_session_refresh,tracedecay_project_search,tracedecay_project_context`
   (one batched call, add only the rungs needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
   `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never

@@ -43,7 +43,24 @@ Announce: "Using tracedecay:reviewing-changes for <diff/PR>."
 9. Branch feedback cycle (CI localization, GitHub review comments, proximity):
    `tracedecay_feedback_advisory_cycle`. It returns the canonical diagnostics
    result and daemon-minted read handle. Read-only; never post, update,
-   resolve, or reply on GitHub.
+   resolve, or reply on GitHub. Consume that handle with
+   `tracedecay_feedback_diagnostics`, `tracedecay_feedback_list`,
+   `tracedecay_feedback_get`, `tracedecay_feedback_expand`,
+   `tracedecay_feedback_impact`, and `tracedecay_affected_tests`. Those
+   projections are not substitutes for graph `tracedecay_affected`.
+10. Authorized branch-stack integration (not generic git): expand a GitHub
+    wakeup with `tracedecay_github_stack_signal_expand`, freeze the edge with
+    `tracedecay_stack_snapshot`, preview with
+    `tracedecay_preflight_native_integration`, then
+    `tracedecay_approve_native_integration` and
+    `tracedecay_apply_native_integration`. Inspect or cancel with
+    `tracedecay_native_integration_status` /
+    `tracedecay_cancel_native_integration`.
+11. Linked-worktree cleanup (never deletes a branch):
+    `tracedecay_worktree_inventory` → `tracedecay_worktree_cleanup_inspect` →
+    `tracedecay_worktree_cleanup_confirm` →
+    `tracedecay_worktree_cleanup_remove` →
+    `tracedecay_worktree_cleanup_reconcile`.
 
 ## Safety audit (ship-readiness) and dead-code cleanup
 
@@ -75,7 +92,7 @@ Drafts text only — `git commit` / `gh pr create` stay with the user.
 ## If tools are deferred or MCP fails
 
 - Deferred: one ToolSearch call —
-  `select:tracedecay_diff_context,tracedecay_pr_context,tracedecay_simplify_scan,tracedecay_redundancy,tracedecay_unsafe_patterns,tracedecay_test_risk`.
+  `select:tracedecay_diff_context,tracedecay_pr_context,tracedecay_simplify_scan,tracedecay_redundancy,tracedecay_unsafe_patterns,tracedecay_test_risk,tracedecay_feedback_advisory_cycle,tracedecay_stack_snapshot,tracedecay_worktree_inventory`.
 - MCP error: `tracedecay tool pr_context --base-ref main --head-ref HEAD` etc.
   (see `tracedecay:using-the-cli`). gh being unauthenticated or offline is NOT
   a blocker — pr_context/diff_context never touch the network.

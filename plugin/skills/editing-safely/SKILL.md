@@ -32,6 +32,8 @@ the graph in place.
 2. **Recon by refactor type:**
    - Rename / move → `tracedecay_rename_preview` (`node_id`): every edge
      where it appears as source or target (preview only — nothing renames).
+     Apply with `tracedecay_rename_symbol` using that exact preview identity
+     (`node_id`, `accepted_preview`, `expected_state`); it defaults to dry-run.
    - Signature change → `tracedecay_callers` (every call site must adapt)
      plus `tracedecay_signature_search` for shape-twins.
    - Field rename/remove/new invariant → `tracedecay_field_sites`
@@ -114,7 +116,7 @@ Run this read-only recon in one shot for a symbol or `Struct::field` with
 ## If tools are deferred or MCP fails
 
 - Deferred (names listed without schemas): load once with ToolSearch —
-  `select:tracedecay_search,tracedecay_similar,tracedecay_signature_search,tracedecay_redundancy,tracedecay_rename_preview,tracedecay_str_replace,tracedecay_replace_symbol`
+  `select:tracedecay_search,tracedecay_similar,tracedecay_signature_search,tracedecay_redundancy,tracedecay_rename_preview,tracedecay_rename_symbol,tracedecay_str_replace,tracedecay_replace_symbol`
   (one batched call, add others needed) — then call normally.
 - MCP error/timeout/disconnect: same tool, same args, via shell:
   `tracedecay tool <name>` (see `tracedecay:using-the-cli`). Never

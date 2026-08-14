@@ -39,6 +39,10 @@ store databases directly.
    spend rollups.
 7. **Dashboard**: `tracedecay dashboard` serves the same summaries at
    `/api/plugins/analytics/overview|diagnostics|usage|hints`.
+8. **Observatory / costs model → `tracedecay_observatory_read`**: the
+   project's canonical Observatory and Costs models. Read-only; use this
+   when the question is the retained observatory snapshot rather than the
+   analytics diagnostics rollup.
 
 ## Reading the diagnostics output
 
@@ -75,7 +79,7 @@ store databases directly.
   `sessions` subcommands run over shell and need no MCP transport.
 - The `tracedecay tool lcm_status` / `lcm_doctor` calls also work via MCP; if
   those tools are deferred, load once with ToolSearch —
-  `select:tracedecay_lcm_status,tracedecay_lcm_doctor` — or just use the CLI
+  `select:tracedecay_lcm_status,tracedecay_lcm_doctor,tracedecay_observatory_read,tracedecay_analytics` — or just use the CLI
   form shown above (see `tracedecay:using-the-cli`).
 
 ## Deliverable
