@@ -1938,6 +1938,9 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// leaves the worktree ahead of the sealed generation, and that split is a
     /// truthful stale serving state. Worktree identity must still resolve so a
     /// missing Git authority stays unverified rather than a stale answer.
+    /// An ignored-source roster is revalidated against the live worktree
+    /// before seating: a tracked or retargeted admission must not become
+    /// serving, and the scheduler must not keep that roster.
     pub(super) fn servable_retained_generation(&mut self) -> Option<LatestCompleteCodeIndexV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return None;
@@ -1949,6 +1952,10 @@ impl CodeIndexWorktreeSchedulerV1 {
         let generation = self.publication.load_active_shared().ok().flatten()?;
         self.validate_generation_identity(&generation).ok()?;
         self.adopt_ignored_source_roster(&generation);
+        if !self.ignored_source_roster_matches_generation(&generation) {
+            self.ignored_source_admissions.clear();
+            return None;
+        }
         Some(self.bind_latest_complete(generation))
     }
 
@@ -2559,7 +2566,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             return Ok(None);
         }
         let raw_bytes = if explicitly_admitted {
-            ignored_dependencies::read_bounded_admitted_source(
+            ignored_dependencies::read_explicitly_admitted_source(
                 &self.project_root,
                 logical_path,
                 control,

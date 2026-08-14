@@ -400,6 +400,18 @@ fn resolve_package_entrypoint(
     .ok_or_else(|| CodeIndexIgnoredDependencyRefusalV1::UnsupportedImport.into())
 }
 
+pub(super) fn read_explicitly_admitted_source(
+    project_root: &Path,
+    logical_path: &str,
+    control: Option<&dyn CodeIndexExecutionControlV1>,
+) -> Result<Vec<u8>, CodeIndexSchedulerErrorV1> {
+    if is_ignored_dependency_admission_path(logical_path) {
+        read_bounded_admitted_source(project_root, logical_path, control)
+    } else {
+        read_contained_project_source(project_root, logical_path, control)
+    }
+}
+
 pub(super) fn read_bounded_admitted_source(
     project_root: &Path,
     logical_path: &str,
@@ -419,6 +431,39 @@ pub(super) fn read_bounded_admitted_source(
         logical_path,
         control,
     )
+}
+
+fn is_ignored_dependency_admission_path(logical_path: &str) -> bool {
+    logical_path == "node_modules" || logical_path.starts_with("node_modules/")
+}
+
+fn read_contained_project_source(
+    project_root: &Path,
+    logical_path: &str,
+    control: Option<&dyn CodeIndexExecutionControlV1>,
+) -> Result<Vec<u8>, CodeIndexSchedulerErrorV1> {
+    checkpoint_if_present(control)?;
+    if logical_path.is_empty() || logical_path.contains(['\\', '\0']) {
+        return Err(CodeIndexIgnoredDependencyRefusalV1::PathEscape.into());
+    }
+    let relative = Path::new(logical_path);
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(CodeIndexIgnoredDependencyRefusalV1::PathEscape.into());
+    }
+    let canonical = project_root
+        .join(relative)
+        .canonicalize()
+        .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::PathEscape)?;
+    if !canonical.starts_with(project_root) {
+        return Err(CodeIndexIgnoredDependencyRefusalV1::PathEscape.into());
+    }
+    if logical_path_for(project_root, &canonical)? != logical_path {
+        return Err(CodeIndexIgnoredDependencyRefusalV1::PathEscape.into());
+    }
+    read_bounded_snapshot_source(&canonical, control)
 }
 
 fn canonical_package_root(
