@@ -55,6 +55,30 @@ fn read_analytics_rows(path: &Path) -> Vec<Value> {
 }
 
 #[test]
+fn unbound_hook_analytics_do_not_create_a_missing_profile() {
+    let _lock = crate::hooks::lock_test_env();
+    let home = tempfile::tempdir().unwrap();
+    let profile_root = home.path().join(".tracedecay");
+    let _profile_env = EnvGuard::set_path(USER_DATA_DIR_ENV, &profile_root);
+    assert!(!profile_root.exists());
+
+    let event = r#"{"hook_event_name":"Stop","session_id":"s1"}"#;
+    let parsed = serde_json::from_str(event).unwrap();
+    drop(record_hook_invoked_parsed(
+        None,
+        HintAgent::Claude,
+        "Stop",
+        event,
+        &parsed,
+    ));
+
+    assert!(
+        !profile_root.exists(),
+        "unbound hook analytics created a missing profile"
+    );
+}
+
+#[test]
 fn telemetry_contract_is_canonical_and_bounded() {
     let contract = host_hook_telemetry_contract();
     assert_eq!(

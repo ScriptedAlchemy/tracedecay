@@ -165,21 +165,19 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
         // instead of falsely attributing the batch to the prompt's session id.
         super::schedule_user_session_review("kiro", None).await;
     }
-    if let Some(guidance) = dispatch_guidance {
-        if let Some(guidance) = guidance {
-            if !super::write_hook_output(
-                root.as_deref(),
-                tracedecay_hooks::HookHostV1::Kiro,
-                &event,
-                &guidance,
-                Some(&hook_telemetry),
-            )
-            .await
-            {
-                return 1;
-            }
-        }
-        return 0;
+    let output = dispatch_guidance
+        .flatten()
+        .unwrap_or_else(|| serde_json::json!({}).to_string());
+    if !super::write_hook_output(
+        root.as_deref(),
+        tracedecay_hooks::HookHostV1::Kiro,
+        &event,
+        &output,
+        Some(&hook_telemetry),
+    )
+    .await
+    {
+        return 1;
     }
     0
 }
@@ -267,14 +265,16 @@ async fn ingest_kiro_transcript_for_event(
             if let Some(telemetry) = telemetry {
                 telemetry.note_timed_out(false);
             }
-            eprintln!("[tracedecay] Kiro transcript ingest daemon call failed: {error}");
+            // Fail-open observer: a missing daemon or profile must not print
+            // to the host or fabricate operator state.
+            tracing::warn!(%error, "Kiro transcript ingest daemon call failed");
             KiroIngestOutcome::default()
         }
         Err(_) => {
             if let Some(telemetry) = telemetry {
                 telemetry.note_timed_out(true);
             }
-            eprintln!("[tracedecay] Kiro transcript ingest daemon call timed out");
+            tracing::warn!("Kiro transcript ingest daemon call timed out");
             KiroIngestOutcome::default()
         }
     }

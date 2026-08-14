@@ -640,6 +640,10 @@ pub(super) fn record_hook_analytics(
 /// than to a store shard minted from the path — writing here used to create
 /// `projects/proj_<path hash>/` for directories that never became projects, and
 /// those shards then outnumbered the real stores.
+///
+/// The profile-wide fallback is observer-only: if the operator has no
+/// TraceDecay profile yet, skip the write instead of creating
+/// `$HOME/.tracedecay` from a fail-open hook.
 fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
     let enrolled_data_root = root
         .and_then(super::store_layout::enrolled_layout)
@@ -648,6 +652,7 @@ fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
         Some(data_root) => Some(data_root.join(HOOK_ANALYTICS_FILENAME)),
         None => crate::storage::default_profile_root()
             .ok()
+            .filter(|profile_root| profile_root.is_dir())
             .map(|profile_root| profile_root.join(HOOK_ANALYTICS_FILENAME)),
     }
 }

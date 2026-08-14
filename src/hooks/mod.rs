@@ -588,7 +588,7 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         hook_name,
         &event_json,
     );
-    if let Some(guidance) = dispatch::dispatch_for_scope(
+    let guidance = dispatch::dispatch_for_scope(
         tracedecay_hooks::HookHostV1::Hermes,
         &event_json,
         project_root.as_deref(),
@@ -596,45 +596,44 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            if !write_hook_output(
-                project_root.as_deref(),
-                tracedecay_hooks::HookHostV1::Hermes,
-                &event_json,
-                &serde_json::json!({ "additional_context": guidance }).to_string(),
-                Some(&hook_telemetry),
-            )
-            .await
+    .flatten();
+    if guidance.is_none() {
+        if let Ok(event) = serde_json::from_value::<DaemonHookEvent>(parsed) {
+            if event.agent == "hermes"
+                && matches!(
+                    event.event.as_str(),
+                    "terminalReceipt" | "turnCompleted" | "turnIngested"
+                )
+                && event.receipt.is_some()
             {
-                return 1;
+                if let Some(project_root) = project_root.as_ref() {
+                    notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
+                } else if let Err(error) = daemon_hook_action(
+                    None,
+                    serde_json::json!({ "action": "hermes_receipt", "event": event }),
+                    Some(&hook_telemetry),
+                )
+                .await
+                {
+                    tracing::warn!(%error, "user Hermes receipt daemon call failed");
+                }
             }
         }
-        return 0;
     }
-
-    let Ok(event) = serde_json::from_value::<DaemonHookEvent>(parsed) else {
-        return 0;
-    };
-    if event.agent != "hermes"
-        || !matches!(
-            event.event.as_str(),
-            "terminalReceipt" | "turnCompleted" | "turnIngested"
-        )
-        || event.receipt.is_none()
-    {
-        return 0;
-    }
-    if let Some(project_root) = project_root.as_ref() {
-        notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
-    } else if let Err(error) = daemon_hook_action(
-        None,
-        serde_json::json!({ "action": "hermes_receipt", "event": event }),
+    let output = guidance.map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
+    );
+    if !write_hook_output(
+        project_root.as_deref(),
+        tracedecay_hooks::HookHostV1::Hermes,
+        &event_json,
+        &output,
         Some(&hook_telemetry),
     )
     .await
     {
-        eprintln!("[tracedecay] user Hermes receipt daemon call failed: {error}");
+        return 1;
     }
     0
 }
