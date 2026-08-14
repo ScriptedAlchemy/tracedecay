@@ -230,7 +230,7 @@ MCP registration or native plugin tools, with permissions where available.
 
 - Hermes installs one native user plugin through Hermes' plugin API.
 - Cursor installs a local plugin in `~/.cursor/plugins/local/tracedecay` that bundles MCP, hooks, and the tracedecay rule.
-- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then `codex plugin add tracedecay@personal` installs Codex's cache from that source. The plugin owns MCP, hooks, and skills. Codex's profile-wide install does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, activation config, or cache entries.
+- Codex uses Codex's plugin source, marketplace, and installed-cache flow: TraceDecay stages the source bundle and marketplace entry, then drives `codex plugin add tracedecay@personal` to install Codex's cache from that source. The plugin owns MCP, hooks, and skills. TraceDecay does not write `~/.codex/AGENTS.md`, `~/.codex/hooks.json`, or `[hooks.state]` trust hashes — Codex still asks you to trust new command hooks via `/hooks`.
 - Kimi Code CLI stages its plugin source at `~/.tracedecay/host-bundle-stage/kimi/tracedecay`; run the printed `/plugins install <staged-path>` command in Kimi Code, then rerun TraceDecay so it can record the staged source. Kimi owns `~/.kimi-code/plugins/installed.json` and its managed/cache paths.
 
 Hermes setup writes the single user integration to
@@ -324,14 +324,14 @@ ln -s /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
 Reload Cursor after installing or replacing the plugin. The plugin expects the `tracedecay` binary to be available on `PATH`; ensure your shell PATH resolves the intended installed binary.
 
 Codex global install is plugin-based for MCP, hooks, and skills. TraceDecay
-stages the plugin source bundle and marketplace entry; Codex CLI installs its
-cache from that source. First install writes
-`~/plugins/tracedecay/`, updates `~/.agents/plugins/marketplace.json`, and prints
-`codex plugin add tracedecay@personal`. Run that command in Codex to copy the
-source into `~/.codex/plugins/cache/personal/tracedecay/<version>`, then rerun
-`tracedecay install --agent codex` to record the staged source. `tracedecay
-update-plugin --agent codex` refreshes only the source and tells Codex to update
-its own cache; it never rewrites Codex activation or cache state.
+stages the plugin source bundle and marketplace entry, then drives
+`codex plugin add tracedecay@personal` so Codex copies the source into
+`~/.codex/plugins/cache/personal/tracedecay/<version>` and records
+`[plugins."tracedecay@personal"] enabled = true`. First install writes
+`~/.codex/plugins/tracedecay/` and `~/.agents/plugins/marketplace.json`.
+`tracedecay update-plugin --agent codex` is owned by the receipt-backed
+component-set transaction, which restages the source and drives `plugin add`
+again.
 
 Skill visibility follows Codex's plugin model. `codex plugin list` and
 `codex plugin add` inspect the marketplace source bundle. Active Codex sessions
@@ -340,12 +340,11 @@ from `~/plugins/tracedecay`; start a new Codex session after adding the plugin o
 recopying it. Codex also skips new or changed command hooks until you trust them,
 so run `/hooks` inside Codex after install or recopy.
 
-Current Codex limitations: TraceDecay can refresh the plugin source and
-marketplace entry, but it cannot force Codex to run `plugin add`, update or
-remove its cache, reload an active session, or trust plugin command hooks for
-you. Remove the native plugin with `codex plugin remove tracedecay@personal`,
-then rerun `tracedecay uninstall --agent codex` to clean its staged source. The
-legacy Codex config surfaces are intentionally left alone.
+Current Codex limitations: TraceDecay drives `codex plugin add` / `remove` but
+cannot reload an active Codex session or trust plugin command hooks for you
+(use `/hooks` after install or recopy). Uninstall drives `codex plugin remove
+tracedecay@personal` and then removes the staged source. The legacy Codex
+config surfaces are intentionally left alone.
 
 Kimi's global lifecycle is also two-step: TraceDecay stages source, then Kimi
 Code's `/plugins install <staged-path>` registers it. To remove it, use Kimi

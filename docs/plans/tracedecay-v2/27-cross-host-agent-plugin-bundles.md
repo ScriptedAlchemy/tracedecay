@@ -310,7 +310,7 @@ Inadequacy reason codes used below:
 | --- | --- | --- | --- |
 | Claude Code | ADOPT-CLI | `claude plugin marketplace add` / `install` / `uninstall` | owner ruling; `agents/claude.rs` |
 | Gemini CLI | ADOPT-CLI | `gemini extensions install <staged dir>` / `uninstall tracedecay` | `agents/gemini/extension.rs`; <https://github.com/google-gemini/gemini-cli/blob/main/docs/extensions/index.md> |
-| Codex | ADOPT-CLI (MCP only) | `codex mcp add` / `remove`; plugin activation stays interactive-only (a) | `agents/codex/mcp_registry.rs`; <https://developers.openai.com/codex/cli> |
+| Codex | ADOPT-CLI | `codex plugin add` / `remove` for Core (probed non-interactive on Codex CLI 0.147.0, 2026-08-14); `codex mcp add` / `remove` for the MCP-only set. Hook trust stays interactive (`/hooks`) — no non-interactive trust surface. | `agents/codex/plugin_registry.rs`; `agents/codex/mcp_registry.rs`; <https://developers.openai.com/codex/cli> |
 | Copilot CLI | ADOPT-CLI | `copilot mcp add NAME -- CMD ARGS` / `remove` | `agents/copilot.rs`; <https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers> |
 | Kiro | ADOPT-CLI | `kiro-cli mcp add --name … --command … --args …` / `remove`; steering + managed agent stay TraceDecay-written (c) | `agents/kiro.rs`; <https://kiro.dev/docs/cli/mcp/registry/> |
 | OpenCode | MANUAL-ONLY (d) | `opencode plugin` de-duplicates by resolved `file://` URL, so driving it beside the auto-discovered `plugin/*.ts` deployment double-loads every hook, and it has no removal counterpart (b) | shipped host v1.18.4 config loader; recorded as executable invariants in `agents/opencode/plugin_cli.rs` |

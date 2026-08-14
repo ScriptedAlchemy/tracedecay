@@ -37,8 +37,8 @@ operator-owned npm trusted-publisher setup.
 | Evidence-only gaps | 18 |
 
 Across the 72 unique gap/evidence entries (conflict rows only reference those
-entries): 34 are `RC-BLOCKING`, 15 are `RC-REQUIRED-EVIDENCE`, 21 are
-`POST-RC`, and 2 are `RECORDED` (A2, A3).
+entries): 33 are `RC-BLOCKING`, 15 are `RC-REQUIRED-EVIDENCE`, 21 are
+`POST-RC`, and 3 are `RECORDED` (A2, A3, A12).
 
 ## A. MOUNTLESS SURFACES
 
@@ -60,7 +60,7 @@ to a real production caller or deleted.
 | A9 | RC-BLOCKING | GitHub stack capability/drift canonical emitters | Helpers exist in `crates/tracedecay-usecases/src/observability/github_stack_emit.rs:124-542`; `record_github_stack_drifts` has only its focused test caller. The stack/advisory runtime itself is mounted, but not these canonical observations. |
 | A10 | POST-RC | Independent-review/task-outcome label emission | The closed vocabulary is implemented and tested (`crates/tracedecay-domain/src/observability/review_labels.rs:93-432`) without a root emitter or Plan 24 consumer. |
 | A11 | RC-BLOCKING | Remote Brain node sender and operational plane | `EnrolledRemoteClient::capture` and transfer/query/recovery methods have zero production callers (`crates/tracedecay-sdk/src/remote_client.rs:197-355`). Inbound authority routes are mounted, but project composition supplies `RemoteOperationalReadV1::Unavailable` (`src/daemon/project_composition.rs:567`); no live Settings/Dashboard/Doctor state, replica/cache refresh, or remote clean-diagnostic publisher is mounted. |
-| A12 | RC-BLOCKING | Supported-host registration breadth | The independent witnesses converge on a mixed staged/mountless lane: Codex hook registration is empty (`plugin/hooks/hooks-codex.json:1-3`); Kiro exposes only prompt-boundary native support (`crates/tracedecay-hooks/src/lib.rs:135-138`); Codex Core and Kimi native plugin assets are staged but not registered (`crates/tracedecay-agent-hosts/src/agents/codex.rs:395-426`; `kimi.rs:1-22,370-428`); and the production-mount census finds Kimi/OpenCode commands take the capture-only fast path before their live handlers (`src/hook_capture_cmd.rs:108-172`; live handlers at `src/hooks/mod.rs:329-389`). Plans 07/27 and the census are independent witnesses. |
+| A12 | RECORDED | Supported-host registration breadth | See [A12 ruling](#a12-ruling-2026-08-14). Codex hook seed is empty by design and filled at install; Kimi has no global-hook or non-interactive plugin CLI; Codex Core now drives `codex plugin add` / `remove`. Kiro prompt-boundary and Kimi/OpenCode capture-fast-path remain out of this slice. |
 | A13 | RC-BLOCKING | General typed workflow step executor | `WorkflowStepExecutionService::execute_ready_step` is implemented at `crates/tracedecay-application/src/workflow_run.rs:546`, but all callers are in `crates/tracedecay-application/tests/workflow_dag_execution.rs`. Production workflow start uses the narrower Work fan-out path. |
 | A14 | POST-RC | Nineteen per-verb LSP gateway façade methods | Methods such as `DaemonLspGateway::declaration` (`crates/tracedecay-lsp/src/gateway.rs:2377-2599`) have zero callers; the live protocol correctly uses `semantic_request` (`gateway.rs:2649-2681`). Both Plan 35 witnesses agree this parallel façade should be folded in or deleted. |
 | A15 | POST-RC | Derived HTTP route documents | `http_route_documents` derives catalog-backed route documentation (`crates/tracedecay-api/src/http.rs:489-532`) but has only a catalog test caller. |
@@ -124,7 +124,7 @@ to a real production caller or deleted.
 | D4 | RC-REQUIRED-EVIDENCE | Plan 36 witnesses disagree on native approval/fanout mounting | Current source mounts the owner, six operations, exact topology, and coordinator preflight. Approval is structurally mounted; the gap is the public approval-to-receipt/restart journey, not an absent handler. Manual branch activation remains independently unavailable (A20). |
 | D5 | RC-BLOCKING | Plan 37 witnesses disagree on PR auto-track and CI localization | Background discovery/stack/advisory CI localization are mounted. Delivery failure localization is intentionally `NotConfigured` and superseded by decision. Exact PR-head/manual activation still returns unavailable, so A20 remains. |
 | D6 | RC-BLOCKING | Semantic path called “implemented-unmounted” versus Plan 31 mounted runtime | Runtime, vector publication, and query fallback are mounted. The live acceptance failure is evaluation/activation rejection, not absence of a semantic production caller. P12/E3 govern. |
-| D7 | RC-BLOCKING | Plan 27 calls Kimi/OpenCode plugin artifacts mounted; mount census calls live hooks capture-only | Artifact generation/install and handler functions exist, but the pre-main capture fast path prevents live handler dispatch for those command forms. The census's executable-path evidence wins; A12 remains. |
+| D7 | RC-BLOCKING | Plan 27 calls Kimi/OpenCode plugin artifacts mounted; mount census calls live hooks capture-only | Artifact generation/install and handler functions exist, but the pre-main capture fast path prevents live handler dispatch for those command forms. The census's executable-path evidence wins. A12's Codex/Kimi registration slice is recorded separately; this row is the capture-fast-path only. |
 | D8 | POST-RC | `task_activity` listed as an unmounted conformance exception | Current daemon code publishes `ActivityFamilyV1::Task` after committed Work mutation (`src/daemon/service/invocation/work.rs:107-123`), and Dashboard subscribes. The exception is stale test/ledger maintenance, not a product gap. |
 | D9 | POST-RC | Plan 34 requests read-only LSP rename candidate/preview; Plan 35 explicitly keeps rename unavailable | The current gateway intentionally returns unavailable (`crates/tracedecay-lsp/src/gateway.rs:2683-2693`) and never applies edits. Plan 35 is the more specific current LSP authority; treat Plan 34's read-only rename binding as a post-RC plan-authority reconciliation, not an RC edit-safety defect. |
 | D10 | RC-BLOCKING | Plan 19 reports fresh final shape complete; Plan 12 finds live migrations/backfills | Direct current source shows live observation migration/backfill and `migrate_and_attach*`. The narrow fresh-store/read-only paths do not satisfy the universal cutover. B1 governs. |
@@ -320,3 +320,70 @@ of the persist stack would. Other code reads that authority:
   trait-only `EvidenceAssemblyPublicationOutcomeV1` enum.
 - Left write/read types, rusqlite executor, final-shape tables, and V3
   target contracts in place for the owning plans.
+
+## A12 ruling (2026-08-14)
+
+Decision: **RECORD** the empty Codex hook seed and Kimi's missing global-hook
+form; **WIRE** Codex Core activation through `codex plugin add` / `remove`.
+Filling `hooks-codex.json` or inventing a Kimi global-hook file is rejected.
+
+### (a) Codex `hooks-codex.json` is an empty `{}`
+
+- The source seed at `plugin/hooks/hooks-codex.json` is an empty `hooks`
+  object by design. `plugin/README.md` and
+  `codex_plugin_hooks_fills_empty_seed_and_preserves_strict_schema` pin that
+  the global renderer mutates the seed in place from `CODEX_MANAGED_HOOKS`.
+- Handlers exist and are already registered at install time:
+  `SessionStart` → `hook-codex-session-start`, `UserPromptSubmit` →
+  `hook-codex-user-prompt-submit`, plus SubagentStart / PostToolUse /
+  PostCompact / Stop. Repo-local bundles ship no hooks
+  (`CodexBundlePolicy::include_hooks` is Global-only).
+- Codex honors plugin `hooks/hooks.json` after `codex plugin add`. It does
+  **not** honor a TraceDecay-authored `~/.codex/hooks.json` or forged
+  `[hooks.state]` trust hashes. Isolated-HOME probe of Codex CLI 0.147.0
+  (`codex plugin add tracedecay@personal --json`) wrote activation only;
+  hook trust stayed empty.
+- Filling the source seed would duplicate `CODEX_MANAGED_HOOKS`, break the
+  empty-seed contract, and leak hooks into repo-local bundles.
+
+### (b) Kimi has no global-hook form
+
+- Re-probed `kimi --help` on 2026-08-14: command set is still
+  `export, provider, acp, web, server, login, doctor, vis, migrate, upgrade`.
+  No `mcp`, `plugin`, or `hooks` subcommand. Matches the 2026-08-08 Plan 27
+  MANUAL-ONLY (a) verdict and `kimi.rs` module ruling.
+- Plugin-manifest hooks (`PostToolUse` + `Stop`) are already rendered by
+  `render_kimi_hook_commands` into `.kimi-plugin/plugin.json`. Those become
+  live only after the operator runs interactive `/plugins install <staged>`.
+- There is no documented Kimi global hooks.json, settings hook table, or
+  non-interactive registration command. Inventing `hooks-kimi.json` would
+  be a staged half-form the host cannot load.
+
+### (c) Codex Core plugin activation
+
+- Plan 27's 2026-08-08 `(a)` verdict is reopened. Codex CLI 0.147.0
+  publishes non-interactive `codex plugin add` / `remove` / `list` /
+  `marketplace`. Isolated-HOME evidence: add exits 0 without a TTY, writes
+  `[plugins."tracedecay@personal"] enabled = true`, and copies the staged
+  source into `~/.codex/plugins/cache/personal/tracedecay/<version>`.
+- `activate_deployed_host_registration` now drives that CLI (same
+  host-capability pattern as `codex mcp add`).
+  `interactive_activation_guidance` is `None` so the catalog transaction
+  actually calls activate instead of returning `UnsupportedCapability`.
+- Hook trust remains interactive (`/hooks`). Doctor reports it; TraceDecay
+  still never authors `[hooks.state]`.
+
+### Why not WIRE (a) or (b)
+
+The host either already fills the registration (Codex global renderer) or
+has no registration surface (Kimi). Wiring a file the host does not read
+would be a staged half-form.
+
+### Action taken
+
+- Added `agents/codex/plugin_registry.rs` and wired Core activate/deactivate
+  / prepare / update through `codex plugin add` / `remove`.
+- Left `hooks-codex.json` as the empty seed; left Kimi plugin-manifest
+  hooks and interactive `/plugins` deferral in place.
+- Kiro prompt-boundary and Kimi/OpenCode capture-fast-path stay on D7 /
+  their own items; they were not this slice.

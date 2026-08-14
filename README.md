@@ -78,13 +78,9 @@ tracedecay install --local --agent codex
 
 After setup, restart the agent so it loads the MCP server, plugin, hooks, or rules written for that host.
 
-Codex first-time installs print one extra step:
-
-```bash
-codex plugin add tracedecay@personal
-```
-
-Run it once before starting a new Codex session so Codex copies the generated plugin into its installed cache.
+Codex first-time installs drive `codex plugin add tracedecay@personal` themselves.
+Trust new command hooks inside Codex with `/hooks`, then start a new session so
+the installed cache is loaded.
 
 ## Common Commands
 
