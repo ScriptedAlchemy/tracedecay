@@ -849,9 +849,20 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(matches!(
-            error,
-            TraceDecayError::ResetRequired { ref authority, .. } if authority == "graph store"
-        ));
+        match error {
+            TraceDecayError::ResetRequired { authority, reason } => {
+                assert_eq!(
+                    authority, "SQLite store",
+                    "wrong-schema read-only open must name the owning store: {reason:?}"
+                );
+                assert!(
+                    reason.contains("schema"),
+                    "wrong-schema read-only open must remain a schema ResetRequired: {reason:?}"
+                );
+            }
+            other => panic!(
+                "nonempty graph at another schema must require a reset, got {other:?}"
+            ),
+        }
     }
 }
