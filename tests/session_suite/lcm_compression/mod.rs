@@ -182,6 +182,15 @@ fn preflight_request(
     }
 }
 
+fn with_authoritative_timestamps(mut messages: Vec<Value>) -> Vec<Value> {
+    for (index, message) in messages.iter_mut().enumerate() {
+        if message.get("timestamp").and_then(Value::as_i64).is_none() {
+            message["timestamp"] = json!(1_715_000_000 + index as i64 + 1);
+        }
+    }
+    messages
+}
+
 /// Ingests host-active messages through the daemon compression path without
 /// creating summary nodes — the production replacement for the retired
 /// ingesting preflight (preflight is a read-only decision surface now).
@@ -191,6 +200,7 @@ async fn ingest_active_messages(
     session_id: &str,
     messages: Vec<Value>,
 ) -> tracedecay_sessions::runtime::lcm::LcmCompressionResponse {
+    let messages = with_authoritative_timestamps(messages);
     let message_count = messages.len();
     let mut request = compress_request(provider, session_id, LcmSummarizerMode::Noop);
     request.messages = messages;

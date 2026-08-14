@@ -23,7 +23,7 @@ async fn fresh_tail_boundary_keeps_multi_tool_transaction_atomic_and_shrinking()
         None,
         Some(400),
     );
-    request.messages = messages;
+    request.messages = with_authoritative_timestamps(messages);
     request.current_tokens = Some(107);
     request.threshold_tokens = Some(80);
     request.fresh_tail_count = Some(3);
@@ -75,7 +75,7 @@ async fn bounded_leaf_chunk_backs_off_before_multi_tool_transaction() {
         Some(2),
         None,
     );
-    request.messages = messages;
+    request.messages = with_authoritative_timestamps(messages);
     request.fresh_tail_count = Some(1);
 
     let response = db.lcm_compress(request).await.unwrap();
@@ -113,7 +113,7 @@ async fn budget_and_overflow_replay_never_split_tool_transaction() {
         None,
         Some(8),
     );
-    request.messages = messages;
+    request.messages = with_authoritative_timestamps(messages);
     request.current_tokens = Some(107);
     request.fresh_tail_count = Some(3);
 

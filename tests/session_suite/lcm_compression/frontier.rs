@@ -179,7 +179,7 @@ async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_
     );
     request.threshold_tokens = Some(1);
     request.fresh_tail_count = Some(2);
-    request.messages = vec![
+    request.messages = with_authoritative_timestamps(vec![
         json!({
             "id": "large-tool-result",
             "role": "tool",
@@ -189,7 +189,7 @@ async fn late_summary_projection_failure_rolls_back_payload_files_and_canonical_
         json!({"id": "middle-1", "role": "assistant", "content": "middle one"}),
         json!({"id": "fresh-1", "role": "user", "content": "fresh one"}),
         json!({"id": "fresh-2", "role": "assistant", "content": "fresh two"}),
-    ];
+    ]);
 
     let error = db
         .lcm_compress_for_test(request)
