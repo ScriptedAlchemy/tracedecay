@@ -15,13 +15,6 @@ pub(crate) struct ResolvedProjectRoute {
     pub(crate) owner: ProjectRegistryContext,
     pub(crate) profile_id: tracedecay_domain::UserProfileId,
     pub(crate) requested_root: PathBuf,
-    /// Git identity observed when the route was resolved. Retained on the
-    /// route value for scope/diagnostic cutover; dispatch today keys only on
-    /// `requested_root` + mounted server.
-    #[allow(dead_code)]
-    pub(crate) requested_git_common_dir: Option<PathBuf>,
-    #[allow(dead_code)]
-    pub(crate) requested_branch: Option<String>,
     /// The exact application scope resolved ONCE at the entry point for this
     /// route (plan: `docs/superpowers/plans/v2/01-domain-request-context.md`).
     /// Query-facing handlers consume the routed server; the scope names the
@@ -55,8 +48,6 @@ impl std::fmt::Debug for ResolvedProjectRoute {
             .field("owner", &self.owner)
             .field("profile_id", &self.profile_id)
             .field("requested_root", &self.requested_root)
-            .field("requested_git_common_dir", &self.requested_git_common_dir)
-            .field("requested_branch", &self.requested_branch)
             .field("scope", &self.scope)
             .finish_non_exhaustive()
     }
@@ -98,8 +89,6 @@ pub(crate) async fn resolve_registered_project_route(
         owner: context,
         profile_id: global_db.binding().shard_id.profile_id.clone(),
         requested_root: requested_path,
-        requested_git_common_dir: request.requested_git_common_dir,
-        requested_branch: request.requested_branch,
         scope,
     })
 }
