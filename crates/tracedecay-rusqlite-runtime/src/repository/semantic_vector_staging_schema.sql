@@ -309,11 +309,11 @@ CREATE TABLE IF NOT EXISTS semantic_vector_stage_chunk_receipts (
     effect_ordinal INTEGER NOT NULL CHECK (effect_ordinal >= 0),
     chunk_id TEXT NOT NULL,
     chunk_digest TEXT NOT NULL,
-    operation TEXT NOT NULL CHECK (operation IN ('embed', 'tombstone')),
+    operation TEXT NOT NULL CHECK (operation IN ('embed', 'reuse', 'tombstone')),
     output_digest TEXT,
     CHECK (
         (operation = 'embed' AND output_digest IS NOT NULL)
-        OR (operation = 'tombstone' AND output_digest IS NULL)
+        OR (operation IN ('reuse', 'tombstone') AND output_digest IS NULL)
     ),
     PRIMARY KEY (batch_id, effect_ordinal),
     UNIQUE (stage_id, chunk_id)

@@ -881,6 +881,36 @@ fn receipt_at(
     .unwrap()
 }
 
+fn reuse_receipt(stage: &SemanticVectorStageKey) -> SemanticVectorStageBatchReceipt {
+    SemanticVectorStageBatchReceipt::new(
+        SemanticVectorStageBatchKey {
+            stage: stage.clone(),
+            ordinal: 0,
+        },
+        digest('9'),
+        digest::<SemanticVectorBatchInputDigest>('a'),
+        digest::<SemanticVectorBatchOutputDigest>('b'),
+        digest('d'),
+        vec![SemanticVectorStageChunkReceipt {
+            effect_ordinal: 0,
+            chunk_id: SemanticVectorChunkId::new("chunk.reused").unwrap(),
+            chunk_digest: digest::<SemanticVectorChunkDigest>('e'),
+            operation: SemanticVectorStageChunkOperation::Reuse,
+            output_digest: None,
+        }],
+    )
+    .unwrap()
+}
+
+fn reuse_chunk_manifest(chunk_id: &str) -> SemanticVectorChunkManifestDigest {
+    semantic_vector_chunk_manifest_digest(&[SemanticVectorChunkManifestMember {
+        chunk_id: SemanticVectorChunkId::new(chunk_id).unwrap(),
+        chunk_digest: digest::<SemanticVectorChunkDigest>('e'),
+        operation: SemanticVectorStageChunkOperation::Reuse,
+    }])
+    .unwrap()
+}
+
 fn chunk_manifest(chunk_id: &str) -> SemanticVectorChunkManifestDigest {
     semantic_vector_chunk_manifest_digest(&[SemanticVectorChunkManifestMember {
         chunk_id: SemanticVectorChunkId::new(chunk_id).unwrap(),
@@ -901,6 +931,33 @@ fn publication_replay(plan: &SemanticVectorStagePlan) -> GraphPublicationReplayV
         vec![1_u8],
     )
     .unwrap()
+}
+
+#[test]
+fn append_persists_lineage_only_reuse_chunks() {
+    let fixture = Fixture::new();
+    let plan = plan(
+        &fixture,
+        "reuse-lineage",
+        reuse_chunk_manifest("chunk.reused"),
+    );
+    let (control, probe) = operation("begin.reuse.lineage");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    fixture.storage().begin_stage(&plan, &context).unwrap();
+
+    let reused = reuse_receipt(&plan.key);
+    let (control, probe) = operation("append.reuse.lineage");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(
+        matches!(
+            fixture
+                .storage()
+                .append_stage_batch(&reused, &plan.writer_fence, &context)
+                .expect("reuse rows must persist as lineage-only chunk receipts"),
+            SemanticVectorStageAppendOutcome::Appended { .. }
+        ),
+        "lineage-only reuse must not fail the chunk-receipt CHECK"
+    );
 }
 
 #[test]
