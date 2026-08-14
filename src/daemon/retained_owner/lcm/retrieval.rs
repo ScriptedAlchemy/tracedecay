@@ -19,6 +19,7 @@ use tracedecay_sessions::runtime::{
     SessionMessageType, SessionSearchScope, SessionSearchTimeRange,
 };
 use tracedecay_temporal_query::context::ContextBudget;
+use tracedecay_temporal_query::ports::ExecutionLimits;
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_usecases::session::{SessionRetrievalScope, SessionTemporalQuery};
 
@@ -36,7 +37,12 @@ use crate::daemon::session_retrieval::{
     SessionTemporalMetadataView,
 };
 use crate::timeutil::SearchTimeBound;
+
 const MAX_RESULTS: usize = 100;
+// Keep this at or below APPLICATION_RETRIEVAL_MAX_BYTES in
+// session_retrieval/admitted.rs. Default ExecutionLimits are multi-MiB and
+// fail within_request_budgets as a persistent BudgetExhausted / Saturated.
+const ADMITTED_RETRIEVAL_BYTE_LIMIT: usize = 64 * 1024;
 const DEFAULT_CONTENT_LIMIT: usize = 4_096;
 const MAX_CONTENT_LIMIT: usize = 8_192;
 const MAX_LOAD_CONTENT_LIMIT: usize = 20_000;
@@ -519,7 +525,8 @@ fn retrieval_query(
         context_budget,
     )
     .map_err(|_| RetainedSurfaceExecutionErrorV1::InvalidRequest)?
-    .with_retrieval_scope(retrieval_scope);
+    .with_retrieval_scope(retrieval_scope)
+    .with_execution_limits(admitted_execution_limits(limit));
     Ok(SessionRetrievalCommand::new(
         query,
         SessionRetrievalFilters {
@@ -538,6 +545,23 @@ fn retrieval_query(
     )
     .query()
     .clone())
+}
+
+fn admitted_execution_limits(limit: usize) -> ExecutionLimits {
+    ExecutionLimits {
+        candidate_limit: limit,
+        candidate_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        candidate_item_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        candidate_metadata_field_bytes: 16 * 1024,
+        record_limit: limit,
+        record_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        record_item_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        hydration_limit: limit,
+        hydration_total_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        hydration_payload_bytes: ADMITTED_RETRIEVAL_BYTE_LIMIT,
+        hydration_chunk_bytes: 16 * 1024,
+        ..ExecutionLimits::default()
+    }
 }
 
 fn retrieval_page(
