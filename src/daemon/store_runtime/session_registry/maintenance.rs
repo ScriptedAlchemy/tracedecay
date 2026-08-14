@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 #[cfg(test)]
@@ -9,18 +8,19 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
+#[cfg(test)]
+use std::sync::atomic::Ordering;
+
 use super::{
-    DaemonSessionRuntimeRegistryV1, LONG_LIVED_SESSION_MAINTENANCE, RegisteredGlobalDb, Result,
-    StoreRuntimeHandle, registry_open_error, release_process_allocator_memory,
+    DaemonSessionRuntimeRegistryV1, RegisteredGlobalDb, Result, StoreRuntimeHandle,
+    registry_open_error, release_process_allocator_memory,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RegisteredSchemaConvergenceStatus {
     Pending,
     Complete,
-    Degraded {
-        message: String,
-    },
+    Degraded { message: String },
 }
 
 type RegisteredSchemaConvergenceStatuses =
@@ -233,17 +233,7 @@ impl RegisteredSchemaConvergenceTestGate {
 
 impl DaemonSessionRuntimeRegistryV1 {
     fn long_lived_session_maintenance(&self) -> bool {
-        if LONG_LIVED_SESSION_MAINTENANCE.load(Ordering::Relaxed) {
-            return true;
-        }
-        #[cfg(test)]
-        if self
-            .long_lived_session_maintenance_for_test
-            .load(Ordering::Relaxed)
-        {
-            return true;
-        }
-        false
+        self.long_lived_session_maintenance
     }
 
     pub(super) async fn attach_registered(
@@ -292,12 +282,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         shard_id: &StoreShardIdV1,
     ) -> Option<RegisteredSchemaConvergenceStatus> {
         self.registered_schema_convergence.status(shard_id)
-    }
-
-    #[cfg(test)]
-    pub(super) fn enable_long_lived_session_maintenance_for_test(&self) {
-        self.long_lived_session_maintenance_for_test
-            .store(true, Ordering::Relaxed);
     }
 
     #[cfg(test)]

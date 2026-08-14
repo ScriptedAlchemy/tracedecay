@@ -45,6 +45,20 @@ impl RemoteSpoolKeyringV1 for UnavailableRemoteSpoolKeyringV1 {
 
 impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
+        // `main` marks long-lived processes before any registry opens, so the
+        // process mode is a construction-time fact, not a mutable runtime flag.
+        let long_lived =
+            super::LONG_LIVED_SESSION_MAINTENANCE.load(std::sync::atomic::Ordering::Relaxed);
+        Self::open_with_session_maintenance(identity, long_lived).await
+    }
+
+    /// Constructor with an explicit session-maintenance policy. Production
+    /// enters through [`Self::open`]; tests exercising convergence pass
+    /// `true` directly so the same gate runs without a mutable side channel.
+    pub(crate) async fn open_with_session_maintenance(
+        identity: LocalProfileIdentityAuthorityV1,
+        long_lived_session_maintenance: bool,
+    ) -> Result<Self> {
         let remote_credential_authority = Arc::new(
             crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
                 identity.brain_id().clone(),
@@ -137,8 +151,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             ),
             session_sync_service: Arc::new(std::sync::OnceLock::new()),
             remote_recovery_project_lifecycle: Arc::new(std::sync::OnceLock::new()),
-            #[cfg(test)]
-            long_lived_session_maintenance_for_test: AtomicBool::new(false),
+            long_lived_session_maintenance,
         };
         registry.mount_registered_remote_nodes().await?;
         Ok(registry)

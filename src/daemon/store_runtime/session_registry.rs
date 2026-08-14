@@ -114,8 +114,10 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     remote_recovery_project_lifecycle: Arc<
         OnceLock<Weak<crate::daemon::branch_admin::remote_recovery_lifecycle::RemoteRecoveryProjectLifecycleV1>>,
     >,
-    #[cfg(test)]
-    long_lived_session_maintenance_for_test: AtomicBool,
+    /// Fixed at construction: whether this registry's process runs long-lived
+    /// session maintenance (background historical schema convergence) for the
+    /// shards it attaches. Short-lived CLI/hook processes stay `false`.
+    long_lived_session_maintenance: bool,
 }
 
 impl DaemonSessionRuntimeRegistryV1 {

@@ -52,6 +52,7 @@ async fn project_sessions_pending_convergence(
     ProjectId,
     PathBuf,
     PathBuf,
+    crate::db::DaemonDatabaseScope,
 ) {
     let temporary = tempfile::tempdir().expect("temporary project parent");
     let root = temporary
@@ -63,6 +64,11 @@ async fn project_sessions_pending_convergence(
     std::fs::create_dir_all(&project_root).expect("project root");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
+    // Production enters the daemon database scope before constructing the
+    // session registry. Keep that authority alive for the whole fixture so
+    // these daemon-maintenance tests never rely on ambient temp-path authority.
+    let database_scope = crate::db::enter_daemon_database_scope(&profile_root, 1, project_name)
+        .expect("daemon database scope");
     let project_id = ProjectId::new(project_name).expect("typed project identity");
     crate::storage::write_enrollment_marker(
         &project_root,
@@ -86,7 +92,14 @@ async fn project_sessions_pending_convergence(
         .await
         .expect("remove durable convergence checkpoint");
     drop(connection);
-    (temporary, identity, project_id, project_root, sessions_path)
+    (
+        temporary,
+        identity,
+        project_id,
+        project_root,
+        sessions_path,
+        database_scope,
+    )
 }
 
 async fn wait_for_schema_convergence(
@@ -528,27 +541,35 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
-    let (_temporary, identity, project_id, project_root, _sessions_path) =
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-admission").await;
     let shard_id = StoreShardIdV1::project_sessions(
         identity.brain_id().clone(),
         identity.profile_id().clone(),
         project_id.clone(),
     );
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
         .await
         .expect("session runtime registry");
-    registry.enable_long_lived_session_maintenance_for_test();
     let convergence_gate = registry.block_registered_schema_convergence_for_test();
 
-    let database = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        registry.project_sessions(project_id, [project_root]),
-    )
-    .await
-    .expect("daemon admission must not wait for historical convergence")
-    .expect("registered project sessions");
-    convergence_gate.wait_until_blocked().await;
+    let admission = registry.project_sessions(project_id, [project_root]);
+    tokio::pin!(admission);
+    let convergence_blocked = convergence_gate.wait_until_blocked();
+    tokio::pin!(convergence_blocked);
+    let database = tokio::select! {
+        result = &mut admission => {
+            let database = result.expect("registered project sessions");
+            convergence_blocked.await;
+            database
+        }
+        () = &mut convergence_blocked => {
+            tokio::time::timeout(std::time::Duration::from_secs(1), admission)
+                .await
+                .expect("daemon admission must not wait for blocked historical convergence")
+                .expect("registered project sessions")
+        }
+    };
 
     assert_eq!(
         registry.registered_schema_convergence_status(&shard_id),
@@ -576,12 +597,11 @@ async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_project_attaches_schedule_one_historical_convergence() {
-    let (_temporary, identity, project_id, project_root, _sessions_path) =
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-deduplication").await;
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
         .await
         .expect("session runtime registry");
-    registry.enable_long_lived_session_maintenance_for_test();
     let convergence_gate = registry.block_registered_schema_convergence_for_test();
 
     let first = registry
@@ -605,17 +625,16 @@ async fn duplicate_project_attaches_schedule_one_historical_convergence() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_convergence_commits_the_durable_authority_checkpoint() {
-    let (_temporary, identity, project_id, project_root, _sessions_path) =
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-checkpoint").await;
     let shard_id = StoreShardIdV1::project_sessions(
         identity.brain_id().clone(),
         identity.profile_id().clone(),
         project_id.clone(),
     );
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
         .await
         .expect("session runtime registry");
-    registry.enable_long_lived_session_maintenance_for_test();
     let database = registry
         .project_sessions(project_id, [project_root])
         .await
@@ -651,7 +670,7 @@ async fn background_convergence_commits_the_durable_authority_checkpoint() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_convergence_failure_remains_observable_as_degraded() {
-    let (_temporary, identity, project_id, project_root, sessions_path) =
+    let (_temporary, identity, project_id, project_root, sessions_path, _database_scope) =
         project_sessions_pending_convergence("project.schema-degraded").await;
     rusqlite::Connection::open(&sessions_path)
         .expect("open corruption fixture")
@@ -669,17 +688,18 @@ async fn background_convergence_failure_remains_observable_as_degraded() {
     let connection = TestConnection::open(&sessions_path);
     crate::global_db::schema_contract::ensure_authority_invariant_schema(&connection)
         .await
-        .expect("restore admission-critical guard triggers after seeding historical row corruption");
+        .expect(
+            "restore admission-critical guard triggers after seeding historical row corruption",
+        );
     drop(connection);
     let shard_id = StoreShardIdV1::project_sessions(
         identity.brain_id().clone(),
         identity.profile_id().clone(),
         project_id.clone(),
     );
-    let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
         .await
         .expect("session runtime registry");
-    registry.enable_long_lived_session_maintenance_for_test();
 
     registry
         .project_sessions(project_id, [project_root])
