@@ -340,6 +340,110 @@ fn retirement_tombstone_and_relational_descendants_commit_atomically() {
 }
 
 #[test]
+fn published_generation_referenced_as_pending_base_survives_retirement() {
+    let fixture = Fixture::new();
+    let empty_manifest = semantic_vector_chunk_manifest_digest(&[]).unwrap();
+    let first = plan_with_count(&fixture, "retirement.live-base", empty_manifest.clone(), 0);
+    publish_empty_stage(&fixture, &first, "retirement.live-base");
+    let first_replay = publication_replay(&first);
+    let first_head = {
+        let key = SemanticVectorPublishedGenerationKey {
+            projection: first.key.projection.clone(),
+            semantic_generation_id: first.semantic_generation_id.clone(),
+        };
+        let (control, probe) = operation("retirement.live-base.lookup");
+        let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+        match fixture
+            .storage()
+            .published_semantic_generation(&key, &context)
+            .unwrap()
+        {
+            SemanticVectorPublishedGenerationLookup::Published { verified_head, .. } => {
+                *verified_head
+            }
+            SemanticVectorPublishedGenerationLookup::Missing => panic!("published base is missing"),
+        }
+    };
+    let pending = SemanticVectorStagePlan::new(
+        first.key.projection.clone(),
+        SemanticVectorBuildId::new("build.retirement.live-base.pending").unwrap(),
+        VectorGenerationIdV1::new(
+            canonical_sha256(&(
+                "semantic-vector-test-generation",
+                "retirement.live-base.pending",
+            ))
+            .unwrap(),
+        ),
+        Some(first.semantic_generation_id.clone()),
+        GraphPublicationKeyV1::new(
+            first.key.projection.clone(),
+            GraphGenerationIdV1::new("generation.retirement.live-base.pending").unwrap(),
+            GraphPublicationIdempotencyKeyV1::new("publication.retirement.live-base.pending")
+                .unwrap(),
+        ),
+        first.source_scope.clone(),
+        first.code_scope_hash.clone(),
+        first.source_generation.clone(),
+        first.source_dependency.clone(),
+        SemanticVectorReconstructionRecipe {
+            expected_chunk_manifest_digest: empty_manifest,
+            ..first.recipe.clone()
+        },
+        0,
+        Some(first_head),
+        first.initial_checkpoint_digest.clone(),
+        first.writer_fence.clone(),
+    )
+    .unwrap();
+    let (control, probe) = operation("retirement.live-base.pending.begin");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        fixture.storage().begin_stage(&pending, &context).unwrap(),
+        SemanticVectorStageBeginOutcome::Begun(_)
+    ));
+
+    let retirement = SemanticVectorPublishedRetirement {
+        stage: first.key.clone(),
+        semantic_generation_id: first.semantic_generation_id.clone(),
+        replay: GraphPublicationReplayRetirementV1::new(
+            first_replay.key.clone(),
+            first_replay.input_digest.clone(),
+            first_replay.dependency_generation_closure_digest.clone(),
+            first_replay.direct_dependency_generations.clone(),
+            first_replay.expected_prior_head.clone(),
+            first_replay.expected_recovered_digest.clone(),
+            first_replay.canonical_replay_source_digest.clone(),
+        )
+        .unwrap(),
+        writer_fence: first.writer_fence.clone(),
+    };
+    let (control, probe) = operation("retirement.live-base.retire");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert_eq!(
+        fixture
+            .storage()
+            .retire_published_generation(&retirement, &context)
+            .unwrap(),
+        SemanticVectorPublishedRetirementOutcome::Conflict
+    );
+
+    let key = SemanticVectorPublishedGenerationKey {
+        projection: first.key.projection.clone(),
+        semantic_generation_id: first.semantic_generation_id.clone(),
+    };
+    let (control, probe) = operation("retirement.live-base.survived");
+    let context = GraphPublicationOperationContextV1::new(&control, &probe).unwrap();
+    assert!(matches!(
+        fixture
+            .storage()
+            .published_semantic_generation(&key, &context)
+            .unwrap(),
+        SemanticVectorPublishedGenerationLookup::Published { record, .. }
+            if record.plan == first
+    ));
+}
+
+#[test]
 fn cancelled_retirement_removes_stage_descendants_and_replays_missing() {
     let fixture = Fixture::new();
     let plan = plan(

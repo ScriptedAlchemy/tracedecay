@@ -39,6 +39,14 @@ pub(super) fn retire_published_generation(
             return Ok(SemanticVectorPublishedRetirementOutcome::Conflict);
         }
         validate_stage_history(&tx, stage, context)?;
+        if generation_has_live_base_reference_in_tx(
+            &tx,
+            &request.stage.projection.shard_id,
+            &request.semantic_generation_id,
+        )? {
+            rollback(tx)?;
+            return Ok(SemanticVectorPublishedRetirementOutcome::Conflict);
+        }
     }
     let graph_outcome =
         crate::repository::graph_publication::retire_replay_in_transaction(&tx, &request.replay)
@@ -105,17 +113,25 @@ pub(super) fn generation_has_live_base_reference(
     }
     let tx = begin(&storage.handle)?;
     require_census_revision(&tx, shard_id, expected_revision)?;
+    let found = generation_has_live_base_reference_in_tx(&tx, shard_id, generation)?;
+    rollback(tx)?;
+    ensure_live(context)?;
+    Ok(found)
+}
+
+fn generation_has_live_base_reference_in_tx(
+    tx: &ExactSqlTransaction,
+    shard_id: &tracedecay_store::StoreShardIdV1,
+    generation: &tracedecay_domain::VectorGenerationIdV1,
+) -> SemanticVectorStagingStoreResult<bool> {
     let rows = query(
-        &tx,
+        tx,
         "SELECT 1 FROM semantic_vector_stages
          WHERE shard_id=?1 AND base_generation=?2
            AND state IN ('pending','ready_to_publish','published') LIMIT 1",
         vec![text(json(shard_id)?), text(generation.as_digest().as_str())],
     )?;
-    let found = !rows.rows.is_empty();
-    rollback(tx)?;
-    ensure_live(context)?;
-    Ok(found)
+    Ok(!rows.rows.is_empty())
 }
 
 pub(super) fn published_generation_exists(
