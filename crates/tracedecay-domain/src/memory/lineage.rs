@@ -28,7 +28,7 @@ pub enum FactCurationActionV1 {
         fact_id: FactId,
     },
     Linked {
-        relation: FactRelationV1,
+        relation: Box<FactRelationV1>,
     },
     Forgotten,
 }
@@ -484,7 +484,9 @@ mod tests {
                 source_fact_id.clone(),
                 owner.clone(),
                 FactLineageEventKindV1::Curated {
-                    action: FactCurationActionV1::Linked { relation },
+                    action: FactCurationActionV1::Linked {
+                        relation: Box::new(relation),
+                    },
                     evidence_ids: vec![],
                 },
                 UtcMicros(23),
@@ -520,14 +522,16 @@ mod tests {
                 owner.clone(),
                 FactLineageEventKindV1::Curated {
                     action: FactCurationActionV1::Linked {
-                        relation: new_relation(
-                            owner.clone(),
-                            source.clone(),
-                            target.clone(),
-                            kind,
-                            relation_evidence(&owner),
-                        )
-                        .unwrap(),
+                        relation: Box::new(
+                            new_relation(
+                                owner.clone(),
+                                source.clone(),
+                                target.clone(),
+                                kind,
+                                relation_evidence(&owner),
+                            )
+                            .unwrap(),
+                        ),
                     },
                     evidence_ids: vec![],
                 },
@@ -564,7 +568,9 @@ mod tests {
                 other_source_fact_id,
                 owner,
                 FactLineageEventKindV1::Curated {
-                    action: FactCurationActionV1::Linked { relation },
+                    action: FactCurationActionV1::Linked {
+                        relation: Box::new(relation),
+                    },
                     evidence_ids: vec![],
                 },
                 UtcMicros(24),
@@ -591,7 +597,9 @@ mod tests {
                 event_source,
                 event_owner,
                 FactLineageEventKindV1::Curated {
-                    action: FactCurationActionV1::Linked { relation },
+                    action: FactCurationActionV1::Linked {
+                        relation: Box::new(relation),
+                    },
                     evidence_ids: vec![],
                 },
                 UtcMicros(24),

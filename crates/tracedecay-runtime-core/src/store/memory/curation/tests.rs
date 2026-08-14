@@ -1731,13 +1731,13 @@ async fn generic_commit_rejects_missing_link_target_and_evidence_without_mutatio
             fixture.owner.clone(),
             FactLineageEventKindV1::Curated {
                 action: FactCurationActionV1::Linked {
-                    relation: relation(
+                    relation: Box::new(relation(
                         &fixture.owner,
                         &source,
                         &target,
                         evidence,
                         FactRelationKindV1::DerivedFrom,
-                    ),
+                    )),
                 },
                 evidence_ids: Vec::new(),
             },
@@ -1966,13 +1966,13 @@ async fn graph_rebuild_rejects_a_dangling_canonical_link_event() {
             fixture.owner.clone(),
             FactLineageEventKindV1::Curated {
                 action: FactCurationActionV1::Linked {
-                    relation: relation(
+                    relation: Box::new(relation(
                         &fixture.owner,
                         &source,
                         &target,
                         vec![evidence],
                         FactRelationKindV1::Supports,
-                    ),
+                    )),
                 },
                 evidence_ids: Vec::new(),
             },

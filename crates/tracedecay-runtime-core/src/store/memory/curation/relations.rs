@@ -260,7 +260,7 @@ pub(super) async fn link_facts_tx(
         owner.clone(),
         FactLineageEventKindV1::Curated {
             action: FactCurationActionV1::Linked {
-                relation: relation.clone(),
+                relation: Box::new(relation.clone()),
             },
             evidence_ids: Vec::new(),
         },

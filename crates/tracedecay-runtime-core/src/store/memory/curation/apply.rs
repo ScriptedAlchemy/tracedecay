@@ -318,7 +318,7 @@ async fn verify_curation_replay_events_tx(
                         FactLineageEventKindV1::Curated {
                             action: FactCurationActionV1::Linked { relation },
                             evidence_ids,
-                        } if relation == operation.relation() && evidence_ids.is_empty()
+                        } if relation.as_ref() == operation.relation() && evidence_ids.is_empty()
                     )
                 {
                     return Err(storage_message(
