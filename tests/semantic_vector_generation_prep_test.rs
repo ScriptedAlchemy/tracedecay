@@ -1089,6 +1089,73 @@ fn splitting_a_run_into_commits_preserves_every_generation_digest() {
     assert_ne!(single.checkpoint, multi.checkpoint);
 }
 
+/// Incremental reuse used to ride on the last (or only) embed page. A 10x
+/// measurement then spent a corpus-sized mutation/capacity budget on one
+/// receipt. Page reused with the same window as embeds.
+#[test]
+fn incremental_reused_chunks_are_paged_with_the_embed_window() {
+    let key = embedding_key();
+    let projection_key = key.projection_key().expect("projection key");
+    let added_chunk = chunk("code-generation.2", "added", "new symbol", 0);
+    let mut reused_chunks = (0..40)
+        .map(|index| {
+            chunk(
+                "code-generation.2",
+                &format!("reused-{index:02}"),
+                "same text",
+                index + 1,
+            )
+        })
+        .collect::<Vec<_>>();
+    reused_chunks.sort_by(|left, right| left.id.cmp(&right.id));
+    let reused = reused_chunks
+        .iter()
+        .map(|chunk| {
+            change(
+                chunk,
+                Some(chunk.content_digest.clone()),
+                Some(chunk.content_digest.clone()),
+            )
+        })
+        .collect();
+    let incremental = request(
+        changes(
+            Some("code-generation.1"),
+            "code-generation.2",
+            vec![change(
+                &added_chunk,
+                None,
+                Some(added_chunk.content_digest.clone()),
+            )],
+            vec![],
+            reused,
+        ),
+        Some(projection_key.clone()),
+        projection_key,
+        ProjectionReplayReasonV1::SourceEdit,
+    );
+    let pages = split_projection_request(&incremental, &[added_chunk], 16).expect("split reused");
+    assert_eq!(pages.len(), 3, "1 added + 40 reused must page at window 16");
+    assert!(
+        pages.iter().all(|page| {
+            page.request.changes.added_or_changed.len()
+                + page.request.changes.deleted.len()
+                + page.request.changes.reused.len()
+                <= 16
+        }),
+        "no page may exceed the named window"
+    );
+    assert_eq!(pages[0].request.changes.added_or_changed.len(), 1);
+    assert_eq!(pages[0].request.changes.reused.len(), 15);
+    assert!(pages[1].request.changes.added_or_changed.is_empty());
+    assert_eq!(pages[1].request.changes.reused.len(), 16);
+    assert!(pages[2].request.changes.added_or_changed.is_empty());
+    assert_eq!(pages[2].request.changes.reused.len(), 9);
+    assert_eq!(pages[0].canonical_chunks.len(), 1);
+    assert!(pages[1].canonical_chunks.is_empty());
+    assert!(pages[2].canonical_chunks.is_empty());
+}
+
 /// A run that stops partway resumes from its durable checkpoint.
 #[test]
 fn a_partial_incremental_run_resumes_from_its_checkpoint() {

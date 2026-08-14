@@ -437,7 +437,13 @@ pub fn split_projection_request(
     let window = max_embeds_per_batch
         .saturating_sub(max_embeds_per_batch % VECTOR_ENCODING_BATCH_SIZE)
         .max(VECTOR_ENCODING_BATCH_SIZE);
-    if request.changes.added_or_changed.len() <= window {
+    let total_changes = request
+        .changes
+        .added_or_changed
+        .len()
+        .saturating_add(request.changes.deleted.len())
+        .saturating_add(request.changes.reused.len());
+    if total_changes <= window {
         return unsplit();
     }
 
@@ -445,26 +451,30 @@ pub fn split_projection_request(
         .iter()
         .map(|chunk| (chunk.id.clone(), chunk))
         .collect::<BTreeMap<_, _>>();
-    let windows = request.changes.added_or_changed.chunks(window);
-    let last_index = windows.len().saturating_sub(1);
-    let mut batches = Vec::with_capacity(windows.len());
-    for (index, embeds) in request.changes.added_or_changed.chunks(window).enumerate() {
-        let is_last = index == last_index;
+    let mut added = request.changes.added_or_changed.as_slice();
+    let mut deleted = request.changes.deleted.as_slice();
+    let mut reused = request.changes.reused.as_slice();
+    let mut batches = Vec::new();
+    while !added.is_empty() || !deleted.is_empty() || !reused.is_empty() {
+        let mut room = window;
+        let take_added = added.len().min(room);
+        let embeds = &added[..take_added];
+        added = &added[take_added..];
+        room -= take_added;
+        let take_deleted = deleted.len().min(room);
+        let page_deleted = &deleted[..take_deleted];
+        deleted = &deleted[take_deleted..];
+        room -= take_deleted;
+        let take_reused = reused.len().min(room);
+        let page_reused = &reused[..take_reused];
+        reused = &reused[take_reused..];
         let mut changes = ChangedCodeChunkSetV1 {
             from_generation: request.changes.from_generation.clone(),
             to_generation: request.changes.to_generation.clone(),
             manifest_digest: request.changes.manifest_digest.clone(),
             added_or_changed: embeds.to_vec(),
-            deleted: if is_last {
-                request.changes.deleted.clone()
-            } else {
-                Vec::new()
-            },
-            reused: if is_last {
-                request.changes.reused.clone()
-            } else {
-                Vec::new()
-            },
+            deleted: page_deleted.to_vec(),
+            reused: page_reused.to_vec(),
         };
         changes.manifest_digest = changes
             .compute_digest()
@@ -484,8 +494,8 @@ pub fn split_projection_request(
             .iter()
             .map(|change| &change.chunk_id)
             .collect::<BTreeSet<_>>();
-        if is_last && reembed_reused {
-            wanted.extend(request.changes.reused.iter().map(|change| &change.chunk_id));
+        if reembed_reused {
+            wanted.extend(page_reused.iter().map(|change| &change.chunk_id));
         }
         let batch_chunks = wanted
             .into_iter()
