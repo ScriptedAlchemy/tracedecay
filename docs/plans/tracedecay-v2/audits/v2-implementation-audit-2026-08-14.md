@@ -46,6 +46,7 @@ Per repository policy, each implemented-but-unmounted item below must be wired
 to a real production caller or deleted.
 
 | ID | Rank | Consolidated item | Evidence and witness verdicts |
+| A21 | RC-BLOCKING | Advisory host-delivery consume path | Added post-consolidation (hawk rerun triage, 2026-08-14): `crates/tracedecay-usecases/src/advisory/host_delivery.rs` delivery/consume/hook-notice surface is registered at daemon startup (`src/daemon/service/invocation/registrars.rs`) but the production call site uses only `.runtime().run_once()`; the consume/deliver half has zero production callers. Wire the delivery consumption or retire that half. |
 |---|---|---|---|
 | A1 | RC-BLOCKING | Generalized external-source acquisition, canonical refetch, correction, and tombstone production | Host-observation specialization is mounted, but `GitHubExternalSourceAcquisitionV1` and the generalized owner remain uncalled (`crates/tracedecay-usecases/src/external_source_github.rs:213-425`; `external_source_acquisition.rs:341-510`). Plans 02 and 03 independently verdict this `IMPLEMENTED-UNMOUNTED`. |
 | A2 | RECORDED | Context Scout suggestion producer parked; neither remounted nor demolished | See [A2 ruling](#a2-ruling-2026-08-14). `1caf016e5` deliberately unmounted the saved-edit/stop producer and set `claim_authority = None`. `c2c11956d6` mounted the distinct advisory/feedback successor. Remount is not a small slice; deleting only the entry points leaves `prepare_controlled` dead. Owner must choose remount or retire. |
