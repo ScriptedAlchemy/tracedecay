@@ -2,6 +2,22 @@
 //!
 //! This crate owns no storage, transport, provider runtime, UI, model runtime,
 //! Git mutation, scheduler, or root catalog composition.
+//!
+//! ## Not the same layer as `tracedecay-usecases`
+//!
+//! The two crates share a word but sit at opposite ends of the stack, and the
+//! one-shot crate split (2026-07-31) briefly conflated them. This crate is
+//! the **ports-and-contracts layer at the bottom of the stack** — it depends
+//! only on `tracedecay-domain`, `tracedecay-policy`, and
+//! `tracedecay-tool-catalog`, and defines the traits (`WorkStoragePort`,
+//! `WorkflowDefinitionAuthorityPort`, `StoreSizeTelemetryPort`,
+//! `AuthorizedScopeSet`, …) that storage and runtime crates implement.
+//! `tracedecay-usecases` is the **product use-case orchestration layer at the
+//! top of the stack** — it depends on this crate (never the reverse) plus
+//! `tracedecay-runtime-core`, `tracedecay-sessions`, `tracedecay-global-db`
+//! and friends, and orchestrates the SQLite engine, session runtime, global
+//! database, and daemon/MCP surfaces. It is what the root binary's
+//! `src/application/` tree became; it did not move into this crate.
 
 #![forbid(unsafe_code)]
 

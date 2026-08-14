@@ -3,9 +3,9 @@
 //! Moved down from root `src/application/session/ports.rs`. The only
 //! implementation of [`SessionTemporalExecutionPort`] is
 //! [`super::RegisteredGlobalDbSessionTemporalExecution`] in this module, and
-//! root `src/application/` is staying at the top of the stack (see
-//! `tracedecay-application/SEAMS.md`) while already depending on `global_db` —
-//! so the port had to land beside its implementer or become a cycle.
+//! the top-of-stack use-case layer (now `tracedecay-usecases`) already
+//! depends on `global_db` — so the port had to land beside its implementer or
+//! become a cycle.
 //!
 //! The four helpers root's `session::retrieval` drives (`new`,
 //! `with_direct_anchor`, `into_kernel_request`, `validates_report`) were
