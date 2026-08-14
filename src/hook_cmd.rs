@@ -28,6 +28,9 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         Commands::HookCursorSessionStart => {
             Some(tracedecay::hooks::hook_cursor_session_start().await)
         }
+        Commands::HookCursorPostToolUse => {
+            Some(tracedecay::hooks::hook_cursor_post_tool_use().await)
+        }
         Commands::HookCodexSessionStart => {
             Some(tracedecay::hooks::hook_codex_session_start().await)
         }

@@ -163,6 +163,7 @@ fn native_response_command_from_name(command: &str) -> bool {
             | "hook-claude-session-start"
             | "hook-claude-post-tool-use"
             | "hook-cursor-session-start"
+            | "hook-cursor-post-tool-use"
             | "hook-codex-session-start"
             | "hook-codex-post-tool-use"
             | "hook-hermes-terminal-receipt"

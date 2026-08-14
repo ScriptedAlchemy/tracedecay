@@ -131,7 +131,9 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
             // no bound daemon guidance, the canonical response journey emits
             // no JSON instead of fabricating context or the capture lane's
             // transport-only `{}` acknowledgement.
-            "hook-claude-post-tool-use" | "hook-codex-post-tool-use" => b"",
+            "hook-claude-post-tool-use"
+            | "hook-codex-post-tool-use"
+            | "hook-cursor-post-tool-use" => b"",
             // Cursor sessionStart has a host-specific response even when no
             // project is bound: empty context and no session environment.
             "hook-cursor-session-start" => b"{\"additional_context\":\"\",\"env\":{}}\n",
@@ -243,6 +245,17 @@ fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
                 "workspace_roots": [],
             }),
             b"{\"additional_context\":\"\",\"env\":{}}\n".as_slice(),
+        ),
+        (
+            "hook-cursor-post-tool-use",
+            serde_json::json!({
+                "hook_event_name": "postToolUse",
+                "conversation_id": "cursor-session",
+                "workspace_roots": [temp.path()],
+                "tool_name": "Write",
+                "tool_input": { "file_path": temp.path().join("src/lib.rs") },
+            }),
+            b"".as_slice(),
         ),
     ];
 
