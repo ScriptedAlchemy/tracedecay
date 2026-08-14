@@ -738,8 +738,9 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
             let result = tokio::task::spawn_blocking(move || {
                 let _measurement = measurement;
                 authority.control.checkpoint()?;
-                evaluate_default_activation_candidate(&evaluated_profile_id, &authority)
-                    .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)
+                evaluate_default_activation_candidate(&evaluated_profile_id, &authority).map_err(
+                    |error| SemanticActivationCoordinationErrorV1::RejectedDetail(error.to_string()),
+                )
             })
             .await
             .map_err(|_| SemanticActivationCoordinationErrorV1::Unavailable)?;

@@ -996,7 +996,13 @@ fn semantic_evaluation_application_problem(
         }
         ApplicationProblemKind::InvalidRequest | ApplicationProblemKind::Unsupported => {
             crate::errors::TraceDecayError::Config {
-                message: format!("semantic evaluation publication rejected: {problem:?}"),
+                message: format!(
+                    "semantic evaluation publication rejected: {}",
+                    problem.diagnostic().map_or_else(
+                        || format!("{problem:?}"),
+                        |diagnostic| diagnostic.message.clone(),
+                    )
+                ),
             }
         }
     }
@@ -1114,6 +1120,27 @@ mod tests {
             assert_eq!(reason, expected_reason);
             assert!(!retryable);
         }
+    }
+
+    #[test]
+    fn semantic_evaluation_client_prints_rejection_diagnostic() {
+        let error = semantic_evaluation_application_problem(ApplicationProblem::InvalidRequest {
+            diagnostic: tracedecay_application::SafeDiagnostic {
+                code: "semantic_evaluation.rejected".to_owned(),
+                message: "exact eligible chunks current expected 2170, measured 2184".to_owned(),
+            },
+            retry: tracedecay_application::RetryDirective::Never,
+            legal_actions: Vec::new(),
+        });
+        let message = error.to_string();
+        assert!(
+            message.contains("2184"),
+            "client must print the SearchEvalError detail: {message}"
+        );
+        assert!(
+            message.contains("semantic evaluation publication rejected"),
+            "client must keep the publication rejection prefix: {message}"
+        );
     }
 
     #[test]

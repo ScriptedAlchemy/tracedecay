@@ -58,6 +58,7 @@ impl DaemonSemanticActivationReconcilerV1 {
                             Ok(Ok(Some(_) | None)) => break,
                             Ok(Err(
                                 SemanticActivationCoordinationErrorV1::Rejected
+                                | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
                                 | SemanticActivationCoordinationErrorV1::Conflict,
                             )) => break,
                             Ok(Err(

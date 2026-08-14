@@ -26,12 +26,14 @@ type ProductionOwner = SemanticRuntimeOwnerV1<
     >,
 >;
 
-#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SemanticActivationCoordinationErrorV1 {
     #[error("semantic activation configuration authority is unavailable")]
     Unavailable,
     #[error("semantic activation input was rejected")]
     Rejected,
+    #[error("semantic activation input was rejected: {0}")]
+    RejectedDetail(String),
     #[error("semantic activation compare-and-swap conflicted")]
     Conflict,
     #[error("semantic runtime activation failed: {0}")]

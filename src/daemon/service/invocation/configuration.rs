@@ -577,6 +577,7 @@ fn map_semantic_configuration_error(
         SemanticActivationCoordinationErrorV1::Unavailable => ConfigurationError::Unavailable,
         SemanticActivationCoordinationErrorV1::Conflict => ConfigurationError::RevisionConflict,
         SemanticActivationCoordinationErrorV1::Rejected
+        | SemanticActivationCoordinationErrorV1::RejectedDetail(_)
         | SemanticActivationCoordinationErrorV1::Runtime(_) => {
             ConfigurationError::validation_message("semantic configuration transition rejected")
         }
