@@ -250,6 +250,9 @@ async fn existing_profile_memory_uses_final_schema_and_canonical_linked_lineage(
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "existing profile memory schema")
+            .expect("daemon database scope");
     let memory_path =
         tracedecay_runtime_core::memory::user::user_memory_db_path(identity.profile_root());
     let seed = TestConnection::open(&memory_path);
@@ -344,6 +347,9 @@ async fn profile_sessions_mount_uses_the_durable_profile_identity_and_profile_pi
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "profile sessions identity pin")
+            .expect("daemon database scope");
     let user_sessions_path =
         tracedecay_sessions::runtime::user_sessions_db_path(identity.profile_root());
 
@@ -456,6 +462,12 @@ async fn profile_sessions_mount_rejects_incompatible_schema_through_registered_r
     let profile_root = temporary.path().join("profile");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "incompatible profile sessions schema",
+    )
+    .expect("daemon database scope");
     let seed_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
         .await
         .expect("schema seed runtime registry");
@@ -502,6 +514,12 @@ async fn project_sessions_mount_uses_typed_enrollment_and_is_idempotent() {
     std::fs::create_dir_all(&project_root).expect("project root");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "typed project sessions enrollment",
+    )
+    .expect("daemon database scope");
     let project_id = ProjectId::new("project.session-runtime").expect("typed project identity");
     crate::storage::write_enrollment_marker(
         &project_root,
@@ -731,6 +749,12 @@ async fn cached_project_sessions_reject_conflicting_enrollment_authority() {
     std::fs::create_dir_all(&conflicting_project_root).expect("conflicting project root");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "conflicting project sessions enrollment",
+    )
+    .expect("daemon database scope");
     let project_id = ProjectId::new("project.session-runtime").expect("typed project identity");
     crate::storage::write_enrollment_marker(
         &first_project_root,
@@ -1126,6 +1150,12 @@ async fn read_only_worktree_mount_never_recreates_a_deleted_database() {
     gix::init(&project_root).expect("initialize project repository");
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
         .expect("durable profile identity");
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        &profile_root,
+        1,
+        "read-only deleted worktree mount",
+    )
+    .expect("daemon database scope");
     let registry = DaemonSessionRuntimeRegistryV1::open(identity)
         .await
         .expect("session runtime registry");
