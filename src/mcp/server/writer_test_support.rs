@@ -69,9 +69,15 @@ pub(super) fn registered_context(
     cg: TraceDecay,
     authority: &WriterTestFixtureAuthority,
 ) -> McpServerConstructionContext {
-    registered_runtime(authority)
+    let mut context = registered_runtime(authority)
         .mcp_server_context_for_test(cg, None)
-        .expect("registered MCP server context")
+        .expect("registered MCP server context");
+    // These fixtures assert exact code-index reconcile-sink accounting.
+    // Startup catch-up admits one reconciliation through that same sink
+    // (its contract is covered by `background_refresh_writer_tests`), so it
+    // must not race those counters.
+    context.startup_catch_up_enabled = false;
+    context
 }
 
 pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
@@ -90,8 +96,5 @@ pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtu
         TraceDecay::init_test_fixture_with_registered_runtime(root, "project.mcp-writer")
             .await
             .expect("init");
-    let mut config = crate::config::load_config(root).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(root, &config).expect("disable startup sync");
     (cg, dir, WriterTestFixtureAuthority { _pin: pin, runtime })
 }

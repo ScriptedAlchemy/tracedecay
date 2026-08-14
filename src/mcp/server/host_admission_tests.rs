@@ -1051,13 +1051,17 @@ async fn server_with_broker_and_runtime(
     reconcile_sink: CodeIndexReconcileSink,
     runtime: Arc<HostAdmissionTestRuntimeV1>,
 ) -> Arc<McpServer> {
-    let context = with_broker(
+    let mut context = with_broker(
         runtime
             .mcp_server_context_for_test(cg, None)
             .expect("registered MCP server context"),
         broker,
         reconcile_sink,
     );
+    // Same isolation as `registered_context`: startup catch-up admits one
+    // reconciliation through the counted sink and must not race this
+    // fixture's accounting.
+    context.startup_catch_up_enabled = false;
     McpServer::new_with_registered_test_context(context, Vec::new())
         .await
         .expect("registered test server")

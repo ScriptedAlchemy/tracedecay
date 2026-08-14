@@ -10,16 +10,8 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn read_refresh_uses_injected_writer_without_direct_fallback() {
-    let (cg, dir, authority) = init_indexed_repo().await;
+    let (cg, dir, _authority) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
-    // `init_indexed_repo` persists `session_start_sync = false`, but the handle
-    // it returns still carries the init-time config snapshot (default true).
-    // Re-open the project so the constructed server honors the persisted
-    // setting and does not spawn a startup catch-up that would also drive the
-    // injected writer, leaving this test's explicit read refresh as the only
-    // observed call.
-    drop(cg);
-    let cg = authority.reopen_project_graph(&root).await;
     let source_path = root.join("src/a.rs");
     std::fs::write(&source_path, "pub fn a() { println!(\"changed\"); }\n").expect("modify source");
     std::fs::File::options()
@@ -88,10 +80,7 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
 /// answers while the sync is still running, and the sync completes behind it.
 #[tokio::test]
 async fn lazy_stale_sync_is_detached_from_the_request() {
-    let (cg, dir, authority) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
-    drop(cg);
-    let cg = authority.reopen_project_graph(&root).await;
+    let (cg, _dir, _authority) = init_indexed_repo().await;
 
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -172,9 +161,6 @@ async fn lazy_stale_sync_is_detached_from_the_request() {
 async fn concurrent_startup_catchups_use_injected_writer_authority() {
     let (first_cg, dir, authority) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
-    let mut config = crate::config::load_config(&root).expect("load config");
-    config.sync.session_start_sync = true;
-    crate::config::save_config(&root, &config).expect("enable startup sync");
     let second_cg = authority.reopen_project_graph(&root).await;
 
     let gate = Arc::new(tokio::sync::Mutex::new(()));
