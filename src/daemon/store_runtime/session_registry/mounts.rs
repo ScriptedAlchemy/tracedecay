@@ -517,6 +517,35 @@ impl DaemonSessionRuntimeRegistryV1 {
         databases
     }
 
+    /// Releases exclusive session-relation Grafeo handles while this registry
+    /// is still reachable. Close-then-reopen and harness restart must not wait
+    /// for every lingering `Arc` to drop; `GraphDb::close` frees the file lock
+    /// even if closed handles remain.
+    pub(crate) async fn close_mounted_session_relation_graphs(&self) -> Result<()> {
+        let databases = self.mounted_session_databases().await;
+        let mut first_error = None;
+        for database in databases {
+            let Ok((binding, locator)) = database.session_relation_graph_identity() else {
+                continue;
+            };
+            if let Err(error) = super::code_graph::graph_attachment::close_retained_for_shutdown(
+                &self.graph_registry,
+                binding.clone(),
+                locator.clone(),
+            )
+            .await
+            {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) async fn mounted_project_sessions(
         &self,
         project_id: &ProjectId,

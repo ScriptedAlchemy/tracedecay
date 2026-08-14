@@ -165,6 +165,10 @@ impl DaemonEngine {
                     .await
                     .map_err(|error| error.to_string())?;
                 owner.cancel();
+                administration
+                    .close_session_relation_graphs()
+                    .await
+                    .map_err(|error| error.to_string())?;
                 owner.shutdown().await
             },
         )

@@ -76,6 +76,21 @@ pub(in crate::daemon::store_runtime::session_registry) async fn close_retained(
         .map_err(|error| session_registry_error("close graph runtime", error.to_string()))
 }
 
+pub(in crate::daemon::store_runtime::session_registry) async fn close_retained_for_shutdown(
+    graph_registry: &tracedecay_graph_db::GraphDbRegistry,
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+) -> Result<()> {
+    let graph_registry = graph_registry.clone();
+    tokio::task::spawn_blocking(move || {
+        graph_registry.close_retained_for_shutdown(&binding, &verified_locator)
+    })
+    .await
+    .map_err(|error| session_registry_error("join graph shutdown close", error.to_string()))?
+    .map(|_| ())
+    .map_err(|error| session_registry_error("close graph runtime for shutdown", error.to_string()))
+}
+
 fn registration(
     lifecycle_cancelled: &Arc<AtomicBool>,
     authority: Arc<CanonicalGraphStoreLeaseV1>,

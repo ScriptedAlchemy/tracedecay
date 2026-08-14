@@ -134,7 +134,7 @@ impl TraceDecay {
             });
         }
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let runtime_registry = super::join_standalone_session_registry(identity).await?;
         let profile_database = runtime_registry.profile_database().await?;
         let store_layout = Self::resolve_registered_configuration_layout(
             project_root,

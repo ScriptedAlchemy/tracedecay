@@ -462,6 +462,7 @@ impl GraphDbRegistry {
             registration.binding(),
             registration.verified_locator(),
             Some((&path, expected_format)),
+            true,
         )? {
             if let Err(error) =
                 check_request(registration.cancellation.as_ref(), registration.deadline)
@@ -507,6 +508,7 @@ impl GraphDbRegistry {
             registration.binding(),
             registration.verified_locator(),
             Some((&path, GraphFormatVersion::current())),
+            true,
         )? {
             CloseReservation::Absent => return Ok(false),
             CloseReservation::Removed => return Ok(true),
@@ -535,11 +537,33 @@ impl GraphDbRegistry {
         binding: &StoreRuntimeBindingV1,
         verified_locator: &VerifiedStoreLocatorV1,
     ) -> Result<bool, GraphDbError> {
-        let reservation = match self.reserve_close(binding, verified_locator, None)? {
-            CloseReservation::Absent => return Ok(false),
-            CloseReservation::Removed => return Ok(true),
-            CloseReservation::Closing(reservation) => reservation,
-        };
+        self.close_retained_inner(binding, verified_locator, true)
+    }
+
+    /// Releases the exclusive Grafeo writer even while session databases still
+    /// hold closed-handle `Arc`s. Idle eviction stays fail-closed on a live
+    /// lease; daemon and harness shutdown must drain the file lock so the next
+    /// in-process open is not blocked by a retired registry.
+    pub fn close_retained_for_shutdown(
+        &self,
+        binding: &StoreRuntimeBindingV1,
+        verified_locator: &VerifiedStoreLocatorV1,
+    ) -> Result<bool, GraphDbError> {
+        self.close_retained_inner(binding, verified_locator, false)
+    }
+
+    fn close_retained_inner(
+        &self,
+        binding: &StoreRuntimeBindingV1,
+        verified_locator: &VerifiedStoreLocatorV1,
+        require_unleased: bool,
+    ) -> Result<bool, GraphDbError> {
+        let reservation =
+            match self.reserve_close(binding, verified_locator, None, require_unleased)? {
+                CloseReservation::Absent => return Ok(false),
+                CloseReservation::Removed => return Ok(true),
+                CloseReservation::Closing(reservation) => reservation,
+            };
         let close_result = reservation.owner.close();
         self.complete_close(*reservation, close_result.clone())?;
         close_result?;
@@ -669,6 +693,7 @@ impl GraphDbRegistry {
         requested_binding: &StoreRuntimeBindingV1,
         requested_locator: &VerifiedStoreLocatorV1,
         requested_location: Option<(&Path, GraphFormatVersion)>,
+        require_unleased: bool,
     ) -> Result<CloseReservation, GraphDbError> {
         let mut state = self.state_lock()?;
         let Some(entry) = state.entries.get(&requested_binding.shard_id) else {
@@ -688,12 +713,14 @@ impl GraphDbRegistry {
             RegistryEntry::Opening { .. } | RegistryEntry::Closing { .. } => {
                 return Err(GraphDbError::Conflict);
             }
-            RegistryEntry::Ready { owner, .. } if !owner.is_unleased() => {
+            RegistryEntry::Ready { owner, .. } if require_unleased && !owner.is_unleased() => {
                 return Err(GraphDbError::Conflict);
             }
             RegistryEntry::Faulted {
                 owner: Some(owner), ..
-            } if !owner.is_unleased() => return Err(GraphDbError::Conflict),
+            } if require_unleased && !owner.is_unleased() => {
+                return Err(GraphDbError::Conflict);
+            }
             RegistryEntry::Faulted { owner: None, .. } => {
                 state.entries.remove(&requested_binding.shard_id);
                 self.inner.changed.notify_all();

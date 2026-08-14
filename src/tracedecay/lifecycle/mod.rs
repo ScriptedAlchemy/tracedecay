@@ -17,7 +17,6 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::{self, StoreLayout};
 use crate::support::weak_registry::WeakRegistry;
-#[cfg(any(test, feature = "test-transport"))]
 use tokio::sync::Mutex as AsyncMutex;
 #[cfg(any(test, feature = "test-transport"))]
 use tracedecay_store::ProjectId;
@@ -41,6 +40,30 @@ pub(crate) use registry::git_remote_url;
 static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
     WeakRegistry<PathBuf, crate::db::OwnedMaintenanceDatabaseScope>,
 > = LazyLock::new(WeakRegistry::new);
+
+/// One standalone session runtime registry per profile, process-wide.
+///
+/// Direct init/open still has a single writer for the profile session-relation
+/// graph (an exclusive Grafeo file lock). A second independent registry on the
+/// same profile cannot open that store. Concurrent opens in one process join
+/// the live registry; entries are weak so close-then-reopen constructs a
+/// fresh mount after the last holder drops.
+static STANDALONE_SESSION_REGISTRIES: LazyLock<
+    AsyncMutex<WeakRegistry<PathBuf, DaemonSessionRuntimeRegistryV1>>,
+> = LazyLock::new(|| AsyncMutex::new(WeakRegistry::new()));
+
+async fn join_standalone_session_registry(
+    identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+) -> Result<Arc<DaemonSessionRuntimeRegistryV1>> {
+    let profile_key = crate::lifecycle_lease::canonical_or_original(identity.profile_root());
+    let registries = STANDALONE_SESSION_REGISTRIES.lock().await;
+    if let Some(registry) = registries.get_live(&profile_key) {
+        return Ok(registry);
+    }
+    let registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+    registries.insert(profile_key, &registry);
+    Ok(registry)
+}
 
 /// One retained standalone test runtime per (profile root, project root).
 ///
@@ -226,7 +249,7 @@ impl TraceDecay {
             });
         }
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let runtime_registry = join_standalone_session_registry(identity).await?;
         let profile_database = runtime_registry.profile_database().await?;
         let store_layout = Self::resolve_first_touch_configuration_layout(
             project_root,
@@ -485,7 +508,7 @@ impl TraceDecay {
             });
         }
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let runtime_registry = join_standalone_session_registry(identity).await?;
         let profile_database = runtime_registry.profile_database().await?;
         let store_layout = Self::resolve_registered_configuration_layout(
             project_root,
@@ -687,7 +710,7 @@ impl TraceDecay {
             });
         }
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let runtime_registry = join_standalone_session_registry(identity).await?;
         let profile_database = runtime_registry.profile_database().await?;
         let store_layout = Self::resolve_registered_configuration_layout(
             project_root,
@@ -826,20 +849,9 @@ mod tests {
             Err(error) => error,
         };
 
-        match error {
-            TraceDecayError::ResetRequired { authority, reason } => {
-                assert_eq!(
-                    authority, "SQLite store",
-                    "wrong-schema read-only open must name the owning store: {reason:?}"
-                );
-                assert!(
-                    reason.contains("schema"),
-                    "wrong-schema read-only open must remain a schema ResetRequired: {reason:?}"
-                );
-            }
-            other => panic!(
-                "nonempty graph at another schema must require a reset, got {other:?}"
-            ),
-        }
+        assert!(matches!(
+            error,
+            TraceDecayError::ResetRequired { ref authority, .. } if authority == "graph store"
+        ));
     }
 }

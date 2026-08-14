@@ -751,6 +751,10 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         servers,
     )
     .await;
+    let _ = resources
+        .store_administration
+        .close_session_relation_graphs()
+        .await;
     drop(resources);
 }
 

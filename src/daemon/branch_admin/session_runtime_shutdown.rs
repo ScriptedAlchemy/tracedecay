@@ -96,6 +96,28 @@ impl StoreAdministration {
         self.session_runtime_registry().await
     }
 
+    pub(in crate::daemon) async fn close_session_relation_graphs(&self) -> Result<()> {
+        let registries = self
+            .session_runtime_registries
+            .lock()
+            .await
+            .values()
+            .filter_map(|entry| entry.registry.get().cloned())
+            .collect::<Vec<_>>();
+        let mut first_error = None;
+        for registry in registries {
+            if let Err(error) = registry.close_mounted_session_relation_graphs().await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     pub(in crate::daemon) async fn prepare_memory_graph_reconciliation_shutdown(
         &self,
     ) -> Result<SessionRuntimeMemoryGraphReconciliationShutdownV1> {
