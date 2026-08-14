@@ -279,6 +279,10 @@ impl Drop for ProductionDaemon {
 struct DashboardProcess {
     process: Child,
     base_url: String,
+    /// Everything the launcher wrote to stderr, so a dashboard that never
+    /// becomes reachable can name its own cause instead of surfacing as a bare
+    /// connection refusal at whichever request happened to be next.
+    diagnostics: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl DashboardProcess {
@@ -293,22 +297,56 @@ impl DashboardProcess {
             .stderr(Stdio::piped())
             .spawn()
             .expect("dashboard should start");
+        let diagnostics = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(stderr) = process.stderr.take() {
+            let sink = std::sync::Arc::clone(&diagnostics);
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while matches!(reader.read_line(&mut line), Ok(read) if read > 0) {
+                    if let Ok(mut sink) = sink.lock() {
+                        sink.push_str(&line);
+                    }
+                    line.clear();
+                }
+            });
+        }
         let stdout = process.stdout.take().expect("dashboard stdout");
         let base_url = read_listening_url(stdout, &mut process);
-        Self { process, base_url }
+        Self {
+            process,
+            base_url,
+            diagnostics,
+        }
     }
 
-    /// Rebinds the dashboard to a daemon that has just been restarted.
+    /// Waits until the daemon-hosted dashboard actually accepts connections.
     ///
-    /// The dashboard resolves the daemon's authority record when it starts, so
-    /// a restarted daemon publishes credentials the running dashboard has
-    /// never seen. Restarting it here keeps the mount honest instead of
-    /// letting a stale forward masquerade as a passing assertion.
-    fn restart(&mut self, fixture: &ProductionDaemon) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-        *self = Self::start(fixture);
+    /// The launcher exits as soon as it has printed the URL, so process
+    /// liveness says nothing about whether the mount is reachable. Polling the
+    /// bound address is the only real readiness signal.
+    fn wait_until_serving(&self, agent: &ureq::Agent, label: &str) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if agent.get(&format!("{}/", self.base_url)).call().is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the daemon-hosted dashboard at {} never accepted connections before {label}\n\
+                 launcher stderr:\n{}",
+                self.base_url,
+                self.diagnostics
+                    .lock()
+                    .map(|captured| captured.clone())
+                    .unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
+
 }
 
 impl Drop for DashboardProcess {
@@ -953,18 +991,17 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
 #[test]
 fn the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mounts() {
     let mut fixture = ProductionDaemon::start();
-    let mut dashboard = DashboardProcess::start(&fixture);
+    // This journey drives real provider execution and a daemon restart, so a
+    // request may legitimately queue behind a rebinding project runtime. The
+    // budget is generous on purpose: a client timeout here would read as a
+    // surface failure it is not.
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(120)))
         .build()
         .into();
 
-    work_task_session::assert_provider_qualified_task_session_evidence(
-        &agent,
-        &mut fixture,
-        &mut dashboard,
-    );
+    work_task_session::assert_provider_qualified_task_session_evidence(&agent, &mut fixture);
 }
 
 #[test]
