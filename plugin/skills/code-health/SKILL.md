@@ -29,6 +29,10 @@ and the specific scans the user asked for — don't run every tool by reflex.
    sites → `tracedecay_unsafe_patterns`**. **Risk-weighted test gaps →
    `tracedecay_test_risk`**. **Changed-files-only pass →
    `tracedecay_simplify_scan`** (`files`).
+6. **Files nothing loads → `tracedecay_unmounted_files`** (`path?`, `limit?`):
+   source files no build root reaches. No compiler, bundler, or test runner
+   ever sees them, yet their symbols inflate every count above — resolve them
+   before trusting a scorecard.
 
 ## Architecture map
 

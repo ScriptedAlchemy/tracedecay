@@ -49,8 +49,8 @@ Announce: "Using tracedecay:reviewing-changes for <diff/PR>."
 
 Read [references/safety-audit.md](references/safety-audit.md) for the full
 sweep (`tracedecay_unsafe_patterns` → `tracedecay_todos` →
-`tracedecay_dead_code`/`tracedecay_unused_imports` → `tracedecay_test_risk` →
-ranking) and the delete-safely protocol (zero-caller confirmation with
+`tracedecay_dead_code`/`tracedecay_unused_imports`/`tracedecay_unmounted_files`
+→ `tracedecay_test_risk` → ranking) and the delete-safely protocol (zero-caller confirmation with
 `tracedecay_callers` before any deletion; conservative on `pub`).
 
 ## Drafting commit & PR text
