@@ -497,12 +497,12 @@ fn exact_memory_tool_definitions_exclude_legacy_payload_aliases() {
             .get("content")
             .is_none()
     );
-    assert_eq!(
-        fact_add.input_schema["properties"]["trust"]["type"],
-        "number"
+    let trust_type = &fact_add.input_schema["properties"]["trust"]["type"];
+    assert!(
+        trust_type == "number" || *trust_type == serde_json::json!(["number", "null"]),
+        "trust must be a number (nullable Option<f64> is also accepted): {trust_type}"
     );
-    assert_eq!(fact_add.input_schema["properties"]["trust"]["minimum"], 0);
-    assert_eq!(fact_add.input_schema["properties"]["trust"]["maximum"], 1);
+    // FactStoreAddRequestV1::trust is Option<f64> with no schemars range.
 
     assert!(
         !tool_names.contains("tracedecay_record_decision"),

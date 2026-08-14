@@ -35,6 +35,15 @@ struct FixtureSymbol<'a> {
     annotated_test: bool,
 }
 
+fn stored_libtest_qualified_name(fixture: &FixtureSymbol<'_>) -> String {
+    let prefix = format!("{}::", fixture.path);
+    if fixture.qualified_name.starts_with(&prefix) {
+        fixture.qualified_name.to_owned()
+    } else {
+        format!("{prefix}{}", fixture.qualified_name)
+    }
+}
+
 fn fixture_id<T>(value: impl Into<String>) -> T
 where
     T: TryFrom<String>,
@@ -119,12 +128,13 @@ fn verified_graph(
             }
         };
         let occurrence = fixture_id::<SymbolOccurrenceId>(format!("symbol.{ordinal}"));
+        let stored_qualified_name = stored_libtest_qualified_name(fixture);
         push_fixture_symbol(
             &generation,
             &file,
             fixture.path,
             &occurrence,
-            fixture.qualified_name,
+            &stored_qualified_name,
             "function",
             u32::try_from(chunks.len()).expect("fixture chunk ordinal"),
             &mut symbols,
