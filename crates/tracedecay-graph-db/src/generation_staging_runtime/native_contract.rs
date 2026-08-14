@@ -227,9 +227,12 @@ fn validate_projection_receipt(
     target: &ProjectionKeyV1,
     projection: &ProjectionBatchReceiptV1,
 ) -> Result<(), GraphDbError> {
+    // The stage recipe's source_manifest_digest is the corpus watermark
+    // (the unsplit change-set). Each page receipt carries that page's
+    // change-set digest so ChangedCodeChunkSetV1::validate stays
+    // self-consistent. They are equal only for a one-batch corpus.
     if &projection.target_projection_key != target
         || projection.source_generation.to_string() != plan.source_generation.as_str()
-        || projection.source_manifest_digest.as_str() != plan.recipe.source_manifest_digest.as_str()
         || projection_batch_publication_digest(projection).map_err(|_| GraphDbError::Conflict)?
             != projection.publication_digest
         || projection.receipts.len() != stage.chunks.len()

@@ -125,6 +125,7 @@ pub enum NativeMismatch {
     Metric,
     VectorValues,
     ProjectionReceipt,
+    PageSourceManifest,
     SameProfileProjection,
     ExtraEffect,
     MissingEffect,
@@ -641,6 +642,36 @@ fn mutate_native_effect(mutations: &mut Vec<GraphMutation>, mismatch: NativeMism
                 GraphPropertyName::new("receipt").unwrap(),
                 GraphProperty::Bytes(vec![0xff]),
             );
+        }
+        NativeMismatch::PageSourceManifest => {
+            let receipt = mutations
+                .iter_mut()
+                .find_map(|mutation| match mutation {
+                    GraphMutation::UpsertEntity(entity)
+                        if entity.labels.iter().any(|label| {
+                            label.as_str() == "semantic-vector-generation-receipt-v1"
+                        }) =>
+                    {
+                        Some(entity)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let property = receipt
+                .properties
+                .get_mut(&GraphPropertyName::new("receipt").unwrap())
+                .unwrap();
+            let GraphProperty::Bytes(bytes) = property else {
+                unreachable!()
+            };
+            let mut decoded: ProjectionBatchReceiptV1 = serde_json::from_slice(bytes).unwrap();
+            let page_manifest = digest::<ManifestDigest>('9');
+            decoded.source_manifest_digest = page_manifest.clone();
+            for chunk in &mut decoded.receipts {
+                chunk.source_manifest_digest = page_manifest.clone();
+            }
+            decoded.publication_digest = projection_batch_publication_digest(&decoded).unwrap();
+            *bytes = serde_json::to_vec(&decoded).unwrap();
         }
         NativeMismatch::SameProfileProjection => {
             let receipt = mutations

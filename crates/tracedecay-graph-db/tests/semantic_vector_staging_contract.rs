@@ -161,6 +161,22 @@ fn native_batch_admission_rejects_every_chunk_binding_mismatch() {
 }
 
 #[test]
+fn native_batch_admission_accepts_page_source_manifest() {
+    let fixture = ContractFixture::new();
+    let mut authority = fixture.authority();
+    let plan = fixture.plan("page-manifest", "page-manifest", None);
+    let (batch, receipt) = fixture.batch_and_receipt_with_mismatch(
+        &plan,
+        1.0,
+        Some(NativeMismatch::PageSourceManifest),
+    );
+    fixture.begin_and_append(&mut authority, &plan, &receipt, "page-manifest");
+    fixture
+        .apply(&mut authority, &receipt, batch, "page-manifest")
+        .expect("page change-set digest is not the corpus watermark");
+}
+
+#[test]
 fn receipt_then_cancel_fences_a_delayed_native_apply() {
     let fixture = ContractFixture::new();
     let mut authority = fixture.authority();
