@@ -123,7 +123,7 @@ pub(super) fn validate_semantic_native_batch(
         ORDINAL,
         i64::try_from(receipt.key.ordinal).map_err(|_| GraphDbError::Conflict)?,
     )?;
-    let projection_receipt: ProjectionBatchReceiptV1 = decode_bytes(receipt_row, RECEIPT)?;
+    let projection_receipt = decode_generation_receipt(receipt_row)?;
     validate_projection_receipt(plan, receipt, &target_projection, &projection_receipt)?;
 
     let expected_metric = graph_metric(embedding.embedding_key().metric);
@@ -482,6 +482,15 @@ fn decode_bytes<T: serde::de::DeserializeOwned>(
         GraphProperty::Bytes(bytes) => {
             serde_json::from_slice(bytes).map_err(|_| GraphDbError::Conflict)
         }
+        _ => Err(GraphDbError::Conflict),
+    }
+}
+
+fn decode_generation_receipt(
+    entity: &GraphEntity,
+) -> Result<ProjectionBatchReceiptV1, GraphDbError> {
+    match property(entity, RECEIPT)? {
+        GraphProperty::Bytes(bytes) => semantic_vector_native::decode_generation_receipt(bytes),
         _ => Err(GraphDbError::Conflict),
     }
 }

@@ -1,11 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeChunkProjectionReceiptV1, CodeGenerationId, CodeSearchChunkId, ContentDigest,
-    ManifestDigest, ProjectionBatchReceiptV1, ProjectionKeyV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, VectorGenerationIdV1,
+    ContentDigest, ManifestDigest, ProjectionBatchReceiptV1, VectorGenerationIdV1,
 };
 use tracedecay_graph_db::{
     GraphEntity, GraphEntityId, GraphLabel, GraphProperty, GraphPropertyName, GraphRelation,
@@ -145,97 +143,26 @@ pub(super) fn bytes_property<T: Serialize>(
         .map_err(storage_error)
 }
 
-/// Page receipts repeat projection/source identity on every chunk. A 512-item
-/// production page of that fat JSON exceeds the 1 MiB graph property ceiling.
-/// Persist the identity once and reconstruct on read.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct PersistedBatchReceiptV1 {
-    target_projection_key: ProjectionKeyV1,
-    request_digest: ManifestDigest,
-    source_generation: CodeGenerationId,
-    source_manifest_digest: ManifestDigest,
-    reused_count: u64,
-    publication_digest: ManifestDigest,
-    receipts: Vec<PersistedChunkReceiptV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct PersistedChunkReceiptV1 {
-    chunk_id: CodeSearchChunkId,
-    prior_generation: Option<CodeGenerationId>,
-    prior_chunk_digest: Option<ContentDigest>,
-    current_chunk_digest: Option<ContentDigest>,
-    operation: ProjectionOperationV1,
-    outcome: ProjectionOutcomeV1,
-    output_digest: Option<ContentDigest>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum StoredBatchReceiptV1 {
-    Fat(ProjectionBatchReceiptV1),
-    Slim(PersistedBatchReceiptV1),
-}
-
 pub(super) fn generation_receipt_property(
     receipt: &ProjectionBatchReceiptV1,
 ) -> Result<GraphProperty, VectorGenerationStoreErrorV1> {
-    bytes_property(&PersistedBatchReceiptV1 {
-        target_projection_key: receipt.target_projection_key.clone(),
-        request_digest: receipt.request_digest.clone(),
-        source_generation: receipt.source_generation.clone(),
-        source_manifest_digest: receipt.source_manifest_digest.clone(),
-        reused_count: receipt.reused_count,
-        publication_digest: receipt.publication_digest.clone(),
-        receipts: receipt
-            .receipts
-            .iter()
-            .filter(|chunk| chunk.operation != ProjectionOperationV1::Reused)
-            .map(|chunk| PersistedChunkReceiptV1 {
-                chunk_id: chunk.chunk_id.clone(),
-                prior_generation: chunk.prior_generation.clone(),
-                prior_chunk_digest: chunk.prior_chunk_digest.clone(),
-                current_chunk_digest: chunk.current_chunk_digest.clone(),
-                operation: chunk.operation,
-                outcome: chunk.outcome.clone(),
-                output_digest: chunk.output_digest.clone(),
-            })
-            .collect(),
-    })
+    semantic_vector_native::encode_generation_receipt(receipt)
+        .map(GraphProperty::Bytes)
+        .map_err(map_graph_error)
 }
 
 pub(super) fn required_generation_receipt(
     row: &GraphEntity,
 ) -> Result<ProjectionBatchReceiptV1, VectorGenerationStoreErrorV1> {
-    match required_bytes::<StoredBatchReceiptV1>(row, semantic_vector_native::RECEIPT)? {
-        StoredBatchReceiptV1::Fat(receipt) => Ok(receipt),
-        StoredBatchReceiptV1::Slim(receipt) => Ok(ProjectionBatchReceiptV1 {
-            target_projection_key: receipt.target_projection_key.clone(),
-            request_digest: receipt.request_digest.clone(),
-            source_generation: receipt.source_generation.clone(),
-            source_manifest_digest: receipt.source_manifest_digest.clone(),
-            reused_count: receipt.reused_count,
-            publication_digest: receipt.publication_digest,
-            receipts: receipt
-                .receipts
-                .into_iter()
-                .map(|chunk| CodeChunkProjectionReceiptV1 {
-                    projection_key: receipt.target_projection_key.clone(),
-                    request_digest: receipt.request_digest.clone(),
-                    prior_generation: chunk.prior_generation,
-                    source_generation: receipt.source_generation.clone(),
-                    source_manifest_digest: receipt.source_manifest_digest.clone(),
-                    chunk_id: chunk.chunk_id,
-                    prior_chunk_digest: chunk.prior_chunk_digest,
-                    current_chunk_digest: chunk.current_chunk_digest,
-                    operation: chunk.operation,
-                    outcome: chunk.outcome,
-                    output_digest: chunk.output_digest,
-                })
-                .collect(),
-        }),
+    match required_property(row, semantic_vector_native::RECEIPT)? {
+        GraphProperty::Bytes(value) => {
+            semantic_vector_native::decode_generation_receipt(value).map_err(map_graph_error)
+        }
+        _ => Err(corrupt(format!(
+            "semantic vector entity {} has invalid {}",
+            row.identity,
+            semantic_vector_native::RECEIPT
+        ))),
     }
 }
 
@@ -443,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_reused_corpus_receipt_exceeds_property_ceiling_until_slimmed() {
+    fn incremental_reused_corpus_receipt_exceeds_property_ceiling_until_paged() {
         let receipt = fat_reused_receipt(21_700);
         let encoded = serde_json::to_vec(&receipt).expect("encode fat reused receipt");
         assert!(
@@ -462,13 +389,23 @@ mod tests {
             message.contains("capacity budget is exhausted (limit 1048576)"),
             "expected named capacity 1 MiB, got {message}"
         );
-        let property = generation_receipt_property(&receipt).expect("slim reused receipt");
+        let slim_unsplit = generation_receipt_property(&receipt).expect("slim reused receipt");
+        let GraphProperty::Bytes(unsplit_bytes) = &slim_unsplit else {
+            panic!("receipt property must be bytes");
+        };
+        assert!(
+            unsplit_bytes.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES,
+            "identity-once persist still exceeds 1 MiB for an unsplit reused corpus, got {}",
+            unsplit_bytes.len()
+        );
+        let paged = fat_reused_receipt(512);
+        let property = generation_receipt_property(&paged).expect("slim paged receipt");
         let GraphProperty::Bytes(bytes) = &property else {
             panic!("receipt property must be bytes");
         };
         assert!(
-            bytes.len() < 8 * 1024,
-            "reused rows must not be persisted on the generation receipt, got {}",
+            bytes.len() < MAX_GRAPH_PROPERTY_VALUE_BYTES,
+            "a 512-item slim reused page must stay under 1 MiB, got {}",
             bytes.len()
         );
     }

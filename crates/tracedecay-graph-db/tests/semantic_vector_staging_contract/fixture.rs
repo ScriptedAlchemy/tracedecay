@@ -847,14 +847,14 @@ fn mutate_native_effect(mutations: &mut Vec<GraphMutation>, mismatch: NativeMism
             let GraphProperty::Bytes(bytes) = property else {
                 unreachable!()
             };
-            let mut decoded: ProjectionBatchReceiptV1 = serde_json::from_slice(bytes).unwrap();
+            let mut decoded = semantic_vector_native::decode_generation_receipt(bytes).unwrap();
             let page_manifest = digest::<ManifestDigest>('9');
             decoded.source_manifest_digest = page_manifest.clone();
             for chunk in &mut decoded.receipts {
                 chunk.source_manifest_digest = page_manifest.clone();
             }
             decoded.publication_digest = projection_batch_publication_digest(&decoded).unwrap();
-            *bytes = serde_json::to_vec(&decoded).unwrap();
+            *bytes = semantic_vector_native::encode_generation_receipt(&decoded).unwrap();
         }
         NativeMismatch::SameProfileProjection => {
             let receipt = mutations
@@ -877,13 +877,13 @@ fn mutate_native_effect(mutations: &mut Vec<GraphMutation>, mismatch: NativeMism
             let GraphProperty::Bytes(bytes) = property else {
                 unreachable!()
             };
-            let mut decoded: ProjectionBatchReceiptV1 = serde_json::from_slice(bytes).unwrap();
+            let mut decoded = semantic_vector_native::decode_generation_receipt(bytes).unwrap();
             decoded.target_projection_key.schema_revision = "embedding.fixture.foreign".to_owned();
             for chunk in &mut decoded.receipts {
                 chunk.projection_key = decoded.target_projection_key.clone();
             }
             decoded.publication_digest = projection_batch_publication_digest(&decoded).unwrap();
-            *bytes = serde_json::to_vec(&decoded).unwrap();
+            *bytes = semantic_vector_native::encode_generation_receipt(&decoded).unwrap();
         }
     }
 }
@@ -953,7 +953,7 @@ fn canonical_native_mutations(
                 ("generation_id", string(generation)),
                 (
                     "receipt",
-                    bytes(&projection_receipt(
+                    receipt_bytes(&projection_receipt(
                         plan,
                         embedding,
                         chunk_id,
@@ -1062,7 +1062,7 @@ fn canonical_page_mutations(
                 ("generation_id", string(generation)),
                 (
                     "receipt",
-                    bytes(&page_projection_receipt(plan, embedding, page_chunks)),
+                    receipt_bytes(&page_projection_receipt(plan, embedding, page_chunks)),
                 ),
                 (
                     "ordinal",
@@ -1260,6 +1260,10 @@ fn string(value: &str) -> GraphProperty {
 
 fn bytes(value: &impl serde::Serialize) -> GraphProperty {
     GraphProperty::Bytes(serde_json::to_vec(value).unwrap())
+}
+
+fn receipt_bytes(receipt: &ProjectionBatchReceiptV1) -> GraphProperty {
+    GraphProperty::Bytes(semantic_vector_native::encode_generation_receipt(receipt).unwrap())
 }
 
 fn admitted_embedding_with_dimensions(dimensions: u32) -> AdmittedEmbeddingProjectionKeyV1 {

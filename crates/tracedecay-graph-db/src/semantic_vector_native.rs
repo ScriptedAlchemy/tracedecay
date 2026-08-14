@@ -1,4 +1,9 @@
-use tracedecay_domain::canonical_sha256;
+use serde::{Deserialize, Serialize};
+use tracedecay_domain::{
+    CodeChunkProjectionReceiptV1, CodeGenerationId, CodeSearchChunkId, ContentDigest,
+    ManifestDigest, ProjectionBatchReceiptV1, ProjectionKeyV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, canonical_sha256,
+};
 
 use crate::{GraphDbError, GraphEntityId, GraphLabel, GraphPropertyName, GraphRelationId};
 
@@ -87,4 +92,98 @@ pub fn relation_id(
     ))
     .map_err(|error| GraphDbError::invalid(error.to_string()))?;
     GraphRelationId::new(format!("semantic-vector:relation:{}", digest.as_str()))
+}
+
+/// Page receipts repeat projection/source identity on every chunk. Persist
+/// that identity once and reconstruct on read so a production-width page
+/// stays inside the 1 MiB property ceiling.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PersistedBatchReceiptV1 {
+    target_projection_key: ProjectionKeyV1,
+    request_digest: ManifestDigest,
+    source_generation: CodeGenerationId,
+    source_manifest_digest: ManifestDigest,
+    reused_count: u64,
+    publication_digest: ManifestDigest,
+    receipts: Vec<PersistedChunkReceiptV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PersistedChunkReceiptV1 {
+    chunk_id: CodeSearchChunkId,
+    prior_generation: Option<CodeGenerationId>,
+    prior_chunk_digest: Option<ContentDigest>,
+    current_chunk_digest: Option<ContentDigest>,
+    operation: ProjectionOperationV1,
+    outcome: ProjectionOutcomeV1,
+    output_digest: Option<ContentDigest>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+enum StoredBatchReceiptV1 {
+    Fat(ProjectionBatchReceiptV1),
+    Slim(PersistedBatchReceiptV1),
+}
+
+pub fn encode_generation_receipt(
+    receipt: &ProjectionBatchReceiptV1,
+) -> Result<Vec<u8>, GraphDbError> {
+    serde_json::to_vec(&PersistedBatchReceiptV1 {
+        target_projection_key: receipt.target_projection_key.clone(),
+        request_digest: receipt.request_digest.clone(),
+        source_generation: receipt.source_generation.clone(),
+        source_manifest_digest: receipt.source_manifest_digest.clone(),
+        reused_count: receipt.reused_count,
+        publication_digest: receipt.publication_digest.clone(),
+        receipts: receipt
+            .receipts
+            .iter()
+            .map(|chunk| PersistedChunkReceiptV1 {
+                chunk_id: chunk.chunk_id.clone(),
+                prior_generation: chunk.prior_generation.clone(),
+                prior_chunk_digest: chunk.prior_chunk_digest.clone(),
+                current_chunk_digest: chunk.current_chunk_digest.clone(),
+                operation: chunk.operation,
+                outcome: chunk.outcome.clone(),
+                output_digest: chunk.output_digest.clone(),
+            })
+            .collect(),
+    })
+    .map_err(|error| GraphDbError::invalid(error.to_string()))
+}
+
+pub fn decode_generation_receipt(bytes: &[u8]) -> Result<ProjectionBatchReceiptV1, GraphDbError> {
+    match serde_json::from_slice::<StoredBatchReceiptV1>(bytes)
+        .map_err(|_| GraphDbError::Conflict)?
+    {
+        StoredBatchReceiptV1::Fat(receipt) => Ok(receipt),
+        StoredBatchReceiptV1::Slim(receipt) => Ok(ProjectionBatchReceiptV1 {
+            target_projection_key: receipt.target_projection_key.clone(),
+            request_digest: receipt.request_digest.clone(),
+            source_generation: receipt.source_generation.clone(),
+            source_manifest_digest: receipt.source_manifest_digest.clone(),
+            reused_count: receipt.reused_count,
+            publication_digest: receipt.publication_digest,
+            receipts: receipt
+                .receipts
+                .into_iter()
+                .map(|chunk| CodeChunkProjectionReceiptV1 {
+                    projection_key: receipt.target_projection_key.clone(),
+                    request_digest: receipt.request_digest.clone(),
+                    prior_generation: chunk.prior_generation,
+                    source_generation: receipt.source_generation.clone(),
+                    source_manifest_digest: receipt.source_manifest_digest.clone(),
+                    chunk_id: chunk.chunk_id,
+                    prior_chunk_digest: chunk.prior_chunk_digest,
+                    current_chunk_digest: chunk.current_chunk_digest,
+                    operation: chunk.operation,
+                    outcome: chunk.outcome,
+                    output_digest: chunk.output_digest,
+                })
+                .collect(),
+        }),
+    }
 }
