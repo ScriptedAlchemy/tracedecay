@@ -1,8 +1,11 @@
 use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
 use tracedecay_domain::{
-    BrainId, CodeGenerationId, ProjectId, RepositoryId, UserProfileId, WorktreeId,
+    BrainId, CodeGenerationId, ProjectId, RepositoryId, UserProfileId, WorktreeId, canonical_sha256,
 };
-use tracedecay_graph_db::GraphDbError;
+use tracedecay_graph_db::{
+    GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphProjectionIdentity,
+    GraphWatermark, SourceGeneration,
+};
 use tracedecay_store::{
     CodeShardScopeV1, GraphPublicationStoreErrorV1, RuntimeInterruptionV1,
     SemanticVectorStagingStoreError, StoreAuthorityEpochV1, StoreIncarnationV1,
@@ -28,6 +31,33 @@ pub(super) fn evaluation_source_namespace(
     generation: &CodeGenerationId,
 ) -> Result<tracedecay_graph_db::GraphNamespace, GraphDbError> {
     tracedecay_graph_db::GraphNamespace::new(format!("semantic-evaluation-code:{generation}"))
+}
+
+/// Isolated measurement publishes a source-generation identity receipt, not a
+/// second copy of the production code graph. Vector staging needs a live
+/// parent replay; chunks come from `CodeIndexPublishedGenerationV1`.
+pub(super) fn evaluation_source_receipt_manifest(
+    projection: GraphProjectionIdentity,
+    graph_generation: GraphGenerationId,
+    source_generation_id: &CodeGenerationId,
+    check: &dyn Fn() -> Result<(), GraphDbError>,
+) -> Result<GraphGenerationManifest, GraphDbError> {
+    let receipt_digest = canonical_sha256(&(
+        "tracedecay.semantic-evaluation-source-receipt.v1",
+        source_generation_id,
+        &graph_generation,
+    ))
+    .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+    GraphGenerationManifest::new_checked(
+        projection,
+        graph_generation,
+        SourceGeneration::new(format!("source:{}", receipt_digest.as_str()))?,
+        GraphWatermark::new(format!("watermark:{}", receipt_digest.as_str()))?,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        check,
+    )
 }
 
 pub(super) fn evaluation_source_scope(

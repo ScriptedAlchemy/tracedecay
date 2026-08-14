@@ -9,9 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracedecay_code_index::{
     graph_projection::{
-        CODE_GRAPH_PROJECTOR_REVISION, CodeGraphProjectionStore,
-        build_published_code_graph_manifest_checked, code_graph_generation_id,
-        code_graph_idempotency_key, code_graph_projection_identity,
+        CODE_GRAPH_PROJECTOR_REVISION, code_graph_generation_id, code_graph_idempotency_key,
+        code_graph_projection_identity,
     },
     production::CodeIndexPublishedGenerationV1,
 };
@@ -21,8 +20,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
-    GraphGenerationDependency, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphWriteBatch, NeverCancelled, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    GraphGenerationDependency, GraphProjectionIdentity, GraphProjectorRevision, GraphWriteBatch,
+    NeverCancelled, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter,
@@ -55,8 +54,8 @@ use crate::semantic_runtime::{
 mod support;
 
 use support::{
-    evaluation_binding, evaluation_source_namespace, evaluation_source_scope, map_code_graph_error,
-    map_publication_error, map_staging_error,
+    evaluation_binding, evaluation_source_namespace, evaluation_source_receipt_manifest,
+    evaluation_source_scope, map_code_graph_error, map_publication_error, map_staging_error,
 };
 
 const POST_COMMIT_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(30);
@@ -360,32 +359,24 @@ impl IsolatedSemanticEvaluationGraphV1 {
             GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
         let source_generation_id = &generation.manifest().generation_id;
-        let projection = code_graph_projection_identity(evaluation_source_namespace(
-            source_generation_id,
-        )?)
-        .map_err(map_code_graph_error)?;
-        let manifest = build_published_code_graph_manifest_checked(
-            projection.clone(),
-            generation,
-            &projector_revision,
-            &check,
-        )
-        .map_err(map_code_graph_error)?;
+        let projection =
+            code_graph_projection_identity(evaluation_source_namespace(source_generation_id)?)
+                .map_err(map_code_graph_error)?;
         let graph_generation = code_graph_generation_id(source_generation_id, &projector_revision)
             .map_err(map_code_graph_error)?;
-        if manifest.generation != graph_generation {
-            return Err(GraphDbError::invalid(format!(
-                "semantic evaluation source {source_generation_id} projected as {} but expected {graph_generation}",
-                manifest.generation
-            )));
-        }
+        let manifest = evaluation_source_receipt_manifest(
+            projection.clone(),
+            graph_generation.clone(),
+            source_generation_id,
+            &check,
+        )?;
         let expected_recovered_digest = manifest.expected_recovered_digest(&check)?;
         let idempotency =
             code_graph_idempotency_key(&generation.manifest().generation_id, &projector_revision)
                 .map_err(map_code_graph_error)?;
         let input_digest = GraphPublicationInputDigestV1::new(
             canonical_sha256(&(
-                "tracedecay.semantic-evaluation-code-graph.v1",
+                "tracedecay.semantic-evaluation-source-receipt.v1",
                 &generation.manifest().generation_id,
                 &manifest.generation,
                 &manifest.source_generation,
@@ -455,15 +446,10 @@ impl IsolatedSemanticEvaluationGraphV1 {
                 namespace: projection.namespace.to_string(),
                 projection: projection.projection.to_string(),
                 generation: graph_generation.to_string(),
-                message: "verified evaluation source content differs from its workload generation"
+                message: "verified evaluation source receipt differs from its published identity"
                     .to_owned(),
             });
         }
-        CodeGraphProjectionStore::from_verified_snapshot(
-            snapshot,
-            generation.manifest().generation_id.clone(),
-        )
-        .map_err(map_code_graph_error)?;
         Ok(GraphGenerationDependency::new(
             projection,
             graph_generation,
@@ -1003,6 +989,38 @@ mod settlement_tests {
                 .contains("generation.evaluation-clean"),
             "namespace must bind the source generation: {}",
             clean_namespace.as_str()
+        );
+    }
+
+    #[test]
+    fn evaluation_source_receipt_is_identity_only_and_under_replay_bound() {
+        let generation = CodeGenerationId::new("generation.evaluation-clean")
+            .expect("clean evaluation source id");
+        let projector_revision =
+            GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
+                .expect("code-graph projector revision");
+        let projection = code_graph_projection_identity(
+            evaluation_source_namespace(&generation).expect("evaluation namespace"),
+        )
+        .expect("evaluation source projection");
+        let graph_generation = code_graph_generation_id(&generation, &projector_revision)
+            .expect("evaluation source generation");
+        let manifest =
+            evaluation_source_receipt_manifest(projection, graph_generation, &generation, &|| {
+                Ok(())
+            })
+            .expect("evaluation source receipt");
+        assert!(
+            manifest.entities.is_empty() && manifest.relations.is_empty(),
+            "isolated evaluation must not inline the production code graph"
+        );
+        let replay_source = manifest
+            .canonical_replay_source(&|| Ok(()))
+            .expect("identity receipt replay");
+        assert!(
+            replay_source.len() < 64 * 1024,
+            "identity receipt must stay far under the 4 MiB replay bound, got {} bytes",
+            replay_source.len()
         );
     }
 }
