@@ -18,32 +18,12 @@ pub struct SourceEditFailedResultV1 {
     pub message: String,
 }
 
-impl SourceEditFailedResultV1 {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            failed: true,
-            message: message.into(),
-        }
-    }
-}
-
 /// Terminal payload when cancellation is observed before an edit commits.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SourceEditCancelledResultV1 {
     pub success: bool,
     pub cancelled: bool,
     pub message: String,
-}
-
-impl SourceEditCancelledResultV1 {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            cancelled: true,
-            message: message.into(),
-        }
-    }
 }
 
 /// Terminal payload when an edit deadline expires before commit.
@@ -54,16 +34,6 @@ pub struct SourceEditTimedOutResultV1 {
     pub message: String,
 }
 
-impl SourceEditTimedOutResultV1 {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            timed_out: true,
-            message: message.into(),
-        }
-    }
-}
-
 /// Terminal payload when publication may have occurred and inspection is required.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SourceEditEffectUnknownResultV1 {
@@ -72,32 +42,12 @@ pub struct SourceEditEffectUnknownResultV1 {
     pub message: String,
 }
 
-impl SourceEditEffectUnknownResultV1 {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            effect_unknown: true,
-            message: message.into(),
-        }
-    }
-}
-
 /// Terminal payload returned by explicit reconciliation and rollback.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SourceEditReconciledResultV1 {
     pub success: bool,
     pub reconciled: bool,
     pub message: String,
-}
-
-impl SourceEditReconciledResultV1 {
-    pub fn new(success: bool, message: impl Into<String>) -> Self {
-        Self {
-            success,
-            reconciled: true,
-            message: message.into(),
-        }
-    }
 }
 
 /// Body-free source-edit evidence retained inside durable effect receipts.
@@ -145,26 +95,6 @@ pub enum SourceEditSurfaceOutcomeV1 {
 }
 
 impl SourceEditSurfaceOutcomeV1 {
-    pub fn failed(message: impl Into<String>) -> Self {
-        Self::Failed(SourceEditFailedResultV1::new(message))
-    }
-
-    pub fn cancelled(message: impl Into<String>) -> Self {
-        Self::Cancelled(SourceEditCancelledResultV1::new(message))
-    }
-
-    pub fn timed_out(message: impl Into<String>) -> Self {
-        Self::TimedOut(SourceEditTimedOutResultV1::new(message))
-    }
-
-    pub fn effect_unknown(message: impl Into<String>) -> Self {
-        Self::EffectUnknown(SourceEditEffectUnknownResultV1::new(message))
-    }
-
-    pub fn reconciled(success: bool, message: impl Into<String>) -> Self {
-        Self::Reconciled(SourceEditReconciledResultV1::new(success, message))
-    }
-
     pub fn success(&self) -> bool {
         match self {
             Self::Edit(result) => result.success,
@@ -250,26 +180,6 @@ impl SourceEditSurfaceOutcomeV1 {
             | Self::TimedOut(_)
             | Self::EffectUnknown(_)
             | Self::Reconciled(_) => Vec::new(),
-        }
-    }
-
-    pub fn file_path(&self) -> Option<&str> {
-        match self {
-            Self::Edit(result) => Some(&result.file_path),
-            Self::MultiEdit(result) => Some(&result.file_path),
-            Self::Insert(result) => Some(&result.file_path),
-            Self::AstGrep(result) => Some(&result.file_path),
-            Self::DurableMetadata(result) if result.files.len() == 1 => {
-                result.files.first().map(String::as_str)
-            }
-            Self::Move(_)
-            | Self::Rename(_)
-            | Self::Failed(_)
-            | Self::Cancelled(_)
-            | Self::TimedOut(_)
-            | Self::EffectUnknown(_)
-            | Self::Reconciled(_)
-            | Self::DurableMetadata(_) => None,
         }
     }
 
