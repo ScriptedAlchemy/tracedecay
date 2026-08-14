@@ -97,28 +97,35 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
     assert!(completed.load(Ordering::Acquire), "work was not detached");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn in_process_effect_without_settlement_returns_reset_required() {
     const REQUEST_ID: &str = "request.in-process-effect-no-settlement";
     let lease = crate::daemon::request_cancellation::register(REQUEST_ID)
         .expect("register invocation cancellation");
     let invocation = tokio::spawn(std::future::pending::<DaemonInvocationResponse>());
 
-    let response = tokio::time::timeout(
-        crate::daemon::DAEMON_TASK_ABORT_DEADLINE + Duration::from_secs(1),
-        settle_in_process_invocation(
-            REQUEST_ID,
-            invocation,
-            Duration::from_millis(10),
-            CancellationSignal::active("cancel.in-process-effect-no-settlement")
-                .expect("cancellation signal"),
-            None,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-        ),
-    )
-    .await
-    .expect("authoritative join is bounded")
-    .expect("indeterminate settlement is typed");
+    let settlement = tokio::spawn(settle_in_process_invocation(
+        REQUEST_ID,
+        invocation,
+        Duration::from_millis(10),
+        CancellationSignal::active("cancel.in-process-effect-no-settlement")
+            .expect("cancellation signal"),
+        None,
+        InvocationCancellationPolicy::AuthoritativeEffect,
+    ));
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(crate::daemon::DAEMON_TOOL_RESPONSE_GRACE).await;
+    tokio::task::yield_now().await;
+    assert!(
+        settlement.is_finished(),
+        "authoritative join did not terminate after its response grace"
+    );
+    let response = settlement
+        .await
+        .expect("join authoritative settlement")
+        .expect("indeterminate settlement is typed");
 
     assert_authoritative_settlement(response);
     assert!(lease.token().is_cancelled());

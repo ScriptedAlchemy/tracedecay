@@ -3653,6 +3653,11 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
         retained_external_authority(dashboard_root, admission);
     recovery_index::add_pending_blocking(dashboard_root, &journal_path, &expected_admission)
         .expect("retain projector-panic authority");
+    let reserved = read_indexed_record_blocking(&journal_path)
+        .expect("projector-panic reserved journal read")
+        .expect("projector-panic reserved journal");
+    assert!(!reserved.is_terminal());
+    assert_eq!(reserved.admission(), &expected_admission);
 
     let journal_lock_path = crate::storage::append_lock_path(&journal_path);
     let journal_lock = std::fs::OpenOptions::new()
@@ -3683,11 +3688,6 @@ async fn retained_projector_panic_finishes_recovery_before_releasing_task_lock()
         .recv_timeout(Duration::from_secs(5))
         .expect("detached owner executed projector");
 
-    let reserved = read_indexed_record_blocking(&journal_path)
-        .expect("projector-panic reserved journal read")
-        .expect("projector-panic reserved journal");
-    assert!(!reserved.is_terminal());
-    assert_eq!(reserved.admission(), &expected_admission);
     assert!(task_lock_is_denied(dashboard_root, job_id).await);
 
     FileExt::unlock(&journal_lock).expect("release projector-panic recovery terminal");
