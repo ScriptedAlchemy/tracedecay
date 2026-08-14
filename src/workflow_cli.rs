@@ -32,7 +32,27 @@ use crate::daemon_contract::{
 use crate::errors::{Result, TraceDecayError};
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
-const WORKFLOW_CLI_DEADLINE_MICROS: i64 = 120_000_000;
+fn workflow_cli_deadline(operation: WorkflowOperation, observed_at: UtcMicros) -> Result<Deadline> {
+    let operation_id =
+        OperationId::new(operation.operation_id_str().to_owned()).map_err(config_error)?;
+    let registry = workflow_executable_binding_registry().map_err(config_error)?;
+    let binding = registry
+        .get(&operation_id)
+        .and_then(|availability| availability.binding())
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "Workflow operation {} is not advertised by this build",
+                operation_id.as_str()
+            ),
+        })?;
+    let maximum_micros = i64::try_from(
+        std::time::Duration::from_millis(binding.deadline().maximum_millis()).as_micros(),
+    )
+    .map_err(|_| TraceDecayError::Config {
+        message: "The canonical Workflow deadline exceeds the domain clock".to_owned(),
+    })?;
+    Deadline::new(UtcMicros(observed_at.0.saturating_add(maximum_micros))).map_err(config_error)
+}
 
 fn workflow_result_contract(operation: WorkflowOperation) -> Result<ResultContractRef> {
     let operation_id =
@@ -172,10 +192,7 @@ pub async fn invoke_workflow_cli(
             message: "could not allocate a Workflow CLI request id".to_owned(),
         })?;
     let observed_at = invocation_now_micros();
-    let deadline = Deadline::new(UtcMicros(
-        observed_at.0.saturating_add(WORKFLOW_CLI_DEADLINE_MICROS),
-    ))
-    .map_err(config_error)?;
+    let deadline = workflow_cli_deadline(operation, observed_at)?;
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
             .map_err(config_error)?;
@@ -365,8 +382,12 @@ fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
 mod tests {
     use serde_json::json;
     use tracedecay_api::WorkflowOperation;
+    use tracedecay_domain::UtcMicros;
+    use tracedecay_tool_catalog::OperationId;
 
-    use super::decode_workflow_invocation;
+    use super::{
+        decode_workflow_invocation, workflow_cli_deadline, workflow_executable_binding_registry,
+    };
 
     #[test]
     fn closed_binding_rejects_unknown_request_fields_before_daemon_dispatch() {
@@ -376,5 +397,29 @@ mod tests {
         )
         .expect_err("strict DTO must reject unknown fields");
         assert!(error.to_string().contains("invalid typed Workflow request"));
+    }
+
+    #[test]
+    fn cli_deadline_uses_the_executable_registry_ceiling() {
+        let observed_at = UtcMicros(1_000_000);
+        let operation = WorkflowOperation::RegisterDefinition;
+        let deadline = workflow_cli_deadline(operation, observed_at)
+            .expect("registry-derived Workflow CLI deadline");
+        let operation_id = OperationId::new(operation.operation_id_str().to_owned()).unwrap();
+        let maximum_millis = workflow_executable_binding_registry()
+            .unwrap()
+            .get(&operation_id)
+            .and_then(|availability| availability.binding())
+            .unwrap()
+            .deadline()
+            .maximum_millis();
+        let maximum_micros =
+            i64::try_from(std::time::Duration::from_millis(maximum_millis).as_micros()).unwrap();
+        assert_eq!(
+            deadline.expires_at,
+            UtcMicros(observed_at.0.saturating_add(maximum_micros))
+        );
+        assert_eq!(maximum_millis, 30_000);
+        assert_ne!(maximum_micros, 120_000_000);
     }
 }
