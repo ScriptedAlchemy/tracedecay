@@ -1,26 +1,24 @@
 // Rust guideline compliant 2025-10-17
 //! `OpenAI` Codex CLI agent integration.
 //!
-//! Stages the TraceDecay plugin source for Codex. Codex itself owns cache,
-//! activation, and hook-trust mutations through its native plugin commands.
+//! Stages the TraceDecay plugin source for Codex, then drives Codex's own
+//! non-interactive plugin CLI to install and enable it.
 //!
 //! # Ruling: what is driven, what stays manual
 //!
-//! Codex's plugin lifecycle is **interactive-only** (`/plugin marketplace add`,
-//! `/plugin install`, `/reload-plugins` all run inside a session), so plugin
-//! install and activation stay **manual**. TraceDecay stages the plugin source
-//! tree and the personal marketplace entry and stops; it never drives a plugin
-//! install, and it never writes `~/.codex/config.toml` — Codex owns the
+//! Codex CLI 0.147.0 publishes `codex plugin add` / `remove` as non-interactive
+//! commands (probed 2026-08-14). TraceDecay stages the plugin source tree and
+//! the personal marketplace entry, then drives those commands for Core
+//! activation. It never writes `~/.codex/config.toml` itself — Codex owns the
 //! `tracedecay@<marketplace>` activation keys and the `[hooks.state]` trust
-//! hashes recorded there. `install_codex_plugin`,
-//! `activate_deployed_host_registration`, and `update_plugin` all reflect that:
-//! they stage and then report host-native guidance rather than acting.
+//! hashes recorded there. Hook trust still has no non-interactive surface
+//! (`/hooks` inside a session), so doctor reports untrusted hooks instead of
+//! forging hashes. See [`plugin_registry`] for the plugin adoption and
+//! [`mcp_registry`] for the MCP-only (non-plugin) registry.
 //!
-//! Codex's **MCP registry** is the one part that *is* documented as
-//! non-interactive (`codex mcp add`/`remove`/`list`/`get`). That is a host
-//! capability TraceDecay drives rather than emulates, but only for the MCP-only
-//! (non-plugin) component set, where nothing else would register the server.
-//! See [`mcp_registry`] for the whole of that adoption and its reasoning.
+//! Codex's **MCP registry** remains the path for an MCP-only component set
+//! (`codex mcp add`/`remove`). A `Core`-bearing set must not also register a
+//! standalone server: the plugin bundle already carries `.mcp.json`.
 //!
 //! Note on rollback ownership: `CodexIntegration::host_registration_paths`
 //! already lists `~/.codex/config.toml` and its backup, so the component-set
@@ -47,6 +45,7 @@ use super::{
 const CODEX_PLUGIN_ACTIVATION_KEY_PREFIX: &str = "tracedecay@";
 
 mod mcp_registry;
+mod plugin_registry;
 mod retired_entrypoints;
 
 /// `OpenAI` Codex CLI agent.
@@ -73,15 +72,11 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn interactive_activation_guidance(&self) -> Option<String> {
-        Some(
-            "Codex activates plugin caches natively; run `codex plugin add tracedecay@personal` after staging the source package.".to_string(),
-        )
+        None
     }
 
     fn interactive_removal_guidance(&self) -> Option<String> {
-        Some(
-            "Codex owns plugin removal; run `codex plugin remove tracedecay@personal`, then re-run TraceDecay to remove its staged source package.".to_string(),
-        )
+        None
     }
 
     fn prepare_non_interactive_install(
@@ -89,14 +84,7 @@ impl AgentIntegration for CodexIntegration {
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
         install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-        codex_non_interactive_install_state(
-            &ctx.home,
-            &ctx.tracedecay_bin,
-            vec![
-                codex_plugin_manifest_path(&ctx.home),
-                codex_personal_marketplace_path(&ctx.home),
-            ],
-        )
+        Ok(NonInteractiveInstallOutcome::Ready)
     }
 
     fn activate_project_host_component_registration(
@@ -173,15 +161,8 @@ impl AgentIntegration for CodexIntegration {
         if staged.is_empty() {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
-        let marketplace_name = codex_cached_marketplace_name(&ctx.home);
-        Ok(UpdatePluginOutcome::DeferredUserAction(
-            DeferredUserAction {
-                remediation: format!(
-                    "Codex plugin source is staged. Run `codex plugin add tracedecay@{marketplace_name}` to install or reinstall it, then re-trust any changed hooks."
-                ),
-                staged_paths: staged,
-            },
-        ))
+        self.activate_deployed_host_registration(ctx)?;
+        Ok(UpdatePluginOutcome::Refreshed(staged))
     }
 
     fn export_managed_skills(
@@ -358,40 +339,30 @@ impl AgentIntegration for CodexIntegration {
             return Ok(());
         }
         let marketplace_name = codex_cached_marketplace_name(&ctx.home);
-        Err(TraceDecayError::Config {
-            message: format!(
-                "Codex activation is host-native. Run `codex plugin add tracedecay@{marketplace_name}` after the source package is staged."
-            ),
-        })
+        let codex_cli = plugin_registry::require_codex_plugin_cli()?;
+        plugin_registry::codex_plugin_add_with(&codex_cli, &ctx.home, &marketplace_name)
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
+        if !codex_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))?
+            && !codex_plugin_enabled(&ctx.home).unwrap_or(false)
+        {
             return Ok(());
         }
         let marketplace_name = codex_cached_marketplace_name(&ctx.home);
-        Err(TraceDecayError::Config {
-            message: format!(
-                "Codex activation is host-native. Run `codex plugin remove tracedecay@{marketplace_name}` before removing the staged source package."
-            ),
-        })
+        let codex_cli = plugin_registry::require_codex_plugin_cli()?;
+        plugin_registry::codex_plugin_remove_with(&codex_cli, &ctx.home, &marketplace_name)
     }
 
     /// Split by component: the MCP-only set is driven through Codex's own
-    /// non-interactive MCP registry; anything carrying `Core` keeps the
-    /// host-native (manual) plugin path.
+    /// non-interactive MCP registry; a `Core`-bearing set drives
+    /// `codex plugin add` / `remove` through [`plugin_registry`].
     ///
-    /// Codex publishes `codex mcp add`/`remove` as non-interactive commands, so
-    /// the MCP route is a host capability TraceDecay drives rather than
-    /// emulates. Codex's *plugin* lifecycle has no such command — install and
-    /// activation happen inside a session — so it stays manual, and this method
-    /// still forwards a `Core`-bearing set to
-    /// `activate_deployed_host_registration`, which reports the
-    /// host-native guidance instead of acting. That split is deliberate: a
-    /// plugin install already carries the MCP route inside its bundled
-    /// `.mcp.json`, and adding a standalone server beside it would give the
-    /// operator two identical tracedecay servers, one of them outside
-    /// `codex plugin` management. See [`mcp_registry`] for the full ruling.
+    /// That split is deliberate: a plugin install already carries the MCP route
+    /// inside its bundled `.mcp.json`, and adding a standalone server beside it
+    /// would give the operator two identical tracedecay servers, one of them
+    /// outside `codex plugin` management. See [`mcp_registry`] and
+    /// [`plugin_registry`] for the full rulings.
     fn activate_deployed_host_component_registration(
         &self,
         components: &[super::host_bundle_v2::HostBundleComponentV1],
@@ -1979,22 +1950,22 @@ fn doctor_check_hooks(
                 ));
             }
             CodexHookTrustState::Trusted => dc.warn(&format!(
-                "Codex hook trust records in {} lack an explicit [hooks.state] table, so Codex still requests review; run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, then use `/hooks` in Codex",
+                "Codex hook trust records in {} lack an explicit [hooks.state] table, so Codex still requests review; use `/hooks` in Codex after `codex plugin add tracedecay@{marketplace_name}`",
                 config_path.display()
             )),
             CodexHookTrustState::Missing(missing) => dc.info(&format!(
-                "Codex skips untrusted command hooks — missing trust for {} in {}; run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, then use `/hooks` in Codex",
+                "Codex skips untrusted command hooks — missing trust for {} in {}; use `/hooks` in Codex to trust the tracedecay hooks",
                 missing.join(", "),
                 config_path.display()
             )),
             CodexHookTrustState::Modified(modified) => dc.warn(&format!(
-                "Codex hook trust is stale for {} in {} — the hook content changed since it was trusted, so Codex now skips it; run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, then use `/hooks` in Codex",
+                "Codex hook trust is stale for {} in {} — the hook content changed since it was trusted, so Codex now skips it; use `/hooks` in Codex to re-trust the tracedecay hooks",
                 modified.join(", "),
                 config_path.display()
             )),
         },
         Err(_) => dc.info(
-            "Codex skips untrusted command hooks — run `codex plugin add tracedecay@{marketplace_name}` to reinstall it, then use `/hooks` in Codex to trust the tracedecay hooks",
+            "Codex skips untrusted command hooks — use `/hooks` in Codex to trust the tracedecay hooks",
         ),
     }
 }

@@ -701,20 +701,33 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     ));
 }
 
-/// Codex cache activation is intentionally deferred to the host CLI.
+/// Preflight still reports that the cache is not yet active; activation itself
+/// is no longer an interactive deferral — Codex CLI 0.147 drives `plugin add`.
 #[test]
-fn codex_reports_host_native_activation_requirement() {
+fn codex_preflight_reports_inactive_cache_without_interactive_guidance() {
     let home = tempfile::tempdir().unwrap();
     let NonInteractiveInstallOutcome::DeferredUserAction(deferred) = CodexIntegration
         .preflight_non_interactive_install(&install_ctx(home.path()))
         .unwrap()
     else {
-        panic!("Codex activation must defer to its native cache lifecycle");
+        panic!("inactive Codex cache must still be a typed preflight deferral");
     };
     assert!(
         deferred
             .remediation
             .contains("codex plugin add tracedecay@personal")
     );
-    assert!(CodexIntegration.interactive_activation_guidance().is_some());
+    assert!(CodexIntegration.interactive_activation_guidance().is_none());
+    assert!(CodexIntegration.interactive_removal_guidance().is_none());
+}
+
+#[test]
+fn prepare_stages_the_source_and_returns_ready_for_cli_activation() {
+    let home = tempfile::tempdir().unwrap();
+    let outcome = CodexIntegration
+        .prepare_non_interactive_install(&install_ctx(home.path()))
+        .unwrap();
+    assert!(matches!(outcome, NonInteractiveInstallOutcome::Ready));
+    assert!(codex_plugin_manifest_path(home.path()).is_file());
+    assert!(codex_personal_marketplace_path(home.path()).is_file());
 }

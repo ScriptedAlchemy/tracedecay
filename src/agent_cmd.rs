@@ -2646,9 +2646,9 @@ fn host_bundle_error_for_agent(
         && error == tracedecay::agents::host_bundle_v2::HostBundleError::UnsupportedCapability
     {
         return tracedecay::errors::TraceDecayError::Config {
-            message: "Codex plugin activation could not be completed through a supported host \
-                      surface. The source bundle was staged but not recorded as enabled; run \
-                      `codex plugin add tracedecay@personal`, then re-run doctor."
+            message: "Codex plugin activation could not be completed through `codex plugin add`. \
+                      Confirm the `codex` CLI is on PATH and retry; hook trust still requires \
+                      `/hooks` inside Codex after a successful add."
                 .to_string(),
         };
     }

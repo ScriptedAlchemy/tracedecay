@@ -3,17 +3,13 @@
 //!
 //! # What Codex owns, and what TraceDecay is allowed to do
 //!
-//! Codex's *plugin* lifecycle is interactive-only: `/plugin marketplace add`,
-//! `/plugin install`, and `/reload-plugins` all run inside a Codex session.
-//! There is no non-interactive equivalent, so the owner ruling for this program
-//! is that plugin install and activation stay **manual**. TraceDecay stages the
-//! plugin source tree and the personal marketplace entry and stops there; it
-//! never drives a plugin install, and it never writes `~/.codex/config.toml`,
-//! which is where Codex records its own `tracedecay@<marketplace>` activation
-//! keys and its `[hooks.state]` trust hashes. Nothing in this module changes
-//! that: see `super::install_codex_plugin` and
-//! `super::CodexIntegration::activate_deployed_host_registration`, which still
-//! refuse with host-native guidance rather than acting.
+//! Codex's *plugin* lifecycle is driven separately by [`super::plugin_registry`]
+//! (`codex plugin add` / `remove`, probed non-interactive on Codex CLI 0.147.0).
+//! This module never drives a plugin install, and it never writes
+//! `~/.codex/config.toml`, which is where Codex records its own
+//! `tracedecay@<marketplace>` activation keys and its `[hooks.state]` trust
+//! hashes. The region guard below refuses any MCP command that disturbs those
+//! plugin-owned regions.
 //!
 //! Codex's **MCP registry**, by contrast, *is* documented as non-interactive:
 //!
@@ -590,9 +586,9 @@ exit 0"#;
         );
     }
 
-    /// Only the non-plugin set drives the registry. A `Core`-bearing set already
-    /// carries its MCP route inside the plugin bundle, whose install stays
-    /// manual per the owner ruling.
+    /// Only the non-plugin set drives the MCP registry. A `Core`-bearing set
+    /// already carries its MCP route inside the plugin bundle, whose install
+    /// is driven by [`super::plugin_registry`].
     #[test]
     fn only_the_non_plugin_component_set_drives_the_registry() {
         use HostBundleComponentV1::{ContextMcp, Core, OperatorMcp};

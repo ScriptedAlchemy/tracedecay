@@ -115,6 +115,60 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     shim
 }
 
+/// Install a non-interactive `codex` that emulates `plugin add` / `remove`
+/// against the isolated HOME. Real Codex CLI 0.147 does this; CI must not
+/// depend on that binary being present.
+fn add_codex_plugin_cli_shim(command: &mut Command, home: &Path) {
+    let bin_dir = home.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let shim = bin_dir.join(if cfg!(windows) { "codex.exe" } else { "codex" });
+    let version = PRODUCT_VERSION;
+    let script = format!(
+        r#"#!/bin/sh
+set -eu
+config="$HOME/.codex/config.toml"
+source="$HOME/.codex/plugins/tracedecay"
+cache="$HOME/.codex/plugins/cache/personal/tracedecay/{version}"
+case "${{1:-}} ${{2:-}}" in
+  "plugin add")
+    mkdir -p "$(dirname "$config")" "$cache"
+    if [ -d "$source" ]; then
+      cp -a "$source/." "$cache/"
+    fi
+    printf '%s\n' '[plugins."tracedecay@personal"]' 'enabled = true' > "$config"
+    printf '%s\n' '{{"pluginId":"tracedecay@personal","enabled":true}}'
+    exit 0
+    ;;
+  "plugin remove")
+    if [ -f "$config" ]; then
+      printf '%s\n' > "$config"
+    fi
+    rm -rf "$HOME/.codex/plugins/cache/personal/tracedecay"
+    exit 0
+    ;;
+esac
+echo "unexpected codex invocation: $*" >&2
+exit 2
+"#,
+        version = version
+    );
+    std::fs::write(&shim, script).unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim, permissions).unwrap();
+    }
+    let path = command
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value.map(|value| value.to_os_string()))
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_default());
+    let joined =
+        std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(&path))).unwrap();
+    command.env("PATH", joined);
+}
+
 /// Initializes the profile-sharded project store through the daemon-owned
 /// runtime. Only for tests where init is setup, not the behaviour under test.
 fn init_project_fixture(home: &Path, project: &Path) {
@@ -538,92 +592,39 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     assert!(!kimi_home.join("plugins/installed.json").exists());
 }
 
-fn copy_dir_recursive(source: &Path, destination: &Path) {
-    std::fs::create_dir_all(destination).unwrap();
-    for entry in std::fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let target = destination.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir_recursive(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), &target).unwrap();
-        }
-    }
-}
-
-/// Drives the staged Codex activation journey non-interactively: the first
-/// install stages the plugin source and defers activation to the user's
-/// native `codex plugin add` (non-zero exit with remediation), the test
-/// simulates that native activation, and the retry completes install plus
-/// daemon-loop automation enablement.
+/// Drives the Codex activation journey non-interactively: install stages the
+/// plugin source and marketplace entry, then drives `codex plugin add` through
+/// a host-CLI shim that emulates Codex 0.147's non-interactive registry.
 fn run_codex_automation_install(home: &TempDir, project_root: &Path) -> Output {
     let home_path = canonical_temp_path(home.path());
 
-    let mut deferred = tracedecay_command(home.path(), project_root);
-    let _shim = add_tracedecay_path_shim(&mut deferred, home.path());
-    deferred.args(["install", "--agent", "codex", "--automation"]);
-    let deferred_output = run_with_timeout(deferred, cli_timeout());
-    assert!(
-        !deferred_output.status.success(),
-        "codex install must defer to the user's native plugin activation\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&deferred_output.stdout),
-        String::from_utf8_lossy(&deferred_output.stderr)
-    );
-    let deferred_stderr = String::from_utf8_lossy(&deferred_output.stderr);
-    assert!(
-        deferred_stderr.contains("codex plugin add tracedecay@personal"),
-        "deferred install must name the native activation remediation\nstderr:\n{deferred_stderr}"
-    );
-    let staged_source = home_path.join(".codex/plugins/tracedecay");
-    assert!(
-        staged_source.join(".codex-plugin/plugin.json").is_file(),
-        "deferred install must stage the Codex plugin source package"
-    );
-    assert!(
-        home_path.join(".agents/plugins/marketplace.json").is_file(),
-        "deferred install must stage the personal marketplace entry"
-    );
-    let projects_dir = profile_root(home.path()).join("projects");
-    let premature_sidecars = std::fs::read_dir(&projects_dir)
-        .map(|entries| {
-            entries
-                .map(|entry| {
-                    entry
-                        .unwrap()
-                        .path()
-                        .join("dashboard/automation_config.json")
-                })
-                .filter(|path| path.is_file())
-                .count()
-        })
-        .unwrap_or(0);
-    assert_eq!(
-        premature_sidecars, 0,
-        "automation sidecar must not be written before native activation"
-    );
-
-    // Simulate the user's native `codex plugin add tracedecay@personal`:
-    // enable the plugin in Codex's config and load the staged source into
-    // Codex's versioned plugin cache.
-    let config_path = home_path.join(".codex/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
-    config.push_str("[plugins.\"tracedecay@personal\"]\nenabled = true\n");
-    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-    std::fs::write(&config_path, config).unwrap();
-    let cache_root = home_path
-        .join(".codex/plugins/cache/personal/tracedecay")
-        .join(PRODUCT_VERSION);
-    copy_dir_recursive(&staged_source, &cache_root);
-
     let mut install = tracedecay_command(home.path(), project_root);
     let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    add_codex_plugin_cli_shim(&mut install, home.path());
     install.args(["install", "--agent", "codex", "--automation"]);
     let output = run_with_timeout(install, cli_timeout());
     assert!(
         output.status.success(),
-        "codex automation install should succeed after native activation\nstdout:\n{}\nstderr:\n{}",
+        "codex automation install should complete through Codex's own plugin CLI\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+    let staged_source = home_path.join(".codex/plugins/tracedecay");
+    assert!(
+        staged_source.join(".codex-plugin/plugin.json").is_file(),
+        "install must stage the Codex plugin source package"
+    );
+    assert!(
+        home_path.join(".agents/plugins/marketplace.json").is_file(),
+        "install must stage the personal marketplace entry"
+    );
+    assert!(
+        home_path
+            .join(".codex/plugins/cache/personal/tracedecay")
+            .join(PRODUCT_VERSION)
+            .join(".codex-plugin/plugin.json")
+            .is_file(),
+        "install must drive Codex to materialise the versioned plugin cache"
     );
     output
 }
