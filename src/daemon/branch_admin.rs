@@ -412,6 +412,8 @@ impl ProfileHostAdmissionBootstrapContext {
 #[derive(Clone)]
 pub(super) struct StoreAdministration {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    authenticated_profile_database_scopes:
+        Arc<tokio::sync::Mutex<HashMap<PathBuf, crate::db::DaemonDatabaseScope>>>,
     session_runtime_registries: SharedSessionRuntimeRegistries,
     session_runtime_registry_admission_closed: Arc<AtomicBool>,
     gate: Arc<StoreWriterGates>,
@@ -454,6 +456,9 @@ impl Default for StoreAdministration {
     fn default() -> Self {
         Self {
             profile_identity: None,
+            authenticated_profile_database_scopes: Arc::new(
+                tokio::sync::Mutex::new(HashMap::new()),
+            ),
             session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             session_runtime_registry_admission_closed: Arc::new(AtomicBool::new(false)),
             gate: Arc::new(StoreWriterGates::default()),
@@ -541,6 +546,31 @@ impl StoreAdministration {
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon profile identity authority is unavailable".to_string(),
             })
+    }
+
+    /// Retains daemon database authority for an authenticated client profile
+    /// that differs from the daemon process's startup profile.
+    ///
+    /// The map is shared by every `StoreAdministration` clone, so cached
+    /// project/runtime owners keep the authority after the admitting socket
+    /// closes. Concurrent first requests for one profile reuse exactly one
+    /// process-stable election scope.
+    pub(super) async fn retain_authenticated_profile_database_scope(
+        &self,
+        profile_root: &Path,
+    ) -> Result<()> {
+        let profile_root = authority::canonical_identity_path(profile_root)?;
+        let mut scopes = self.authenticated_profile_database_scopes.lock().await;
+        if scopes.contains_key(&profile_root) {
+            return Ok(());
+        }
+        let scope = crate::db::enter_daemon_database_scope(
+            &profile_root,
+            0,
+            crate::runtime_identity::process_run_id(),
+        )?;
+        scopes.insert(profile_root, scope);
+        Ok(())
     }
 
     pub(super) async fn registered_profile_session_database(

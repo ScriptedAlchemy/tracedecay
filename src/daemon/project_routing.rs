@@ -68,6 +68,14 @@ pub(super) async fn bind_authenticated_profile_identity(
     store_administration: &StoreAdministration,
 ) -> Result<StoreAdministration> {
     let profile_root = authority::canonical_identity_path(&handshake.client_identity.profile_root)?;
+    let daemon_profile_root = authority::canonical_identity_path(
+        store_administration.profile_identity()?.profile_root(),
+    )?;
+    if profile_root != daemon_profile_root {
+        store_administration
+            .retain_authenticated_profile_database_scope(&profile_root)
+            .await?;
+    }
     let profile_identity = profile_identity::load_or_create(&profile_root)?;
     let scoped_administration = store_administration
         .clone()
