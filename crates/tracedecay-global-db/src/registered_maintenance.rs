@@ -64,5 +64,5 @@ impl RegisteredGlobalDb {
     //     tx.commit().await?;   // or tx.rollback() for the dry run
     //
     // Restore them here once `retention` + `config::RetentionConfig` land below
-    // the composition root. See `SEAMS.md`.
+    // the composition root.
 }

@@ -567,8 +567,8 @@ impl RegisteredGlobalDb {
     ///
     /// Exposed so the composition root can build the adapters it owns —
     /// `RuntimeExternalSourceStore`, `GlobalDbObservationStore` — without this
-    /// crate naming a root type. See the "root-owned adapters" seam note in
-    /// `SEAMS.md`.
+    /// crate naming a root type (see this crate's `lib.rs` module doc for the
+    /// "Dependency edges" note).
     pub fn runtime(&self) -> &StoreRuntimeHandle {
         &self.runtime
     }
@@ -796,7 +796,7 @@ impl RegisteredGlobalDb {
     // Root-owned adapter, deliberately not built here: `external_source_store`
     // returned `crate::application::external_source_store::
     // RuntimeExternalSourceStore`. The composition root builds it from
-    // `runtime().clone()` and `authority().clone()`; see `SEAMS.md`.
+    // `runtime().clone()` and `authority().clone()`.
 
     pub fn storage_page_counts(&self) -> tracedecay_runtime_core::errors::Result<(u64, u64, u64)> {
         self.runtime
@@ -885,8 +885,7 @@ impl RegisteredGlobalDb {
     // Root-owned adapter, deliberately not built here: `observation_store`
     // returned `crate::store::observation::GlobalDbObservationStore<'_>`, the
     // root implementation of `tracedecay_store::ObservationStore`. The
-    // composition root builds it from `runtime()` and `authority()`; see
-    // `SEAMS.md`.
+    // composition root builds it from `runtime()` and `authority()`.
 
     pub fn db_path(&self) -> &Path {
         self.authority.canonical_database_path()

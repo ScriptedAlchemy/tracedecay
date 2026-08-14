@@ -224,7 +224,7 @@ fn project_kind(project: &CodeProjectRecord) -> String {
 pub use tracedecay_runtime_core::project_registry::primary_checkout_root;
 
 /// Registry reap contract: root shim over the canonical copy beside its
-/// producer in `tracedecay_global_db::project_registry` (see SEAMS.md).
+/// producer in `tracedecay_global_db::project_registry`.
 pub use tracedecay_global_db::{
     EPHEMERAL_PROJECT_ROOT_REASON_CODE, GIT_COMMON_DIR_ALIAS_PREFIX, PROJECT_REGISTRY_AUTHORITY,
     ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry, alias_key_path,
