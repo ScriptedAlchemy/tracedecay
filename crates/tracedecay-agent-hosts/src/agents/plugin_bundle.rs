@@ -5,7 +5,7 @@
 //! agent format.
 //!
 //! Layout of `plugin/`:
-//! - `plugin/skills/*/SKILL.md` — the 15 shared model-invocable skills. All
+//! - `plugin/skills/*/SKILL.md` — the 17 shared model-invocable skills. All
 //!   four hosts deploy the full set; the workflow dispatcher skills were
 //!   removed (their behavior lives in the native slash commands below), so no
 //!   host filters the skill set today. The `cursor_skill_files` filter is kept

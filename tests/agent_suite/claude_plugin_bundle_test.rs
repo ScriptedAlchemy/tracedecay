@@ -46,6 +46,8 @@ const EXPECTED_SKILLS: &[&str] = &[
     "inspecting-managed-skills",
     "investigating-unexpected-changes",
     "managing-session-context",
+    "managing-work",
+    "managing-workflows",
     "project-memory",
     "reviewing-changes",
     "tracing-functions",
@@ -346,7 +348,7 @@ fn claude_bundle_ships_exactly_the_expected_skills() {
     assert_eq!(
         sorted_subdir_names(&skills_root),
         expected,
-        "claude-plugin/skills must contain exactly the expected 15 skill directories"
+        "claude-plugin/skills must contain exactly the expected 17 skill directories"
     );
 }
 

@@ -287,7 +287,7 @@ fn claude_embedded_file_list_covers_the_whole_source_bundle() {
         .collect();
 
     let skills = plugin_subdir_names("skills");
-    assert_eq!(skills.len(), 15, "expected 15 shared skill dirs");
+    assert_eq!(skills.len(), 17, "expected 17 shared skill dirs");
     // Every file under plugin/skills/ (SKILL.md *and* any support files) is
     // deployed — the recursive embed leaves nothing on disk unwired.
     let skills_root = plugin_source_root().join("skills");

@@ -60,6 +60,9 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | Build/type errors present, or about to run cargo check/tsc | `tracedecay:fixing-build-and-type-errors` |
 | About to write MEMORY.md/CLAUDE.md notes, or asked about a past decision | `tracedecay:project-memory` (`fact_store`) |
 | Need raw past-session transcripts or compaction recovery | `tracedecay:managing-session-context` |
+| Creating or running a Work task/attempt/placement | `tracedecay:managing-work` |
+| Registering or running a Workflow definition | `tracedecay:managing-workflows` |
+| Querying several registered roots as one frozen scope | `tracedecay_multi_root_scope_set_read` / `tracedecay_multi_root_scope_set_compare_and_swap` then `tracedecay_multi_root_execute` |
 | Architecture, tech debt, index/project status | `tracedecay:code-health` |
 | An MCP call just failed | `tracedecay:using-the-cli` — never abandon over transport |
 
