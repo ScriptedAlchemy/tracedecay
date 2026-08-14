@@ -105,46 +105,6 @@ pub fn parse_file(source: &str, language: &tree_sitter::Language) -> Option<Tree
     parser.parse(source, None)
 }
 
-/// Locate a child node within `tree` that overlaps the given 0-indexed
-/// line range. Used to map a `Node` row (with its `start_line` /
-/// `end_line`) back to a tree-sitter node after re-parsing.
-pub fn find_node_at_lines<'tree>(
-    tree: &'tree Tree,
-    start_line_zero_indexed: u32,
-    end_line_zero_indexed: u32,
-) -> Option<Node<'tree>> {
-    let root = tree.root_node();
-    let mut best: Option<Node<'tree>> = None;
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        let ns = node.start_position().row as u32;
-        let ne = node.end_position().row as u32;
-        if ns <= start_line_zero_indexed && ne >= end_line_zero_indexed {
-            // Prefer the deepest enclosing match (most specific).
-            if let Some(b) = best {
-                let b_span = b.end_position().row - b.start_position().row;
-                let n_span = ne - ns;
-                if n_span < u32::try_from(b_span).unwrap_or(u32::MAX) {
-                    best = Some(node);
-                }
-            } else {
-                best = Some(node);
-            }
-            // Continue descending only into matching children.
-            let mut cursor = node.walk();
-            if cursor.goto_first_child() {
-                loop {
-                    stack.push(cursor.node());
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    best
-}
-
 // ---------------------------------------------------------------------------
 // Tokenisation
 // ---------------------------------------------------------------------------
