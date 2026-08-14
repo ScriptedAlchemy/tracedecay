@@ -4,6 +4,7 @@ use super::*;
 async fn manual_memory_curator_runs_when_scheduling_and_task_are_disabled() {
     let temp = tempdir().unwrap();
     let cg = init_project(temp.path()).await;
+    seed_duplicate_facts(&cg).await;
     let backend = JsonBackend::new(json!({"ops": []}));
     let config = AutomationConfig {
         enabled: false,
