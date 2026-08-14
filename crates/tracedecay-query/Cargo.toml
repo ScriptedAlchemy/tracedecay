@@ -30,11 +30,9 @@ test-helpers = ["tracedecay-temporal-query/test-helpers"]
 
 [dev-dependencies]
 static_assertions = "1.1.0"
-tempfile = "3"
 # Test-only: the relocated search-quality suites build lexical/exact fixtures
 # through the code-index intake and the extracted language registry, which
 # needs the bundled lite grammar tier (Rust).
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", features = ["lite"] }
 tracedecay-code-index = { path = "../tracedecay-code-index", default-features = false, features = ["lite", "test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db", version = "0.1.0", features = ["test-helpers"] }
-tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

@@ -25,7 +25,6 @@ mod profile;
 pub(crate) mod receipts;
 mod session;
 pub(crate) mod session_queries;
-mod session_receipts;
 pub(crate) mod session_refresh;
 
 pub(crate) use memory_mapping::public_search_page;

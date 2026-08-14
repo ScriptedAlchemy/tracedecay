@@ -39,7 +39,6 @@ gix = { version = "=0.86.0", default-features = false, features = ["revision", "
 glob = "0.3"
 hmac = { version = "0.13.0", features = ["zeroize"] }
 hex = "0.4"
-regex = "1"
 same-file = "1"
 schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
@@ -54,7 +53,6 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 url = "2"
 zeroize = "1.9.0"
-ignore = "0.4"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }

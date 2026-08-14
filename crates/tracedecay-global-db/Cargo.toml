@@ -39,7 +39,6 @@ tracedecay-semantic = { path = "../tracedecay-semantic", version = "0.1.0" }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 # Test-only harnesses in this crate build temporary stores; kept as a normal
 # dependency because `#[cfg(test)]` modules are compiled inside the lib target
 # and the root crate re-exports `tests::` harness helpers.

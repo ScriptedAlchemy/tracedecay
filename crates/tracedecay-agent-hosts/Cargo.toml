@@ -24,7 +24,6 @@ test-transport = ["tracedecay-runtime-core/test-transport"]
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
-dirs = "6"
 fs2 = "0.4"
 getrandom = "0.2"
 hex = "0.4"
@@ -41,7 +40,6 @@ thiserror = "2"
 tiktoken-rs = { version = "0.12", optional = true }
 tokio = { version = "1", features = ["full"] }
 toml = "1"
-toml_edit = "0.25.13"
 tracing = "0.1"
 url = "2"
 webpki-roots = "1"

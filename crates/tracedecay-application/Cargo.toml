@@ -14,8 +14,6 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 native-git = ["dep:gix"]
 
 [dependencies]
-getrandom = "0.2"
-hex = "0.4"
 gix = { version = "=0.86.0", default-features = false, features = [
     "revision",
     "blob-diff",
@@ -34,3 +32,8 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
+
+# These are test modules declared inside automation/tests.rs, which is linked
+# into the lib via #[path]; shear cannot follow #[path] inclusions.
+[package.metadata.cargo-shear]
+ignored-paths = ["src/retained_surfaces/sdk/results/automation/admission_binding.rs", "src/retained_surfaces/sdk/results/automation/outer_partial.rs"]

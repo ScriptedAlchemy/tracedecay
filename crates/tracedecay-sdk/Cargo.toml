@@ -24,3 +24,8 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 [dev-dependencies]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile = "3"
+
+# The codegen binary source is compiled by sdks/codegen via a [[bin]] path
+# reference; it is intentionally not a target of this crate (autobins = false).
+[package.metadata.cargo-shear]
+ignored-paths = ["src/bin/generate.rs"]

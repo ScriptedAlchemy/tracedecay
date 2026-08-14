@@ -13,7 +13,6 @@ include = ["/src/**", "/tests/**"]
 test-helpers = []
 
 [dependencies]
-axum = "0.8"
 base64 = "0.22"
 dirs = "6"
 gix = { version = "=0.86.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
@@ -28,7 +27,6 @@ sha2 = "0.11"
 thiserror = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-tower = "0.5"
 tracing = "0.1"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0" }
 tracedecay-capture = { path = "../tracedecay-capture", version = "0.1.0" }

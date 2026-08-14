@@ -44,3 +44,9 @@ evaluator-corpus-languages = ["lite", "lang-dockerfile"]
 # Self dev-dependency: the crate's own test build needs the extraction tiers
 # the checked-in corpus declares. Composing binaries still choose their own.
 tracedecay-search-eval = { path = ".", features = ["evaluator-corpus-languages"] }
+
+# The self dev-dependency enables corpus language tiers for this crate's own
+# tests; assets/ holds checked-in eval fixture corpora, not crate sources.
+[package.metadata.cargo-shear]
+ignored = ["tracedecay-search-eval"]
+ignored-paths = ["assets/**"]

@@ -2825,30 +2825,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "headers"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3314d5adb5d94bcdf56771f2e50dbbc80bb4bdf88967526706205ac9eff24eb"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "headers-core",
- "http",
- "httpdate",
- "mime",
- "sha1",
-]
-
-[[package]]
-name = "headers-core"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54b4a22553d4242c49fddb9ba998a99962b5cc6f22cb5a3482bec22522403ce4"
-dependencies = [
- "http",
-]
-
-[[package]]
 name = "heapless"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5521,7 +5497,6 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
- "toml_writer",
  "winnow",
 ]
 
@@ -5614,7 +5589,6 @@ dependencies = [
  "keyring",
  "libc",
  "logo-art",
- "lsp-types",
  "memmap2",
  "notify",
  "open",
@@ -5635,7 +5609,6 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
- "tiktoken-rs",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -5687,7 +5660,6 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "dirs",
  "fs2",
  "getrandom 0.2.17",
  "hex",
@@ -5700,7 +5672,6 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "toml",
- "toml_edit",
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-domain",
@@ -5729,11 +5700,9 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
- "headers",
  "schemars",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thiserror",
  "tokio",
  "tower",
@@ -5746,9 +5715,7 @@ dependencies = [
 name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.2.17",
  "gix",
- "hex",
  "schemars",
  "serde",
  "serde_json",
@@ -5830,7 +5797,6 @@ name = "tracedecay-dashboard-api"
 version = "0.1.0"
 dependencies = [
  "axum",
- "dirs",
  "open",
  "schemars",
  "serde",
@@ -5856,7 +5822,6 @@ dependencies = [
  "tracedecay-tool-catalog",
  "tracedecay-usecases",
  "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -5901,7 +5866,6 @@ dependencies = [
  "tracedecay-sessions",
  "tracedecay-store",
  "tracedecay-temporal-query",
- "tracedecay-tool-catalog",
  "tracing",
  "zeroize",
 ]
@@ -6012,14 +5976,12 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "static_assertions",
- "tempfile",
  "thiserror",
  "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-graph-db",
- "tracedecay-store",
  "tracedecay-temporal-query",
  "zeroize",
 ]
@@ -6033,7 +5995,6 @@ dependencies = [
  "criterion",
  "dirs",
  "fs2",
- "fsys",
  "getrandom 0.2.17",
  "gix",
  "hex",
@@ -6065,7 +6026,6 @@ dependencies = [
  "tree-sitter",
  "url",
  "windows-sys 0.61.2",
- "xattr",
 ]
 
 [[package]]
@@ -6150,7 +6110,6 @@ dependencies = [
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
- "axum",
  "base64 0.22.1",
  "dirs",
  "filetime",
@@ -6166,7 +6125,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tower",
  "tracedecay-application",
  "tracedecay-capture",
  "tracedecay-domain",
@@ -6230,9 +6188,7 @@ dependencies = [
  "glob",
  "hex",
  "hmac 0.13.0",
- "ignore",
  "libc",
- "regex",
  "same-file",
  "schemars",
  "serde",
