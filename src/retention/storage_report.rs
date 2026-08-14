@@ -277,18 +277,23 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
             .map_err(|error| report_error("create external read-snapshot scratch", error))?;
         validate_external_scratch(profile_root, scratch.path())
             .map_err(|error| report_error("validate read-snapshot scratch placement", error))?;
-        // Snapshot authority takes a lock beside its source database. Back up
-        // the live family to the external scratch first so the authority lock,
-        // the immutable reader, and every temporary artifact stay outside the
-        // profile being reported. Copy bytes rather than opening the live
-        // family: a read-only SQLite open against a WAL database can still
-        // materialize a missing SHM sidecar.
+        // The live family stays untouched: a read-only SQLite open against a
+        // WAL database can still materialize a missing SHM sidecar, and any
+        // snapshot lock or scratch must stay outside the profile being
+        // reported. The copy is a private throwaway, not a managed TraceDecay
+        // database, so Foreign/read-only snapshot policy is the truthful
+        // authority: Owned would demand managed-daemon or exclusive-maintenance
+        // on a path that can never hold either.
         let snapshot_source = scratch.path().join(GLOBAL_DB_FILENAME);
         copy_sqlite_family(&global_db_path, &snapshot_source)
             .map_err(|error| report_error("copy global.db family for read-only report", error))?;
-        let snapshot = crate::sqlite_read_snapshot::open_in(&snapshot_source, scratch.path())
-            .await
-            .map_err(|error| report_error("open global.db read snapshot", error))?;
+        let snapshot = crate::sqlite_read_snapshot::open_foreign_in(
+            &snapshot_source,
+            scratch.path(),
+            crate::sqlite_read_snapshot::SnapshotReadControl::unlimited(),
+        )
+        .await
+        .map_err(|error| report_error("open global.db read snapshot", error))?;
         let connection = snapshot.connection();
         let mut rows = connection
             .query(
