@@ -554,10 +554,21 @@ the commit as attribution evidence.
   inversions, root-wiring lists) is tracked separately and is not part of
   this cutover's contract.
 - Semantic configuration table ownership and activation reconciliation are
-  implemented, but the real accepted-profile/Linux evaluation and a live
-  profile activation journey remain. Exact, lexical, graph, and ordinary
-  session retrieval must stay available while semantic activation is pending
-  or unavailable.
+  implemented. The mounted fan-out journey
+  `mounted_fan_out_recovers_then_synthesizes_and_hands_off` cleared
+  `store_unknown_build` (`ab01a31e5`) and chunk-contract 2170 (`e7a740457`).
+  On a quieter host (load 23→18, 96 cores) the product client dispatch
+  ceiling of 300s in `evaluate_and_publish_semantic_profile` still fired;
+  raising it measured honest FastEmbed 1x+10x `evaluate-and-publish` wall
+  time of 625s. The ceiling is sized to 900s (625s + margin) as
+  `SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS`. After evaluation
+  completes the journey now dies at `activate_evaluated_semantic_profile`
+  with CLI exit 2: `semantic evaluation publication rejected:
+  InvalidRequest`, mapped from `SemanticActivationCoordinationErrorV1::Rejected`
+  in `semantic_evaluation_response` (the underlying `SearchEvalError` is
+  swallowed by `evaluate_default_candidate`). Exact, lexical, graph, and
+  ordinary session retrieval must stay available while semantic activation
+  is pending or unavailable.
 - Re-run the doctor authority-audit journey and a clean Cursor agents/in-
   composer install -> version bump -> doctor lifecycle. Preserve Cursor Core
   drift versus ownership-conflict distinctions and do not add Cursor Cloud.
