@@ -17,8 +17,9 @@ use tracedecay_application::{
     PolicyDecisionRef, ReconciliationState, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ComponentVersion, ManifestDigest, ProjectId, RepositoryId, RunId, UtcMicros,
-    WorktreeId, canonical_sha256,
+    ActorId, ComponentVersion, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
+    ManifestDigest, ProjectId, ProvenanceId, RepositoryId, RunId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::EffectClass;
 
@@ -726,14 +727,29 @@ fn result_terminal(
 
 fn partial_terminal(admission: &DurableAutomationAdmission) -> AutomationSettledTerminal {
     let receipt_run_id = admission.request.run_id.as_str();
+    let owner = FactOwnerV1::Project {
+        project_id: admission.scope.project_id.clone(),
+    };
+    let fact_id = FactId::derive(
+        &FactIdentityMaterialV1::new(
+            owner.clone(),
+            FactIdentitySourceV1::Application {
+                operation_id: ProvenanceId::new("operation.memory-journal")
+                    .expect("operation id"),
+            },
+        )
+        .expect("identity material"),
+    )
+    .expect("owner-bound fact id");
     let mut receipt: MemoryAutomationCurationReceiptV1 = serde_json::from_value(json!({
             "receipt": {
-                "owner": {"kind":"project","project_id":"project.memory-journal"},
+                "owner": owner,
                 "operation_id":"operation.memory-journal",
                 "input_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "automation_run_id": receipt_run_id,
-                "operation_effects":[{"kind":"normalize_tags","fact_id":"fact.memory-journal","commit":{"disposition":"committed","fact_id":"fact.memory-journal","owner":{"kind":"project","project_id":"project.memory-journal"},"committed_event_ids":["event.memory-journal.fact","event.memory-journal.provenance"],"last_event_id":"event.memory-journal.provenance","active_assertion_id":"assertion.memory-journal"}}],
-                "replay_fact_id":"fact.memory-journal","replay_event_id":"event.memory-journal.provenance","changed_fact_ids":["fact.memory-journal"],"normalized_tags":1,"facts_linked":0
+                "operation_effects":[{"kind":"normalize_tags","fact_id":fact_id,"commit":{"disposition":"committed","fact_id":fact_id,"owner":owner,"committed_event_ids":["event.memory-journal.fact","event.memory-journal.provenance"],"last_event_id":"event.memory-journal.provenance","active_assertion_id":"assertion.memory-journal"}}],
+                "replay_fact_id":fact_id,"replay_event_id":"event.memory-journal.provenance","changed_fact_ids":[fact_id],
+                "accepted_operations":1,"facts_added":0,"facts_updated":0,"facts_merged":0,"facts_removed":0,"normalized_tags":1,"facts_linked":0
             },
             "canonical_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         }))
@@ -934,7 +950,13 @@ fn reserved_read_removes_an_orphan_terminal_sidecar() {
         .expect("simulate crash-partial sidecar");
     assert!(sidecar.exists());
 
-    assert!(reserve_or_replay_blocking(&path, admitted).is_err());
+    // The orphan sidecar is crash residue of an unbound terminal: the read
+    // removes it and the abandoned reservation enters recovery instead of
+    // replaying or re-executing.
+    assert!(matches!(
+        reserve_or_replay_blocking(&path, admitted).expect("orphan cleanup enters recovery"),
+        ReservationResult::Recover { .. }
+    ));
     assert!(!sidecar.exists());
 }
 
@@ -1612,6 +1634,15 @@ fn durable_journal_reports_changed_task_identity_as_a_conflict() {
             end_time: None,
         },
     );
+    let changed_problem = reset_problem(&changed.request_id, &changed.scope, &changed.request);
+    let AutomationRecoveryBinding::Memory {
+        recovery_problem, ..
+    } = &mut changed.recovery
+    else {
+        panic!("memory admission must carry memory recovery")
+    };
+    *recovery_problem = changed_problem;
+    let changed = seal_effect_authority(changed);
     assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
 }
 
@@ -1622,13 +1653,29 @@ fn durable_journal_reports_changed_scope_identity_as_a_conflict() {
     let original = admission("run.memory-journal", "request.memory-journal");
     reserve_or_replay_blocking(&path, original).expect("reserve");
     let mut changed = admission("run.memory-journal", "request.memory-journal");
-    changed.scope = ResolvedScope::new(
+    let changed_scope = ResolvedScope::new(
         ProjectId::new("project.memory-journal.other").expect("project"),
         RepositoryId::new("repository.memory-journal").expect("repository"),
         WorktreeId::new("worktree.memory-journal").expect("worktree"),
         None,
     )
     .expect("scope");
+    changed.scope = changed_scope.clone();
+    changed.effect_receipt_template.scope = changed_scope.clone();
+    let changed_problem = reset_problem(&changed.request_id, &changed_scope, &changed.request);
+    let AutomationRecoveryBinding::Memory {
+        owner,
+        recovery_problem,
+        ..
+    } = &mut changed.recovery
+    else {
+        panic!("memory admission must carry memory recovery")
+    };
+    *owner = FactOwnerV1::Project {
+        project_id: changed_scope.project_id.clone(),
+    };
+    *recovery_problem = changed_problem;
+    let changed = seal_effect_authority(changed);
     assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
 }
 
@@ -1733,19 +1780,24 @@ fn recovery_authority_digest_rejects_every_mutable_recovery_and_digest_domain() 
 }
 
 #[test]
-fn durable_journal_reports_changed_project_owner_as_a_conflict() {
+fn divergent_recovery_owner_is_rejected_without_downgrading_the_reservation() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let original = admission("run.memory-journal", "request.memory-journal");
     reserve_or_replay_blocking(&path, original).expect("reserve");
+    let before = std::fs::read(&path).expect("reserved bytes");
     let mut changed = admission("run.memory-journal", "request.memory-journal");
     let AutomationRecoveryBinding::Memory { owner, .. } = &mut changed.recovery else {
         panic!("memory admission must carry memory recovery")
     };
+    // The admission contract pins the memory recovery owner to the scope's
+    // project identity, so a divergent owner is an invalid admission shape
+    // and must be rejected before any durable comparison or write.
     *owner = FactOwnerV1::Project {
         project_id: ProjectId::new("project.memory-journal.other").expect("project"),
     };
-    assert_admission_conflict(reserve_or_replay_blocking(&path, changed));
+    assert!(reserve_or_replay_blocking(&path, changed).is_err());
+    assert_eq!(std::fs::read(&path).expect("preserved reservation"), before);
 }
 
 #[test]
@@ -2516,22 +2568,24 @@ fn physical_reopen_rejects_a_corrupt_swapped_terminal() {
     let temp = tempfile::tempdir().expect("tempdir");
     let path = temp.path().join("terminal.json");
     let admission = admission("run.memory-journal", "request.memory-journal");
-    write_record(
-        &path,
-        &DurableAutomationRecord {
-            admission: admission.clone(),
-            state: DurableAutomationState::Terminal {
-                terminal: write_terminal_sidecar(
-                    &path,
-                    &success_terminal(&admission, "run.memory-journal.other"),
-                )
-                .expect("swapped sidecar"),
-                publication: None,
-            },
-            legacy_terminal: None,
+    // The durable writer fail-closes on a swapped terminal, so the corrupt
+    // on-disk state must be staged as raw bytes to model foreign corruption.
+    let corrupt = DurableAutomationRecord {
+        admission: admission.clone(),
+        state: DurableAutomationState::Terminal {
+            terminal: write_terminal_sidecar(
+                &path,
+                &success_terminal(&admission, "run.memory-journal.other"),
+            )
+            .expect("swapped sidecar"),
+            publication: None,
         },
-    )
-    .expect("write corrupt fixture");
+        legacy_terminal: None,
+    };
+    write_private_test_file(
+        &path,
+        &serde_json::to_vec_pretty(&corrupt).expect("corrupt fixture bytes"),
+    );
     assert!(reserve_or_replay_blocking(&path, admission).is_err());
 }
 
@@ -2602,6 +2656,8 @@ async fn reserved_admission_conflict_preserves_recovery_index() {
     reserve_or_replay_blocking(&path, original.clone()).expect("reserve");
     let mut changed = original;
     changed.configuration_digest = digest('c');
+    changed.effect_receipt_template.configuration_digest = digest('c');
+    let changed = seal_effect_authority(changed);
     let ReservationResult::Conflict { terminal } =
         reserve_or_replay_blocking(&path, changed).expect("typed conflict")
     else {
@@ -2640,6 +2696,8 @@ async fn terminal_admission_conflict_preserves_existing_cleanup_authority() {
     .expect("terminal");
     let mut changed = original;
     changed.configuration_digest = digest('d');
+    changed.effect_receipt_template.configuration_digest = digest('d');
+    let changed = seal_effect_authority(changed);
     recovery_index::add_pending_blocking(dashboard_root, &path, &changed)
         .expect("prepare recreates pending entry before reservation lookup");
     let ReservationResult::Conflict { terminal } =
@@ -2794,7 +2852,7 @@ async fn project_open_repairs_corrupt_append_intent_at_clean_eof_without_pending
     let dashboard_root = &cg.store_layout().dashboard_root;
     let intent_path = dashboard_root.join("automation_runs.jsonl.append-intent");
     let corrupt = b"corrupt-clean-eof-intent";
-    std::fs::write(&intent_path, corrupt).expect("corrupt append intent");
+    write_private_test_file(&intent_path, corrupt);
 
     let report = recovery_index::reconcile_reserved_automation_effects_for_project(
         &cg,

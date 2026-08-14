@@ -2,26 +2,33 @@ use serde_json::json;
 use tracedecay_application::retained_surfaces::{
     AutomationCommittedReceiptV1, AutomationTaskV1, MemoryAutomationCurationReceiptV1,
 };
-use tracedecay_domain::{FactId, FactOwnerV1, ProvenanceId, RunId, canonical_sha256};
+use tracedecay_domain::{
+    FactId, FactIdentityMaterialV1, FactIdentitySourceV1, FactOwnerV1, ProvenanceId, RunId,
+    canonical_sha256,
+};
 use tracedecay_store::ProjectMemoryFactCurationReceiptV1;
 
 use super::{project_curation_receipt, project_run_summary};
 
-fn fact(suffix: char) -> FactId {
-    FactId::new(format!(
-        "fact.{}.{}",
-        "0".repeat(64),
-        suffix.to_string().repeat(64)
-    ))
-    .expect("fact id")
+fn fact(owner: &FactOwnerV1, operation: &str) -> FactId {
+    FactId::derive(
+        &FactIdentityMaterialV1::new(
+            owner.clone(),
+            FactIdentitySourceV1::Application {
+                operation_id: ProvenanceId::new(operation).expect("operation id"),
+            },
+        )
+        .expect("identity material"),
+    )
+    .expect("owner-bound fact id")
 }
 
 #[test]
 fn all_noop_curation_projects_accepted_effects_without_mutation_or_anchors() {
     let owner = FactOwnerV1::Profile;
     let run_id = RunId::new("run.projection.all-noop").expect("run id");
-    let duplicate = fact('1');
-    let absent = fact('2');
+    let duplicate = fact(&owner, "operation.projection.all-noop.duplicate");
+    let absent = fact(&owner, "operation.projection.all-noop.absent");
     let receipt: ProjectMemoryFactCurationReceiptV1 = serde_json::from_value(json!({
         "owner": owner,
         "operation_id": ProvenanceId::new("operation.projection.all-noop").expect("operation id"),
