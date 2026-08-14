@@ -511,17 +511,9 @@ mod tests {
                 "{required} must be reachable via #[path] from its declaring file; unmounted={unmounted:?}"
             );
         }
-        // These three are real orphans, not auditor false positives:
-        // a leftover sibling after tests were inlined, and two fixture
-        // corpora that cargo-shear's ignored-paths list does not cover.
-        // Pinning the exact set keeps a new false positive loud.
-        assert_eq!(
-            unmounted,
-            [
-                "crates/tracedecay-agent-hosts/src/agents/host_component_registration/tests.rs",
-                "tests/fixtures/search_quality/incremental/time-after.rs",
-                "tests/fixtures/storage_runtime/source_ast.rs",
-            ]
+        assert!(
+            unmounted.is_empty(),
+            "this repository must have no unmounted rust files; found {unmounted:?}"
         );
     }
 

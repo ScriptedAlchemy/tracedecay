@@ -44,6 +44,7 @@ ignored-paths = [
     "evals/agent_adoption/fixture_broken/*.rs",
     "tests/fixtures/context_eval_project/src/**/*.rs",
     "tests/fixtures/search_quality/corpus/**/*.rs",
+    "tests/fixtures/search_quality/incremental/**/*.rs",
 ]
 
 # Declared once here; every member (including the root package) inherits via
