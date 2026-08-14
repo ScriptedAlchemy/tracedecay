@@ -44,15 +44,15 @@ fn fact_store_creates_profile_store_on_first_touch() {
         &[
             "--project",
             &profile_arg,
-            "fact_store",
+            "fact_store_add",
             "--json",
             "--args",
-            r#"{"action":"add","content":"first touch creates the store","category":"decision"}"#,
+            r#"{"content":"first touch creates the store","category":"decision"}"#,
         ],
     );
     assert!(
         output.status.success(),
-        "fact_store should bootstrap the profile store\nstdout:\n{}\nstderr:\n{}",
+        "fact_store_add through a live daemon should bootstrap the profile store\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -73,17 +73,17 @@ fn fact_store_creates_profile_store_on_first_touch() {
         &[
             "--project",
             &profile_arg,
-            "fact_store",
+            "fact_store_search",
             "--json",
             "--args",
-            r#"{"action":"search","query":"first touch creates"}"#,
+            r#"{"query":"first touch creates"}"#,
         ],
     );
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("first touch creates the store"),
-        "search should find the fact stored at first touch, got:\n{stdout}"
+        stdout.contains("Status: `success`") && stdout.contains("returned=1"),
+        "fact_store_search should return the first-touch fact as a one-hit evidence page, got:\n{stdout}"
     );
 }
 
