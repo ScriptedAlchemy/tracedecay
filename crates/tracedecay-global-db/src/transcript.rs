@@ -472,20 +472,12 @@ impl RegisteredGlobalDb {
 
         let write_result: Result<(), TranscriptPersistenceError> = async {
             if let TranscriptWritePolicy::Full { expected_offset } = policy {
-                match require_expected_offset(&transaction, parse_offset_path, expected_offset)
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(TranscriptPersistenceError::Conflict { actual, .. })
-                        if actual == parse_offset =>
-                    {
-                        // The SQL batch already committed and a later graph
-                        // publication failed. Re-run deterministic upserts so
-                        // every post-commit projection can be retried without
-                        // rewinding or fabricating the durable parse cursor.
-                    }
-                    Err(error) => return Err(error),
-                }
+                // Full batches are one-winner compare-and-swap on the durable
+                // parse cursor. `actual == next_offset` is not a retry grant:
+                // a competing writer can share that destination while carrying
+                // different parse products. Post-commit publication retries
+                // must not re-enter this CAS with a stale expected cursor.
+                require_expected_offset(&transaction, parse_offset_path, expected_offset).await?;
             }
             for batch in batches {
                 if !Self::upsert_session_in_existing_tx(&transaction, &batch.session).await {
