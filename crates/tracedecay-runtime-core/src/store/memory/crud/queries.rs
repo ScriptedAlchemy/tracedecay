@@ -897,6 +897,11 @@ impl DatabaseFactStore<'_> {
                     .commit()
                     .await
                     .map_err(|error| storage_error(COMMIT_OPERATION, error))?;
+                // The mutation is durable from here; the operation is not
+                // settled yet. Acceptance harnesses park exactly here to make a
+                // budget that expires after the commit point reproducible.
+                #[cfg(feature = "test-transport")]
+                crate::store::memory::commit_barrier::wait_after_durable_fact_commit().await;
             } else {
                 transaction
                     .rollback()
