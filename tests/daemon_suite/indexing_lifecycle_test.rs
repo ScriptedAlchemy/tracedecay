@@ -216,8 +216,11 @@ async fn tool(socket: &Path, handshake: &DaemonHandshake, name: &str, arguments:
         match result {
             Ok(payload) => return tool_payload(payload, name),
             Err(error)
-                if error.to_string().contains("warming in the background")
-                    && Instant::now() < deadline =>
+                if Instant::now() < deadline
+                    && (error.to_string().contains("warming in the background")
+                        || error
+                            .to_string()
+                            .contains("retired before response completion")) =>
             {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -873,6 +876,10 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     .await;
 
     git(&project, &["checkout", "--quiet", "feature/lifecycle"]);
+    // External checkout is not a hooked file-edit, and shell hooks are a typed
+    // noop. Other ref-switch journeys request the same authoritative reconcile
+    // the production CLI uses after an out-of-band git operation.
+    inject_overflow(&socket, &handshake).await;
     let switched = wait_for_terminal_generation(
         &socket,
         &handshake,
