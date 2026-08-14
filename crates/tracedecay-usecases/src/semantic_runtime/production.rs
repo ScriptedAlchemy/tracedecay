@@ -78,7 +78,9 @@ use tracedecay_semantic::{
     SemanticRuntimeScheduleStatusV1, measure_semantic_evaluation_projection_cancellation,
     prepare_semantic_evaluation_projection,
 };
-use vector_projection_support::{BatchCommitStateV1, projection_input_bytes};
+use vector_projection_support::{
+    BatchCommitStateV1, commit_evaluation_prepared_generation, projection_input_bytes,
+};
 
 use super::graph_provider::{
     RetainedSemanticVectorGraphV1, SemanticGraphExecutionAuthorityV1, SemanticVectorGraphProviderV1,
@@ -616,15 +618,14 @@ impl ProductionSemanticRuntimeV1 {
                 ));
             }
         };
-        replay_store
-            .commit_batch(
-                &replay_build,
-                None,
-                clean_prepared.clone(),
-                Arc::clone(&cancellation),
-            )
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+        commit_evaluation_prepared_generation(
+            &replay_store,
+            &replay_build,
+            clean_prepared.clone(),
+            clean.code.chunks().chunks(),
+            Arc::clone(&cancellation),
+        )
+        .await?;
         let clean_publication = replay_store
             .publish_generation(&replay_build, Arc::clone(&cancellation))
             .await
@@ -920,15 +921,14 @@ impl ProductionSemanticRuntimeV1 {
             .map_err(SemanticRuntimeScheduleFailureV1::projection)?
             .build_id()
             .clone();
-        incompatible_store
-            .commit_batch(
-                &incompatible_build,
-                None,
-                incompatible.clone(),
-                Arc::clone(&cancellation),
-            )
-            .await
-            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+        commit_evaluation_prepared_generation(
+            &incompatible_store,
+            &incompatible_build,
+            incompatible.clone(),
+            sources.one_symbol.chunks().chunks(),
+            Arc::clone(&cancellation),
+        )
+        .await?;
         if !incompatible_store
             .cancel_generation(&incompatible_build, Arc::clone(&cancellation))
             .await
@@ -2391,10 +2391,14 @@ async fn publish_evaluation_projection_case_isolated(
         .map_err(SemanticRuntimeScheduleFailureV1::projection)?
         .build_id()
         .clone();
-    store
-        .commit_batch(&build, None, prepared, Arc::clone(cancellation))
-        .await
-        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
+    commit_evaluation_prepared_generation(
+        store,
+        &build,
+        prepared,
+        generation.chunks().chunks(),
+        Arc::clone(cancellation),
+    )
+    .await?;
     let publication = store
         .publish_generation(&build, Arc::clone(cancellation))
         .await
