@@ -8,6 +8,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io::Write,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak,
@@ -1795,9 +1796,20 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self,
         generation: &CodeIndexPublishedGenerationV1,
     ) -> bool {
-        self.semantic_schedule
-            .as_ref()
-            .is_some_and(|schedule| schedule(generation))
+        let Some(schedule) = self.semantic_schedule.as_ref() else {
+            return false;
+        };
+        match catch_unwind(AssertUnwindSafe(|| schedule(generation))) {
+            Ok(scheduled) => scheduled,
+            Err(_) => {
+                tracing::warn!(
+                    event = "code_index_semantic_schedule_panicked",
+                    generation = %generation.manifest().generation_id,
+                    "code-index semantic scheduling panicked; the generation remains serving"
+                );
+                false
+            }
+        }
     }
 
     pub fn notify_path(&self, path: PathBuf) {
