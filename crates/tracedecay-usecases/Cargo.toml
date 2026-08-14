@@ -55,6 +55,10 @@ url = "2"
 zeroize = "1.9.0"
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
+# Grammar-free entry only: `markdown_structure` compiles with no language
+# feature enabled, so section structure reaches retrieval without linking a
+# tree-sitter bundle into this crate.
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version = "0.1.0", default-features = false }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0" }
