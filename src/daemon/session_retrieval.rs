@@ -47,7 +47,10 @@ const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 mod admitted;
 mod contract;
 mod primitive;
-pub(crate) use admitted::{SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1};
+pub(crate) use admitted::{
+    SessionApplicationRetrievalFutureV1, SessionApplicationRetrievalPortV1,
+    UnavailableSessionApplicationRetrievalV1,
+};
 pub(crate) use contract::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome,

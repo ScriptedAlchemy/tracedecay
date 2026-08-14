@@ -454,13 +454,10 @@ struct MountedProjectApplicationRetrievalV1 {
 }
 
 impl MountedProjectApplicationRetrievalV1 {
-    fn work_evidence_retrieval(
+    fn retrieval_for_scope(
         &self,
         expected_scope: &tracedecay_application::ResolvedScope,
-        federated_authority: Arc<
-            dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
-        >,
-    ) -> Result<crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1> {
+    ) -> Result<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>> {
         let mounted_scope =
             self.identity
                 .session_request_scope()
@@ -478,10 +475,20 @@ impl MountedProjectApplicationRetrievalV1 {
                     .to_owned(),
             });
         }
+        Ok(Arc::clone(&self.service))
+    }
+
+    fn work_evidence_retrieval(
+        &self,
+        expected_scope: &tracedecay_application::ResolvedScope,
+        federated_authority: Arc<
+            dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
+        >,
+    ) -> Result<crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1> {
         Ok(
-            crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(Arc::clone(
-                &self.service,
-            ))
+            crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
+                self.retrieval_for_scope(expected_scope)?,
+            )
             .with_federated_authority(federated_authority),
         )
     }
@@ -1164,21 +1171,36 @@ impl McpServer {
             dyn crate::daemon::work_evidence_retrieval::WorkFederatedQueryAuthorityPortV1,
         >,
     ) -> Result<crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1> {
-        let Some(mounted) = self.project_application_retrieval.as_ref() else {
-            return Err(TraceDecayError::Config {
-                message: "Work evidence retrieval requires a mounted project session authority"
-                    .to_owned(),
-            });
-        };
-        mounted.work_evidence_retrieval(expected_scope, federated_authority)
+        match self.project_application_retrieval.as_ref() {
+            Some(mounted) => mounted.work_evidence_retrieval(expected_scope, federated_authority),
+            None => Ok(
+                crate::daemon::work_evidence_retrieval::DaemonWorkEvidenceRetrievalV1::new(
+                    self.project_session_retrieval_for_scope(expected_scope)?,
+                )
+                .with_federated_authority(federated_authority),
+            ),
+        }
     }
 
     pub(crate) fn project_session_application_retrieval_service(
         &self,
-    ) -> Option<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>> {
-        self.project_application_retrieval
-            .as_ref()
-            .map(|mounted| Arc::clone(&mounted.service))
+        expected_scope: &tracedecay_application::ResolvedScope,
+    ) -> Result<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>> {
+        self.project_session_retrieval_for_scope(expected_scope)
+    }
+
+    fn project_session_retrieval_for_scope(
+        &self,
+        expected_scope: &tracedecay_application::ResolvedScope,
+    ) -> Result<Arc<dyn crate::daemon::session_retrieval::SessionApplicationRetrievalPortV1>> {
+        match self.project_application_retrieval.as_ref() {
+            Some(mounted) => mounted.retrieval_for_scope(expected_scope),
+            None => Ok(Arc::new(
+                crate::daemon::session_retrieval::UnavailableSessionApplicationRetrievalV1::new(
+                    expected_scope.clone(),
+                ),
+            )),
+        }
     }
 
     pub(crate) fn retained_surface_ports(

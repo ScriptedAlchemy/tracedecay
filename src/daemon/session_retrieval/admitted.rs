@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use sha2::{Digest, Sha256};
-use tracedecay_application::{CancellationSignal, RequestContext};
+use tracedecay_application::{CancellationSignal, RequestContext, ResolvedScope};
 use tracedecay_domain::{
     ComponentRevision, EphemeralSanitizedQueryViewV1, RetrievalRequest, ScoreDomainId,
 };
@@ -144,6 +144,41 @@ pub(crate) trait SessionApplicationRetrievalPortV1: Send + Sync {
             LcmExpandServiceOutcome::Unavailable(
                 SessionRetrievalUnavailable::service_not_configured(),
             )
+        })
+    }
+}
+
+/// Scope-bound terminal used when a project has no mounted session-retrieval
+/// identity (for example, an enrolled non-Git project with no graph scope).
+///
+/// The missing optional authority must not abort the rest of project
+/// composition. It also must not fabricate an empty session store: requests
+/// for the admitted project receive the canonical typed unavailable outcome,
+/// while any other scope remains denied.
+pub(crate) struct UnavailableSessionApplicationRetrievalV1 {
+    scope: ResolvedScope,
+}
+
+impl UnavailableSessionApplicationRetrievalV1 {
+    pub(crate) fn new(scope: ResolvedScope) -> Self {
+        Self { scope }
+    }
+}
+
+impl SessionApplicationRetrievalPortV1 for UnavailableSessionApplicationRetrievalV1 {
+    fn retrieve_admitted<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        _query: SessionTemporalQuery,
+    ) -> SessionApplicationRetrievalFutureV1<'a> {
+        Box::pin(async move {
+            if context.scope() != &self.scope {
+                SessionRetrievalServiceOutcome::Denied
+            } else {
+                SessionRetrievalServiceOutcome::Unavailable(
+                    SessionRetrievalUnavailable::service_not_configured(),
+                )
+            }
         })
     }
 }

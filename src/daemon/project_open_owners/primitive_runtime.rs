@@ -36,12 +36,7 @@ pub(super) async fn open_and_register_project_primitive_runtime(
                 .to_owned(),
         })?;
     let temporal = Arc::new(DaemonSessionLookupPrimitiveV1::new(
-        server
-            .project_session_application_retrieval_service()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project-open primitive session lookup requires the mounted project session retrieval authority"
-                    .to_owned(),
-            })?,
+        server.project_session_application_retrieval_service(&access.scope)?,
     ));
     let primitive_runtime =
         open_production_primitive_runtime(ProductionPrimitiveOpenRequestV1::new(
