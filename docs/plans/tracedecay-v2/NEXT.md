@@ -503,10 +503,16 @@ the commit as attribution evidence.
 
 ### Additional wound-down lane handoffs
 
-- Grafeo memory relations are mounted in `f0708a7fda` with profile/project
-  identity, CAS projection, hydration, and dashboard consumption. The full
-  daemon restart/isolation journey was terminated before execution and remains
-  required; do not replace it with the already-passing narrow registry test.
+- DONE 2026-08-14: Grafeo memory relations remain mounted in `f0708a7fda`
+  with profile/project identity, CAS projection, hydration, and dashboard
+  consumption. The full daemon restart/isolation journey
+  `tests/grafeo_restart_acceptance.rs::memory_relation_graph_survives_physical_daemon_restart_and_isolates_profile_and_projects`
+  passed 1/1 in 57.250s (`nextest` run `e08aa083-8519-464a-bfc5-b5c6a0bad3a2`)
+  under isolated `CARGO_TARGET_DIR=/tmp/grafeo-rerun-target` after
+  `bff4c108d` committed the fixture checkout, requested an authoritative
+  reconcile, and retried warming identity. Selected-project writes stay
+  denied (`c74e4d8c4`). Do not replace this journey with the narrow
+  registry test.
 - Finish and checkpoint the exact-route Hermes plugin, unit, and stock changes
   described by the host lane, then build a fresh binary. `c635423a56` contains
   the retained Hermes surface, and `c061d3b883` (2026-08-11) removed the old
