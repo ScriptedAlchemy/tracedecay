@@ -274,6 +274,14 @@ fn work_definitions_cover_the_canonical_operation_registry() {
         work_definitions.len(),
         tracedecay_api::WorkOperation::ALL.len()
     );
+    let canonical_reads = tracedecay_api::WorkOperation::ALL
+        .iter()
+        .filter(|operation| operation.is_read_only())
+        .count();
+    assert_eq!(
+        canonical_reads, 16,
+        "canonical Work read set changed; confirm each new read is intentional",
+    );
     assert_eq!(
         work_definitions
             .iter()
@@ -285,7 +293,7 @@ fn work_definitions_cover_the_canonical_operation_registry() {
                 }) == Some(true)
             )
             .count(),
-        11,
+        canonical_reads,
         "all and only canonical Work reads must carry readOnlyHint",
     );
     for operation in tracedecay_api::WorkOperation::ALL {
@@ -422,9 +430,12 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_cancel_native_integration",
         "tracedecay_run_affected_tests",
         "tracedecay_fact_store_add",
+        "tracedecay_fact_store_curate",
         "tracedecay_fact_store_update",
         "tracedecay_fact_store_remove",
         "tracedecay_fact_feedback",
+        "tracedecay_multi_root_scope_set_compare_and_swap",
+        "tracedecay_worktree_cleanup_remove",
         "tracedecay_session_refresh",
         "tracedecay_configuration_set",
         "tracedecay_configuration_unset",
@@ -445,13 +456,18 @@ fn test_tool_definitions_have_annotations() {
             .annotations
             .as_ref()
             .unwrap_or_else(|| panic!("{} missing annotations", tool.name));
-        if write_tools.contains(&tool.name.as_str()) {
+        let name = tool.name.as_str();
+        // Work and Workflow project readOnlyHint from their executable
+        // registries; those families are pinned by their own discovery tests.
+        let registry_projected =
+            name.starts_with("tracedecay_work_") || name.starts_with("tracedecay_workflow_");
+        if write_tools.contains(&name) {
             assert_eq!(
                 ann["readOnlyHint"], false,
                 "{} should have readOnlyHint=false",
                 tool.name
             );
-        } else {
+        } else if !registry_projected {
             assert_eq!(
                 ann["readOnlyHint"], true,
                 "{} missing readOnlyHint",
@@ -475,8 +491,12 @@ fn memory_status_discovery_matches_its_pure_read_owner() {
         .expect("memory status definition");
     assert_eq!(status.annotations.unwrap()["readOnlyHint"], true);
     assert!(
-        status.description.contains("without advancing repair"),
-        "read-only discovery must distinguish the status snapshot from the repair effect"
+        status.description.contains("Inspect canonical memory state"),
+        "read-only discovery must advertise a status snapshot, not a mutation"
+    );
+    assert!(
+        !status.description.contains("repair"),
+        "memory status no longer shares an owner with holographic repair"
     );
 }
 
