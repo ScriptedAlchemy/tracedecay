@@ -569,13 +569,15 @@ async fn lcm_ingest_uses_the_canonical_privacy_detector_without_local_policy() {
             .await
     );
 
-    let secret = "sk-lcm-canonical-detector-1234567890abcdef";
+    let secret = "lcm-canonical-detector-1234567890abcdef";
     let mut message = raw_message(
         "cursor",
         "canonical-lcm-secret",
         "session-1",
         "user",
-        &format!("api_key={secret} canonicallcmcanary"),
+        // Ingest parses KEY=value as dotenv and redacts the whole value span.
+        // Keep the searchable canary on a comment line, outside that span.
+        &format!("# canonicallcmcanary\napi_key={secret}"),
     );
     message.kind = Some("message".to_string());
 
@@ -589,6 +591,7 @@ async fn lcm_ingest_uses_the_canonical_privacy_detector_without_local_policy() {
         .await
         .expect("raw message should exist");
     assert!(!raw.content.contains(secret));
+    assert!(raw.content.contains("TraceDecay-redacted-sensitive-field"));
     assert!(raw.content.contains("canonicallcmcanary"));
     assert_eq!(
         lcm_fts_count(&db, "canonicaldetector1234567890abcdef").await,
@@ -607,13 +610,13 @@ async fn sensitive_redaction_is_canonical_lossy_and_not_indexed() {
             .await
     );
 
-    let secret = "sk-redaction1234567890abcdef";
+    let secret = "redaction1234567890abcdef";
     let mut message = raw_message(
         "cursor",
         "redacted-secret",
         "session-1",
         "user",
-        &format!("api_key={secret} keep searchable redaction canary"),
+        &format!("# keep searchable redaction canary\napi_key={secret}"),
     );
     message.kind = Some("message".to_string());
     message.metadata_json = Some(
@@ -636,16 +639,13 @@ async fn sensitive_redaction_is_canonical_lossy_and_not_indexed() {
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(!raw.content.contains(secret));
-    assert!(
-        raw.content
-            .contains("[TraceDecay redacted: credential assignment]")
-    );
+    assert!(raw.content.contains("TraceDecay-redacted-sensitive-field"));
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["ingest_protection"]["lossy"], true);
     assert_eq!(metadata["ingest_protection"]["redacted"], true);
     assert_eq!(
         metadata["ingest_protection"]["redaction_patterns"],
-        json!(["api_key"])
+        json!(["sensitive_field"])
     );
 
     let status = db
@@ -674,7 +674,7 @@ async fn quoted_password_assignment_redacts_full_quoted_value() {
         "quoted-password-redaction",
         "session-1",
         "user",
-        &format!("password=\"{secret}\" keep quotedpasswordcanary"),
+        &format!("# keep quotedpasswordcanary\npassword=\"{secret}\""),
     );
     message.metadata_json = Some(
         json!({
@@ -696,10 +696,7 @@ async fn quoted_password_assignment_redacts_full_quoted_value() {
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(!raw.content.contains(secret));
-    assert!(
-        raw.content
-            .contains("[TraceDecay redacted: credential assignment]")
-    );
+    assert!(raw.content.contains("TraceDecay-redacted-sensitive-field"));
     assert!(raw.content.contains("keep quotedpasswordcanary"));
     assert_eq!(lcm_fts_count(&db, "battery").await, 0);
 }
