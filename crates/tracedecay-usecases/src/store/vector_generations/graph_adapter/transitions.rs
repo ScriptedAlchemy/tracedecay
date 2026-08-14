@@ -36,9 +36,9 @@ use super::super::{
     VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1, validate_plan,
 };
 use super::native_records::{
-    NativeGraphStateV1, PublishedBaseRecover, ScopedBuildRecordsV1, ScopedGenerationRecordsV1,
-    encode_generation_batch_delta, read_build_records, read_cataloged_generation_records,
-    read_generation_publication_pointer, read_state_metadata,
+    NativeGraphStateV1, ScopedBuildRecordsV1, ScopedGenerationRecordsV1,
+    encode_generation_batch_delta, read_build_records, read_generation_publication_pointer,
+    read_state_metadata,
 };
 use super::persistence::{map_graph_error, storage_error};
 use super::stage_identity::next_stage_attempt;
@@ -190,25 +190,22 @@ impl GraphVectorGenerationStoreV1 {
                 .map(|snapshot| read_build_records(snapshot, &build_id, Arc::clone(&cancellation)))
                 .transpose()?
                 .flatten();
+            let has_snapshot = snapshot.is_some();
+            drop(snapshot);
             // `open()` starts with an empty process-local pending map.
             // Snapshot-visible builds must still be adopted into pending
             // before commit_batch; otherwise the store reports UnknownBuild.
             let mut generations = Vec::new();
-            if let Some(snapshot) = snapshot.as_ref() {
-                self.with_published_base_recover(|recover| {
-                    push_required_generation(
-                        &mut generations,
-                        snapshot,
-                        plan.base_generation.as_ref(),
-                        Arc::clone(&cancellation),
-                        Some(recover),
-                    )
-                })?;
-            } else if plan.base_generation.is_some() {
+            if !has_snapshot && plan.base_generation.is_some() {
                 return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
                     BaseGenerationIncompatibilityV1::MissingSnapshot,
                 ));
             }
+            self.push_required_generation(
+                &mut generations,
+                plan.base_generation.as_ref(),
+                Arc::clone(&cancellation),
+            )?;
             let before = transition_state(existing.as_ref(), generations.iter())?;
             let mut after = before.clone();
             let result = if rebuild {
@@ -900,30 +897,30 @@ pub(super) fn transition_state<'a>(
     Ok(state)
 }
 
-fn push_required_generation(
-    generations: &mut Vec<ScopedGenerationRecordsV1>,
-    snapshot: &super::snapshot::SemanticVectorVerifiedRead,
-    generation_id: Option<&VectorGenerationIdV1>,
-    cancellation: Arc<dyn GraphCancellation>,
-    recover: Option<&PublishedBaseRecover<'_>>,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    let Some(generation_id) = generation_id else {
-        return Ok(());
-    };
-    if generations
-        .iter()
-        .any(|records| records.generation.generation_id() == generation_id)
-    {
-        return Ok(());
-    }
-    let records =
-        read_cataloged_generation_records(snapshot, generation_id, cancellation, recover)?.ok_or(
-            VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+impl GraphVectorGenerationStoreV1 {
+    fn push_required_generation(
+        &self,
+        generations: &mut Vec<ScopedGenerationRecordsV1>,
+        generation_id: Option<&VectorGenerationIdV1>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), VectorGenerationStoreErrorV1> {
+        let Some(generation_id) = generation_id else {
+            return Ok(());
+        };
+        if generations
+            .iter()
+            .any(|records| records.generation.generation_id() == generation_id)
+        {
+            return Ok(());
+        }
+        let records = self
+            .read_cataloged_hydrating_published_bases(generation_id, cancellation)?
+            .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
                 BaseGenerationIncompatibilityV1::MissingSnapshot,
-            ),
-        )?;
-    generations.push(records);
-    Ok(())
+            ))?;
+        generations.push(records);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

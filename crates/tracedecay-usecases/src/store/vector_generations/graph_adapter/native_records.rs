@@ -36,8 +36,8 @@ pub(super) use catalog::{
     read_generation_catalog, read_generation_catalog_entry, read_generation_publication_pointer,
 };
 pub(super) use scoped::{
-    PublishedBaseRecover, ScopedBuildRecordsV1, ScopedGenerationRecordsV1, read_build_records,
-    read_generation_records_continuing, read_generation_records_with_recover,
+    PublishedBaseRecover, ScopedBuildRecordsV1, ScopedGenerationRecordsV1, peek_generation_base,
+    read_build_records, read_generation_records_with_recover,
 };
 
 use support::{

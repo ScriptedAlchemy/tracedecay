@@ -40,6 +40,7 @@ pub(crate) struct ScopedBuildRecordsV1 {
     pub staged: StagedVectorGenerationV1,
 }
 
+#[derive(Clone)]
 pub(crate) struct ScopedGenerationRecordsV1 {
     pub generation: PublishedVectorGenerationV1,
     pub vector_bytes: u64,
@@ -274,6 +275,24 @@ pub(crate) type PublishedBaseRecover<'a> = dyn Fn(
         &mut BTreeSet<VectorGenerationIdV1>,
     ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1>
     + 'a;
+
+pub(crate) fn peek_generation_base(
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
+    generation: &VectorGenerationIdV1,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
+    let owner = snapshot
+        .entity(
+            &snapshot.projection().namespace,
+            &generation_entity_id(generation)?,
+            cancellation,
+        )
+        .map_err(map_graph_error)?
+        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingSnapshot,
+        ))?;
+    optional_generation(&owner, BASE_GENERATION)
+}
 
 pub(crate) fn read_generation_records_with_recover(
     snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
