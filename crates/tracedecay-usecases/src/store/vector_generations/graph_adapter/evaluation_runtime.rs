@@ -21,7 +21,7 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
-    GraphGenerationDependency, GraphNamespace, GraphProjectionIdentity, GraphProjectorRevision,
+    GraphGenerationDependency, GraphProjectionIdentity, GraphProjectorRevision,
     GraphWriteBatch, NeverCancelled, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
@@ -55,8 +55,8 @@ use crate::semantic_runtime::{
 mod support;
 
 use support::{
-    evaluation_binding, evaluation_source_scope, map_code_graph_error, map_publication_error,
-    map_staging_error,
+    evaluation_binding, evaluation_source_namespace, evaluation_source_scope, map_code_graph_error,
+    map_publication_error, map_staging_error,
 };
 
 const POST_COMMIT_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(30);
@@ -359,9 +359,11 @@ impl IsolatedSemanticEvaluationGraphV1 {
         let projector_revision =
             GraphProjectorRevision::try_from(CODE_GRAPH_PROJECTOR_REVISION.to_owned())
                 .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-        let projection =
-            code_graph_projection_identity(GraphNamespace::new("semantic-evaluation-code")?)
-                .map_err(map_code_graph_error)?;
+        let source_generation_id = &generation.manifest().generation_id;
+        let projection = code_graph_projection_identity(evaluation_source_namespace(
+            source_generation_id,
+        )?)
+        .map_err(map_code_graph_error)?;
         let manifest = build_published_code_graph_manifest_checked(
             projection.clone(),
             generation,
@@ -369,14 +371,13 @@ impl IsolatedSemanticEvaluationGraphV1 {
             &check,
         )
         .map_err(map_code_graph_error)?;
-        let graph_generation =
-            code_graph_generation_id(&generation.manifest().generation_id, &projector_revision)
-                .map_err(map_code_graph_error)?;
-        if manifest.generation != graph_generation
-            || manifest.source_generation.as_str()
-                != generation.manifest().generation_id.to_string()
-        {
-            return Err(GraphDbError::Conflict);
+        let graph_generation = code_graph_generation_id(source_generation_id, &projector_revision)
+            .map_err(map_code_graph_error)?;
+        if manifest.generation != graph_generation {
+            return Err(GraphDbError::invalid(format!(
+                "semantic evaluation source {source_generation_id} projected as {} but expected {graph_generation}",
+                manifest.generation
+            )));
         }
         let expected_recovered_digest = manifest.expected_recovered_digest(&check)?;
         let idempotency =
@@ -423,11 +424,13 @@ impl IsolatedSemanticEvaluationGraphV1 {
                 GraphReplayAppendOutcomeV1::Appended(_)
                 | GraphReplayAppendOutcomeV1::ExactReplay(_)
                 | GraphReplayAppendOutcomeV1::ExactVerifiedReplay { .. } => Ok(()),
-                GraphReplayAppendOutcomeV1::Conflict { .. }
+                outcome @ (GraphReplayAppendOutcomeV1::Conflict { .. }
                 | GraphReplayAppendOutcomeV1::RetiredReplayConflict { .. }
                 | GraphReplayAppendOutcomeV1::VerifiedHeadConflict { .. }
-                | GraphReplayAppendOutcomeV1::PendingReplayConflict { .. } => {
-                    Err(GraphDbError::Conflict)
+                | GraphReplayAppendOutcomeV1::PendingReplayConflict { .. }) => {
+                    Err(GraphDbError::invalid(format!(
+                        "semantic evaluation source {source_generation_id} append conflict: {outcome:?}"
+                    )))
                 }
             },
         )?;
@@ -977,5 +980,29 @@ mod settlement_tests {
                     if message.contains("settlement remains replayable")
             ));
         }
+    }
+
+    #[test]
+    fn evaluation_source_namespaces_are_independent_roots() {
+        let clean = CodeGenerationId::new("generation.evaluation-clean")
+            .expect("clean evaluation source id");
+        let one_symbol = CodeGenerationId::new("generation.evaluation-one-symbol")
+            .expect("one-symbol evaluation source id");
+        let clean_namespace =
+            evaluation_source_namespace(&clean).expect("clean evaluation namespace");
+        let one_symbol_namespace =
+            evaluation_source_namespace(&one_symbol).expect("one-symbol evaluation namespace");
+        assert_ne!(
+            clean_namespace.as_str(),
+            one_symbol_namespace.as_str(),
+            "independent evaluation sources must not share a code-graph head"
+        );
+        assert!(
+            clean_namespace
+                .as_str()
+                .contains("generation.evaluation-clean"),
+            "namespace must bind the source generation: {}",
+            clean_namespace.as_str()
+        );
     }
 }

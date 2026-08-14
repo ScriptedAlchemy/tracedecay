@@ -1,5 +1,7 @@
 use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
-use tracedecay_domain::{BrainId, ProjectId, RepositoryId, UserProfileId, WorktreeId};
+use tracedecay_domain::{
+    BrainId, CodeGenerationId, ProjectId, RepositoryId, UserProfileId, WorktreeId,
+};
 use tracedecay_graph_db::GraphDbError;
 use tracedecay_store::{
     CodeShardScopeV1, GraphPublicationStoreErrorV1, RuntimeInterruptionV1,
@@ -20,6 +22,12 @@ pub(super) fn evaluation_binding() -> Result<StoreRuntimeBindingV1, GraphDbError
         StoreIncarnationV1::new(1).map_err(|error| GraphDbError::invalid(error.to_string()))?,
         StoreAuthorityEpochV1::new(1).map_err(|error| GraphDbError::invalid(error.to_string()))?,
     ))
+}
+
+pub(super) fn evaluation_source_namespace(
+    generation: &CodeGenerationId,
+) -> Result<tracedecay_graph_db::GraphNamespace, GraphDbError> {
+    tracedecay_graph_db::GraphNamespace::new(format!("semantic-evaluation-code:{generation}"))
 }
 
 pub(super) fn evaluation_source_scope(
