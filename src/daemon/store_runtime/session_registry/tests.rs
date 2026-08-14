@@ -666,6 +666,11 @@ async fn background_convergence_failure_remains_observable_as_degraded() {
                     ('cursor-b', 2, X'02', 200, NULL);",
         )
         .expect("seed corruption behind missing guards");
+    let connection = TestConnection::open(&sessions_path);
+    crate::global_db::schema_contract::ensure_authority_invariant_schema(&connection)
+        .await
+        .expect("restore admission-critical guard triggers after seeding historical row corruption");
+    drop(connection);
     let shard_id = StoreShardIdV1::project_sessions(
         identity.brain_id().clone(),
         identity.profile_id().clone(),

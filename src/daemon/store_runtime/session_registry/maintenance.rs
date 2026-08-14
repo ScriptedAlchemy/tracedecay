@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use tokio::sync::{Notify, Semaphore};
-#[cfg(test)]
 use tokio::task::JoinHandle;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1};
 
@@ -18,9 +17,7 @@ use super::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RegisteredSchemaConvergenceStatus {
     Pending,
-    #[cfg(test)]
     Complete,
-    #[cfg(test)]
     Degraded {
         message: String,
     },
@@ -54,7 +51,6 @@ fn lock_registered_schema_convergence_statuses(
 
 pub(super) struct RegisteredSchemaConvergenceMaintenance {
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
-    #[cfg(test)]
     tasks: StdMutex<BTreeMap<StoreShardIdV1, JoinHandle<()>>>,
     #[cfg(test)]
     schedule_count: std::sync::atomic::AtomicUsize,
@@ -66,7 +62,6 @@ impl RegisteredSchemaConvergenceMaintenance {
     pub(super) fn new() -> Self {
         Self {
             statuses: Arc::new(StdMutex::new(BTreeMap::new())),
-            #[cfg(test)]
             tasks: StdMutex::new(BTreeMap::new()),
             #[cfg(test)]
             schedule_count: std::sync::atomic::AtomicUsize::new(0),
@@ -85,13 +80,13 @@ impl RegisteredSchemaConvergenceMaintenance {
             .cloned()
     }
 
+    #[cfg(test)]
     pub(super) fn defer(&self, shard_id: StoreShardIdV1) {
         lock_registered_schema_convergence_statuses(&self.statuses)
             .entry(shard_id)
             .or_insert(RegisteredSchemaConvergenceStatus::Pending);
     }
 
-    #[cfg(test)]
     pub(super) fn schedule(
         &self,
         database: Arc<RegisteredGlobalDb>,
@@ -166,7 +161,7 @@ impl RegisteredSchemaConvergenceMaintenance {
         });
         self.tasks
             .lock()
-            .expect("registered schema convergence test task lock remains healthy")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(shard_id, task);
     }
 
@@ -186,13 +181,12 @@ impl RegisteredSchemaConvergenceMaintenance {
     }
 }
 
-#[cfg(test)]
 impl Drop for RegisteredSchemaConvergenceMaintenance {
     fn drop(&mut self) {
         let tasks = self
             .tasks
             .get_mut()
-            .expect("registered schema convergence test task lock remains healthy");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (_, task) in std::mem::take(tasks) {
             task.abort();
         }
@@ -286,29 +280,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         };
         let database = Arc::new(database);
         if long_lived {
-            #[cfg(test)]
-            if self
-                .long_lived_session_maintenance_for_test
-                .load(Ordering::Relaxed)
-            {
-                self.registered_schema_convergence
-                    .schedule(Arc::clone(&database), convergence);
-                return Ok(database);
-            }
-            let _ = convergence;
-            if let Err(error) = database.release_connection_memory().await {
-                crate::daemon::log_daemon_event(
-                    "registered_schema_admission_memory_release",
-                    &[
-                        ("outcome", "degraded".to_owned()),
-                        ("database", database.db_path().display().to_string()),
-                        ("error", error.to_string()),
-                    ],
-                );
-            }
-            release_process_allocator_memory();
             self.registered_schema_convergence
-                .defer(database.binding().shard_id.clone());
+                .schedule(Arc::clone(&database), convergence);
         }
         Ok(database)
     }
