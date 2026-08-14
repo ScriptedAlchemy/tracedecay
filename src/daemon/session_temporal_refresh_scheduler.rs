@@ -12,8 +12,6 @@ pub(super) use history::{ProfileSessionHistoricalIngestor, ProjectSessionHistori
 pub(super) use registry::SessionTemporalRefreshSchedulerRegistry;
 pub(crate) use wake::SessionTemporalRefreshWake;
 
-const MAX_PENDING_REFRESH_REQUESTS: usize = 128;
-
 #[cfg(test)]
 pub(crate) struct SessionTemporalRefreshTestAuthority {
     _runtime: crate::host_admission::HostAdmissionTestRuntimeV1,

@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
 use tracedecay_temporal_query::ports::ExecutionControl;
 
-use super::MAX_PENDING_REFRESH_REQUESTS;
 use super::history::SessionHistoricalIngestOutcome;
 use crate::store::SessionRefreshRecoveryV1;
 use tracedecay_usecases::session::{
@@ -600,14 +599,6 @@ pub(crate) struct SessionTemporalRefreshWake {
     route: Arc<SessionTemporalRefreshWakeRoute>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Slice 3 consumes the queued-request disposition.
-pub(crate) enum SessionTemporalRefreshWakeDisposition {
-    Enqueued,
-    Coalesced,
-    Saturated,
-}
-
 impl SessionTemporalRefreshWake {
     pub(crate) fn unavailable() -> Self {
         Self {
@@ -691,41 +682,6 @@ impl SessionTemporalRefreshWake {
             .map_or_else(SessionTemporalRefreshWorkerStatus::missing, |state| {
                 state.status()
             })
-    }
-
-    #[allow(dead_code)] // Slice 3 maps admitted source frontiers into begin requests.
-    pub(crate) fn request(
-        &self,
-        request: SessionRefreshBeginOrJoinRequestV1,
-    ) -> SessionTemporalRefreshWakeDisposition {
-        let Some(state) = self.target() else {
-            return SessionTemporalRefreshWakeDisposition::Saturated;
-        };
-        let (disposition, backlog) = {
-            let mut requests = state
-                .requests
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let disposition = if state.cancelled.load(Ordering::Acquire) {
-                SessionTemporalRefreshWakeDisposition::Saturated
-            } else if requests
-                .iter()
-                .any(|pending| pending.is_equivalent_to(&request))
-            {
-                SessionTemporalRefreshWakeDisposition::Coalesced
-            } else if requests.len() >= MAX_PENDING_REFRESH_REQUESTS {
-                SessionTemporalRefreshWakeDisposition::Saturated
-            } else {
-                requests.push_back(request);
-                SessionTemporalRefreshWakeDisposition::Enqueued
-            };
-            (disposition, requests.len())
-        };
-        if disposition != SessionTemporalRefreshWakeDisposition::Saturated {
-            state.observe_queued_backlog(backlog);
-            state.wake();
-        }
-        disposition
     }
 }
 

@@ -361,27 +361,6 @@ async fn apply_refresh_effect(
                 }
             }
         }
-        SessionTemporalRefreshEffect::Cancel(request) => {
-            if !state.claim_terminal_attempt(recovery) {
-                return;
-            }
-            let mut attempt = TerminalAttemptGuard::new(state, recovery);
-            match store.cancel_session_refresh(request).await {
-                Ok(_) => {
-                    report.cancelled += 1;
-                }
-                Err(error) if error.is_storage() => {
-                    report.last_error = Some(format!("{error:?}"));
-                    report.retryable_errors += 1;
-                    report.observe_retry(SessionTemporalRefreshRetryClass::Storage);
-                }
-                Err(error) => {
-                    attempt.retain();
-                    report.last_error = Some(format!("{error:?}"));
-                    report.terminal_errors += 1;
-                }
-            }
-        }
         SessionTemporalRefreshEffect::Deferred => report.deferred += 1,
     }
 }

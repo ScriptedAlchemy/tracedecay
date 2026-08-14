@@ -257,23 +257,6 @@ fn equivalent_wakes_coalesce_into_one_pending_pass() {
 }
 
 #[test]
-fn equivalent_begin_requests_join_before_the_store_boundary() {
-    let state = Arc::new(SessionTemporalRefreshWakeState::default());
-    let wake = state.handle();
-    let request = request("session.join", 4);
-
-    assert_eq!(
-        wake.request(request.clone()),
-        SessionTemporalRefreshWakeDisposition::Enqueued
-    );
-    assert_eq!(
-        wake.request(request),
-        SessionTemporalRefreshWakeDisposition::Coalesced
-    );
-    assert_eq!(state.take_requests(8).len(), 1);
-}
-
-#[test]
 fn retry_classes_use_distinct_bounded_backoff_curves() {
     let storage = session_refresh_retry_delay(SessionTemporalRefreshRetryClass::Storage, 99);
     let projector = session_refresh_retry_delay(SessionTemporalRefreshRetryClass::Projector, 99);
@@ -584,18 +567,16 @@ async fn restart_resumes_each_committed_boundary_without_writer_fallback() {
     let authority =
         registered_test_database(&temp, "committed-boundary", HostAdmissionScope::Profile).await;
     let db = authority.database();
+    crate::store::GlobalDbSessionTemporalStore::new(db)
+        .begin_or_join_session_refresh(request("session.restart.boundaries", 0))
+        .await
+        .unwrap();
     let state = Arc::new(SessionTemporalRefreshWakeState::default());
-    let wake = state.handle();
-    assert_eq!(
-        wake.request(request("session.restart.boundaries", 0)),
-        SessionTemporalRefreshWakeDisposition::Enqueued
-    );
     let projector = EmptyProjector::new();
 
     let first = authority
         .run_pass(&state, &projector, SessionTemporalRefreshPolicy::default())
         .await;
-    assert_eq!(first.begun, 1);
     assert_eq!(first.projected_batches, 1);
     assert_eq!(projector.calls.load(Ordering::Acquire), 1);
     assert_eq!(
@@ -683,9 +664,7 @@ async fn failed_terminal_operation_is_not_retried_in_one_owner_generation() {
     assert!(store.running_session_refreshes().await.unwrap().is_empty());
 }
 
-struct TerminalProjector {
-    cancel: bool,
-}
+struct TerminalProjector;
 
 impl SessionTemporalRefreshProjector for TerminalProjector {
     fn project<'a>(
@@ -695,27 +674,16 @@ impl SessionTemporalRefreshProjector for TerminalProjector {
     ) -> SessionTemporalRefreshProjectionFuture<'a> {
         Box::pin(async move {
             let progress = recovery.progress().unwrap();
-            if self.cancel {
-                Ok(SessionTemporalRefreshEffect::Cancel(
-                    tracedecay_store::SessionRefreshCancellationRequestV1::new(
-                        recovery.operation_id().clone(),
-                        recovery.session_id().clone(),
-                        progress.frontier(),
-                        *progress.coverage(),
-                    ),
-                ))
-            } else {
-                Ok(SessionTemporalRefreshEffect::Fail(
-                    tracedecay_store::SessionRefreshFailureRequestV1::new(
-                        recovery.operation_id().clone(),
-                        recovery.session_id().clone(),
-                        progress.frontier(),
-                        *progress.coverage(),
-                        "projector_failed",
-                    )
-                    .unwrap(),
-                ))
-            }
+            Ok(SessionTemporalRefreshEffect::Fail(
+                tracedecay_store::SessionRefreshFailureRequestV1::new(
+                    recovery.operation_id().clone(),
+                    recovery.session_id().clone(),
+                    progress.frontier(),
+                    *progress.coverage(),
+                    "projector_failed",
+                )
+                .unwrap(),
+            ))
         })
     }
 }
@@ -758,7 +726,7 @@ async fn begin_with_incomplete_progress(db: &RegisteredGlobalDb, session_id: &Se
 }
 
 #[tokio::test]
-async fn failure_and_cancel_effects_use_typed_terminal_store_operations() {
+async fn failure_effects_use_typed_terminal_store_operations() {
     let temp = TempDir::new().unwrap();
     let authority =
         registered_test_database(&temp, "terminal-effects", HostAdmissionScope::Profile).await;
@@ -768,34 +736,16 @@ async fn failure_and_cancel_effects_use_typed_terminal_store_operations() {
     let failed = authority
         .run_pass(
             &Arc::new(SessionTemporalRefreshWakeState::default()),
-            &TerminalProjector { cancel: false },
+            &TerminalProjector,
             SessionTemporalRefreshPolicy::default(),
         )
         .await;
     assert_eq!(failed.failed, 1);
 
-    let cancelled_session = SessionId::new("session.effect.cancelled").unwrap();
-    begin_with_incomplete_progress(db, &cancelled_session).await;
-    let cancelled = authority
-        .run_pass(
-            &Arc::new(SessionTemporalRefreshWakeState::default()),
-            &TerminalProjector { cancel: true },
-            SessionTemporalRefreshPolicy::default(),
-        )
-        .await;
-    assert_eq!(cancelled.cancelled, 1);
-
     let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     assert!(
         store
             .session_refresh_recovery(&failed_session)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        store
-            .session_refresh_recovery(&cancelled_session)
             .await
             .unwrap()
             .is_none()
@@ -912,13 +862,15 @@ async fn saturated_recovery_passes_visit_every_operation_before_idling() {
         max_operations_per_pass: 2,
         ..SessionTemporalRefreshPolicy::default()
     };
-    let wake = authority.ensure_profile(&registry).await;
+    let store = crate::store::GlobalDbSessionTemporalStore::new(db);
     for index in 0..3 {
-        assert_eq!(
-            wake.request(request(&format!("session.saturated.{index}"), 0)),
-            SessionTemporalRefreshWakeDisposition::Enqueued
-        );
+        store
+            .begin_or_join_session_refresh(request(&format!("session.saturated.{index}"), 0))
+            .await
+            .unwrap();
     }
+    let wake = authority.ensure_profile(&registry).await;
+    assert!(wake.wake());
 
     assert!(
         registry
@@ -948,10 +900,11 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
         release: Arc::new(tokio::sync::Notify::new()),
     });
     let wake = authority.ensure_project(&registry, owner.clone()).await;
-    assert_eq!(
-        wake.request(request("session.retire.inflight", 0)),
-        SessionTemporalRefreshWakeDisposition::Enqueued
-    );
+    crate::store::GlobalDbSessionTemporalStore::new(authority.database())
+        .begin_or_join_session_refresh(request("session.retire.inflight", 0))
+        .await
+        .unwrap();
+    assert!(wake.wake());
     tokio::time::timeout(Duration::from_secs(1), started.notified())
         .await
         .unwrap();
@@ -961,10 +914,7 @@ async fn project_retirement_cancels_and_awaits_an_inflight_projector() {
         .expect("retirement should cancel and await the worker promptly");
 
     assert_eq!(registry.project_worker_count().await, 0);
-    assert_eq!(
-        wake.request(request("session.retire.after", 0)),
-        SessionTemporalRefreshWakeDisposition::Saturated
-    );
+    assert!(!wake.wake());
 }
 
 struct PanicOnceProjector {
@@ -996,10 +946,11 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         panicked: AtomicBool::new(false),
     });
     let wake = authority.ensure_profile(&registry).await;
-    assert_eq!(
-        wake.request(request("session.worker.restart", 0)),
-        SessionTemporalRefreshWakeDisposition::Enqueued
-    );
+    crate::store::GlobalDbSessionTemporalStore::new(db)
+        .begin_or_join_session_refresh(request("session.worker.restart", 0))
+        .await
+        .unwrap();
+    assert!(wake.wake());
     let recovering = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let status = registry.profile_worker_status(db.db_path()).await;
@@ -1314,10 +1265,7 @@ async fn project_rekey_retires_old_owner_before_rebinding_wake() {
     let stale = old_authority
         .ensure_project(&registry, old_owner.clone())
         .await;
-    assert_eq!(
-        stale.request(request("session.rekey.stale-owner", 0)),
-        SessionTemporalRefreshWakeDisposition::Saturated
-    );
+    assert!(!stale.wake());
     assert!(registry.project_state(&old_owner).await.is_none());
     assert_eq!(registry.project_worker_count().await, 1);
     assert!(new_state.take_dirty());

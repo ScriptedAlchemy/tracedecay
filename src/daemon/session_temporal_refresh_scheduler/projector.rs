@@ -5,9 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{TemporalCoverageCountsV1, UtcMicros};
 use tracedecay_store::{
-    SessionRefreshCancellationRequestV1, SessionRefreshFailureCodeV1,
-    SessionRefreshFailureRequestV1, SessionRefreshFrontierV1, SessionRefreshProgressV1,
-    SessionTemporalProjectionBatchV1,
+    SessionRefreshFailureCodeV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
+    SessionRefreshProgressV1, SessionTemporalProjectionBatchV1,
 };
 
 use crate::global_db::RegisteredGlobalDb;
@@ -31,32 +30,27 @@ impl Default for SessionTemporalRefreshPolicy {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // Slice 3's projector constructs these effects.
 pub(in crate::daemon) enum SessionTemporalRefreshEffect {
     Projection {
         progress: SessionRefreshProgressV1,
         batch: SessionTemporalProjectionBatchV1,
     },
     Fail(SessionRefreshFailureRequestV1),
-    Cancel(SessionRefreshCancellationRequestV1),
     Deferred,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // Slice 3 classifies projector failures.
 pub(in crate::daemon) enum SessionTemporalRefreshProjectorErrorClass {
     Retryable,
     Terminal,
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // Slice 3 returns this through the projector port.
 pub(in crate::daemon) struct SessionTemporalRefreshProjectorError {
     pub(super) class: SessionTemporalRefreshProjectorErrorClass,
     pub(super) code: String,
 }
 
-#[allow(dead_code)] // Slice 3 constructs classified projector failures.
 impl SessionTemporalRefreshProjectorError {
     pub(super) fn retryable(code: impl Into<String>) -> Self {
         Self {
