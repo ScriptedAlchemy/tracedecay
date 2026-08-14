@@ -553,10 +553,10 @@ async fn apply_project_automation_patch_via_surface(
     )
     .expect("automation setting key");
     let request = crate::application_surface::ApplicationSurfaceRequest::Configuration(
-        crate::application_surface::ConfigurationSurfaceRequest::Batch(
-            crate::application_surface::ConfigurationBatchSurfaceRequest {
+        tracedecay_application::ConfigurationWireRequestV1::Batch(
+            tracedecay_application::ConfigurationBatchRequestV1 {
                 mutations: vec![
-                    crate::application_surface::ConfigurationDirectMutationSurfaceRequest::Set {
+                    tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
                         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
                             project_id: target.project_id,
                         },

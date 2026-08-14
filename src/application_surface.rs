@@ -25,7 +25,7 @@ use tracedecay_api::{
     HttpApplicationInvocationFuture, HttpApplicationOperation, HttpApplicationRequest,
     WorkOperation, WorkflowOperation, application_problem_response, sse_response,
 };
-pub use tracedecay_application::git::{
+use tracedecay_application::git::{
     GitHubStackSignalExpandSurfaceRequest, NativeIntegrationApproveSurfaceRequest,
     NativeWorktreeSurfaceRequest,
 };
@@ -40,33 +40,15 @@ use tracedecay_application::retrieval::{
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
-    ApplicationResult, CancellationContext, CancellationSignal, CancellationStage, Deadline,
-    HealthReadRequest, LegalAction, ObservatoryReadRequestV1, OpaqueCursor, OperationTermination,
-    PageRequest, ProblemOwningLayer, RequestContext, RequestId, ResultContractRef,
-    ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective,
-    SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
-};
-pub use tracedecay_application::{
-    ConfigurationAuditRequestV1 as ConfigurationAuditSurfaceRequest,
-    ConfigurationBatchRequestV1 as ConfigurationBatchSurfaceRequest,
-    ConfigurationDirectMutationRequestV1 as ConfigurationDirectMutationSurfaceRequest,
-    ConfigurationGetRequestV1 as ConfigurationKeySurfaceRequest,
-    ConfigurationListRequestV1 as ConfigurationListSurfaceRequest,
-    ConfigurationObservedStateRequestV1 as ConfigurationObservedStateSurfaceRequest,
-    ConfigurationProtectedApplyRequestV1 as ConfigurationProtectedApplySurfaceRequest,
-    ConfigurationProtectedPreviewRequestV1 as ConfigurationProtectedPreviewSurfaceRequest,
-    ConfigurationRollbackApplyRequestV1 as ConfigurationRollbackApplySurfaceRequest,
-    ConfigurationRollbackPreviewRequestV1 as ConfigurationRollbackPreviewSurfaceRequest,
-    ConfigurationSetRequestV1 as ConfigurationSetSurfaceRequest,
-    ConfigurationUnsetRequestV1 as ConfigurationUnsetSurfaceRequest,
-    ConfigurationWireRequestV1 as ConfigurationSurfaceRequest,
-    ConfigurationWriteCredentialRequestV1 as ConfigurationWriteCredentialSurfaceRequest,
-};
-pub use tracedecay_application::{
+    ApplicationResult, CancellationContext, CancellationSignal, CancellationStage,
+    ConfigurationWireRequestV1, Deadline, HealthReadRequest, LegalAction,
     NativeIntegrationApplySurfaceRequest, NativeIntegrationCancelSurfaceRequest,
     NativeIntegrationPreflightSurfaceRequest, NativeIntegrationStackSnapshotSurfaceRequest,
-    NativeIntegrationStatusSurfaceRequest, NativeIntegrationSurfaceResultV1,
-    NativeIntegrationSurfaceUnavailableV1,
+    NativeIntegrationStatusSurfaceRequest, ObservatoryReadRequestV1, OpaqueCursor,
+    OperationTermination, PageRequest, ProblemOwningLayer, RequestContext, RequestId,
+    ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder, RetrievalRequestMeta,
+    RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest, StreamEvent,
+    StreamEventKind,
 };
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_domain::{
@@ -753,7 +735,7 @@ pub enum ApplicationSurfaceRequest {
     PrimitiveCode(PrimitiveCodeSurfaceRequest),
     Primitive(PrimitiveRequest),
     ObservatoryRead(ObservatoryReadRequestV1),
-    Configuration(ConfigurationSurfaceRequest),
+    Configuration(ConfigurationWireRequestV1),
     ContextScout(ContextScoutSurfaceRequest),
     Retained(tracedecay_application::retained_surfaces::RetainedSurfaceRequestV1),
 }
@@ -2547,55 +2529,55 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::ObservatoryRead
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::List(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::List(_)),
                     ApplicationSurfaceOperation::ConfigurationList
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::Explain(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::Explain(_)),
                     ApplicationSurfaceOperation::ConfigurationExplain
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::Get(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::Get(_)),
                     ApplicationSurfaceOperation::ConfigurationGet
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::Set(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::Set(_)),
                     ApplicationSurfaceOperation::ConfigurationSet
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::Unset(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::Unset(_)),
                     ApplicationSurfaceOperation::ConfigurationUnset
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::Batch(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::Batch(_)),
                     ApplicationSurfaceOperation::ConfigurationBatch
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::WriteCredential(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::WriteCredential(_)),
                     ApplicationSurfaceOperation::ConfigurationWriteCredential
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::ObservedState(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::ObservedState(_)),
                     ApplicationSurfaceOperation::ConfigurationObservedState
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::ProtectedPreview(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::ProtectedPreview(_)),
                     ApplicationSurfaceOperation::ConfigurationProtectedPreview
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::ProtectedApply(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::ProtectedApply(_)),
                     ApplicationSurfaceOperation::ConfigurationProtectedApply
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::RollbackPreview(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::RollbackPreview(_)),
                     ApplicationSurfaceOperation::ConfigurationRollbackPreview
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::RollbackApply(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::RollbackApply(_)),
                     ApplicationSurfaceOperation::ConfigurationRollbackApply
                 )
                 | (
-                    Self::Configuration(ConfigurationSurfaceRequest::Audit(_)),
+                    Self::Configuration(ConfigurationWireRequestV1::Audit(_)),
                     ApplicationSurfaceOperation::ConfigurationAudit
                 )
                 | (
@@ -2929,55 +2911,55 @@ pub fn parse_application_surface_request(
             .map(ApplicationSurfaceRequest::ObservatoryRead)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationList => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::List)
+            .map(ConfigurationWireRequestV1::List)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationExplain => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::Explain)
+            .map(ConfigurationWireRequestV1::Explain)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationGet => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::Get)
+            .map(ConfigurationWireRequestV1::Get)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationSet => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::Set)
+            .map(ConfigurationWireRequestV1::Set)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationUnset => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::Unset)
+            .map(ConfigurationWireRequestV1::Unset)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationBatch => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::Batch)
+            .map(ConfigurationWireRequestV1::Batch)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationWriteCredential => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::WriteCredential)
+            .map(ConfigurationWireRequestV1::WriteCredential)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationObservedState => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::ObservedState)
+            .map(ConfigurationWireRequestV1::ObservedState)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationProtectedPreview => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::ProtectedPreview)
+            .map(ConfigurationWireRequestV1::ProtectedPreview)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationProtectedApply => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::ProtectedApply)
+            .map(ConfigurationWireRequestV1::ProtectedApply)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationRollbackPreview => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::RollbackPreview)
+            .map(ConfigurationWireRequestV1::RollbackPreview)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationRollbackApply => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::RollbackApply)
+            .map(ConfigurationWireRequestV1::RollbackApply)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ConfigurationAudit => serde_json::from_value(value)
-            .map(ConfigurationSurfaceRequest::Audit)
+            .map(ConfigurationWireRequestV1::Audit)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)

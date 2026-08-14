@@ -64,9 +64,11 @@ use tracedecay_lsp::{
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
 use crate::application_surface::{
-    ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
-    GitHubStackSignalExpandSurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
+    ContextScoutSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
+    GitReadSurfaceRequest,
 };
+use tracedecay_application::ConfigurationWireRequestV1;
+use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
 use tracedecay_usecases::feedback::observations::{FeedbackDeliveryRouteV1, FeedbackSourceEventV1};
 use tracedecay_usecases::primitives::PrimitiveRequest;
 
@@ -810,7 +812,7 @@ pub(crate) enum DaemonInvocationPayload {
     },
     Configuration {
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-        request: ConfigurationSurfaceRequest,
+        request: ConfigurationWireRequestV1,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_scope: Option<ResolvedScope>,
         observed_at: UtcMicros,
@@ -1248,7 +1250,7 @@ impl DaemonInvocationRequest {
     pub(crate) fn configuration(
         request_id: impl Into<String>,
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-        request: ConfigurationSurfaceRequest,
+        request: ConfigurationWireRequestV1,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,

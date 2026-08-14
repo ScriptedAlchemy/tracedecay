@@ -13,12 +13,13 @@ use tracedecay_tool_catalog::BindingSurface;
 
 use crate::agents::{self, DoctorCounters, HealthcheckContext};
 use crate::application_surface::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, ConfigurationKeySurfaceRequest,
-    ConfigurationSurfaceRequest, execute_application_surface, resolve_application_surface_dispatch,
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
+    resolve_application_surface_dispatch,
 };
 use crate::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use crate::display::format_token_count;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::{ConfigurationGetRequestV1, ConfigurationWireRequestV1};
 
 // Consumed by the unix-only daemon git-watch maintenance path; on other
 // targets only the module's tests reference it.
@@ -987,8 +988,8 @@ async fn configured_upload_enabled(project_path: &Path) -> crate::errors::Result
         BindingSurface::Cli,
         operation,
         request_id.clone(),
-        ApplicationSurfaceRequest::Configuration(ConfigurationSurfaceRequest::Get(
-            ConfigurationKeySurfaceRequest { key: key.clone() },
+        ApplicationSurfaceRequest::Configuration(ConfigurationWireRequestV1::Get(
+            ConfigurationGetRequestV1 { key: key.clone() },
         )),
         RequestedOutputFormat::Json,
     )

@@ -10,7 +10,7 @@ pub(super) async fn execute_configuration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
     surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-    request: ConfigurationSurfaceRequest,
+    request: ConfigurationWireRequestV1,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
@@ -49,7 +49,7 @@ pub(super) async fn execute_configuration(
         match (surface_operation, request) {
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationList,
-                ConfigurationSurfaceRequest::List(_),
+                ConfigurationWireRequestV1::List(_),
             ) => configuration_evidence(
                 serde_json::to_value(client.list(actor).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
@@ -59,7 +59,7 @@ pub(super) async fn execute_configuration(
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationExplain,
-                ConfigurationSurfaceRequest::Explain(request),
+                ConfigurationWireRequestV1::Explain(request),
             ) => configuration_evidence(
                 serde_json::to_value(client.explain(actor, request.key).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
@@ -69,7 +69,7 @@ pub(super) async fn execute_configuration(
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationGet,
-                ConfigurationSurfaceRequest::Get(request),
+                ConfigurationWireRequestV1::Get(request),
             ) => configuration_evidence(
                 serde_json::to_value(client.get(actor, request.key).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
@@ -79,7 +79,7 @@ pub(super) async fn execute_configuration(
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationObservedState,
-                ConfigurationSurfaceRequest::ObservedState(_),
+                ConfigurationWireRequestV1::ObservedState(_),
             ) => configuration_evidence(
                 serde_json::to_value(client.observed_state(actor).await?)
                     .map_err(|_| ConfigurationError::Unavailable)?,
@@ -89,7 +89,7 @@ pub(super) async fn execute_configuration(
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit,
-                ConfigurationSurfaceRequest::Audit(request),
+                ConfigurationWireRequestV1::Audit(request),
             ) => configuration_evidence(
                 serde_json::to_value(
                     client
@@ -109,7 +109,7 @@ pub(super) async fn execute_configuration(
             ),
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
-                ConfigurationSurfaceRequest::Set(request),
+                ConfigurationWireRequestV1::Set(request),
             ) => {
                 let idempotency_key = request.idempotency_key;
                 let mutation = DirectConfigurationMutation::Set {
@@ -150,7 +150,7 @@ pub(super) async fn execute_configuration(
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationUnset,
-                ConfigurationSurfaceRequest::Unset(request),
+                ConfigurationWireRequestV1::Unset(request),
             ) => {
                 let idempotency_key = request.idempotency_key;
                 let mutation = DirectConfigurationMutation::Unset {
@@ -190,19 +190,19 @@ pub(super) async fn execute_configuration(
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
-                ConfigurationSurfaceRequest::Batch(request),
+                ConfigurationWireRequestV1::Batch(request),
             ) => {
                 let idempotency_key = request.idempotency_key;
                 let mutations = request
                     .mutations
                     .into_iter()
                     .map(|mutation| match mutation {
-                        crate::application_surface::ConfigurationDirectMutationSurfaceRequest::Set {
+                        tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
                             layer,
                             key,
                             value,
                         } => DirectConfigurationMutation::Set { layer, key, value },
-                        crate::application_surface::ConfigurationDirectMutationSurfaceRequest::Unset {
+                        tracedecay_application::ConfigurationDirectMutationRequestV1::Unset {
                             layer,
                             key,
                         } => DirectConfigurationMutation::Unset { layer, key },
@@ -242,7 +242,7 @@ pub(super) async fn execute_configuration(
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationWriteCredential,
-                ConfigurationSurfaceRequest::WriteCredential(request),
+                ConfigurationWireRequestV1::WriteCredential(request),
             ) => {
                 let idempotency_key = request.idempotency_key;
                 let mutation_authority = issue_configuration_mutation_authority(
@@ -286,7 +286,7 @@ pub(super) async fn execute_configuration(
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedPreview,
-                ConfigurationSurfaceRequest::ProtectedPreview(request),
+                ConfigurationWireRequestV1::ProtectedPreview(request),
             ) => {
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,
@@ -319,7 +319,7 @@ pub(super) async fn execute_configuration(
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationProtectedApply,
-                ConfigurationSurfaceRequest::ProtectedApply(request),
+                ConfigurationWireRequestV1::ProtectedApply(request),
             ) => {
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,
@@ -362,7 +362,7 @@ pub(super) async fn execute_configuration(
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackPreview,
-                ConfigurationSurfaceRequest::RollbackPreview(request),
+                ConfigurationWireRequestV1::RollbackPreview(request),
             ) => {
                 let current = client.current().await?;
                 let mutation_authority = issue_configuration_mutation_authority(
@@ -398,7 +398,7 @@ pub(super) async fn execute_configuration(
             }
             (
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationRollbackApply,
-                ConfigurationSurfaceRequest::RollbackApply(request),
+                ConfigurationWireRequestV1::RollbackApply(request),
             ) => {
                 let mutation_authority = issue_configuration_mutation_authority(
                     &registered,

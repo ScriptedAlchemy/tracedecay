@@ -1,11 +1,6 @@
 use std::path::Path;
 
-use tracedecay::application_surface::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, ConfigurationBatchSurfaceRequest,
-    ConfigurationDirectMutationSurfaceRequest, ConfigurationKeySurfaceRequest,
-    ConfigurationObservedStateSurfaceRequest, ConfigurationSetSurfaceRequest,
-    ConfigurationSurfaceRequest, ConfigurationUnsetSurfaceRequest,
-};
+use tracedecay::application_surface::{ApplicationSurfaceOperation, ApplicationSurfaceRequest};
 use tracedecay::daemon_client::{
     DaemonInvocationClient, RequestedOutputFormat, invocation_now_micros,
 };
@@ -13,6 +8,11 @@ use tracedecay::request_identity::{GlobalRequestSurface, mint_global_request_id}
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationOutcome, CancellationSignal, ComponentConfigurationState,
     Deadline, EffectReceipt, ResolvedSetting,
+};
+use tracedecay_application::{
+    ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationGetRequestV1,
+    ConfigurationObservedStateRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
+    ConfigurationWireRequestV1,
 };
 use tracedecay_domain::configuration::{
     ConfigurationIdempotencyKey, ConfigurationLayerIdV1, ConfigurationRevisionId,
@@ -31,7 +31,7 @@ fn configuration_error(message: impl Into<String>) -> tracedecay::errors::TraceD
 fn cli_configuration_idempotency_key(
     project_id: &ProjectId,
     expected_revision: &ConfigurationRevisionId,
-    mutations: &[ConfigurationDirectMutationSurfaceRequest],
+    mutations: &[ConfigurationDirectMutationRequestV1],
 ) -> tracedecay::errors::Result<ConfigurationIdempotencyKey> {
     let digest = canonical_sha256(&(
         "tracedecay.cli.configuration-mutation.v1",
@@ -51,7 +51,7 @@ fn cli_configuration_idempotency_key(
 fn cli_user_configuration_idempotency_key(
     profile_id: &UserProfileId,
     expected_revision: &ConfigurationRevisionId,
-    mutations: &[ConfigurationDirectMutationSurfaceRequest],
+    mutations: &[ConfigurationDirectMutationRequestV1],
 ) -> tracedecay::errors::Result<ConfigurationIdempotencyKey> {
     let digest = canonical_sha256(&(
         "tracedecay.cli.user-configuration-mutation.v1",
@@ -98,7 +98,7 @@ fn configuration_deadline(
 async fn invoke_configuration_surface(
     project_path: &Path,
     operation: ApplicationSurfaceOperation,
-    request: ConfigurationSurfaceRequest,
+    request: ConfigurationWireRequestV1,
 ) -> tracedecay::errors::Result<ApplicationEnvelope<serde_json::Value>> {
     let request_id = mint_global_request_id(GlobalRequestSurface::Cli)
         .map_err(|error| configuration_error(error.to_string()))?;
@@ -139,7 +139,7 @@ pub(crate) async fn current_configuration_revision(
     let envelope = invoke_configuration_surface(
         project_path,
         ApplicationSurfaceOperation::ConfigurationObservedState,
-        ConfigurationSurfaceRequest::ObservedState(ConfigurationObservedStateSurfaceRequest {}),
+        ConfigurationWireRequestV1::ObservedState(ConfigurationObservedStateRequestV1 {}),
     )
     .await?;
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
@@ -176,7 +176,7 @@ pub(crate) async fn current_project_setting(
     let envelope = invoke_configuration_surface(
         project_path,
         ApplicationSurfaceOperation::ConfigurationGet,
-        ConfigurationSurfaceRequest::Get(ConfigurationKeySurfaceRequest { key }),
+        ConfigurationWireRequestV1::Get(ConfigurationGetRequestV1 { key }),
     )
     .await?;
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
@@ -208,7 +208,7 @@ pub(crate) async fn mutate_project_configuration(
     project_path: &Path,
     project_id: &ProjectId,
     expected_revision: ConfigurationRevisionId,
-    mutations: Vec<ConfigurationDirectMutationSurfaceRequest>,
+    mutations: Vec<ConfigurationDirectMutationRequestV1>,
 ) -> tracedecay::errors::Result<Option<EffectReceipt>> {
     if mutations.is_empty() {
         return Ok(None);
@@ -216,9 +216,9 @@ pub(crate) async fn mutate_project_configuration(
     let idempotency_key =
         cli_configuration_idempotency_key(project_id, &expected_revision, &mutations)?;
     let (operation, request) = match mutations.as_slice() {
-        [ConfigurationDirectMutationSurfaceRequest::Set { layer, key, value }] => (
+        [ConfigurationDirectMutationRequestV1::Set { layer, key, value }] => (
             ApplicationSurfaceOperation::ConfigurationSet,
-            ConfigurationSurfaceRequest::Set(ConfigurationSetSurfaceRequest {
+            ConfigurationWireRequestV1::Set(ConfigurationSetRequestV1 {
                 layer: layer.clone(),
                 key: key.clone(),
                 value: value.clone(),
@@ -226,9 +226,9 @@ pub(crate) async fn mutate_project_configuration(
                 idempotency_key: idempotency_key.clone(),
             }),
         ),
-        [ConfigurationDirectMutationSurfaceRequest::Unset { layer, key }] => (
+        [ConfigurationDirectMutationRequestV1::Unset { layer, key }] => (
             ApplicationSurfaceOperation::ConfigurationUnset,
-            ConfigurationSurfaceRequest::Unset(ConfigurationUnsetSurfaceRequest {
+            ConfigurationWireRequestV1::Unset(ConfigurationUnsetRequestV1 {
                 layer: layer.clone(),
                 key: key.clone(),
                 expected_revision,
@@ -237,7 +237,7 @@ pub(crate) async fn mutate_project_configuration(
         ),
         _ => (
             ApplicationSurfaceOperation::ConfigurationBatch,
-            ConfigurationSurfaceRequest::Batch(ConfigurationBatchSurfaceRequest {
+            ConfigurationWireRequestV1::Batch(ConfigurationBatchRequestV1 {
                 mutations,
                 expected_revision,
                 idempotency_key: idempotency_key.clone(),
@@ -252,7 +252,7 @@ async fn mutate_user_configuration(
     project_path: &Path,
     profile_id: &UserProfileId,
     expected_revision: ConfigurationRevisionId,
-    mutations: Vec<ConfigurationDirectMutationSurfaceRequest>,
+    mutations: Vec<ConfigurationDirectMutationRequestV1>,
 ) -> tracedecay::errors::Result<Option<EffectReceipt>> {
     if mutations.is_empty() {
         return Ok(None);
@@ -262,7 +262,7 @@ async fn mutate_user_configuration(
     let envelope = invoke_configuration_surface(
         project_path,
         ApplicationSurfaceOperation::ConfigurationBatch,
-        ConfigurationSurfaceRequest::Batch(ConfigurationBatchSurfaceRequest {
+        ConfigurationWireRequestV1::Batch(ConfigurationBatchRequestV1 {
             mutations,
             expected_revision,
             idempotency_key: idempotency_key.clone(),
@@ -299,8 +299,8 @@ pub(crate) fn project_configuration_set(
     project_id: &ProjectId,
     key: &str,
     value: ConfigurationValueV1,
-) -> tracedecay::errors::Result<ConfigurationDirectMutationSurfaceRequest> {
-    Ok(ConfigurationDirectMutationSurfaceRequest::Set {
+) -> tracedecay::errors::Result<ConfigurationDirectMutationRequestV1> {
+    Ok(ConfigurationDirectMutationRequestV1::Set {
         layer: ConfigurationLayerIdV1::Project {
             project_id: project_id.clone(),
         },
@@ -322,7 +322,7 @@ pub(crate) async fn handle_upload_counter(enable: bool) -> tracedecay::errors::R
     let expected_revision = current_configuration_revision(&resolved.project_path).await?;
     let current = canonical_upload_enabled(&resolved.project_path).await?;
     let mutations = if current != enable {
-        vec![ConfigurationDirectMutationSurfaceRequest::Set {
+        vec![ConfigurationDirectMutationRequestV1::Set {
             layer: ConfigurationLayerIdV1::UserProfile {
                 profile_id: resolved.profile_id.clone(),
             },

@@ -446,12 +446,8 @@ pub(super) struct StoreAdministration {
 /// Retry ownership for a timed-out server, or a terminal failure receipt that
 /// must remain visible without retaining the server and its daemon callbacks.
 pub(super) enum RetainedProjectShutdownOwner {
-    TimedOut {
-        server: Arc<crate::mcp::McpServer>,
-    },
-    Failed {
-        error: String,
-    },
+    TimedOut { server: Arc<crate::mcp::McpServer> },
+    Failed { error: String },
 }
 
 impl Default for StoreAdministration {

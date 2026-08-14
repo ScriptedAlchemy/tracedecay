@@ -19,12 +19,14 @@ use std::collections::BTreeSet;
 
 use serde_json::json;
 use tracedecay::application_surface::{
-    ApplicationSurfaceOperation, ApplicationSurfaceRequest, NativeIntegrationSurfaceResultV1,
-    NativeIntegrationSurfaceUnavailableV1, parse_application_surface_request,
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, parse_application_surface_request,
     resolve_application_surface_dispatch, resolve_catalog_tool_binding,
 };
 use tracedecay::daemon_client::RequestedOutputFormat;
 use tracedecay::mcp::tools::get_tool_definitions;
+use tracedecay_application::{
+    NativeIntegrationSurfaceResultV1, NativeIntegrationSurfaceUnavailableV1,
+};
 use tracedecay_application::{
     RequestId, native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,

@@ -756,19 +756,17 @@ async fn execute_context_scout_state_transition(
         wire_request_id,
         Some(registered.clone()),
         crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
-        ConfigurationSurfaceRequest::Set(
-            crate::application_surface::ConfigurationSetSurfaceRequest {
-                layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
-                    project_id: registered.scope.project_id.clone(),
-                },
-                key,
-                value: tracedecay_domain::configuration::ConfigurationValueV1::ContextScoutSettings(
-                    settings,
-                ),
-                expected_revision: control.expected_revision.clone(),
-                idempotency_key: control.idempotency_key.clone(),
+        ConfigurationWireRequestV1::Set(tracedecay_application::ConfigurationSetRequestV1 {
+            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: registered.scope.project_id.clone(),
             },
-        ),
+            key,
+            value: tracedecay_domain::configuration::ConfigurationValueV1::ContextScoutSettings(
+                settings,
+            ),
+            expected_revision: control.expected_revision.clone(),
+            idempotency_key: control.idempotency_key.clone(),
+        }),
         observed_at,
         deadline,
         cancellation,

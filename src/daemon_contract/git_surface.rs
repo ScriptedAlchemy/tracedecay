@@ -4,9 +4,9 @@ use tracedecay_application::{CancellationContext, Deadline};
 use tracedecay_domain::UtcMicros;
 
 use crate::application_surface::{
-    GitApplySurfaceRequest, GitHubStackSignalExpandSurfaceRequest, GitPreviewSurfaceRequest,
-    GitReadSurfaceRequest,
+    GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
 };
+use tracedecay_application::git::GitHubStackSignalExpandSurfaceRequest;
 
 use super::{
     DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION, DaemonInvocationPayload,

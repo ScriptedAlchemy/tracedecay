@@ -120,8 +120,8 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
                 crate::application_surface::ApplicationSurfaceOperation::ConfigurationBatch,
                 request_id,
                 crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                    crate::application_surface::ConfigurationSurfaceRequest::Batch(
-                        crate::application_surface::ConfigurationBatchSurfaceRequest {
+                    tracedecay_application::ConfigurationWireRequestV1::Batch(
+                        tracedecay_application::ConfigurationBatchRequestV1 {
                             mutations: direct_mutations,
                             expected_revision,
                             idempotency_key,
@@ -155,14 +155,12 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
 
 fn append_direct_configuration_mutations(
     mutation: DirectConfigurationMutation,
-    direct_mutations: &mut Vec<
-        crate::application_surface::ConfigurationDirectMutationSurfaceRequest,
-    >,
+    direct_mutations: &mut Vec<tracedecay_application::ConfigurationDirectMutationRequestV1>,
 ) {
     match mutation {
         DirectConfigurationMutation::Set { layer, key, value } => {
             direct_mutations.push(
-                crate::application_surface::ConfigurationDirectMutationSurfaceRequest::Set {
+                tracedecay_application::ConfigurationDirectMutationRequestV1::Set {
                     layer,
                     key,
                     value,
@@ -171,10 +169,7 @@ fn append_direct_configuration_mutations(
         }
         DirectConfigurationMutation::Unset { layer, key } => {
             direct_mutations.push(
-                crate::application_surface::ConfigurationDirectMutationSurfaceRequest::Unset {
-                    layer,
-                    key,
-                },
+                tracedecay_application::ConfigurationDirectMutationRequestV1::Unset { layer, key },
             );
         }
         DirectConfigurationMutation::Batch { mutations } => {

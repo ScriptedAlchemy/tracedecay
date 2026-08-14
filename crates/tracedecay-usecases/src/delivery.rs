@@ -29,12 +29,12 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::advisory::{
     CiRetainedObservationManifestLoadOutcomeV1, GitHubActionsConclusionV1, GitHubActionsStatusV1,
-    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
-    GitHubReleaseReadControlV1, GitHubReviewStoreManifestLoadOutcomeV1,
-    ProjectCiRetainedObservationStoreV1, ProjectGitHubReleaseAuthorityOpenOutcomeV1,
-    ProjectGitHubReleasePageV1, ProjectGitHubReleaseReadAuthorityV1,
-    ProjectGitHubReleaseReadOutcomeV1, ProjectGitHubReleaseReadRequestV1,
-    ProjectGitHubReviewStoreV1, open_project_github_release_read_authority_v1,
+    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReleaseReadControlV1,
+    GitHubReviewStoreManifestLoadOutcomeV1, ProjectCiRetainedObservationStoreV1,
+    ProjectGitHubReleaseAuthorityOpenOutcomeV1, ProjectGitHubReleasePageV1,
+    ProjectGitHubReleaseReadAuthorityV1, ProjectGitHubReleaseReadOutcomeV1,
+    ProjectGitHubReleaseReadRequestV1, ProjectGitHubReviewStoreV1,
+    open_project_github_release_read_authority_v1,
 };
 
 pub const MAX_PROJECT_DELIVERY_PULL_REQUESTS_V1: usize = 4;
@@ -975,9 +975,7 @@ mod tests {
     use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
     use super::*;
-    use crate::advisory::{
-        CiRetainedProviderObservationAuthorityV1, GitHubCiProviderRecordV1,
-    };
+    use crate::advisory::{CiRetainedProviderObservationAuthorityV1, GitHubCiProviderRecordV1};
 
     fn test_scope(
         fixture: &crate::advisory::fixtures::AdvisorySourceBackedCompositeFixtureV1,

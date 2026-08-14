@@ -16,15 +16,14 @@ use super::{
     enter_test_daemon_database_scope, initialize_test_project, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
-use crate::application_surface::{
-    ApplicationSurfaceOperation, ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest,
-};
+use crate::application_surface::ApplicationSurfaceOperation;
 use crate::daemon::service::invocation::DaemonInvocationProblem;
 use crate::daemon::{
     DaemonEngine, DaemonHandshake, DaemonInvocationOutcome, DaemonInvocationRequest,
     execute_daemon_invocation,
 };
 use crate::daemon_contract::WorkApplicationInvocationV1;
+use tracedecay_application::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_usecases::primitives::{PrimitiveRequest, StorageStatusPrimitiveRequest};
 
 fn git(root: &Path, args: &[&str]) {
@@ -95,7 +94,7 @@ fn assert_configuration_routes_mounted<'a>(
             DaemonInvocationRequest::configuration(
                 "request.project-open.configuration",
                 ApplicationSurfaceOperation::ConfigurationList,
-                ConfigurationSurfaceRequest::List(ConfigurationListSurfaceRequest::default()),
+                ConfigurationWireRequestV1::List(ConfigurationListRequestV1::default()),
                 observed_at,
                 deadline,
                 cancellation,
@@ -273,7 +272,7 @@ async fn unregistered_project_invocation_reports_truthful_unavailable() {
         DaemonInvocationRequest::configuration(
             "request.unregistered-project.configuration",
             ApplicationSurfaceOperation::ConfigurationList,
-            ConfigurationSurfaceRequest::List(ConfigurationListSurfaceRequest::default()),
+            ConfigurationWireRequestV1::List(ConfigurationListRequestV1::default()),
             observed_at,
             deadline,
             cancellation,

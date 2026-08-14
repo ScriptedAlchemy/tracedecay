@@ -19,10 +19,7 @@ use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use super::service::invocation::{
     DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
 };
-use crate::application_surface::{
-    ApplicationSurfaceOperation, ConfigurationBatchSurfaceRequest,
-    ConfigurationDirectMutationSurfaceRequest, ConfigurationSurfaceRequest,
-};
+use crate::application_surface::ApplicationSurfaceOperation;
 use crate::daemon_client::invocation_now_micros;
 use crate::daemon_contract::{DaemonInvocationOutcome, DaemonInvocationRequest};
 use crate::dashboard::{
@@ -31,6 +28,9 @@ use crate::dashboard::{
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
+use tracedecay_application::{
+    ConfigurationBatchRequestV1, ConfigurationDirectMutationRequestV1, ConfigurationWireRequestV1,
+};
 
 const CONFIGURATION_REQUEST_DEADLINE_MICROS: i64 = 15_000_000;
 const CONFIGURATION_AUTHORITY_LIFETIME_MICROS: i64 = 3_600_000_000;
@@ -95,7 +95,7 @@ impl DashboardApplicationRuntime for DashboardConfigurationRuntimeForTestV1 {
             let request = DaemonInvocationRequest::configuration(
                 request_id.as_str(),
                 ApplicationSurfaceOperation::ConfigurationBatch,
-                ConfigurationSurfaceRequest::Batch(ConfigurationBatchSurfaceRequest {
+                ConfigurationWireRequestV1::Batch(ConfigurationBatchRequestV1 {
                     mutations: direct_mutations,
                     expected_revision,
                     idempotency_key,
@@ -193,14 +193,14 @@ impl crate::daemon_client::DaemonInvocationExecutor for DashboardConfigurationRu
 
 fn flatten_configuration_mutation(
     mutation: DirectConfigurationMutation,
-    output: &mut Vec<ConfigurationDirectMutationSurfaceRequest>,
+    output: &mut Vec<ConfigurationDirectMutationRequestV1>,
 ) {
     match mutation {
         DirectConfigurationMutation::Set { layer, key, value } => {
-            output.push(ConfigurationDirectMutationSurfaceRequest::Set { layer, key, value });
+            output.push(ConfigurationDirectMutationRequestV1::Set { layer, key, value });
         }
         DirectConfigurationMutation::Unset { layer, key } => {
-            output.push(ConfigurationDirectMutationSurfaceRequest::Unset { layer, key });
+            output.push(ConfigurationDirectMutationRequestV1::Unset { layer, key });
         }
         DirectConfigurationMutation::Batch { mutations } => {
             for mutation in mutations {

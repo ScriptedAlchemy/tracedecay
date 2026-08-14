@@ -83,8 +83,8 @@ use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ProjectContextScoutAddressRegistryV1,
 };
 use crate::application_surface::{
-    ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
-    GitPreviewSurfaceRequest, GitReadSurfaceRequest,
+    ContextScoutSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
+    GitReadSurfaceRequest,
 };
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::git_transactions::{
@@ -92,6 +92,7 @@ use crate::daemon::git_transactions::{
     capture_exact_snapshot,
 };
 use crate::daemon::native_integration::DaemonNativeIntegrationOwner;
+use tracedecay_application::ConfigurationWireRequestV1;
 use tracedecay_usecases::ProjectSourceAccessSnapshot;
 use tracedecay_usecases::configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationError, ConfigurationMutationAuthority,

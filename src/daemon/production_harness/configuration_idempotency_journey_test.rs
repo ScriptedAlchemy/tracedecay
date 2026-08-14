@@ -119,7 +119,7 @@ async fn cli_configuration_set(
             operation,
             request_id,
             crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                crate::application_surface::ConfigurationSurfaceRequest::Set(request),
+                tracedecay_application::ConfigurationWireRequestV1::Set(request),
             ),
             PageRequest::first(10).expect("CLI page"),
             Some(deadline),
@@ -210,7 +210,7 @@ async fn configuration_batch_via_surface(
             operation,
             request_id,
             crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                crate::application_surface::ConfigurationSurfaceRequest::Batch(request),
+                tracedecay_application::ConfigurationWireRequestV1::Batch(request),
             ),
             crate::daemon_client::RequestedOutputFormat::Json,
             Some(&executor),
@@ -228,7 +228,7 @@ async fn configuration_batch_via_surface(
             operation,
             request_id,
             crate::application_surface::ApplicationSurfaceRequest::Configuration(
-                crate::application_surface::ConfigurationSurfaceRequest::Batch(request),
+                tracedecay_application::ConfigurationWireRequestV1::Batch(request),
             ),
             PageRequest::first(10).expect("surface page"),
             Some(deadline),

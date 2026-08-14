@@ -11,6 +11,7 @@ use tracedecay_application::{
     DisclosureClass, OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest,
     RequestContext, RequestId, ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
 };
+use tracedecay_application::{ConfigurationListRequestV1, ConfigurationWireRequestV1};
 use tracedecay_domain::configuration::{ConfigurationIdempotencyKey, ConfigurationRevisionId};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
@@ -23,11 +24,10 @@ use super::workflow::validate_catalog_bindings as validate_workflow_catalog_bind
 use super::{
     APPLICATION_PROTOCOL_REVISION, ActiveHttpRequest, ApplicationSurfaceAdapterError,
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, CallableCodeSurfaceRequest,
-    ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest, ContextScoutClaimSurfaceRequest,
-    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
-    ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
-    HttpOperationEventState, NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest,
-    application_http_context, application_negotiated_features,
+    ContextScoutClaimSurfaceRequest, ContextScoutClaimWindowSurfaceV1,
+    ContextScoutControlSurfaceRequest, ContextScoutSurfaceRequest, FeedbackSurfaceRequest,
+    HttpCancellationRegistry, HttpOperationEventState, NativeIntegrationSurfaceRequest,
+    PrimitiveCodeSurfaceRequest, application_http_context, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     feedback_sse_stream_event, http_operation_event_router, invocation_problem,
     normalize_application_tool_args, parse_application_surface_request,
@@ -325,8 +325,8 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
 fn dashboard_configuration_dispatch_preserves_http_application_semantics() {
     let operation = ApplicationSurfaceOperation::ConfigurationList;
     let request = || {
-        ApplicationSurfaceRequest::Configuration(ConfigurationSurfaceRequest::List(
-            ConfigurationListSurfaceRequest::default(),
+        ApplicationSurfaceRequest::Configuration(ConfigurationWireRequestV1::List(
+            ConfigurationListRequestV1::default(),
         ))
     };
     let http = resolve_application_surface_dispatch(
