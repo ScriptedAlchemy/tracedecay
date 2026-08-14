@@ -918,18 +918,8 @@ fn daemon_sigterm_exits_while_authenticated_project_client_is_connected() {
     init_project_with_cli(&home_path, &project_path);
 
     let socket_path = common::daemon_socket_path(&home_path);
-    let _ = std::fs::remove_file(&socket_path);
-    let mut daemon = common::DaemonProcess::new(
-        tracedecay_command_with_home(&home_path)
-            .arg("daemon")
-            .arg("run")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("tracedecay daemon should start"),
-    );
-    wait_for_daemon_socket(&socket_path);
+    common::stop_managed_daemon(&home_path);
+    let mut daemon = spawn_tracedecay_daemon(&home_path);
 
     let mut client = UnixStream::connect(&socket_path).expect("client should connect to daemon");
     let mut reader = BufReader::new(client.try_clone().expect("clone daemon client stream"));

@@ -12,6 +12,8 @@ use std::net::TcpListener;
 use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -648,6 +650,7 @@ impl Drop for TestChildProcess {
     }
 }
 
+/// PID-directed stop: survives `process_group(0)` / `setsid` detachment.
 fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
     if let Ok(Some(status)) = child.try_wait() {
         return Ok(status);
@@ -663,6 +666,25 @@ fn terminate_and_reap(child: &mut Child) -> std::io::Result<ExitStatus> {
     child.wait()
 }
 
+/// Detach a test child from the test process group.
+///
+/// Nextest (and other harness timeouts) signal the test's process group.
+/// Spawned `tracedecay daemon run` children inherit that group unless they
+/// call `setpgid`, so a group SIGTERM becomes a clean daemon exit (status 0
+/// via `run_foreground_unix`) mid-test. `TestChildProcess::kill_and_wait` and
+/// `Drop` still target the PID, so the harness reaps the daemon when the
+/// test ends.
+fn detach_from_test_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+    }
+}
+
 pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
     let home = canonical_existing_path(home);
     command
@@ -671,6 +693,7 @@ pub fn apply_tracedecay_home_env(command: &mut Command, home: &Path) {
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env(USER_DATA_DIR_ENV, home.join(".tracedecay"))
         .env(GLOBAL_DB_ENV, home.join(".tracedecay/global.db"));
+    detach_from_test_process_group(command);
 }
 
 pub fn tracedecay_command_with_home(home: &Path) -> Command {
@@ -878,6 +901,7 @@ fn spawn_tracedecay_daemon_process(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     configure(&mut command);
+    detach_from_test_process_group(&mut command);
     let child = command.spawn().expect("tracedecay daemon should start");
     let mut daemon = DaemonProcess::new(child);
 
