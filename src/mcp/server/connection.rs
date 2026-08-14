@@ -943,13 +943,16 @@ impl McpServer {
         }
     }
 
-    async fn shutdown_background_tasks_until(&self, deadline: tokio::time::Instant) -> Vec<String> {
+    async fn shutdown_background_tasks_until(
+        &self,
+        _deadline: tokio::time::Instant,
+    ) -> Vec<String> {
         let mut failures = Vec::new();
-        if let Err(error) =
-            crate::mcp::tools::handlers::dashboard::shutdown_dashboard_until(deadline).await
-        {
-            failures.push(format!("dashboard shutdown: {error}"));
-        }
+        // The hosted dashboard is daemon-process state (`DASHBOARD_MANAGER`),
+        // not project-server state. `tracedecay_dashboard` starts against the
+        // Core server; the later Core→Full remount retires that server. Tearing
+        // the listener down here made a fresh bind report a URL that died as
+        // soon as full capability published.
         failures.extend(self.background_tasks.shutdown().await);
         self.dispatch_authority.shutdown().await;
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {

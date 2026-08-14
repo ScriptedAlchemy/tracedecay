@@ -258,6 +258,7 @@ pub async fn run_foreground(
                 || {},
                 move |_| async move { http_application_service.shutdown().await },
             ),
+            hosted_dashboard_shutdown_owner(),
             shutdown_coordination::ShutdownOwner::with_deadline_status(
                 "project_open",
                 || {},
@@ -413,6 +414,18 @@ fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskRec
             ],
         );
     }
+}
+
+fn hosted_dashboard_shutdown_owner() -> shutdown_coordination::ShutdownOwner {
+    shutdown_coordination::ShutdownOwner::with_deadline_result(
+        "hosted_dashboard",
+        || {},
+        move |_| async move {
+            crate::mcp::tools::handlers::dashboard::shutdown_dashboard()
+                .await
+                .map_err(|error| error.to_string())
+        },
+    )
 }
 
 #[cfg(unix)]
@@ -647,12 +660,18 @@ async fn run_foreground_unix(
                 || {},
                 move |_| async move { http_application_service.shutdown().await },
             );
+            let hosted_dashboard_owner = hosted_dashboard_shutdown_owner();
             match owner_phases.first_mut() {
                 Some(producers) => {
                     producers.push(semantic_artifact_gc_owner);
                     producers.push(http_application_owner);
+                    producers.push(hosted_dashboard_owner);
                 }
-                None => owner_phases.push(vec![semantic_artifact_gc_owner, http_application_owner]),
+                None => owner_phases.push(vec![
+                    semantic_artifact_gc_owner,
+                    http_application_owner,
+                    hosted_dashboard_owner,
+                ]),
             }
             let server_engine = shutdown_engine.clone();
             shutdown_orchestration::DaemonShutdownPlan::new(
