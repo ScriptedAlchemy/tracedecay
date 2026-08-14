@@ -282,8 +282,9 @@ fn activate_evaluated_semantic_profile(
         .expect("start direct semantic evaluator");
     assert!(
         output.status.success(),
-        "direct semantic evaluator failed: {}\n{}",
+        "direct semantic evaluator failed: {}\nstdout={}\nstderr={}",
         output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let publication: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {

@@ -7,8 +7,8 @@
       "query_workers": 1
     },
     "exact_corpus_bytes": 147447,
-    "exact_eligible_chunks_10x": 19600,
-    "exact_eligible_chunks_current": 1960,
+    "exact_eligible_chunks_10x": 21700,
+    "exact_eligible_chunks_current": 2170,
     "exact_file_count": 13,
     "exact_query_count": 28,
     "fusion_revision": "CompositionKernel::compose",
