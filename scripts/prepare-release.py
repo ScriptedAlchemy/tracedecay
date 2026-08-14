@@ -36,6 +36,13 @@ Usage
 -----
   scripts/prepare-release.py             # reads version from Cargo.toml
   scripts/prepare-release.py 1.2.3       # explicit version
+  scripts/prepare-release.py 1.2.3 --changelog PATH --cargo-toml PATH
+
+Fail-closed cases
+-----------------
+  Unrecognized `## […` headers abort instead of swallowing later history.
+  An already-published `[<version>]` block that precedes `[Unreleased]`
+  is refused (future-breaking notes must not merge into a shipped version).
 
 Output
 ------
@@ -45,6 +52,7 @@ on parse failures.
 """
 from __future__ import annotations
 
+import argparse
 import datetime
 import re
 import sys
@@ -55,14 +63,22 @@ CHANGELOG_PATH = REPO_ROOT / "CHANGELOG.md"
 CARGO_TOML_PATH = REPO_ROOT / "Cargo.toml"
 GITHUB_URL = "https://github.com/ScriptedAlchemy/tracedecay"
 
-VERSION_HEADER_RE = re.compile(r"^## \[([^\]]+)\](?:\s+-\s+(.+))?\s*$")
+# Keep-a-changelog (`## [1.2.3] - date`) and conventional-changelog /
+# release-please (`## [1.2.3](compare-url) (date)` or `## [1.2.3](url) - date`).
+VERSION_HEADER_RE = re.compile(
+    r"^## \[([^\]]+)\]"
+    r"(?:\([^)]+\))?"
+    r"(?:\s+-\s+(.+?)|\s+\(([^)]+)\))?"
+    r"\s*$"
+)
+VERSIONISH_HEADER_RE = re.compile(r"^##\s+\[")
 SUBSECTION_RE = re.compile(r"^### (\w+)\s*$")
 BULLET_RE = re.compile(r"^\s*([-*]|\d+\.)\s+")
 
 
-def read_cargo_version() -> str:
+def read_cargo_version(cargo_toml: Path = CARGO_TOML_PATH) -> str:
     """Read the [package].version field from Cargo.toml."""
-    text = CARGO_TOML_PATH.read_text(encoding="utf-8")
+    text = cargo_toml.read_text(encoding="utf-8")
     # Find [package] section then walk to the first `version = "..."`.
     in_package = False
     for line in text.splitlines():
@@ -97,9 +113,14 @@ def parse_changelog(text: str):
             cur = {
                 "header": line,
                 "name": m.group(1),
-                "date": m.group(2),
+                "date": m.group(2) or m.group(3),
                 "body": [],
             }
+        elif VERSIONISH_HEADER_RE.match(line):
+            raise ValueError(
+                "unrecognized version header (refusing to swallow later history): "
+                + line
+            )
         elif cur is not None:
             cur["body"].append(line)
         else:
@@ -167,10 +188,34 @@ def append_link_ref(text: str, version: str) -> str:
     return text + trailing + ref + "\n"
 
 
-def main() -> int:
-    version = sys.argv[1] if len(sys.argv) > 1 else read_cargo_version()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "version",
+        nargs="?",
+        help="Release version. Defaults to Cargo.toml [package].version.",
+    )
+    parser.add_argument(
+        "--changelog",
+        type=Path,
+        default=CHANGELOG_PATH,
+        help="Changelog path (default: repository CHANGELOG.md).",
+    )
+    parser.add_argument(
+        "--cargo-toml",
+        type=Path,
+        default=CARGO_TOML_PATH,
+        help="Cargo.toml used when version is omitted.",
+    )
+    return parser.parse_args(argv)
 
-    text = CHANGELOG_PATH.read_text(encoding="utf-8")
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    version = args.version or read_cargo_version(args.cargo_toml)
+    changelog_path = args.changelog
+
+    text = changelog_path.read_text(encoding="utf-8")
     preface, blocks = parse_changelog(text)
 
     unrel_idx = next(
@@ -189,6 +234,14 @@ def main() -> int:
         print("prepare-release: [Unreleased] is empty - nothing to do")
         return 0
 
+    if ver_idx != -1 and ver_idx < unrel_idx:
+        print(
+            f"prepare-release: refusing to merge [Unreleased] into already-published "
+            f"[{version}] that precedes it",
+            file=sys.stderr,
+        )
+        return 1
+
     if ver_idx == -1:
         # Case A — promote Unreleased -> [version].
         today = today_utc_iso()
@@ -206,7 +259,7 @@ def main() -> int:
         }
         blocks[unrel_idx : unrel_idx + 1] = [emptied, promoted]
         out = append_link_ref(join_changelog(preface, blocks), version)
-        CHANGELOG_PATH.write_text(out, encoding="utf-8")
+        changelog_path.write_text(out, encoding="utf-8")
         n = sum(1 for line in promoted["body"] if BULLET_RE.match(line))
         print(
             f"prepare-release: {version} - renamed [Unreleased] to "
@@ -249,7 +302,7 @@ def main() -> int:
     unrel["body"] = ["", ""]
 
     out = append_link_ref(join_changelog(preface, blocks), version)
-    CHANGELOG_PATH.write_text(out, encoding="utf-8")
+    changelog_path.write_text(out, encoding="utf-8")
     print(
         f"prepare-release: {version} - merged {merged} Unreleased entries "
         f"into existing [{version}] block"
