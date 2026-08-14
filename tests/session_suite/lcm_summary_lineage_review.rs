@@ -15,7 +15,7 @@ use tracedecay_usecases::host_admission::HostAdmissionScope;
 
 use crate::common::{lcm_dag_message, lcm_dag_session};
 
-const FOREIGN_CANARY: &str = "sk-proj-lineage-foreign-canary-1234567890";
+const FOREIGN_CANARY: &str = "lineage-foreign-canary-1234567890";
 
 async fn registered_lcm_runtime(tmp: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(tmp.path().join(".tracedecay"))
