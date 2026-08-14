@@ -6,12 +6,15 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphEntityId, GraphRelationId, GraphTraversalDirection, TraversalRequest,
 };
 
-use super::super::super::VectorGenerationStoreErrorV1;
+use super::super::super::{
+    VectorGenerationPublicationV1, VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
+};
 use super::super::persistence::map_graph_error;
 use super::{
-    BASE_GENERATION, CONTROL_ID, GENERATION_CATALOG_KIND, GENERATION_ID, ROW_COUNT, VECTOR_BYTES,
-    entity_id, generation_entity_id, generation_id, optional_generation, relation, relation_kind,
-    required_string, required_u64,
+    BASE_GENERATION, CHECKPOINT, CONTROL_ID, GENERATION_CATALOG_KIND, GENERATION_ID,
+    MANIFEST_DIGEST, ROW_COUNT, VECTOR_BYTES, digest, entity_id, generation_entity_id,
+    generation_id, optional_generation, relation, relation_kind, required_bytes, required_string,
+    required_u64,
 };
 
 const MAX_CATALOG_RECORDS: usize = 10_000;
@@ -77,6 +80,36 @@ pub(crate) fn read_generation_catalog_entry(
         ));
     }
     Ok(Some(entry))
+}
+
+pub(crate) fn read_generation_publication_pointer(
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
+    generation: &VectorGenerationIdV1,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> Result<Option<VectorGenerationPublicationV1>, VectorGenerationStoreErrorV1> {
+    let Some(entry) =
+        read_generation_catalog_entry(snapshot, generation, Arc::clone(&cancellation))?
+    else {
+        return Ok(None);
+    };
+    let row = snapshot
+        .entity(
+            &snapshot.projection().namespace,
+            &generation_entity_id(generation)?,
+            cancellation,
+        )
+        .map_err(map_graph_error)?
+        .ok_or_else(|| corrupt("semantic vector generation catalog target is missing"))?;
+    if &entry.generation_id != generation {
+        return Err(corrupt(
+            "semantic vector generation catalog identity is inconsistent",
+        ));
+    }
+    Ok(Some(VectorGenerationPublicationV1 {
+        generation_id: generation.clone(),
+        manifest_digest: digest(required_string(&row, MANIFEST_DIGEST)?)?,
+        checkpoint: required_bytes::<VectorProjectionCheckpointV1>(&row, CHECKPOINT)?,
+    }))
 }
 
 pub(crate) fn generation_catalog_relation_id(

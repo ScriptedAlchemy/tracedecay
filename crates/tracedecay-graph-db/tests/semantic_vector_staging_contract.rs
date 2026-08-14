@@ -9,6 +9,7 @@ use tracedecay_graph_db::{
 };
 use tracedecay_store::{
     GraphPublicationOperationContextV1, GraphPublicationReplayLookupV1, GraphPublicationStoreV1,
+    MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH, SemanticVectorCheckpointDigest,
     SemanticVectorPublicationAuthority, SemanticVectorPublishedGenerationKey,
     SemanticVectorPublishedGenerationLookup, SemanticVectorStageCancelOutcome,
     SemanticVectorStageResumeOutcome, SemanticVectorStageState, SemanticVectorStagingStore,
@@ -158,6 +159,109 @@ fn native_batch_admission_rejects_every_chunk_binding_mismatch() {
             SemanticVectorStageCancelOutcome::Cancelled(_)
         ));
     }
+}
+
+#[test]
+fn paged_synthetic_corpus_publishes_after_eval_sized_admission() {
+    // Dim-3 stand-in for paged admission. A 43-page (~21700) run applies, then
+    // prepare_publication hits the 30s registration deadline while hashing the
+    // recovered generation — keep this short and cover production width below.
+    const PAGES: u64 = 4;
+    let page = u64::try_from(MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH).unwrap();
+    let chunk_count = page.checked_mul(PAGES).unwrap();
+    let fixture = ContractFixture::new();
+    let mut authority = fixture.authority();
+    let plan = fixture.plan_with_chunk_count("paged-corpus", "paged-corpus", chunk_count);
+    let mut expected = plan.initial_checkpoint_digest.clone();
+    for ordinal in 0..PAGES {
+        let start = ordinal.checked_mul(page).unwrap();
+        let next = unique_page_checkpoint(ordinal);
+        let (batch, receipt) = fixture.page_batch_and_receipt(
+            &plan,
+            "paged-corpus",
+            ordinal,
+            start,
+            page,
+            expected.clone(),
+            next.clone(),
+            ordinal as f32,
+        );
+        if ordinal == 0 {
+            fixture.begin_and_append(&mut authority, &plan, &receipt, "paged-corpus");
+        } else {
+            fixture.append(&mut authority, &plan, &receipt, "paged-corpus");
+        }
+        fixture
+            .apply(
+                &mut authority,
+                &receipt,
+                batch,
+                &format!("paged-corpus.apply.{ordinal}"),
+            )
+            .unwrap_or_else(|error| {
+                panic!("paged synthetic apply exhausted a named graph budget: {error}")
+            });
+        fixture.settle_batch(
+            &mut authority,
+            &receipt,
+            &format!("paged-corpus.settle.{ordinal}"),
+        );
+        expected = next;
+    }
+    fixture
+        .try_ready(&mut authority, &plan, "paged-corpus.ready")
+        .unwrap_or_else(|error| {
+            panic!("paged synthetic prepare exhausted a named graph budget: {error}")
+        });
+    let committed = fixture.publish(&mut authority, &plan, "paged-corpus.publish");
+    settle_publication(
+        &mut authority,
+        &plan,
+        &committed,
+        "paged-corpus.publication-settle",
+    );
+}
+
+#[test]
+fn production_width_page_applies_and_publishes_through_named_budgets() {
+    let page = u64::try_from(MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH).unwrap();
+    let fixture = ContractFixture::new_with_embedding_dimensions(768);
+    let mut authority = fixture.authority();
+    let plan = fixture.plan_with_chunk_count("prod-width", "prod-width", page);
+    let next = unique_page_checkpoint(0);
+    let (batch, receipt) = fixture.page_batch_and_receipt(
+        &plan,
+        "prod-width",
+        0,
+        0,
+        page,
+        plan.initial_checkpoint_digest.clone(),
+        next,
+        0.125,
+    );
+    fixture.begin_and_append(&mut authority, &plan, &receipt, "prod-width");
+    fixture
+        .apply(&mut authority, &receipt, batch, "prod-width.apply")
+        .unwrap_or_else(|error| {
+            panic!("production-width apply exhausted a named graph budget: {error}")
+        });
+    fixture.settle_batch(&mut authority, &receipt, "prod-width.settle");
+    fixture
+        .try_ready(&mut authority, &plan, "prod-width.ready")
+        .unwrap_or_else(|error| {
+            panic!("production-width prepare exhausted a named graph budget: {error}")
+        });
+    let committed = fixture.publish(&mut authority, &plan, "prod-width.publish");
+    settle_publication(
+        &mut authority,
+        &plan,
+        &committed,
+        "prod-width.publication-settle",
+    );
+}
+
+fn unique_page_checkpoint(ordinal: u64) -> SemanticVectorCheckpointDigest {
+    SemanticVectorCheckpointDigest::try_from(format!("sha256:{:064x}", 20_000 + ordinal)).unwrap()
 }
 
 #[test]

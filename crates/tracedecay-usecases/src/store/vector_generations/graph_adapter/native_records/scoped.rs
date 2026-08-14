@@ -1,17 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use tracedecay_domain::{ProjectionBatchReceiptV1, VectorGenerationIdV1, canonical_sha256};
+use tracedecay_domain::{
+    CodeChunkProjectionReceiptV1, CodeSearchChunkId, ProjectionBatchReceiptV1,
+    ProjectionOperationV1, ProjectionOutcomeV1, VectorGenerationIdV1, canonical_sha256,
+};
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphRelation, GraphRelationId,
     GraphTraversalDirection, TraversalRequest,
 };
 
 use super::super::super::{
-    CommittedVectorBatchV1, ExternalV1, PreparedBatchesV1, PublishedVectorGenerationV1,
-    StagedVectorGenerationV1, VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, VectorGenerationBuildIdV1,
-    VectorGenerationPlanV1, VectorGenerationStoreErrorV1, VectorRowMapV1, validate_plan,
-    validate_vector_row,
+    CommittedVectorBatchV1, ExternalV1, PreparedBatchesV1, ProjectedChunkVectorV1,
+    PublishedVectorGenerationV1, StagedVectorGenerationV1, VECTOR_GENERATION_BUILD_DIGEST_DOMAIN,
+    VectorGenerationBuildIdV1, VectorGenerationPlanV1, VectorGenerationStoreErrorV1,
+    VectorRowMapV1, validate_plan, validate_vector_row,
 };
 use super::super::persistence::map_graph_error;
 use super::VectorProjectionCheckpointV1;
@@ -19,7 +22,7 @@ use super::{
     BASE_GENERATION, BASE_KIND, BATCH_COUNT, BUILD_BATCH_LABEL, BUILD_ID, BUILD_LABEL,
     BUILD_MEMBER_LABEL, CHECKPOINT, CHUNK_ID, CONTAINS_KIND, EMBEDDING_KEY, EXPECTED_COUNT,
     GENERATION_ID, GENERATION_LABEL, GENERATION_RECEIPT_LABEL, GENERATION_TOMBSTONE_LABEL,
-    GENERATION_VECTOR_LABEL, MANIFEST_DIGEST, ORDINAL, PREPARED_DIGEST, PRIOR_DIGEST, RECEIPT,
+    GENERATION_VECTOR_LABEL, MANIFEST_DIGEST, ORDINAL, PREPARED_DIGEST, PRIOR_DIGEST,
     RECEIPT_COUNT, REQUEST_DIGEST, ROW_COUNT, SOURCE_GENERATION, SOURCE_MANIFEST,
     STAGED_TOMBSTONE_LABEL, STAGED_VECTOR_LABEL, TARGET_PROJECTION, TOMBSTONE_COUNT, VECTOR_BYTES,
     VECTOR_COUNT, build_entity_id, build_id, content_digest, decode_vector, digest,
@@ -129,7 +132,7 @@ pub(crate) fn read_build_records(
                 CommittedVectorBatchV1 {
                     request_digest: digest(required_string(row, REQUEST_DIGEST)?)?,
                     prepared_digest: digest(required_string(row, PREPARED_DIGEST)?)?,
-                    receipt: required_bytes(row, RECEIPT)?,
+                    receipt: super::support::required_generation_receipt(row)?,
                 },
             ))
         })
@@ -330,12 +333,12 @@ pub(crate) fn read_generation_records(
     .map(|row| {
         Ok((
             required_u64(row, ORDINAL)?,
-            required_bytes::<ProjectionBatchReceiptV1>(row, RECEIPT)?,
+            super::support::required_generation_receipt(row)?,
         ))
     })
     .collect::<Result<Vec<_>, VectorGenerationStoreErrorV1>>()?;
     receipts.sort_by_key(|(ordinal, _)| *ordinal);
-    let receipts = receipts
+    let mut receipts = receipts
         .into_iter()
         .enumerate()
         .map(|(expected, (ordinal, receipt))| {
@@ -348,6 +351,7 @@ pub(crate) fn read_generation_records(
             }
         })
         .collect::<Result<Vec<_>, _>>()?;
+    attach_reused_receipts(&mut receipts, &vectors)?;
     require_count(owner, ROW_COUNT, vectors.len())?;
     let measured_vector_bytes = vectors.values().try_fold(0_u64, |total, vector| {
         total
@@ -481,6 +485,81 @@ fn read_scope(
         ));
     }
     Ok(Some((entities, relations)))
+}
+
+fn attach_reused_receipts(
+    receipts: &mut [ProjectionBatchReceiptV1],
+    vectors: &BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    if receipts.iter().any(|batch| {
+        batch
+            .receipts
+            .iter()
+            .any(|receipt| receipt.operation == ProjectionOperationV1::Reused)
+    }) {
+        return Ok(());
+    }
+    let mut named = BTreeSet::new();
+    let mut reused_batch = None;
+    for (index, batch) in receipts.iter().enumerate() {
+        if batch.reused_count > 0 {
+            if reused_batch.replace(index).is_some() {
+                return Err(corrupt(
+                    "published generation names reused receipts on more than one batch",
+                ));
+            }
+        }
+        for receipt in &batch.receipts {
+            if !named.insert(receipt.chunk_id.clone()) {
+                return Err(corrupt(
+                    "published generation receipts name a chunk more than once",
+                ));
+            }
+        }
+    }
+    let mut unused = vectors
+        .keys()
+        .filter(|chunk_id| !named.contains(*chunk_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    unused.sort();
+    let Some(index) = reused_batch else {
+        if unused.is_empty() {
+            return Ok(());
+        }
+        return Err(corrupt(
+            "published generation has vectors that no receipt names",
+        ));
+    };
+    let batch = &mut receipts[index];
+    if unused.len() as u64 != batch.reused_count {
+        return Err(corrupt(
+            "published reused receipt count does not match unnamed vectors",
+        ));
+    }
+    let synthesized = unused
+        .into_iter()
+        .map(|chunk_id| {
+            let vector = vectors
+                .get(&chunk_id)
+                .ok_or_else(|| corrupt("published reused receipt is missing its vector"))?;
+            Ok(CodeChunkProjectionReceiptV1 {
+                projection_key: batch.target_projection_key.clone(),
+                request_digest: batch.request_digest.clone(),
+                prior_generation: None,
+                source_generation: batch.source_generation.clone(),
+                source_manifest_digest: batch.source_manifest_digest.clone(),
+                chunk_id,
+                prior_chunk_digest: Some(vector.chunk_digest.clone()),
+                current_chunk_digest: Some(vector.chunk_digest.clone()),
+                operation: ProjectionOperationV1::Reused,
+                outcome: ProjectionOutcomeV1::Reused,
+                output_digest: None,
+            })
+        })
+        .collect::<Result<Vec<_>, VectorGenerationStoreErrorV1>>()?;
+    batch.receipts.extend(synthesized);
+    Ok(())
 }
 
 fn require_count(

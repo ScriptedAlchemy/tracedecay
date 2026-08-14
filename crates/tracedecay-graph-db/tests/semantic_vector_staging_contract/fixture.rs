@@ -133,6 +133,10 @@ pub enum NativeMismatch {
 
 impl ContractFixture {
     pub fn new() -> Self {
+        Self::new_with_embedding_dimensions(3)
+    }
+
+    pub fn new_with_embedding_dimensions(dimensions: u32) -> Self {
         let root = TempDir::new().unwrap();
         let graph = RegisteredGraph::new(root.path()).unwrap();
         let path = root.path().join("semantic-vector-authority.sqlite3");
@@ -183,7 +187,7 @@ impl ContractFixture {
             _readers: readers,
             handle,
             source_dependency,
-            embedding: admitted_embedding(),
+            embedding: admitted_embedding_with_dimensions(dimensions),
         };
         fixture.seed_source_generation();
         fixture
@@ -240,7 +244,8 @@ impl ContractFixture {
                     canonical_sha256(&self.embedding).unwrap().as_str(),
                 )
                 .unwrap(),
-                embedding_dimension: 3,
+                embedding_dimension: u16::try_from(self.embedding.embedding_key().dimensions)
+                    .expect("fixture embedding dimension fits recipe"),
                 model_artifact_digest: SemanticModelArtifactDigestV1::new(
                     self.embedding
                         .embedding_key()
@@ -415,23 +420,33 @@ impl ContractFixture {
         plan: &SemanticVectorStagePlan,
         suffix: &str,
     ) {
+        self.try_ready(authority, plan, suffix).unwrap();
+    }
+
+    pub fn try_ready(
+        &self,
+        authority: &mut SemanticVectorStagingExactSqlStorage,
+        plan: &SemanticVectorStagePlan,
+        suffix: &str,
+    ) -> Result<(), GraphDbError> {
         with_context(suffix, |context| {
-            assert!(matches!(
-                self.graph
-                    .registry
-                    .prepare_publication_from_staged_native(
-                        self.registration(),
-                        authority,
-                        context,
-                        &plan.key,
-                    )
-                    .unwrap(),
-                tracedecay_store::SemanticVectorStagePublicationPrepareOutcome::ReadyToPublish(_)
-                    | tracedecay_store::SemanticVectorStagePublicationPrepareOutcome::ExactReplay(
-                        _
-                    )
-            ));
-        });
+            match self.graph.registry.prepare_publication_from_staged_native(
+                self.registration(),
+                authority,
+                context,
+                &plan.key,
+            )? {
+                tracedecay_store::SemanticVectorStagePublicationPrepareOutcome::ReadyToPublish(
+                    _,
+                )
+                | tracedecay_store::SemanticVectorStagePublicationPrepareOutcome::ExactReplay(_) => {
+                    Ok(())
+                }
+                other => Err(GraphDbError::invalid(format!(
+                    "semantic vector stage was not ready to publish: {other:?}"
+                ))),
+            }
+        })
     }
 
     pub fn publish(
@@ -449,6 +464,174 @@ impl ContractFixture {
             )
         })
         .unwrap()
+    }
+
+    pub fn plan_with_chunk_count(
+        &self,
+        name: &str,
+        semantic_generation: &str,
+        chunk_count: u64,
+    ) -> SemanticVectorStagePlan {
+        let projection = GraphProjectionIdentityV1 {
+            shard_id: self.graph.binding.shard_id.clone(),
+            namespace: GraphNamespaceV1::new("semantic-vector").unwrap(),
+            projection: GraphProjectionIdV1::new("chunks").unwrap(),
+        };
+        let members = (0..chunk_count)
+            .map(|index| SemanticVectorChunkManifestMember {
+                chunk_id: page_chunk_id(name, index),
+                chunk_digest: unique_digest(index),
+                operation: SemanticVectorStageChunkOperation::Embed,
+            })
+            .collect::<Vec<_>>();
+        let manifest = semantic_vector_chunk_manifest_digest(&members).unwrap();
+        SemanticVectorStagePlan::new(
+            projection.clone(),
+            SemanticVectorBuildId::new(format!("build.{name}")).unwrap(),
+            VectorGenerationIdV1::new(
+                canonical_sha256(&("semantic-vector-staging-contract", semantic_generation))
+                    .unwrap(),
+            ),
+            None,
+            GraphPublicationKeyV1::new(
+                projection,
+                tracedecay_store::GraphGenerationIdV1::new(format!("generation.{name}")).unwrap(),
+                GraphPublicationIdempotencyKeyV1::new(format!("publication.{name}")).unwrap(),
+            ),
+            source_scope(&self.graph.binding),
+            tracedecay_store::SemanticVectorCodeScopeHash::new("a".repeat(64)).unwrap(),
+            SemanticVectorSourceGenerationId::new("source-code-generation").unwrap(),
+            self.source_dependency.clone(),
+            SemanticVectorReconstructionRecipe {
+                source_manifest_digest: digest::<SemanticVectorSourceManifestDigest>('1'),
+                embedding_projection_digest: SemanticEmbeddingProjectionDigestV1::new(
+                    canonical_sha256(&self.embedding).unwrap().as_str(),
+                )
+                .unwrap(),
+                embedding_dimension: u16::try_from(self.embedding.embedding_key().dimensions)
+                    .expect("fixture embedding dimension fits recipe"),
+                model_artifact_digest: SemanticModelArtifactDigestV1::new(
+                    self.embedding
+                        .embedding_key()
+                        .model_artifact_digest
+                        .as_str(),
+                )
+                .unwrap(),
+                projection_manifest_digest: SemanticProjectionManifestDigestV1::new(
+                    self.embedding.projection_key().profile_digest.as_str(),
+                )
+                .unwrap(),
+                privacy_domain_digest: SemanticPrivacyDomainDigestV1::new(
+                    canonical_sha256(self.embedding.privacy_domain())
+                        .unwrap()
+                        .as_str(),
+                )
+                .unwrap(),
+                privacy_key_epoch: self.embedding.privacy_key_epoch(),
+                expected_chunk_manifest_digest: manifest,
+            },
+            chunk_count,
+            None,
+            digest::<SemanticVectorCheckpointDigest>('9'),
+            SemanticVectorWriterFence {
+                binding: self.graph.binding.clone(),
+            },
+        )
+        .unwrap()
+    }
+
+    pub fn page_batch_and_receipt(
+        &self,
+        plan: &SemanticVectorStagePlan,
+        name: &str,
+        ordinal: u64,
+        start: u64,
+        count: u64,
+        expected_checkpoint: SemanticVectorCheckpointDigest,
+        next_checkpoint: SemanticVectorCheckpointDigest,
+        marker: f32,
+    ) -> (GraphWriteBatch, SemanticVectorStageBatchReceipt) {
+        let mut chunks = Vec::with_capacity(usize::try_from(count).unwrap());
+        let mut page_chunks = Vec::with_capacity(chunks.capacity());
+        for index in start..start.saturating_add(count) {
+            let chunk_id = page_chunk_id(name, index);
+            let chunk_digest = unique_digest::<SemanticVectorChunkDigest>(index);
+            let dimension = usize::try_from(self.embedding.embedding_key().dimensions).unwrap();
+            let values = vec![marker; dimension];
+            let output_digest = SemanticVectorOutputDigest::new(
+                semantic_vector_output_digest(
+                    self.embedding.projection_key(),
+                    &CodeSearchChunkId::try_from(chunk_id.as_str().to_owned()).unwrap(),
+                    &ContentDigest::try_from(chunk_digest.as_str().to_owned()).unwrap(),
+                    &values,
+                )
+                .unwrap()
+                .as_str(),
+            )
+            .unwrap();
+            page_chunks.push((
+                chunk_id.clone(),
+                chunk_digest.clone(),
+                output_digest.clone(),
+                values,
+            ));
+            chunks.push(SemanticVectorStageChunkReceipt {
+                effect_ordinal: u32::try_from(index.saturating_sub(start)).unwrap(),
+                chunk_id,
+                chunk_digest,
+                operation: SemanticVectorStageChunkOperation::Embed,
+                output_digest: Some(output_digest),
+            });
+        }
+        let mutations = canonical_page_mutations(
+            plan,
+            &self.embedding,
+            ordinal,
+            start.saturating_add(count),
+            &page_chunks,
+        );
+        let mut batch = GraphWriteBatch::new(
+            GraphNamespace::new(plan.key.projection.namespace.as_str()).unwrap(),
+            GraphProjectionId::new(plan.key.projection.projection.as_str()).unwrap(),
+            SourceGeneration::new(plan.source_generation.as_str()).unwrap(),
+            GraphWatermark::new(format!(
+                "watermark.{}.{}",
+                plan.key.build_id.as_str(),
+                ordinal
+            ))
+            .unwrap(),
+            mutations,
+            Arc::new(TestCancellation),
+        )
+        .unwrap();
+        let output = batch.semantic_vector_output_digest().unwrap();
+        let receipt = SemanticVectorStageBatchReceipt::new(
+            SemanticVectorStageBatchKey {
+                stage: plan.key.clone(),
+                ordinal,
+            },
+            expected_checkpoint,
+            unique_digest::<SemanticVectorBatchInputDigest>(10_000 + ordinal),
+            output,
+            next_checkpoint,
+            chunks,
+        )
+        .unwrap();
+        (batch, receipt)
+    }
+
+    pub fn append(
+        &self,
+        authority: &mut SemanticVectorStagingExactSqlStorage,
+        plan: &SemanticVectorStagePlan,
+        receipt: &SemanticVectorStageBatchReceipt,
+        suffix: &str,
+    ) {
+        with_context(&format!("{suffix}.append"), |context| {
+            authority
+                .append_stage_batch(receipt, &plan.writer_fence, context)
+                .unwrap();
+        });
     }
 
     pub fn semantic_entity_reference(&self, plan: &SemanticVectorStagePlan) -> GraphEntityRef {
@@ -799,6 +982,191 @@ fn canonical_native_mutations(
         .collect()
 }
 
+fn page_chunk_id(name: &str, index: u64) -> SemanticVectorChunkId {
+    SemanticVectorChunkId::new(format!("chunk.{name}.{index:05}")).unwrap()
+}
+
+fn unique_digest<T: TryFrom<String>>(index: u64) -> T
+where
+    T::Error: std::fmt::Debug,
+{
+    T::try_from(format!("sha256:{index:064x}")).unwrap()
+}
+
+fn canonical_page_mutations(
+    plan: &SemanticVectorStagePlan,
+    embedding: &AdmittedEmbeddingProjectionKeyV1,
+    ordinal: u64,
+    applied_rows: u64,
+    page_chunks: &[(
+        SemanticVectorChunkId,
+        SemanticVectorChunkDigest,
+        SemanticVectorOutputDigest,
+        Vec<f32>,
+    )],
+) -> Vec<GraphMutation> {
+    let generation = plan.semantic_generation_id.as_digest().as_str();
+    let owner_id = format!("semantic-vector:generation:{generation}");
+    let receipt_id = scoped_id("generation-receipt", generation, &ordinal.to_string());
+    let applied = i64::try_from(applied_rows).unwrap();
+    let mut entities = vec![
+        entity(
+            "semantic-vector:control",
+            &["semantic-vector-control-v1"],
+            [(
+                "revision",
+                GraphProperty::I64(i64::try_from(ordinal).unwrap() + 1),
+            )],
+        ),
+        entity(
+            &owner_id,
+            &["semantic-vector-generation-v1"],
+            [
+                ("generation_id", string(generation)),
+                ("target_projection", bytes(embedding.projection_key())),
+                ("source_generation", string(plan.source_generation.as_str())),
+                (
+                    "source_manifest",
+                    string(plan.recipe.source_manifest_digest.as_str()),
+                ),
+                ("base_generation", string("")),
+                ("embedding_key", bytes(embedding)),
+                ("checkpoint", bytes(&plan.initial_checkpoint_digest)),
+                ("manifest_digest", string(generation)),
+                ("row_count", GraphProperty::I64(applied)),
+                (
+                    "vector_bytes",
+                    GraphProperty::I64(
+                        applied.saturating_mul(
+                            i64::try_from(
+                                page_chunks
+                                    .first()
+                                    .map(|(_, _, _, values)| values.len().saturating_mul(4))
+                                    .unwrap_or(0),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                ),
+                ("tombstone_count", GraphProperty::I64(0)),
+                (
+                    "receipt_count",
+                    GraphProperty::I64(i64::try_from(ordinal).unwrap() + 1),
+                ),
+            ],
+        ),
+        entity(
+            &receipt_id,
+            &["semantic-vector-generation-receipt-v1"],
+            [
+                ("generation_id", string(generation)),
+                (
+                    "receipt",
+                    bytes(&page_projection_receipt(plan, embedding, page_chunks)),
+                ),
+                (
+                    "ordinal",
+                    GraphProperty::I64(i64::try_from(ordinal).unwrap()),
+                ),
+            ],
+        ),
+    ];
+    let mut relations = vec![
+        relation(
+            "semantic-vector:control",
+            &owner_id,
+            "semantic_vector_generation_catalog",
+            "generation-catalog",
+        ),
+        relation(&owner_id, &receipt_id, "semantic_vector_contains", "batch"),
+    ];
+    for (chunk_id, chunk_digest, output_digest, values) in page_chunks {
+        let effect_id = scoped_id("generation-vector", generation, chunk_id.as_str());
+        entities.push(entity(
+            &effect_id,
+            &[
+                "semantic-vector-generation-vector-v1",
+                &format!("semantic-vector-generation:{generation}"),
+            ],
+            [
+                ("generation_id", string(generation)),
+                ("chunk_id", string(chunk_id.as_str())),
+                ("chunk_digest", string(chunk_digest.as_str())),
+                ("output_digest", string(output_digest.as_str())),
+                (
+                    &format!("vector:{generation}"),
+                    GraphProperty::Vector(
+                        GraphVector::new(values.clone(), values.len(), VectorMetric::Cosine)
+                            .unwrap(),
+                    ),
+                ),
+            ],
+        ));
+        relations.push(relation(
+            &owner_id,
+            &effect_id,
+            "semantic_vector_contains",
+            "vector",
+        ));
+    }
+    entities
+        .into_iter()
+        .map(GraphMutation::UpsertEntity)
+        .chain(relations.into_iter().map(GraphMutation::UpsertRelation))
+        .collect()
+}
+
+fn page_projection_receipt(
+    plan: &SemanticVectorStagePlan,
+    embedding: &AdmittedEmbeddingProjectionKeyV1,
+    page_chunks: &[(
+        SemanticVectorChunkId,
+        SemanticVectorChunkDigest,
+        SemanticVectorOutputDigest,
+        Vec<f32>,
+    )],
+) -> ProjectionBatchReceiptV1 {
+    let request_digest = digest::<ManifestDigest>('f');
+    let source_generation =
+        CodeGenerationId::try_from(plan.source_generation.as_str().to_owned()).unwrap();
+    let source_manifest_digest =
+        ManifestDigest::try_from(plan.recipe.source_manifest_digest.as_str().to_owned()).unwrap();
+    let mut receipts = page_chunks
+        .iter()
+        .map(
+            |(chunk_id, chunk_digest, output_digest, _)| CodeChunkProjectionReceiptV1 {
+                projection_key: embedding.projection_key().clone(),
+                request_digest: request_digest.clone(),
+                prior_generation: None,
+                source_generation: source_generation.clone(),
+                source_manifest_digest: source_manifest_digest.clone(),
+                chunk_id: CodeSearchChunkId::try_from(chunk_id.as_str().to_owned()).unwrap(),
+                prior_chunk_digest: None,
+                current_chunk_digest: Some(
+                    ContentDigest::try_from(chunk_digest.as_str().to_owned()).unwrap(),
+                ),
+                operation: ProjectionOperationV1::Added,
+                outcome: ProjectionOutcomeV1::Applied,
+                output_digest: Some(
+                    ContentDigest::try_from(output_digest.as_str().to_owned()).unwrap(),
+                ),
+            },
+        )
+        .collect::<Vec<_>>();
+    receipts.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
+    let mut receipt = ProjectionBatchReceiptV1 {
+        target_projection_key: embedding.projection_key().clone(),
+        request_digest,
+        source_generation,
+        source_manifest_digest,
+        receipts,
+        reused_count: 0,
+        publication_digest: digest('0'),
+    };
+    receipt.publication_digest = projection_batch_publication_digest(&receipt).unwrap();
+    receipt
+}
+
 fn projection_receipt(
     plan: &SemanticVectorStagePlan,
     embedding: &AdmittedEmbeddingProjectionKeyV1,
@@ -894,7 +1262,7 @@ fn bytes(value: &impl serde::Serialize) -> GraphProperty {
     GraphProperty::Bytes(serde_json::to_vec(value).unwrap())
 }
 
-fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
+fn admitted_embedding_with_dimensions(dimensions: u32) -> AdmittedEmbeddingProjectionKeyV1 {
     EmbeddingProjectionKeyV1 {
         model_artifact_digest: digest('a'),
         tokenizer_digest: digest('b'),
@@ -907,7 +1275,7 @@ fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
         runtime_backend: "fixture-runtime".to_owned(),
         runtime_build_revision: "fixture-runtime.v1".to_owned(),
         device_class: EmbeddingDeviceClassV1::Cpu,
-        dimensions: 3,
+        dimensions,
         metric: EmbeddingMetricV1::Cosine,
         normalization: EmbeddingNormalizationV1::L2,
         precision: EmbeddingPrecisionV1::Fp32,

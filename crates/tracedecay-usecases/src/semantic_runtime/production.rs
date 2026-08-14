@@ -631,11 +631,13 @@ impl ProductionSemanticRuntimeV1 {
             .await
             .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let replay_elapsed = elapsed_micros(replay_started);
-        if replay_store
-            .generation(&clean_publication.generation_id, Arc::clone(&cancellation))
+        if !replay_store
+            .published_generation_is_visible(
+                &clean_publication.generation_id,
+                Arc::clone(&cancellation),
+            )
             .await
             .map_err(SemanticRuntimeScheduleFailureV1::projection)?
-            .is_none()
         {
             return Err(SemanticRuntimeScheduleFailureV1::projection(
                 "clean evaluation publication is not visible after publish",
@@ -836,10 +838,9 @@ impl ProductionSemanticRuntimeV1 {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         };
         if cancellation_store
-            .generation(&cancellation_generation, Arc::clone(&cancellation))
+            .published_generation_is_visible(&cancellation_generation, Arc::clone(&cancellation))
             .await
             .map_err(SemanticRuntimeScheduleFailureV1::projection)?
-            .is_some()
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -861,10 +862,9 @@ impl ProductionSemanticRuntimeV1 {
         let cancellation_after_store = GraphVectorGenerationStoreV1::open(&deletion_retained)
             .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         if cancellation_after_store
-            .generation(&cancellation_generation, Arc::clone(&cancellation))
+            .published_generation_is_visible(&cancellation_generation, Arc::clone(&cancellation))
             .await
             .map_err(SemanticRuntimeScheduleFailureV1::projection)?
-            .is_some()
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -2403,11 +2403,10 @@ async fn publish_evaluation_projection_case_isolated(
         .publish_generation(&build, Arc::clone(cancellation))
         .await
         .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
-    if store
-        .generation(&publication.generation_id, Arc::clone(cancellation))
+    if !store
+        .published_generation_is_visible(&publication.generation_id, Arc::clone(cancellation))
         .await
         .map_err(SemanticRuntimeScheduleFailureV1::projection)?
-        .is_none()
     {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);
     }

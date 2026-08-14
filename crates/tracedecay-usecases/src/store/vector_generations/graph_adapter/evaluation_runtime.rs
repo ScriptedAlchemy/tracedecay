@@ -59,6 +59,17 @@ use support::{
 };
 
 const POST_COMMIT_SETTLEMENT_DEADLINE: Duration = Duration::from_secs(30);
+/// Isolated measurement graphs hash and settle a 10x corpus (~21700 × 768-d
+/// pages). Production `GRAPH_OPERATION_DEADLINE` (30s) stays on the live
+/// graph; this ceiling is eval-scoped and sized for that workload.
+const EVALUATION_GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(15 * 60);
+
+fn evaluation_operation_deadline(requested: Instant) -> Instant {
+    Instant::now()
+        .checked_add(EVALUATION_GRAPH_OPERATION_DEADLINE)
+        .map(|eval| eval.max(requested))
+        .unwrap_or(requested)
+}
 
 #[derive(Debug)]
 struct EvaluationGraphLeaseV1 {
@@ -507,6 +518,7 @@ impl IsolatedSemanticEvaluationGraphV1 {
             &GraphPublicationOperationContextV1<'_>,
         ) -> Result<T, GraphDbError>,
     ) -> Result<T, GraphDbError> {
+        let deadline = evaluation_operation_deadline(deadline);
         let sequence = self.operation_sequence.fetch_add(1, Ordering::AcqRel) + 1;
         let cancellation_identity = RuntimeCancellationIdentityV1 {
             cancellation_id: RuntimeCancellationIdV1::new(format!(
@@ -1021,6 +1033,20 @@ mod settlement_tests {
             replay_source.len() < 64 * 1024,
             "identity receipt must stay far under the 4 MiB replay bound, got {} bytes",
             replay_source.len()
+        );
+    }
+
+    #[test]
+    fn evaluation_operation_deadline_is_eval_scoped_not_production_30s() {
+        let requested = Instant::now() + Duration::from_secs(30);
+        let eval = evaluation_operation_deadline(requested);
+        assert!(
+            eval.duration_since(Instant::now()) > Duration::from_secs(10 * 60),
+            "isolated evaluation must keep a measurement-sized operation ceiling"
+        );
+        assert!(
+            eval >= requested,
+            "eval deadline must not shrink a longer caller deadline"
         );
     }
 }

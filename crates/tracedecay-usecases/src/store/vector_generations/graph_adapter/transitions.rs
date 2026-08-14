@@ -38,7 +38,7 @@ use super::super::{
 use super::native_records::{
     NativeGraphStateV1, ScopedBuildRecordsV1, ScopedGenerationRecordsV1,
     encode_generation_batch_delta, read_build_records, read_cataloged_generation_records,
-    read_state_metadata,
+    read_generation_publication_pointer, read_state_metadata,
 };
 use super::persistence::{map_graph_error, storage_error};
 use super::stage_identity::next_stage_attempt;
@@ -407,19 +407,13 @@ impl GraphVectorGenerationStoreV1 {
         }
         let generation_id = VectorGenerationIdV1::new(generation_identity_digest(plan)?);
         let read = super::snapshot::SemanticVectorVerifiedReadV1::new(snapshot.clone());
-        let generation =
-            read_cataloged_generation_records(&read, &generation_id, authority.cancellation())?
+        let publication =
+            read_generation_publication_pointer(&read, &generation_id, authority.cancellation())?
                 .ok_or_else(|| {
-                    VectorGenerationStoreErrorV1::ResetRequired(
-                        "published semantic vector stage has no exact generation records"
-                            .to_owned(),
-                    )
-                })?;
-        let publication = VectorGenerationPublicationV1 {
-            generation_id,
-            manifest_digest: generation.generation.manifest_digest().clone(),
-            checkpoint: generation.generation.checkpoint().clone(),
-        };
+                VectorGenerationStoreErrorV1::ResetRequired(
+                    "published semantic vector stage has no exact generation records".to_owned(),
+                )
+            })?;
         self.install_snapshot(snapshot)?;
         Ok(publication)
     }

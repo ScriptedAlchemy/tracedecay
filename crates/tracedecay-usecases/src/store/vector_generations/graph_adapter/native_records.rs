@@ -32,17 +32,19 @@ mod catalog;
 mod scoped;
 mod support;
 
-pub(super) use catalog::{read_generation_catalog, read_generation_catalog_entry};
+pub(super) use catalog::{
+    read_generation_catalog, read_generation_catalog_entry, read_generation_publication_pointer,
+};
 pub(super) use scoped::{
     ScopedBuildRecordsV1, ScopedGenerationRecordsV1, read_build_records, read_generation_records,
 };
 
 use support::{
     build_entity_id, build_id, bytes_property, content_digest, corrupt, digest, entity, entity_id,
-    generation_entity_id, generation_id, graph_label, i64_property, insert_entity, insert_relation,
-    optional_bytes, optional_digest_property, optional_generation, parse_id, properties, relation,
-    relation_kind, require_labels, required_bytes, required_property, required_string,
-    required_u64, scoped_entity_id, string_property,
+    generation_entity_id, generation_id, generation_receipt_property, graph_label, i64_property,
+    insert_entity, insert_relation, optional_bytes, optional_digest_property, optional_generation,
+    parse_id, properties, relation, relation_kind, require_labels, required_bytes,
+    required_property, required_string, required_u64, scoped_entity_id, string_property,
 };
 
 pub(super) fn read_cataloged_generation_records(
@@ -272,7 +274,7 @@ pub(super) fn encode_generation_batch_delta(
                     GENERATION_ID,
                     string_property(generation_id.as_digest().as_str()),
                 ),
-                (RECEIPT, bytes_property(&committed.receipt)?),
+                (RECEIPT, generation_receipt_property(&committed.receipt)?),
                 (ORDINAL, i64_property(ordinal)?),
             ],
         )?,

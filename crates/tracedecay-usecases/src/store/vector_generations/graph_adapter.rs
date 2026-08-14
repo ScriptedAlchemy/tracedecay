@@ -36,7 +36,7 @@ pub(super) mod transitions;
 
 use native_records::{
     read_build_records, read_cataloged_generation_records, read_generation_catalog,
-    read_generation_metadata, read_state_metadata,
+    read_generation_catalog_entry, read_generation_metadata, read_state_metadata,
 };
 use persistence::{
     check_cancelled, generation_label, map_graph_error, resident_size_overflow, storage_error,
@@ -458,6 +458,18 @@ impl GraphVectorGenerationStoreV1 {
         };
         read_cataloged_generation_records(&snapshot, generation_id, cancellation)
             .map(|records| records.map(|records| records.generation))
+    }
+
+    /// Catalog/owner visibility only — does not hydrate resident vectors.
+    pub async fn published_generation_is_visible(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        let Some(snapshot) = self.optional_snapshot()? else {
+            return Ok(false);
+        };
+        Ok(read_generation_catalog_entry(&snapshot, generation_id, cancellation)?.is_some())
     }
 
     pub fn verified_revision(

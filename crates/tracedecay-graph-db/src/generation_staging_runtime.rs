@@ -513,6 +513,7 @@ fn batch_idempotency_key(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use super::{
@@ -527,6 +528,54 @@ mod tests {
         SemanticVectorBatchOutputDigest, SemanticVectorBatchReceiptDigest,
         SemanticVectorGraphBatchDigest,
     };
+
+    #[test]
+    fn production_width_vector_page_stays_inside_named_graph_budgets() {
+        use crate::{
+            GraphEntity, GraphEntityId, GraphLabel, GraphMutation, GraphProperty,
+            GraphPropertyName, GraphVector, VectorMetric,
+        };
+
+        let page = 512usize;
+        let dimension = 768usize;
+        let values = vec![0.125_f32; dimension];
+        let mut mutations = Vec::with_capacity(page);
+        for index in 0..page {
+            mutations.push(GraphMutation::UpsertEntity(
+                GraphEntity::new(
+                    GraphEntityId::new(format!("vector-{index}")).unwrap(),
+                    BTreeSet::from([
+                        GraphLabel::new("semantic-vector-generation-vector-v1").unwrap()
+                    ]),
+                    BTreeMap::from([(
+                        GraphPropertyName::new("vector").unwrap(),
+                        GraphProperty::Vector(
+                            GraphVector::new(values.clone(), dimension, VectorMetric::Cosine)
+                                .unwrap(),
+                        ),
+                    )]),
+                )
+                .expect("512 x 768-d vector entities must stay inside property budgets"),
+            ));
+        }
+        assert_eq!(
+            require_staged_batch_mutation_count(mutations.len()),
+            Ok(()),
+            "a production-width page must stay inside the mutation budget"
+        );
+        let mut batch = GraphWriteBatch::new(
+            GraphNamespace::new("logical.semantic").unwrap(),
+            GraphProjectionId::new("projection.semantic").unwrap(),
+            SourceGeneration::new("source.semantic").unwrap(),
+            GraphWatermark::new("watermark.semantic").unwrap(),
+            mutations,
+            Arc::new(NeverCancelled),
+        )
+        .expect("production-width page must construct");
+        batch
+            .semantic_vector_output_digest()
+            .expect("production-width page digest must stay inside the 32 MiB write budget");
+    }
 
     #[test]
     fn semantic_vector_stage_rejects_more_than_one_bounded_native_batch() {
