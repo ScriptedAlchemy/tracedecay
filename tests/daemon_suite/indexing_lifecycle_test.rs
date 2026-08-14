@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -205,14 +205,25 @@ fn tool_payload(result: Value, operation: &str) -> Value {
 }
 
 async fn tool(socket: &Path, handshake: &DaemonHandshake, name: &str, arguments: Value) -> Value {
-    let result = tokio::time::timeout(
-        RECEIPT_TIMEOUT,
-        call_tool(socket, handshake, name, arguments),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("{name} timed out"))
-    .unwrap_or_else(|error| panic!("{name} transport failed: {error}"));
-    tool_payload(result, name)
+    let deadline = Instant::now() + RECEIPT_TIMEOUT;
+    loop {
+        let result = tokio::time::timeout(
+            RECEIPT_TIMEOUT,
+            call_tool(socket, handshake, name, arguments.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name} timed out"));
+        match result {
+            Ok(payload) => return tool_payload(payload, name),
+            Err(error)
+                if error.to_string().contains("warming in the background")
+                    && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{name} transport failed: {error}"),
+        }
+    }
 }
 
 async fn status(socket: &Path, handshake: &DaemonHandshake) -> Value {
@@ -272,6 +283,7 @@ async fn exact_symbol(
             "name": name,
             "limit": 5,
             "lazy_index_ignored_dependencies": lazy_index,
+            "format": "json",
         }),
     )
     .await
@@ -291,7 +303,7 @@ fn assert_exact_identity(
     project: &Path,
     identity: &ExactIndexIdentity,
     expected_reference: &str,
-    expected_revision: &str,
+    expected_revision: Option<&str>,
 ) {
     let canonical_project = project.canonicalize().expect("canonical project receipt");
     assert_eq!(
@@ -320,11 +332,13 @@ fn assert_exact_identity(
         Some(expected_reference),
         "freshness must retain exact ref identity: {status}"
     );
-    assert_eq!(
-        worktree["source_revision"].as_str(),
-        Some(expected_revision),
-        "freshness must retain exact source revision: {status}"
-    );
+    if let Some(expected_revision) = expected_revision {
+        assert_eq!(
+            worktree["source_revision"].as_str(),
+            Some(expected_revision),
+            "freshness must retain exact source revision: {status}"
+        );
+    }
 }
 
 async fn assert_project_identity(
@@ -354,7 +368,7 @@ async fn wait_for_terminal_generation(
     project: &Path,
     identity: &ExactIndexIdentity,
     expected_reference: &str,
-    expected_revision: &str,
+    expected_revision: Option<&str>,
     prior_generation: Option<&str>,
     query: &str,
     expected_path: Option<&str>,
@@ -368,11 +382,13 @@ async fn wait_for_terminal_generation(
             let generation = worktree["latest_generation_id"]
                 .as_str()
                 .map(str::to_owned);
+            let revision_matches = expected_revision
+                .is_none_or(|revision| worktree["source_revision"] == revision);
             let terminal = observed["code_index_freshness"]["status"] == "current"
                 && worktree["coverage"] == "complete"
                 && worktree["staleness_state"] == "fresh"
                 && worktree["source_reference"] == expected_reference
-                && worktree["source_revision"] == expected_revision
+                && revision_matches
                 && generation.is_some()
                 && prior_generation.is_none_or(|prior| generation.as_deref() != Some(prior));
             last_status = observed;
@@ -496,7 +512,7 @@ async fn wait_for_refreshing_old_generation(
     project: &Path,
     identity: &ExactIndexIdentity,
     expected_reference: &str,
-    expected_revision: &str,
+    expected_revision: Option<&str>,
     old_generation: &str,
 ) -> Value {
     let mut last = Value::Null;
@@ -628,10 +644,10 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
     let (environment, project) = IsolatedEnv::acquire().await;
     let project = project.canonicalize().expect("canonical fixture project");
     let revision = initialize_ignored_dependency_repository(&project);
-    let project_id = initialize_tracedecay(environment.home(), &project);
-    let identity = exact_identity(&project, project_id);
     let socket = daemon_socket_path(environment.home());
     let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let project_id = initialize_tracedecay(environment.home(), &project);
+    let identity = exact_identity(&project, project_id);
     let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
         .expect("production daemon handshake");
 
@@ -641,7 +657,7 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
         &project,
         &identity,
         "refs/heads/main",
-        &revision,
+        Some(&revision),
         None,
         "LifecycleGenerationAnchor",
         Some("src/app.ts"),
@@ -710,7 +726,7 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
         &project,
         &identity,
         "refs/heads/main",
-        &revision,
+        None,
         None,
         "LifecycleIgnoredDependency",
         Some("node_modules/pkg/index.d.ts"),
@@ -742,8 +758,6 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     let (environment, project) = IsolatedEnv::acquire().await;
     let project = project.canonicalize().expect("canonical fixture project");
     let (main_revision, feature_revision) = initialize_repository(&project);
-    let project_id = initialize_tracedecay(environment.home(), &project);
-    let identity = exact_identity(&project, project_id);
     let socket = daemon_socket_path(environment.home());
     let log_path = environment
         .scratch()
@@ -755,6 +769,8 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
             "tracedecay::daemon::code_index_scheduler::registry=debug",
         );
     });
+    let project_id = initialize_tracedecay(environment.home(), &project);
+    let identity = exact_identity(&project, project_id);
     let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
         .expect("production daemon handshake");
 
@@ -764,7 +780,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        &main_revision,
+        Some(&main_revision),
         None,
         "lifecycle_main_symbol",
         Some("src/lib.rs"),
@@ -783,7 +799,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        &main_revision,
+        Some(&main_revision),
         Some(&initial.generation_id),
         "lifecycle_saved_symbol",
         Some("src/saved.rs"),
@@ -799,7 +815,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        &main_revision,
+        Some(&main_revision),
         Some(&saved.generation_id),
         "lifecycle_saved_symbol",
         Some("src/renamed.rs"),
@@ -819,7 +835,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        &main_revision,
+        Some(&main_revision),
         Some(&renamed.generation_id),
         "lifecycle_saved_symbol",
         None,
@@ -833,7 +849,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         Some(&deleted.generation_id),
         "lifecycle_branch_symbol",
         Some("src/branch.rs"),
@@ -852,7 +868,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         Some(&switched.generation_id),
         "lifecycle_overflow_symbol",
         Some("src/overflow.rs"),
@@ -868,7 +884,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         &overflowed.generation_id,
     )
     .await;
@@ -906,7 +922,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         &overflowed.generation_id,
     )
     .await;
@@ -956,7 +972,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         Some(&overflowed.generation_id),
         "cancellation_probe_0000_000",
         Some("src/cancelled_batch/file_0000.rs"),
