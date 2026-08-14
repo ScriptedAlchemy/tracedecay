@@ -567,11 +567,18 @@ the commit as attribution evidence.
 
 ### Dashboard, SDK, hosts, and release
 
-- Freeze Rust source first, then run the canonical contract generator and
-  `contracts:check`; never hand-edit generated dashboard contracts.
-- Re-run Automations DOM tests after scheduler schemas are regenerated. Basic
-  browser usability remains required; screen-reader polish is not an RC
-  priority.
+- DONE 2026-08-14: contract freeze verified on the current tree. After Rust
+  source settled, `npm run contracts:generate` then `npm run contracts:check`
+  reproduced the checked-in dashboard contracts byte-identically (no schema
+  drift; generated files unchanged). Isolated `scripts/check-sdk-codegen.sh`
+  (`CARGO_TARGET_DIR=/tmp/contracts-pass-target`) also reproduced the SDK
+  tree with no diff. Never hand-edit generated dashboard contracts.
+- DONE 2026-08-14: Automations DOM tests re-run after that freeze.
+  AutomationsPage, transport, schedulerDispatchScope, RunHistory, and
+  KnowledgeCuration passed 41/41; `npm run typecheck` passed; the full
+  dashboard vitest suite passed 1608/1608 (144 files); production
+  `npm run build` succeeded in 3.09s. Basic browser usability remains
+  required; screen-reader polish is not an RC priority.
 - Regenerate SDK operations/types only after Work, TaskSession, terminal
   problems, source edit, retained surfaces, native topology, and automation are
   mounted and compile together.
