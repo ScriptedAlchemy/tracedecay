@@ -1011,16 +1011,19 @@ async fn serve_broker_socket_client(
                     .map(|id| project_open_error_response(id, &error));
             }
             // Keep catalog-refresh bookkeeping consistent with the regular MCP
-            // server path: initialize and tools/list mark this catalog current,
-            // unless the project graph is still warming, in which case the
-            // catalog answered here is provisional and must not be recorded as
-            // the client's current one.
+            // server path. Only a warming `tools/list` (no published node count)
+            // or an initialize answered while a project graph is still opening
+            // is provisional. `project_node_count` is computed only for
+            // `tools/list`, so treating every `None` as provisional also
+            // skipped projectless initialize (must mark current) and
+            // `notifications/initialized` (must emit a pending refresh).
+            let catalog_is_provisional = match classify_mcp_method(&request.method) {
+                McpMethod::ToolsList => project_node_count.is_none(),
+                McpMethod::Initialize => handshake.project_path.is_some(),
+                _ => false,
+            };
             if let Some(key) = engine
-                .claim_catalog_refresh(
-                    &handshake,
-                    &first_request_line,
-                    project_node_count.is_none(),
-                )
+                .claim_catalog_refresh(&handshake, &first_request_line, catalog_is_provisional)
                 .await
                 && let Err(error) = write_tool_list_changed_notification(&mut transport).await
             {
