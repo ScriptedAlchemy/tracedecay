@@ -333,26 +333,38 @@ pub async fn record_canonical_observation_effect(
         i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
     let output_count = i64::try_from(temporal_output_count)
         .map_err(|_| ProjectionStoreError::SequenceOverflow(u64::MAX))?;
-    conn.execute(
-        "INSERT INTO session_temporal_observation_effects (
+    let inserted = conn
+        .execute(
+            "INSERT INTO session_temporal_observation_effects (
             observation_id, observation_sequence, session_id, receipt_id,
             effect_digest, output_count, recorded_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch() * 1000000)
          ON CONFLICT(observation_id) DO NOTHING",
-        params![
-            observation.observation_id().as_str(),
-            sequence,
-            envelope.relations().session_id().as_str(),
-            observation.receipt().receipt().receipt_id().as_str(),
-            effect_digest.as_str(),
-            output_count,
-        ],
-    )
-    .await
-    .map_err(|error| ProjectionStoreError::Storage {
-        operation: "record canonical temporal observation effect",
-        source: Box::new(error),
-    })?;
+            params![
+                observation.observation_id().as_str(),
+                sequence,
+                envelope.relations().session_id().as_str(),
+                observation.receipt().receipt().receipt_id().as_str(),
+                effect_digest.as_str(),
+                output_count,
+            ],
+        )
+        .await
+        .map_err(|error| ProjectionStoreError::Storage {
+            operation: "record canonical temporal observation effect",
+            source: Box::new(error),
+        })?;
+    // `ON CONFLICT(observation_id) DO NOTHING` reports one changed row when the
+    // effect was newly written and zero when the primary key already held one.
+    // A fresh insert wrote the tuple above inside this transaction, and the
+    // table is insert-only (immutable update/delete triggers plus an authority
+    // guard on insert), so reading it back could only echo these very
+    // parameters. Only the conflict branch can hide a durable row that
+    // disagrees with this derivation, so the read-back comparison — the actual
+    // provenance contract for replayed observations — is confined to it.
+    if inserted == 1 {
+        return Ok(());
+    }
     let mut rows = conn
         .query(
             "SELECT observation_sequence, session_id, receipt_id, effect_digest, output_count

@@ -334,6 +334,7 @@ mod tests {
         SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     };
     use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
+    use tracedecay_store::ProjectionStoreError;
 
     use super::*;
     use crate::observation_projection::apply_provider_usage_effects;
@@ -493,9 +494,33 @@ mod tests {
         let (usage, usage_cursor) = fixture(1, usage_fact(10));
         let usage_sequence = seed_observation(&conn, &usage, &usage_cursor, false).await;
 
+        // Fresh insert. The write path no longer reads every inserted row back,
+        // so the durable tuple is asserted here instead.
         apply_provider_usage_effects(&conn, usage_sequence, &usage)
             .await
             .unwrap();
+        assert_eq!(count(&conn, "observation_provider_usage").await, 1);
+        let mut inserted_rows = conn
+            .query(
+                "SELECT usage_ordinal, observation_sequence, counters_json
+                 FROM observation_provider_usage",
+                (),
+            )
+            .await
+            .unwrap();
+        let inserted = inserted_rows.next().await.unwrap().unwrap();
+        assert_eq!(inserted.get::<i64>(0).unwrap(), 0);
+        assert_eq!(
+            u64::try_from(inserted.get::<i64>(1).unwrap()).unwrap(),
+            usage_sequence
+        );
+        let counters: serde_json::Value =
+            serde_json::from_str(&inserted.get::<String>(2).unwrap()).unwrap();
+        assert_eq!(counters["state"], serde_json::json!("known"));
+        assert_eq!(counters["input_tokens"], serde_json::json!(10));
+        drop(inserted_rows);
+
+        // Identical replay conflicts on the primary key and must converge.
         apply_provider_usage_effects(&conn, usage_sequence, &usage)
             .await
             .unwrap();
@@ -521,6 +546,52 @@ mod tests {
         apply_provider_usage_effects(&conn, sequence, &uncorrelated)
             .await
             .unwrap();
+        assert_eq!(count(&conn, "observation_provider_usage").await, 1);
+    }
+
+    /// A durable row that satisfies the receipt-binding trigger (same
+    /// observation, receipt, sequence, and scope) but disagrees on the
+    /// projected counters must still be rejected. This is the only branch that
+    /// can hide such a row, so it is also the only branch that reads back.
+    #[tokio::test]
+    async fn live_usage_replay_rejects_a_divergent_durable_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let conn = TestConnection::open(&directory.path().join("sessions.db"));
+        ensure_registered_schema(&conn).await.unwrap();
+        let (usage, usage_cursor) = fixture(1, usage_fact(10));
+        let usage_sequence = seed_observation(&conn, &usage, &usage_cursor, false).await;
+        conn.execute(
+            "INSERT INTO observation_provider_usage (
+                projector_version, observation_id, usage_ordinal, receipt_id,
+                observation_sequence, scope_kind, project_id, provider, model_json,
+                native_scope, counter_semantics, counters_json, session_id, turn_id,
+                message_id, request_id, native_kind, native_field, ordering_domain,
+                source_start, source_end, native_timestamp
+             ) VALUES (
+                ?1, ?2, 0, ?3, ?4, 'profile', NULL, 'codex',
+                '{\"state\":\"known\",\"model\":\"gpt-5.6-codex\"}', 'turn', 'delta',
+                '{\"state\":\"known\",\"input_tokens\":999}', 'session.provider-usage', NULL,
+                NULL, NULL, 'token_count', 'payload.info.last_token_usage',
+                'file_bytes', 10, 15, NULL
+             )",
+            params![
+                PROVIDER_USAGE_PROJECTOR_VERSION,
+                usage.observation_id().as_str(),
+                usage.receipt().receipt().receipt_id().as_str(),
+                i64::try_from(usage_sequence).unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let error = apply_provider_usage_effects(&conn, usage_sequence, &usage)
+            .await
+            .expect_err("a divergent durable usage row must not be accepted as a replay");
+
+        assert!(
+            matches!(error, ProjectionStoreError::ProvenanceCollision),
+            "{error:?}"
+        );
         assert_eq!(count(&conn, "observation_provider_usage").await, 1);
     }
 

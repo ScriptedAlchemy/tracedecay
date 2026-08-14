@@ -1133,23 +1133,17 @@ pub(crate) async fn apply_provider_usage_effects(
     if expected.is_empty() {
         return Ok(());
     }
-    let envelope: CanonicalObservationEnvelopeV1 =
-        match serde_json::from_value(observation.payload().clone()) {
-            Ok(envelope) => envelope,
-            Err(_) => return Ok(()),
-        };
     let sequence =
         i64::try_from(sequence).map_err(|_| ProjectionStoreError::SequenceOverflow(sequence))?;
-    let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
-        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-    })?;
-    let source_end = i64::try_from(envelope.evidence().range().end()).map_err(|_| {
-        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-    })?;
-    let (scope_kind, project_id) = provider_usage_scope(observation.scope());
-    for row in expected {
-        conn.execute(
-            "INSERT INTO observation_provider_usage (
+    // A non-empty row set already proves the canonical payload decodes, so the
+    // strict decode inside the context cannot reject an observation the old
+    // lenient `Err(_) => return Ok(())` arm would have accepted.
+    let context = ProviderUsageContext::new(sequence, observation)?;
+    let mut conflicted = Vec::new();
+    for row in &expected {
+        let inserted = conn
+            .execute(
+                "INSERT INTO observation_provider_usage (
                 projector_version, observation_id, usage_ordinal, receipt_id,
                 observation_sequence, scope_kind, project_id, provider, model_json,
                 native_scope, counter_semantics, counters_json, session_id, turn_id,
@@ -1159,35 +1153,52 @@ pub(crate) async fn apply_provider_usage_effects(
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
              ) ON CONFLICT DO NOTHING",
-            params![
-                PROVIDER_USAGE_PROJECTOR_VERSION,
-                observation.observation_id().as_str(),
-                row.usage_ordinal,
-                observation.receipt().receipt().receipt_id().as_str(),
-                sequence,
-                scope_kind,
-                project_id,
-                envelope.provider().as_str(),
-                row.model_json.as_str(),
-                row.native_scope,
-                row.counter_semantics,
-                row.counters_json.as_str(),
-                envelope.relations().session_id().as_str(),
-                envelope.relations().turn_id().map(|id| id.as_str()),
-                envelope.relations().message_id().map(|id| id.as_str()),
-                row.request_id.as_deref(),
-                row.native_kind.as_str(),
-                row.native_field.as_str(),
-                envelope.evidence().ordering_domain().as_str(),
-                source_start,
-                source_end,
-                envelope.evidence().native_timestamp(),
-            ],
-        )
-        .await
-        .map_err(|error| storage("insert provider usage projection", error))?;
+                params![
+                    PROVIDER_USAGE_PROJECTOR_VERSION,
+                    observation.observation_id().as_str(),
+                    row.usage_ordinal,
+                    observation.receipt().receipt().receipt_id().as_str(),
+                    sequence,
+                    context.scope_kind,
+                    context.project_id,
+                    context.envelope.provider().as_str(),
+                    row.model_json.as_str(),
+                    row.native_scope,
+                    row.counter_semantics,
+                    row.counters_json.as_str(),
+                    context.envelope.relations().session_id().as_str(),
+                    context.envelope.relations().turn_id().map(|id| id.as_str()),
+                    context
+                        .envelope
+                        .relations()
+                        .message_id()
+                        .map(|id| id.as_str()),
+                    row.request_id.as_deref(),
+                    row.native_kind.as_str(),
+                    row.native_field.as_str(),
+                    context.envelope.evidence().ordering_domain().as_str(),
+                    context.source_start,
+                    context.source_end,
+                    context.envelope.evidence().native_timestamp(),
+                ],
+            )
+            .await
+            .map_err(|error| storage("insert provider usage projection", error))?;
+        // `ON CONFLICT DO NOTHING` reports one changed row for a fresh insert
+        // and zero when the primary key already held one. A fresh insert wrote
+        // the exact tuple above inside this transaction, and the table is
+        // insert-only (immutable update/delete triggers), so reading it back
+        // could only echo these parameters. Only a conflict can hide a durable
+        // row that disagrees with this derivation, so the verification read is
+        // confined to the rows that actually conflicted.
+        if inserted != 1 {
+            conflicted.push(row);
+        }
     }
-    verify_provider_usage_effects(conn, sequence, observation).await
+    for row in conflicted {
+        verify_provider_usage_row(conn, &context, observation, row).await?;
+    }
+    Ok(())
 }
 
 pub(super) async fn stage_provider_usage_effects(
@@ -1258,6 +1269,49 @@ pub(super) async fn stage_provider_usage_effects(
     Ok(())
 }
 
+/// Provenance shared by every provider-usage row of one observation.
+///
+/// The insert path and the read-back verification need the same decoded
+/// envelope, scope, and source range, so it is decoded once per observation
+/// instead of once per path.
+struct ProviderUsageContext<'a> {
+    sequence: i64,
+    envelope: CanonicalObservationEnvelopeV1,
+    scope_kind: &'static str,
+    project_id: Option<&'a str>,
+    source_start: i64,
+    source_end: i64,
+}
+
+impl<'a> ProviderUsageContext<'a> {
+    fn new(sequence: i64, observation: &'a DurableObservationV1) -> ProjectionStoreResult<Self> {
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_value(observation.payload().clone()).map_err(|_| {
+                ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+            })?;
+        let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
+            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+        })?;
+        let source_end = i64::try_from(envelope.evidence().range().end()).map_err(|_| {
+            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
+        })?;
+        let (scope_kind, project_id) = provider_usage_scope(observation.scope());
+        Ok(Self {
+            sequence,
+            envelope,
+            scope_kind,
+            project_id,
+            source_start,
+            source_end,
+        })
+    }
+}
+
+/// Re-derives every provider-usage row and asserts the durable table agrees.
+///
+/// This is the unconditional replay contract used by [`verify_effect`] for
+/// observations at or below the projection checkpoint; the write path checks
+/// only the rows whose insert actually conflicted.
 async fn verify_provider_usage_effects(
     conn: &impl QueryExecutor,
     sequence: i64,
@@ -1267,21 +1321,22 @@ async fn verify_provider_usage_effects(
     if expected.is_empty() {
         return Ok(());
     }
-    let envelope: CanonicalObservationEnvelopeV1 =
-        serde_json::from_value(observation.payload().clone()).map_err(|_| {
-            ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-        })?;
-    let source_start = i64::try_from(envelope.evidence().range().start()).map_err(|_| {
-        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-    })?;
-    let source_end = i64::try_from(envelope.evidence().range().end()).map_err(|_| {
-        ProjectionStoreError::Contract(ObservationContractError::InvalidCanonicalPayload)
-    })?;
-    let (scope_kind, project_id) = provider_usage_scope(observation.scope());
+    let context = ProviderUsageContext::new(sequence, observation)?;
     for row in &expected {
-        let mut rows = conn
-            .query(
-                "SELECT COUNT(*)
+        verify_provider_usage_row(conn, &context, observation, row).await?;
+    }
+    Ok(())
+}
+
+async fn verify_provider_usage_row(
+    conn: &impl QueryExecutor,
+    context: &ProviderUsageContext<'_>,
+    observation: &DurableObservationV1,
+    row: &ProviderUsageRow,
+) -> ProjectionStoreResult<()> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*)
                  FROM observation_provider_usage
                  WHERE projector_version = ?1 AND observation_id = ?2
                    AND usage_ordinal = ?3 AND receipt_id = ?4
@@ -1294,43 +1349,46 @@ async fn verify_provider_usage_effects(
                    AND turn_id IS ?17 AND message_id IS ?18
                    AND ordering_domain = ?19 AND source_start = ?20
                    AND source_end = ?21 AND native_timestamp IS ?22",
-                params![
-                    PROVIDER_USAGE_PROJECTOR_VERSION,
-                    observation.observation_id().as_str(),
-                    row.usage_ordinal,
-                    observation.receipt().receipt().receipt_id().as_str(),
-                    sequence,
-                    scope_kind,
-                    project_id,
-                    row.model_json.as_str(),
-                    row.native_scope,
-                    row.counter_semantics,
-                    row.counters_json.as_str(),
-                    row.request_id.as_deref(),
-                    row.native_kind.as_str(),
-                    row.native_field.as_str(),
-                    envelope.provider().as_str(),
-                    envelope.relations().session_id().as_str(),
-                    envelope.relations().turn_id().map(|id| id.as_str()),
-                    envelope.relations().message_id().map(|id| id.as_str()),
-                    envelope.evidence().ordering_domain().as_str(),
-                    source_start,
-                    source_end,
-                    envelope.evidence().native_timestamp(),
-                ],
-            )
-            .await
-            .map_err(|error| storage("verify provider usage projection", error))?;
-        let count = rows
-            .next()
-            .await
-            .map_err(|error| storage("verify provider usage projection", error))?
-            .ok_or(ProjectionStoreError::ProvenanceCollision)?
-            .get::<i64>(0)
-            .map_err(|error| storage("verify provider usage projection", error))?;
-        if count != 1 {
-            return Err(ProjectionStoreError::ProvenanceCollision);
-        }
+            params![
+                PROVIDER_USAGE_PROJECTOR_VERSION,
+                observation.observation_id().as_str(),
+                row.usage_ordinal,
+                observation.receipt().receipt().receipt_id().as_str(),
+                context.sequence,
+                context.scope_kind,
+                context.project_id,
+                row.model_json.as_str(),
+                row.native_scope,
+                row.counter_semantics,
+                row.counters_json.as_str(),
+                row.request_id.as_deref(),
+                row.native_kind.as_str(),
+                row.native_field.as_str(),
+                context.envelope.provider().as_str(),
+                context.envelope.relations().session_id().as_str(),
+                context.envelope.relations().turn_id().map(|id| id.as_str()),
+                context
+                    .envelope
+                    .relations()
+                    .message_id()
+                    .map(|id| id.as_str()),
+                context.envelope.evidence().ordering_domain().as_str(),
+                context.source_start,
+                context.source_end,
+                context.envelope.evidence().native_timestamp(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("verify provider usage projection", error))?;
+    let count = rows
+        .next()
+        .await
+        .map_err(|error| storage("verify provider usage projection", error))?
+        .ok_or(ProjectionStoreError::ProvenanceCollision)?
+        .get::<i64>(0)
+        .map_err(|error| storage("verify provider usage projection", error))?;
+    if count != 1 {
+        return Err(ProjectionStoreError::ProvenanceCollision);
     }
     Ok(())
 }

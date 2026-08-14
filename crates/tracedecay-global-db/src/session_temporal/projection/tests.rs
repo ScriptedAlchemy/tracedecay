@@ -16,7 +16,8 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::NeverCancelled;
 use tracedecay_store::{
-    AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
+    AnchoredObservationWrite, ObservationProjection, ObservationProjectionStore, ObservationStore,
+    ObservationWrite, ProjectionSkipReason, ProjectionStoreError,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
     SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshStore,
     SessionRefreshTerminalStateV1, SessionTemporalProjectionBatchV1,
@@ -25,11 +26,12 @@ use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
+use super::record_canonical_observation_effect;
 use crate::session_temporal::GlobalDbSessionTemporalStore;
 use crate::tests::harness::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
 };
-use tracedecay_runtime_core::db::engine::{Executor, TestConnection, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection, params};
 
 fn fixture_session(value: &str) -> SessionId {
     SessionId::new(value).unwrap()
@@ -802,5 +804,183 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
             .await
             .unwrap(),
         progress.committed_batches() as i64
+    );
+}
+
+/// Seeds the receipt and observation rows that
+/// `session_temporal_observation_effects` requires: its insert guard aborts
+/// unless `(observation_id, observation_sequence, receipt_id)` already names a
+/// committed observation.
+async fn seed_effect_observation(conn: &TestConnection, observation: &DurableObservationV1) -> u64 {
+    let receipt = observation.receipt();
+    conn.execute(
+        "INSERT INTO sanitization_receipts
+         (receipt_id, sanitizer_version, payload_digest, receipt_json)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            receipt.receipt().receipt_id().as_str(),
+            receipt.receipt().sanitizer_version().as_str(),
+            observation.payload_reference().digest().as_str(),
+            serde_json::to_string(receipt).unwrap(),
+        ],
+    )
+    .await
+    .unwrap();
+    let cursor = ObservationSourceCursorV1::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        observation.identity().ordering_domain(),
+        observation.identity().position().end(),
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO observations
+         (observation_id, payload_digest, receipt_id, observation_json, committed_cursor_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            observation.observation_id().as_str(),
+            observation.payload_reference().digest().as_str(),
+            receipt.receipt().receipt_id().as_str(),
+            serde_json::to_string(observation).unwrap(),
+            serde_json::to_string(&cursor).unwrap(),
+        ],
+    )
+    .await
+    .unwrap();
+    let mut rows = conn
+        .query(
+            "SELECT sequence FROM observations WHERE observation_id = ?1",
+            params![observation.observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+    let sequence = rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap();
+    u64::try_from(sequence).unwrap()
+}
+
+async fn recorded_effect(
+    conn: &TestConnection,
+    observation: &DurableObservationV1,
+) -> Option<(i64, String, String, i64)> {
+    let mut rows = conn
+        .query(
+            "SELECT observation_sequence, session_id, effect_digest, output_count
+             FROM session_temporal_observation_effects WHERE observation_id = ?1",
+            params![observation.observation_id().as_str()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap()?;
+    Some((
+        row.get::<i64>(0).unwrap(),
+        row.get::<String>(1).unwrap(),
+        row.get::<String>(2).unwrap(),
+        row.get::<i64>(3).unwrap(),
+    ))
+}
+
+async fn open_effect_store(name: &str) -> (TempDir, TestConnection) {
+    let directory = TempDir::new().unwrap();
+    let connection = TestConnection::open(&directory.path().join(format!("{name}.db")));
+    crate::ensure_registered_schema(&connection).await.unwrap();
+    (directory, connection)
+}
+
+/// Case 1 — fresh insert. The write path no longer reads the row back, so this
+/// test carries the assertion the removed read-back used to make on every
+/// single ingest: the durable tuple is exactly the derived one.
+#[tokio::test]
+async fn canonical_effect_insert_persists_the_derived_tuple() {
+    let (_directory, connection) = open_effect_store("effect-fresh-insert").await;
+    let session_id = fixture_session("session.projector.effect-fresh");
+    let (observation, _) = fixture_observation(&session_id, 0, None, false);
+    let sequence = seed_effect_observation(&connection, &observation).await;
+    let effect = ObservationProjection::Skipped(ProjectionSkipReason::NonConversationalRecord);
+
+    record_canonical_observation_effect(&connection, sequence, &observation, &effect)
+        .await
+        .unwrap();
+
+    let (recorded_sequence, recorded_session, digest, output_count) =
+        recorded_effect(&connection, &observation)
+            .await
+            .expect("fresh insert records one effect row");
+    assert_eq!(recorded_sequence, i64::try_from(sequence).unwrap());
+    assert_eq!(recorded_session, session_id.as_str());
+    assert_eq!(output_count, 0);
+    assert!(digest.starts_with("sha256:"), "{digest}");
+}
+
+/// Case 2 — idempotent replay. Re-projecting an observation at or below the
+/// checkpoint conflicts on the primary key, and the conflict branch's
+/// field-by-field comparison must converge instead of erroring.
+#[tokio::test]
+async fn canonical_effect_replay_converges_on_an_identical_row() {
+    let (_directory, connection) = open_effect_store("effect-identical-replay").await;
+    let session_id = fixture_session("session.projector.effect-replay");
+    let (observation, _) = fixture_observation(&session_id, 0, None, false);
+    let sequence = seed_effect_observation(&connection, &observation).await;
+    let effect = ObservationProjection::Skipped(ProjectionSkipReason::NonConversationalRecord);
+
+    record_canonical_observation_effect(&connection, sequence, &observation, &effect)
+        .await
+        .unwrap();
+    let first = recorded_effect(&connection, &observation).await.unwrap();
+
+    record_canonical_observation_effect(&connection, sequence, &observation, &effect)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recorded_effect(&connection, &observation).await,
+        Some(first)
+    );
+}
+
+/// Case 3 — conflict with a divergent payload. The durable row satisfies the
+/// insert guard (same observation, sequence, and receipt) yet disagrees on the
+/// projected effect, so the conflict-only read-back must still reject it.
+#[tokio::test]
+async fn canonical_effect_replay_rejects_a_divergent_durable_row() {
+    let (_directory, connection) = open_effect_store("effect-divergent-row").await;
+    let session_id = fixture_session("session.projector.effect-divergent");
+    let (observation, _) = fixture_observation(&session_id, 0, None, false);
+    let sequence = seed_effect_observation(&connection, &observation).await;
+    connection
+        .execute(
+            "INSERT INTO session_temporal_observation_effects (
+                observation_id, observation_sequence, session_id, receipt_id,
+                effect_digest, output_count, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+            params![
+                observation.observation_id().as_str(),
+                i64::try_from(sequence).unwrap(),
+                session_id.as_str(),
+                observation.receipt().receipt().receipt_id().as_str(),
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                7_i64,
+            ],
+        )
+        .await
+        .unwrap();
+    let effect = ObservationProjection::Skipped(ProjectionSkipReason::NonConversationalRecord);
+
+    let error = record_canonical_observation_effect(&connection, sequence, &observation, &effect)
+        .await
+        .expect_err("a divergent durable effect must not be accepted as a replay");
+
+    assert!(
+        matches!(error, ProjectionStoreError::ProvenanceCollision),
+        "{error:?}"
+    );
+    assert_eq!(
+        recorded_effect(&connection, &observation).await,
+        Some((
+            i64::try_from(sequence).unwrap(),
+            session_id.as_str().to_owned(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            7,
+        ))
     );
 }
