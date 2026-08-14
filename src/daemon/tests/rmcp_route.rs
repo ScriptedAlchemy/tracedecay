@@ -480,6 +480,23 @@ impl ControlledCancellationExecutor {
             release_first: AtomicBool::new(false),
         }
     }
+
+    async fn await_cancellation(&self, cancellation: tracedecay_application::CancellationSignal) {
+        let ordinal = self.started.fetch_add(1, Ordering::SeqCst);
+        if cancellation.is_cancelled() {
+            self.pre_cancelled.fetch_add(1, Ordering::SeqCst);
+        }
+        while !cancellation.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        self.cancellation_observed.fetch_add(1, Ordering::SeqCst);
+        if ordinal == 0 {
+            while !self.release_first.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        self.completed.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[cfg(unix)]
@@ -497,20 +514,7 @@ impl tracedecay_application::ApplicationInvocationExecutor for ControlledCancell
         Box::pin(async move {
             let (context, _) = invocation.into_parts();
             let (_, _, _, cancellation) = context.into_parts();
-            let ordinal = self.started.fetch_add(1, Ordering::SeqCst);
-            if cancellation.is_cancelled() {
-                self.pre_cancelled.fetch_add(1, Ordering::SeqCst);
-            }
-            while !cancellation.is_cancelled() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            self.cancellation_observed.fetch_add(1, Ordering::SeqCst);
-            if ordinal == 0 {
-                while !self.release_first.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            }
-            self.completed.fetch_add(1, Ordering::SeqCst);
+            self.await_cancellation(cancellation).await;
             Err(tracedecay_application::InvocationError::Cancelled)
         })
     }
@@ -522,7 +526,7 @@ impl crate::daemon_client::DaemonInvocationExecutor for ControlledCancellationEx
         &self,
         _request: super::super::DaemonInvocationRequest,
         _deadline: tracedecay_application::Deadline,
-        _cancellation: tracedecay_application::CancellationSignal,
+        cancellation: tracedecay_application::CancellationSignal,
         _policy: crate::daemon_client::InvocationCancellationPolicy,
     ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
         '_,
@@ -531,7 +535,12 @@ impl crate::daemon_client::DaemonInvocationExecutor for ControlledCancellationEx
             crate::daemon_client::DaemonInvocationError,
         >,
     > {
-        Box::pin(async { panic!("controlled RMCP fixture uses application invocation") })
+        Box::pin(async move {
+            self.await_cancellation(cancellation).await;
+            Err(crate::daemon_client::DaemonInvocationError::Cancelled {
+                stage: tracedecay_application::CancellationStage::DuringRead,
+            })
+        })
     }
 
     fn observe_feedback(
@@ -679,8 +688,15 @@ async fn selected_target_rmcp_flushes_response_and_full_disconnect_cancels_targe
     )
     .await
     .expect("open controlled target project");
+    let profile_identity = fixture
+        .engine
+        .store_administration
+        .profile_identity()
+        .expect("controlled target profile identity")
+        .clone();
     let controlled = crate::mcp::McpServer::new_with_context(
         crate::mcp::server::McpServerConstructionContext::direct(graph, None)
+            .with_direct_profile_identity(profile_identity)
             .with_application_invocation_executor(executor.clone()),
     )
     .await;

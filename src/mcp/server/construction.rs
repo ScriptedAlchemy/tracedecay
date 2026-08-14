@@ -256,6 +256,16 @@ impl McpServerConstructionContext {
         self
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
+    pub(crate) fn with_direct_profile_identity(
+        mut self,
+        profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    ) -> Self {
+        self.profile_root = Some(profile_identity.profile_root().to_path_buf());
+        self.profile_identity = Some(profile_identity);
+        self
+    }
+
     pub(crate) fn daemon_owned(
         cg: impl Into<Arc<TraceDecay>>,
         scope_prefix: Option<String>,
