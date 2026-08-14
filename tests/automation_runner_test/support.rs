@@ -404,7 +404,7 @@ impl AgentTaskBackend for JsonBackend {
         assert_eq!(request.task, AgentTaskKind::MemoryCurator);
         assert_request_contract(request, "memory_curator", "memory_curator:v1", "ops");
         assert!(
-            request.prompt.contains("canonical current-fact pairs"),
+            request.prompt.contains("canonical current facts"),
             "runner should build a task prompt from the curation messages"
         );
         assert_eq!(
