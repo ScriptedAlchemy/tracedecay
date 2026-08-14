@@ -713,6 +713,23 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// Stops the managed daemon for `home` and removes its connection artifacts.
+///
+/// Scripted-daemon suites init through the real daemon, then need connection
+/// authority to fall back to their explicit socket; a live managed daemon (or
+/// its stale authority record) would otherwise outrank the scripted endpoint.
+#[allow(dead_code)] // Consumed per-binary; not every suite retires the daemon.
+pub fn stop_managed_daemon(home: &Path) {
+    let home = canonical_existing_path(home);
+    drop(take_managed_daemon(&home));
+    let profile_root = home.join(".tracedecay");
+    let _ = std::fs::remove_file(daemon_authority_path(&profile_root));
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(daemon_socket_path(&home));
+    }
+}
+
 fn take_managed_daemon(home: &Path) -> Option<DaemonProcess> {
     TEST_DAEMONS.with(|daemons| {
         let mut daemons = daemons.borrow_mut();

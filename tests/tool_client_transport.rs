@@ -69,6 +69,9 @@ fn init_project(home: &Path, project: &Path) {
     std::fs::write(project.join("src/lib.rs"), "pub fn marker() {}\n")
         .expect("write project source");
     crate::common::initialize_tracedecay_cli_project(home, project);
+    // These journeys speak to a scripted daemon on an explicit socket; retire
+    // the init daemon so its authority record cannot outrank that endpoint.
+    crate::common::stop_managed_daemon(home);
 }
 
 fn tool_command(home: &Path, project: &Path, socket: &Path, query: &str) -> Command {
@@ -255,6 +258,8 @@ fn generic_tool_rejects_semantic_truncation_envelope_without_output() {
         let envelope = json!({
             "truncated": true,
             "original_chars": 16000,
+            "preview_chars": 2,
+            "preview": "{}",
             "handle": "tool-trunc-1",
         });
         let mut bytes = serde_json::to_vec(&json!({
@@ -286,8 +291,13 @@ fn generic_tool_rejects_semantic_truncation_envelope_without_output() {
     );
 }
 
+/// The request deadline rides to the daemon, which enforces it; the client
+/// reads for a bounded response grace beyond that deadline and never discards
+/// an envelope it actually received. A reply arriving after the caller's
+/// deadline but within the grace is therefore the authoritative outcome, not
+/// an "outcome may be unknown" abort.
 #[test]
-fn generic_tool_never_reply_uses_typed_deadline() {
+fn generic_tool_preserves_late_reply_within_response_grace() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let (_requests, server) = spawn_scripted_daemon(socket.clone(), 1, |mut stream, request| {
         std::thread::sleep(Duration::from_secs(1));
@@ -297,14 +307,18 @@ fn generic_tool_never_reply_uses_typed_deadline() {
     command.env("TRACEDECAY_TOOL_DEADLINE_MS", "200");
     let result = run_command_with_timeout(command, CHILD_TIMEOUT);
     server.join().expect("join fake daemon");
-    assert!(!result.killed_by_harness, "product deadline did not fire");
-    assert!(!result.output.status.success());
-    assert!(result.output.stdout.is_empty());
-    assert!(result.elapsed < Duration::from_secs(2));
-    let stderr = String::from_utf8_lossy(&result.output.stderr);
+    assert!(!result.killed_by_harness, "late reply was not read");
     assert!(
-        stderr.contains("tool request timed out") && stderr.contains("tracedecay_search"),
-        "unexpected timeout error: {stderr}"
+        result.output.status.success(),
+        "received envelope must be honoured, not discarded: {}",
+        String::from_utf8_lossy(&result.output.stderr)
+    );
+    assert!(result.elapsed >= Duration::from_millis(200));
+    assert!(result.elapsed < Duration::from_secs(5));
+    let stdout = String::from_utf8_lossy(&result.output.stdout);
+    assert!(
+        stdout.contains("too-late"),
+        "late payload must be printed: {stdout}"
     );
 }
 
