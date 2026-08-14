@@ -190,12 +190,9 @@ impl GraphVectorGenerationStoreV1 {
                 .map(|snapshot| read_build_records(snapshot, &build_id, Arc::clone(&cancellation)))
                 .transpose()?
                 .flatten();
-            if !rebuild
-                && let Some(existing) = &existing
-                && existing.staged.plan == plan
-            {
-                return Ok(VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id });
-            }
+            // `open()` starts with an empty process-local pending map.
+            // Snapshot-visible builds must still be adopted into pending
+            // before commit_batch; otherwise the store reports UnknownBuild.
             let mut generations = Vec::new();
             if let Some(snapshot) = snapshot.as_ref() {
                 push_required_generation(
@@ -513,11 +510,6 @@ impl GraphVectorGenerationStoreV1 {
             &prepared,
             next_revision,
         )?);
-        let publication = match after.publish_generation(build_id) {
-            Ok(publication) => Some(publication),
-            Err(VectorGenerationStoreErrorV1::IncompleteGeneration) => None,
-            Err(error) => return Err(error),
-        };
         let next_watermark = GraphWatermark::new(format!(
             "semantic-vector-stage:{}:{}",
             pending.stage.next_ordinal,
@@ -540,6 +532,9 @@ impl GraphVectorGenerationStoreV1 {
         let native_output = batch
             .semantic_vector_output_digest()
             .map_err(map_graph_error)?;
+        // A one-batch corpus publishes and removes the staged build. The
+        // stage receipt still has to name those rows, so it must be built
+        // before publish_generation drops them.
         let receipt = stage_batch_receipt(
             &pending.stage,
             &after,
@@ -548,6 +543,11 @@ impl GraphVectorGenerationStoreV1 {
             &checkpoint,
             native_output,
         )?;
+        let publication = match after.publish_generation(build_id) {
+            Ok(publication) => Some(publication),
+            Err(VectorGenerationStoreErrorV1::IncompleteGeneration) => None,
+            Err(error) => return Err(error),
+        };
         self.runtime
             .append_stage_batch(&receipt, batch, &authority)
             .map_err(map_graph_error)?;
