@@ -252,36 +252,35 @@ fn unknown_tool_name_errors() {
 
 #[test]
 fn array_value_collected_via_repetition() {
-    let d = def("context");
+    let d = def("file_metadata");
     let parsed = parse_invocation(
         &d,
         &[
-            "x".to_string(),
-            "--keywords".to_string(),
-            "auth".to_string(),
-            "--keywords".to_string(),
-            "login".to_string(),
+            "--files".to_string(),
+            "src/a.rs".to_string(),
+            "--files".to_string(),
+            "src/b.rs".to_string(),
         ],
     )
     .unwrap();
     // After parse, the second occurrence wraps into an array. finalize is
     // only called via the run path; here we just observe the merged shape.
-    let kw = &parsed.tool_args["keywords"];
-    assert!(kw.is_array(), "expected array, got {kw}");
-    let arr = kw.as_array().unwrap();
+    let files = &parsed.tool_args["files"];
+    assert!(files.is_array(), "expected array, got {files}");
+    let arr = files.as_array().unwrap();
     assert_eq!(arr.len(), 2);
 }
 
 #[test]
 fn finalize_arrays_splits_csv() {
-    let d = def("context");
+    let d = def("file_metadata");
     let mut map = Map::new();
-    map.insert("keywords".to_string(), json!("auth,login,session"));
+    map.insert("files".to_string(), json!("src/a.rs,src/b.rs,src/c.rs"));
     finalize_arrays(&d, &mut map);
-    let arr = map["keywords"].as_array().unwrap();
+    let arr = map["files"].as_array().unwrap();
     assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0], json!("auth"));
-    assert_eq!(arr[2], json!("session"));
+    assert_eq!(arr[0], json!("src/a.rs"));
+    assert_eq!(arr[2], json!("src/c.rs"));
 }
 
 #[test]
@@ -435,19 +434,22 @@ fn args_payload_optional_null_is_absent() {
 
 #[test]
 fn dispatch_routing_keys_bypass_unknown_key_gate() {
-    // Dispatch reads top-level project_root, and LCM response handles can
-    // target a separate live project; these must keep flowing through the gate.
+    // LCM response handles can target a separate live project, and Hermes
+    // may forward cwd; these must keep flowing through the gate.
     let d = def("fact_store_list");
     let parsed = parse_invocation(
         &d,
         &[
             "--args".to_string(),
-            r#"{"project_root":"/tmp/p","response_handle_project_root":"/tmp/r","cwd":"/tmp"}"#
-                .to_string(),
+            r#"{"response_handle_project_root":"/tmp/r","cwd":"/tmp"}"#.to_string(),
         ],
     )
     .unwrap();
-    assert_eq!(parsed.tool_args["project_root"], json!("/tmp/p"));
+    assert_eq!(
+        parsed.tool_args["response_handle_project_root"],
+        json!("/tmp/r")
+    );
+    assert_eq!(parsed.tool_args["cwd"], json!("/tmp"));
 }
 
 #[test]
@@ -582,15 +584,16 @@ fn fact_feedback_bare_helpful_flag_does_not_swallow_note_flag() {
         &[
             "--fact-id".to_string(),
             "5".to_string(),
-            "--helpful".to_string(),
-            "--note".to_string(),
+            "--action".to_string(),
+            "helpful".to_string(),
+            "--reason".to_string(),
             "great context".to_string(),
         ],
     )
     .unwrap();
     assert_eq!(
         parsed.tool_args,
-        json!({ "fact_id": "5", "helpful": true, "note": "great context" })
+        json!({ "fact_id": "5", "action": "helpful", "reason": "great context" })
     );
 }
 

@@ -163,7 +163,7 @@ flags are fine. Parameter names below are the MCP argument names in kebab-case.
 | Tool | Required flags | Common optional flags |
 |---|---|---|
 | `search` | `--query` | `--limit`, `--format` |
-| `context` | `--task` | `--keywords`, `--include-code`, `--max-nodes` |
+| `context` | `--task` | `--include-code`, `--max-nodes`, `--mode` |
 | `body` | `--symbol` | `--limit` |
 | `callers` / `callees` | `--node-id` (from a prior search/context hit) | `--max-depth` |
 | `impact` | `--node-id` | `--max-depth` |
@@ -179,12 +179,13 @@ flags are fine. Parameter names below are the MCP argument names in kebab-case.
 | `affected` | `--files` | — |
 | `diff_context` | `--files` | — |
 | `pr_context` | `--base-ref`, `--head-ref` | — |
-| `fact_store` | `--action`, `--query` (for search) | `--min-trust` |
+| `fact_store_search` | `--query` | `--min-trust` |
+| `fact_store_list` | — | `--limit`, `--min-trust` |
 | `message_search` | `--query` | `--provider`, `--limit` |
 | `retrieve` | `--handle` | — |
 
 Notes on the scalar list: array-of-strings params (e.g. `affected --files`,
-`diff_context --files`, `context --keywords`) accept repetition
+`diff_context --files`, `file_metadata --files`) accept repetition
 (`--files a --files b`) or comma-splitting (`--files a,b`); JSON
 (`--files '["a","b"]'`) also works. `str_replace`'s `--old-str`/`--new-str`
 accept `@file` / `@-` for multi-line bodies.
