@@ -1,8 +1,8 @@
 use super::LspCodeIndexProjectionIdentity;
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ContentDigest, ManifestDigest, ProjectId, RefId, RepositoryId,
-    WorktreeId,
+    CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId, RefId,
+    RepositoryId, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -38,6 +38,7 @@ fn identity() -> LspCodeIndexProjectionIdentity {
         snapshot_digest: id::<ManifestDigest>(&digest('a')),
         invalidation_digest: id::<ManifestDigest>(&digest('b')),
         snapshot_content_digest: id::<ContentDigest>(&digest('c')),
+        document_file_occurrence_id: Some(id::<FileOccurrenceId>("file.lsp-scope")),
         document_content_digest: Some(id::<ContentDigest>(&digest('d'))),
     }
 }
@@ -107,6 +108,10 @@ fn projection_scope_requires_and_uses_the_sealed_generation_identity() {
     assert_eq!(
         admitted.document_content_digest,
         Some(id::<ContentDigest>(&digest('d')))
+    );
+    assert_eq!(
+        admitted.document_file_occurrence_id,
+        Some(id::<FileOccurrenceId>("file.lsp-scope"))
     );
     assert_eq!(admitted.generation, 7);
 }

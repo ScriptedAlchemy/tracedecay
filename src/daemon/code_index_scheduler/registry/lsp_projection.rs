@@ -24,7 +24,7 @@ impl tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 .await
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
             let generation = &current.generation;
-            let document_content_digest = document_relative_path
+            let document_identity = document_relative_path
                 .map(|path| path.replace('\\', "/"))
                 .map(|logical_path| {
                     generation
@@ -32,12 +32,13 @@ impl tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentityPort
                         .files
                         .iter()
                         .find(|file| file.logical_path == logical_path)
-                        .map(|file| file.content_digest.clone())
+                        .map(|file| (file.file_occurrence_id.clone(), file.content_digest.clone()))
                         .ok_or_else(|| {
                             LspRuntimeFailure::new("lsp-code-index-document-unavailable")
                         })
                 })
                 .transpose()?;
+            let (document_file_occurrence_id, document_content_digest) = document_identity.unzip();
             Ok(
                 tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentity {
                     project: generation.manifest().project_id.clone(),
@@ -49,6 +50,7 @@ impl tracedecay_usecases::lsp_runtime::LspCodeIndexProjectionIdentityPort
                     snapshot_digest: generation.manifest().snapshot_digest.clone(),
                     invalidation_digest: generation.manifest().invalidation_digest.clone(),
                     snapshot_content_digest: generation.snapshot().content_identity.clone(),
+                    document_file_occurrence_id,
                     document_content_digest,
                 },
             )

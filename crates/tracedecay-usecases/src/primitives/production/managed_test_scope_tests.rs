@@ -40,6 +40,7 @@ impl LspCodeIndexProjectionIdentityPort for SealedIdentity {
                 snapshot_digest: id::<ManifestDigest>(&digest('a')),
                 invalidation_digest: id::<ManifestDigest>(&digest('b')),
                 snapshot_content_digest: id::<ContentDigest>(&digest('c')),
+                document_file_occurrence_id: None,
                 document_content_digest: None,
             })
         })

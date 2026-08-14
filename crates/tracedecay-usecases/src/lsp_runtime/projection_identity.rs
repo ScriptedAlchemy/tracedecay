@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use tracedecay_application::ResolvedScope;
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ContentDigest, ManifestDigest, ProjectId, RefId, RepositoryId,
-    WorktreeId,
+    CodeGenerationId, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, ProjectId, RefId,
+    RepositoryId, WorktreeId,
 };
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
@@ -23,6 +23,7 @@ pub struct LspCodeIndexProjectionIdentity {
     pub snapshot_digest: ManifestDigest,
     pub invalidation_digest: ManifestDigest,
     pub snapshot_content_digest: ContentDigest,
+    pub document_file_occurrence_id: Option<FileOccurrenceId>,
     pub document_content_digest: Option<ContentDigest>,
 }
 
@@ -57,6 +58,7 @@ impl LspCodeIndexProjectionIdentity {
             snapshot_digest: self.snapshot_digest,
             invalidation_digest: self.invalidation_digest,
             snapshot_content_digest: self.snapshot_content_digest,
+            document_file_occurrence_id: self.document_file_occurrence_id,
             document_content_digest: self.document_content_digest,
             document_relative_path: None,
             generation,

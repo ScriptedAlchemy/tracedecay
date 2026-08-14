@@ -33,7 +33,8 @@ use tracedecay_domain::feedback::{
     ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, ManifestDigest, UtcMicros,
+    CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, FileOccurrenceId,
+    ManifestDigest, UtcMicros,
 };
 use tracedecay_lsp::analyzer::adapters::{LspAdapterDefinition, builtin_adapters};
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
@@ -95,10 +96,11 @@ pub struct LspFeedbackProjectionScope {
     pub snapshot_digest: ManifestDigest,
     pub invalidation_digest: ManifestDigest,
     pub snapshot_content_digest: ContentDigest,
+    /// Canonical sealed file identity for a document-scoped request.
+    pub document_file_occurrence_id: Option<FileOccurrenceId>,
     pub document_content_digest: Option<ContentDigest>,
-    /// Canonical project-relative document identity for a document-scoped
-    /// request. Findings from another file must never receive an expansion
-    /// handle for this document.
+    /// Project-relative path for path-addressed external findings. Sealed
+    /// code-index findings use `document_file_occurrence_id`.
     pub document_relative_path: Option<String>,
     pub generation: u64,
 }
@@ -2613,14 +2615,17 @@ fn finding_matches_document(
     scope: &LspFeedbackProjectionScope,
     impact_target_file: Option<&tracedecay_domain::FileOccurrenceId>,
 ) -> bool {
-    let Some(document_relative_path) = scope.document_relative_path.as_deref() else {
-        return true;
-    };
     let finding_file = finding
         .diagnostic_projection
         .as_ref()
         .map(|projection| &projection.file)
         .or(impact_target_file);
+    if let Some(document_file) = scope.document_file_occurrence_id.as_ref() {
+        return finding_file == Some(document_file);
+    }
+    let Some(document_relative_path) = scope.document_relative_path.as_deref() else {
+        return true;
+    };
     finding_file.is_some_and(|file| file.as_str() == document_relative_path)
 }
 
@@ -3160,6 +3165,7 @@ mod context_expansion_tests {
                 record.identity.snapshot_content_digest.clone(),
             )
             .expect("snapshot content digest"),
+            document_file_occurrence_id: None,
             document_content_digest: record
                 .identity
                 .document_content_digest
@@ -3253,6 +3259,9 @@ mod projection_tests {
                 .expect("invalidation digest"),
             snapshot_content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64)))
                 .expect("snapshot content digest"),
+            document_file_occurrence_id: Some(
+                FileOccurrenceId::new("src/lib.rs").expect("document file"),
+            ),
             document_content_digest: None,
             document_relative_path: Some("src/lib.rs".to_owned()),
             generation: 42,

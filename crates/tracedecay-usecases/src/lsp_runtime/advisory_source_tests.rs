@@ -159,6 +159,9 @@ fn projection_scope() -> LspFeedbackProjectionScope {
         invalidation_digest: digest('b'),
         snapshot_content_digest: ContentDigest::new(digest('c').as_str().to_owned())
             .expect("snapshot content"),
+        document_file_occurrence_id: Some(
+            FileOccurrenceId::new("src/lib.rs").expect("document file"),
+        ),
         document_content_digest: Some(
             ContentDigest::new(digest('c').as_str().to_owned()).expect("document content"),
         ),

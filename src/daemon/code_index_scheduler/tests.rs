@@ -5690,10 +5690,15 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     )
     .await
     .expect("lsp code-index projection identity");
+    let document_file_occurrence_id = projection_identity
+        .document_file_occurrence_id
+        .clone()
+        .expect("document file occurrence identity");
     let document_content_digest: ContentDigest = projection_identity
         .document_content_digest
         .clone()
         .expect("document content digest");
+    assert_eq!(document_file_occurrence_id, indexed_file);
     assert_eq!(document_content_digest, indexed_digest);
 
     let finding = FeedbackFindingV1 {
@@ -5709,7 +5714,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         result_id: id::<FeedbackResultId>("result.diagnostics.admission"),
         cycle_id: id::<FeedbackCycleId>("cycle.diagnostics.admission"),
         scope: FeedbackScopeV1 {
-            project_id: id("project.diagnostics.admission"),
+            project_id: test_project_id(),
             repository_id: id(record.repository.as_str()),
             worktree_id: id(record
                 .worktree
@@ -5810,6 +5815,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 snapshot_digest: projection_identity.snapshot_digest.clone(),
                 invalidation_digest: projection_identity.invalidation_digest.clone(),
                 snapshot_content_digest: projection_identity.snapshot_content_digest.clone(),
+                document_file_occurrence_id: Some(document_file_occurrence_id.clone()),
                 document_content_digest: Some(document_content_digest.clone()),
                 document_relative_path: Some("src/lib.rs".to_owned()),
                 generation: 1,
@@ -5845,6 +5851,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 snapshot_digest: projection_identity.snapshot_digest,
                 invalidation_digest: projection_identity.invalidation_digest,
                 snapshot_content_digest: projection_identity.snapshot_content_digest,
+                document_file_occurrence_id: Some(document_file_occurrence_id),
                 document_content_digest: Some(document_content_digest),
                 document_relative_path: Some("src/lib.rs".to_owned()),
                 generation: 2,

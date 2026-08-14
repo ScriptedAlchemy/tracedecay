@@ -3110,6 +3110,7 @@ mod affected_tests_tests {
                 snapshot_digest,
                 invalidation_digest: digest('e'),
                 snapshot_content_digest: content('f'),
+                document_file_occurrence_id: None,
                 document_content_digest: None,
             };
             Box::pin(async move { Ok(identity) })
