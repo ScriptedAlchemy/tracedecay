@@ -814,40 +814,6 @@ pub static NIX_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-vbnet")]
-pub static VBNET_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &[
-        "if_statement",
-        "elseif_clause",
-        "else_clause",
-        "select_case_statement",
-        "catch_clause",
-    ],
-    loop_types: &[
-        "for_statement",
-        "for_each_statement",
-        "while_statement",
-        "do_loop_statement",
-    ],
-    return_types: &["return_statement", "exit_statement", "throw_statement"],
-    nesting_types: &["block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["invocation_expression"],
-    call_method_field: "",
-    assertion_names: &[
-        "Assert",
-        "AreEqual",
-        "AreNotEqual",
-        "IsTrue",
-        "IsFalse",
-        "IsNull",
-        "IsNotNull",
-    ],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-powershell")]
 pub static POWERSHELL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &[
@@ -966,51 +932,6 @@ pub static FORTRAN_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-cobol")]
-pub static COBOL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_header", "evaluate_statement", "when_phrase"],
-    loop_types: &["perform_statement_loop"],
-    return_types: &["stop_statement", "goback_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["perform_statement_call_proc"],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-msbasic2")]
-pub static MSBASIC2_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_statement"],
-    loop_types: &["for_statement"],
-    return_types: &["return_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &[],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-gwbasic")]
-pub static GWBASIC_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if_statement"],
-    loop_types: &["for_statement", "while_statement"],
-    return_types: &["return_statement"],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &[],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-qbasic")]
 pub static QBASIC_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["block_if_statement"],
@@ -1047,21 +968,6 @@ pub static R_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     macro_invocation_types: &[],
 };
 
-#[cfg(feature = "lang-sql")]
-pub static SQL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["if", "when_clause"],
-    loop_types: &["loop"],
-    return_types: &["return"],
-    nesting_types: &["block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["invocation"],
-    call_method_field: "",
-    assertion_names: &[],
-    macro_invocation_types: &[],
-};
-
 #[cfg(feature = "lang-julia")]
 pub static JULIA_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     branch_types: &["if_statement", "elseif_clause", "ternary_expression"],
@@ -1075,28 +981,6 @@ pub static JULIA_COMPLEXITY: ComplexityConfig = ComplexityConfig {
     call_method_field: "",
     assertion_names: &["@assert", "assert", "@test", "@test_throws"],
     macro_invocation_types: &["macro_expression"],
-};
-
-#[cfg(feature = "lang-haskell")]
-pub static HASKELL_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["alternative", "guard"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["where"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &["fromJust", "head"],
-    call_expression_types: &["apply"],
-    call_method_field: "",
-    assertion_names: &[
-        "assertBool",
-        "assertEqual",
-        "assertTrue",
-        "assertFailure",
-        "shouldBe",
-        "shouldSatisfy",
-    ],
-    macro_invocation_types: &[],
 };
 
 #[cfg(feature = "lang-ocaml")]
@@ -1117,51 +1001,6 @@ pub static OCAML_COMPLEXITY: ComplexityConfig = ComplexityConfig {
         "assert_bool",
         "check_bool",
     ],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-clojure")]
-pub static CLOJURE_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["list_lit"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &[],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["list_lit"],
-    call_method_field: "",
-    assertion_names: &["assert", "is", "are", "testing"],
-    macro_invocation_types: &[],
-};
-
-#[cfg(feature = "lang-erlang")]
-pub static ERLANG_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["cr_clause", "if_clause"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["clause_body"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["call"],
-    call_method_field: "",
-    assertion_names: &["assertEqual", "assert", "assertMatch", "assertError"],
-    macro_invocation_types: &["macro_application"],
-};
-
-#[cfg(feature = "lang-elixir")]
-pub static ELIXIR_COMPLEXITY: ComplexityConfig = ComplexityConfig {
-    branch_types: &["stab_clause"],
-    loop_types: &[],
-    return_types: &[],
-    nesting_types: &["do_block"],
-    unsafe_types: &[],
-    unchecked_types: &[],
-    unchecked_methods: &[],
-    call_expression_types: &["call"],
-    call_method_field: "",
-    assertion_names: &["assert", "assert_raise", "assert_receive", "refute"],
     macro_invocation_types: &[],
 };
 
