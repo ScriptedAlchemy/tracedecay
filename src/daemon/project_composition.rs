@@ -228,7 +228,10 @@ pub(super) async fn production_project_server(
         code_index_hint_sink,
     ));
     let code_index_hook_sink = code_index_hook_sink(Arc::clone(&code_index_activation));
-    let code_index_reconcile_sink = code_index_reconcile_sink(Arc::clone(&code_index_activation));
+    let code_index_reconcile_sink = code_index_reconcile_sink(
+        invocation.code_index_schedulers.clone(),
+        Arc::clone(&code_index_activation),
+    );
     // The daemon mounts the same broker the MCP server and the directly
     // served dashboard open: persisted analyzer settings (with a recorded
     // degradation for an unreadable file) plus the home-level OpenCode

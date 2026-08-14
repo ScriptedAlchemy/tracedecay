@@ -272,11 +272,19 @@ pub(super) fn code_index_hook_sink(
 /// MCP-facing reconcile sink: an overflowed hook batch asks the activation
 /// owner for a full reconcile instead of enumerating paths.
 pub(super) fn code_index_reconcile_sink(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     activation: Arc<code_index_scheduler::CodeIndexActivationV1>,
 ) -> crate::mcp::server::CodeIndexReconcileSink {
     let sink: crate::mcp::server::CodeIndexReconcileSink = Arc::new(move |root: PathBuf| {
+        let schedulers = schedulers.clone();
         let activation = Arc::clone(&activation);
-        Box::pin(async move { activation.notify_hook_overflow(&root).await })
+        Box::pin(async move {
+            if schedulers.request_authoritative_reconcile(&root).await {
+                true
+            } else {
+                activation.notify_hook_overflow(&root).await
+            }
+        })
     });
     sink
 }
