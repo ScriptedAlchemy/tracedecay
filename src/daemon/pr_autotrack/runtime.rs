@@ -7,6 +7,7 @@ use tokio::time::Instant;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::daemon::branch_admin::StoreAdministration;
+use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use crate::daemon::log_daemon_event;
 
 use super::{
@@ -45,25 +46,44 @@ impl PrAutotrackTask {
 /// Spawns the PR-autotrack poll loop. Cheap and inert when no registered project
 /// has the feature enabled — each tick consults only daemon-published snapshots.
 pub fn spawn(global_db_path: Option<PathBuf>) -> PrAutotrackTask {
-    spawn_with_administration(global_db_path, StoreAdministration::default())
+    spawn_with_administration(
+        global_db_path,
+        StoreAdministration::default(),
+        inert_schedulers(),
+    )
 }
 
-/// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator.
-/// The coordinator serializes PR additions and destructive branch administration
-/// with every other daemon connection that owns the same store family.
+fn inert_schedulers() -> CodeIndexSchedulerRegistryV1 {
+    CodeIndexSchedulerRegistryV1::with_resident_memory(
+        1,
+        Arc::new(
+            tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
+                tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
+            ),
+        ),
+    )
+}
+
+/// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator
+/// and the retained code-index scheduler used for PR-head worktree activation.
 pub(crate) fn spawn_with_administration(
     _global_db_path: Option<PathBuf>,
     administration: StoreAdministration,
+    schedulers: CodeIndexSchedulerRegistryV1,
 ) -> PrAutotrackTask {
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
     let task = tokio::spawn(async move {
-        run(administration, task_cancellation).await;
+        run(administration, schedulers, task_cancellation).await;
     });
     PrAutotrackTask { cancellation, task }
 }
 
-async fn run(administration: StoreAdministration, cancellation: CancellationToken) {
+async fn run(
+    administration: StoreAdministration,
+    schedulers: CodeIndexSchedulerRegistryV1,
+    cancellation: CancellationToken,
+) {
     let Ok(database) = administration.registered_profile_database().await else {
         return;
     };
@@ -76,6 +96,7 @@ async fn run(administration: StoreAdministration, cancellation: CancellationToke
             database.as_ref(),
             &mut last_poll,
             &administration,
+            &schedulers,
             &cancellation,
         )
         .await;
@@ -90,6 +111,7 @@ async fn tick(
     database: &crate::global_db::RegisteredGlobalDb,
     last_poll: &mut HashMap<PathBuf, Instant>,
     administration: &StoreAdministration,
+    schedulers: &CodeIndexSchedulerRegistryV1,
     cancellation: &CancellationToken,
 ) {
     let window = 14 * 86_400;
@@ -127,13 +149,18 @@ async fn tick(
         }
         last_poll.insert(root.clone(), Instant::now());
         if cfg.auto_track_pr_branches {
-            poll_project(root, administration, cancellation).await;
+            poll_project(root, administration, schedulers, cancellation).await;
         } else {
             // Feature disabled: if it left managed PR state behind (it was on,
             // then turned off), tear that state down once instead of stranding
             // worktrees/refs/branches/stores forever.
-            teardown_disabled_project_with_administration(&root, administration, cancellation)
-                .await;
+            teardown_disabled_project_with_administration(
+                &root,
+                administration,
+                schedulers,
+                cancellation,
+            )
+            .await;
         }
     }
 }
@@ -155,6 +182,7 @@ async fn retained_project_graph(
 async fn poll_project(
     repo_root: PathBuf,
     administration: &StoreAdministration,
+    schedulers: &CodeIndexSchedulerRegistryV1,
     cancellation: &CancellationToken,
 ) {
     let Some(graph) = retained_project_graph(administration, &repo_root).await else {
@@ -193,7 +221,7 @@ async fn poll_project(
         &data_root,
         &discovery,
         MAX_NEW_TRACKS_PER_CYCLE,
-        PrStoreAdministration::with_control(administration, &graph, &command_control),
+        PrStoreAdministration::with_control(schedulers, &graph, &command_control),
     )
     .await;
     let managed = load_state(&data_root).managed.len();
@@ -219,25 +247,33 @@ pub async fn teardown_disabled_project(
     let Ok(administration) = StoreAdministration::for_retained_project_graph(&graph).await else {
         return;
     };
-    teardown_disabled_project_with_graph(repo_root, graph, &administration, None).await;
+    teardown_disabled_project_with_graph(repo_root, graph, &administration, None, None).await;
 }
 
 async fn teardown_disabled_project_with_administration(
     repo_root: &Path,
     administration: &StoreAdministration,
+    schedulers: &CodeIndexSchedulerRegistryV1,
     cancellation: &CancellationToken,
 ) {
     let Some(graph) = retained_project_graph(administration, repo_root).await else {
         return;
     };
-    teardown_disabled_project_with_graph(repo_root, graph, administration, Some(cancellation))
-        .await;
+    teardown_disabled_project_with_graph(
+        repo_root,
+        graph,
+        administration,
+        Some(schedulers),
+        Some(cancellation),
+    )
+    .await;
 }
 
 async fn teardown_disabled_project_with_graph(
     repo_root: &Path,
     graph: Arc<crate::tracedecay::TraceDecay>,
-    administration: &StoreAdministration,
+    _administration: &StoreAdministration,
+    schedulers: Option<&CodeIndexSchedulerRegistryV1>,
     cancellation: Option<&CancellationToken>,
 ) {
     let data_root = graph.store_layout().data_root.clone();
@@ -248,12 +284,22 @@ async fn teardown_disabled_project_with_graph(
         cancellation: cancellation.cloned(),
         ..PrCommandControl::default()
     };
+    let pr_administration = match schedulers {
+        Some(schedulers) => {
+            PrStoreAdministration::with_control(schedulers, &graph, &command_control)
+        }
+        None => PrStoreAdministration {
+            schedulers: None,
+            graph: Some(&graph),
+            command_control: &command_control,
+        },
+    };
     let report = reconcile_project_with_administration(
         repo_root,
         &data_root,
         &PrDiscovery::default(),
         MAX_NEW_TRACKS_PER_CYCLE,
-        PrStoreAdministration::with_control(administration, &graph, &command_control),
+        pr_administration,
     )
     .await;
     log_daemon_event(

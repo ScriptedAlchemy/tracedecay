@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::*;
 
 #[tokio::test]
@@ -296,6 +298,82 @@ async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
     );
     assert!(load_state(data_root.path()).managed.is_empty());
     assert!(!data_root.path().join("pr-worktrees").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
+    use crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    let origin = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    git(repo.path(), &["config", "user.name", "TraceDecay Test"]);
+    git(
+        repo.path(),
+        &["config", "user.email", "tracedecay@example.invalid"],
+    );
+    std::fs::create_dir_all(repo.path().join("src")).unwrap();
+    std::fs::write(repo.path().join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "initial"]);
+    git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    git(
+        repo.path(),
+        &["remote", "add", "origin", origin.path().to_str().unwrap()],
+    );
+    git(repo.path(), &["push", "-q", "origin", "main"]);
+    git(repo.path(), &["checkout", "-q", "-b", "feature-11", "main"]);
+    std::fs::write(repo.path().join("src/pr_11.rs"), "pub fn pr_eleven() {}\n").unwrap();
+    git(repo.path(), &["add", "."]);
+    git(repo.path(), &["commit", "-qm", "PR 11 content"]);
+    git(repo.path(), &["push", "-q", "origin", "feature-11"]);
+    git(
+        origin.path(),
+        &["update-ref", "refs/pull/11/head", "refs/heads/feature-11"],
+    );
+    git(repo.path(), &["checkout", "-q", "main"]);
+    git(repo.path(), &["branch", "-q", "-D", "feature-11"]);
+
+    let graph = Arc::new(
+        crate::tracedecay::TraceDecay::open(repo.path())
+            .await
+            .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let discovery = discover_open_prs(repo.path()).expect("discover PR head");
+    assert_eq!(discovery.open.len(), 1);
+    assert_eq!(discovery.open[0].number, 11);
+
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let command_control = PrCommandControl::default();
+    let report = reconcile_project_with_administration(
+        repo.path(),
+        &data_root,
+        &discovery,
+        10,
+        PrStoreAdministration::with_control(&schedulers, &graph, &command_control),
+    )
+    .await;
+
+    assert_eq!(report.failures, Vec::<(String, String)>::new());
+    assert_eq!(report.tracked, vec![pr_label(11)]);
+    let worktree = data_root.join("pr-worktrees/pr-11");
+    assert!(worktree.is_dir(), "PR head must be checked out");
+    assert!(
+        schedulers.is_worktree_mounted(&worktree).await,
+        "scheduler must mount the registered PR worktree"
+    );
+    assert!(load_state(&data_root).managed.contains_key(&pr_label(11)));
+    schedulers.shutdown().await;
+}
+
+fn git(repo: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .expect("spawn git");
+    assert!(status.success(), "git {args:?} failed");
 }
 
 #[tokio::test]

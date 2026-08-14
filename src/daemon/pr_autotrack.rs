@@ -3,10 +3,12 @@
 //! # What this does
 //!
 //! When a project enables `sync.auto_track_pr_branches`, a daemon poll loop
-//! discovers the open pull requests on the repo's `origin` remote. PR worktree
-//! activation requires the daemon's retained code-index scheduler authority;
-//! this module deliberately fails closed before Git or durable-state mutation
-//! until that authority is injected into the poll runtime.
+//! discovers the open pull requests on the repo's `origin` remote and activates
+//! each same-repo PR head as a registered linked worktree through the daemon's
+//! retained code-index scheduler. Public `reconcile_project` stays fail-closed:
+//! it has no scheduler to inject. The poll runtime receives that authority at
+//! spawn and still refuses Git or durable-state mutation when Git discovery
+//! cannot name a worktree root.
 //!
 //! # Why worktrees
 //!
@@ -30,12 +32,15 @@
 //! forks would mean fetching untrusted `refs/pull/N/head` from arbitrary
 //! repositories; that is deliberately out of scope for the first cut.
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::ProjectId;
+
+use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 
 const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 
@@ -43,6 +48,7 @@ fn scheduler_unavailable(detail: &str) -> String {
     format!("{CODE_INDEX_SCHEDULER_UNAVAILABLE}: {detail}")
 }
 
+#[cfg(test)]
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
 
@@ -51,20 +57,32 @@ pub(super) use runtime::spawn_with_administration;
 pub use runtime::{PrAutotrackTask, spawn, teardown_disabled_project};
 
 #[derive(Clone, Copy)]
-struct PrStoreAdministration;
+struct PrStoreAdministration<'a> {
+    schedulers: Option<&'a CodeIndexSchedulerRegistryV1>,
+    graph: Option<&'a Arc<crate::tracedecay::TraceDecay>>,
+    command_control: &'a PrCommandControl,
+}
 
-impl PrStoreAdministration {
+impl<'a> PrStoreAdministration<'a> {
     fn with_control(
-        _daemon: &StoreAdministration,
-        _graph: &std::sync::Arc<crate::tracedecay::TraceDecay>,
-        _command_control: &PrCommandControl,
+        schedulers: &'a CodeIndexSchedulerRegistryV1,
+        graph: &'a Arc<crate::tracedecay::TraceDecay>,
+        command_control: &'a PrCommandControl,
     ) -> Self {
-        Self
+        Self {
+            schedulers: Some(schedulers),
+            graph: Some(graph),
+            command_control,
+        }
     }
 
     #[cfg(test)]
     fn state_only(_daemon: &StoreAdministration) -> Self {
-        Self
+        Self {
+            schedulers: None,
+            graph: None,
+            command_control: default_pr_command_control(),
+        }
     }
 }
 
@@ -570,7 +588,7 @@ async fn reconcile_project_with_administration(
     data_root: &Path,
     discovery: &PrDiscovery,
     cap: usize,
-    administration: PrStoreAdministration,
+    administration: PrStoreAdministration<'_>,
 ) -> ReconcileReport {
     let mut state = load_state(data_root);
     let mut report = ReconcileReport {
@@ -757,30 +775,262 @@ async fn reconcile_project_with_administration(
     report
 }
 
-/// Refuses PR activation until the daemon injects its retained code-index
-/// scheduler. The refusal precedes fetch, checkout, or durable-state mutation.
+/// Fetches a PR head, checks it out into a linked worktree, and mounts that
+/// worktree on the injected code-index scheduler. Refuses before Git mutation
+/// when the scheduler, retained graph, or Git worktree authority is missing.
 async fn track_pr(
-    _repo_root: &Path,
-    _data_root: &Path,
-    _pr: &DiscoveredPr,
-    _administration: PrStoreAdministration,
+    repo_root: &Path,
+    data_root: &Path,
+    pr: &DiscoveredPr,
+    administration: PrStoreAdministration<'_>,
 ) -> std::result::Result<ManagedPr, String> {
-    Err(scheduler_unavailable(
-        "code-index scheduler authority is unavailable for PR worktree activation",
-    ))
+    let Some(schedulers) = administration.schedulers else {
+        return Err(scheduler_unavailable(
+            "code-index scheduler authority is unavailable for PR worktree activation",
+        ));
+    };
+    let Some(graph) = administration.graph else {
+        return Err(scheduler_unavailable(
+            "code-index scheduler authority is unavailable for PR worktree activation",
+        ));
+    };
+    if crate::worktree::git_worktree_root(repo_root).is_none() {
+        return Err("git authority is unavailable for PR worktree activation".to_string());
+    }
+
+    let label = pr_label(pr.number);
+    let tracking_ref = pr_tracking_ref(pr.number);
+    let worktree = data_root
+        .join("pr-worktrees")
+        .join(format!("pr-{}", pr.number));
+    let repo = repo_root.to_path_buf();
+    let wt = worktree.clone();
+    let tref = tracking_ref.clone();
+    let label_for_prep = label.clone();
+    let expected_head = pr.head_sha.clone();
+    let command_control = administration.command_control.clone();
+    match tokio::task::spawn_blocking(move || {
+        prepare_pr_worktree(
+            &repo,
+            &wt,
+            &tref,
+            &label_for_prep,
+            &expected_head,
+            &command_control,
+        )
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            return cleanup_failed_track(
+                repo_root,
+                data_root,
+                pr.number,
+                &pr.head_sha,
+                &label,
+                administration,
+                &reason,
+            )
+            .await;
+        }
+        Err(error) => {
+            let reason = format!("worktree preparation join error: {error}");
+            return cleanup_failed_track(
+                repo_root,
+                data_root,
+                pr.number,
+                &pr.head_sha,
+                &label,
+                administration,
+                &reason,
+            )
+            .await;
+        }
+    }
+
+    match activate_pr_worktree(schedulers, graph, &worktree).await {
+        Ok(()) => Ok(ManagedPr {
+            pr: pr.number,
+            head_branch: pr.head_branch.clone(),
+            head_sha: pr.head_sha.clone(),
+            worktree,
+            tracking_ref,
+        }),
+        Err(reason) => {
+            cleanup_failed_track(
+                repo_root,
+                data_root,
+                pr.number,
+                &pr.head_sha,
+                &label,
+                administration,
+                &reason,
+            )
+            .await
+        }
+    }
 }
 
-/// Refuses retirement without the same retained scheduler authority. Managed
-/// state and Git artifacts remain intact for a later authoritative retry.
+async fn activate_pr_worktree(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    graph: &crate::tracedecay::TraceDecay,
+    worktree: &Path,
+) -> std::result::Result<(), String> {
+    let project_id = graph
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .ok_or_else(|| {
+            scheduler_unavailable("project identity is unavailable for PR worktree activation")
+        })?;
+    let project_id = ProjectId::new(project_id.to_owned()).map_err(|error| {
+        scheduler_unavailable(&format!(
+            "invalid project identity for PR worktree activation: {error}"
+        ))
+    })?;
+    let store_root = graph.store_layout().data_root.join("code-index-v1");
+    let graph_runtime = graph.retained_store_runtime_registry();
+    let project_database = Arc::new(graph.db().clone());
+    schedulers
+        .mount_worktree_with_graph_runtime(
+            project_id,
+            worktree,
+            store_root,
+            None,
+            graph_runtime,
+            project_database,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            scheduler_unavailable(&format!(
+                "code-index scheduler rejected PR worktree activation: {error}"
+            ))
+        })
+}
+
+/// Retires the scheduler mount for a managed PR worktree. Git artifacts stay
+/// intact until [`untrack_pr`] or sweep cleanup runs after this returns Ok.
 async fn remove_pr_store(
     _repo_root: &Path,
-    _data_root: &Path,
-    _label: &str,
-    _administration: PrStoreAdministration,
+    data_root: &Path,
+    label: &str,
+    administration: PrStoreAdministration<'_>,
 ) -> std::result::Result<(), String> {
-    Err(scheduler_unavailable(
-        "code-index scheduler authority is unavailable for PR worktree retirement",
-    ))
+    let Some(schedulers) = administration.schedulers else {
+        return Err(scheduler_unavailable(
+            "code-index scheduler authority is unavailable for PR worktree retirement",
+        ));
+    };
+    let Some(number) = pr_number_from_label(label) else {
+        return Err("managed PR label does not name a PR worktree".to_string());
+    };
+    let worktree = data_root.join("pr-worktrees").join(format!("pr-{number}"));
+    let root = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
+    let roots = BTreeSet::from([root]);
+    if !schedulers.retire_project_roots(&roots).await {
+        return Err(scheduler_unavailable(
+            "code-index scheduler did not finish PR worktree retirement",
+        ));
+    }
+    Ok(())
+}
+
+fn pr_number_from_label(label: &str) -> Option<u64> {
+    label
+        .strip_prefix("tracedecay/autotrack/pr/")
+        .or_else(|| label.strip_prefix("pr/"))
+        .and_then(|number| number.parse().ok())
+}
+
+/// Rolls back a failed branch add without deleting owned Git artifacts until
+/// the scheduler proves the corresponding worktree mount is gone.
+async fn cleanup_failed_track(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: u64,
+    head_sha: &str,
+    label: &str,
+    administration: PrStoreAdministration<'_>,
+    original_reason: &str,
+) -> std::result::Result<ManagedPr, String> {
+    match remove_pr_store(repo_root, data_root, label, administration).await {
+        Ok(()) => {
+            cleanup_pr_worktree(
+                repo_root,
+                data_root,
+                pr,
+                head_sha,
+                true,
+                administration.command_control,
+            );
+            Err(original_reason.to_string())
+        }
+        Err(cleanup_reason) => Err(format!(
+            "{original_reason}; failed to remove incomplete branch store: {cleanup_reason}"
+        )),
+    }
+}
+
+/// Fetches `refs/pull/<N>/head` into `tracking_ref` and adds a linked worktree
+/// checked out on a local branch named `label` at that ref.
+fn prepare_pr_worktree(
+    repo_root: &Path,
+    worktree: &Path,
+    tracking_ref: &str,
+    label: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> std::result::Result<(), String> {
+    let pr_ref_spec = {
+        let n = tracking_ref
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        format!("+refs/pull/{n}/head:{tracking_ref}")
+    };
+    let fetch = successful_git_with_control(
+        repo_root,
+        &["fetch", "--no-tags", "origin", &pr_ref_spec],
+        command_control,
+    );
+    if fetch.is_none() {
+        return Err("fetch of PR head failed".to_string());
+    }
+    let fetched_head =
+        successful_git_with_control(repo_root, &["rev-parse", tracking_ref], command_control)
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|sha| sha.trim().to_string());
+    if fetched_head.as_deref() != Some(expected_head) {
+        return Err("PR head changed during reconciliation".to_string());
+    }
+
+    if let Some(parent) = worktree.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    remove_worktree(repo_root, worktree, command_control);
+
+    let wt_str = worktree.to_string_lossy();
+    let add = successful_git_with_control(
+        repo_root,
+        &[
+            "worktree",
+            "add",
+            "-B",
+            label,
+            "--force",
+            &wt_str,
+            tracking_ref,
+        ],
+        command_control,
+    );
+    if add.is_none() {
+        return Err("worktree add failed".to_string());
+    }
+    Ok(())
 }
 
 /// Untracks a managed PR: removes its branch store, its worktree, its local
@@ -791,21 +1041,31 @@ async fn untrack_pr(
     data_root: &Path,
     label: &str,
     managed: &ManagedPr,
-    administration: PrStoreAdministration,
+    administration: PrStoreAdministration<'_>,
 ) -> std::result::Result<(), String> {
     let expected_label = pr_label(managed.pr);
     let legacy_label = format!("pr/{}", managed.pr);
+    let is_legacy = label == legacy_label;
     let expected_worktree = data_root
         .join("pr-worktrees")
         .join(format!("pr-{}", managed.pr));
     let expected_ref = pr_tracking_ref(managed.pr);
-    if (label != expected_label && label != legacy_label)
+    if (label != expected_label && !is_legacy)
         || managed.worktree != expected_worktree
         || managed.tracking_ref != expected_ref
     {
         return Err("managed PR entry does not own the requested branch artifacts".to_string());
     }
-    remove_pr_store(repo_root, data_root, label, administration).await
+    remove_pr_store(repo_root, data_root, label, administration).await?;
+    cleanup_pr_worktree(
+        repo_root,
+        data_root,
+        managed.pr,
+        &managed.head_sha,
+        !is_legacy,
+        administration.command_control,
+    );
+    Ok(())
 }
 
 /// Removes leaked PR worktrees from interrupted prior cycles.
@@ -822,7 +1082,7 @@ async fn sweep_orphan_pr_worktrees(
     data_root: &Path,
     desired: &BTreeMap<String, &DiscoveredPr>,
     state: &PrAutotrackState,
-    administration: PrStoreAdministration,
+    administration: PrStoreAdministration<'_>,
 ) {
     let worktrees_dir = data_root.join("pr-worktrees");
     let Ok(entries) = std::fs::read_dir(&worktrees_dir) else {
@@ -845,6 +1105,14 @@ async fn sweep_orphan_pr_worktrees(
         let label = pr_label(number);
         match remove_pr_store(repo_root, data_root, &label, administration).await {
             Ok(()) => {
+                cleanup_pr_worktree(
+                    repo_root,
+                    data_root,
+                    number,
+                    "",
+                    true,
+                    administration.command_control,
+                );
                 log_daemon_event(
                     "pr_autotrack",
                     &[
@@ -857,6 +1125,85 @@ async fn sweep_orphan_pr_worktrees(
             }
             Err(reason) => log_pr_skip(repo_root, Some(&label), Some(number), &reason),
         }
+    }
+}
+
+fn cleanup_pr_worktree(
+    repo_root: &Path,
+    data_root: &Path,
+    pr: u64,
+    expected_head: &str,
+    remove_synthetic_branch: bool,
+    command_control: &PrCommandControl,
+) {
+    let worktree = data_root.join("pr-worktrees").join(format!("pr-{pr}"));
+    let tracking_ref = pr_tracking_ref(pr);
+    let owned_head = if expected_head.is_empty() {
+        let ref_head = ref_sha(repo_root, &tracking_ref, command_control);
+        let worktree_head = ref_sha(&worktree, "HEAD", command_control);
+        match (ref_head, worktree_head) {
+            (Some(ref_head), Some(worktree_head)) if ref_head == worktree_head => Some(ref_head),
+            _ => None,
+        }
+    } else {
+        Some(expected_head.to_string())
+    };
+    remove_worktree(repo_root, &worktree, command_control);
+    let label = pr_label(pr);
+    let branch_ref = format!("refs/heads/{label}");
+    if let Some(owned_head) = owned_head {
+        if remove_synthetic_branch
+            && ref_points_to(repo_root, &branch_ref, &owned_head, command_control)
+        {
+            let _ =
+                successful_git_with_control(repo_root, &["branch", "-D", &label], command_control);
+        }
+        if ref_points_to(repo_root, &tracking_ref, &owned_head, command_control) {
+            let _ = successful_git_with_control(
+                repo_root,
+                &["update-ref", "-d", &tracking_ref],
+                command_control,
+            );
+        }
+    }
+}
+
+fn ref_points_to(
+    repo_root: &Path,
+    reference: &str,
+    expected_head: &str,
+    command_control: &PrCommandControl,
+) -> bool {
+    ref_sha(repo_root, reference, command_control).is_some_and(|sha| sha == expected_head)
+}
+
+fn ref_sha(
+    repo_root: &Path,
+    reference: &str,
+    command_control: &PrCommandControl,
+) -> Option<String> {
+    successful_git_with_control(repo_root, &["rev-parse", reference], command_control)
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|sha| sha.trim().to_string())
+}
+
+fn remove_worktree(repo_root: &Path, worktree: &Path, command_control: &PrCommandControl) {
+    let wt_str = worktree.to_string_lossy();
+    let _ = successful_git_with_control(
+        repo_root,
+        &["worktree", "remove", "--force", &wt_str],
+        command_control,
+    );
+    let _ = successful_git_with_control(repo_root, &["worktree", "prune"], command_control);
+    if command_control
+        .cancellation
+        .as_ref()
+        .is_some_and(tracedecay_runtime_core::cancellation::CancellationToken::is_cancelled)
+    {
+        return;
+    }
+    if worktree.exists() {
+        let _ = std::fs::remove_dir_all(worktree);
     }
 }
 

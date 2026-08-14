@@ -589,6 +589,7 @@ async fn run_foreground_unix(
     let pr_autotrack_task = pr_autotrack::spawn_with_administration(
         crate::global_db::global_db_path(),
         engine.store_administration.clone(),
+        engine.invocation.code_index_schedulers.clone(),
     );
     let engine = engine
         .with_git_watcher(git_watcher)
