@@ -193,7 +193,7 @@ pub struct ConfigurationAuditPage {
     pub next_after_event_id: Option<ConfigurationAuditEventId>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "operation", content = "request")]
 pub enum ConfigurationWireRequestV1 {
     List(ConfigurationListRequestV1),

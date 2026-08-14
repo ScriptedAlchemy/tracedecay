@@ -16,7 +16,7 @@ pub(super) async fn execute_configuration(
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let Some(registered) = registered else {
-        return concealed_application_problem(wire_request_id);
+        return runtime_mounting_problem(wire_request_id);
     };
     if cancellation.is_cancelled() {
         return application_problem(

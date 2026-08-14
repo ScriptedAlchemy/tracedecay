@@ -114,23 +114,35 @@ async fn invoke_configuration_surface(
         false,
     )?;
     let client = DaemonInvocationClient::for_current(handshake)?;
-    let result = crate::cli::dispatch::resolve_cli_application_surface(
-        operation,
-        request_id,
-        ApplicationSurfaceRequest::Configuration(request),
-        RequestedOutputFormat::Json,
-        deadline,
-        cancellation,
-        Some(&client),
-    )
-    .await
-    .map_err(|error| configuration_error(error.to_string()))?;
-    result.result.map_err(|problem| {
-        configuration_error(format!(
-            "{}: {}",
-            problem.problem.code, problem.problem.message
-        ))
-    })
+    loop {
+        let result = crate::cli::dispatch::resolve_cli_application_surface(
+            operation,
+            request_id.clone(),
+            ApplicationSurfaceRequest::Configuration(request.clone()),
+            RequestedOutputFormat::Json,
+            deadline.clone(),
+            cancellation.clone(),
+            Some(&client),
+        )
+        .await
+        .map_err(|error| configuration_error(error.to_string()))?;
+        if let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) {
+            let now = invocation_now_micros();
+            let remaining_micros = deadline.expires_at.0.saturating_sub(now.0);
+            let remaining_micros = u64::try_from(remaining_micros)
+                .map_err(|_| configuration_error("configuration deadline elapsed"))?;
+            if delay <= std::time::Duration::from_micros(remaining_micros) {
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+        }
+        return result.result.map_err(|problem| {
+            configuration_error(format!(
+                "{}: {}",
+                problem.problem.code, problem.problem.message
+            ))
+        });
+    }
 }
 
 pub(crate) async fn current_configuration_revision(

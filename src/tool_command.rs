@@ -62,7 +62,7 @@ use tracedecay::mcp::tools::{
     render_tool_cli_help, short_tool_name,
 };
 use tracedecay::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{CancellationSignal, Deadline, RetryDirective};
+use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::BindingSurface;
 
@@ -414,7 +414,7 @@ async fn dispatch_cli_application_surface(
         .map_err(|error| TraceDecayError::Config {
             message: error.to_string(),
         })?;
-        let Some(delay) = cli_surface_retry_delay(&result) else {
+        let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) else {
             break result;
         };
         if deadline.saturating_duration_since(Instant::now()) <= delay {
@@ -423,23 +423,6 @@ async fn dispatch_cli_application_surface(
         tokio::time::sleep(delay).await;
     };
     print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
-}
-
-/// Delay before re-sending the same request, when the daemon answered a
-/// retryable pre-admission problem whose envelope directs an after-delay retry
-/// of the same request (a project open still warming or a saturated open
-/// queue). Terminal problems and post-admission outcomes are never retried.
-fn cli_surface_retry_delay(result: &ApplicationSurfaceInvocationResult) -> Option<Duration> {
-    const DEFAULT_SURFACE_RETRY_DELAY: Duration = Duration::from_millis(250);
-    let envelope = result.result.as_ref().err()?;
-    let problem = envelope.problem.as_ref();
-    (problem.retryable && problem.retry == RetryDirective::AfterDelay && problem.is_pre_admission())
-        .then(|| {
-            problem
-                .retry_after_millis
-                .map(Duration::from_millis)
-                .unwrap_or(DEFAULT_SURFACE_RETRY_DELAY)
-        })
 }
 
 fn print_cli_application_surface(
