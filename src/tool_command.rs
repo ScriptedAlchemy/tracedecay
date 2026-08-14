@@ -517,6 +517,8 @@ impl DaemonToolDispatch {
         DaemonHandshake::for_current_client(self.project_path.clone(), None, false, self.allow_init)
     }
 
+    /// `deadline` is the caller's request deadline. It is sent to the daemon and
+    /// enforced there; the transport reads for a bounded grace beyond it.
     async fn call(&self, tool_name: &str, tool_args: Value, deadline: Instant) -> Result<Value> {
         let handshake = self.handshake()?;
         // The interactive CLI wants the tool's answer, not the daemon's typed
@@ -568,15 +570,26 @@ async fn dispatch_compatibility_tool(
     raw_json: bool,
     deadline: Instant,
 ) -> Result<()> {
-    let result_value =
-        match timeout_at(deadline, dispatch.call(tool_name, tool_args, deadline)).await {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => return Err(map_tool_deadline_error(tool_name, error)),
-            Err(_) => return Err(tool_timeout_error(tool_name)),
-        };
-    if Instant::now() >= deadline {
-        return Err(tool_timeout_error(tool_name));
-    }
+    // `deadline` is the caller's *request* deadline: it now travels to the
+    // daemon, which enforces it. The local wait exists only to bound a dead or
+    // wedged daemon, so it runs on the transport's response bound — that same
+    // deadline plus a bounded grace. Waiting strictly to the request deadline
+    // made every deadline-elapsed typed terminal unobservable through this
+    // transport: the daemon's PartialEffect (committed receipt, Reconcile-only
+    // legal action) or typed timeout envelope arrived moments after the local
+    // abort had already printed "outcome may be unknown" — untruthful, since
+    // the outcome was in flight. Never discard an envelope that was received.
+    let response_bound = tracedecay::daemon::daemon_tool_response_bound(deadline)?;
+    let result_value = match timeout_at(
+        response_bound,
+        dispatch.call(tool_name, tool_args, deadline),
+    )
+    .await
+    {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return Err(map_tool_deadline_error(tool_name, error)),
+        Err(_) => return Err(tool_timeout_error(tool_name)),
+    };
     reject_tool_result_truncation(&result_value, tool_name)?;
     print_tool_output(&result_value, raw_json);
     Ok(())

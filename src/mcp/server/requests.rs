@@ -14,6 +14,8 @@ struct PreparedToolCall {
     arguments: Value,
     analytics_arguments: Value,
     analytics_session_id: Option<String>,
+    /// The deadline the caller declared on the request, when it declared one.
+    caller_deadline: Option<tracedecay_application::Deadline>,
 }
 
 struct DispatchedToolCall {
@@ -782,6 +784,9 @@ impl McpServer {
             analytics_arguments: arguments.clone(),
             analytics_session_id: mcp_analytics_session_id(&arguments),
             arguments,
+            caller_deadline: crate::mcp::tool_call_deadline::caller_tool_call_deadline(Some(
+                params,
+            )),
         })
     }
 
@@ -1273,6 +1278,7 @@ impl McpServer {
             arguments,
             analytics_arguments,
             analytics_session_id,
+            caller_deadline,
         } = match Self::prepare_tool_call(&id, params) {
             Ok(call) => call,
             Err(response) => return response,
@@ -1325,6 +1331,7 @@ impl McpServer {
             &tool_name,
             &memory_request_scope,
             pre_cancelled,
+            caller_deadline,
         ) {
             Ok(prepared) => prepared,
             Err(error) => return tool_error_response(id, &tool_name, &error),

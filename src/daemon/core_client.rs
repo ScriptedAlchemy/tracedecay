@@ -18,6 +18,47 @@ use super::{
 pub(crate) const DAEMON_TOOL_LIVENESS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Bounded grace a client keeps reading for *after* the caller's request
+/// deadline has elapsed.
+///
+/// The request deadline belongs to the daemon: it is what admission measures
+/// and what the retained owners settle against, and its whole purpose is to
+/// produce a typed terminal — a `PartialEffect` carrying a committed receipt, a
+/// typed timeout — rather than silence. Bounding the client's *read* by that
+/// same instant made every one of those terminals unobservable through this
+/// transport: the client abandoned the connection moments before the envelope
+/// it had asked for arrived and reported "outcome may be unknown" while the
+/// outcome was already on the wire. The read bound must therefore outlive the
+/// request deadline; this is by how much. It bounds only a dead or wedged
+/// daemon, never the request.
+pub const DAEMON_TOOL_RESPONSE_GRACE: Duration = Duration::from_secs(30);
+
+/// The local read bound for a request whose caller deadline is `request_deadline`.
+pub fn daemon_tool_response_bound(request_deadline: Instant) -> Result<Instant> {
+    request_deadline
+        .checked_add(DAEMON_TOOL_RESPONSE_GRACE)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "daemon tool response bound exceeds the supported monotonic range".to_string(),
+        })
+}
+
+/// The caller's request deadline as an absolute wall-clock instant, for the
+/// wire.
+///
+/// The monotonic `Instant` a CLI caller holds cannot cross a process boundary;
+/// the daemon measures admission against UTC micros. Converting the *remaining*
+/// budget at send time keeps the two clocks independent and makes a re-send
+/// (project-open retry) carry the correctly shrunken budget rather than the
+/// original one.
+fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain::UtcMicros {
+    let remaining = request_deadline.saturating_duration_since(Instant::now());
+    let now = tracedecay_application::clock::now_micros();
+    tracedecay_domain::UtcMicros(
+        now.0
+            .saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
+    )
+}
+
 /// How long daemon clients keep retrying a failed connect before giving up.
 ///
 /// `tracedecay update` restarts the daemon service (`systemctl --user restart`);
@@ -321,8 +362,18 @@ pub(crate) async fn call_tool_with_liveness_poll(
     tool_name: &str,
     arguments: serde_json::Value,
     liveness_poll_interval: Duration,
-    client_deadline: Option<DaemonClientDeadline>,
+    request_deadline: Option<Instant>,
 ) -> Result<serde_json::Value> {
+    // Two different bounds, deliberately: the caller's deadline travels to the
+    // daemon so admission and settlement measure the budget the caller actually
+    // asked for, while the local I/O bound is that deadline plus a bounded
+    // response grace so the typed terminal the deadline produces is still read.
+    let client_deadline = match request_deadline {
+        Some(deadline) => Some(DaemonClientDeadline::until(daemon_tool_response_bound(
+            deadline,
+        )?)?),
+        None => None,
+    };
     let (connection, stream) = match client_deadline {
         Some(deadline) => {
             deadline
@@ -335,14 +386,25 @@ pub(crate) async fn call_tool_with_liveness_poll(
     };
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
+    let mut params = json!({
+        "name": tool_name,
+        "arguments": arguments,
+    });
+    if let Some(deadline) = request_deadline
+        && let Some(params) = params.as_object_mut()
+    {
+        params.insert(
+            "_meta".to_owned(),
+            crate::mcp::tool_call_deadline::tool_call_deadline_meta(wire_request_deadline_micros(
+                deadline,
+            )),
+        );
+    }
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(id.clone()),
         method: "tools/call".to_string(),
-        params: Some(json!({
-            "name": tool_name,
-            "arguments": arguments,
-        })),
+        params: Some(params),
     };
 
     let write = async {
@@ -438,6 +500,11 @@ pub async fn call_tool(
     .await
 }
 
+/// Calls a daemon tool with `deadline` as the *caller's request deadline*.
+///
+/// The deadline is sent to the daemon, which enforces it; the local read runs
+/// on that deadline plus [`DAEMON_TOOL_RESPONSE_GRACE`] so a deadline-elapsed
+/// typed terminal is read rather than raced.
 pub async fn call_tool_within(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -451,7 +518,7 @@ pub async fn call_tool_within(
         tool_name,
         arguments,
         DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-        Some(DaemonClientDeadline::until(deadline)?),
+        Some(deadline),
     )
     .await
 }

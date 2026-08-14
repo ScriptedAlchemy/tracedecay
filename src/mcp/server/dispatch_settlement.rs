@@ -315,6 +315,7 @@ impl super::McpServer {
         tool_name: &str,
         memory_request_scope: &str,
         pre_cancelled: bool,
+        caller_deadline: Option<tracedecay_application::Deadline>,
     ) -> Result<PreparedDispatchControl<'a>> {
         let request_id = super::application_surface_request_id(id, memory_request_scope)
             .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
@@ -363,25 +364,37 @@ impl super::McpServer {
             ))
             .ok()
         });
-        let deadline = match carried_deadline {
-            Some(deadline)
-                if crate::daemon_client::deadline_remaining(&deadline)
-                    .is_some_and(|remaining| remaining <= ceiling) =>
-            {
-                deadline
-            }
-            _ => {
-                let micros =
-                    i64::try_from(ceiling.as_micros()).map_err(|_| TraceDecayError::Config {
-                        message: "MCP dispatch ceiling exceeds the domain clock".to_owned(),
-                    })?;
-                tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                    super::requests::mcp_now_micros().0.saturating_add(micros),
-                ))
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("invalid MCP dispatch deadline: {error}"),
-                })?
-            }
+        let ceiling_micros =
+            i64::try_from(ceiling.as_micros()).map_err(|_| TraceDecayError::Config {
+                message: "MCP dispatch ceiling exceeds the domain clock".to_owned(),
+            })?;
+        let ceiling_deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+            super::requests::mcp_now_micros()
+                .0
+                .saturating_add(ceiling_micros),
+        ))
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("invalid MCP dispatch deadline: {error}"),
+        })?;
+        // A caller that named its own deadline is the authority on its budget,
+        // up to the tool's ceiling. Without this, every `tools/call` — the CLI
+        // compatibility route and every MCP host — was served on the ceiling no
+        // matter what the caller asked for, so a caller-visible deadline could
+        // never reach admission or settlement and the typed terminals it exists
+        // to produce were unreachable through this transport. An already
+        // elapsed caller deadline is kept as-is on purpose: the honest answer
+        // to it is the typed timeout, not a silently widened budget.
+        let deadline = match caller_deadline {
+            Some(caller) if caller.expires_at <= ceiling_deadline.expires_at => caller,
+            _ => match carried_deadline {
+                Some(deadline)
+                    if crate::daemon_client::deadline_remaining(&deadline)
+                        .is_some_and(|remaining| remaining <= ceiling) =>
+                {
+                    deadline
+                }
+                _ => ceiling_deadline,
+            },
         };
         let control = DispatchControl::new(tool_name, deadline, cancellation)?;
         Ok(PreparedDispatchControl {
@@ -474,7 +487,22 @@ impl DispatchControl {
                 )))
             }
             () = &mut deadline => {
-                if self.canonical_effect_settlement {
+                // An effect worker that is already settling is *producing the
+                // authoritative answer to this very deadline*: the retained
+                // owners report a `PartialEffect` carrying the committed
+                // receipt and a Reconcile-only legal action when their budget
+                // expires after the commit point. Abandoning it here replaced
+                // that typed terminal with `tool_dispatch_effect_unknown` —
+                // telling the caller to "inspect the daemon receipt" while the
+                // daemon was holding the receipt and about to hand it over.
+                // Effect-unknown is for a result that is genuinely
+                // unavailable, which is exactly what this branch's own
+                // contract says; awaiting the canonical result is what makes
+                // that true.
+                if self.canonical_effect_settlement
+                    || (settlement.snapshot().effect_may_have_committed()
+                        && tool_carries_effect(&self.tool_name))
+                {
                     receive_canonical_result(&mut result).await
                 } else if self
                     .cancellation
