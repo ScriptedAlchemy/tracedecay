@@ -37,17 +37,6 @@ pub(super) use scoped::{
     ScopedBuildRecordsV1, ScopedGenerationRecordsV1, read_build_records, read_generation_records,
 };
 
-pub(super) fn generation_vector_entity_id(
-    generation: &VectorGenerationIdV1,
-    chunk: &CodeSearchChunkId,
-) -> Result<GraphEntityId, VectorGenerationStoreErrorV1> {
-    scoped_entity_id(
-        "generation-vector",
-        generation.as_digest().as_str(),
-        &chunk.to_string(),
-    )
-}
-
 use support::{
     build_entity_id, build_id, bytes_property, content_digest, corrupt, digest, entity, entity_id,
     generation_entity_id, generation_id, graph_label, i64_property, insert_entity, insert_relation,
@@ -95,11 +84,11 @@ pub(super) struct NativeStateMetadataV1 {
     pub revision: u64,
 }
 
+/// Decoded generation-row metadata. Only the embedding key is consumed; the
+/// remaining persisted identity properties are validated fail-closed during
+/// decode without being retained.
 #[derive(Clone, Debug)]
 pub(super) struct NativeGenerationMetadataV1 {
-    pub projection_key: ProjectionKeyV1,
-    pub source_generation: CodeGenerationId,
-    pub source_manifest_digest: ManifestDigest,
     pub embedding_key: AdmittedEmbeddingProjectionKeyV1,
 }
 
@@ -363,10 +352,10 @@ pub(super) fn read_generation_metadata(
                     "semantic vector generation identity is inconsistent",
                 ));
             }
+            let _: ProjectionKeyV1 = required_bytes(&row, TARGET_PROJECTION)?;
+            let _: CodeGenerationId = parse_id(required_string(&row, SOURCE_GENERATION)?)?;
+            let _: ManifestDigest = digest(required_string(&row, SOURCE_MANIFEST)?)?;
             Ok(NativeGenerationMetadataV1 {
-                projection_key: required_bytes(&row, TARGET_PROJECTION)?,
-                source_generation: parse_id(required_string(&row, SOURCE_GENERATION)?)?,
-                source_manifest_digest: digest(required_string(&row, SOURCE_MANIFEST)?)?,
                 embedding_key: required_bytes(&row, EMBEDDING_KEY)?,
             })
         })

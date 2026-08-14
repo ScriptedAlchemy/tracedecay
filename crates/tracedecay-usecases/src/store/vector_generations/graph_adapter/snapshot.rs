@@ -4,7 +4,7 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
     GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionTelemetry,
     GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationRef,
-    TraversalRequest, TraversalResult, TraversalVisit, VectorSearchRequest, VectorSearchResult,
+    TraversalRequest, TraversalResult, TraversalVisit,
     VerifiedGraphSnapshot,
 };
 
@@ -59,14 +59,6 @@ impl SemanticVectorVerifiedRead {
     ) -> Result<Option<GraphProjectionTelemetry>, GraphDbError> {
         self.require_projection(&request.namespace, &request.projection)?;
         self.inner.projection_telemetry(request)
-    }
-
-    pub(super) fn vector_search(
-        &self,
-        request: VectorSearchRequest,
-    ) -> Result<VectorSearchResult, GraphDbError> {
-        self.require_projection(&request.namespace, &request.projection)?;
-        self.inner.vector_search(request)
     }
 
     pub(super) fn traverse(
