@@ -5,7 +5,9 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
 use tracedecay::daemon::DaemonHandshake;
-use tracedecay::daemon_client::DaemonInvocationClient;
+use tracedecay::daemon_client::{
+    DaemonInvocationClient, SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
+};
 use tracedecay::search_eval::{
     DirectEvaluationStatusV1, DirectWorkloadSummaryV1, GenerateCandidateOutputsOptions,
     SearchEvalError, compare_default_direct, compare_direct, generate_candidate_outputs,
@@ -171,7 +173,10 @@ fn evaluate_and_publish(project_root: PathBuf, candidate_path: PathBuf) -> ExitC
             Err(error) => return invalid("evaluate_and_publish", error),
         };
         match client
-            .evaluate_and_publish_semantic_profile(candidate)
+            .evaluate_and_publish_semantic_profile_until(
+                candidate,
+                SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
+            )
             .await
         {
             Ok(result) => emit(&result, ExitCode::SUCCESS),

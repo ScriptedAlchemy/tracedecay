@@ -411,6 +411,11 @@ struct DaemonInvocationConnection {
 /// isolated `CARGO_TARGET_DIR=/tmp/semantic-rerun-target`) plus margin.
 pub const SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS: i64 = 900_000_000;
 
+/// Isolated 10x measurement plus paged incremental copies. Production
+/// `evaluate_and_publish_semantic_profile` stays at 900s; eval-direct sizes
+/// this from the 906s deadline miss after reused paging.
+pub const SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS: i64 = 1_800_000_000;
+
 impl DaemonInvocationClient {
     pub fn for_current(handshake: crate::daemon::DaemonHandshake) -> crate::errors::Result<Self> {
         Ok(Self {
@@ -616,6 +621,18 @@ impl DaemonInvocationClient {
         &self,
         candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
     ) -> crate::errors::Result<SemanticEvaluationPublicationResultV1> {
+        self.evaluate_and_publish_semantic_profile_until(
+            candidate,
+            SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
+        )
+        .await
+    }
+
+    pub async fn evaluate_and_publish_semantic_profile_until(
+        &self,
+        candidate: tracedecay_usecases::semantic_runtime::SemanticEvaluationProfileCandidateV1,
+        deadline_micros: i64,
+    ) -> crate::errors::Result<SemanticEvaluationPublicationResultV1> {
         let request_id =
             mint_global_request_id(GlobalRequestSurface::SemanticEvaluation).map_err(|error| {
                 crate::errors::TraceDecayError::Config {
@@ -627,12 +644,11 @@ impl DaemonInvocationClient {
                 message: "semantic evaluation clock is unavailable".to_owned(),
             })?;
         let deadline = Deadline::new(UtcMicros(
-            observed_at
-                .0
-                .checked_add(SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS)
-                .ok_or_else(|| crate::errors::TraceDecayError::Config {
+            observed_at.0.checked_add(deadline_micros).ok_or_else(|| {
+                crate::errors::TraceDecayError::Config {
                     message: "semantic evaluation deadline is unavailable".to_owned(),
-                })?,
+                }
+            })?,
         ))
         .map_err(|error| crate::errors::TraceDecayError::Config {
             message: error.to_string(),
@@ -1047,7 +1063,9 @@ mod controlled_invocation_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        DaemonInvocationError, SemanticEvaluationPublicationResultV1, application_response,
+        DaemonInvocationError, SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
+        SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
+        SemanticEvaluationPublicationResultV1, application_response,
         semantic_evaluation_application_problem,
     };
     use tracedecay_application::{
@@ -1099,6 +1117,19 @@ mod tests {
             panic!("reset-required must remain an authoritative typed problem");
         };
         assert_eq!(problem.kind(), ApplicationProblemKind::ResetRequired);
+    }
+
+    #[test]
+    fn isolated_evaluation_dispatch_deadline_is_eval_scoped_not_production_900s() {
+        assert_eq!(SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS, 900_000_000);
+        assert_eq!(
+            SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS,
+            1_800_000_000
+        );
+        assert!(
+            SEMANTIC_EVALUATION_ISOLATED_DISPATCH_DEADLINE_MICROS
+                > SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS
+        );
     }
 
     #[test]
