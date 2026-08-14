@@ -412,7 +412,7 @@ async fn stale_scoring_explains_archive_candidates_and_exclusions() {
         .find(|recommendation| recommendation.skill_id == "stale-skill")
         .unwrap();
     assert!(stale.stale);
-    assert_eq!(stale.recommendation, "archive_review");
+    assert_eq!(stale.recommendation, "archive_candidate");
     assert!(stale.reason.contains("no recorded uses or patches"));
     assert!(
         stale
@@ -476,7 +476,7 @@ async fn repeated_skill_patches_recommend_improvement_review() {
         .unwrap();
 
     assert!(recommendation.improvement);
-    assert_eq!(recommendation.recommendation, "patch_review");
+    assert_eq!(recommendation.recommendation, "repair_candidate");
     assert_eq!(recommendation.priority, "medium");
     assert!(recommendation.reason.contains("repeated patches"));
     assert!(

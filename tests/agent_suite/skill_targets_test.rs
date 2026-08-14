@@ -455,7 +455,7 @@ fn uninstall_repairs_legacy_orphan_end_without_claiming_user_text() {
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `generated`: Generated.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
         "Keep after.\n",
@@ -482,7 +482,7 @@ fn prompt_index_start_only_remains_ambiguous_and_fails_closed() {
         "# User rules\n\n",
         "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n",
+        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n",
     );
     std::fs::write(&prompt_path, contents).unwrap();
 
@@ -499,12 +499,12 @@ fn uninstall_all_removes_legacy_orphan_alongside_slugged_block() {
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `legacy`: Legacy.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
         "<!-- TRACEDECAY MANAGED SKILLS START claude -->\n",
         "## TraceDecay managed skills\n\n",
-        "This Claude index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This Claude index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `slugged`: Slugged.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END claude -->\n\n",
         "Keep after.\n",
@@ -528,12 +528,12 @@ fn uninstall_all_removes_inverse_order_legacy_orphan_and_slugged_block() {
     let contents = concat!(
         "# User rules\n\nKeep before.\n\n",
         "## TraceDecay managed skills\n\n",
-        "This Claude index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This Claude index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `legacy`: Legacy.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END -->\n\n",
         "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "- `slugged`: Slugged.\n",
         "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n\n",
         "Keep after.\n",
@@ -555,7 +555,7 @@ fn prompt_index_duplicate_balanced_blocks_fail_closed() {
     let block = concat!(
         "<!-- TRACEDECAY MANAGED SKILLS START agents -->\n",
         "## TraceDecay managed skills\n\n",
-        "This AGENTS.md index lists active automatically managed skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
+        "This AGENTS.md index lists active automatically managed profile skills. For full instructions, call MCP tool `tracedecay_skill_view` with the listed `id`.\n\n",
         "<!-- TRACEDECAY MANAGED SKILLS END agents -->\n",
     );
     let contents = format!("# User rules\n\n{block}\n{block}");
@@ -749,6 +749,13 @@ fn install_fake_claude(home: &std::path::Path) -> std::path::PathBuf {
     std::fs::write(
         home.join(".claude.json"),
         r#"{"mcpServers":{"tracedecay":{"command":"tracedecay","args":["serve"]}}}"#,
+    )
+    .unwrap();
+    let marketplace = home.join(".claude/plugins/marketplaces/tracedecay/.claude-plugin");
+    std::fs::create_dir_all(&marketplace).unwrap();
+    std::fs::write(
+        marketplace.join("marketplace.json"),
+        r#"{"name":"tracedecay"}"#,
     )
     .unwrap();
     claude_md
