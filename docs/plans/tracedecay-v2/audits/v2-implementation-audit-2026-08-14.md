@@ -37,8 +37,8 @@ operator-owned npm trusted-publisher setup.
 | Evidence-only gaps | 18 |
 
 Across the 72 unique gap/evidence entries (conflict rows only reference those
-entries): 36 are `RC-BLOCKING`, 15 are `RC-REQUIRED-EVIDENCE`, and 21 are
-`POST-RC`.
+entries): 35 are `RC-BLOCKING`, 15 are `RC-REQUIRED-EVIDENCE`, 21 are
+`POST-RC`, and 1 is `RECORDED` (A2).
 
 ## A. MOUNTLESS SURFACES
 
@@ -48,7 +48,7 @@ to a real production caller or deleted.
 | ID | Rank | Consolidated item | Evidence and witness verdicts |
 |---|---|---|---|
 | A1 | RC-BLOCKING | Generalized external-source acquisition, canonical refetch, correction, and tombstone production | Host-observation specialization is mounted, but `GitHubExternalSourceAcquisitionV1` and the generalized owner remain uncalled (`crates/tracedecay-usecases/src/external_source_github.rs:213-425`; `external_source_acquisition.rs:341-510`). Plans 02 and 03 independently verdict this `IMPLEMENTED-UNMOUNTED`. |
-| A2 | RC-BLOCKING | Context Scout suggestion producer | Controls/status are mounted, but `ContextScoutCanonicalInputV1::selection_input` (`crates/tracedecay-agent-hosts/src/agents/context_scout_ports.rs:735-763`) and `ProjectContextScoutOwnerV1::prepare_configured` (`context_scout_owner.rs:301-333`) have zero callers. Hook admission hard-codes `claim_authority = None` (`src/mcp/tools/handlers/hook_runtime/admission.rs:370`). The Plan 07 witness calls the owner/control surface mounted but the guidance branch unreachable; Plan 22 calls selection/model/delivery `IMPLEMENTED-UNMOUNTED`. The latter is the production verdict. |
+| A2 | RECORDED | Context Scout suggestion producer parked; neither remounted nor demolished | See [A2 ruling](#a2-ruling-2026-08-14). `1caf016e5` deliberately unmounted the saved-edit/stop producer and set `claim_authority = None`. `c2c11956d6` mounted the distinct advisory/feedback successor. Remount is not a small slice; deleting only the entry points leaves `prepare_controlled` dead. Owner must choose remount or retire. |
 | A3 | RC-BLOCKING | V3 evidence assembly and V3 Git-topology anchor publication | `EvidenceAssemblyStore::publish_or_replay` has zero callers (`crates/tracedecay-store/src/evidence_assembly.rs:1518`). Native-object, PR/review, conflict, preflight, and integration target contracts exist at `crates/tracedecay-domain/src/research/git_topology.rs:1261-1352`, while production GitHub stack publication still uses the distinct V2 path (`crates/tracedecay-usecases/src/advisory/github_runtime/stack_anchors.rs:219-304`). |
 | A4 | RC-BLOCKING | Exact generation-bound Git and diagnostic joins | `GitReadAuthorityV1::join_generation` has only the regression caller (`crates/tracedecay-usecases/src/git_reads.rs:429`; `tests/git_intelligence_regression.rs:679`). `GenerationDiagnosticJoinV1` is referenced by contracts/composite types and tests, not a producer (`crates/tracedecay-code-index/src/diagnostics.rs:108-315`). `25-code-intelligence.md` says both are `IMPLEMENTED-UNMOUNTED`; `25-code-index.md` inferred `IMPLEMENTED+MOUNTED` from broader Git/LSP routes. Exact caller evidence resolves both as unmounted. |
 | A5 | RC-BLOCKING | Canonical index and retrieval-pipeline observability emission | `record_index` exists at `crates/tracedecay-usecases/src/observability/emit.rs:560`; `emit_retrieval_pipeline` exists at `observability/retrieval_emit.rs:466`, but its only caller is an in-module test. Query execution computes an observation without calling the canonical emitter. |
@@ -116,7 +116,7 @@ to a real production caller or deleted.
 
 | ID | Rank | Conflict | Ruling |
 |---|---|---|---|
-| D1 | RC-BLOCKING | Scout contracts/hooks “mounted” versus zero selection/owner callers | Controls, address registry, and advisory successor are mounted; actual Scout selection/production is not. `selection_input` and `prepare_configured` have no callers, and hook claim authority is `None`. `c2c11956d6` mounts feedback/advisory, not Scout envelopes. A2 governs. |
+| D1 | RECORDED | Scout contracts/hooks “mounted” versus zero selection/owner callers | Controls, address registry, and advisory successor remain mounted; Scout envelope production remains parked. See [A2 ruling](#a2-ruling-2026-08-14). |
 | D2 | RC-BLOCKING | Plan 25 duplicate witnesses disagree on Git/diagnostic joins | Broader Git and LSP routes are mounted, but the exact generation join entrypoints are not. Caller/type evidence resolves A4 as unmounted. |
 | D3 | POST-RC | One Plan 35 witness reported missing host/feedback mounts; the other found the production route | Current project-open source mounts feedback/advisory and LSP semantic authorities (`src/daemon/project_open_owners/advisory_runtime.rs:291-308,423-628`; LSP protocol uses `semantic_request`). Those product paths are mounted. Only the 19 convenience façades remain unmounted (A14). |
 | D4 | RC-REQUIRED-EVIDENCE | Plan 36 witnesses disagree on native approval/fanout mounting | Current source mounts the owner, six operations, exact topology, and coordinator preflight. Approval is structurally mounted; the gap is the public approval-to-receipt/restart journey, not an absent handler. Manual branch activation remains independently unavailable (A20). |
@@ -158,9 +158,10 @@ Each task is deliberately single-concern.
 
 1. Make project-open settle one incompatible store as typed `ResetRequired`;
    unignore only that exact restart regression.
-2. Connect admitted hook input to `ContextScoutCanonicalInputV1::selection_input`
-   and `ProjectContextScoutOwnerV1::prepare_configured`; add one saved-edit
-   reachability test.
+2. Closed: A2. Do not reconstruct the deleted hook-cycle mount and do not
+   demolish the parked Scout runtime. Owner chooses remount (restore
+   `run_production_hook_cycle` + lifecycle + claim authority) or retire
+   (delete producer entry points and `prepare_controlled` together).
 3. Register one generalized GitHub external-source acquisition owner at
    project-open; prove one canonical refetch reaches the existing store.
 4. Give `EvidenceAssemblyStore::publish_or_replay` one canonical production
@@ -178,3 +179,75 @@ Each task is deliberately single-concern.
    from existing Work/native evidence.
 10. Run the Plan 15 Linux evaluation and fix the first surfaced
     `SearchEvalError`, rather than widening deadlines or weakening the oracle.
+
+## A2 ruling (2026-08-14)
+
+Decision: **RECORD-RULING**. The producer mount was deliberately parked, not
+abandoned mid-build. **WIRE** and **DELETE** are both rejected without an
+owner remount-or-retire choice. A2 stays parked, not silently green.
+
+### Caller-intent evidence
+
+- Before `1caf016e5` (`refactor(runtime): complete V2 authority cutovers`,
+  2026-08-09) the producer was mounted. `run_production_hook_cycle` in
+  `src/daemon/project_open_owners.rs` mapped SavedEdit/Stop/Explicit to
+  `ContextScoutCanonicalInputV1::selection_input` and
+  `ProjectContextScoutOwnerV1::prepare_configured`, then mounted claim
+  authority on enqueue. `src/daemon/project_open_owners/scout_journey_tests.rs`
+  (378 lines) covered that journey.
+- `1caf016e5` deleted that mount on purpose: `context_scout_lifecycle.rs`
+  (−1303), the scout journey tests, and ~2203 lines from
+  `project_open_owners.rs` including `run_production_hook_cycle`. The same
+  commit replaced live claim-authority resolution
+  (`resolve_current_context_scout_claim_authority`) with
+  `let claim_authority = None` in
+  `src/mcp/tools/handlers/hook_runtime/admission.rs`. That assignment is
+  why the ready-guidance branch is unreachable: it is a cutover disable,
+  not a forgotten `None`.
+- Current `admit_hook_orchestration`
+  (`src/daemon/service/invocation/types.rs`) has no success path. SavedEdit,
+  session End/TurnComplete, and explicit prepare all return `Unavailable`;
+  every other event returns `UnsupportedTrigger`. `hook_v2_scout_prepare`
+  only calls that stub. This is a parking brake, not a missing wire.
+- `c2c11956d6` (`feat(advisory): mount production feedback runtime`,
+  2026-08-12) mounted the hook-notice successor. Admission now peeks
+  `peek_advisory_hook_notice`. That surface is distinct from Scout
+  suggestion envelopes (D1).
+- `tracedecay tool callers` on `prepare_configured`
+  (`method:db3b71de8fa41fdfb4e5aa1f22ab09e9`) and `selection_input`
+  (`method:a3e64357a89b62413d0774fe9ef8d57b`) returns none.
+  `bind_and_assemble` and `ContextScoutCanonicalInputAssemblerV1` have no
+  production callers. `run_production_hook_cycle` no longer exists.
+  `resolve_current_context_scout_claim_authority` no longer exists.
+- NEXT.md has no Scout remount or retire ruling. Plan 22 still describes a
+  saved-edit/stop envelope journey; a plan ambition is not a mount.
+
+### Why not WIRE
+
+The “smallest honest slice” is not a hook-to-`prepare_configured` call.
+`selection_input` requires a fully assembled canonical packet (address
+registry bind, authority pin, `RequestContext`, lifecycle, committed
+publication, candidates). That assembler was fed by the deleted lifecycle
+and `run_production_hook_cycle`. Reconstructing those is a product remount,
+not a one-call connect. Wiring a thinner envelope from the hook alone
+would fabricate Scout evidence.
+
+### Why not DELETE
+
+The stated delete set (`prepare_configured`, `selection_input`, dead
+assembler ports) is not warning-free. The only non-test caller of
+`ContextScoutDurableRuntimeV1::prepare_controlled` is `prepare_configured`.
+Removing the entry points leaves the deterministic runtime unused under
+`cargo check --lib`. Deleting `prepare_controlled` as well demolishes the
+Plan 22 producer while mounted controls, durable store, address registry,
+and claim/delivery/feedback remain. That is a retire decision, not a dead-
+port cleanup. `allow(dead_code)` is forbidden.
+
+### Action taken
+
+- No producer, advisory, hook-cmd, or daemon-reset code was changed.
+- Parking is now an explicit register ruling: owner must remount the
+  deleted hook-cycle/lifecycle/claim-authority path, or retire the
+  producer entry points together with `prepare_controlled`.
+- Advisory/feedback (`c2c11956d6`) remains the live hook-notice successor
+  and is not a Scout envelope producer.
