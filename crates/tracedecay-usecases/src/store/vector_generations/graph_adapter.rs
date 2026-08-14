@@ -21,9 +21,9 @@ use crate::semantic_runtime::{
 };
 
 use super::{
-    PreparedVectorGenerationV1, VectorGenerationBuildIdV1, VectorGenerationPlanV1,
-    VectorGenerationPublicationV1, VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
-    VectorProjectionCheckpointV1,
+    BaseGenerationIncompatibilityV1, PreparedVectorGenerationV1, VectorGenerationBuildIdV1,
+    VectorGenerationPlanV1, VectorGenerationPublicationV1, VectorGenerationStateMachineV1,
+    VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
 };
 
 mod evaluation_runtime;
@@ -507,7 +507,9 @@ impl GraphVectorGenerationStoreV1 {
             expected_generation,
             Arc::clone(&cancellation),
         )?
-        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
+        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingSnapshot,
+        ))?;
         if &catalog.generation_id != expected_generation {
             return Err(VectorGenerationStoreErrorV1::Corrupt(
                 "active semantic vector generation catalog identity is inconsistent".to_owned(),

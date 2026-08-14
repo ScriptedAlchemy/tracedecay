@@ -958,6 +958,19 @@ pub struct VectorGenerationPublicationV1 {
     pub checkpoint: VectorProjectionCheckpointV1,
 }
 
+/// Why a planned or hydrated base generation cannot be used.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum BaseGenerationIncompatibilityV1 {
+    #[error("missing from published generations")]
+    MissingPublished,
+    #[error(
+        "incompatible with the incremental request (source generation, projection key, or embedding key)"
+    )]
+    IdentityMismatch,
+    #[error("missing from the verified snapshot")]
+    MissingSnapshot,
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum VectorGenerationStoreErrorV1 {
     #[error("semantic vector graph operation was cancelled")]
@@ -984,8 +997,8 @@ pub enum VectorGenerationStoreErrorV1 {
     ConflictingBatchReplay,
     #[error("chunk {0} appears in more than one committed batch")]
     DuplicateChunkEffect(CodeSearchChunkId),
-    #[error("base vector generation is missing or incompatible")]
-    IncompatibleBaseGeneration,
+    #[error("base vector generation is {0}")]
+    IncompatibleBaseGeneration(BaseGenerationIncompatibilityV1),
     #[error("reused chunk {0} has no matching immutable base vector")]
     MissingBaseVector(CodeSearchChunkId),
     #[error("applied chunk {0} has no matching vector output")]
@@ -1066,10 +1079,11 @@ impl VectorGenerationStateMachineV1 {
     ) -> Result<VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1> {
         validate_plan(&plan)?;
         if let Some(base_id) = &plan.base_generation {
-            self.published
-                .generations
-                .get(base_id)
-                .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
+            self.published.generations.get(base_id).ok_or(
+                VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+                    BaseGenerationIncompatibilityV1::MissingPublished,
+                ),
+            )?;
         }
         let digest = canonical_sha256(&(VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, &plan))
             .map_err(|error| VectorGenerationStoreErrorV1::InvalidPlan(error.to_string()))?;
@@ -1841,16 +1855,19 @@ fn validate_base_generation_for_batch(
     let Some(base_id) = plan.base_generation.as_ref() else {
         return Ok(());
     };
-    let base = published
-        .generations
-        .get(base_id)
-        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
+    let base = published.generations.get(base_id).ok_or(
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingPublished,
+        ),
+    )?;
     if prepared.request.changes.from_generation.as_ref() != Some(base.source_generation())
         || prepared.request.previous_projection_key.as_ref() != Some(base.projection_key())
         || (prepared.request.target_projection_key == *base.projection_key()
             && prepared.embedding_key != *base.embedding_key())
     {
-        return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
+        return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::IdentityMismatch,
+        ));
     }
     Ok(())
 }
@@ -2210,7 +2227,9 @@ mod tests {
             .expect("staged build");
         assert_eq!(
             store.commit_batch(&build, None, prepared.clone()),
-            Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)
+            Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+                BaseGenerationIncompatibilityV1::IdentityMismatch,
+            ))
         );
 
         let base_source = id("code-generation.base");
@@ -2311,14 +2330,32 @@ mod tests {
             .expect("complete reused batch");
         let encoded = graph_adapter::encode_generation_batch_delta(&store, &build, &prepared, 1)
             .expect("receipt-only reused encode");
-        assert!(
-            encoded.entities.iter().all(|entity| {
-                !entity.labels.iter().any(|label| {
+        let generation_owners = encoded
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.labels.iter().any(|label| {
+                    label.as_str() == tracedecay_graph_db::semantic_vector_native::GENERATION_LABEL
+                })
+            })
+            .count();
+        assert_eq!(
+            generation_owners, 2,
+            "receipt-only persist must keep the live base generation in the same snapshot"
+        );
+        let vector_entities = encoded
+            .entities
+            .iter()
+            .filter(|entity| {
+                entity.labels.iter().any(|label| {
                     label.as_str()
                         == tracedecay_graph_db::semantic_vector_native::GENERATION_VECTOR_LABEL
                 })
-            }),
-            "ordinary reuse must not copy base vectors as generation entities"
+            })
+            .count();
+        assert_eq!(
+            vector_entities, 1,
+            "ordinary reuse must keep the live base vector row and not copy it onto the incremental generation"
         );
         assert!(
             encoded.entities.iter().any(|entity| {

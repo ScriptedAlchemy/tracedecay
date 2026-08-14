@@ -158,7 +158,7 @@ impl SemanticPublicationFailureCategoryV1 {
             VectorGenerationStoreErrorV1::DuplicateChunkEffect(_) => {
                 Self::StoreDuplicateChunkEffect
             }
-            VectorGenerationStoreErrorV1::IncompatibleBaseGeneration => {
+            VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(_) => {
                 Self::StoreIncompatibleBaseGeneration
             }
             VectorGenerationStoreErrorV1::MissingBaseVector(_) => Self::StoreMissingBaseVector,

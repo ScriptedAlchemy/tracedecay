@@ -12,10 +12,10 @@ use tracedecay_graph_db::{
 };
 
 use super::super::super::{
-    CommittedVectorBatchV1, ExternalV1, PreparedBatchesV1, ProjectedChunkVectorV1,
-    PublishedVectorGenerationV1, StagedVectorGenerationV1, VECTOR_GENERATION_BUILD_DIGEST_DOMAIN,
-    VectorGenerationBuildIdV1, VectorGenerationPlanV1, VectorGenerationStoreErrorV1,
-    VectorRowMapV1, validate_plan, validate_vector_row,
+    BaseGenerationIncompatibilityV1, CommittedVectorBatchV1, ExternalV1, PreparedBatchesV1,
+    ProjectedChunkVectorV1, PublishedVectorGenerationV1, StagedVectorGenerationV1,
+    VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, VectorGenerationBuildIdV1, VectorGenerationPlanV1,
+    VectorGenerationStoreErrorV1, VectorRowMapV1, validate_plan, validate_vector_row,
 };
 use super::super::persistence::map_graph_error;
 use super::VectorProjectionCheckpointV1;
@@ -294,9 +294,11 @@ fn read_generation_records_inner(
     else {
         return Ok(None);
     };
-    let owner = entities
-        .get(&generation_entity_id(generation)?)
-        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
+    let owner = entities.get(&generation_entity_id(generation)?).ok_or(
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingSnapshot,
+        ),
+    )?;
     require_labels(owner, [GENERATION_LABEL])?;
     if generation_id(required_string(owner, GENERATION_ID)?)? != *generation {
         return Err(corrupt(
@@ -538,7 +540,9 @@ fn hydrate_reused_vectors(
     };
     let Some(base) = read_generation_records_inner(snapshot, base_id, cancellation, visiting)?
     else {
-        return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
+        return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingSnapshot,
+        ));
     };
     apply_reused_base_vectors(
         &missing,

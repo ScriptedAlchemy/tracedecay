@@ -30,10 +30,10 @@ use tracedecay_store::{
 
 use super::super::identity::generation_identity_digest;
 use super::super::{
-    PhysicalVectorBytePoolV1, PreparedVectorGenerationV1, PublishedStateV1,
-    VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, VectorGenerationBuildIdV1, VectorGenerationPlanV1,
-    VectorGenerationPublicationV1, VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1,
-    VectorProjectionCheckpointV1, validate_plan,
+    BaseGenerationIncompatibilityV1, PhysicalVectorBytePoolV1, PreparedVectorGenerationV1,
+    PublishedStateV1, VECTOR_GENERATION_BUILD_DIGEST_DOMAIN, VectorGenerationBuildIdV1,
+    VectorGenerationPlanV1, VectorGenerationPublicationV1, VectorGenerationStateMachineV1,
+    VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1, validate_plan,
 };
 use super::native_records::{
     NativeGraphStateV1, ScopedBuildRecordsV1, ScopedGenerationRecordsV1,
@@ -202,7 +202,9 @@ impl GraphVectorGenerationStoreV1 {
                     Arc::clone(&cancellation),
                 )?;
             } else if plan.base_generation.is_some() {
-                return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
+                return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+                    BaseGenerationIncompatibilityV1::MissingSnapshot,
+                ));
             }
             let before = transition_state(existing.as_ref(), generations.iter())?;
             let mut after = before.clone();
@@ -910,8 +912,11 @@ fn push_required_generation(
     {
         return Ok(());
     }
-    let records = read_cataloged_generation_records(snapshot, generation_id, cancellation)?
-        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
+    let records = read_cataloged_generation_records(snapshot, generation_id, cancellation)?.ok_or(
+        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+            BaseGenerationIncompatibilityV1::MissingSnapshot,
+        ),
+    )?;
     generations.push(records);
     Ok(())
 }
