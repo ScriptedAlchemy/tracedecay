@@ -1965,6 +1965,12 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         .expect("load test profile identity");
     let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
         .with_profile_identity(profile_identity);
+    store_administration
+        .registered_profile_database()
+        .await
+        .expect("prewarm portable bootstrap profile registry");
+    super::super::prewarm_daemon_bootstrap_catalog()
+        .expect("prewarm portable static bootstrap catalog");
     let gates = Arc::new(tokio::sync::Mutex::new(
         super::super::ProjectOpenGates::default(),
     ));
@@ -2374,6 +2380,12 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
             .expect("daemon database scope");
+    engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("prewarm bootstrap profile registry");
+    super::super::prewarm_daemon_bootstrap_catalog().expect("prewarm static bootstrap catalog");
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config).expect("disable unrelated startup catch-up");

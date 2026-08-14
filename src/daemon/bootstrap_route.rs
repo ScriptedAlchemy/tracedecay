@@ -8,7 +8,52 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+use std::sync::OnceLock;
+
+use crate::mcp::tools::ToolDefinition;
+
 use super::*;
+
+static WARMING_BOOTSTRAP_TOOLS: OnceLock<Vec<ToolDefinition>> = OnceLock::new();
+
+fn warming_bootstrap_tool_definitions() -> Result<Vec<ToolDefinition>> {
+    if let Some(definitions) = WARMING_BOOTSTRAP_TOOLS.get() {
+        return Ok(definitions.clone());
+    }
+    let profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("MCP bootstrap profile is invalid: {error}"),
+    })?;
+    let authority =
+        default_catalog_discovery_authority().map_err(|error| TraceDecayError::Config {
+            message: format!("MCP bootstrap catalog authority is unavailable: {error}"),
+        })?;
+    let definitions = get_catalog_filtered_tool_definitions_with_warming_budget(
+        explore_call_budget(0),
+        &profile_id,
+        &authority,
+        &project_catalog_discovery_scope(),
+        ToolRegistryMode::HostAvailable,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("MCP bootstrap catalog is unavailable: {error}"),
+    })?;
+    if WARMING_BOOTSTRAP_TOOLS.set(definitions.clone()).is_ok() {
+        return Ok(definitions);
+    }
+    WARMING_BOOTSTRAP_TOOLS
+        .get()
+        .cloned()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "MCP bootstrap catalog cache lost a concurrent publication".to_owned(),
+        })
+}
+
+pub(super) fn prewarm_daemon_bootstrap_catalog() -> Result<()> {
+    warming_bootstrap_tool_definitions().map(|_| ())
+}
 
 pub(super) async fn apply_daemon_initialize_route(
     handshake: &mut DaemonHandshake,
@@ -64,45 +109,46 @@ pub(super) fn daemon_bootstrap_response(
             response
         })),
         McpMethod::InitializedAck => Some(None),
-        McpMethod::ToolsList => Some(request.id.clone().map(|id| {
-            let budget = explore_call_budget(project_node_count.unwrap_or(0));
-            let profile_id = tracedecay_tool_catalog::ProfileId::new(
-                tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
-            );
-            let authority = default_catalog_discovery_authority();
-            match (profile_id, authority) {
-                (Ok(profile_id), Ok(authority)) => {
-                    let definitions = match project_node_count {
-                        Some(node_count) => get_catalog_filtered_tool_definitions_with_budget(
+        McpMethod::ToolsList => Some(request.id.clone().map(|id| match project_node_count {
+            None => match warming_bootstrap_tool_definitions() {
+                Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
+                Err(_) => JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    "MCP catalog discovery unavailable".to_owned(),
+                ),
+            },
+            Some(node_count) => {
+                let budget = explore_call_budget(node_count);
+                let profile_id = tracedecay_tool_catalog::ProfileId::new(
+                    tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+                );
+                let authority = default_catalog_discovery_authority();
+                match (profile_id, authority) {
+                    (Ok(profile_id), Ok(authority)) => {
+                        let definitions = get_catalog_filtered_tool_definitions_with_budget(
                             node_count,
                             budget,
                             &profile_id,
                             &authority,
                             &project_catalog_discovery_scope(),
                             ToolRegistryMode::HostAvailable,
-                        ),
-                        None => get_catalog_filtered_tool_definitions_with_warming_budget(
-                            budget,
-                            &profile_id,
-                            &authority,
-                            &project_catalog_discovery_scope(),
-                            ToolRegistryMode::HostAvailable,
-                        ),
-                    };
-                    match definitions {
-                        Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
-                        Err(_) => JsonRpcResponse::error(
-                            id,
-                            ErrorCode::InternalError,
-                            "MCP catalog discovery unavailable".to_owned(),
-                        ),
+                        );
+                        match definitions {
+                            Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
+                            Err(_) => JsonRpcResponse::error(
+                                id,
+                                ErrorCode::InternalError,
+                                "MCP catalog discovery unavailable".to_owned(),
+                            ),
+                        }
                     }
+                    _ => JsonRpcResponse::error(
+                        id,
+                        ErrorCode::InternalError,
+                        "MCP catalog discovery unavailable".to_owned(),
+                    ),
                 }
-                _ => JsonRpcResponse::error(
-                    id,
-                    ErrorCode::InternalError,
-                    "MCP catalog discovery unavailable".to_owned(),
-                ),
             }
         })),
         _ => None,

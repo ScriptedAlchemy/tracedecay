@@ -73,6 +73,15 @@ impl RemoteBrainTlsConfig {
     }
 }
 
+fn prewarm_static_daemon_bootstrap_catalog() {
+    if let Err(error) = prewarm_daemon_bootstrap_catalog() {
+        tracing::warn!(
+            %error,
+            "static MCP bootstrap catalog prewarm failed; tools/list will return a typed error"
+        );
+    }
+}
+
 #[cfg(unix)]
 pub async fn run_foreground(
     socket_path: PathBuf,
@@ -89,6 +98,7 @@ pub async fn run_foreground(
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
+    prewarm_static_daemon_bootstrap_catalog();
     let requested = transport::default_loopback_endpoint();
     let _lifecycle_lease = crate::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
@@ -440,6 +450,7 @@ async fn run_foreground_unix(
     let profile_root = crate::config::user_data_dir().ok_or_else(|| TraceDecayError::Config {
         message: "could not determine TraceDecay user data directory".to_string(),
     })?;
+    prewarm_static_daemon_bootstrap_catalog();
     let endpoint = transport::DaemonEndpoint::Unix(socket_path);
     let _lifecycle = crate::lifecycle_lease::acquire_shared_for_profile(
         &profile_root,
