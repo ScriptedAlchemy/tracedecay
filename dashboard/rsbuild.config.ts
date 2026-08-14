@@ -35,9 +35,10 @@ export default defineConfig({
     },
   },
   performance: {
-    buildCache: {
-      buildDependencies: ['postcss.config.mjs'],
-    },
+    // Persistent cache makes a warm production rebuild minify the same
+    // entry to different short names than a cold build, so index.js
+    // contenthash drifts and CI's consecutive-build sha256 check fails.
+    buildCache: false,
     chunkSplit: { strategy: 'split-by-experience' },
   },
 });
