@@ -681,6 +681,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn first_party_plugin_assets_fit_host_bundle_artifact_bound() {
+        use tracedecay_host_integration::MAX_ARTIFACT_CONTENT_BYTES;
+
+        for (host, files) in [
+            ("claude", claude_files()),
+            ("cursor", cursor_files()),
+            ("cursor-native", cursor_native_extension_files()),
+            ("codex", codex_files()),
+            ("kimi", kimi_files()),
+            ("opencode-agent", opencode_agent_files()),
+        ] {
+            for (relative, contents) in files {
+                assert!(
+                    contents.len() <= MAX_ARTIFACT_CONTENT_BYTES,
+                    "{host} {relative} is {} bytes, exceeds MAX_ARTIFACT_CONTENT_BYTES ({MAX_ARTIFACT_CONTENT_BYTES})",
+                    contents.len()
+                );
+            }
+        }
+    }
+
     fn collect_relative(base: &Path, dir: &Path, out: &mut BTreeSet<String>) {
         for entry in std::fs::read_dir(dir).expect("read skills dir").flatten() {
             let path = entry.path();

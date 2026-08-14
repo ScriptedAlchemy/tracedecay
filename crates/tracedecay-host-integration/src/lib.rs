@@ -23,7 +23,10 @@ pub const MAX_MANIFEST_ARTIFACTS: usize = 128;
 pub const MAX_HOST_COMPONENTS: usize = 4;
 pub const MAX_RELATIVE_PATH_BYTES: usize = 512;
 pub const MAX_IDENTIFIER_BYTES: usize = 128;
-pub const MAX_ARTIFACT_CONTENT_BYTES: usize = 1024 * 1024;
+/// Per-artifact byte cap for compiled first-party host-bundle contents.
+/// Sized to admit the Cursor desktop native-diagnostics extension
+/// (`plugin/cursor-native-extension/embedded/extension.js`).
+pub const MAX_ARTIFACT_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
