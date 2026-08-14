@@ -312,10 +312,7 @@ fn validate_receipt_chunks(
         return Err(corrupt("semantic vector batch chunk child count mismatch"));
     }
     for (row, chunk) in rows.rows.iter().zip(&receipt.chunks) {
-        let operation = match chunk.operation {
-            tracedecay_store::SemanticVectorStageChunkOperation::Embed => "embed",
-            tracedecay_store::SemanticVectorStageChunkOperation::Tombstone => "tombstone",
-        };
+        let operation = chunk.operation.as_str();
         if u64_at(row, 0)? != u64::from(chunk.effect_ordinal)
             || text_at(row, 1)? != chunk.chunk_id.as_str()
             || text_at(row, 2)? != chunk.chunk_digest.as_str()
@@ -483,10 +480,7 @@ pub(super) fn validate_stage_history(
                 .chunks
                 .get(effect_ordinal)
                 .ok_or_else(|| corrupt("semantic vector batch has excess chunk child"))?;
-            let operation = match chunk.operation {
-                SemanticVectorStageChunkOperation::Embed => "embed",
-                SemanticVectorStageChunkOperation::Tombstone => "tombstone",
-            };
+            let operation = chunk.operation.as_str();
             if text_at(row, 10)? != chunk.chunk_id.as_str()
                 || text_at(row, 11)? != chunk.chunk_digest.as_str()
                 || text_at(row, 12)? != operation
@@ -920,11 +914,8 @@ pub(super) fn chunk_manifest_digest(
         }
         for row in &rows.rows {
             ensure_live(context)?;
-            let operation = match text_at(row, 2)? {
-                "embed" => SemanticVectorStageChunkOperation::Embed,
-                "tombstone" => SemanticVectorStageChunkOperation::Tombstone,
-                _ => return Err(corrupt("unknown semantic vector chunk operation")),
-            };
+            let operation = SemanticVectorStageChunkOperation::parse(text_at(row, 2)?)
+                .map_err(|_| corrupt("unknown semantic vector chunk operation"))?;
             let member = SemanticVectorChunkManifestMember {
                 chunk_id: tracedecay_store::SemanticVectorChunkId::new(text_at(row, 0)?)?,
                 chunk_digest: tracedecay_store::SemanticVectorChunkDigest::new(text_at(row, 1)?)?,

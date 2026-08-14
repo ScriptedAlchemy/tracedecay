@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::{
-    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
-    ManifestDigest, VectorGenerationIdV1,
+    AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, ChangedCodeChunkV1, CodeGenerationId,
+    CodeSearchChunkId, ManifestDigest, VectorGenerationIdV1,
 };
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_store::{
@@ -38,9 +38,10 @@ use native_records::{
     read_build_records, read_cataloged_generation_records, read_generation_catalog,
     read_generation_catalog_entry, read_generation_metadata, read_state_metadata,
 };
-use persistence::{
-    check_cancelled, generation_label, map_graph_error, resident_size_overflow, storage_error,
-};
+
+#[cfg(test)]
+pub(crate) use native_records::encode_generation_batch_delta;
+use persistence::{check_cancelled, map_graph_error, resident_size_overflow, storage_error};
 use snapshot::SemanticVectorVerifiedReadV1;
 
 pub use evaluation_runtime::{
@@ -98,24 +99,31 @@ impl SemanticVectorStageDescriptorV1 {
         projection: AdmittedEmbeddingProjectionKeyV1,
         changes: &ChangedCodeChunkSetV1,
     ) -> Result<Self, VectorGenerationStoreErrorV1> {
+        let live_member = |change: &ChangedCodeChunkV1,
+                           operation: SemanticVectorStageChunkOperation| {
+            let digest = change.current_digest.as_ref().ok_or_else(|| {
+                VectorGenerationStoreErrorV1::InvalidPlan(
+                    "semantic vector live member has no current digest".to_owned(),
+                )
+            })?;
+            Ok(SemanticVectorChunkManifestMember {
+                chunk_id: SemanticVectorChunkId::new(change.chunk_id.to_string())
+                    .map_err(storage_error)?,
+                chunk_digest: SemanticVectorChunkDigest::new(digest.as_str())
+                    .map_err(storage_error)?,
+                operation,
+            })
+        };
         let mut members = changes
             .added_or_changed
             .iter()
-            .chain(&changes.reused)
-            .map(|change| {
-                let digest = change.current_digest.as_ref().ok_or_else(|| {
-                    VectorGenerationStoreErrorV1::InvalidPlan(
-                        "semantic vector live member has no current digest".to_owned(),
-                    )
-                })?;
-                Ok(SemanticVectorChunkManifestMember {
-                    chunk_id: SemanticVectorChunkId::new(change.chunk_id.to_string())
-                        .map_err(storage_error)?,
-                    chunk_digest: SemanticVectorChunkDigest::new(digest.as_str())
-                        .map_err(storage_error)?,
-                    operation: SemanticVectorStageChunkOperation::Embed,
-                })
-            })
+            .map(|change| live_member(change, SemanticVectorStageChunkOperation::Embed))
+            .chain(
+                changes
+                    .reused
+                    .iter()
+                    .map(|change| live_member(change, SemanticVectorStageChunkOperation::Reuse)),
+            )
             .chain(changes.deleted.iter().map(|change| {
                 let digest = change.prior_digest.as_ref().ok_or_else(|| {
                     VectorGenerationStoreErrorV1::InvalidPlan(
@@ -479,22 +487,6 @@ impl GraphVectorGenerationStoreV1 {
         read_state_metadata(&self.snapshot()?, cancellation).map(|metadata| metadata.revision)
     }
 
-    fn generation_entities(
-        &self,
-        snapshot: &SemanticVectorVerifiedReadV1,
-        generation_id: &VectorGenerationIdV1,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<tracedecay_graph_db::GraphEntity>, VectorGenerationStoreErrorV1> {
-        let label = generation_label(generation_id)?;
-        let records = read_cataloged_generation_records(snapshot, generation_id, cancellation)?
-            .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
-        Ok(records
-            .entities
-            .into_values()
-            .filter(|entity| entity.labels.contains(&label))
-            .collect())
-    }
-
     pub async fn verified_resident_plan(
         &self,
         expected_generation: &VectorGenerationIdV1,
@@ -510,9 +502,18 @@ impl GraphVectorGenerationStoreV1 {
                         "active semantic vector generation metadata is missing".to_owned(),
                     )
                 })?;
-        let rows =
-            self.generation_entities(&snapshot, expected_generation, Arc::clone(&cancellation))?;
-        let row_count = u64::try_from(rows.len()).map_err(storage_error)?;
+        let catalog = read_generation_catalog_entry(
+            &snapshot,
+            expected_generation,
+            Arc::clone(&cancellation),
+        )?
+        .ok_or(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)?;
+        if &catalog.generation_id != expected_generation {
+            return Err(VectorGenerationStoreErrorV1::Corrupt(
+                "active semantic vector generation catalog identity is inconsistent".to_owned(),
+            ));
+        }
+        let row_count = catalog.rows;
         let dimensions = u64::from(generation.embedding_key.embedding_key().dimensions);
         let vector_bytes = dimensions
             .checked_mul(u64::try_from(size_of::<f32>()).map_err(storage_error)?)

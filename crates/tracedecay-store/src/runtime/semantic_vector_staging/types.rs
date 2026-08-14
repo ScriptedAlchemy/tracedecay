@@ -496,7 +496,31 @@ impl SemanticVectorStageBatchKey {
 #[serde(rename_all = "snake_case")]
 pub enum SemanticVectorStageChunkOperation {
     Embed,
+    /// Lineage-only reuse: the generation receipt names the chunk, and the
+    /// base generation's vector rows serve it. No local vector entity.
+    Reuse,
     Tombstone,
+}
+
+impl SemanticVectorStageChunkOperation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Embed => "embed",
+            Self::Reuse => "reuse",
+            Self::Tombstone => "tombstone",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, StorageRuntimeContractErrorV1> {
+        match value {
+            "embed" => Ok(Self::Embed),
+            "reuse" => Ok(Self::Reuse),
+            "tombstone" => Ok(Self::Tombstone),
+            _ => Err(StorageRuntimeContractErrorV1::NonCanonical {
+                field: "semantic vector chunk operation",
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -514,6 +538,7 @@ impl SemanticVectorStageChunkReceipt {
         let valid_output = matches!(
             (self.operation, &self.output_digest),
             (SemanticVectorStageChunkOperation::Embed, Some(_))
+                | (SemanticVectorStageChunkOperation::Reuse, None)
                 | (SemanticVectorStageChunkOperation::Tombstone, None)
         );
         if !valid_output {

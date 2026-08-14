@@ -2127,12 +2127,6 @@ mod tests {
             .expect("base vector")
             .chunk_digest
             .clone();
-        let base_output_digest = base
-            .vectors
-            .get(&chunk_id)
-            .expect("base vector")
-            .output_digest
-            .clone();
         let base_id = base.generation_id().clone();
         let mut store = FakeVectorGenerationStoreV1::new();
         insert_generation(&mut store, base);
@@ -2189,14 +2183,16 @@ mod tests {
             &split_build,
             &compatible,
         )
-        .expect("reused batch binds its carried native vector");
+        .expect("reused batch binds lineage without a local vector effect");
         assert_eq!(durable_chunks.len(), 1);
         assert_eq!(
-            durable_chunks[0]
-                .output_digest
-                .as_ref()
-                .map(|digest| digest.as_str()),
-            Some(base_output_digest.as_str())
+            durable_chunks[0].operation,
+            tracedecay_store::SemanticVectorStageChunkOperation::Reuse
+        );
+        assert_eq!(durable_chunks[0].output_digest, None);
+        assert_eq!(
+            durable_chunks[0].chunk_digest.as_str(),
+            chunk_digest.as_str()
         );
         let staged = store.staged.get(&split_build).expect("staged build");
         assert_eq!(
@@ -2246,23 +2242,50 @@ mod tests {
                 target_projection_key: embedding.projection_key().clone(),
                 source_generation: target_source,
                 source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
-                expected_chunk_ids: vec![chunk_id].into(),
+                expected_chunk_ids: vec![chunk_id.clone()].into(),
                 base_generation: Some(base_id.clone()),
             })
             .expect("staged build");
         store
-            .commit_batch(&build, None, prepared)
+            .commit_batch(&build, None, prepared.clone())
             .expect("complete reused batch");
+        let encoded = graph_adapter::encode_generation_batch_delta(&store, &build, &prepared, 1)
+            .expect("receipt-only reused encode");
+        assert!(
+            encoded.entities.iter().all(|entity| {
+                !entity.labels.iter().any(|label| {
+                    label.as_str()
+                        == tracedecay_graph_db::semantic_vector_native::GENERATION_VECTOR_LABEL
+                })
+            }),
+            "ordinary reuse must not copy base vectors as generation entities"
+        );
+        assert!(
+            encoded.entities.iter().any(|entity| {
+                entity.labels.iter().any(|label| {
+                    label.as_str()
+                        == tracedecay_graph_db::semantic_vector_native::GENERATION_RECEIPT_LABEL
+                })
+            }),
+            "ordinary reuse must still persist the generation receipt"
+        );
         let publication = store
             .publish_generation(&build)
             .expect("immutable publication");
 
         assert!(!store.staged.contains_key(&build));
-        store
+        let published = store
             .generation(&publication.generation_id)
-            .expect("published generation")
+            .expect("published generation");
+        published
             .validate_persisted()
             .expect("published generation is complete");
+        let reused = published
+            .vectors()
+            .get(&chunk_id)
+            .expect("reused vector remains retrievable");
+        assert_eq!(reused.values, vec![0.25]);
+        assert_eq!(reused.chunk_digest, chunk_digest);
     }
 
     #[test]

@@ -648,14 +648,17 @@ fn unchanged_generation_reuses_vectors_without_fake_inference() {
         .unwrap();
     store.commit_batch(&build_id, None, prepared).unwrap();
     let published = store.publish_generation(&build_id).unwrap();
-    assert_eq!(
-        store
-            .generation(&published.generation_id)
-            .unwrap()
+    let incremental = store.generation(&published.generation_id).unwrap();
+    let base = store.generation(&base_generation).unwrap();
+    assert_eq!(incremental.vectors().len(), 3);
+    for (chunk_id, vector) in incremental.vectors() {
+        let prior = base
             .vectors()
-            .len(),
-        3
-    );
+            .get(chunk_id)
+            .expect("reused chunk must exist on the base generation");
+        assert_eq!(vector.values, prior.values);
+        assert_eq!(vector.chunk_digest, prior.chunk_digest);
+    }
 }
 
 #[test]

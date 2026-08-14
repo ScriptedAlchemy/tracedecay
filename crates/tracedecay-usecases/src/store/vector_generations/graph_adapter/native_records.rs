@@ -58,9 +58,23 @@ pub(super) fn read_cataloged_generation_records(
         (None, None) => Ok(None),
         (Some(records), Some(catalog)) => {
             let rows = u64::try_from(records.generation.vectors().len()).map_err(storage_error)?;
+            let local_vector_entities = u64::try_from(
+                records
+                    .entities
+                    .values()
+                    .filter(|entity| {
+                        entity
+                            .labels
+                            .iter()
+                            .any(|label| label.as_str() == GENERATION_VECTOR_LABEL)
+                    })
+                    .count(),
+            )
+            .map_err(storage_error)?;
             if catalog.base_generation.as_ref() != records.generation.base_generation()
                 || catalog.rows != rows
                 || catalog.vector_bytes != records.vector_bytes
+                || local_vector_entities > catalog.rows
             {
                 return Err(corrupt(
                     "semantic vector generation catalog record is inconsistent",
@@ -75,7 +89,7 @@ pub(super) fn read_cataloged_generation_records(
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct NativeGraphStateV1 {
+pub(crate) struct NativeGraphStateV1 {
     pub entities: Vec<GraphEntity>,
     pub relations: Vec<GraphRelation>,
 }
@@ -97,7 +111,9 @@ pub(super) struct NativeGenerationMetadataV1 {
 /// Encode one bounded projector batch directly into its immutable semantic
 /// generation identity. The semantic identity is known from the admitted plan
 /// before batch zero; no staged row namespace or terminal corpus rename exists.
-pub(super) fn encode_generation_batch_delta(
+/// Ordinary reuse is receipt-only: reused chunks name lineage on the batch
+/// receipt, and the base generation's vector rows serve them.
+pub(crate) fn encode_generation_batch_delta(
     state: &VectorGenerationStateMachineV1,
     build_id: &VectorGenerationBuildIdV1,
     prepared: &PreparedVectorGenerationV1,
@@ -184,9 +200,7 @@ pub(super) fn encode_generation_batch_delta(
     )?;
     for receipt in &prepared.receipt.receipts {
         match receipt.operation {
-            ProjectionOperationV1::Added
-            | ProjectionOperationV1::Updated
-            | ProjectionOperationV1::Reused => {
+            ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
                 let vector = build.vectors.get(&receipt.chunk_id).ok_or_else(|| {
                     VectorGenerationStoreErrorV1::Corrupt(
                         "committed semantic vector receipt has no staged vector".to_owned(),
@@ -214,6 +228,13 @@ pub(super) fn encode_generation_batch_delta(
                     &mut relations,
                     relation(&owner, &child, CONTAINS_KIND, "vector")?,
                 )?;
+            }
+            ProjectionOperationV1::Reused => {
+                if !build.vectors.contains_key(&receipt.chunk_id) {
+                    return Err(VectorGenerationStoreErrorV1::Corrupt(
+                        "committed semantic reused receipt has no staged vector".to_owned(),
+                    ));
+                }
             }
             ProjectionOperationV1::Deleted => {
                 let prior_digest = build.tombstones.get(&receipt.chunk_id).ok_or_else(|| {

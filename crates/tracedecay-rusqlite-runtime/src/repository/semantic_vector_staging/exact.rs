@@ -355,12 +355,7 @@ impl SemanticVectorStagingStore for SemanticVectorStagingExactSqlStorage {
                     ExactSqlValue::Integer(i64::from(chunk.effect_ordinal)),
                     text(chunk.chunk_id.as_str()),
                     text(chunk.chunk_digest.as_str()),
-                    text(match chunk.operation {
-                        tracedecay_store::SemanticVectorStageChunkOperation::Embed => "embed",
-                        tracedecay_store::SemanticVectorStageChunkOperation::Tombstone => {
-                            "tombstone"
-                        }
-                    }),
+                    text(chunk.operation.as_str()),
                     optional_text(
                         chunk
                             .output_digest

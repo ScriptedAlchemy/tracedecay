@@ -130,41 +130,57 @@ pub(super) fn validate_semantic_native_batch(
     let expected_dimension = usize::from(plan.recipe.embedding_dimension);
     let mut expected_effect_ids = Vec::with_capacity(receipt.chunks.len());
     for chunk in &receipt.chunks {
-        let chunk_id = chunk.chunk_id.as_str();
-        let (kind, discriminator) = match chunk.operation {
-            SemanticVectorStageChunkOperation::Embed => ("generation-vector", "vector"),
-            SemanticVectorStageChunkOperation::Tombstone => ("generation-tombstone", "tombstone"),
-        };
-        let effect_id =
-            semantic_vector_native::scoped_entity_id(kind, generation, chunk_id)?.to_string();
-        let effect = entities
-            .remove(effect_id.as_str())
-            .ok_or(GraphDbError::Conflict)?;
         match chunk.operation {
-            SemanticVectorStageChunkOperation::Embed => validate_vector_effect(
-                effect,
-                generation,
-                &generation_row_label,
-                &vector_property,
-                chunk_id,
-                chunk.chunk_digest.as_str(),
-                chunk
-                    .output_digest
-                    .as_ref()
-                    .ok_or(GraphDbError::Conflict)?
-                    .as_str(),
-                expected_dimension,
-                expected_metric,
-                &target_projection,
-            )?,
-            SemanticVectorStageChunkOperation::Tombstone => validate_tombstone_effect(
-                effect,
-                generation,
-                chunk_id,
-                chunk.chunk_digest.as_str(),
-            )?,
+            SemanticVectorStageChunkOperation::Reuse => {}
+            SemanticVectorStageChunkOperation::Embed => {
+                let chunk_id = chunk.chunk_id.as_str();
+                let effect_id = semantic_vector_native::scoped_entity_id(
+                    "generation-vector",
+                    generation,
+                    chunk_id,
+                )?
+                .to_string();
+                let effect = entities
+                    .remove(effect_id.as_str())
+                    .ok_or(GraphDbError::Conflict)?;
+                validate_vector_effect(
+                    effect,
+                    generation,
+                    &generation_row_label,
+                    &vector_property,
+                    chunk_id,
+                    chunk.chunk_digest.as_str(),
+                    chunk
+                        .output_digest
+                        .as_ref()
+                        .ok_or(GraphDbError::Conflict)?
+                        .as_str(),
+                    expected_dimension,
+                    expected_metric,
+                    &target_projection,
+                )?;
+                expected_effect_ids.push((effect_id, "vector"));
+            }
+            SemanticVectorStageChunkOperation::Tombstone => {
+                let chunk_id = chunk.chunk_id.as_str();
+                let effect_id = semantic_vector_native::scoped_entity_id(
+                    "generation-tombstone",
+                    generation,
+                    chunk_id,
+                )?
+                .to_string();
+                let effect = entities
+                    .remove(effect_id.as_str())
+                    .ok_or(GraphDbError::Conflict)?;
+                validate_tombstone_effect(
+                    effect,
+                    generation,
+                    chunk_id,
+                    chunk.chunk_digest.as_str(),
+                )?;
+                expected_effect_ids.push((effect_id, "tombstone"));
+            }
         }
-        expected_effect_ids.push((effect_id, discriminator));
     }
     if !entities.is_empty() {
         return Err(GraphDbError::Conflict);
@@ -256,10 +272,11 @@ fn validate_projection_receipt(
         let operation_matches = matches!(
             (native.operation, durable.operation),
             (
-                ProjectionOperationV1::Added
-                    | ProjectionOperationV1::Updated
-                    | ProjectionOperationV1::Reused,
+                ProjectionOperationV1::Added | ProjectionOperationV1::Updated,
                 SemanticVectorStageChunkOperation::Embed
+            ) | (
+                ProjectionOperationV1::Reused,
+                SemanticVectorStageChunkOperation::Reuse
             ) | (
                 ProjectionOperationV1::Deleted,
                 SemanticVectorStageChunkOperation::Tombstone

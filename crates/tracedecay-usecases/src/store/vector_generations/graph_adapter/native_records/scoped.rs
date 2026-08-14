@@ -2,8 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    CodeChunkProjectionReceiptV1, CodeSearchChunkId, ProjectionBatchReceiptV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, VectorGenerationIdV1, canonical_sha256,
+    CodeChunkProjectionReceiptV1, CodeGenerationId, CodeSearchChunkId, ManifestDigest,
+    ProjectionBatchReceiptV1, ProjectionOperationV1, ProjectionOutcomeV1, VectorGenerationIdV1,
+    canonical_sha256,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphRelation, GraphRelationId,
@@ -272,11 +273,23 @@ pub(crate) fn read_generation_records(
     generation: &VectorGenerationIdV1,
     cancellation: Arc<dyn GraphCancellation>,
 ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
+    read_generation_records_inner(snapshot, generation, cancellation, &mut BTreeSet::new())
+}
+
+fn read_generation_records_inner(
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
+    generation: &VectorGenerationIdV1,
+    cancellation: Arc<dyn GraphCancellation>,
+    visiting: &mut BTreeSet<VectorGenerationIdV1>,
+) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
+    if !visiting.insert(generation.clone()) {
+        return Err(corrupt("semantic vector generation base lineage is cyclic"));
+    }
     let Some((entities, relations)) = read_scope(
         snapshot,
         generation_entity_id(generation)?,
         MAX_GENERATION_SCOPE_RECORDS,
-        cancellation,
+        Arc::clone(&cancellation),
     )?
     else {
         return Ok(None);
@@ -293,7 +306,7 @@ pub(crate) fn read_generation_records(
     let projection_key = required_bytes(owner, TARGET_PROJECTION)?;
     let source_generation = parse_id(required_string(owner, SOURCE_GENERATION)?)?;
     let source_manifest_digest = digest(required_string(owner, SOURCE_MANIFEST)?)?;
-    let vectors = rows_with_owner(
+    let mut vectors = rows_with_owner(
         &entities,
         GENERATION_VECTOR_LABEL,
         GENERATION_ID,
@@ -352,6 +365,18 @@ pub(crate) fn read_generation_records(
         })
         .collect::<Result<Vec<_>, _>>()?;
     attach_reused_receipts(&mut receipts, &vectors)?;
+    let local_vector_count = vectors.len();
+    let base_generation = optional_generation(owner, BASE_GENERATION)?;
+    hydrate_reused_vectors(
+        snapshot,
+        &receipts,
+        &mut vectors,
+        base_generation.as_ref(),
+        &source_generation,
+        &source_manifest_digest,
+        Arc::clone(&cancellation),
+        visiting,
+    )?;
     require_count(owner, ROW_COUNT, vectors.len())?;
     let measured_vector_bytes = vectors.values().try_fold(0_u64, |total, vector| {
         total
@@ -370,7 +395,6 @@ pub(crate) fn read_generation_records(
     }
     require_count(owner, TOMBSTONE_COUNT, tombstone_digests.len())?;
     require_count(owner, RECEIPT_COUNT, receipts.len())?;
-    let base_generation = optional_generation(owner, BASE_GENERATION)?;
     let base_relations = relations
         .values()
         .filter(|relation| relation.kind.as_str() == BASE_KIND)
@@ -380,8 +404,7 @@ pub(crate) fn read_generation_records(
             "immutable semantic vector generation links to a foreign physical generation",
         ));
     }
-    let contained_records = vectors
-        .len()
+    let contained_records = local_vector_count
         .checked_add(tombstone_digests.len())
         .and_then(|count| count.checked_add(receipts.len()))
         .ok_or_else(|| corrupt("semantic vector generation relation count overflowed"))?;
@@ -487,6 +510,71 @@ fn read_scope(
     Ok(Some((entities, relations)))
 }
 
+fn hydrate_reused_vectors(
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
+    receipts: &[ProjectionBatchReceiptV1],
+    vectors: &mut BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
+    base_generation: Option<&VectorGenerationIdV1>,
+    source_generation: &CodeGenerationId,
+    source_manifest_digest: &ManifestDigest,
+    cancellation: Arc<dyn GraphCancellation>,
+    visiting: &mut BTreeSet<VectorGenerationIdV1>,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    let missing = receipts
+        .iter()
+        .flat_map(|batch| batch.receipts.iter())
+        .filter(|receipt| {
+            receipt.operation == ProjectionOperationV1::Reused
+                && !vectors.contains_key(&receipt.chunk_id)
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let Some(base_id) = base_generation else {
+        return Err(VectorGenerationStoreErrorV1::MissingBaseVector(
+            missing[0].chunk_id.clone(),
+        ));
+    };
+    let Some(base) = read_generation_records_inner(snapshot, base_id, cancellation, visiting)?
+    else {
+        return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration);
+    };
+    apply_reused_base_vectors(
+        &missing,
+        vectors,
+        base.generation.vectors(),
+        source_generation,
+        source_manifest_digest,
+    )
+}
+
+fn apply_reused_base_vectors(
+    missing: &[&tracedecay_domain::CodeChunkProjectionReceiptV1],
+    vectors: &mut BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
+    base_vectors: &BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
+    source_generation: &CodeGenerationId,
+    source_manifest_digest: &ManifestDigest,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    for receipt in missing {
+        let base_vector = base_vectors.get(&receipt.chunk_id).ok_or_else(|| {
+            VectorGenerationStoreErrorV1::MissingBaseVector(receipt.chunk_id.clone())
+        })?;
+        if receipt.prior_chunk_digest.as_ref() != Some(&base_vector.chunk_digest)
+            || receipt.current_chunk_digest.as_ref() != Some(&base_vector.chunk_digest)
+        {
+            return Err(VectorGenerationStoreErrorV1::MissingBaseVector(
+                receipt.chunk_id.clone(),
+            ));
+        }
+        let mut rebound = base_vector.clone();
+        rebound.source_generation = source_generation.clone();
+        rebound.source_manifest_digest = source_manifest_digest.clone();
+        vectors.insert(receipt.chunk_id.clone(), rebound);
+    }
+    Ok(())
+}
+
 fn attach_reused_receipts(
     receipts: &mut [ProjectionBatchReceiptV1],
     vectors: &BTreeMap<CodeSearchChunkId, ProjectedChunkVectorV1>,
@@ -578,4 +666,120 @@ fn require_count(
 
 fn corrupt(message: impl Into<String>) -> VectorGenerationStoreErrorV1 {
     VectorGenerationStoreErrorV1::Corrupt(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use tracedecay_domain::{
+        CodeChunkProjectionReceiptV1, CodeGenerationId, CodeSearchChunkId, ContentDigest,
+        ManifestDigest, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+        ProjectionOutcomeV1,
+    };
+
+    use super::{ProjectedChunkVectorV1, apply_reused_base_vectors};
+
+    fn digest(seed: u8) -> ManifestDigest {
+        ManifestDigest::try_from(format!("sha256:{:064x}", seed as u64)).expect("digest")
+    }
+
+    fn content(seed: u8) -> ContentDigest {
+        ContentDigest::try_from(format!("sha256:{:064x}", seed as u64)).expect("content")
+    }
+
+    fn chunk(name: &str) -> CodeSearchChunkId {
+        CodeSearchChunkId::try_from(name.to_owned()).expect("chunk id")
+    }
+
+    fn generation(name: &str) -> CodeGenerationId {
+        CodeGenerationId::try_from(name.to_owned()).expect("generation")
+    }
+
+    fn vector(
+        chunk_id: &CodeSearchChunkId,
+        source: &str,
+        digest_seed: u8,
+        values: Vec<f32>,
+    ) -> ProjectedChunkVectorV1 {
+        ProjectedChunkVectorV1 {
+            projection_key: ProjectionKeyV1 {
+                kind: ProjectionKindV1::Embedding,
+                schema_revision: "tracedecay.embedding-projection.v1".to_owned(),
+                profile_digest: digest(1),
+            },
+            source_generation: generation(source),
+            source_manifest_digest: digest(2),
+            chunk_id: chunk_id.clone(),
+            chunk_digest: content(digest_seed),
+            values,
+            output_digest: content(digest_seed + 10),
+        }
+    }
+
+    fn reused_receipt(
+        chunk_id: &CodeSearchChunkId,
+        digest_seed: u8,
+    ) -> CodeChunkProjectionReceiptV1 {
+        let chunk_digest = content(digest_seed);
+        CodeChunkProjectionReceiptV1 {
+            projection_key: ProjectionKeyV1 {
+                kind: ProjectionKindV1::Embedding,
+                schema_revision: "tracedecay.embedding-projection.v1".to_owned(),
+                profile_digest: digest(1),
+            },
+            request_digest: digest(3),
+            prior_generation: None,
+            source_generation: generation("code-generation.incremental"),
+            source_manifest_digest: digest(4),
+            chunk_id: chunk_id.clone(),
+            prior_chunk_digest: Some(chunk_digest.clone()),
+            current_chunk_digest: Some(chunk_digest),
+            operation: ProjectionOperationV1::Reused,
+            outcome: ProjectionOutcomeV1::Reused,
+            output_digest: None,
+        }
+    }
+
+    #[test]
+    fn reused_receipts_resolve_through_base_vectors_without_local_copies() {
+        let chunk_id = chunk("chunk.v1.stable");
+        let base = vector(&chunk_id, "code-generation.base", 7, vec![0.5, 0.25]);
+        let receipt = reused_receipt(&chunk_id, 7);
+        let mut local = BTreeMap::new();
+        apply_reused_base_vectors(
+            &[&receipt],
+            &mut local,
+            &BTreeMap::from([(chunk_id.clone(), base.clone())]),
+            &generation("code-generation.incremental"),
+            &digest(4),
+        )
+        .expect("hydrate reused from base");
+        let hydrated = local.get(&chunk_id).expect("reused vector");
+        assert_eq!(hydrated.values, base.values);
+        assert_eq!(hydrated.chunk_digest, base.chunk_digest);
+        assert_eq!(
+            hydrated.source_generation,
+            generation("code-generation.incremental")
+        );
+        assert_eq!(hydrated.source_manifest_digest, digest(4));
+    }
+
+    #[test]
+    fn reused_receipts_fail_closed_when_the_base_vector_is_missing() {
+        let chunk_id = chunk("chunk.v1.missing");
+        let receipt = reused_receipt(&chunk_id, 7);
+        let error = apply_reused_base_vectors(
+            &[&receipt],
+            &mut BTreeMap::new(),
+            &BTreeMap::new(),
+            &generation("code-generation.incremental"),
+            &digest(4),
+        )
+        .expect_err("missing base vector");
+        assert!(matches!(
+            error,
+            super::VectorGenerationStoreErrorV1::MissingBaseVector(id) if id == chunk_id
+        ));
+    }
 }

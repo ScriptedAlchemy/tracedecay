@@ -806,9 +806,7 @@ pub(in crate::store::vector_generations) fn semantic_stage_chunk_receipts(
         .enumerate()
         .map(|(ordinal, receipt)| {
             let (operation, chunk_digest, output_digest) = match receipt.operation {
-                ProjectionOperationV1::Added
-                | ProjectionOperationV1::Updated
-                | ProjectionOperationV1::Reused => {
+                ProjectionOperationV1::Added | ProjectionOperationV1::Updated => {
                     let vector = build.vectors.get(&receipt.chunk_id).ok_or_else(|| {
                         VectorGenerationStoreErrorV1::Corrupt(
                             "semantic vector native receipt has no carried vector effect"
@@ -819,6 +817,19 @@ pub(in crate::store::vector_generations) fn semantic_stage_chunk_receipts(
                         SemanticVectorStageChunkOperation::Embed,
                         Some(&vector.chunk_digest),
                         Some(&vector.output_digest),
+                    )
+                }
+                ProjectionOperationV1::Reused => {
+                    if !build.vectors.contains_key(&receipt.chunk_id) {
+                        return Err(VectorGenerationStoreErrorV1::Corrupt(
+                            "semantic vector reused receipt has no staged lineage vector"
+                                .to_owned(),
+                        ));
+                    }
+                    (
+                        SemanticVectorStageChunkOperation::Reuse,
+                        receipt.current_chunk_digest.as_ref(),
+                        None,
                     )
                 }
                 ProjectionOperationV1::Deleted => (
