@@ -514,7 +514,8 @@ fn platform_create_dir_all_durable(path: &Path) -> io::Result<()> {
 fn unique_private_staging_directory(parent: &Path) -> io::Result<PathBuf> {
     for _ in 0..16 {
         let mut entropy = [0_u8; 16];
-        getrandom::getrandom(&mut entropy).map_err(io::Error::from)?;
+        getrandom::getrandom(&mut entropy)
+            .map_err(|error| io::Error::other(error.to_string()))?;
         let path = parent.join(format!(
             ".tracedecay-directory-staging-{}",
             hex::encode(entropy)
