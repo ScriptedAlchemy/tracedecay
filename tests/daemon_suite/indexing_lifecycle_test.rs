@@ -272,6 +272,7 @@ async fn exact_symbol(
             "name": name,
             "limit": 5,
             "lazy_index_ignored_dependencies": lazy_index,
+            "format": "json",
         }),
     )
     .await
