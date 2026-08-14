@@ -445,6 +445,15 @@ the commit as attribution evidence.
   CLI, and both SDKs. Prove the partial-effect committed receipt and reset-only
   legal action survive each boundary and physical daemon restart; unit mappers
   and synthetic SDK envelopes are necessary but not final journey evidence.
+  PARTIAL 2026-08-14: the CLI leg is proven —
+  `tests/typed_terminal_restart_acceptance.rs` (`e56fadeff`) drives a real
+  commit-barrier-induced PartialEffect through the CLI transport across a
+  physical daemon kill/respawn with the committed receipt preserved, on top of
+  `a941a058e` (an expired effect keeps its authoritative terminal) and
+  `9b92818cc` (caller deadline on `tools/call` with bounded response grace).
+  The ResetRequired leg is `#[ignore]`d with unweakened assertions — real
+  product gap: project-open never settles a reset-required store. HTTP, MCP,
+  and both SDK legs remain unbuilt.
 - DONE 2026-08-10 (verified 2026-08-13): the ten `schema_unavailable`
   application bindings were repaired in `d2b094ca7` — the primitive-surface
   read operations gained typed schemas in
@@ -471,10 +480,14 @@ the commit as attribution evidence.
   interval, native integration, fan-out, and reduced rollup emitters without
   duplicating authority. The blocked-interval focused integration had passed
   1/1 before wind-down.
-- Reconstruct the delivery settlement checkpoint from tree
-  `52f68b889751014e7946f73e6137f3b99b0a5595` only after Work and observability
-  stabilize. Preserve RMCP disconnect settlement, durable hook ACK/replay
-  identity, cancellation, and terminal CLI ACK behavior.
+- DONE 2026-08-13 (recovered from session evidence 2026-08-14): the delivery
+  settlement lane landed via merge `fe110b92a` (`codex/rc-delivery-settlement`,
+  `8c55e01be` — transport-boundary settlement journeys over
+  `src/daemon/broker_stream_transport.rs` and `src/daemon/hook_v2_replay.rs`);
+  the orchestrator verified the four-part contract implemented and its three
+  transport journeys green before merging, then hit the spend limit before
+  writing this ledger line. The previously cited reconstruction source tree
+  `52f68b8897…` is an unreachable orphan object and is no longer needed.
 - Run execution-topology metrics, rollup, compaction, retry, cancellation, and
   restart journeys rather than contract inventories.
 - RESOLVED-BY-DECISION (2026-08-13): CI failure-localization owner. Ruling —
@@ -567,6 +580,16 @@ the commit as attribution evidence.
   scoped, and opencode. Do not add Cursor Cloud or expand Kiro scope.
 - Complete the default package/install/start journey. npm OIDC setup is the
   explicit remaining operator-owned publication action.
+- Operator-owned items (recovered 2026-08-14 from the 2026-08-08 session
+  record; fleet must not pick these up): npm trusted-publisher/OIDC setup
+  (operator said "later today" on 2026-08-08; no transcript reports it done);
+  the corrupted `30445febbe` commit-body reword (needs force-with-lease, only
+  on the operator's word after a completed generation); stash drops; an
+  operator-machine doctor pass; and truthful human screen-reader/usability
+  notes for the RC. Release/publishing workflows stay operator-owned per the
+  standing npm OIDC boundary rule. PR #421 is the branch's only CI surface
+  (`ci.yml` triggers on master pushes and PRs only) with
+  `cancel-in-progress: false` accepted until RC for complete matrices.
 - RESOLVED-BY-DECISION (2026-08-13): `src/doctor.rs:953` domain symbol
   extraction self-report. Ruling — keep the safe degradation, retire the
   "unimplemented" wording. `domain_symbol_rules_warning` now reports domain
