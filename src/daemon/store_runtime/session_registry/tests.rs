@@ -12,7 +12,8 @@ use tracedecay_rusqlite_runtime::remote::{
 use super::maintenance::RegisteredSchemaConvergenceStatus;
 use super::{
     DaemonSessionRuntimeRegistryV1, DatabaseAccessMode, DatabaseAuthority,
-    LocalProfileIdentityAuthorityV1, ProjectId, StoreShardIdV1, process_runtime_generation,
+    LocalProfileIdentityAuthorityV1, ProjectId, StoreRuntimeRegistryFailure, StoreShardIdV1,
+    TraceDecayError, process_runtime_generation, registry_open_error,
 };
 use crate::db::engine::{Executor, TestConnection};
 use tracedecay_graph_db::{
@@ -153,6 +154,23 @@ fn fallback_runtime_generation_always_fits_sqlite_integer() {
         process_runtime_generation("00000000000000000000000000000000"),
         Some(1)
     );
+}
+
+#[test]
+fn runtime_registry_reset_failure_remains_typed_for_project_open() {
+    let error = registry_open_error(
+        "open registered session runtime",
+        StoreRuntimeRegistryFailure::ResetRequired {
+            authority: "configuration".to_owned(),
+            reason: "persisted shape is not final".to_owned(),
+        },
+    );
+
+    assert!(matches!(
+        error,
+        TraceDecayError::ResetRequired { authority, reason }
+            if authority == "configuration" && reason == "persisted shape is not final"
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -397,7 +397,12 @@ fn registry_open_error(
     operation: &'static str,
     failure: StoreRuntimeRegistryFailure,
 ) -> TraceDecayError {
-    session_registry_error(operation, format!("{failure:?}"))
+    match failure {
+        StoreRuntimeRegistryFailure::ResetRequired { authority, reason } => {
+            TraceDecayError::reset_required(authority, reason)
+        }
+        failure => session_registry_error(operation, format!("{failure:?}")),
+    }
 }
 
 fn session_registry_error(operation: &'static str, message: String) -> TraceDecayError {
