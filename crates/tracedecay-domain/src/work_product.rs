@@ -697,30 +697,6 @@ impl WorkProposalV1 {
     pub const fn based_on_version(&self) -> WorkGraphVersionV1 {
         self.based_on_version
     }
-
-    pub fn route(&self) -> &WorkRouteDecisionV1 {
-        &self.route
-    }
-
-    pub const fn shape(&self) -> &WorkShapeAssessmentV1 {
-        &self.shape
-    }
-
-    pub const fn sizing(&self) -> &WorkSizingV1 {
-        &self.sizing
-    }
-
-    pub fn children(&self) -> &[WorkProposedChildV1] {
-        &self.children
-    }
-
-    pub fn explanation(&self) -> &str {
-        &self.explanation
-    }
-
-    pub fn evidence_digest(&self) -> &ManifestDigest {
-        &self.evidence_digest
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -747,10 +723,6 @@ impl WorkProposalDecisionV1 {
     pub const fn disposition(&self) -> &WorkProposalDispositionV1 {
         &self.disposition
     }
-
-    pub const fn decided_at(&self) -> UtcMicros {
-        self.decided_at
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -766,51 +738,12 @@ pub struct WorkHandoffV1 {
 }
 
 impl WorkHandoffV1 {
-    pub fn new(
-        handoff_id: WorkHandoffId,
-        task_id: TaskId,
-        from_actor: ActorId,
-        to_actor: ActorId,
-        evidence_frontier: BTreeSet<TaskEvidenceLinkId>,
-        unknowns: BTreeSet<String>,
-        handed_off_at: UtcMicros,
-    ) -> Result<Self, WorkProductContractError> {
-        for unknown in &unknowns {
-            validate_text(unknown)?;
-        }
-        Ok(Self {
-            handoff_id,
-            task_id,
-            from_actor,
-            to_actor,
-            evidence_frontier,
-            unknowns,
-            handed_off_at,
-        })
-    }
-
     pub fn task_id(&self) -> &TaskId {
         &self.task_id
     }
 
     pub fn handoff_id(&self) -> &WorkHandoffId {
         &self.handoff_id
-    }
-
-    pub fn from_actor(&self) -> &ActorId {
-        &self.from_actor
-    }
-
-    pub fn to_actor(&self) -> &ActorId {
-        &self.to_actor
-    }
-
-    pub fn evidence_frontier(&self) -> &BTreeSet<TaskEvidenceLinkId> {
-        &self.evidence_frontier
-    }
-
-    pub fn unknowns(&self) -> &BTreeSet<String> {
-        &self.unknowns
     }
 }
 
@@ -892,10 +825,6 @@ impl WorkItemV1 {
 
     pub fn hierarchy(&self) -> &WorkHierarchyV1 {
         &self.input.hierarchy
-    }
-
-    pub fn title(&self) -> &str {
-        &self.input.title
     }
 
     pub fn dependencies(&self) -> &BTreeSet<TaskId> {

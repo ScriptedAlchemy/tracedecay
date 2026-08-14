@@ -125,14 +125,6 @@ impl WorkExecutionLimits {
         })
     }
 
-    pub const fn max_input_tokens(self) -> u64 {
-        self.max_input_tokens
-    }
-
-    pub const fn max_output_tokens(self) -> u64 {
-        self.max_output_tokens
-    }
-
     pub const fn max_stdout_bytes(self) -> u64 {
         self.max_stdout_bytes
     }
@@ -143,10 +135,6 @@ impl WorkExecutionLimits {
 
     pub const fn max_protocol_bytes(self) -> u64 {
         self.max_protocol_bytes
-    }
-
-    pub const fn max_concurrency(self) -> u32 {
-        self.max_concurrency
     }
 }
 
@@ -316,16 +304,8 @@ impl WorkExecutionSnapshot {
         &self.configuration_revision_id
     }
 
-    pub fn configuration_snapshot_id(&self) -> &ConfigurationSnapshotId {
-        &self.configuration_snapshot_id
-    }
-
     pub fn effective_behavior_digest(&self) -> &ManifestDigest {
         &self.effective_behavior_digest
-    }
-
-    pub fn resolution_provenance_digest(&self) -> &ManifestDigest {
-        &self.resolution_provenance_digest
     }
 
     pub fn route(&self) -> &WorkProviderRouteV1 {
@@ -346,22 +326,6 @@ impl WorkExecutionSnapshot {
 
     pub fn executable(&self) -> &WorkExecutableReference {
         &self.executable
-    }
-
-    pub const fn sandbox(&self) -> WorkSandboxPolicy {
-        self.sandbox
-    }
-
-    pub const fn approval(&self) -> WorkApprovalPolicy {
-        self.approval
-    }
-
-    pub const fn filesystem(&self) -> WorkFilesystemPolicy {
-        self.filesystem
-    }
-
-    pub const fn egress(&self) -> WorkEgressPolicy {
-        self.egress
     }
 
     pub fn environment_allowlist(&self) -> &BTreeSet<String> {

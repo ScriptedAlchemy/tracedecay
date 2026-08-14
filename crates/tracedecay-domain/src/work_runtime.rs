@@ -273,10 +273,6 @@ impl WorkExecutionBudgetV1 {
         self.max_stderr_bytes
     }
 
-    pub const fn max_protocol_bytes(self) -> u64 {
-        self.max_protocol_bytes
-    }
-
     pub const fn from_limits(limits: WorkExecutionLimits) -> Self {
         Self {
             max_stdout_bytes: limits.max_stdout_bytes(),
@@ -379,63 +375,8 @@ impl WorkExecutionEnvelopeV1 {
         })
     }
 
-    pub fn attempt_identity(&self) -> &WorkAttemptIdentityV1 {
-        &self.attempt_identity
-    }
-
-    pub fn projection_binding(&self) -> &WorkAttemptProjectionBindingV1 {
-        &self.projection_binding
-    }
-
-    /// Whether two envelopes carry the same *caller-supplied* admission
-    /// content: identity, operation, pinned execution snapshot, scope,
-    /// worktree/reference/commit, instructions, cancellation generation, and
-    /// effect state.
-    ///
-    /// The projection binding is deliberately excluded. It is server-derived
-    /// state pinned when the attempt was admitted, and its generation,
-    /// sequence, and work version necessarily advance as *any* Work event
-    /// lands on the authority — including the attempt's own terminal runtime
-    /// evidence. Comparing it against a freshly recomputed binding would
-    /// therefore classify a byte-identical replay of the same admission as a
-    /// content conflict as soon as the attempt reported its own outcome, so
-    /// idempotent replay would be unreachable in practice. The proposal the
-    /// attempt was admitted against is the part of the binding that is real
-    /// admission authority, and callers check it separately through
-    /// [`WorkAttemptProjectionBindingV1::accepted_proposal`].
-    pub fn same_admission_content(&self, other: &Self) -> bool {
-        self.attempt_identity == other.attempt_identity
-            && self.operation == other.operation
-            && self.execution_snapshot == other.execution_snapshot
-            && self.project_id == other.project_id
-            && self.repository_id == other.repository_id
-            && self.worktree_id == other.worktree_id
-            && self.worktree_root == other.worktree_root
-            && self.reference == other.reference
-            && self.commit == other.commit
-            && self.instructions == other.instructions
-            && self.cancellation_generation == other.cancellation_generation
-            && self.effect_state == other.effect_state
-    }
-
     pub fn operation(&self) -> &WorkflowOperationRef {
         &self.operation
-    }
-
-    pub fn route(&self) -> &WorkProviderRouteV1 {
-        self.execution_snapshot.route()
-    }
-
-    pub const fn backend(&self) -> WorkProviderBackendV1 {
-        self.execution_snapshot.backend()
-    }
-
-    pub fn model(&self) -> &str {
-        self.execution_snapshot.model()
-    }
-
-    pub fn configuration_digest(&self) -> &ManifestDigest {
-        self.execution_snapshot.effective_behavior_digest()
     }
 
     pub fn execution_snapshot(&self) -> &WorkExecutionSnapshot {
@@ -692,10 +633,6 @@ impl WorkCancellationRequestV1 {
     pub fn request_id(&self) -> &WorkCancellationRequestId {
         &self.request_id
     }
-
-    pub const fn requested_at(&self) -> UtcMicros {
-        self.requested_at
-    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
@@ -721,10 +658,6 @@ impl WorkCancellationAcknowledgementV1 {
 
     pub fn request(&self) -> &WorkCancellationRequestV1 {
         &self.request
-    }
-
-    pub const fn acknowledged_at(&self) -> UtcMicros {
-        self.acknowledged_at
     }
 }
 
@@ -768,10 +701,6 @@ impl WorkCancellationEscalationV1 {
 
     pub fn acknowledgement(&self) -> &WorkCancellationAcknowledgementV1 {
         &self.acknowledgement
-    }
-
-    pub const fn escalated_at(&self) -> UtcMicros {
-        self.escalated_at
     }
 }
 
