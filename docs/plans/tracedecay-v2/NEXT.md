@@ -610,6 +610,25 @@ the commit as attribution evidence.
   scoped, and opencode. Do not add Cursor Cloud or expand Kiro scope.
 - Complete the default package/install/start journey. npm OIDC setup is the
   explicit remaining operator-owned publication action.
+- The npm publish WORKFLOW side is complete: `92d701086` (2026-08-07) rewired
+  the release publish job to tokenless OIDC trusted publishing — no NPM_TOKEN
+  anywhere, a policy gate forbidding token/.npmrc/registry-url auth, and
+  falsification tests. Only the operator's GitHub/npm trusted-publisher setup
+  remains. Operator setup checklist (recovered; never previously written):
+  on npmjs.com, add a trusted publisher for the SDK package pointing at
+  ScriptedAlchemy/tracedecay's release workflow (`release.yml`) and
+  environment; no token secrets are to be created; verify with a dry
+  workflow run that publish authenticates via OIDC.
+- RC verification protocol provenance (recovered 2026-08-14 from Codex thread
+  019fded1, 2026-08-11): an "Ubuntu Linux RC matrix" protocol was defined
+  (clean checkout `/fast/builds/tracedecay-v2-rc-linux`, per-SHA target dirs,
+  isolated TRACEDECAY_DATA_DIR, ff-only merge gate) with perf-gate budgets
+  (6 workers × 60s; index ≤900s; warm p95 ≤10s; max call ≤60s; RSS ≤6144MB;
+  errors ≤5%; ≥10k nodes) and the finding that NO Work-rollup measurement
+  script exists. Shard branches `codex/rc-linux-verify` and
+  `codex/rc-work-rollup-project-shard` carried partial work (a stash for the
+  latter survives as `stash@{0}`); no full green pass was executed and the
+  clean-checkout state predates the reboot/reclaim.
 - Operator-owned items (recovered 2026-08-14 from the 2026-08-08 session
   record; fleet must not pick these up): npm trusted-publisher/OIDC setup
   (operator said "later today" on 2026-08-08; no transcript reports it done);
