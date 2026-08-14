@@ -491,22 +491,28 @@ impl RegisteredGlobalDb {
             });
         }
         drop(rows);
+        transaction.commit().await?;
         if unprotected.is_empty() {
-            transaction.commit().await?;
             return Ok(0);
         }
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(&storage_root);
-        let protected = u64::try_from(unprotected.len())
-            .map_err(|error| LcmError::Db(format!("invalid protection batch size: {error}")))?;
+        let mut staged = Vec::with_capacity(unprotected.len());
         for message in &unprotected {
-            raw::upsert_raw_message_with_payload_tracked(
-                &transaction,
+            staged.push(raw::stage_raw_message_with_payload_tracked(
                 &storage_root,
                 message,
                 &mut payload_rollback,
-            )
-            .await?;
+            )?);
+        }
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
+        let protected = u64::try_from(unprotected.len())
+            .map_err(|error| LcmError::Db(format!("invalid protection batch size: {error}")))?;
+        for (message, staged) in unprotected.iter().zip(staged) {
+            raw::commit_staged_raw_message(&transaction, message, staged).await?;
         }
         transaction.commit().await?;
         payload_rollback.disarm();
@@ -518,19 +524,18 @@ impl RegisteredGlobalDb {
         storage_root: &Path,
         message: &SessionMessageRecord,
     ) -> Result<(), LcmError> {
+        let mut payload_rollback =
+            payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
+        let staged = raw::stage_raw_message_with_payload_tracked(
+            storage_root,
+            message,
+            &mut payload_rollback,
+        )?;
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
-        let mut payload_rollback =
-            payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
-        raw::upsert_raw_message_with_payload_tracked(
-            &transaction,
-            storage_root,
-            message,
-            &mut payload_rollback,
-        )
-        .await?;
+        raw::commit_staged_raw_message(&transaction, message, staged).await?;
         transaction.commit().await?;
         payload_rollback.disarm();
         Ok(())

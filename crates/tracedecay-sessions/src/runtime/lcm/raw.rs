@@ -169,6 +169,23 @@ struct PreparedMessage {
     nested_external_payloads: usize,
     quarantine_reason: Option<String>,
     quarantine_kind: Option<String>,
+    pending_payload_refs: Vec<LcmPayloadRef>,
+}
+
+/// File-side ingest work that must not sit on a SQLite write lease.
+///
+/// Privacy sanitization and payload externalization are CPU- and IO-bound.
+/// Holding an ordinary Immediate transaction across them lets the idle lease
+/// expire under load before the first SQL command runs.
+pub struct StagedRawMessageIngest {
+    prepared: PreparedMessage,
+    whole_message: Option<StagedWholeMessage>,
+}
+
+struct StagedWholeMessage {
+    payload_ref: LcmPayloadRef,
+    placeholder: String,
+    metadata_json: String,
 }
 
 impl PreparedMessage {
@@ -320,6 +337,7 @@ pub async fn upsert_projection_raw_message(
         nested_external_payloads: 0,
         quarantine_reason: None,
         quarantine_kind: None,
+        pending_payload_refs: Vec::new(),
     };
     prepared.metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &prepared)?;
     upsert_inline_raw_message(
@@ -331,29 +349,20 @@ pub async fn upsert_projection_raw_message(
     .await
 }
 
-pub async fn upsert_raw_message_with_payload_tracked(
-    conn: &(impl Executor + ?Sized),
+pub fn stage_raw_message_with_payload_tracked(
     storage_root: &Path,
     message: &SessionMessageRecord,
     rollback: &mut payload::PayloadFileRollback,
-) -> Result<RawMessageUpsert, LcmError> {
+) -> Result<StagedRawMessageIngest, LcmError> {
     let mut externalizer = PayloadExternalizer {
         storage_root,
         rollback,
     };
-    let prepared = prepare_message(conn, message, &mut externalizer).await?;
+    let prepared = prepare_message(message, &mut externalizer)?;
     if !security::should_externalize(&message.role, message.kind.as_deref(), &prepared.text) {
-        let projection_text = derived_text_for_index(&prepared.text);
-        upsert_inline_raw_message(
-            conn,
-            message,
-            &prepared.text,
-            prepared.metadata_json.as_deref(),
-        )
-        .await?;
-        return Ok(RawMessageUpsert {
-            projection_text,
-            projection_metadata_json: prepared.metadata_json,
+        return Ok(StagedRawMessageIngest {
+            prepared,
+            whole_message: None,
         });
     }
 
@@ -368,14 +377,45 @@ pub async fn upsert_raw_message_with_payload_tracked(
         &prepared.text,
         payload_metadata_json(&prepared)?,
     )?;
-    payload::upsert_payload_metadata(conn, &payload_ref).await?;
-
     let placeholder = externalized_payload_placeholder(
         &payload_ref,
         "content",
         prepared.quarantine_reason.as_deref(),
     );
     let metadata_json = externalized_payload_metadata(&payload_ref, &prepared)?;
+    Ok(StagedRawMessageIngest {
+        prepared,
+        whole_message: Some(StagedWholeMessage {
+            payload_ref,
+            placeholder,
+            metadata_json,
+        }),
+    })
+}
+
+pub async fn commit_staged_raw_message(
+    conn: &(impl Executor + ?Sized),
+    message: &SessionMessageRecord,
+    staged: StagedRawMessageIngest,
+) -> Result<RawMessageUpsert, LcmError> {
+    for payload_ref in &staged.prepared.pending_payload_refs {
+        payload::upsert_payload_metadata(conn, payload_ref).await?;
+    }
+    let Some(whole_message) = staged.whole_message else {
+        let projection_text = derived_text_for_index(&staged.prepared.text);
+        upsert_inline_raw_message(
+            conn,
+            message,
+            &staged.prepared.text,
+            staged.prepared.metadata_json.as_deref(),
+        )
+        .await?;
+        return Ok(RawMessageUpsert {
+            projection_text,
+            projection_metadata_json: staged.prepared.metadata_json,
+        });
+    };
+    payload::upsert_payload_metadata(conn, &whole_message.payload_ref).await?;
     conn.execute(
         "INSERT INTO lcm_raw_messages (
             provider, message_id, session_id, role, ordinal, timestamp,
@@ -404,19 +444,29 @@ pub async fn upsert_raw_message_with_payload_tracked(
             message.role.as_str(),
             message.ordinal,
             message.timestamp,
-            payload_ref.content_hash.as_str(),
+            whole_message.payload_ref.content_hash.as_str(),
             LcmStorageKind::External.as_str(),
-            payload_ref.payload_ref.as_str(),
-            placeholder.as_str(),
-            placeholder.as_str(),
-            metadata_json.as_str(),
+            whole_message.payload_ref.payload_ref.as_str(),
+            whole_message.placeholder.as_str(),
+            whole_message.placeholder.as_str(),
+            whole_message.metadata_json.as_str(),
         ],
     )
     .await?;
     Ok(RawMessageUpsert {
-        projection_text: placeholder,
-        projection_metadata_json: Some(metadata_json),
+        projection_text: whole_message.placeholder,
+        projection_metadata_json: Some(whole_message.metadata_json),
     })
+}
+
+pub async fn upsert_raw_message_with_payload_tracked(
+    conn: &(impl Executor + ?Sized),
+    storage_root: &Path,
+    message: &SessionMessageRecord,
+    rollback: &mut payload::PayloadFileRollback,
+) -> Result<RawMessageUpsert, LcmError> {
+    let staged = stage_raw_message_with_payload_tracked(storage_root, message, rollback)?;
+    commit_staged_raw_message(conn, message, staged).await
 }
 
 /// Applies ingest protection to an arbitrary replay field value (for example
@@ -460,8 +510,7 @@ pub async fn protect_replay_field_value_tracked(
         .map_err(|error| LcmError::Db(format!("replay privacy decoding failed: {error}")))
 }
 
-async fn prepare_message(
-    conn: &(impl Executor + ?Sized),
+fn prepare_message(
     message: &SessionMessageRecord,
     externalizer: &mut PayloadExternalizer<'_>,
 ) -> Result<PreparedMessage, LcmError> {
@@ -471,7 +520,7 @@ async fn prepare_message(
     let quarantine_reason =
         security::quarantine_reason(&message.role, message.kind.as_deref(), &text)
             .map(str::to_owned);
-    let mut nested_external_payloads = 0usize;
+    let mut pending_payload_refs = Vec::new();
 
     let mut handled_as_structured = false;
     if quarantine_reason.is_none()
@@ -489,10 +538,7 @@ async fn prepare_message(
             externalizer,
         )?;
         if !nested_payloads.is_empty() {
-            for payload_ref in &nested_payloads {
-                payload::upsert_payload_metadata(conn, payload_ref).await?;
-            }
-            nested_external_payloads = nested_payloads.len();
+            pending_payload_refs.extend(nested_payloads.iter().cloned());
             json_changed = true;
         }
         if json_changed {
@@ -520,14 +566,12 @@ async fn prepare_message(
         if let Some(protected) =
             replace_media_substrings(&text, message, "content", &mut span_payloads, externalizer)?
         {
-            for payload_ref in &span_payloads {
-                payload::upsert_payload_metadata(conn, payload_ref).await?;
-            }
-            nested_external_payloads += span_payloads.len();
+            pending_payload_refs.extend(span_payloads.iter().cloned());
             text = protected;
         }
     }
 
+    let nested_external_payloads = pending_payload_refs.len();
     let sanitization = bind_sanitized_lcm_payload_text(&message.text, &text)
         .map_err(|error| LcmError::Db(format!("LCM privacy receipt failed: {error}")))?;
     text = sanitization.sanitized_text().to_owned();
@@ -548,6 +592,7 @@ async fn prepare_message(
         nested_external_payloads,
         quarantine_reason,
         quarantine_kind,
+        pending_payload_refs,
     };
     prepared.metadata_json = protected_metadata_json(message.metadata_json.as_deref(), &prepared)?;
     Ok(prepared)
