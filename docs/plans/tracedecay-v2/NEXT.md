@@ -2,11 +2,12 @@
 
 **Status:** active product delivery; local reboot recovery, the live Work
 product journey, and the verified dashboard code-graph cutover are complete as
-of 2026-08-09. Checkpoints below are current through the 2026-08-13 late
-window, including the typed delivery-evidence slice, external TLS listener
+of 2026-08-09. Checkpoints below are current through the 2026-08-14 window,
+including the typed delivery-evidence slice, external TLS listener
 hardening, the runtime-identity ABA repair, the automation
-scheduler/settlement hardening wave, and the multi-agent review wave over
-PR #421.
+scheduler/settlement hardening wave, the dashboard work-surface TaskSession
+journey, markdown lite-index admission, and the cargo+npm unmounted-files
+audit.
 
 `00-plan-set-index.md` remains the sole roadmap and acceptance authority. This
 file is the current operational handoff updated from direct branch, test, and
@@ -130,6 +131,17 @@ the commit as attribution evidence.
   typed `Unavailable` in all four modes while retaining the exact attempt,
   provider-session, and artifact receipts; it does not substantiate live
   TaskSession hydration.
+- The dashboard Work surface now answers who worked on a task on both
+  published mounts in `a68470647`. The named journey
+  `the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mounts`
+  (`tests/work_route_exposure_conformance.rs:992`, body in
+  `tests/work_route_exposure_conformance/work_task_session.rs`) drives a real
+  pinned provider, imports the transcript, and grades provider-qualified
+  session evidence in all four temporal modes on the daemon and dashboard
+  mounts, including after physical daemon restart. The conformance suite
+  passed 3/3. Exact continuation and rank-final revocation at the dashboard
+  mount remain gated on an activated evaluated federated query authority;
+  the `Anchor` continuation variant is unconditionally `Unavailable`.
 - The dashboard board and commands now consume only the product graph authority
   in `d0d9f7dcb`; its complete focused Work suite passed 202/202 with typecheck
   and production build green. The public `WorkProjection` snapshot, delta,
@@ -370,13 +382,35 @@ the commit as attribution evidence.
 
 ### Work and TaskSession retrieval
 
-- Activate a real evaluated query profile in the mounted provider-workflow
-  journey, then prove task-to-session correlation through both MCP and the
-  typed SDK after transcript import and physical daemon restart. Preserve the
-  already-proven typed `Unavailable` result when that authority is absent.
-- Extend the dashboard journey beyond its verified task root to who worked on
-  a task, provider-qualified session evidence, exact continuation, rank-final
-  revocation, restart, and all four temporal modes.
+- Already implemented at HEAD (verification, not construction): activate a
+  real evaluated query profile in the mounted provider-workflow journey, then
+  prove task-to-session correlation through both MCP and the typed SDK after
+  transcript import and physical daemon restart. The journey lives in
+  `tests/daemon_suite/advanced_workflow_journey/task_session.rs` (from
+  `76a5da86c` / `29ebe000d`) and already preserves typed `Unavailable` when
+  that authority is absent. Do not reconstruct this path.
+- DONE 2026-08-14: the dashboard journey extension landed in `a68470647`
+  (suite 3/3).
+  `the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mounts`
+  (`tests/work_route_exposure_conformance.rs:992`, driving
+  `tests/work_route_exposure_conformance/work_task_session.rs`) closes "who
+  worked on a task", provider-qualified session evidence, all four temporal
+  modes, and restart on both published mounts. Two dimensions remain open
+  with recorded reasons: exact continuation and rank-final revocation at the
+  dashboard mount require an activated evaluated federated query authority
+  (`DaemonWorkFederatedQueryAuthorityV1::authority_for`,
+  `src/daemon/invocation_state.rs:831`); the `Anchor` continuation variant is
+  unconditionally `Unavailable`
+  (`src/daemon/work_evidence_retrieval.rs:225-230`).
+- OPEN (owner decision required): `ProfileOwnedNoGit` selection poisoning.
+  `selection_covers`
+  (`crates/tracedecay-rusqlite-runtime/src/work_product.rs:95-108`) covers
+  only events with no relation scopes and refuses the whole read on a miss.
+  Once a settled provider attempt publishes repository-scoped events, every
+  `work/views` and prepare-graph-mutation under a no-Git selection
+  permanently returns `not_found_or_not_authorized` (proven live: 200 before
+  start-attempt, permanent 404 after). Do not fabricate a fix; decide
+  intended no-Git selection semantics first.
 
 ### Typed terminal problem propagation
 
@@ -472,6 +506,14 @@ the commit as attribution evidence.
 - Exercise incremental indexing through save, rename, delete, ref switch,
   overflow, cancellation, and restart. Preserve serve-during-refresh and exact
   identity; only complete compatible semantic generations may publish.
+- IN-FLIGHT 2026-08-14: `cd35ad9e9` admits markdown structure into the lite
+  index (`crates/tracedecay-code-extraction/src/markdown_structure.rs` and
+  `crates/tracedecay-code-index/src/languages.rs`). Grep-surface visibility
+  of `.md` content is being fixed separately — not done.
+- DONE 2026-08-14: `tracedecay_unmounted_files` generalized to cargo+npm
+  ecosystems with correct `#[path]` semantics in `144f1d0ff` (43/43 focused
+  tests across `src/mcp/tools/handlers/analysis/unmounted_files.rs` and
+  `unmounted_files/{rust,typescript}.rs`).
 
 ### Dashboard, SDK, hosts, and release
 
@@ -492,6 +534,11 @@ the commit as attribution evidence.
   that domain symbol extraction is unimplemented — a loud, safe degradation
   on the doctor surface, previously untracked here. Decide implement-or-retire
   before the doctor journey is called complete.
+- OPEN (2026-08-14, recorded from the worksession journey; cause unchased):
+  the daemon-hosted dashboard does not resume after a physical daemon restart.
+  `tracedecay dashboard` (`src/main.rs:790-824`) relaunch reports a fresh
+  bound URL that never accepts connections over a 60s poll (observed
+  41321→36165).
 
 ### Backend performance and final verification
 
