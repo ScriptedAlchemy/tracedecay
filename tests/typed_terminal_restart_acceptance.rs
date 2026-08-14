@@ -347,7 +347,6 @@ fn partial_effect_survives_physical_daemon_restart_via_cli() {
 /// The assertions below are the contract this journey must eventually prove and
 /// are deliberately left unweakened.
 #[test]
-#[ignore = "product gap: a reset-required project store never settles its open, so callers observe warming/unavailable and then their own timeout instead of the typed ResetRequired terminal"]
 fn reset_required_survives_physical_daemon_restart_via_cli() {
     let home = tempfile::TempDir::new().expect("isolated home");
     let home_path = canonical_existing_path(home.path());
