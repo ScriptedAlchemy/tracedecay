@@ -884,7 +884,21 @@ fn kiro_hooks_capture_prompt_boundary_and_type_post_tool_use_unsupported() {
             "prompt": "redacted prompt text",
         }),
     );
-    assert_capture_transport_response("Kiro userPromptSubmit captured", &prompt_submit, 0);
+    // PromptBoundary now live-dispatches (counter reset). Without a daemon the
+    // hook still fail-opens at exit 0 / `{}` and records the typed diagnostic.
+    assert_eq!(
+        prompt_submit.status.code(),
+        Some(0),
+        "Kiro userPromptSubmit captured: unexpected exit\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&prompt_submit.stdout),
+        String::from_utf8_lossy(&prompt_submit.stderr)
+    );
+    assert_eq!(prompt_submit.stdout, b"{}\n", "{prompt_submit:?}");
+    let prompt_stderr = String::from_utf8_lossy(&prompt_submit.stderr);
+    assert!(
+        prompt_stderr.contains("local counter reset daemon call failed"),
+        "live PromptBoundary dispatch must surface the daemon-unavailable diagnostic: {prompt_submit:?}"
+    );
 
     let (mut spool, report) = HookSpoolV1::open(
         native_capture_spool_root(&data_root, host),
