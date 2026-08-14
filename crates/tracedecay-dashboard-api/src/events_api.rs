@@ -44,13 +44,6 @@
 //! All activity families share one canonical `dashboard_activity` stream and
 //! producer sequence. SSE `Last-Event-ID` binds the durable run and sequence,
 //! while the named SSE event and typed family preserve routing semantics.
-//!
-//! Declared-but-unfed families (documented seams; additive, tolerated
-//! downstream):
-//! - `code_index_generation_published` — needs the daemon
-//!   `CodeIndexSchedulerRegistry` read port that `/api/code-index/freshness`
-//!   also requires. Distinct from `code_index_activity`, which reports *queued
-//!   work*, not a *published generation*.
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -106,10 +99,6 @@ pub enum DashboardEventKindV1 {
     ProjectRegistryChanged { project_count: u64, digest: String },
     /// A coarse storage-telemetry change; client refetches `/api/storage/telemetry`.
     StorageTelemetryInvalidated { total_bytes: u64 },
-    /// A new code-index generation was published. Declared but unfed until the
-    /// scheduler-registry read port is wired.
-    #[allow(dead_code)]
-    CodeIndexGenerationPublished { generation_id: String },
     /// Host lifecycle hooks were admitted for this project in the last window.
     /// `count` is coalesced pulses, `hook_events` the underlying hook events.
     HookActivity {
@@ -162,7 +151,6 @@ impl DashboardEventKindV1 {
             Self::Heartbeat => STREAM_HEARTBEAT,
             Self::ProjectRegistryChanged { .. } => STREAM_PROJECT_REGISTRY,
             Self::StorageTelemetryInvalidated { .. } => STREAM_STORAGE_TELEMETRY,
-            Self::CodeIndexGenerationPublished { .. } => "code_index",
             Self::HookActivity { .. } => ActivityFamilyV1::Hook.stream_name(),
             Self::SessionIngestActivity { .. } => ActivityFamilyV1::SessionIngest.stream_name(),
             Self::CodeIndexActivity { .. } => ActivityFamilyV1::CodeIndex.stream_name(),
@@ -1154,11 +1142,13 @@ mod tests {
 
     #[test]
     fn event_kinds_serialize_additively_with_family_tag() {
-        let value = serde_json::to_value(DashboardEventKindV1::CodeIndexGenerationPublished {
-            generation_id: "gen-1".into(),
+        let value = serde_json::to_value(DashboardEventKindV1::CodeIndexActivity {
+            count: 1,
+            files: 1,
+            detail: None,
         })
         .unwrap();
-        assert_eq!(value["family"], "code_index_generation_published");
+        assert_eq!(value["family"], "code_index_activity");
         let heartbeat = serde_json::to_value(DashboardEventKindV1::Heartbeat).unwrap();
         assert_eq!(heartbeat["family"], "heartbeat");
     }
