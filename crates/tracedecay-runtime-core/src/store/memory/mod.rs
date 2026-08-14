@@ -145,7 +145,7 @@ impl FactStore for DatabaseFactStore<'_> {
                         &outcome,
                         FactCommitOutcome::Committed(_) | FactCommitOutcome::IdempotentReplay(_)
                     ) {
-                        schedule_project_memory_graph_reconciliation(db.clone());
+                        graph::publish_project_memory_graph_after_write(db.clone()).await;
                     }
                     Ok(outcome)
                 })

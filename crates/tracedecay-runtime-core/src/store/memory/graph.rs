@@ -277,21 +277,86 @@ async fn reconcile_project_memory_graph_pass(db: &Database) -> FactStoreResult<(
         GraphIdempotencyKey::new(format!("publish:{}", expected_generation.as_str()))
             .map_err(|error| graph_error(&owner, error))?;
     let runtime_for_reconciliation = Arc::clone(&runtime);
-    let snapshot = tokio::task::spawn_blocking(move || {
+    let snapshot = match tokio::task::spawn_blocking(move || {
         runtime_for_reconciliation.reconcile_verified_manifest(&manifest, idempotency_key)
     })
     .await
     .map_err(|error| storage_error(OPERATION, error))?
-    .map_err(|error| graph_error(&owner, error))?;
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let mapped = graph_error(&owner, error);
+            if matches!(mapped, FactStoreError::GraphConflict)
+                && verified_head_matches_expected(
+                    &runtime,
+                    &projection,
+                    &expected_generation,
+                    &owner,
+                )
+                .await?
+            {
+                return finish_reconciliation_watermark(db, &owner, watermark).await;
+            }
+            return Err(mapped);
+        }
+    };
     if snapshot.projection() != &projection || snapshot.generation() != &expected_generation {
+        if verified_head_matches_expected(&runtime, &projection, &expected_generation, &owner)
+            .await?
+        {
+            return finish_reconciliation_watermark(db, &owner, watermark).await;
+        }
         return Err(FactStoreError::GraphConflict);
     }
-    if source_watermark(&owner, &load_source(db, &owner, None).await?, None)? != watermark
+    finish_reconciliation_watermark(db, &owner, watermark).await
+}
+
+async fn finish_reconciliation_watermark(
+    db: &Database,
+    owner: &FactOwnerV1,
+    watermark: tracedecay_graph_db::GraphWatermark,
+) -> FactStoreResult<()> {
+    if source_watermark(owner, &load_source(db, owner, None).await?, None)? != watermark
         && !db.memory_graph_reconciliation_pending()
     {
         return Err(FactStoreError::GraphConflict);
     }
     Ok(())
+}
+
+async fn verified_head_matches_expected(
+    runtime: &Arc<dyn crate::store_runtime::VerifiedGraphRuntimePortV1>,
+    projection: &GraphProjectionIdentity,
+    expected_generation: &tracedecay_graph_db::GraphGenerationId,
+    owner: &FactOwnerV1,
+) -> FactStoreResult<bool> {
+    let runtime = Arc::clone(runtime);
+    let projection_for_read = projection.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        runtime.verified_snapshot(
+            &projection_for_read,
+            FactReadControl::new(Arc::new(|| false)),
+        )
+    })
+    .await
+    .map_err(|error| storage_error(OPERATION, error))?
+    .map_err(|error| graph_error(owner, error))?;
+    Ok(snapshot.is_some_and(|snapshot| {
+        snapshot.projection() == projection && snapshot.generation() == expected_generation
+    }))
+}
+
+pub(super) async fn publish_project_memory_graph_after_write(db: Database) {
+    match reconcile_project_memory_graph_pass(&db).await {
+        Ok(()) => {}
+        Err(error) => {
+            tracing::warn!(
+                error_kind = reconciliation_error_kind(&error),
+                "project memory graph publication after write remains pending"
+            );
+            schedule_project_memory_graph_reconciliation(db);
+        }
+    }
 }
 
 fn bound_owner(db: &Database) -> FactStoreResult<FactOwnerV1> {

@@ -226,7 +226,7 @@ impl DatabaseFactStore<'_> {
         tokio::spawn(async move {
             let result = execute_project_memory_write(db.clone(), write_control, work).await;
             if result.is_ok() {
-                super::schedule_project_memory_graph_reconciliation(db);
+                super::graph::publish_project_memory_graph_after_write(db).await;
             }
             result
         })

@@ -5,7 +5,7 @@ use super::super::primitives::{
     parse_payload_access, row_i64, row_optional_f64, row_optional_string, row_string,
     storage_error, storage_message,
 };
-use super::super::{DatabaseFactStore, schedule_project_memory_graph_reconciliation};
+use super::super::DatabaseFactStore;
 use super::{Projection, anchor_matches, commit_fact_tx};
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
@@ -913,7 +913,7 @@ impl DatabaseFactStore<'_> {
                 &outcome,
                 FactCommitOutcome::Committed(_) | FactCommitOutcome::IdempotentReplay(_)
             ) {
-                schedule_project_memory_graph_reconciliation(db.clone());
+                super::super::graph::publish_project_memory_graph_after_write(db.clone()).await;
             }
             Ok(outcome)
         })
