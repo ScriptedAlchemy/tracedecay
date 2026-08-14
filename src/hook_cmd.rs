@@ -41,7 +41,9 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
         Commands::HookKiroPromptSubmit => Some(tracedecay::hooks::hook_kiro_prompt_submit().await),
         Commands::HookKimiEvent => Some(tracedecay::hooks::hook_kimi_event().await),
         Commands::HookOpenCodeEvent => Some(tracedecay::hooks::hook_opencode_event().await),
-        Commands::HookOpenCodeToolAfter => Some(tracedecay::hooks::hook_opencode_tool_after().await),
+        Commands::HookOpenCodeToolAfter => {
+            Some(tracedecay::hooks::hook_opencode_tool_after().await)
+        }
         _ => None,
     };
     if let Some(code) = native_response_code {

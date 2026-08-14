@@ -28,7 +28,10 @@ fn initialize_project(home: &Path, project: &Path) {
     git(project, &["config", "user.name", "TraceDecay Test"]);
     git(project, &["config", "user.email", "tracedecay@example.com"]);
     git(project, &["add", "."]);
-    git(project, &["commit", "--quiet", "-m", "grafeo restart fixture"]);
+    git(
+        project,
+        &["commit", "--quiet", "-m", "grafeo restart fixture"],
+    );
     common::initialize_tracedecay_cli_project(home, project);
 }
 
@@ -538,8 +541,9 @@ async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
             .await
             {
                 Ok(result) => {
-                    let status = tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
-                        .unwrap_or_else(|error| panic!("{label} status payload: {error}"));
+                    let status =
+                        tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
+                            .unwrap_or_else(|error| panic!("{label} status payload: {error}"));
                     last = status.to_string();
                     match status["code_index_freshness"]["status"].as_str() {
                         Some("current") => return,

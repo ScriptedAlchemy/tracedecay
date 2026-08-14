@@ -755,7 +755,9 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 let _measurement = measurement;
                 authority.control.checkpoint()?;
                 evaluate_default_activation_candidate(&evaluated_profile_id, &authority).map_err(
-                    |error| SemanticActivationCoordinationErrorV1::RejectedDetail(error.to_string()),
+                    |error| {
+                        SemanticActivationCoordinationErrorV1::RejectedDetail(error.to_string())
+                    },
                 )
             })
             .await
