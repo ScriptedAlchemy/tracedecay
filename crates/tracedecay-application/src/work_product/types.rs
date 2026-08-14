@@ -27,6 +27,24 @@ pub enum WorkProductApplicationErrorV1 {
     IdempotencyConflict,
     #[error("Work request is invalid")]
     InvalidRequest,
+    /// The selection covers only part of the owner's journal, so there is no
+    /// head to prepare a mutation against.
+    ///
+    /// A read may answer over the covered slice and disclose the rest, because
+    /// a truthful partial reading is still a reading. A mutation may not: it
+    /// pins the head it read as its expected version, and under partial
+    /// coverage that head is the covered slice's head, not the journal's. A
+    /// change prepared against it would be reasoning from a graph that is not
+    /// current, and the append would fail its compare-and-swap for a reason
+    /// that names the wrong cause. The remedy is in the message because it is
+    /// actionable: widen the selection to the relation scopes the excluded
+    /// events were admitted under.
+    #[error(
+        "Work selection covers only part of the owner's journal, so no mutation can be \
+         prepared against it; widen the selection to the relation scopes the excluded \
+         events were admitted under"
+    )]
+    SelectionCoverageIncomplete,
     #[error("Work event authority is unavailable")]
     EventAuthorityUnavailable,
     #[error("Verified Work graph authority is unavailable")]

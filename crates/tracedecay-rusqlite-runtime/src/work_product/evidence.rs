@@ -50,9 +50,7 @@ use tracedecay_domain::{
     TaskEvidenceLinkV1, TaskId, WorkProductGraphV1, WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1,
 };
 
-use super::{
-    fold_graph, load_journal, load_published_versions, selection_covers, verified_version,
-};
+use super::{fold_graph, load_covered_journal, verified_version};
 use crate::work::WorkSqliteStorage;
 
 type PortError = WorkEvidenceReadPortErrorV1;
@@ -146,25 +144,21 @@ fn task_links(graph: &WorkProductGraphV1, task_id: &TaskId) -> Vec<TaskEvidenceL
 /// Resolve the exact verified version the caller named, and the graph folded to
 /// it.
 ///
-/// The selection must cover the whole journal for the same reason a graph read
-/// requires it: a fold over part of the history is a graph that never existed,
-/// and answering "no evidence" would conceal a task the caller simply is not
-/// authorized for.
+/// The selection bounds which versions are readable, exactly as it does for a
+/// graph read: the journal's covered prefix is answered, and a version folded
+/// across an event outside the selection is not readable under it, because that
+/// graph never existed under this selection. A version *inside* the covered
+/// prefix is served normally — an event admitted under some other scope later
+/// in the journal does not retract evidence the caller is plainly authorized
+/// for.
 fn verified_graph(
     storage: &WorkSqliteStorage,
     context: &WorkProductPortContextV1,
     requested: &VerifiedWorkGraphVersionV1,
 ) -> Result<(VerifiedWorkGraphVersionV1, WorkProductGraphV1), PortError> {
     let scope = context.authorized_scope();
-    let journal = load_journal(&storage.handle, scope).ok_or(PortError::Unavailable)?;
-    if journal
-        .iter()
-        .any(|entry| !selection_covers(scope.selection(), &entry.event))
-    {
-        return Err(PortError::NotFoundOrNotAuthorized);
-    }
-    let published =
-        load_published_versions(&storage.handle, scope).ok_or(PortError::Unavailable)?;
+    let covered = load_covered_journal(&storage.handle, scope).ok_or(PortError::Unavailable)?;
+    let (journal, published) = (covered.journal, covered.published);
     let Some(version) = published
         .iter()
         .find(|version| version.graph_version == requested.graph_version())

@@ -617,6 +617,10 @@ impl WorkGraphReadPortV1 for WorkProductAttemptStore {
         match request.mode {
             tracedecay_application::WorkGraphReadModeV1::Current => Ok(WorkGraphReadV1::Current {
                 authorized_scope: context.authorized_scope().clone(),
+                selection_coverage:
+                    tracedecay_application::WorkGraphSelectionCoverageV1::Complete {
+                        covered_events: 1,
+                    },
                 snapshot: entry,
             }),
             _ => Err(WorkGraphReadPortErrorV1::Unavailable),

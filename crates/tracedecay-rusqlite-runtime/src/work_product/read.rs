@@ -24,6 +24,22 @@
 //! supplies the observed attempts here and the coverage becomes `Complete`
 //! without any other shape changing.
 //!
+//! ## The selection-coverage rule
+//!
+//! A selection names a slice of the owner's work, not the whole journal. An
+//! event outside the selection falls outside the slice; it does not invalidate
+//! the events inside it. So a read is answered over the journal's covered
+//! prefix — see [`covered_prefix`](super::covered_prefix) for why the covered
+//! slice is always a prefix — and carries a
+//! [`WorkGraphSelectionCoverageV1`](tracedecay_application::WorkGraphSelectionCoverageV1)
+//! that says how much lies outside it. Answering the slice silently would be
+//! the real falsification; refusing the whole read because a later event was
+//! admitted under a scope this selection does not name would discard work the
+//! caller is plainly authorized for.
+//!
+//! Published versions are filtered by the same boundary: a version folded from
+//! an event outside the selection is not readable under it at all.
+//!
 //! ## The empty-journal rule
 //!
 //! An owner with no published version has no graph. `Current` and `AsOf` are
@@ -45,8 +61,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    WorkProductJournalEntryV1, WorkProductPublishedVersionV1, fold_graph, load_journal,
-    load_published_versions, selection_covers, verified_version,
+    WorkProductJournalEntryV1, WorkProductPublishedVersionV1, fold_graph, load_covered_journal,
+    verified_version,
 };
 use crate::work::WorkSqliteStorage;
 
@@ -63,21 +79,15 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
         request: &WorkGraphReadRequestV1,
     ) -> Result<WorkGraphReadV1, PortError> {
         let scope = context.authorized_scope();
-        let journal = load_journal(&self.handle, scope).ok_or(PortError::Unavailable)?;
-        // A selection that does not cover every event in the journal is refused
-        // outright. Folding only the covered prefix would answer with a graph
-        // that never existed, and answering "empty" would conceal a graph the
-        // caller is simply not authorized for.
-        if journal
-            .iter()
-            .any(|entry| !selection_covers(scope.selection(), &entry.event))
-        {
-            return Err(PortError::NotFoundOrNotAuthorized);
-        }
-        let published =
-            load_published_versions(&self.handle, scope).ok_or(PortError::Unavailable)?;
+        // Events outside the selection fall outside it; they do not poison the
+        // ones inside. The read is answered over the covered prefix and carries
+        // the coverage that says what was left out, so a caller can never
+        // mistake a slice for the whole.
+        let covered =
+            load_covered_journal(&self.handle, scope).ok_or(PortError::Unavailable)?;
+        let selection_coverage = covered.coverage;
 
-        let entries = build_entries(&journal, &published, request.observed_at)?;
+        let entries = build_entries(&covered.journal, &covered.published, request.observed_at)?;
         match &request.mode {
             WorkGraphReadModeV1::Current => {
                 let snapshot = entries
@@ -86,6 +96,7 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
                     .ok_or(PortError::NotFoundOrNotAuthorized)?;
                 Ok(WorkGraphReadV1::Current {
                     authorized_scope: scope.clone(),
+                    selection_coverage,
                     snapshot,
                 })
             }
@@ -96,6 +107,7 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
                     .ok_or(PortError::NotFoundOrNotAuthorized)?;
                 Ok(WorkGraphReadV1::AsOf {
                     authorized_scope: scope.clone(),
+                    selection_coverage,
                     snapshot,
                 })
             }
@@ -111,6 +123,7 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
                     .collect::<Vec<_>>();
                 Ok(WorkGraphReadV1::Evolution {
                     authorized_scope: scope.clone(),
+                    selection_coverage,
                     timeline: page(selected, request.continuation.as_ref())?,
                 })
             }
@@ -127,6 +140,7 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
                     .collect::<Vec<_>>();
                 Ok(WorkGraphReadV1::Forensic {
                     authorized_scope: scope.clone(),
+                    selection_coverage,
                     timeline: page(selected, request.continuation.as_ref())?,
                 })
             }

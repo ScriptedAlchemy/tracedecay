@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
+    WorkGraphSelectionCoverageV1,
     AuthorizedWorkProductScopeV1, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GenerateProposalRequest, RequestContext, RequestId, ResolvedScope,
     VerifiedWorkGraphVersionV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1,
@@ -176,6 +177,7 @@ impl WorkGraphReadPortV1 for TestStore {
         .map_err(|_| WorkGraphReadPortErrorV1::Unavailable)?;
         Ok(WorkGraphReadV1::Current {
             authorized_scope: context.authorized_scope().clone(),
+            selection_coverage: WorkGraphSelectionCoverageV1::Complete { covered_events: 1 },
             snapshot,
         })
     }

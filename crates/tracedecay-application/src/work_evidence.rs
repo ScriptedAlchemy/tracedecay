@@ -988,6 +988,11 @@ fn task_session_reauthorization_error(
             WorkTaskSessionReauthorizationErrorV1::Stale
         }
         WorkProductApplicationErrorV1::InvalidRequest
+        // Reauthorization has no vocabulary for "widen your selection", and a
+        // slice-bounded reading cannot reauthorize a session it may not have
+        // observed, so it is reported as the typed unavailability rather than
+        // as a denial that would read as a revocation.
+        | WorkProductApplicationErrorV1::SelectionCoverageIncomplete
         | WorkProductApplicationErrorV1::RevisionConflict
         | WorkProductApplicationErrorV1::IdempotencyConflict
         | WorkProductApplicationErrorV1::EventAuthorityUnavailable

@@ -29,7 +29,8 @@
 //!    event without the graph authority that verified and digested it.
 
 use tracedecay_application::{
-    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkProductSelectionScopeV1,
+    AuthorizedWorkProductScopeV1, VerifiedWorkGraphVersionV1, WorkGraphSelectionCoverageV1,
+    WorkProductSelectionScopeV1,
 };
 use tracedecay_domain::{
     ManifestDigest, UtcMicros, WorkGraphVersionV1, WorkProductEventPayloadV1,
@@ -86,12 +87,16 @@ pub(crate) fn owner_params(scope: &AuthorizedWorkProductScopeV1) -> Vec<ExactSql
 }
 
 /// Whether this selection authorizes every relation scope the event was
-/// admitted under.
+/// admitted under — that is, whether this one event is inside the slice of work
+/// the selection names.
 ///
-/// A selection that does not cover an event is not answered with the events it
-/// does cover: a partially folded graph is a falsified graph, so the read is
-/// refused instead. `ProfileOwnedNoGit` is an explicit no-Git selection, so it
-/// covers exactly the events that named no relation scope.
+/// `ProfileOwnedNoGit` is an explicit no-Git selection, so it covers exactly
+/// the events that named no relation scope. A `Relations` selection covers any
+/// event whose scopes it names, which includes the scope-free ones.
+///
+/// An event this returns `false` for is *outside* the selection. It is not a
+/// defect in the journal and it does not invalidate the events that are inside:
+/// see [`covered_prefix`] for what a reader does with it.
 pub(crate) fn selection_covers(
     selection: &WorkProductSelectionScopeV1,
     event: &WorkProductEventV1,
@@ -105,6 +110,89 @@ pub(crate) fn selection_covers(
             .iter()
             .all(|scope| relation_scopes.contains(scope)),
     }
+}
+
+/// The readable slice of an owner's journal under one selection, and the
+/// disclosure that says how much was left out.
+///
+/// A selection names a slice of the owner's work. Events outside it fall
+/// outside the slice; they do not poison it. So the read is answered over the
+/// covered slice rather than refused outright — with the caveat that a silent
+/// covered slice would be worse than a refusal, which is why the coverage comes
+/// back with it and every mounted read carries it through.
+///
+/// The slice is the journal's covered *prefix*, and that follows from folding
+/// rather than from convenience. A graph version is folded from every event up
+/// to its own sequence, so the first uncovered event ends the readable slice:
+/// any later version would have to be folded across an event outside the
+/// selection to exist at all, and that graph never existed under this
+/// selection. Every event from the first uncovered one onward is therefore
+/// counted as excluded, whatever scopes it named itself.
+pub(crate) fn covered_prefix(
+    selection: &WorkProductSelectionScopeV1,
+    mut journal: Vec<WorkProductJournalEntryV1>,
+) -> Option<(
+    Vec<WorkProductJournalEntryV1>,
+    WorkGraphSelectionCoverageV1,
+)> {
+    let total = journal.len();
+    let covered = journal
+        .iter()
+        .position(|entry| !selection_covers(selection, &entry.event))
+        .unwrap_or(total);
+    let covered_events = u32::try_from(covered).ok()?;
+    let Some(first_excluded_sequence) = journal.get(covered).map(|entry| entry.sequence) else {
+        return Some((
+            journal,
+            WorkGraphSelectionCoverageV1::Complete { covered_events },
+        ));
+    };
+    journal.truncate(covered);
+    Some((
+        journal,
+        WorkGraphSelectionCoverageV1::Partial {
+            covered_events,
+            excluded_events: u32::try_from(total - covered).ok()?,
+            first_excluded_sequence,
+        },
+    ))
+}
+
+/// One owner's journal and published versions, both bounded to the slice the
+/// selection covers.
+///
+/// Every read that folds a graph needs the same three things — the covered
+/// events, the versions folded from them alone, and the coverage disclosure —
+/// so they are resolved once here rather than re-derived at each reader.
+pub(crate) struct CoveredJournalV1 {
+    pub(crate) journal: Vec<WorkProductJournalEntryV1>,
+    pub(crate) published: Vec<WorkProductPublishedVersionV1>,
+    pub(crate) coverage: WorkGraphSelectionCoverageV1,
+}
+
+/// Load the covered slice of the owner's journal and the versions readable from
+/// it. `None` is an undecodable store, which every caller turns into a typed
+/// unavailability rather than into an empty graph.
+pub(crate) fn load_covered_journal(
+    source: &impl RegisteredWorkQuery,
+    scope: &AuthorizedWorkProductScopeV1,
+) -> Option<CoveredJournalV1> {
+    let (journal, coverage) = covered_prefix(scope.selection(), load_journal(source, scope)?)?;
+    let published = load_published_versions(source, scope)?
+        .into_iter()
+        // A version folded from an event outside the selection is not readable
+        // under it: that graph never existed under this selection.
+        .filter(|version| {
+            coverage
+                .first_excluded_sequence()
+                .is_none_or(|excluded| version.event_sequence < excluded)
+        })
+        .collect();
+    Some(CoveredJournalV1 {
+        journal,
+        published,
+        coverage,
+    })
 }
 
 /// Load the owner's whole journal in canonical sequence order.
