@@ -377,6 +377,30 @@ the commit as attribution evidence.
   shared-attachment equality while a rebuilt runtime can never alias its
   predecessor
   (`crates/tracedecay-runtime-core/src/store_runtime/{registry,shard}.rs`).
+- The 2026-08-14 CI-repair and takeover wave is on the branch (pushed through
+  `c5c0a7663`, reviewed end-to-end by an independent read-only pass):
+  semantic vector publication builds stage receipts before
+  `publish_generation` drops staged rows (`ab01a31e5`, ends the one-batch
+  `store_unknown_build` family); the daemon-hosted dashboard listener is
+  daemon-process-owned and survives Core→Full remount (`58d62d913`); the
+  fleet-wide test-harness daemon-before-init repair (`3163f31e7`) restored
+  the previously mass-failing Linux/macOS suites; `tools/call` carries the
+  caller's request deadline with a bounded response grace and received
+  envelopes are never discarded (`9b92818cc`, pins updated in the transport
+  suite); selected-project fact-store writes are denied as
+  `not_found_or_not_authorized` instead of committing cross-project
+  (`c74e4d8c4`); post-restart and live-ref-switch code-index query authority
+  rebinds from the retained serving slot (`22d73d98d`, `e72eacaec`,
+  `4e293bac0`, `5b794edff` — graph-replay failure now refuses the stale seat
+  instead of being swallowed; `381c91925` keeps scanning identity-matching
+  mounts for an installed authority); codex `turn/completed` provider turn
+  id is a typed `Option` absence (`20320067f`); Hermes/Kiro hooks dispatch
+  their live handlers again instead of the capture-only `{}` path
+  (`c5c0a7663`); LSP protocol sessions register a warming owner before a
+  sealed census so initialize/shutdown/exit admit during warming
+  (`5e222426e`); Windows getrandom mapping, `large_enum_variant` boxing,
+  and byte-identical consecutive dashboard builds (`28973da32`,
+  `fd5b1dfe8`, `66c69e034`) close the remaining CI job classes.
 
 ## Remaining work by lane
 
