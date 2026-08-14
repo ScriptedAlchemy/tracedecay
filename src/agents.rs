@@ -8,9 +8,7 @@
 //! `pub mod` is itself a re-exportable item.
 //!
 //! Items that were `pub(crate)` in the old tree are deliberately NOT covered:
-//! they are now private to `tracedecay-agent-hosts`. Root call sites that
-//! reached them are cataloged in
-//! `crates/tracedecay-agent-hosts/SEAMS.md`.
+//! they are now private to `tracedecay-agent-hosts`.
 pub use tracedecay_agent_hosts::agents::*;
 
 use std::sync::OnceLock;
