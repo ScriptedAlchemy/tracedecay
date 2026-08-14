@@ -282,12 +282,8 @@ pub enum StackDriftKindV1 {
     HeadAdvanced,
     BaseAdvanced,
     MergeBaseChanged,
-    DependencyMissing,
-    RefDeleted,
-    WorktreeGenerationChanged,
     Retargeted,
     Superseded,
-    Unknown,
 }
 closed_enum!(IntervalStateV1 { Open, Closed });
 closed_enum!(DurationBucketV1 {

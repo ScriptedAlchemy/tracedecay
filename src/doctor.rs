@@ -949,8 +949,8 @@ fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
     let rules = crate::config::get_tracedecay_dir(project_path).join(DOMAIN_SYMBOL_RULES_FILENAME);
     rules.is_file().then(|| {
         format!(
-            "Domain symbol rules at {} are not read: domain symbol extraction is \
-             unimplemented, so this file contributes no graph nodes. \
+            "Domain symbol extraction is unavailable: no extractor reads {}, \
+             so this file contributes no graph nodes. \
              See docs/DOMAIN-EXTRACTORS.md, which describes the design only.",
             rules.display()
         )
