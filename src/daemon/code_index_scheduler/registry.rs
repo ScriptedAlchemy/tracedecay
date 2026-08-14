@@ -1360,7 +1360,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 continue;
             }
             let Some((_scope_digest, authority)) = &worktree.query_authority else {
-                return None;
+                continue;
             };
             if matched.is_some() {
                 return None;

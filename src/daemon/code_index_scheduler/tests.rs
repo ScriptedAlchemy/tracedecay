@@ -2188,6 +2188,80 @@ async fn core_query_profile_composes_live_code_index_lanes() {
     registry.shutdown().await;
 }
 
+#[tokio::test]
+async fn query_authority_lookup_preserves_real_mount_identity_isolation() {
+    let primary = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let linked_root = TempDir::new().expect("linked worktree root");
+    let linked = linked_root.path().join("linked");
+    let linked_arg = linked.to_str().expect("linked worktree path");
+    git(
+        primary.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked-query",
+            linked_arg,
+            "main",
+        ],
+    );
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(2);
+    for root in [primary.path(), linked.as_path()] {
+        registry
+            .mount_worktree(test_project_id(), root, store.path().to_path_buf(), None)
+            .await
+            .expect("mount real sibling worktree");
+    }
+
+    let scope_for = |root: &Path| {
+        let identity =
+            super::identity::IndexingIdentityV1::resolve(root).expect("mounted worktree identity");
+        ResolvedScope::new(
+            test_project_id(),
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            identity.head_ref().cloned(),
+        )
+        .expect("resolved scope")
+    };
+    let primary_scope = scope_for(primary.path());
+    let linked_scope = scope_for(&linked);
+    assert_eq!(primary_scope.repository_id, linked_scope.repository_id);
+    assert_ne!(primary_scope.worktree_id, linked_scope.worktree_id);
+
+    registry
+        .mount_query_authority(
+            &linked,
+            &linked_scope,
+            query_authority(
+                PrivacyDomainId::new("privacy.query-authority-linked")
+                    .expect("linked privacy domain"),
+            ),
+        )
+        .await
+        .expect("mount linked query authority");
+    assert!(!registry.has_query_authority_for_scope(&primary_scope).await);
+    assert!(registry.has_query_authority_for_scope(&linked_scope).await);
+
+    registry
+        .mount_query_authority(
+            primary.path(),
+            &primary_scope,
+            query_authority(
+                PrivacyDomainId::new("privacy.query-authority-primary")
+                    .expect("primary privacy domain"),
+            ),
+        )
+        .await
+        .expect("mount primary query authority");
+    assert!(registry.has_query_authority_for_scope(&primary_scope).await);
+    assert!(registry.has_query_authority_for_scope(&linked_scope).await);
+
+    registry.shutdown().await;
+}
+
 /// Build the core-authority search policy shared by the
 /// stale-while-revalidate tests.
 fn core_search_request(query: &str) -> super::query_runtime::QuerySearchExecutionRequestV1 {
