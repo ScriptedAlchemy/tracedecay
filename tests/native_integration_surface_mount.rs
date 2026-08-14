@@ -5,6 +5,9 @@
 //! `apply_native_integration`, `native_integration_status`, and
 //! `cancel_native_integration`, and slice 4 requires the whole journey to be
 //! exposed consistently through CLI and MCP over one application result.
+//! The same surface later mounted the explicit-root worktree inventory and
+//! cleanup operations; those bind CLI, MCP, and HTTP, while the transaction
+//! journey still withholds HTTP because apply has no transport fallback.
 //!
 //! This suite proves the journey is *mounted and callable* end to end at the
 //! surface boundary: canonical operation identity, catalog bindings on both
@@ -31,10 +34,10 @@ use tracedecay_application::{
     RequestId, native_integration_surface_catalog_contribution,
     native_integration_surface_handler_descriptors, native_integration_surface_operation,
 };
-use tracedecay_tool_catalog::BindingSurface;
+use tracedecay_tool_catalog::{BindingSurface, CatalogContributionV1};
 
-/// The journey, restated here as the reverse authority. Deriving it from the
-/// module under test would let a dropped operation pass vacuously.
+/// The transaction journey, restated here as the reverse authority. Deriving
+/// it from the module under test would let a dropped operation pass vacuously.
 const JOURNEY: [(ApplicationSurfaceOperation, &str); 6] = [
     (
         ApplicationSurfaceOperation::NativeIntegrationStackSnapshot,
@@ -62,17 +65,41 @@ const JOURNEY: [(ApplicationSurfaceOperation, &str); 6] = [
     ),
 ];
 
+/// Explicit-root worktree inventory/cleanup mounted on the same surface.
+const WORKTREE_JOURNEY: [(ApplicationSurfaceOperation, &str); 5] = [
+    (
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeInventory,
+        "worktree_inventory",
+    ),
+    (
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeInspect,
+        "worktree_cleanup_inspect",
+    ),
+    (
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeConfirm,
+        "worktree_cleanup_confirm",
+    ),
+    (
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeRemove,
+        "worktree_cleanup_remove",
+    ),
+    (
+        ApplicationSurfaceOperation::NativeIntegrationWorktreeReconcile,
+        "worktree_cleanup_reconcile",
+    ),
+];
+
 #[test]
 fn every_journey_operation_has_canonical_identity() {
-    for (operation, name) in JOURNEY {
-        assert_eq!(operation.as_str(), name);
+    for (operation, name) in JOURNEY.iter().chain(WORKTREE_JOURNEY.iter()) {
+        assert_eq!(operation.as_str(), *name);
         assert_eq!(
             ApplicationSurfaceOperation::from_tool_name(&format!("tracedecay_{name}")),
-            Some(operation),
+            Some(*operation),
             "{name} does not resolve from its MCP tool name"
         );
         assert!(
-            ApplicationSurfaceOperation::ALL.contains(&operation),
+            ApplicationSurfaceOperation::ALL.contains(operation),
             "{name} is missing from the canonical operation authority"
         );
     }
@@ -83,23 +110,14 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
     let contribution =
         native_integration_surface_catalog_contribution().expect("catalog contribution");
     let descriptors = native_integration_surface_handler_descriptors().expect("descriptors");
-    assert_eq!(descriptors.len(), JOURNEY.len());
+    assert_eq!(
+        descriptors.len(),
+        JOURNEY.len() + WORKTREE_JOURNEY.len(),
+        "handler descriptors must cover the transaction journey and the worktree journey"
+    );
 
     for (operation, name) in JOURNEY {
-        for surface in [BindingSurface::Cli, BindingSurface::Mcp] {
-            assert!(
-                contribution.bindings().iter().any(|binding| {
-                    binding.operation().as_str() == name && binding.surface() == surface
-                }),
-                "{name} declares no {surface:?} binding"
-            );
-            let resolved = resolve_catalog_tool_binding(surface, &format!("tracedecay_{name}"))
-                .expect("binding resolution");
-            assert!(
-                resolved.is_some(),
-                "{name} is declared for {surface:?} but the production resolver answers nothing"
-            );
-        }
+        assert_cli_and_mcp_bindings(&contribution, name);
         // Apply is an authoritative native mutation and this journey has no
         // transport fallback, so HTTP stays deliberately unexposed.
         assert!(
@@ -113,6 +131,42 @@ fn every_journey_operation_binds_to_cli_and_mcp_and_withholds_http() {
             "{name} resolves to no application operation"
         );
     }
+    for (operation, name) in WORKTREE_JOURNEY {
+        assert_cli_and_mcp_bindings(&contribution, name);
+        assert!(
+            operation.is_http_exposed(),
+            "{name} is the read/admin worktree journey and must stay on HTTP"
+        );
+        assert!(
+            contribution.bindings().iter().any(|binding| {
+                binding.operation().as_str() == name && binding.surface() == BindingSurface::Http
+            }),
+            "{name} declares no HTTP binding"
+        );
+        assert!(
+            native_integration_surface_operation(name)
+                .expect("operation resolution")
+                .is_some(),
+            "{name} resolves to no application operation"
+        );
+    }
+}
+
+fn assert_cli_and_mcp_bindings(contribution: &CatalogContributionV1, name: &str) {
+    for surface in [BindingSurface::Cli, BindingSurface::Mcp] {
+        assert!(
+            contribution.bindings().iter().any(|binding| {
+                binding.operation().as_str() == name && binding.surface() == surface
+            }),
+            "{name} declares no {surface:?} binding"
+        );
+        let resolved = resolve_catalog_tool_binding(surface, &format!("tracedecay_{name}"))
+            .expect("binding resolution");
+        assert!(
+            resolved.is_some(),
+            "{name} is declared for {surface:?} but the production resolver answers nothing"
+        );
+    }
 }
 
 #[test]
@@ -122,7 +176,7 @@ fn every_journey_operation_is_an_advertised_mcp_tool() {
         .into_iter()
         .map(|definition| definition.name)
         .collect::<BTreeSet<_>>();
-    for (_, name) in JOURNEY {
+    for (_, name) in JOURNEY.iter().chain(WORKTREE_JOURNEY.iter()) {
         assert!(
             advertised.contains(&format!("tracedecay_{name}")),
             "tracedecay_{name} is not advertised by the MCP tool registry"
@@ -149,6 +203,8 @@ fn stack_snapshot_body() -> serde_json::Value {
             "reference": "refs/heads/destination",
             "scope_digest": digest
         },
+        "authorized_scope_set_id": "scope-set.alpha",
+        "authorized_scope_set_revision": 1,
         "authorized_scope_set_digest": digest,
         "inventory_snapshot_id": "inventory.snapshot.1",
         "inventory_epoch": 7,
