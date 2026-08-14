@@ -483,17 +483,17 @@ pub fn cursor_project_root_from_event(event_json: &str) -> Option<PathBuf> {
 
 fn cursor_project_root_candidate_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
     cursor_project_root_from_parsed_event(parsed).or_else(|| {
-        cursor_event_candidates(parsed)
+        cursor_hook_root_candidates(parsed)
             .into_iter()
             .find_map(|candidate| nearest_project_like_root(&candidate))
     })
 }
 
 pub(super) fn cursor_project_root_from_parsed_event(parsed: &Value) -> Option<PathBuf> {
-    let resolved = cursor_event_candidates(parsed)
+    let resolved = cursor_hook_root_candidates(parsed)
         .into_iter()
         .find_map(|candidate| crate::config::discover_project_root(&candidate));
-    let cwd_root = cursor_event_cwd(parsed)
+    let cwd_root = cursor_hook_cwd(parsed)
         .as_deref()
         .and_then(crate::config::discover_project_root);
     match (cwd_root, resolved) {
@@ -512,13 +512,13 @@ async fn cursor_project_root_from_event_with_identity(event_json: &str) -> Optio
 
 async fn cursor_project_root_from_parsed_event_with_identity(parsed: &Value) -> Option<PathBuf> {
     let mut resolved = None;
-    for candidate in cursor_event_candidates(parsed) {
+    for candidate in cursor_hook_root_candidates(parsed) {
         if let Some(root) = crate::config::discover_project_root_with_identity(&candidate).await {
             resolved = Some(root);
             break;
         }
     }
-    let cwd_root = match cursor_event_cwd(parsed) {
+    let cwd_root = match cursor_hook_cwd(parsed) {
         Some(cwd) => crate::config::discover_project_root_with_identity(&cwd).await,
         None => None,
     };
@@ -529,14 +529,14 @@ async fn cursor_project_root_from_parsed_event_with_identity(parsed: &Value) -> 
     }
 }
 
-fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
+fn cursor_hook_root_candidates(event: &Value) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let mut push_unique = |candidate: PathBuf| {
         if !candidates.iter().any(|seen| seen == &candidate) {
             candidates.push(candidate);
         }
     };
-    if let Some(cwd) = cursor_event_cwd(event) {
+    if let Some(cwd) = cursor_hook_cwd(event) {
         push_unique(cwd);
     }
     if let Some(project_root) = crate::config::brand_env("PROJECT_ROOT") {
@@ -568,7 +568,7 @@ fn cursor_event_candidates(event: &Value) -> Vec<PathBuf> {
     candidates
 }
 
-fn cursor_event_cwd(event: &Value) -> Option<PathBuf> {
+fn cursor_hook_cwd(event: &Value) -> Option<PathBuf> {
     event
         .get("cwd")
         .and_then(Value::as_str)
@@ -677,7 +677,7 @@ async fn notify_cursor_after_shell_event(
     if !crate::tracedecay::TraceDecay::is_initialized(&root) {
         return;
     }
-    let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
+    let cwd = cursor_hook_cwd(&parsed).unwrap_or_else(|| root.clone());
     super::notify_hook_event_with_telemetry(
         &root,
         DaemonHookEvent::cursor_after_shell_execution(cwd)

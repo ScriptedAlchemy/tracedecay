@@ -67,7 +67,7 @@ async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
     .await
 }
 
-fn cursor_event(project: &std::path::Path, transcript: &std::path::Path) -> serde_json::Value {
+fn cursor_hook_event(project: &std::path::Path, transcript: &std::path::Path) -> serde_json::Value {
     serde_json::json!({
         "session_id": "parent-session",
         "conversation_id": "conversation-1",
@@ -101,7 +101,7 @@ fn write_cursor_parent_with_subagent(tmp: &TempDir) -> (std::path::PathBuf, std:
 }
 
 #[tokio::test]
-async fn projectless_cursor_event_uses_user_session_identity() {
+async fn projectless_cursor_hook_event_uses_user_session_identity() {
     let tmp = TempDir::new().unwrap();
     let transcript = tmp.path().join("general.jsonl");
     std::fs::write(
@@ -131,7 +131,7 @@ async fn projectless_cursor_event_uses_user_session_identity() {
 }
 
 #[tokio::test]
-async fn user_cursor_event_rejects_registered_project_transcript_slug() {
+async fn user_cursor_hook_event_rejects_registered_project_transcript_slug() {
     let tmp = TempDir::new().unwrap();
     let registered = tmp.path().join("registered-project");
     let slug = cursor_project_slug(&registered).unwrap();
@@ -176,7 +176,7 @@ async fn user_cursor_event_rejects_registered_project_transcript_slug() {
 }
 
 #[tokio::test]
-async fn user_cursor_event_prefers_exact_workspace_over_colliding_slug() {
+async fn user_cursor_hook_event_prefers_exact_workspace_over_colliding_slug() {
     let tmp = TempDir::new().unwrap();
     let registered = tmp.path().join("work").join("foo-bar");
     let projectless = tmp.path().join("work").join("foo").join("bar");
@@ -226,7 +226,7 @@ async fn user_cursor_event_prefers_exact_workspace_over_colliding_slug() {
 }
 
 #[tokio::test]
-async fn user_cursor_event_without_workspace_fails_closed_on_slug_collision() {
+async fn user_cursor_hook_event_without_workspace_fails_closed_on_slug_collision() {
     let tmp = TempDir::new().unwrap();
     let registered = tmp.path().join("work").join("foo-bar");
     let colliding = tmp.path().join("work").join("foo").join("bar");
@@ -938,7 +938,7 @@ async fn cursor_subagent_transcript_ingests_as_child_session() {
     let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let event = cursor_event(&project, &parent);
+    let event = cursor_hook_event(&project, &parent);
 
     let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
     assert_eq!(stats.sessions_upserted, 2);
@@ -984,7 +984,7 @@ async fn cursor_subagent_child_messages_inherit_parent_dispatch_model() {
     .unwrap();
 
     let db = open_project_session_db(&project).await.unwrap();
-    let event = cursor_event(&project, &parent);
+    let event = cursor_hook_event(&project, &parent);
 
     let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
     assert_eq!(stats.sessions_upserted, 2);
@@ -1010,7 +1010,7 @@ async fn cursor_capped_ingest_discovers_subagents() {
     let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let event = cursor_event(&project, &parent);
+    let event = cursor_hook_event(&project, &parent);
 
     let stats = ingest_cursor_transcript_event_capped(&event.to_string(), &db, Some(4096)).await;
     assert_eq!(stats.sessions_upserted, 2);
@@ -1031,7 +1031,7 @@ async fn cursor_subagent_ingestion_is_incremental_per_file() {
     let (parent, subagent) = write_cursor_parent_with_subagent(&tmp);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let event = cursor_event(&project, &parent);
+    let event = cursor_hook_event(&project, &parent);
     let first = ingest_cursor_transcript_event(&event.to_string(), &db).await;
     assert_eq!(first.messages_upserted, 2);
 
@@ -1073,7 +1073,7 @@ async fn cursor_parent_and_subagent_offsets_do_not_collide() {
     let (parent, _subagent) = write_cursor_parent_with_subagent(&tmp);
 
     let db = open_project_session_db(&project).await.unwrap();
-    let event = cursor_event(&project, &parent);
+    let event = cursor_hook_event(&project, &parent);
     let stats = ingest_cursor_transcript_event(&event.to_string(), &db).await;
     assert_eq!(stats.messages_upserted, 2);
 
@@ -1579,7 +1579,7 @@ async fn cursor_jsonl_secret_is_sanitized_before_observation_and_projection() {
         ),
     )
     .unwrap();
-    let event = cursor_event(&project, &transcript);
+    let event = cursor_hook_event(&project, &transcript);
     let db = open_project_session_db(&project).await.unwrap();
 
     assert_eq!(

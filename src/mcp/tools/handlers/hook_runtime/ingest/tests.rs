@@ -185,7 +185,7 @@ fn capture_registry_owns_every_supported_transcript_route() {
 }
 
 #[test]
-fn cursor_event_numbers_accept_numeric_and_string_forms() {
+fn cursor_hook_event_numbers_accept_numeric_and_string_forms() {
     let event = json!({ "tokens": "42", "message_count": 7 });
     assert_eq!(event_i64(&event, &["tokens"]), Some(42));
     assert_eq!(event_usize(&event, &["message_count"]), Some(7));

@@ -615,7 +615,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     else {
         return Ok(CursorTranscriptIngestStats::default());
     };
-    let event_workspaces = cursor_event_workspace_roots(&event);
+    let event_workspaces = cursor_hook_workspace_roots(&event);
     let belongs_to_registered_project = if event_workspaces.is_empty() {
         // Without event workspace identity, Cursor's transcript directory is
         // the only attribution available. Its slash-to-hyphen encoding is
@@ -788,7 +788,7 @@ async fn admit_cursor_sweep_observations_with_session_ids(
         .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred()))
 }
 
-fn cursor_event_workspace_roots(event: &Value) -> Vec<PathBuf> {
+fn cursor_hook_workspace_roots(event: &Value) -> Vec<PathBuf> {
     let candidates = if let Some(cwd) = event_cwd(event) {
         vec![cwd]
     } else if let Some(file_path) = event
