@@ -37,8 +37,8 @@ operator-owned npm trusted-publisher setup.
 | Evidence-only gaps | 18 |
 
 Across the 72 unique gap/evidence entries (conflict rows only reference those
-entries): 35 are `RC-BLOCKING`, 15 are `RC-REQUIRED-EVIDENCE`, 21 are
-`POST-RC`, and 1 is `RECORDED` (A2).
+entries): 34 are `RC-BLOCKING`, 15 are `RC-REQUIRED-EVIDENCE`, 21 are
+`POST-RC`, and 2 are `RECORDED` (A2, A3).
 
 ## A. MOUNTLESS SURFACES
 
@@ -49,7 +49,7 @@ to a real production caller or deleted.
 |---|---|---|---|
 | A1 | RC-BLOCKING | Generalized external-source acquisition, canonical refetch, correction, and tombstone production | Host-observation specialization is mounted, but `GitHubExternalSourceAcquisitionV1` and the generalized owner remain uncalled (`crates/tracedecay-usecases/src/external_source_github.rs:213-425`; `external_source_acquisition.rs:341-510`). Plans 02 and 03 independently verdict this `IMPLEMENTED-UNMOUNTED`. |
 | A2 | RECORDED | Context Scout suggestion producer parked; neither remounted nor demolished | See [A2 ruling](#a2-ruling-2026-08-14). `1caf016e5` deliberately unmounted the saved-edit/stop producer and set `claim_authority = None`. `c2c11956d6` mounted the distinct advisory/feedback successor. Remount is not a small slice; deleting only the entry points leaves `prepare_controlled` dead. Owner must choose remount or retire. |
-| A3 | RC-BLOCKING | V3 evidence assembly and V3 Git-topology anchor publication | `EvidenceAssemblyStore::publish_or_replay` has zero callers (`crates/tracedecay-store/src/evidence_assembly.rs:1518`). Native-object, PR/review, conflict, preflight, and integration target contracts exist at `crates/tracedecay-domain/src/research/git_topology.rs:1261-1352`, while production GitHub stack publication still uses the distinct V2 path (`crates/tracedecay-usecases/src/advisory/github_runtime/stack_anchors.rs:219-304`). |
+| A3 | RECORDED | V3 evidence assembly persist contract; unused `publish_or_replay` trait deleted | See [A3 ruling](#a3-ruling-2026-08-14). The unimplemented `EvidenceAssemblyStore` façade was deleted. Persisted schema, `RepositoryWritePayloadV1::EvidenceAssembly`, rusqlite publish-or-replay, and V3 exact/Git-topology targets remain sanctioned-pending contract authority. |
 | A4 | RC-BLOCKING | Exact generation-bound Git and diagnostic joins | `GitReadAuthorityV1::join_generation` has only the regression caller (`crates/tracedecay-usecases/src/git_reads.rs:429`; `tests/git_intelligence_regression.rs:679`). `GenerationDiagnosticJoinV1` is referenced by contracts/composite types and tests, not a producer (`crates/tracedecay-code-index/src/diagnostics.rs:108-315`). `25-code-intelligence.md` says both are `IMPLEMENTED-UNMOUNTED`; `25-code-index.md` inferred `IMPLEMENTED+MOUNTED` from broader Git/LSP routes. Exact caller evidence resolves both as unmounted. |
 | A5 | RC-BLOCKING | Canonical index and retrieval-pipeline observability emission | `record_index` exists at `crates/tracedecay-usecases/src/observability/emit.rs:560`; `emit_retrieval_pipeline` exists at `observability/retrieval_emit.rs:466`, but its only caller is an in-module test. Query execution computes an observation without calling the canonical emitter. |
 | A6 | RC-BLOCKING | Conflict-prediction and linked-outcome emitters | `WorkConflictPredictionObservedV1` and `WorkConflictOutcomeLinkedV1` are closed payload/projection contracts (`crates/tracedecay-domain/src/observability/payload.rs:41-42`) with no production producer, so their confusion matrices cannot be truthful. |
@@ -164,8 +164,9 @@ Each task is deliberately single-concern.
    (delete producer entry points and `prepare_controlled` together).
 3. Register one generalized GitHub external-source acquisition owner at
    project-open; prove one canonical refetch reaches the existing store.
-4. Give `EvidenceAssemblyStore::publish_or_replay` one canonical production
-   publication caller and one replay-conflict journey.
+4. Closed: A3. Do not invent a V3 evidence-assembly producer. Plan 23 owns
+   retriever-contribution publication; Git-topology V3 producers remain the
+   owning plans in Plan 13's pending-producer inventory.
 5. Mount an `EnrolledRemoteClient` node-side capture/transfer scheduler without
    changing the authority-side protocol.
 6. Route production workflow ready-step execution through
@@ -251,3 +252,69 @@ port cleanup. `allow(dead_code)` is forbidden.
   producer entry points together with `prepare_controlled`.
 - Advisory/feedback (`c2c11956d6`) remains the live hook-notice successor
   and is not a Scout envelope producer.
+
+## A3 ruling (2026-08-14)
+
+Decision: **RECORD** the persist/V3-target contract; **DELETE** the unused
+`EvidenceAssemblyStore` trait. **WIRE** is rejected.
+
+### Caller-intent evidence
+
+- Plan 13 names `PublishEvidenceAssembly::execute` as
+  `EvidenceAssemblyStore::publish_or_replay` and says Plan 23 emits
+  `RetrieverContributionRecordV1` after it freezes scope, temporal mode, and
+  watermarks. That producer does not exist. Plan 23's live
+  `RetrieverContribution` / `RetrieverContributionV1` types are application
+  and temporal-query ranking records, not `EvidenceAssemblyWriteV1`.
+- The only historical production-shaped caller was
+  `RuntimeEvidenceAssemblyStore` in `crates/tracedecay-usecases/src/evidence_assembly.rs`.
+  It shipped under `#![allow(dead_code)]` and was removed in `a2fea0e7a`
+  (`refactor(evidence): remove unmounted duplicate adapters`). The usecases
+  seam note kept "canonical store and runtime capabilities" and deleted the
+  adapter "until a production journey needs them."
+- `tracedecay tool callers` on `publish_or_replay` and on
+  `RepositoryWritePayloadV1::EvidenceAssembly` returns no production
+  constructor. The only write-payload construction site is
+  `crates/tracedecay-rusqlite-runtime/src/writer/tests/authority.rs`.
+- The trait had **zero implementors**. Real publish-or-replay is
+  `EvidenceAssemblyExecutor::execute_write`
+  (`crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly/mod.rs`),
+  already covered by `publish_replay_conflict_and_drilldown_are_atomic`.
+- Work evidence retrieval uses a different application
+  `RetrieverContribution`. GitHub stack publication uses the mounted V2 path
+  in `stack_anchors.rs`. Observation, diagnostic, CI, resolution, tombstone,
+  and UI anchors are mounted separately. None of those paths publish
+  equivalent V3 evidence assemblies, so the persist contract is not
+  superseded-in-place.
+- Git-topology V3 targets are already **SANCTIONED-PENDING** in Plan 13
+  (2026-08-07 pending-producer inventory). Owning plans: 36/27/37/24/32/16/03.
+  Plan 13 forbids deleting those targets as unused breadth.
+
+### Why not WIRE
+
+No current retrieval, stack, or work path can construct a honest
+`EvidenceAssemblyWriteV1` (occurrence set, verified ordering proof, dual
+sanitization receipts, catalog binding, retriever contribution). Wiring a
+call without that producer would fabricate evidence.
+
+### Why not delete the persist stack
+
+Deletion of the unused trait does **not** destroy schema authority. Deletion
+of the persist stack would. Other code reads that authority:
+
+- `EVIDENCE_ASSEMBLY_SCHEMA` / `EVIDENCE_ASSEMBLY_IMMUTABILITY` are part of
+  the final-shape expected schema
+  (`crates/tracedecay-runtime-core/src/db/migrations/final_shape.rs`).
+- `RepositoryWritePayloadV1::EvidenceAssembly` and
+  `ProjectReadOperationV1::EvidenceAssembly` are live store-protocol variants
+  dispatched by rusqlite `execute`.
+- `RetrievalAnchorTargetV3::{ExactSourceOccurrence, ExactEvidenceSpan,
+  RetrieverContribution}` and the Git-topology target family are the
+  contracts later producers must bind to.
+
+### Action taken
+
+- Deleted the unimplemented `EvidenceAssemblyStore` trait and the
+  trait-only `EvidenceAssemblyPublicationOutcomeV1` enum.
+- Left write/read types, rusqlite executor, final-shape tables, and V3
+  target contracts in place for the owning plans.
