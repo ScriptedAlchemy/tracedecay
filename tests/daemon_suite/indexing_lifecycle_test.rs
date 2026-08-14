@@ -628,10 +628,10 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
     let (environment, project) = IsolatedEnv::acquire().await;
     let project = project.canonicalize().expect("canonical fixture project");
     let revision = initialize_ignored_dependency_repository(&project);
-    let project_id = initialize_tracedecay(environment.home(), &project);
-    let identity = exact_identity(&project, project_id);
     let socket = daemon_socket_path(environment.home());
     let mut daemon = spawn_tracedecay_daemon_with(environment.home(), |_| {});
+    let project_id = initialize_tracedecay(environment.home(), &project);
+    let identity = exact_identity(&project, project_id);
     let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
         .expect("production daemon handshake");
 
@@ -742,8 +742,6 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     let (environment, project) = IsolatedEnv::acquire().await;
     let project = project.canonicalize().expect("canonical fixture project");
     let (main_revision, feature_revision) = initialize_repository(&project);
-    let project_id = initialize_tracedecay(environment.home(), &project);
-    let identity = exact_identity(&project, project_id);
     let socket = daemon_socket_path(environment.home());
     let log_path = environment
         .scratch()
@@ -755,6 +753,8 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
             "tracedecay::daemon::code_index_scheduler::registry=debug",
         );
     });
+    let project_id = initialize_tracedecay(environment.home(), &project);
+    let identity = exact_identity(&project, project_id);
     let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
         .expect("production daemon handshake");
 
