@@ -164,8 +164,7 @@ pub use projection::{
     SessionMessageProjection, WorkflowFactProjection, WorkflowFactRecord,
 };
 pub use provider_descriptor::{
-    CompatibilityMetadataHook, compatibility_metadata_hook, metadata_namespace,
-    synthesizes_native_record_id,
+    ToolMetadataNormalizer, synthesizes_native_record_id, tool_metadata_normalizer,
 };
 pub use remote::{RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1};
 pub use retrieval_anchor::{

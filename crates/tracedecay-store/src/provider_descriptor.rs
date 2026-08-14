@@ -2,13 +2,17 @@
 //!
 //! The projection reducer itself is provider-neutral: it turns canonical facts
 //! into session, message, and workflow records the same way for every host.
-//! Three decisions are not neutral, because the provider — or the compatibility
-//! source its records were captured through — changes the answer:
+//! Two decisions are not neutral, because the provider — or the capture source
+//! its records were read through — changes the answer:
 //!
 //! * whether a record may omit its native record id, because the provider
 //!   synthesizes a stable one instead;
-//! * which namespace the session-location metadata keys are written under;
-//! * whether provider-compatibility fields are appended to message metadata.
+//! * whether a provider's tool invocations are normalized into the
+//!   cross-provider `tool_calls` / `tool_events` message-metadata shape.
+//!
+//! Session-location metadata keys are deliberately absent from that list: every
+//! provider writes them under `{provider}_session`, so the reducer formats the
+//! namespace itself rather than asking a descriptor.
 //!
 //! Spreading those literals through the reducer made the reducer read as if it
 //! were provider-aware everywhere, and left no single place to answer "what is
@@ -26,19 +30,13 @@ use crate::{ProjectionStoreError, ProjectionStoreResult};
 /// `native_record_id`.
 const SYNTHESIZED_RECORD_ID_PROVIDER: &str = "claude";
 
-/// Provider whose transcript-sourced records use the event metadata namespace.
-const CURSOR_PROVIDER: &str = "cursor";
-
-/// Compatibility source naming Cursor records captured from its transcript.
+/// Capture source naming Cursor records read from its transcript.
 const CURSOR_TRANSCRIPT_SOURCE: &str = "cursor_transcript";
 
-/// Namespace those transcript records keep for their location metadata keys.
-const CURSOR_EVENT_NAMESPACE: &str = "cursor_event";
-
-/// Appends a provider's compatibility fields to already-projected message
-/// metadata. Selected by compatibility source, then applied to the merged
+/// Normalizes a provider's tool invocations into the cross-provider message
+/// metadata shape. Selected by capture source, then applied to the merged
 /// metadata map and the record's canonical facts.
-pub type CompatibilityMetadataHook = fn(
+pub type ToolMetadataNormalizer = fn(
     &mut serde_json::Map<String, serde_json::Value>,
     &[CanonicalObservationFactV1],
 ) -> ProjectionStoreResult<()>;
@@ -52,38 +50,22 @@ pub fn synthesizes_native_record_id(provider: &str) -> bool {
     provider == SYNTHESIZED_RECORD_ID_PROVIDER
 }
 
-/// Namespace prefix for a session's location metadata keys.
-///
-/// The default is `{provider}_session`. Cursor's transcript-sourced records
-/// keep the `cursor_event` namespace they were first written under, so readers
-/// of already-persisted metadata continue to resolve the same keys. Both the
-/// provider and the compatibility source must match: a cursor record from any
-/// other source, and any other provider's `cursor_transcript` record, take the
-/// default.
-pub fn metadata_namespace(provider: &str, source: Option<&str>) -> String {
-    if provider == CURSOR_PROVIDER && source == Some(CURSOR_TRANSCRIPT_SOURCE) {
-        CURSOR_EVENT_NAMESPACE.to_owned()
-    } else {
-        format!("{provider}_session")
-    }
-}
-
-/// Compatibility-metadata hook for a record's compatibility `source`, if any.
+/// Tool-metadata normalizer for a record's capture `source`, if any.
 ///
 /// Keyed by source rather than provider because the source is what records the
 /// captured shape: it is the shape, not the host, that decides which
-/// compatibility fields downstream readers expect.
-pub fn compatibility_metadata_hook(source: Option<&str>) -> Option<CompatibilityMetadataHook> {
+/// normalization the canonical message metadata still needs.
+pub fn tool_metadata_normalizer(source: Option<&str>) -> Option<ToolMetadataNormalizer> {
     if source == Some(CURSOR_TRANSCRIPT_SOURCE) {
-        Some(append_cursor_compatibility_metadata)
+        Some(normalize_cursor_tool_metadata)
     } else {
         None
     }
 }
 
-/// Restates a record's tool invocations as the `tool_calls`, `tool_events`, and
-/// `tool_use_id` fields Cursor transcript readers were built against.
-fn append_cursor_compatibility_metadata(
+/// Restates a Cursor transcript record's tool invocations as the canonical
+/// cross-provider `tool_calls`, `tool_events`, and `tool_use_id` fields.
+fn normalize_cursor_tool_metadata(
     metadata: &mut serde_json::Map<String, serde_json::Value>,
     facts: &[CanonicalObservationFactV1],
 ) -> ProjectionStoreResult<()> {
@@ -148,28 +130,10 @@ mod tests {
     }
 
     #[test]
-    fn the_event_namespace_needs_the_cursor_provider_and_the_transcript_source() {
-        assert_eq!(
-            metadata_namespace("cursor", Some("cursor_transcript")),
-            "cursor_event"
-        );
-        assert_eq!(
-            metadata_namespace("cursor", Some("cursor_composer")),
-            "cursor_session"
-        );
-        assert_eq!(metadata_namespace("cursor", None), "cursor_session");
-        assert_eq!(
-            metadata_namespace("codex", Some("cursor_transcript")),
-            "codex_session"
-        );
-        assert_eq!(metadata_namespace("codex", None), "codex_session");
-    }
-
-    #[test]
-    fn the_compatibility_hook_is_selected_by_the_transcript_source_alone() {
-        assert!(compatibility_metadata_hook(Some("cursor_transcript")).is_some());
-        assert!(compatibility_metadata_hook(Some("cursor_composer")).is_none());
-        assert!(compatibility_metadata_hook(Some("provider_store")).is_none());
-        assert!(compatibility_metadata_hook(None).is_none());
+    fn the_tool_metadata_normalizer_is_selected_by_the_transcript_source_alone() {
+        assert!(tool_metadata_normalizer(Some("cursor_transcript")).is_some());
+        assert!(tool_metadata_normalizer(Some("cursor_composer")).is_none());
+        assert!(tool_metadata_normalizer(Some("provider_store")).is_none());
+        assert!(tool_metadata_normalizer(None).is_none());
     }
 }

@@ -8,9 +8,7 @@ use tracedecay_domain::{
 };
 
 use crate::cursor_dispatch::{cursor_dispatch_model, dispatch_text, is_subagent_dispatch_tool};
-use crate::provider_descriptor::{
-    compatibility_metadata_hook, metadata_namespace, synthesizes_native_record_id,
-};
+use crate::provider_descriptor::{synthesizes_native_record_id, tool_metadata_normalizer};
 use crate::{
     ObservationProjection, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
     SessionMessageRecord, SessionRecord, WorkflowFactRecord,
@@ -246,7 +244,7 @@ fn canonical_session_metadata(
         if let Some(native_source) = &session.native_source {
             metadata.insert(format!("{provider}_source"), native_source.clone().into());
         }
-        let location_namespace = metadata_namespace(provider, session.source.as_deref());
+        let location_namespace = format!("{provider}_session");
         if let Some(location_path) = session
             .location_path
             .as_ref()
@@ -295,10 +293,10 @@ fn canonical_message_metadata(
             })?;
         metadata.extend(session_metadata);
     }
-    if let Some(hook) =
-        compatibility_metadata_hook(metadata.get("source").and_then(serde_json::Value::as_str))
+    if let Some(normalize) =
+        tool_metadata_normalizer(metadata.get("source").and_then(serde_json::Value::as_str))
     {
-        hook(&mut metadata, envelope.facts())?;
+        normalize(&mut metadata, envelope.facts())?;
     }
     serde_json::to_string(&metadata)
         .map_err(|_| ProjectionStoreError::Contract(ObservationContractError::CanonicalEncoding))
@@ -1000,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_event_namespace_requires_both_the_provider_and_the_transcript_source() {
+    fn the_location_namespace_is_the_provider_alone_whatever_the_capture_source() {
         let mut fields = cursor_transcript_session_fields();
 
         let transcript: serde_json::Value = serde_json::from_str(
@@ -1011,7 +1009,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            transcript["cursor_event_cwd"],
+            transcript["cursor_session_cwd"],
             "/workspace/project/.worktrees/feature"
         );
 
@@ -1025,9 +1023,8 @@ mod tests {
         assert_eq!(
             other_provider["codex_session_cwd"],
             "/workspace/project/.worktrees/feature",
-            "the event namespace is cursor-only even for a cursor_transcript source"
+            "the namespace follows the provider, not the capture source"
         );
-        assert!(other_provider.get("cursor_event_cwd").is_none());
 
         fields.source = Some("cursor_composer".to_owned());
         let other_source: serde_json::Value = serde_json::from_str(
@@ -1040,13 +1037,12 @@ mod tests {
         assert_eq!(
             other_source["cursor_session_cwd"],
             "/workspace/project/.worktrees/feature",
-            "cursor falls back to its session namespace outside the transcript source"
+            "a different cursor capture source keeps the same session namespace"
         );
-        assert!(other_source.get("cursor_event_cwd").is_none());
     }
 
     #[test]
-    fn cursor_transcript_message_metadata_appends_tool_compatibility_fields() {
+    fn cursor_transcript_message_metadata_normalizes_tool_fields() {
         let envelope = envelope(vec![CanonicalObservationFactV1::ToolInvocation {
             invocation_id: ObservationId::new("tool.dispatch").unwrap(),
             name: "Task".to_owned(),
@@ -1084,7 +1080,7 @@ mod tests {
         .unwrap();
         assert!(
             other_metadata.get("tool_calls").is_none(),
-            "compatibility fields belong to the cursor transcript source only"
+            "tool-metadata normalization belongs to the cursor transcript source only"
         );
         assert!(other_metadata.get("tool_events").is_none());
         assert!(other_metadata.get("tool_use_id").is_none());
@@ -1269,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_transcript_metadata_uses_event_compatibility_namespace() {
+    fn cursor_transcript_metadata_uses_the_canonical_session_namespace() {
         let fields = CanonicalSessionFields {
             project_path: Some("/workspace/project".to_owned()),
             location_path: Some("/workspace/project/.worktrees/feature".to_owned()),
@@ -1291,15 +1287,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            metadata["cursor_event_cwd"],
+            metadata["cursor_session_cwd"],
             "/workspace/project/.worktrees/feature"
         );
         assert_eq!(
-            metadata["cursor_event_worktree"],
+            metadata["cursor_session_worktree"],
             "/workspace/project/.worktrees/feature"
         );
-        assert_eq!(metadata["cursor_event_location_provenance"], "hook_event");
-        assert!(metadata.get("cursor_session_cwd").is_none());
+        assert_eq!(metadata["cursor_session_location_provenance"], "hook_event");
     }
 
     #[test]
