@@ -3,10 +3,11 @@
 //! Both project-open query-authority mounts resolve the privacy domain from an
 //! already-complete current code generation, but a fresh project publishes its
 //! first generation asynchronously after admission, so the open-time mount can
-//! lose that race. Losing it must not deny every callable code query for the
-//! rest of the daemon session: retry the exact mount that failed when the
-//! scheduler publishes a generation for this project, mirroring the deferred
-//! feedback-cycle upgrade.
+//! lose that race. A physical restart restores a sealed generation as `Noop`
+//! and does not republish, so waiters must also poll the serving slot: a
+//! publication that will never repeat must not deny search for the rest of the
+//! daemon session. Retry the exact mount that failed when this project's
+//! generation becomes serving, mirroring the deferred feedback-cycle upgrade.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +34,11 @@ pub(super) enum DeferredQueryAuthorityMountV1 {
 /// Waits for the first complete code-index generation of `project_root` and
 /// then retries the query-authority mount. Exits when the mount reaches any
 /// terminal outcome or the publication channel closes (daemon shutdown).
+///
+/// The open-time mount runs before code-index activation, so the first ready
+/// check usually misses. A later `Published` event wakes the waiter on a
+/// fresh build; a restart that restores the same sealed generation records
+/// `Noop` and never repeats that event, so the serving slot is polled too.
 pub(super) fn spawn_deferred_query_authority_mount(
     invocation: DaemonInvocationState,
     project_root: PathBuf,
@@ -43,33 +49,29 @@ pub(super) fn spawn_deferred_query_authority_mount(
         let mut publications = invocation
             .code_index_schedulers
             .subscribe_generation_publications();
-        // Generations build on demand and the failed open-time mount may have
-        // raced a publish that already landed; answer immediately when a
-        // complete generation is already ready instead of waiting for a
-        // publication that will never repeat.
-        if invocation
-            .code_index_schedulers
-            .latest_complete_ready_for_scope(&scope)
-            .await
-            .is_some()
-            && try_deferred_mount(&invocation, &project_root, &scope, &mount).await
-                != DeferredMountAttemptV1::AwaitNextPublication
-        {
-            return;
-        }
+        let mut ready_poll = tokio::time::interval(std::time::Duration::from_secs(1));
+        ready_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            match publications.recv().await {
-                Ok(publication) if publication.project_root == project_root => {}
-                Ok(_) => continue,
-                // A lagged receiver dropped publications; one of them may have
-                // been this project's, so attempt the mount anyway.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            }
-            if try_deferred_mount(&invocation, &project_root, &scope, &mount).await
-                != DeferredMountAttemptV1::AwaitNextPublication
+            if invocation
+                .code_index_schedulers
+                .latest_complete_ready_for_scope(&scope)
+                .await
+                .is_some()
+                && try_deferred_mount(&invocation, &project_root, &scope, &mount).await
+                    != DeferredMountAttemptV1::AwaitNextPublication
             {
                 return;
+            }
+            tokio::select! {
+                _ = ready_poll.tick() => {}
+                publication = publications.recv() => match publication {
+                    Ok(publication) if publication.project_root == project_root => {}
+                    Ok(_) => continue,
+                    // A lagged receiver dropped publications; one of them may have
+                    // been this project's, so attempt the mount anyway.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
             }
         }
     });

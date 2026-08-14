@@ -125,8 +125,9 @@ struct QueryAuthorityWaitInputs {
 
 /// Wait for this project's first sealed generation, then mount its query
 /// authority. Route revocation, cancellation, and a closed publication channel
-/// each end the wait without mounting; a lagged channel re-reads the latest
-/// generation directly rather than trusting the missed publications.
+/// each end the wait without mounting; a lagged channel or the route poll
+/// re-reads the serving slot, because a retained `Noop` restore does not
+/// republish.
 fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs) {
     let QueryAuthorityWaitInputs {
         invocation: authority_invocation,
@@ -157,6 +158,14 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
                     _ = route_poll.tick() => {
                         if !authority_route_registered.load(Ordering::Acquire) {
                             break false;
+                        }
+                        if authority_invocation
+                            .code_index_schedulers
+                            .latest_generation_id(&authority_project)
+                            .await
+                            .is_some()
+                        {
+                            break true;
                         }
                     }
                     publication = publications.recv() => match publication {
