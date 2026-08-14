@@ -339,6 +339,35 @@ mod tests {
     }
 
     #[test]
+    fn scan_tree_hits_markdown_heading_body() {
+        let project = tempfile::tempdir().expect("temp project");
+        std::fs::create_dir_all(project.path().join("docs/plans")).expect("docs fixture directory");
+        std::fs::write(
+            project.path().join("docs/plans/notes.md"),
+            "# Remaining work by lane\n\nUNIQUE_MARKDOWN_HEADING_BODY_TOKEN in the section body.\n",
+        )
+        .expect("markdown fixture");
+
+        let scan = scan(
+            project.path(),
+            "UNIQUE_MARKDOWN_HEADING_BODY_TOKEN",
+            None,
+            10,
+            || false,
+        );
+
+        assert_eq!(scan.hits.len(), 1, "{scan:?}");
+        assert_eq!(scan.hits[0].file, "docs/plans/notes.md");
+        assert_eq!(scan.hits[0].line, 3);
+        assert!(
+            scan.hits[0]
+                .text
+                .contains("UNIQUE_MARKDOWN_HEADING_BODY_TOKEN"),
+            "{scan:?}"
+        );
+    }
+
+    #[test]
     fn scan_tree_prunes_generated_dependency_directories_without_gitignore() {
         let project = tempfile::tempdir().expect("temp project");
         let generated = project.path().join(".venv/lib/python/site-packages/pkg");
