@@ -1037,11 +1037,34 @@ pub(super) async fn register_project_open_production_owners(
             elapsed_ms = owner_registration_started.elapsed().as_millis(),
         );
     } else {
+        // Protocol sessions (initialize / shutdown / exit) must be admissible
+        // as soon as the project route is published. Diagnostics still wait
+        // for a sealed census; the deferred owner upgrade replaces this
+        // warming registration when that generation arrives.
+        let lsp_scope_grant =
+            project_open_lsp_scope_grant(&access, now_micros()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("project-open LSP workspace grant is invalid: {error}"),
+                }
+            })?;
+        register_production_lsp_owner(
+            invocation,
+            project_root,
+            lsp_scope_grant,
+            Arc::clone(&session_db),
+            database.clone(),
+            Arc::clone(&diagnostic_broker),
+            &[],
+            admitted_root_uri.clone(),
+        )
+        .await?;
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
-            phase = "lsp_owner_unavailable",
-            reason = "current sealed code-index generation is unavailable",
+            phase = "lsp_owner_registered",
+            reason = "warming_without_sealed_generation",
+            step_elapsed_ms = owner_phase_started.elapsed().as_millis(),
+            elapsed_ms = owner_registration_started.elapsed().as_millis(),
         );
     }
 
