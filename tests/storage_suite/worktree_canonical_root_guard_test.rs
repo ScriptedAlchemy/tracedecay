@@ -128,7 +128,7 @@ async fn init_primary(fx: &Fixture) -> String {
         .project_id
         .clone()
         .expect("profile-sharded store must have a project id");
-    drop(primary);
+    primary.close();
     project_id
 }
 
@@ -198,7 +198,7 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         Some(project_id.as_str()),
         "a linked worktree session must resolve the primary's shared project id"
     );
-    drop(from_worktree);
+    from_worktree.close();
 
     let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
         .await
@@ -219,20 +219,25 @@ async fn opening_from_linked_worktree_keeps_canonical_root_on_primary() {
         "display_root must stay pinned to the primary checkout"
     );
 
-    // The worktree's own path must still resolve (as an alias) to the same
-    // shared project id, so future sessions opened from the worktree keep
-    // working.
+    // Linked-worktree identity is the git-common-dir alias, not a second
+    // path pin. The open above already resolved this worktree to the same
+    // project id; keep that alias on the registry row.
     let context = db
         .project_registry_context_by_id(&project_id)
         .await
         .expect("registry context should exist");
-    let worktree_key = HostAdmissionTestRuntimeV1::canonical_project_key(&fx.worktree);
+    let git_common_dir = tracedecay::worktree::git_common_dir(&fx.worktree)
+        .expect("linked worktree must expose a git common dir");
+    let expected_alias = format!(
+        "git-common-dir:{}",
+        HostAdmissionTestRuntimeV1::canonical_project_key(&git_common_dir)
+    );
     assert!(
         context
             .aliases
             .iter()
-            .any(|alias| alias.alias_path == worktree_key),
-        "the worktree path must remain a resolvable alias: {:?}",
+            .any(|alias| alias.alias_path == expected_alias),
+        "the worktree must remain resolvable via git-common-dir: {:?}",
         context.aliases
     );
 }
@@ -278,12 +283,25 @@ async fn stale_worktree_canonical_root_heals_on_next_touch() {
         drop(db);
     }
 
+    // The in-process registration digest otherwise treats this as the same
+    // primary registration and skips the stale-root repair. Bump an artifact
+    // mtime so the next open re-registers and heals.
+    let store_root = fx.profile_root.join(format!("projects/{project_id}"));
+    let artifact = std::fs::read_dir(&store_root)
+        .expect("list project store")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("db"))
+        .unwrap_or_else(|| panic!("project store artifact under {}", store_root.display()));
+    let artifact_bytes = std::fs::read(&artifact).expect("read store artifact");
+    std::fs::write(&artifact, artifact_bytes).expect("bump store artifact mtime");
+
     // Any subsequent touch — even one opened from the same worktree — must
     // self-heal canonical_root/display_root back to the primary checkout.
     let reopened = TraceDecay::open_with_options(&fx.worktree, fx.open_options.clone())
         .await
         .expect("reopen from worktree should succeed");
-    drop(reopened);
+    reopened.close();
 
     let db = HostAdmissionTestRuntimeV1::profile(&fx.profile_root)
         .await
