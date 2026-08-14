@@ -763,7 +763,7 @@ enum AppServerEnding {
 struct AppServerSessionOutput {
     answer: String,
     source: ObservationSourceIdentityV1,
-    provider_request_id: String,
+    provider_request_id: Option<String>,
 }
 
 /// Runs one attempt over the Codex app-server JSON-RPC transport.
@@ -904,7 +904,7 @@ async fn execute_app_server<S>(
         AppServerEnding::Session(Ok(Ok(output))) => {
             text = Some(output.answer);
             provider_session = Some(output.source);
-            provider_request_id = Some(output.provider_request_id);
+            provider_request_id = output.provider_request_id;
             WorkAttemptProviderOutcomeV1::Exited { code: 0 }
         }
         AppServerEnding::Session(Ok(Err(error))) => {

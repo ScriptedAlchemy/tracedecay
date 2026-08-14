@@ -136,7 +136,10 @@ pub struct CodexAppServerSummary {
     /// Provider-native thread identity returned by the admitted thread/start.
     pub thread_id: String,
     /// Provider-native turn identity used by Codex token-usage notifications.
-    pub provider_request_id: String,
+    ///
+    /// Codex `turn/completed` may omit `/params/turn/id`. Absence is a typed
+    /// state: observability correlators skip usage join rather than inventing an id.
+    pub provider_request_id: Option<String>,
 }
 
 /// Same-process receipt for the exact app-server child launch boundary.
@@ -602,12 +605,7 @@ fn wait_for_turn_summary(
                 let provider_request_id = value
                     .pointer("/params/turn/id")
                     .and_then(Value::as_str)
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message: format!(
-                            "codex app-server turn/completed lacked a provider turn id: {value}"
-                        ),
-                    })?
-                    .to_owned();
+                    .map(str::to_owned);
                 return Ok(CodexAppServerSummary {
                     text,
                     model,
@@ -841,11 +839,14 @@ mod tests {
         assert_eq!(summary.text, "summary text");
         assert_eq!(summary.model.as_deref(), Some("gpt-5.5-codex-actual"));
         assert_eq!(summary.thread_id, thread_id);
-        assert_eq!(summary.provider_request_id, "turn-provider-request");
+        assert_eq!(
+            summary.provider_request_id.as_deref(),
+            Some("turn-provider-request")
+        );
     }
 
     #[test]
-    fn turn_summary_rejects_missing_provider_turn_identity() {
+    fn turn_summary_records_absent_provider_turn_identity() {
         let (tx, rx) = mpsc::channel();
         assert!(
             tx.send(Ok(json!({
@@ -856,13 +857,15 @@ mod tests {
                 .is_ok()
         );
 
-        let error = wait_for_turn_summary(
+        let summary = match wait_for_turn_summary(
             &rx,
             Instant::now() + Duration::from_secs(1),
             "summary-thread".to_owned(),
-        )
-        .expect_err("provider turn identity is required");
-        assert!(error.to_string().contains("lacked a provider turn id"));
+        ) {
+            Ok(summary) => summary,
+            Err(err) => panic!("missing provider turn id is a typed absence: {err}"),
+        };
+        assert_eq!(summary.provider_request_id, None);
     }
 
     #[test]
@@ -947,7 +950,7 @@ mod tests {
 
         let summary = result.expect("work app-server protocol should complete");
         assert_eq!(summary.text, "work result");
-        assert_eq!(summary.provider_request_id, "work-turn");
+        assert_eq!(summary.provider_request_id.as_deref(), Some("work-turn"));
         assert!(launch_receipt.started_at().is_some());
         assert_eq!(
             std::fs::read_to_string(&marker).expect("child environment marker"),
