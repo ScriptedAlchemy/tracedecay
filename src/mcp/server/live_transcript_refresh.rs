@@ -49,7 +49,12 @@ fn required_refresh_scope(
 fn refresh_unavailable(tool_name: &str) -> TraceDecayError {
     const DETAIL: &str = "session temporal refresh did not publish before hook completion";
     if tool_name == "tracedecay_hook_runtime" {
-        TraceDecayError::hook_runtime("temporal_refresh_unavailable", true, DETAIL)
+        TraceDecayError::hook_runtime_with_status(
+            "temporal_refresh_unavailable",
+            true,
+            DETAIL,
+            tracedecay_usecases::host_admission::HostAdmissionStatus::Unavailable.as_wire(),
+        )
     } else {
         TraceDecayError::Config {
             message: DETAIL.to_owned(),

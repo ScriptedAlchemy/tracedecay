@@ -248,10 +248,11 @@ async fn direct_server_keeps_configured_profile_root_with_overridden_registry_db
 
 #[test]
 fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
-    let error = crate::errors::TraceDecayError::hook_runtime(
+    let error = crate::errors::TraceDecayError::hook_runtime_with_status(
         "observation_cursor_conflict",
         true,
         "Claude observation store operation failed",
+        tracedecay_usecases::host_admission::HostAdmissionStatus::Backpressured.as_wire(),
     );
 
     let response = tool_error_response(serde_json::json!(7), "tracedecay_hook_runtime", &error);
@@ -260,6 +261,9 @@ fn hook_runtime_failures_keep_structured_retry_data_at_json_rpc_boundary() {
     assert_eq!(data["reason_code"], "observation_cursor_conflict");
     assert_eq!(data["retryable"], true);
     assert_eq!(data["detail"], "Claude observation store operation failed");
+    // The authority's own status survives to the JSON-RPC boundary instead of
+    // being re-derived there from the reason code.
+    assert_eq!(data["status"], "backpressured");
 }
 
 // ---- ledger settle is bounded when a recorder task wedges ---------

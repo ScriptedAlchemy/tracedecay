@@ -177,6 +177,55 @@ fn claude_observation_failures_expose_stable_retry_contracts() {
 }
 
 #[test]
+fn hook_errors_report_the_status_their_authority_declared() {
+    let cases = [
+        (HostAdmissionStatus::Backpressured, "backpressured"),
+        (HostAdmissionStatus::Unavailable, "unavailable"),
+        (HostAdmissionStatus::Unknown, "unknown"),
+        (HostAdmissionStatus::Degraded, "degraded"),
+    ];
+
+    for (status, wire) in cases {
+        let error = hook_admission_error(status, "spool_ack_conflict", true, "detail");
+        let data = structured_hook_error_data(&error).unwrap();
+        assert_eq!(data["status"], wire, "{status:?}");
+        assert_eq!(data["reason_code"], "spool_ack_conflict");
+    }
+}
+
+#[test]
+fn transcript_store_failures_keep_their_conflict_and_availability_statuses() {
+    // Both codes previously fell through the boundary's catch-all and were
+    // reported as `degraded`; each now carries the classifier's own verdict.
+    let conflict = map_transcript_ingest_error(
+        &tracedecay_sessions::runtime::source::TranscriptIngestError::Store(
+            tracedecay_store::TranscriptStoreError::Conflict {
+                cursor_path: std::path::PathBuf::from("private-cursor-path"),
+                expected: tracedecay_store::ParseOffset::default(),
+                actual: tracedecay_store::ParseOffset::default(),
+            },
+        ),
+    );
+    let data = structured_hook_error_data(&conflict).unwrap();
+    assert_eq!(data["reason_code"], "transcript_cursor_conflict");
+    assert_eq!(data["status"], "backpressured");
+    assert_eq!(data["retryable"], true);
+
+    let storage = map_transcript_ingest_error(
+        &tracedecay_sessions::runtime::source::TranscriptIngestError::Store(
+            tracedecay_store::TranscriptStoreError::Storage {
+                operation: "private transcript store operation",
+                source: Box::new(io::Error::other("private transcript source detail")),
+            },
+        ),
+    );
+    let data = structured_hook_error_data(&storage).unwrap();
+    assert_eq!(data["reason_code"], "transcript_storage_failed");
+    assert_eq!(data["status"], "unavailable");
+    assert!(!data.to_string().contains("private transcript store operation"));
+}
+
+#[test]
 fn transcript_hook_errors_keep_bounded_retry_data_without_cursor_detail() {
     let error = tracedecay_sessions::runtime::source::TranscriptIngestError::CursorKeyMismatch {
         expected: "private expected cursor".to_string(),

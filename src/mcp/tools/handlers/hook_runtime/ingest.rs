@@ -14,17 +14,50 @@ use tracedecay_usecases::host_admission::{
 use tracedecay_usecases::observation::ObservationCancellation;
 use tracedecay_usecases::session::lcm::{
     LcmAuthorityOutcome, LcmAuthorityPayload, LcmAuthorityRequest, LcmAuthorityUnavailableReason,
-    LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol, LcmTranscriptIngestCommand,
+    LcmCompactionCommand, LcmCompressionEvidence, LcmHostProtocol,
 };
 
 use super::super::SessionAuthorities;
 
-use super::errors::{map_claude_observation_ingest_error, map_transcript_ingest_error};
+use super::errors::{
+    hook_admission_error, map_claude_observation_ingest_error, map_transcript_ingest_error,
+};
 use super::required_str;
 
 mod kernels;
 
-use kernels::{TranscriptCaptureContext, TranscriptCaptureOutcome, transcript_capture_kernel};
+use kernels::{
+    TranscriptCaptureContext, TranscriptCaptureOutcome, TranscriptPayloadRouteV1,
+    transcript_capture_kernel,
+};
+
+/// Rejects an admission outcome that never reached a capture route.
+///
+/// One implementation for every ingest entry point, and the authority's own
+/// status, reason code, and retryability all survive verbatim: rewriting any
+/// of the three here launders the admission verdict that downstream retry
+/// policy reads back.
+fn reject_unadmitted(
+    admission: HostAdmissionOutcome,
+    unavailable_detail: &'static str,
+    unsupported_detail: &'static str,
+) -> Option<TraceDecayError> {
+    match admission.status {
+        HostAdmissionStatus::Unavailable => Some(hook_admission_error(
+            admission.status,
+            admission.reason_code.unwrap_or("authority_unavailable"),
+            admission.retryable,
+            unavailable_detail,
+        )),
+        HostAdmissionStatus::Unknown => Some(hook_admission_error(
+            admission.status,
+            admission.reason_code.unwrap_or("unknown_provider"),
+            admission.retryable,
+            unsupported_detail,
+        )),
+        _ => None,
+    }
+}
 
 fn host_admission_facade<'a>(
     cg: Option<&TraceDecay>,
@@ -213,10 +246,17 @@ const COMPACTION_INGEST_RETRY_DELAY: Duration = Duration::from_millis(400);
 /// pass, the shared writer was saturated, or a write authority was still
 /// mounting. Each converges once the peer pass settles, so the bounded retry
 /// re-reads rather than surfacing a terminal failure.
+///
+/// `project_authority_unbound` is listed explicitly because the authority
+/// itself reports it as non-retryable: it means the project's write authority
+/// has not been bound *yet*, which the project-open sequence resolves. A
+/// mismatched authority is deliberately absent — that never converges by
+/// waiting.
 const COMPACTION_INGEST_CONVERGING_REASONS: &[&str] = &[
     "cursor_conflict",
     "authority_write_failed",
     "authority_unavailable",
+    "project_authority_unbound",
     "external_source_runtime_unavailable",
     "external_source_commit_failed",
 ];
@@ -266,22 +306,12 @@ async fn admit_codex_rollouts_once(
 ) -> Result<u64> {
     let facade = host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
     let admission = facade.accept_replay("codex", HostAdmissionScope::Project);
-    match admission.status {
-        HostAdmissionStatus::Unavailable => {
-            return Err(TraceDecayError::hook_runtime(
-                admission.reason_code.unwrap_or("authority_unavailable"),
-                true,
-                "daemon observation authority is unavailable for compaction ingest",
-            ));
-        }
-        HostAdmissionStatus::Unknown => {
-            return Err(TraceDecayError::hook_runtime(
-                admission.reason_code.unwrap_or("unknown_provider"),
-                admission.retryable,
-                "codex transcript provider is unsupported",
-            ));
-        }
-        _ => {}
+    if let Some(rejection) = reject_unadmitted(
+        admission,
+        "daemon observation authority is unavailable for compaction ingest",
+        "codex transcript provider is unsupported",
+    ) {
+        return Err(rejection);
     }
     let source = tracedecay_sessions::runtime::codex::CodexSource::new()
         .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
@@ -561,9 +591,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         .get("user_scope")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if provider == "hermes" && args.get("messages").is_some() {
-        return ingest_hermes_callback_turn(args, user_scope, session_authorities).await;
-    }
+    let payload_route = TranscriptPayloadRouteV1::from_args(args);
     let max_new_bytes = args.get("max_new_bytes").and_then(Value::as_u64);
     let admission_scope = if user_scope {
         HostAdmissionScope::Profile
@@ -572,36 +600,18 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     };
     let facade = host_admission_facade(cg, admission_scope, session_authorities)?;
     let admission = facade.accept_replay(provider, admission_scope);
-    match admission.status {
-        HostAdmissionStatus::Unavailable => {
-            let (reason_code, retryable) = match admission.reason_code {
-                Some("project_authority_unbound" | "registered_authority_unavailable") => {
-                    ("authority_unavailable", true)
-                }
-                reason_code => (
-                    reason_code.unwrap_or("authority_unavailable"),
-                    admission.retryable,
-                ),
-            };
-            return Err(TraceDecayError::hook_runtime(
-                reason_code,
-                retryable,
-                "daemon observation authority is unavailable",
-            ));
-        }
-        HostAdmissionStatus::Unknown => {
-            return Err(TraceDecayError::hook_runtime(
-                admission.reason_code.unwrap_or("unknown_provider"),
-                admission.retryable,
-                "transcript provider is unsupported",
-            ));
-        }
-        _ => {}
+    if let Some(rejection) = reject_unadmitted(
+        admission,
+        "daemon observation authority is unavailable",
+        "transcript provider is unsupported",
+    ) {
+        return Err(rejection);
     }
     // Unregistered routes are reported with the same typed `unknown_provider`
     // admission status the probe uses, not a generic configuration error.
-    let kernel = transcript_capture_kernel(provider, user_scope).ok_or_else(|| {
-        TraceDecayError::hook_runtime(
+    let kernel = transcript_capture_kernel(provider, user_scope, payload_route).ok_or_else(|| {
+        hook_admission_error(
+            HostAdmissionStatus::Unknown,
             "unknown_provider",
             false,
             "transcript provider is unsupported",
@@ -611,6 +621,7 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         .capture(TranscriptCaptureContext {
             cg,
             args,
+            user_scope,
             profile_root,
             global_db,
             session_authorities,
@@ -624,6 +635,8 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         snapshot: snapshot_capture,
         claude_observation: claude_observation_stats,
         source_deferred,
+        lcm_receipt,
+        route_admission,
     } = capture;
     let authority_changed = messages_upserted > 0
         || snapshot_capture
@@ -640,12 +653,16 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         || snapshot_capture
             .as_ref()
             .is_some_and(|capture| capture.deferred_by_byte_cap);
-    let admission = complete_ingest_admission(
-        admission,
-        authority_changed,
-        exact_duplicate,
-        deferred_by_byte_cap,
-    );
+    // A route whose own authority refused the pass reports that verdict here;
+    // otherwise the replay completes against the admission that opened it.
+    let admission = route_admission.unwrap_or_else(|| {
+        complete_ingest_admission(
+            admission,
+            authority_changed,
+            exact_duplicate,
+            deferred_by_byte_cap,
+        )
+    });
     let mut output = json!({
         "action": "ingest_transcript",
         "provider": provider,
@@ -655,6 +672,13 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         "admission": admission,
         "messages_upserted": messages_upserted,
     });
+    if let Some(reason) = route_admission.and_then(|admission| admission.reason_code) {
+        output["reason"] = json!(reason);
+    }
+    if let Some(receipt) = lcm_receipt {
+        output["authority_outcome"] = json!(receipt.outcome);
+        output["committed_state"] = json!(receipt.receipt.committed_state);
+    }
     // Project-scope ingest is the production moment new post-hint session
     // activity becomes durable, so settle emitted hook hints into
     // `hint_outcome` analytics events here. Best-effort: unavailable or
@@ -692,83 +716,6 @@ pub(crate) async fn ingest_transcript_with_cancellation(
         output["source_bytes_scanned"] = json!(stats.source_bytes_scanned);
     }
     Ok(output)
-}
-
-async fn ingest_hermes_callback_turn(
-    args: &Value,
-    user_scope: bool,
-    session_authorities: SessionAuthorities<'_>,
-) -> Result<Value> {
-    let session_id = required_str(args, "session_id")?;
-    let messages = args
-        .get("messages")
-        .and_then(Value::as_array)
-        .filter(|messages| !messages.is_empty())
-        .ok_or_else(|| config_error("Hermes turn callback requires non-empty messages"))?
-        .clone();
-    let authority = if user_scope {
-        session_authorities.profile_lcm
-    } else {
-        session_authorities.project_lcm
-    };
-    let Some(authority) = authority else {
-        return Ok(json!({
-            "action": "ingest_transcript",
-            "provider": "hermes",
-            "user_scope": user_scope,
-            "status": "unavailable",
-            "reason": "lcm_daemon_authority_unavailable",
-        }));
-    };
-    let event_digest = tracedecay_domain::canonical_sha256(&(&"hermes", &session_id, &messages))
-        .map_err(|error| config_error(format!("digest Hermes turn failed: {error}")))?;
-    let request = LcmAuthorityRequest::Ingest(LcmTranscriptIngestCommand {
-        preflight: tracedecay_sessions::runtime::lcm::LcmPreflightRequest {
-            provider: "hermes".to_owned(),
-            session_id: session_id.to_owned(),
-            messages,
-            current_tokens: None,
-            ignore_session_patterns: Vec::new(),
-            stateless_session_patterns: Vec::new(),
-            threshold_tokens: None,
-            max_assembly_tokens: None,
-            leaf_chunk_tokens: None,
-            max_source_messages: None,
-            summary_fan_in: None,
-            incremental_max_depth: None,
-            fresh_tail_count: None,
-            dynamic_leaf_chunk_enabled: None,
-            dynamic_leaf_chunk_max: None,
-            context_length: None,
-            reserve_tokens_floor: None,
-        },
-        protocol_revision: "hermes.turn-completed.v1".to_owned(),
-        event_digest,
-    });
-    let Some(response) = authority.execute(request).await else {
-        return Ok(json!({
-            "action": "ingest_transcript",
-            "provider": "hermes",
-            "user_scope": user_scope,
-            "status": "unavailable",
-            "reason": "lcm_daemon_authority_unavailable",
-        }));
-    };
-    let status = if response.outcome == LcmAuthorityOutcome::Ready
-        && matches!(response.payload, Some(LcmAuthorityPayload::Ingest(_)))
-    {
-        "committed"
-    } else {
-        "unavailable"
-    };
-    Ok(json!({
-        "action": "ingest_transcript",
-        "provider": "hermes",
-        "user_scope": user_scope,
-        "status": status,
-        "authority_outcome": response.outcome,
-        "committed_state": response.receipt.committed_state,
-    }))
 }
 
 pub(super) fn complete_ingest_admission(

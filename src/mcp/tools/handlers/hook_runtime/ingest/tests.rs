@@ -115,8 +115,12 @@ async fn supported_transcript_admission_requires_its_authority_without_echoing_p
 
     let data = structured_hook_error_data(&error).unwrap();
     assert_eq!(data["status"], "unavailable");
-    assert_eq!(data["reason_code"], "authority_unavailable");
-    assert_eq!(data["retryable"], true);
+    // The admission authority's own verdict reaches the host: an unbound
+    // project authority is reported by its own reason code and its own
+    // (non-retryable) classification, not laundered into a generic retryable
+    // `authority_unavailable`.
+    assert_eq!(data["reason_code"], "project_authority_unbound");
+    assert_eq!(data["retryable"], false);
     assert!(!error.to_string().contains(secret));
     assert!(!data.to_string().contains(secret));
 }
@@ -143,30 +147,38 @@ async fn claude_postcompact_without_machine_provenance_is_read_only_unavailable(
 
 #[test]
 fn capture_registry_owns_every_supported_transcript_route() {
+    use super::kernels::TranscriptPayloadRouteV1::{InlineMessages, SourceScan};
+
     for route in [
-        ("claude", true),
-        ("codex", true),
-        ("cursor", true),
-        ("kiro", true),
-        ("codex", false),
-        ("cursor", false),
-        ("kiro", false),
+        ("claude", true, SourceScan),
+        ("codex", true, SourceScan),
+        ("cursor", true, SourceScan),
+        ("hermes", true, SourceScan),
+        ("kiro", true, SourceScan),
+        ("codex", false, SourceScan),
+        ("cursor", false, SourceScan),
+        ("hermes", false, SourceScan),
+        ("kiro", false, SourceScan),
+        // The Hermes turn callback inlines its messages; it is a registered
+        // capture route, not a branch above the lookup.
+        ("hermes", true, InlineMessages),
+        ("hermes", false, InlineMessages),
     ] {
         assert!(
-            super::kernels::transcript_capture_kernel(route.0, route.1).is_some(),
+            super::kernels::transcript_capture_kernel(route.0, route.1, route.2).is_some(),
             "no capture kernel registered for {route:?}"
         );
     }
     // Routes with no registered kernel are reported through the typed
     // `unknown_provider` admission status rather than a generic config error.
     for route in [
-        ("claude", false),
-        ("hermes", true),
-        ("hermes", false),
-        ("unknown-provider-v99", true),
+        ("claude", false, SourceScan),
+        ("claude", true, InlineMessages),
+        ("codex", false, InlineMessages),
+        ("unknown-provider-v99", true, SourceScan),
     ] {
         assert!(
-            super::kernels::transcript_capture_kernel(route.0, route.1).is_none(),
+            super::kernels::transcript_capture_kernel(route.0, route.1, route.2).is_none(),
             "unexpected capture kernel registered for {route:?}"
         );
     }
