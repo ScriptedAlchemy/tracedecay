@@ -266,13 +266,13 @@ fn catalog_filter_preserves_non_catalog_tools_and_filters_catalog_bindings() {
     assert!(
         definitions
             .iter()
-            .any(|definition| definition.name == "tracedecay_context"),
+            .any(|definition| definition.name == "tracedecay_search"),
         "legacy production tools remain discoverable until cataloged"
     );
     assert!(
-        definitions
-            .iter()
-            .all(|definition| definition.name != "tracedecay_git_preview"),
+        definitions.iter().all(|definition| {
+            definition.name != "tracedecay_context" && definition.name != "tracedecay_git_preview"
+        }),
         "catalog-bound tools require explicit capability authority"
     );
 }
