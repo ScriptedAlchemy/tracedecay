@@ -1370,6 +1370,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 continue;
             }
             let Some((_scope_digest, authority)) = &worktree.query_authority else {
+                // Defensive only: real mounts key the registry and derive the
+                // worktree ID from the same canonical root, so this identity
+                // cannot have an authority-bearing sibling.
                 continue;
             };
             if matched.is_some() {
