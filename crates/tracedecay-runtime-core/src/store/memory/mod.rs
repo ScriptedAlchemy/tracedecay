@@ -64,6 +64,8 @@ use status::project_memory_status_tx;
 mod automatic_facts;
 mod automation_run_receipts;
 mod candidates;
+#[cfg(feature = "test-transport")]
+mod commit_barrier;
 mod crud;
 mod curation;
 mod dashboard;

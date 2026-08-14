@@ -606,7 +606,17 @@ async fn settle_in_process_invocation(
             }
         }
         crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
-            match tokio::time::timeout(crate::daemon::DAEMON_TASK_ABORT_DEADLINE, &mut invocation)
+            // An authoritative effect settles itself: its own budget bounds it,
+            // and when that budget expires after the commit point it reports
+            // `PartialEffect` with a committed receipt. Waiting only
+            // `DAEMON_TASK_ABORT_DEADLINE` — two seconds, a *shutdown* bound —
+            // replaced that answer with `ResetRequired` whenever settlement
+            // took a moment longer than the deadline, which tells the operator
+            // their store is corrupt and must be reset when in truth one
+            // effect merely outlived its budget. Wait for the authoritative
+            // settlement over the same grace the daemon's own clients keep
+            // reading for, so the effect's real terminal is the one reported.
+            match tokio::time::timeout(crate::daemon::DAEMON_TOOL_RESPONSE_GRACE, &mut invocation)
                 .await
             {
                 Ok(Ok(response)) => Ok(response),

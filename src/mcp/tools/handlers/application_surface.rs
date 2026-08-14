@@ -274,15 +274,17 @@ fn render_result_parts(
     let mut rendered = super::text_tool_result(&text);
     if let Err(problem) = result {
         // Keep the typed problem machine-readable in every presentation
-        // format: markdown rendering alone would strand the kind/code in
-        // prose that clients cannot classify.
+        // format: markdown rendering alone would strand it in prose that
+        // clients cannot classify. The whole record travels, not a
+        // kind/code summary — the parts a caller must *act* on are the
+        // legal actions, the retry directive, and, for an admitted partial
+        // effect, the committed receipt. Publishing only kind/code left the
+        // one instruction that matters ("reconcile this committed effect")
+        // readable by humans and invisible to every client.
         if let Some(object) = rendered.value.as_object_mut() {
             object.insert(
                 "problem".to_string(),
-                serde_json::json!({
-                    "kind": problem.problem.kind,
-                    "code": problem.problem.code,
-                }),
+                serde_json::to_value(problem.problem.as_ref())?,
             );
         }
     }

@@ -275,6 +275,11 @@ async fn execute_project_memory_write<T: Send + 'static>(
                 .commit()
                 .await
                 .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
+            // The mutation is durable from here; the operation is not settled
+            // yet. Acceptance harnesses park exactly here to make a budget that
+            // expires after the commit point reproducible.
+            #[cfg(feature = "test-transport")]
+            crate::store::memory::commit_barrier::wait_after_durable_fact_commit().await;
             Ok(value)
         }
         Err(error) => match transaction.rollback().await {

@@ -11,6 +11,7 @@ pub mod response_handles;
 pub(crate) mod scope;
 pub mod server;
 mod tool_analytics;
+pub(crate) mod tool_call_deadline;
 
 /// Tool definitions and dispatch.
 pub mod tools;

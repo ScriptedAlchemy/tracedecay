@@ -243,6 +243,13 @@ name = "daemon_fault_harness_test"
 path = "tests/daemon_fault_harness_test.rs"
 required-features = ["test-transport"]
 
+# The PartialEffect leg parks a real fact commit at the daemon's durable commit
+# boundary, which is the `test-transport` fact-commit barrier.
+[[test]]
+name = "typed_terminal_restart_acceptance"
+path = "tests/typed_terminal_restart_acceptance.rs"
+required-features = ["test-transport"]
+
 [[test]]
 name = "host_lifecycle_cli_acceptance"
 path = "tests/host_lifecycle_cli_acceptance.rs"
