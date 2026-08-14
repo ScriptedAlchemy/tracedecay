@@ -332,13 +332,11 @@ fn assert_exact_identity(
         Some(expected_reference),
         "freshness must retain exact ref identity: {status}"
     );
-    if let Some(expected_revision) = expected_revision {
-        assert_eq!(
-            worktree["source_revision"].as_str(),
-            Some(expected_revision),
-            "freshness must retain exact source revision: {status}"
-        );
-    }
+    assert_eq!(
+        worktree["source_revision"].as_str(),
+        expected_revision,
+        "freshness must retain exact source revision: {status}"
+    );
 }
 
 async fn assert_project_identity(
@@ -382,8 +380,7 @@ async fn wait_for_terminal_generation(
             let generation = worktree["latest_generation_id"]
                 .as_str()
                 .map(str::to_owned);
-            let revision_matches = expected_revision
-                .is_none_or(|revision| worktree["source_revision"] == revision);
+            let revision_matches = worktree["source_revision"].as_str() == expected_revision;
             let terminal = observed["code_index_freshness"]["status"] == "current"
                 && worktree["coverage"] == "complete"
                 && worktree["staleness_state"] == "fresh"
@@ -569,7 +566,7 @@ fn assert_sealed_generation_identity(
     generation: &CodeIndexPublishedGenerationV1,
     identity: &ExactIndexIdentity,
     reference: &str,
-    revision: &str,
+    revision: Option<&str>,
     generation_id: &str,
 ) {
     assert_eq!(
@@ -603,7 +600,7 @@ fn assert_sealed_generation_identity(
             .source_revision
             .as_ref()
             .map(|revision| revision.as_str()),
-        Some(revision)
+        revision
     );
 }
 
@@ -793,13 +790,15 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     )
     .expect("save source file");
     deliver_save(&project, &["src/saved.rs"]).await;
+    // Dirty worktree generations keep ref/worktree identity but must not claim
+    // HEAD as source_revision — that field is exact-commit evidence only.
     let saved = wait_for_terminal_generation(
         &socket,
         &handshake,
         &project,
         &identity,
         "refs/heads/main",
-        Some(&main_revision),
+        None,
         Some(&initial.generation_id),
         "lifecycle_saved_symbol",
         Some("src/saved.rs"),
@@ -815,7 +814,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        Some(&main_revision),
+        None,
         Some(&saved.generation_id),
         "lifecycle_saved_symbol",
         Some("src/renamed.rs"),
@@ -868,7 +867,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        Some(&feature_revision),
+        None,
         Some(&switched.generation_id),
         "lifecycle_overflow_symbol",
         Some("src/overflow.rs"),
@@ -884,7 +883,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        Some(&feature_revision),
+        None,
         &overflowed.generation_id,
     )
     .await;
@@ -922,7 +921,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        Some(&feature_revision),
+        None,
         &overflowed.generation_id,
     )
     .await;
@@ -948,7 +947,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &retained,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        None,
         &overflowed.generation_id,
     );
     assert!(
@@ -972,7 +971,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        Some(&feature_revision),
+        None,
         Some(&overflowed.generation_id),
         "cancellation_probe_0000_000",
         Some("src/cancelled_batch/file_0000.rs"),
@@ -987,7 +986,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &recovered,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        None,
         &restarted.generation_id,
     );
     assert!(
