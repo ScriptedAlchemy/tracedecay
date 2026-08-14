@@ -269,6 +269,13 @@ async fn run_memory_curator_for_store_with_publication(
         }
     };
     let after_fact_id = memory_curator_resume_cursor(&run.dashboard_root).await?;
+    if run_control.read_control().interrupted() {
+        return Err(TraceDecayError::Database {
+            operation: "run memory curator".to_owned(),
+            message: "memory curator run was interrupted before review".to_owned(),
+        }
+        .into());
+    }
 
     let owner = store.owner()?;
     let database = store.open_memory_database().await?;
@@ -573,11 +580,17 @@ async fn run_memory_curator_for_store_with_publication(
         after_fact_id.as_ref(),
         resume_after_fact_id.as_ref(),
     );
+    if let Some(object) = terminal_summary.as_object_mut() {
+        object.insert("validation_repairs".to_owned(), json!(validation_repairs));
+        if let Some(policy) = validated_report.get("curation_policy").cloned() {
+            object.insert("curation_policy".to_owned(), policy);
+        }
+    }
     let validation_report = Some(terminal_summary);
     let mut record = match finalizer.success_record(
         &response,
         evidence_hash,
-        None,
+        Some(proposed_ops),
         accepted_count,
         rejected_count,
     ) {
@@ -597,7 +610,7 @@ async fn run_memory_curator_for_store_with_publication(
         }
     };
     record.applied_ops = applied_ops;
-    record.rejected_ops = None;
+    record.rejected_ops = Some(json!(rejected_ops));
     record.validation_report = validation_report;
     let record = match finalizer
         .append_success_record(&request, &response, &retry_report, record)
