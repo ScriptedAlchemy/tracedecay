@@ -144,8 +144,12 @@ production = [
 token-counting = ["dep:tiktoken-rs", "tracedecay-agent-hosts/token-counting", "tracedecay-dashboard-api/token-counting"]
 
 # Lite tier (11 languages) — always compiled, no feature flag needed:
-# Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift
-lite = ["tracedecay-code-index/lite"]
+# Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift.
+# Markdown joins them: documentation is architecture content, every repository
+# has it, and a build that indexes code but not its docs is not a shippable
+# tier. Its grammar lives in the (monolithic) large bundle, so `lite` now links
+# that bundle — the compile-weight cost of making docs unconditional.
+lite = ["tracedecay-code-index/lite", "lang-markdown"]
 
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]

@@ -20,7 +20,10 @@ include = [
 [features]
 default = ["lite", "medium", "full"]
 test-helpers = []
-lite = ["dep:tracedecay-medium-treesitters"]
+# Markdown rides in `lite` as well as `full`: docs are architecture content and
+# every repository has them, so no shipped tier may index code without also
+# indexing its documentation.
+lite = ["dep:tracedecay-medium-treesitters", "lang-markdown"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
 lang-dart = ["dep:tracedecay-medium-treesitters"]

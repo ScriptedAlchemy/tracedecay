@@ -89,6 +89,9 @@ mod lean_extractor;
 mod lua_extractor;
 #[cfg(feature = "lang-markdown")]
 mod markdown_extractor;
+/// Grammar-free; always compiled so the retrieval layer can read section
+/// structure without linking a tree-sitter bundle.
+pub mod markdown_structure;
 #[cfg(feature = "lang-metal")]
 mod metal_extractor;
 #[cfg(feature = "lang-msbasic2")]
@@ -186,7 +189,7 @@ pub use lean_extractor::LeanExtractor;
 #[cfg(feature = "lang-lua")]
 pub use lua_extractor::LuaExtractor;
 #[cfg(feature = "lang-markdown")]
-pub use markdown_extractor::MarkdownExtractor;
+pub use markdown_extractor::{HEADING_PATH_SEPARATOR, MarkdownExtractor};
 #[cfg(feature = "lang-metal")]
 pub use metal_extractor::MetalExtractor;
 #[cfg(feature = "lang-msbasic2")]

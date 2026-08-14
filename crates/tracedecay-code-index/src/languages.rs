@@ -56,10 +56,17 @@ pub(crate) fn canonical_language_id(language_name: &str) -> String {
 
 /// Languages whose extractors identify stable member spans, enabling
 /// `SymbolMember` child chunks (Plan 25).
+///
+/// Markdown qualifies: a heading owns its whole section, and nested headings
+/// are stable child spans. That is what keeps a chunk from splitting mid
+/// section — an oversized section splits at its sub-heading boundaries via
+/// `structural_segments` instead of at an arbitrary byte window, and a section
+/// that fits the budget stays one chunk.
 fn has_stable_member_spans(language: &str) -> bool {
     matches!(
         language,
-        "rust"
+        "markdown"
+            | "rust"
             | "go"
             | "java"
             | "scala"
@@ -540,5 +547,33 @@ mod tests {
             .map(|d| d.language.as_str())
             .collect();
         assert_eq!(ids, vec!["aaa-test-language", "rust"]);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-markdown")]
+    fn markdown_is_admitted_with_stable_section_spans() {
+        let registry = StaticLanguageRegistry::new();
+        let markdown = registry
+            .descriptor(&language("markdown"))
+            .expect("markdown is a lite-tier language");
+        assert!(markdown.stable_member_spans);
+        assert!(markdown.capabilities.extraction);
+        assert!(markdown.capabilities.outline);
+        assert_eq!(
+            markdown.extensions,
+            vec!["markdown".to_owned(), "md".to_owned()]
+        );
+        assert_eq!(
+            registry
+                .descriptor_for_extension("md")
+                .map(|descriptor| descriptor.language.as_str()),
+            Some("markdown")
+        );
+        assert_eq!(
+            registry
+                .descriptor_for_extension("markdown")
+                .map(|descriptor| descriptor.language.as_str()),
+            Some("markdown")
+        );
     }
 }

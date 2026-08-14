@@ -13,7 +13,9 @@ default = [
     "medium",
     "full",
 ]
-lite = ["tracedecay-code-extraction/lite"]
+# Markdown is admitted by every tier, not just `full` — see the note on the
+# extraction crate's `lite` feature.
+lite = ["tracedecay-code-extraction/lite", "lang-markdown"]
 medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
 full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
 test-helpers = ["tracedecay-graph-db/test-helpers"]
