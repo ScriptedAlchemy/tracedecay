@@ -343,7 +343,8 @@ pub(super) async fn evaluate_native_profile(
                 candidate,
                 observed_at,
                 tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                    observed_at.0 + 300_000_000,
+                    observed_at.0
+                        + crate::daemon_client::SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS,
                 ))
                 .expect("evaluation deadline"),
                 tracedecay_application::CancellationContext::active(

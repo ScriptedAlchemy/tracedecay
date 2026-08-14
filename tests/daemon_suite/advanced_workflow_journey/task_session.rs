@@ -272,6 +272,8 @@ fn activate_evaluated_semantic_profile(
     let mut evaluator =
         std::process::Command::new(env!("CARGO_BIN_EXE_tracedecay-search-eval-direct"));
     common::apply_tracedecay_home_env(&mut evaluator, home);
+    eprintln!("semantic evaluate-and-publish starting");
+    let evaluation_started = Instant::now();
     let output = evaluator
         .args(["evaluate-and-publish", "--project-root"])
         .arg(project)
@@ -280,6 +282,11 @@ fn activate_evaluated_semantic_profile(
         .current_dir(project)
         .output()
         .expect("start direct semantic evaluator");
+    eprintln!(
+        "semantic evaluate-and-publish finished wall_ms={} status={:?}",
+        evaluation_started.elapsed().as_millis(),
+        output.status
+    );
     assert!(
         output.status.success(),
         "direct semantic evaluator failed: {}\nstdout={}\nstderr={}",

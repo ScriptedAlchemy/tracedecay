@@ -403,6 +403,14 @@ struct DaemonInvocationConnection {
     writer: WriteHalf<crate::daemon::transport::BrokerStream>,
 }
 
+/// Client-owned dispatch ceiling for native FastEmbed current+10x evaluation.
+///
+/// The daemon honors this deadline on `semantic_evaluate_and_publish`; it is
+/// not a journey-harness timeout. Sized from a quieter-host measurement of
+/// 625s for the pinned 1x+10x FastEmbed workload (load 23→18 on 96 cores,
+/// isolated `CARGO_TARGET_DIR=/tmp/semantic-rerun-target`) plus margin.
+pub const SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS: i64 = 900_000_000;
+
 impl DaemonInvocationClient {
     pub fn for_current(handshake: crate::daemon::DaemonHandshake) -> crate::errors::Result<Self> {
         Ok(Self {
@@ -619,11 +627,12 @@ impl DaemonInvocationClient {
                 message: "semantic evaluation clock is unavailable".to_owned(),
             })?;
         let deadline = Deadline::new(UtcMicros(
-            observed_at.0.checked_add(300_000_000).ok_or_else(|| {
-                crate::errors::TraceDecayError::Config {
+            observed_at
+                .0
+                .checked_add(SEMANTIC_EVALUATION_DISPATCH_DEADLINE_MICROS)
+                .ok_or_else(|| crate::errors::TraceDecayError::Config {
                     message: "semantic evaluation deadline is unavailable".to_owned(),
-                }
-            })?,
+                })?,
         ))
         .map_err(|error| crate::errors::TraceDecayError::Config {
             message: error.to_string(),
