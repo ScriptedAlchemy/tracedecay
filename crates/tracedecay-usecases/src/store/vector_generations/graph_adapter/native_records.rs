@@ -7,7 +7,7 @@ use tracedecay_domain::{
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphEntity, GraphEntityId, GraphLabel, GraphProjectionTelemetryRequest,
-    GraphProperty, GraphRelation, GraphRelationId, GraphVector, GraphWatermark,
+    GraphProperty, GraphRelation, GraphVector, GraphWatermark,
     semantic_vector_native::{
         BASE_GENERATION, BASE_KIND, BATCH_COUNT, BUILD_BATCH_LABEL, BUILD_ID, BUILD_LABEL,
         BUILD_MEMBER_LABEL, CHECKPOINT, CHUNK_DIGEST, CHUNK_ID, CONTAINS_KIND, CONTROL_ID,
@@ -22,9 +22,8 @@ use tracedecay_graph_db::{
 
 use super::super::identity::generation_identity_digest;
 use super::super::{
-    BaseGenerationIncompatibilityV1, PreparedVectorGenerationV1, ProjectedChunkVectorV1,
-    PublishedVectorGenerationV1, VectorGenerationBuildIdV1, VectorGenerationStateMachineV1,
-    VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
+    PreparedVectorGenerationV1, ProjectedChunkVectorV1, VectorGenerationBuildIdV1,
+    VectorGenerationStateMachineV1, VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1,
 };
 use super::persistence::{generation_label, map_graph_error, storage_error, vector_metric};
 use super::snapshot::SemanticVectorVerifiedRead;
@@ -37,7 +36,8 @@ pub(super) use catalog::{
     read_generation_catalog, read_generation_catalog_entry, read_generation_publication_pointer,
 };
 pub(super) use scoped::{
-    ScopedBuildRecordsV1, ScopedGenerationRecordsV1, read_build_records, read_generation_records,
+    PublishedBaseRecover, ScopedBuildRecordsV1, ScopedGenerationRecordsV1, read_build_records,
+    read_generation_records_continuing, read_generation_records_with_recover,
 };
 
 use support::{
@@ -52,8 +52,14 @@ pub(super) fn read_cataloged_generation_records(
     snapshot: &SemanticVectorVerifiedRead,
     generation_id: &VectorGenerationIdV1,
     cancellation: Arc<dyn GraphCancellation>,
+    recover: Option<&PublishedBaseRecover<'_>>,
 ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
-    let records = read_generation_records(snapshot, generation_id, Arc::clone(&cancellation))?;
+    let records = read_generation_records_with_recover(
+        snapshot,
+        generation_id,
+        Arc::clone(&cancellation),
+        recover,
+    )?;
     let catalog = read_generation_catalog_entry(snapshot, generation_id, cancellation)?;
     match (records, catalog) {
         (None, None) => Ok(None),
@@ -305,175 +311,11 @@ pub(crate) fn encode_generation_batch_delta(
         &mut relations,
         relation(&owner, &batch_row, CONTAINS_KIND, "batch")?,
     )?;
-    encode_published_base_generation(
-        &mut entities,
-        &mut relations,
-        &state.published,
-        build.plan.base_generation.as_ref(),
-    )?;
 
     Ok(NativeGraphStateV1 {
         entities: entities.into_values().collect(),
         relations: relations.into_values().collect(),
     })
-}
-
-fn encode_published_base_generation(
-    entities: &mut BTreeMap<GraphEntityId, GraphEntity>,
-    relations: &mut BTreeMap<GraphRelationId, GraphRelation>,
-    published: &super::super::PublishedStateV1,
-    base_generation: Option<&VectorGenerationIdV1>,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    let Some(base_id) = base_generation else {
-        return Ok(());
-    };
-    let generation = published.generations.get(base_id).ok_or(
-        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
-            BaseGenerationIncompatibilityV1::MissingPublished,
-        ),
-    )?;
-    encode_published_generation_records(entities, relations, generation)
-}
-
-fn encode_published_generation_records(
-    entities: &mut BTreeMap<GraphEntityId, GraphEntity>,
-    relations: &mut BTreeMap<GraphRelationId, GraphRelation>,
-    generation: &PublishedVectorGenerationV1,
-) -> Result<(), VectorGenerationStoreErrorV1> {
-    let generation_id = generation.generation_id();
-    let owner = generation_entity_id(generation_id)?;
-    let vector_bytes = generation
-        .vectors()
-        .values()
-        .try_fold(0_u64, |total, vector| {
-            total
-                .checked_add(
-                    u64::try_from(vector.values.len())
-                        .map_err(storage_error)?
-                        .checked_mul(4)
-                        .ok_or_else(|| corrupt("semantic vector byte count overflowed"))?,
-                )
-                .ok_or_else(|| corrupt("semantic vector byte count overflowed"))
-        })?;
-    insert_entity(
-        &mut *entities,
-        entity(
-            owner.as_str(),
-            [GENERATION_LABEL],
-            [
-                (
-                    GENERATION_ID,
-                    string_property(generation_id.as_digest().as_str()),
-                ),
-                (
-                    TARGET_PROJECTION,
-                    bytes_property(generation.projection_key())?,
-                ),
-                (
-                    SOURCE_GENERATION,
-                    string_property(&generation.source_generation().to_string()),
-                ),
-                (
-                    SOURCE_MANIFEST,
-                    string_property(generation.source_manifest_digest().as_str()),
-                ),
-                (
-                    BASE_GENERATION,
-                    optional_digest_property(generation.base_generation().map(|id| id.as_digest())),
-                ),
-                (EMBEDDING_KEY, bytes_property(generation.embedding_key())?),
-                (CHECKPOINT, bytes_property(generation.checkpoint())?),
-                (
-                    MANIFEST_DIGEST,
-                    string_property(generation.manifest_digest().as_str()),
-                ),
-                (ROW_COUNT, i64_property(generation.vectors().len())?),
-                (VECTOR_BYTES, i64_property(vector_bytes)?),
-                (
-                    TOMBSTONE_COUNT,
-                    i64_property(generation.tombstone_digests().len())?,
-                ),
-                (RECEIPT_COUNT, i64_property(generation.receipts().len())?),
-            ],
-        )?,
-    )?;
-    for vector in generation.vectors().values() {
-        let child = scoped_entity_id(
-            "generation-vector",
-            generation_id.as_digest().as_str(),
-            &vector.chunk_id.to_string(),
-        )?;
-        insert_entity(
-            &mut *entities,
-            vector_entity(
-                child.as_str(),
-                GENERATION_VECTOR_LABEL,
-                GENERATION_ID,
-                generation_id.as_digest().as_str(),
-                vector,
-                generation.embedding_key(),
-                Some(generation_label(generation_id)?),
-                Some(generation_id),
-            )?,
-        )?;
-        insert_relation(
-            &mut *relations,
-            relation(&owner, &child, CONTAINS_KIND, "vector")?,
-        )?;
-    }
-    for (chunk_id, prior_digest) in generation.tombstone_digests() {
-        let child = scoped_entity_id(
-            "generation-tombstone",
-            generation_id.as_digest().as_str(),
-            &chunk_id.to_string(),
-        )?;
-        insert_entity(
-            &mut *entities,
-            entity(
-                child.as_str(),
-                [GENERATION_TOMBSTONE_LABEL],
-                [
-                    (
-                        GENERATION_ID,
-                        string_property(generation_id.as_digest().as_str()),
-                    ),
-                    (CHUNK_ID, string_property(&chunk_id.to_string())),
-                    (PRIOR_DIGEST, string_property(prior_digest.as_str())),
-                ],
-            )?,
-        )?;
-        insert_relation(
-            &mut *relations,
-            relation(&owner, &child, CONTAINS_KIND, "tombstone")?,
-        )?;
-    }
-    for (ordinal, receipt) in generation.receipts().iter().enumerate() {
-        let batch_row = scoped_entity_id(
-            "generation-receipt",
-            generation_id.as_digest().as_str(),
-            &ordinal.to_string(),
-        )?;
-        insert_entity(
-            &mut *entities,
-            entity(
-                batch_row.as_str(),
-                [GENERATION_RECEIPT_LABEL],
-                [
-                    (
-                        GENERATION_ID,
-                        string_property(generation_id.as_digest().as_str()),
-                    ),
-                    (RECEIPT, generation_receipt_property(receipt)?),
-                    (ORDINAL, i64_property(ordinal)?),
-                ],
-            )?,
-        )?;
-        insert_relation(
-            &mut *relations,
-            relation(&owner, &batch_row, CONTAINS_KIND, "batch")?,
-        )?;
-    }
-    Ok(())
 }
 
 pub(super) fn read_state_metadata(

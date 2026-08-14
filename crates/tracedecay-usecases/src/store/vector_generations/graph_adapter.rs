@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -35,8 +36,9 @@ mod stage_identity;
 pub(super) mod transitions;
 
 use native_records::{
-    read_build_records, read_cataloged_generation_records, read_generation_catalog,
-    read_generation_catalog_entry, read_generation_metadata, read_state_metadata,
+    PublishedBaseRecover, ScopedGenerationRecordsV1, read_build_records,
+    read_cataloged_generation_records, read_generation_catalog, read_generation_catalog_entry,
+    read_generation_metadata, read_generation_records_continuing, read_state_metadata,
 };
 
 #[cfg(test)]
@@ -357,11 +359,14 @@ impl GraphVectorGenerationStoreV1 {
                 "verified semantic vector graph must contain exactly one generation".to_owned(),
             ));
         }
-        read_cataloged_generation_records(
-            &snapshot,
-            &catalog[0].generation_id,
-            Arc::clone(&cancellation),
-        )?
+        self.with_published_base_recover(|recover| {
+            read_cataloged_generation_records(
+                &snapshot,
+                &catalog[0].generation_id,
+                Arc::clone(&cancellation),
+                Some(recover),
+            )
+        })?
         .ok_or_else(|| {
             VectorGenerationStoreErrorV1::Corrupt(
                 "verified semantic vector generation records are missing".to_owned(),
@@ -370,6 +375,74 @@ impl GraphVectorGenerationStoreV1 {
         drop(snapshot);
         check_cancelled(cancellation.as_ref())?;
         Ok(())
+    }
+
+    /// Receipt-only incremental generations keep reused vectors on the live
+    /// published base identity. The current verified snapshot names that base
+    /// but does not copy its rows, so hydration resolves the published mapping
+    /// instead of fabricating compatibility or rematerializing under the
+    /// incremental mutation budget.
+    fn with_published_base_recover<T>(
+        &self,
+        f: impl FnOnce(&PublishedBaseRecover<'_>) -> Result<T, VectorGenerationStoreErrorV1>,
+    ) -> Result<T, VectorGenerationStoreErrorV1> {
+        let recovery = PublishedBaseRecovery {
+            store: self,
+            recovered: RefCell::new(BTreeSet::new()),
+        };
+        let recover: &PublishedBaseRecover<'_> = &|generation, cancellation, visiting| {
+            recovery.recover(generation, cancellation, visiting)
+        };
+        f(recover)
+    }
+
+    fn load_published_generation_snapshot(
+        &self,
+        generation_id: &VectorGenerationIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<Option<SemanticVectorVerifiedReadV1>, VectorGenerationStoreErrorV1> {
+        let authority = SemanticGraphExecutionAuthorityV1::new(
+            cancellation,
+            Instant::now() + GRAPH_OPERATION_DEADLINE,
+        );
+        let (_, binding) = self.runtime.staging_binding();
+        let scope = self.runtime.scope();
+        let key = SemanticVectorPublishedGenerationKey {
+            projection: GraphProjectionIdentityV1 {
+                shard_id: binding.shard_id.clone(),
+                namespace: GraphNamespaceV1::new(scope.projection().namespace.as_str())
+                    .map_err(storage_error)?,
+                projection: GraphProjectionIdV1::new(scope.projection().projection.as_str())
+                    .map_err(storage_error)?,
+            },
+            semantic_generation_id: generation_id.clone(),
+        };
+        let (record, verified_head) = match self
+            .runtime
+            .published_semantic_generation(&key, &authority)
+            .map_err(map_graph_error)?
+        {
+            SemanticVectorPublishedGenerationLookup::Missing => return Ok(None),
+            SemanticVectorPublishedGenerationLookup::Published {
+                record,
+                verified_head,
+            } => (record, verified_head),
+        };
+        if record.plan.semantic_generation_id != *generation_id
+            || record.plan.publication_key != verified_head.key
+        {
+            return Err(VectorGenerationStoreErrorV1::Corrupt(
+                "published semantic mapping returned foreign generation evidence".to_owned(),
+            ));
+        }
+        let snapshot = self
+            .runtime
+            .recover_verified_generation(&verified_head.key, &authority)
+            .map_err(map_graph_error)?;
+        if snapshot.verified_head() != verified_head.as_ref() {
+            return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
+        }
+        Ok(Some(SemanticVectorVerifiedReadV1::new(snapshot)))
     }
 
     pub async fn begin_generation(
@@ -426,8 +499,9 @@ impl GraphVectorGenerationStoreV1 {
     ) -> Result<Option<VerifiedGraphVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
         let snapshot = self.snapshot()?;
         let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
-        let Some(records) =
-            read_cataloged_generation_records(&snapshot, generation_id, cancellation)?
+        let Some(records) = self.with_published_base_recover(|recover| {
+            read_cataloged_generation_records(&snapshot, generation_id, cancellation, Some(recover))
+        })?
         else {
             return Ok(None);
         };
@@ -464,8 +538,10 @@ impl GraphVectorGenerationStoreV1 {
         let Some(snapshot) = self.optional_snapshot()? else {
             return Ok(None);
         };
-        read_cataloged_generation_records(&snapshot, generation_id, cancellation)
-            .map(|records| records.map(|records| records.generation))
+        self.with_published_base_recover(|recover| {
+            read_cataloged_generation_records(&snapshot, generation_id, cancellation, Some(recover))
+        })
+        .map(|records| records.map(|records| records.generation))
     }
 
     /// Catalog/owner visibility only — does not hydrate resident vectors.
@@ -544,5 +620,40 @@ impl GraphVectorGenerationStoreV1 {
             retained_bytes,
             hydration_peak_bytes,
         }))
+    }
+}
+
+struct PublishedBaseRecovery<'store> {
+    store: &'store GraphVectorGenerationStoreV1,
+    recovered: RefCell<BTreeSet<VectorGenerationIdV1>>,
+}
+
+impl PublishedBaseRecovery<'_> {
+    fn recover(
+        &self,
+        generation: &VectorGenerationIdV1,
+        cancellation: Arc<dyn GraphCancellation>,
+        visiting: &mut BTreeSet<VectorGenerationIdV1>,
+    ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
+        if !self.recovered.borrow_mut().insert(generation.clone()) {
+            return Ok(None);
+        }
+        let Some(snapshot) = self
+            .store
+            .load_published_generation_snapshot(generation, Arc::clone(&cancellation))?
+        else {
+            return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+                BaseGenerationIncompatibilityV1::MissingPublished,
+            ));
+        };
+        let recover: &PublishedBaseRecover<'_> =
+            &|generation, cancellation, visiting| self.recover(generation, cancellation, visiting);
+        read_generation_records_continuing(
+            &snapshot,
+            generation,
+            cancellation,
+            visiting,
+            Some(recover),
+        )
     }
 }

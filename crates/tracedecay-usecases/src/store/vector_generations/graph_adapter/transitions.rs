@@ -36,7 +36,7 @@ use super::super::{
     VectorGenerationStoreErrorV1, VectorProjectionCheckpointV1, validate_plan,
 };
 use super::native_records::{
-    NativeGraphStateV1, ScopedBuildRecordsV1, ScopedGenerationRecordsV1,
+    NativeGraphStateV1, PublishedBaseRecover, ScopedBuildRecordsV1, ScopedGenerationRecordsV1,
     encode_generation_batch_delta, read_build_records, read_cataloged_generation_records,
     read_generation_publication_pointer, read_state_metadata,
 };
@@ -195,12 +195,15 @@ impl GraphVectorGenerationStoreV1 {
             // before commit_batch; otherwise the store reports UnknownBuild.
             let mut generations = Vec::new();
             if let Some(snapshot) = snapshot.as_ref() {
-                push_required_generation(
-                    &mut generations,
-                    snapshot,
-                    plan.base_generation.as_ref(),
-                    Arc::clone(&cancellation),
-                )?;
+                self.with_published_base_recover(|recover| {
+                    push_required_generation(
+                        &mut generations,
+                        snapshot,
+                        plan.base_generation.as_ref(),
+                        Arc::clone(&cancellation),
+                        Some(recover),
+                    )
+                })?;
             } else if plan.base_generation.is_some() {
                 return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
                     BaseGenerationIncompatibilityV1::MissingSnapshot,
@@ -902,6 +905,7 @@ fn push_required_generation(
     snapshot: &super::snapshot::SemanticVectorVerifiedRead,
     generation_id: Option<&VectorGenerationIdV1>,
     cancellation: Arc<dyn GraphCancellation>,
+    recover: Option<&PublishedBaseRecover<'_>>,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     let Some(generation_id) = generation_id else {
         return Ok(());
@@ -912,11 +916,12 @@ fn push_required_generation(
     {
         return Ok(());
     }
-    let records = read_cataloged_generation_records(snapshot, generation_id, cancellation)?.ok_or(
-        VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
-            BaseGenerationIncompatibilityV1::MissingSnapshot,
-        ),
-    )?;
+    let records =
+        read_cataloged_generation_records(snapshot, generation_id, cancellation, recover)?.ok_or(
+            VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
+                BaseGenerationIncompatibilityV1::MissingSnapshot,
+            ),
+        )?;
     generations.push(records);
     Ok(())
 }

@@ -2330,32 +2330,14 @@ mod tests {
             .expect("complete reused batch");
         let encoded = graph_adapter::encode_generation_batch_delta(&store, &build, &prepared, 1)
             .expect("receipt-only reused encode");
-        let generation_owners = encoded
-            .entities
-            .iter()
-            .filter(|entity| {
-                entity.labels.iter().any(|label| {
-                    label.as_str() == tracedecay_graph_db::semantic_vector_native::GENERATION_LABEL
-                })
-            })
-            .count();
-        assert_eq!(
-            generation_owners, 2,
-            "receipt-only persist must keep the live base generation in the same snapshot"
-        );
-        let vector_entities = encoded
-            .entities
-            .iter()
-            .filter(|entity| {
-                entity.labels.iter().any(|label| {
+        assert!(
+            encoded.entities.iter().all(|entity| {
+                !entity.labels.iter().any(|label| {
                     label.as_str()
                         == tracedecay_graph_db::semantic_vector_native::GENERATION_VECTOR_LABEL
                 })
-            })
-            .count();
-        assert_eq!(
-            vector_entities, 1,
-            "ordinary reuse must keep the live base vector row and not copy it onto the incremental generation"
+            }),
+            "ordinary reuse must not copy base vectors as generation entities"
         );
         assert!(
             encoded.entities.iter().any(|entity| {

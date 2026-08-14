@@ -268,12 +268,36 @@ pub(crate) fn read_build_records(
     }))
 }
 
-pub(crate) fn read_generation_records(
+pub(crate) type PublishedBaseRecover<'a> = dyn Fn(
+        &VectorGenerationIdV1,
+        Arc<dyn GraphCancellation>,
+        &mut BTreeSet<VectorGenerationIdV1>,
+    ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1>
+    + 'a;
+
+pub(crate) fn read_generation_records_with_recover(
     snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
     generation: &VectorGenerationIdV1,
     cancellation: Arc<dyn GraphCancellation>,
+    recover: Option<&PublishedBaseRecover<'_>>,
 ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
-    read_generation_records_inner(snapshot, generation, cancellation, &mut BTreeSet::new())
+    read_generation_records_continuing(
+        snapshot,
+        generation,
+        cancellation,
+        &mut BTreeSet::new(),
+        recover,
+    )
+}
+
+pub(crate) fn read_generation_records_continuing(
+    snapshot: &super::super::snapshot::SemanticVectorVerifiedRead,
+    generation: &VectorGenerationIdV1,
+    cancellation: Arc<dyn GraphCancellation>,
+    visiting: &mut BTreeSet<VectorGenerationIdV1>,
+    recover: Option<&PublishedBaseRecover<'_>>,
+) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
+    read_generation_records_inner(snapshot, generation, cancellation, visiting, recover)
 }
 
 fn read_generation_records_inner(
@@ -281,6 +305,7 @@ fn read_generation_records_inner(
     generation: &VectorGenerationIdV1,
     cancellation: Arc<dyn GraphCancellation>,
     visiting: &mut BTreeSet<VectorGenerationIdV1>,
+    recover: Option<&PublishedBaseRecover<'_>>,
 ) -> Result<Option<ScopedGenerationRecordsV1>, VectorGenerationStoreErrorV1> {
     if !visiting.insert(generation.clone()) {
         return Err(corrupt("semantic vector generation base lineage is cyclic"));
@@ -292,6 +317,10 @@ fn read_generation_records_inner(
         Arc::clone(&cancellation),
     )?
     else {
+        visiting.remove(generation);
+        if let Some(recover) = recover {
+            return recover(generation, cancellation, visiting);
+        }
         return Ok(None);
     };
     let owner = entities.get(&generation_entity_id(generation)?).ok_or(
@@ -378,6 +407,7 @@ fn read_generation_records_inner(
         &source_manifest_digest,
         Arc::clone(&cancellation),
         visiting,
+        recover,
     )?;
     require_count(owner, ROW_COUNT, vectors.len())?;
     let measured_vector_bytes = vectors.values().try_fold(0_u64, |total, vector| {
@@ -521,6 +551,7 @@ fn hydrate_reused_vectors(
     source_manifest_digest: &ManifestDigest,
     cancellation: Arc<dyn GraphCancellation>,
     visiting: &mut BTreeSet<VectorGenerationIdV1>,
+    recover: Option<&PublishedBaseRecover<'_>>,
 ) -> Result<(), VectorGenerationStoreErrorV1> {
     let missing = receipts
         .iter()
@@ -538,7 +569,8 @@ fn hydrate_reused_vectors(
             missing[0].chunk_id.clone(),
         ));
     };
-    let Some(base) = read_generation_records_inner(snapshot, base_id, cancellation, visiting)?
+    let Some(base) =
+        read_generation_records_inner(snapshot, base_id, cancellation, visiting, recover)?
     else {
         return Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration(
             BaseGenerationIncompatibilityV1::MissingSnapshot,
