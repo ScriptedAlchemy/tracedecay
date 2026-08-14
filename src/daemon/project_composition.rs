@@ -58,7 +58,8 @@ pub(super) async fn production_project_server(
     )
     .await?;
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
-    if let Some((cached_key, cached_server)) = cached_route_server(store_administration, &route).await
+    if let Some((cached_key, cached_server)) =
+        cached_route_server(store_administration, &route).await
     {
         return Ok(cached_project_composition(
             canonical_project_path,
@@ -76,7 +77,8 @@ pub(super) async fn production_project_server(
     };
     // Order-sensitive: the same lookup runs again behind the single-flight gate
     // so a concurrent open that published while this caller waited is reused.
-    if let Some((cached_key, cached_server)) = cached_route_server(store_administration, &route).await
+    if let Some((cached_key, cached_server)) =
+        cached_route_server(store_administration, &route).await
     {
         return Ok(cached_project_composition(
             canonical_project_path,

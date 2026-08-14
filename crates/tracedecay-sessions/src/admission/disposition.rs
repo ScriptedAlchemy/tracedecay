@@ -267,7 +267,10 @@ mod tests {
                 Value::String(status.as_wire().to_owned()),
                 "{status:?} wire spelling drifted from serde"
             );
-            assert_eq!(HostAdmissionStatus::from_wire(status.as_wire()), Some(status));
+            assert_eq!(
+                HostAdmissionStatus::from_wire(status.as_wire()),
+                Some(status)
+            );
         }
     }
 }

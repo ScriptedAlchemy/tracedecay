@@ -609,14 +609,15 @@ pub(crate) async fn ingest_transcript_with_cancellation(
     }
     // Unregistered routes are reported with the same typed `unknown_provider`
     // admission status the probe uses, not a generic configuration error.
-    let kernel = transcript_capture_kernel(provider, user_scope, payload_route).ok_or_else(|| {
-        hook_admission_error(
-            HostAdmissionStatus::Unknown,
-            "unknown_provider",
-            false,
-            "transcript provider is unsupported",
-        )
-    })?;
+    let kernel =
+        transcript_capture_kernel(provider, user_scope, payload_route).ok_or_else(|| {
+            hook_admission_error(
+                HostAdmissionStatus::Unknown,
+                "unknown_provider",
+                false,
+                "transcript provider is unsupported",
+            )
+        })?;
     let capture = kernel
         .capture(TranscriptCaptureContext {
             cg,

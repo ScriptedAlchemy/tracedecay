@@ -222,7 +222,11 @@ fn transcript_store_failures_keep_their_conflict_and_availability_statuses() {
     let data = structured_hook_error_data(&storage).unwrap();
     assert_eq!(data["reason_code"], "transcript_storage_failed");
     assert_eq!(data["status"], "unavailable");
-    assert!(!data.to_string().contains("private transcript store operation"));
+    assert!(
+        !data
+            .to_string()
+            .contains("private transcript store operation")
+    );
 }
 
 #[test]

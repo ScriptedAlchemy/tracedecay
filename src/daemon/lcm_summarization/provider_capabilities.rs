@@ -84,7 +84,11 @@ impl NativeSummaryRecognizerV1 for CodexNativeCompactionV1 {
         let recognized = candidate.kind == Some("summary")
             && candidate.metadata.get("source").and_then(Value::as_str)
                 == Some("codex_context_compacted")
-            && candidate.metadata.get("summary_body").and_then(Value::as_str) == Some("plaintext");
+            && candidate
+                .metadata
+                .get("summary_body")
+                .and_then(Value::as_str)
+                == Some("plaintext");
         Box::pin(async move { Ok(recognized) })
     }
 }

@@ -4,8 +4,7 @@ use tracedecay_graph_db::{
     GraphCancellation, GraphDbError, GraphEntity, GraphEntityId, GraphEntityRef,
     GraphGenerationRelation, GraphNamespace, GraphProjectionId, GraphProjectionTelemetry,
     GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationRef,
-    TraversalRequest, TraversalResult, TraversalVisit,
-    VerifiedGraphSnapshot,
+    TraversalRequest, TraversalResult, TraversalVisit, VerifiedGraphSnapshot,
 };
 
 /// Exact verified read authority for one semantic-vector projection generation.

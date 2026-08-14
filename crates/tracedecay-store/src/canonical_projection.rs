@@ -1021,8 +1021,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            other_provider["codex_session_cwd"],
-            "/workspace/project/.worktrees/feature",
+            other_provider["codex_session_cwd"], "/workspace/project/.worktrees/feature",
             "the namespace follows the provider, not the capture source"
         );
 
@@ -1035,8 +1034,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            other_source["cursor_session_cwd"],
-            "/workspace/project/.worktrees/feature",
+            other_source["cursor_session_cwd"], "/workspace/project/.worktrees/feature",
             "a different cursor capture source keeps the same session namespace"
         );
     }
@@ -1049,7 +1047,8 @@ mod tests {
             arguments: json!({"prompt": "explore"}),
         }]);
         let session_metadata =
-            canonical_session_metadata("cursor", Some(&cursor_transcript_session_fields())).unwrap();
+            canonical_session_metadata("cursor", Some(&cursor_transcript_session_fields()))
+                .unwrap();
 
         let metadata: serde_json::Value = serde_json::from_str(
             &canonical_message_metadata(&envelope, session_metadata.as_deref()).unwrap(),
@@ -1062,7 +1061,9 @@ mod tests {
         assert_eq!(metadata["tool_events"][0]["call_id"], "tool.dispatch");
         assert_eq!(
             metadata["tool_events"][0]["input_bytes"],
-            serde_json::to_vec(&json!({"prompt": "explore"})).unwrap().len()
+            serde_json::to_vec(&json!({"prompt": "explore"}))
+                .unwrap()
+                .len()
         );
         assert_eq!(metadata["tool_use_id"], "tool.dispatch");
 

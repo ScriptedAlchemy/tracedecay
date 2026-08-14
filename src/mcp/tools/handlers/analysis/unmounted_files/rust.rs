@@ -160,12 +160,7 @@ pub(super) fn audit(files: &ProjectFiles) -> Result<EcosystemAudit> {
     let mut entry_point_count = 0usize;
     for package in manifests.iter().filter_map(|entry| entry.package.as_ref()) {
         entry_point_count += package.roots.len();
-        walk_mounted_files(
-            &package.roots,
-            &mut mounted,
-            &mut visited,
-            &mut directories,
-        );
+        walk_mounted_files(&package.roots, &mut mounted, &mut visited, &mut directories);
     }
 
     let excluded = build_excluded_matcher(project_root, &excluded_globs);
@@ -486,10 +481,7 @@ fn read_dir_index(directory: &Path) -> HashMap<String, Vec<OsString>> {
 /// spelling, the single case-variant when it holds exactly one, and `None` when
 /// the directory holds several (a case-sensitive filesystem with both `Foo.rs`
 /// and `foo.rs` — guessing there would mount the wrong file).
-fn on_disk_spelling(
-    listing: &HashMap<String, Vec<OsString>>,
-    wanted: &OsStr,
-) -> Option<OsString> {
+fn on_disk_spelling(listing: &HashMap<String, Vec<OsString>>, wanted: &OsStr) -> Option<OsString> {
     let lowered = wanted.to_string_lossy().to_ascii_lowercase();
     let names = listing.get(&lowered)?;
     if names.iter().any(|name| name == wanted) {
@@ -705,12 +697,7 @@ fn collect_module_declarations(
 /// A computed path (`concat!`, `env!("OUT_DIR")`) is deliberately not guessed
 /// at: those name generated files that do not exist in the working tree, so
 /// resolving them would be inventing a mount for a file the audit never sees.
-fn collect_include_paths(
-    source: &str,
-    node: Node<'_>,
-    directory: &Path,
-    out: &mut Vec<PathBuf>,
-) {
+fn collect_include_paths(source: &str, node: Node<'_>, directory: &Path, out: &mut Vec<PathBuf>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "macro_invocation"
@@ -848,10 +835,8 @@ fn repair_for_unmounted_file(
     file: &Path,
     mounted: &HashSet<PathBuf>,
 ) -> (Option<String>, String) {
-    let declaration = module_stem(file).map_or_else(
-        || "mod <module>;".to_owned(),
-        |stem| format!("mod {stem};"),
-    );
+    let declaration =
+        module_stem(file).map_or_else(|| "mod <module>;".to_owned(), |stem| format!("mod {stem};"));
     let mut current = normalized(file);
     // Bounded by the path depth; the loop always either returns or shortens
     // `current`, and stops at the project root.
@@ -955,8 +940,14 @@ mod tests {
         let finding = &audit.unmounted[0];
         assert_eq!(finding.package, "fixture");
         assert_eq!(finding.manifest, "Cargo.toml");
-        assert_eq!(finding.nearest_mounted_parent.as_deref(), Some("src/lib.rs"));
-        assert_eq!(finding.suggested_declaration.as_deref(), Some("mod orphan;"));
+        assert_eq!(
+            finding.nearest_mounted_parent.as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            finding.suggested_declaration.as_deref(),
+            Some("mod orphan;")
+        );
     }
 
     /// `mod.rs` and `name.rs` are both legal spellings of the same module and
@@ -1085,8 +1076,16 @@ mod tests {
                 "mod tests;\n",
             ),
         );
-        write(root, "src/sessions/claude_observation_benchmark/artifact.rs", "");
-        write(root, "src/sessions/claude_observation_benchmark/tests.rs", "");
+        write(
+            root,
+            "src/sessions/claude_observation_benchmark/artifact.rs",
+            "",
+        );
+        write(
+            root,
+            "src/sessions/claude_observation_benchmark/tests.rs",
+            "",
+        );
         write(root, "src/sessions/ingest_tests.rs", "");
         write(root, "src/sessions/forgotten.rs", "");
 
@@ -1214,7 +1213,10 @@ mod tests {
         write(root, "src/macro_only.rs", "");
         write(root, "src/block_scoped.rs", "");
 
-        assert_eq!(unmounted_paths(&audit_rust(root)), vec!["src/macro_only.rs"]);
+        assert_eq!(
+            unmounted_paths(&audit_rust(root)),
+            vec!["src/macro_only.rs"]
+        );
     }
 
     /// The integration-test shape the daemon orphans hid in: every `tests/*.rs`
@@ -1526,7 +1528,10 @@ mod tests {
 
     #[test]
     fn string_literals_unwrap_plain_and_raw_forms() {
-        assert_eq!(string_literal_value("\"a/b.rs\""), Some("a/b.rs".to_owned()));
+        assert_eq!(
+            string_literal_value("\"a/b.rs\""),
+            Some("a/b.rs".to_owned())
+        );
         assert_eq!(string_literal_value("r\"a.rs\""), Some("a.rs".to_owned()));
         assert_eq!(string_literal_value("r#\"a.rs\"#"), Some("a.rs".to_owned()));
     }

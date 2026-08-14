@@ -346,7 +346,6 @@ impl DashboardProcess {
             std::thread::sleep(Duration::from_millis(200));
         }
     }
-
 }
 
 impl Drop for DashboardProcess {

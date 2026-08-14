@@ -42,12 +42,10 @@ const SOURCE_EXTENSIONS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "m
 
 /// Extension order tried when resolving an extensionless specifier, matching
 /// the order bundlers and `tsc` use.
-const RESOLUTION_EXTENSIONS: [&str; 9] = [
-    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "d.ts",
-];
+const RESOLUTION_EXTENSIONS: [&str; 9] =
+    ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "d.ts"];
 
-const TYPESCRIPT_VERDICT: &str =
-    "no static import, require, or export-from path reaches this file from any declared entry \
+const TYPESCRIPT_VERDICT: &str = "no static import, require, or export-from path reaches this file from any declared entry \
      point — nothing links it into a program (`tsc` may still type-check it via a tsconfig \
      `include`)";
 
@@ -214,8 +212,10 @@ fn node_package(
         .and_then(Value::as_str)
         .map_or_else(
             || {
-                dir.file_name()
-                    .map_or_else(|| "<unnamed>".to_owned(), |name| name.to_string_lossy().into_owned())
+                dir.file_name().map_or_else(
+                    || "<unnamed>".to_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
             },
             str::to_owned,
         );
@@ -426,10 +426,7 @@ fn tsconfig_declarations(dir: &Path) -> (Vec<AliasRule>, Vec<PathBuf>, Vec<Strin
             .and_then(|options| options.get("baseUrl"))
             .and_then(Value::as_str)
             .map_or_else(|| dir.to_path_buf(), |base| normalized(&dir.join(base)));
-        if options
-            .and_then(|options| options.get("baseUrl"))
-            .is_some()
-        {
+        if options.and_then(|options| options.get("baseUrl")).is_some() {
             base_urls.push(base.clone());
         }
         if let Some(paths) = options
@@ -460,12 +457,7 @@ fn tsconfig_declarations(dir: &Path) -> (Vec<AliasRule>, Vec<PathBuf>, Vec<Strin
             }
         }
         if let Some(declared) = parsed.get("files").and_then(Value::as_array) {
-            files.extend(
-                declared
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned),
-            );
+            files.extend(declared.iter().filter_map(Value::as_str).map(str::to_owned));
         }
     }
     (aliases, base_urls, files)
@@ -638,10 +630,8 @@ fn collect_reexports_and_calls(source: &str, node: Node<'_>, out: &mut Vec<Strin
                     && let Some(argument) = child
                         .child_by_field_name("arguments")
                         .and_then(|arguments| arguments.named_child(0))
-                    && let Some(literal) = argument
-                        .utf8_text(source.as_bytes())
-                        .ok()
-                        .and_then(unquote)
+                    && let Some(literal) =
+                        argument.utf8_text(source.as_bytes()).ok().and_then(unquote)
                 {
                     out.push(literal);
                 }
@@ -655,7 +645,10 @@ fn collect_reexports_and_calls(source: &str, node: Node<'_>, out: &mut Vec<Strin
 fn unquote(text: &str) -> Option<String> {
     let text = text.trim();
     for quote in ['"', '\'', '`'] {
-        if let Some(inner) = text.strip_prefix(quote).and_then(|rest| rest.strip_suffix(quote)) {
+        if let Some(inner) = text
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+        {
             return Some(inner.to_owned());
         }
     }
@@ -738,8 +731,7 @@ fn resolve_existing(candidate: &Path) -> Vec<PathBuf> {
         }
     }
     for extension in RESOLUTION_EXTENSIONS {
-        let with_extension =
-            PathBuf::from(format!("{}.{extension}", candidate.to_string_lossy()));
+        let with_extension = PathBuf::from(format!("{}.{extension}", candidate.to_string_lossy()));
         if with_extension.is_file() {
             out.push(with_extension);
         }
@@ -916,7 +908,11 @@ mod tests {
         );
         write(root, "src/test-helper.ts", "export const helper = 1;\n");
         write(root, "src/env.d.ts", "declare const x: number;\n");
-        write(root, "src/__tests__/legacy.ts", "export const legacy = 1;\n");
+        write(
+            root,
+            "src/__tests__/legacy.ts",
+            "export const legacy = 1;\n",
+        );
         write(root, "stories/peek.ts", "export const peek = 1;\n");
         write(root, "src/nobody.ts", "export const nobody = 1;\n");
 
@@ -1033,7 +1029,11 @@ mod tests {
             ),
         );
         write(root, "src/index.ts", "export const sdk = 1;\n");
-        write(root, "src/client.ts", "import './wire';\nexport const c = 1;\n");
+        write(
+            root,
+            "src/client.ts",
+            "import './wire';\nexport const c = 1;\n",
+        );
         write(root, "src/wire.ts", "export const wire = 1;\n");
         write(root, "src/abandoned.ts", "export const gone = 1;\n");
 
@@ -1068,9 +1068,8 @@ mod tests {
 
     #[test]
     fn json_comments_are_stripped_without_touching_strings() {
-        let stripped = strip_json_comments(
-            "{\n // a\n \"url\": \"http://x/y\", /* b */ \"n\": 1\n}",
-        );
+        let stripped =
+            strip_json_comments("{\n // a\n \"url\": \"http://x/y\", /* b */ \"n\": 1\n}");
         let parsed = serde_json::from_str::<Value>(&stripped).expect("json");
         assert_eq!(parsed["url"], Value::from("http://x/y"));
         assert_eq!(parsed["n"], Value::from(1));

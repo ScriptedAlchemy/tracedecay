@@ -491,7 +491,9 @@ fn memory_status_discovery_matches_its_pure_read_owner() {
         .expect("memory status definition");
     assert_eq!(status.annotations.unwrap()["readOnlyHint"], true);
     assert!(
-        status.description.contains("Inspect canonical memory state"),
+        status
+            .description
+            .contains("Inspect canonical memory state"),
         "read-only discovery must advertise a status snapshot, not a mutation"
     );
     assert!(
