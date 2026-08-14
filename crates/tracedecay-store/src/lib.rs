@@ -49,9 +49,8 @@ pub use diagnostics::{
 pub use evidence_assembly::{
     CanonicalSourceOccurrenceSetIdentityProjectionV1, CanonicalSourceOccurrenceSetRecordV1,
     EvidenceAssemblyDrilldownPageV1, EvidenceAssemblyIdempotencyKeyV1, EvidenceAssemblyOwnerV1,
-    EvidenceAssemblyPublicationIdentityProjectionV1, EvidenceAssemblyPublicationOutcomeV1,
-    EvidenceAssemblyPublicationReceiptV1, EvidenceAssemblyReadOperationV1,
-    EvidenceAssemblyReadResultV1, EvidenceAssemblyStore, EvidenceAssemblyStoreError,
+    EvidenceAssemblyPublicationIdentityProjectionV1, EvidenceAssemblyPublicationReceiptV1,
+    EvidenceAssemblyReadOperationV1, EvidenceAssemblyReadResultV1, EvidenceAssemblyStoreError,
     EvidenceAssemblyStoreResult, EvidenceAssemblyWriteV1, EvidenceSourceOccurrenceRecordV1,
     EvidenceSourceTimelineV1, EvidenceSpanCatalogBindingV1, EvidenceSpanHorizonV1,
     EvidenceSpanIdentityProjectionV1, EvidenceSpanMemberReceiptBindingV1,

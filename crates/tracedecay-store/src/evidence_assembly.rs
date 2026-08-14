@@ -1,7 +1,6 @@
 //! Driver-neutral, payload-free evidence-assembly persistence contracts.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::future::Future;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1473,12 +1472,6 @@ fn validate_derived_anchor_lineage(
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EvidenceAssemblyPublicationOutcomeV1 {
-    Published(EvidenceAssemblyPublicationReceiptV1),
-    Replayed(EvidenceAssemblyPublicationReceiptV1),
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceAssemblyDrilldownPageV1 {
@@ -1512,21 +1505,6 @@ pub enum EvidenceAssemblyReadOperationV1 {
 pub enum EvidenceAssemblyReadResultV1 {
     Publication(Option<EvidenceAssemblyPublicationReceiptV1>),
     ContributionPage(Option<EvidenceAssemblyDrilldownPageV1>),
-}
-
-pub trait EvidenceAssemblyStore: Send + Sync {
-    fn publish_or_replay(
-        &self,
-        write: EvidenceAssemblyWriteV1,
-    ) -> impl Future<Output = EvidenceAssemblyStoreResult<EvidenceAssemblyPublicationOutcomeV1>> + Send;
-
-    fn drilldown_contribution(
-        &self,
-        owner: &EvidenceAssemblyOwnerV1,
-        contribution_id: &RetrieverContributionIdV1,
-        start_ordinal: u64,
-        page_size: u64,
-    ) -> impl Future<Output = EvidenceAssemblyStoreResult<Option<EvidenceAssemblyDrilldownPageV1>>> + Send;
 }
 
 fn validate_member_count(count: usize) -> EvidenceAssemblyStoreResult<()> {
