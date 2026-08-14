@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -205,14 +205,25 @@ fn tool_payload(result: Value, operation: &str) -> Value {
 }
 
 async fn tool(socket: &Path, handshake: &DaemonHandshake, name: &str, arguments: Value) -> Value {
-    let result = tokio::time::timeout(
-        RECEIPT_TIMEOUT,
-        call_tool(socket, handshake, name, arguments),
-    )
-    .await
-    .unwrap_or_else(|_| panic!("{name} timed out"))
-    .unwrap_or_else(|error| panic!("{name} transport failed: {error}"));
-    tool_payload(result, name)
+    let deadline = Instant::now() + RECEIPT_TIMEOUT;
+    loop {
+        let result = tokio::time::timeout(
+            RECEIPT_TIMEOUT,
+            call_tool(socket, handshake, name, arguments.clone()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{name} timed out"));
+        match result {
+            Ok(payload) => return tool_payload(payload, name),
+            Err(error)
+                if error.to_string().contains("warming in the background")
+                    && Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("{name} transport failed: {error}"),
+        }
+    }
 }
 
 async fn status(socket: &Path, handshake: &DaemonHandshake) -> Value {
