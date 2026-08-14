@@ -623,13 +623,18 @@ fn project_open_problem(
     workflow_application: bool,
     git_operation: bool,
 ) -> service::invocation::DaemonInvocationProblem {
-    if workflow_application
-        && matches!(
-            error,
-            crate::errors::TraceDecayError::ResetRequired { authority, .. }
-                if authority == "workflow"
-        )
-    {
+    // A store that refuses to open until it is explicitly reset is a terminal
+    // state for *every* operation, not only the workflow application. Scoping
+    // this to `authority == "workflow"` sent every other caller down the
+    // retryable-unavailable branch below, so a project whose relational shape
+    // this binary refuses answered "the application service is unavailable,
+    // retry after 250ms" — and clients dutifully retried it until their whole
+    // budget was gone, never learning that the only legal action is `reset`.
+    if matches!(
+        error,
+        crate::errors::TraceDecayError::ResetRequired { authority, .. }
+            if workflow_application || authority != "workflow"
+    ) {
         service::invocation::DaemonInvocationProblem::ResetRequired
     } else if crate::daemon::error_message_is_project_open_retryable(&error.to_string()) {
         // A still-warming project open (or a saturated open queue) is a
