@@ -999,7 +999,7 @@ fn application_context(
     worktree: WorktreeId,
 ) -> RequestContext {
     let scope = ResolvedScope::new(
-        ProjectId::new("project.code-index.fixture").expect("project id"),
+        test_project_id(),
         repository,
         worktree,
         Some(RefId::new("refs/heads/main").expect("ref id")),
@@ -2128,7 +2128,7 @@ async fn core_query_profile_composes_live_code_index_lanes() {
         .expect("live generation");
     let snapshot = latest.generation.snapshot();
     let scope = ResolvedScope::new(
-        ProjectId::new("project.core-query.fixture").expect("project id"),
+        test_project_id(),
         snapshot.repository.clone(),
         snapshot.worktree.clone().expect("worktree id"),
         snapshot.reference.clone(),
@@ -2347,7 +2347,7 @@ async fn mounted_core_query_worktree_in(
         .expect("live generation");
     let snapshot = latest.generation.snapshot();
     let scope = ResolvedScope::new(
-        ProjectId::new("project.stale-serving.fixture").expect("project id"),
+        test_project_id(),
         snapshot.repository.clone(),
         snapshot.worktree.clone().expect("worktree id"),
         snapshot.reference.clone(),
@@ -4993,7 +4993,7 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
         .expect("mount first worktree");
     registry
         .mount_worktree(
-            ProjectId::new("project.unpinned.target").expect("valid project"),
+            test_project_id(),
             target.path(),
             store.path().to_path_buf(),
             None,
@@ -5226,7 +5226,7 @@ async fn pinned_generation_from_another_worktree_is_unavailable() {
         .expect("mount owner worktree");
     registry
         .mount_worktree(
-            ProjectId::new("project.pinned.requester").expect("valid project"),
+            test_project_id(),
             requester.path(),
             store.path().to_path_buf(),
             None,
