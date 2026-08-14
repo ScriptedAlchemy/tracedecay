@@ -13,16 +13,14 @@
 //!
 //! Every port fails closed (or degrades to a documented no-op) when the root
 //! never registers, which keeps unit tests of the kernel alone runnable.
-//! `crates/tracedecay-runtime-core/SEAMS.md` tracks which registration sites
-//! the landing still owes.
 
 /// Installer for the registered global/session schema.
 ///
 /// `store_runtime::registry` initialises a freshly created profile- or
 /// session-scoped shard by running the registered global-database schema
 /// against the attachment it just opened. That schema lives in
-/// `tracedecay-global-db`, which already depends on `tracedecay-migrate`, which
-/// depends on this crate — so the kernel cannot name it without a Cargo cycle.
+/// `tracedecay-global-db`, which depends on this crate — so the kernel cannot
+/// name it without a Cargo cycle.
 ///
 /// This port **fails closed**: an uninitialised profile or session store is
 /// not safe to publish, so an unregistered installer refuses the open instead

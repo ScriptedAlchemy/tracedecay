@@ -26,8 +26,9 @@ use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_store::FactReadControl;
 
 use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelligenceError};
-// SEAM: the native `git` spawn adapter is still root-owned
-// (`src/git_intelligence.rs`). See `SEAMS.md`.
+// The native `git` spawn adapter lives beside its consumer in this crate's
+// own `git_intelligence` module (moved down from the root's
+// `src/git_intelligence.rs`, which is now a compatibility shim).
 use crate::git_intelligence::NativeGitIntelligence;
 use crate::git_query::{
     GenerationBoundGitQueryV1, GenerationGitJoinV1, GitQueryBounds, GitQueryEngine,

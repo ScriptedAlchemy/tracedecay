@@ -5,11 +5,12 @@ publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay product use cases shared by CLI, MCP, HTTP, hooks, and daemon adapters"
-# PACKAGING SEAM: `semantic_runtime::bundled_query` byte-pins the shipped query
-# profile with `include_str!` against two repo-root fixtures that live outside
-# this package. `cargo check` resolves them; `cargo package` will not. See
-# SEAMS.md — the fixtures must be vendored under `/src` or produced by a build
-# script before this crate can be published.
+# PACKAGING SEAM: `semantic_runtime` byte-pins the shipped search-quality
+# candidate workload with `include_str!` against a repo-root fixture
+# (tests/fixtures/search_quality/...) that lives outside this package.
+# `cargo check` resolves it; `cargo package` will not. `publish = false` above
+# accepts this rather than vendoring the fixture under `/src` or producing it
+# from a build script.
 include = ["/src/**"]
 
 [features]

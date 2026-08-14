@@ -14,7 +14,7 @@
 //!
 //! Root wiring: the root converts between these and
 //! `sessions::lcm::{LcmScope, LcmGrepSort, LcmGrepHit}` in the adapter it
-//! registers as `AutomationSessionRetrieval`. `SEAMS.md` tracks the row.
+//! registers as `AutomationSessionRetrieval`.
 
 /// Canonical definitions live in `tracedecay_sessions::runtime::lcm::types`;
 /// re-exported here so this crate's port keeps its historical path.

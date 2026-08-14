@@ -4,6 +4,18 @@
 //! with the project's database path and its cumulative tokens-saved count. Read
 //! paths are generally best-effort; authoritative open and maintenance
 //! interfaces preserve failures for callers that must fail closed.
+//!
+//! ## Dependency edges
+//!
+//! Depends on `tracedecay-runtime-core` (kernel db/errors/storage/config),
+//! `tracedecay-sessions` (session runtime, `lcm::contracts`,
+//! `retrieval_content`), and `tracedecay-semantic` (resource ceilings, default
+//! embedding model). All three are proven acyclic — `cargo tree -p <dep> -e
+//! normal` never names this crate. `RuntimeExternalSourceStore` and
+//! `GlobalDbObservationStore` are deliberately root-owned adapters, not
+//! methods here: [`RegisteredGlobalDb::runtime`] and `authority` expose the
+//! ingredients so the composition root builds what it owns, instead of this
+//! crate naming a root type.
 
 use tracedecay_sessions::runtime::SessionMessageSearchResult;
 pub use tracedecay_store::ParseOffset;

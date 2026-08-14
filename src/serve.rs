@@ -242,7 +242,7 @@ fn serve_scope_prefix(original_cwd: Option<&Path>, project_root: &Path) -> Optio
 /// Legacy marker recognized in existing Cursor logs by doctor diagnostics.
 /// Proxy-only `serve` no longer emits it, but older logs remain actionable.
 /// Canonical copy lives beside its reader in
-/// `tracedecay_agent_hosts::agents::cursor_diagnostics` (see SEAMS.md).
+/// `tracedecay_agent_hosts::agents::cursor_diagnostics`.
 pub use tracedecay_agent_hosts::agents::DEGRADED_SERVE_STDERR_MARKER;
 
 #[cfg(test)]

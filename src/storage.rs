@@ -3,8 +3,7 @@
 //! The layout resolver moved to `tracedecay_runtime_core::storage` in the
 //! one-shot crate split. One thin adapter could not follow it: it takes the
 //! `global_db::StoreInstanceRecord` type that still lives above the kernel, so
-//! it stays here and calls the kernel's field-shaped classifier. See
-//! `crates/tracedecay-runtime-core/SEAMS.md`.
+//! it stays here and calls the kernel's field-shaped classifier.
 
 use std::path::Path;
 

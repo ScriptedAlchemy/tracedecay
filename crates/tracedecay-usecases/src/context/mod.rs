@@ -1,6 +1,6 @@
 //! Request-context value types, plus the source-read helpers moved down from
 //! the root binary's `src/context/{read_modes,source_read}.rs` (their only
-//! consumer is `primitives::concrete` in this crate). See SEAMS.md.
+//! consumer is `primitives::concrete` in this crate).
 
 pub mod markdown_sections;
 pub mod read_cache;

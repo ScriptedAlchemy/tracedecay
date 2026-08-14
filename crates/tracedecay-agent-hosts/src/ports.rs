@@ -19,9 +19,6 @@
 //!
 //! Lower-owned value types are imported directly from their canonical crate;
 //! this module does not provide compatibility re-export paths for them.
-//!
-//! `SEAMS.md` next to this crate's manifest tracks which registration sites
-//! the landing still owes.
 
 pub mod codex_app_server;
 pub mod hook_runtime;

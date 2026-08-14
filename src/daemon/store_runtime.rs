@@ -11,7 +11,7 @@
 //! so the kernel taking that edge is a Cargo cycle. It also reaches
 //! `daemon::{authority,
 //! code_index_scheduler, profile_identity, transport}` and `log_daemon_event`.
-//! `crates/tracedecay-runtime-core/SEAMS.md` catalogs the remainder.
+//! See `tracedecay_runtime_core`'s crate-level doc for why.
 
 pub(crate) use tracedecay_runtime_core::store_runtime::*;
 

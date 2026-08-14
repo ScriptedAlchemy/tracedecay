@@ -12,8 +12,29 @@
 //! `tracedecay_agent_hosts::automation`; it does not maintain an automation
 //! compatibility facade.
 //!
-//! Remaining root couplings that this crate satisfies through injected ports
-//! rather than a dependency edge are cataloged in `SEAMS.md`.
+//! ## Registered ports
+//!
+//! A handful of root-owned runtimes cannot become a dependency edge (the MCP
+//! tool catalog, the hook runtime, the Codex app-server backend, and the
+//! registered database's canonical project key). Each is a
+//! [`crate::ports`] slot the root registers at startup
+//! (`src/agents.rs::register_mcp_tool_catalog_ports`,
+//! `src/runtime_ports.rs`); every port degrades to a documented inert answer
+//! (daemon reported unavailable, injection disabled, `u64::MAX`, …) when
+//! unregistered, so this crate's own unit tests stay runnable standalone. A
+//! crate-local `cargo check` passing is therefore not evidence the production
+//! composition root is wired — check the registration call sites too.
+//!
+//! ## Packaging
+//!
+//! `publish = false`. Several `include_str!`/`include_bytes!` sites (plugin
+//! bundle generation, the Hermes dashboard wrapper, packaged-host-event and
+//! transcript-golden fixtures) reach up through `../../../../…` into
+//! repository-root `plugin/`, `dashboard/hermes-wrapper/`, and
+//! `tests/fixtures/`, outside this crate's package root. `cargo package
+//! --list` succeeds because it only enumerates this crate's own tracked
+//! files; a real standalone package build would still fail to resolve those
+//! includes. Accepted as-is because the crate is workspace-internal only.
 
 /// Installs the registered global/session schema into the kernel's fail-closed
 /// port for this crate's test process.
