@@ -21,9 +21,9 @@ use crate::state::{
     projection_entities_checked, projection_relations_checked,
 };
 use crate::{
-    GraphCancellation, GraphCommit, GraphDb, GraphDbError, GraphEntityRef, GraphGenerationManifest,
-    GraphGenerationRelation, GraphMutation, GraphNamespace, GraphRelationRef,
-    GraphTraversalDirection, GraphWriteBatch, TraversalRequest, mutation,
+    GraphBudgetKind, GraphCancellation, GraphCommit, GraphDb, GraphDbError, GraphEntityRef,
+    GraphGenerationManifest, GraphGenerationRelation, GraphMutation, GraphNamespace,
+    GraphRelationRef, GraphTraversalDirection, GraphWriteBatch, TraversalRequest, mutation,
 };
 
 impl GraphDb {
@@ -525,7 +525,10 @@ impl GraphDb {
             return Err(GraphDbError::Cancelled);
         }
         if request.max_visits == 0 {
-            return Err(GraphDbError::BudgetExhausted);
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Read,
+                request.max_visits,
+            ));
         }
         if request.max_results == 0 {
             return Ok(VerifiedTraversalResult { visits: Vec::new() });
@@ -549,7 +552,10 @@ impl GraphDb {
                 return Err(GraphDbError::Cancelled);
             }
             if visits.len() >= request.max_visits {
-                return Err(GraphDbError::BudgetExhausted);
+                return Err(GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Read,
+                    request.max_visits,
+                ));
             }
             visits.push(VerifiedTraversalVisit {
                 entity: typed_entity_ref(database, node, &namespace_projection)?,
@@ -620,7 +626,12 @@ impl GraphDb {
             adjacent.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
             for (relation, _, neighbor) in adjacent {
                 if discovered.insert(neighbor) {
-                    let next_depth = depth.checked_add(1).ok_or(GraphDbError::BudgetExhausted)?;
+                    let next_depth = depth.checked_add(1).ok_or_else(|| {
+                        GraphDbError::budget_exhausted_count(
+                            GraphBudgetKind::Read,
+                            request.max_depth,
+                        )
+                    })?;
                     queue.push_back((neighbor, next_depth, Some(relation)));
                 }
             }

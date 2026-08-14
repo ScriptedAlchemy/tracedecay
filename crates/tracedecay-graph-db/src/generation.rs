@@ -16,9 +16,9 @@ use crate::limits::{MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RE
 use crate::schema::{NAMESPACE_PROPERTY, required_string};
 use crate::state::latest_projection;
 use crate::{
-    GraphDbError, GraphEntity, GraphEntityId, GraphGenerationId, GraphIdempotencyKey,
-    GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation,
-    GraphRelationId, GraphRelationKind, GraphWatermark, SourceGeneration,
+    GraphBudgetKind, GraphDbError, GraphEntity, GraphEntityId, GraphGenerationId,
+    GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
+    GraphRelation, GraphRelationId, GraphRelationKind, GraphWatermark, SourceGeneration,
 };
 
 const DIGEST_CHECK_INTERVAL_BYTES: u64 = 64 * 1024;
@@ -150,10 +150,17 @@ impl GraphGenerationManifest {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<Self, GraphDbError> {
         check()?;
-        if entities.len() > MAX_VERIFIED_GENERATION_ENTITIES
-            || relations.len() > MAX_VERIFIED_GENERATION_RELATIONS
-        {
-            return Err(GraphDbError::BudgetExhausted);
+        if entities.len() > MAX_VERIFIED_GENERATION_ENTITIES {
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_VERIFIED_GENERATION_ENTITIES,
+            ));
+        }
+        if relations.len() > MAX_VERIFIED_GENERATION_RELATIONS {
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_VERIFIED_GENERATION_RELATIONS,
+            ));
         }
         let dependencies = checked_sorted_dependencies(dependencies, check)?;
         let entities = checked_sorted_entities(entities, check)?;
@@ -406,10 +413,17 @@ impl GraphGenerationManifest {
         check: &dyn Fn() -> Result<(), GraphDbError>,
     ) -> Result<(), GraphDbError> {
         check()?;
-        if self.entities.len() > MAX_VERIFIED_GENERATION_ENTITIES
-            || self.relations.len() > MAX_VERIFIED_GENERATION_RELATIONS
-        {
-            return Err(GraphDbError::BudgetExhausted);
+        if self.entities.len() > MAX_VERIFIED_GENERATION_ENTITIES {
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_VERIFIED_GENERATION_ENTITIES,
+            ));
+        }
+        if self.relations.len() > MAX_VERIFIED_GENERATION_RELATIONS {
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_VERIFIED_GENERATION_RELATIONS,
+            ));
         }
         let mut dependency_projections = BTreeSet::new();
         for dependency in &self.dependencies {
@@ -922,7 +936,10 @@ impl Write for CheckedVecWriter<'_> {
             ));
         }
         if self.bytes.try_reserve_exact(bytes.len()).is_err() {
-            self.failure = Some(GraphDbError::BudgetExhausted);
+            self.failure = Some(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Write,
+                self.max_bytes,
+            ));
             return Err(io::Error::other(
                 "canonical graph replay allocation exceeds its product budget",
             ));

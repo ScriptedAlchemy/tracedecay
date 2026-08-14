@@ -154,7 +154,7 @@ pub(super) fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             GraphDbError::Cancelled
             | GraphDbError::InvalidRequest { .. }
             | GraphDbError::Conflict
-            | GraphDbError::BudgetExhausted
+            | GraphDbError::BudgetExhausted { .. }
             | GraphDbError::DeadlineExceeded
             | GraphDbError::ProjectionMismatch { .. }
             | GraphDbError::GenerationMismatch { .. }

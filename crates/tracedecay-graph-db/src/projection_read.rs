@@ -11,8 +11,8 @@ use crate::schema::{
 };
 use crate::state::{latest_projection, load_entity, load_relation};
 use crate::{
-    GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId, GraphLabel,
-    GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
+    GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId,
+    GraphLabel, GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphSnapshot,
     GraphWatermark, SourceGeneration,
 };
 
@@ -208,7 +208,10 @@ fn read_projection(
 ) -> Result<GraphProjectionPage, GraphDbError> {
     check_cancelled(request.cancellation.as_ref())?;
     if request.max_entities == 0 && request.max_relations == 0 {
-        return Err(GraphDbError::BudgetExhausted);
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Read,
+            MAX_PROJECTION_PAGE_ITEMS,
+        ));
     }
     validate_optional_page_limit(request.max_entities)?;
     validate_optional_page_limit(request.max_relations)?;
@@ -355,7 +358,9 @@ fn query_identity_page(
     check_cancelled(cancellation)?;
     let mut params = HashMap::from([(
         "limit".to_owned(),
-        Value::from(i64::try_from(limit).map_err(|_| GraphDbError::BudgetExhausted)?),
+        Value::from(i64::try_from(limit).map_err(|_| {
+            GraphDbError::budget_exhausted_count(GraphBudgetKind::Read, MAX_PROJECTION_PAGE_ITEMS)
+        })?),
     )]);
     let predicate = if let Some(after) = after {
         params.insert("after".to_owned(), Value::from(after));
@@ -416,7 +421,10 @@ fn count_labeled_nodes(
 
 fn validate_page_limit(limit: usize) -> Result<(), GraphDbError> {
     if limit == 0 || limit > MAX_PROJECTION_PAGE_ITEMS {
-        Err(GraphDbError::BudgetExhausted)
+        Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Read,
+            MAX_PROJECTION_PAGE_ITEMS,
+        ))
     } else {
         Ok(())
     }
@@ -424,7 +432,10 @@ fn validate_page_limit(limit: usize) -> Result<(), GraphDbError> {
 
 fn validate_optional_page_limit(limit: usize) -> Result<(), GraphDbError> {
     if limit > MAX_PROJECTION_PAGE_ITEMS {
-        Err(GraphDbError::BudgetExhausted)
+        Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Read,
+            MAX_PROJECTION_PAGE_ITEMS,
+        ))
     } else {
         Ok(())
     }

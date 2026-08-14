@@ -37,7 +37,7 @@ fn map_graph_error(context: &str, path: &Path, error: GraphDbError) -> ProfileBa
         GraphDbError::InvalidRequest { .. } => ProfileBackupError::invalid(message),
         GraphDbError::DurabilityUncertain { .. }
         | GraphDbError::Cancelled
-        | GraphDbError::BudgetExhausted
+        | GraphDbError::BudgetExhausted { .. }
         | GraphDbError::DeadlineExceeded
         | GraphDbError::Unavailable { .. }
         | GraphDbError::Closed => ProfileBackupError::unavailable(message),

@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig,
-    GraphDbRegistryStatus, GraphEntity, GraphEntityId, GraphMutation, GraphNamespace,
-    GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection,
-    GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
+    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbRegistration, GraphDbRegistry,
+    GraphDbRegistryConfig, GraphDbRegistryStatus, GraphEntity, GraphEntityId, GraphMutation,
+    GraphNamespace, GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind,
+    GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    TraversalRequest,
 };
 use tracedecay_runtime_core::storage;
 use tracedecay_runtime_core::store_runtime::registry::StoreRuntimeKey;
@@ -664,7 +665,7 @@ fn close_and_retention_refuse_an_active_handle() {
                 second_root.path(),
             ))
             .unwrap_err(),
-        GraphDbError::BudgetExhausted
+        GraphDbError::budget_exhausted(GraphBudgetKind::Capacity, 1)
     );
     assert!(active.snapshot().is_ok());
 }

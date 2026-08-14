@@ -10,7 +10,7 @@ use tracedecay_store::{
 
 use crate::generation::InlineOnlyGraphGenerationManifestProvider;
 use crate::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphDbRuntimeState,
+    GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphDbRuntimeState,
     GraphFormatVersion, GraphGenerationManifestProvider,
 };
 
@@ -938,7 +938,7 @@ fn reserve_capacity_eviction(
                 .then_with(|| left_shard.cmp(right_shard))
         })
         .map(|(shard_id, _)| shard_id)
-        .ok_or(GraphDbError::BudgetExhausted)?;
+        .ok_or_else(|| GraphDbError::budget_exhausted_count(GraphBudgetKind::Capacity, max_open))?;
     let Some(RegistryEntry::Ready {
         authority_lease,
         binding,

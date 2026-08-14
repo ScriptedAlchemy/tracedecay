@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity, GraphEntityId,
-    GraphMutation, GraphNamespace, GraphProjectionId, GraphProjectionReadRequest,
+    GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity,
+    GraphEntityId, GraphMutation, GraphNamespace, GraphProjectionId, GraphProjectionReadRequest,
     GraphProjectionTelemetryRequest, GraphRelation, GraphRelationId, GraphRelationKind,
     GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
 };
@@ -173,14 +173,14 @@ fn projection_read_authenticates_cursors_and_enforces_budgets() {
     empty.max_relations = 0;
     assert_eq!(
         db.read_projection(empty).unwrap_err(),
-        GraphDbError::BudgetExhausted
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 100_000)
     );
 
     let mut oversized = request("code-one");
     oversized.max_entities = 100_001;
     assert_eq!(
         db.read_projection(oversized).unwrap_err(),
-        GraphDbError::BudgetExhausted
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 100_000)
     );
 
     let mut cancelled = request("code-one");

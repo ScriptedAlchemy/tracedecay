@@ -15,7 +15,7 @@ use tracedecay_store::{
 
 use super::publication_support::{check_all, map_publication_error, require_publication_binding};
 use super::{GraphDbRegistration, GraphDbRegistry};
-use crate::{GraphCommit, GraphDbError, GraphWriteBatch, VerifiedGraphCommit};
+use crate::{GraphBudgetKind, GraphCommit, GraphDbError, GraphWriteBatch, VerifiedGraphCommit};
 
 #[derive(Clone, Debug)]
 pub struct VerifiedGenerationBatchCommit {
@@ -41,7 +41,10 @@ impl GraphDbRegistry {
         require_publication_binding(&registration, &plan.publication_key)?;
         require_plan_binding(&registration, plan)?;
         if plan.expected_chunk_count > MAX_SEMANTIC_VECTOR_STAGE_CHUNKS {
-            return Err(GraphDbError::BudgetExhausted);
+            return Err(GraphDbError::budget_exhausted(
+                GraphBudgetKind::Capacity,
+                MAX_SEMANTIC_VECTOR_STAGE_CHUNKS,
+            ));
         }
         plan.validate()
             .map_err(|error| GraphDbError::invalid(error.to_string()))?;

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tracedecay_graph_db::{GraphDbError, SealedGraphStateDigest};
+use tracedecay_graph_db::{GraphBudgetKind, GraphDbError, SealedGraphStateDigest};
 
 static STAGED_SEAL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -335,8 +335,18 @@ fn copy_and_verify_seal(
             break;
         }
         copied = copied
-            .checked_add(u64::try_from(read).map_err(|_| GraphDbError::BudgetExhausted)?)
-            .ok_or(GraphDbError::BudgetExhausted)?;
+            .checked_add(u64::try_from(read).map_err(|_| {
+                GraphDbError::budget_exhausted(
+                    GraphBudgetKind::Write,
+                    tracedecay_code_index::production::MAX_SEALED_CODE_GENERATION_BYTES_V1,
+                )
+            })?)
+            .ok_or_else(|| {
+                GraphDbError::budget_exhausted(
+                    GraphBudgetKind::Write,
+                    tracedecay_code_index::production::MAX_SEALED_CODE_GENERATION_BYTES_V1,
+                )
+            })?;
         if copied > admitted_len
             || copied > tracedecay_code_index::production::MAX_SEALED_CODE_GENERATION_BYTES_V1
         {

@@ -67,7 +67,7 @@ fn rooted_induced_relations_preserve_chords_parallel_kinds_and_exact_limit() {
 
     assert!(matches!(
         validate_rooted_relations(&accepted, exact, 2),
-        Err(GraphDbError::BudgetExhausted)
+        Err(GraphDbError::BudgetExhausted { .. })
     ));
 }
 

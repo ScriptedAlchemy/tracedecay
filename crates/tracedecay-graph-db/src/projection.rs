@@ -11,7 +11,7 @@ use crate::limits::{
     MAX_GRAPH_IDENTIFIER_BYTES, MAX_GRAPH_PROPERTIES, MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
     MAX_GRAPH_PROPERTY_VALUE_BYTES, MAX_GRAPH_VECTOR_DIMENSION,
 };
-use crate::{GraphDbError, VectorMetric};
+use crate::{GraphBudgetKind, GraphDbError, VectorMetric};
 
 const RESERVED_PREFIX: &str = "__tracedecay_graph_db_";
 const CHECKED_DIGEST_INTERVAL_BYTES: u64 = 64 * 1024;
@@ -134,7 +134,10 @@ impl GraphVector {
             ));
         }
         if self.dimension > MAX_GRAPH_VECTOR_DIMENSION {
-            return Err(GraphDbError::BudgetExhausted);
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_GRAPH_VECTOR_DIMENSION,
+            ));
         }
         if self.values.len() != self.dimension {
             return Err(GraphDbError::invalid(format!(
@@ -169,10 +172,16 @@ impl GraphProperty {
             }
             Self::Vector(vector) => vector.validate(),
             Self::String(value) if value.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES => {
-                Err(GraphDbError::BudgetExhausted)
+                Err(GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Capacity,
+                    MAX_GRAPH_PROPERTY_VALUE_BYTES,
+                ))
             }
             Self::Bytes(value) if value.len() > MAX_GRAPH_PROPERTY_VALUE_BYTES => {
-                Err(GraphDbError::BudgetExhausted)
+                Err(GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Capacity,
+                    MAX_GRAPH_PROPERTY_VALUE_BYTES,
+                ))
             }
             _ => Ok(()),
         }
@@ -422,12 +431,18 @@ impl CheckedProjectionDigestWriter<'_> {
 impl Write for CheckedProjectionDigestWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let Some(total_bytes) = self.total_bytes.checked_add(bytes.len()) else {
-            self.failure = Some(GraphDbError::BudgetExhausted);
+            self.failure = Some(GraphDbError::budget_exhausted(
+                GraphBudgetKind::Write,
+                u64::MAX,
+            ));
             return Err(io::Error::other("graph batch digest input is too large"));
         };
         self.total_bytes = total_bytes;
         if self.total_bytes > self.max_bytes {
-            self.failure = Some(GraphDbError::BudgetExhausted);
+            self.failure = Some(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Write,
+                self.max_bytes,
+            ));
             return Err(io::Error::other(
                 "graph batch canonical payload exceeds its product bound",
             ));
@@ -480,15 +495,24 @@ fn normalize_mutations(mutations: &mut Vec<GraphMutation>) -> Result<(), GraphDb
 
 fn validate_labels(labels: &BTreeSet<GraphLabel>) -> Result<(), GraphDbError> {
     if labels.len() > MAX_GRAPH_ENTITY_LABELS {
-        return Err(GraphDbError::BudgetExhausted);
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Capacity,
+            MAX_GRAPH_ENTITY_LABELS,
+        ));
     }
     let mut bytes = 0usize;
     for label in labels {
-        bytes = bytes
-            .checked_add(label.as_str().len())
-            .ok_or(GraphDbError::BudgetExhausted)?;
+        bytes = bytes.checked_add(label.as_str().len()).ok_or_else(|| {
+            GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_GRAPH_ENTITY_LABEL_BYTES,
+            )
+        })?;
         if bytes > MAX_GRAPH_ENTITY_LABEL_BYTES {
-            return Err(GraphDbError::BudgetExhausted);
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_GRAPH_ENTITY_LABEL_BYTES,
+            ));
         }
     }
     Ok(())
@@ -498,7 +522,10 @@ fn validate_properties(
     properties: &BTreeMap<GraphPropertyName, GraphProperty>,
 ) -> Result<(), GraphDbError> {
     if properties.len() > MAX_GRAPH_PROPERTIES {
-        return Err(GraphDbError::BudgetExhausted);
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Capacity,
+            MAX_GRAPH_PROPERTIES,
+        ));
     }
     let mut bytes = 0usize;
     for (name, property) in properties {
@@ -506,9 +533,17 @@ fn validate_properties(
         bytes = bytes
             .checked_add(name.as_str().len())
             .and_then(|total| total.checked_add(property_payload_bytes(property)?))
-            .ok_or(GraphDbError::BudgetExhausted)?;
+            .ok_or_else(|| {
+                GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Capacity,
+                    MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
+                )
+            })?;
         if bytes > MAX_GRAPH_PROPERTY_AGGREGATE_BYTES {
-            return Err(GraphDbError::BudgetExhausted);
+            return Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_GRAPH_PROPERTY_AGGREGATE_BYTES,
+            ));
         }
     }
     Ok(())
@@ -581,8 +616,8 @@ mod tests {
         GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
     };
     use crate::{
-        GraphDbError, MAX_GRAPH_VECTOR_DIMENSION, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
-        VectorMetric,
+        GraphBudgetKind, GraphDbError, MAX_GRAPH_VECTOR_DIMENSION,
+        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, VectorMetric,
     };
 
     #[test]
@@ -618,7 +653,10 @@ mod tests {
                 MAX_GRAPH_VECTOR_DIMENSION + 1,
                 VectorMetric::Cosine,
             ),
-            Err(GraphDbError::BudgetExhausted)
+            Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Capacity,
+                MAX_GRAPH_VECTOR_DIMENSION,
+            ))
         );
         let batch = GraphWriteBatch::new(
             GraphNamespace::new("namespace.bounded").unwrap(),
@@ -631,7 +669,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             batch.canonical_digest_checked_with_limit(8, &|| Ok(())),
-            Err(GraphDbError::BudgetExhausted)
+            Err(GraphDbError::budget_exhausted(GraphBudgetKind::Write, 8))
         );
     }
 }

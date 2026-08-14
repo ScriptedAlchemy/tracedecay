@@ -1,4 +1,4 @@
-use crate::GraphDbError;
+use crate::{GraphBudgetKind, GraphDbError};
 
 pub const MAX_VERIFIED_GENERATION_ENTITIES: usize = 1_000_000;
 pub const MAX_VERIFIED_GENERATION_RELATIONS: usize = 2_000_000;
@@ -30,7 +30,10 @@ pub(crate) fn require_generation_capacity(
         .checked_add(additions)
         .is_none_or(|projected| projected > maximum)
     {
-        return Err(GraphDbError::BudgetExhausted);
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Capacity,
+            maximum,
+        ));
     }
     Ok(())
 }
@@ -38,7 +41,7 @@ pub(crate) fn require_generation_capacity(
 #[cfg(test)]
 mod tests {
     use super::require_generation_capacity;
-    use crate::GraphDbError;
+    use crate::{GraphBudgetKind, GraphDbError};
 
     #[test]
     fn generation_capacity_distinguishes_persisted_corruption_from_input_budget() {
@@ -51,7 +54,10 @@ mod tests {
         );
         assert_eq!(
             require_generation_capacity("entities", 10, 1, 10),
-            Err(GraphDbError::BudgetExhausted)
+            Err(GraphDbError::budget_exhausted(
+                GraphBudgetKind::Capacity,
+                10
+            ))
         );
         assert_eq!(require_generation_capacity("entities", 9, 1, 10), Ok(()));
     }

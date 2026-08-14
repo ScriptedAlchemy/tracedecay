@@ -60,8 +60,8 @@ pub(super) fn map_graph_error(error: GraphDbError) -> VectorGenerationStoreError
         GraphDbError::DurabilityUncertain { message } => {
             VectorGenerationStoreErrorV1::DurabilityUncertain(message)
         }
-        GraphDbError::BudgetExhausted => VectorGenerationStoreErrorV1::Unavailable(
-            "semantic vector graph read budget is exhausted".to_owned(),
+        GraphDbError::BudgetExhausted { kind, limit } => VectorGenerationStoreErrorV1::Unavailable(
+            format!("semantic vector graph {kind} budget is exhausted (limit {limit})"),
         ),
         GraphDbError::DeadlineExceeded => VectorGenerationStoreErrorV1::DeadlineExceeded,
         GraphDbError::Closed => {
@@ -72,4 +72,23 @@ pub(super) fn map_graph_error(error: GraphDbError) -> VectorGenerationStoreError
 
 pub(super) fn storage_error(error: impl std::fmt::Display) -> VectorGenerationStoreErrorV1 {
     VectorGenerationStoreErrorV1::Corrupt(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_graph_db::{GraphBudgetKind, GraphDbError};
+
+    use super::map_graph_error;
+
+    #[test]
+    fn map_graph_error_names_exhausted_budget_kind_and_limit() {
+        let error = map_graph_error(GraphDbError::budget_exhausted(
+            GraphBudgetKind::Mutation,
+            4_096,
+        ));
+        assert_eq!(
+            error.to_string(),
+            "semantic vector graph is unavailable: semantic vector graph mutation budget is exhausted (limit 4096)"
+        );
+    }
 }

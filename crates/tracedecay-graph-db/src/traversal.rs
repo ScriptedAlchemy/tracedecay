@@ -16,12 +16,16 @@ use crate::schema::{
     relation_type_for_kind,
 };
 use crate::{
-    GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProjectionId,
-    GraphRelation, GraphRelationId, GraphRelationKind, GraphSnapshot, VectorSearchRequest,
-    VectorSearchResult,
+    GraphBudgetKind, GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace,
+    GraphProjectionId, GraphRelation, GraphRelationId, GraphRelationKind, GraphSnapshot,
+    VectorSearchRequest, VectorSearchResult,
 };
 
 const MAX_BATCH_TRAVERSAL_STARTS: usize = 100_000;
+
+fn read_budget(limit: usize) -> GraphDbError {
+    GraphDbError::budget_exhausted_count(GraphBudgetKind::Read, limit)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphTraversalDirection {
@@ -294,9 +298,9 @@ fn directed_relations(
         relations.dedup_by(|left, right| left.identity == right.identity);
         admitted = admitted
             .checked_add(relations.len())
-            .ok_or(GraphDbError::BudgetExhausted)?;
+            .ok_or_else(|| read_budget(max_relations))?;
         if admitted > max_relations {
-            return Err(GraphDbError::BudgetExhausted);
+            return Err(read_budget(max_relations));
         }
         results.push(relations);
     }
@@ -350,7 +354,7 @@ fn check_batch_request(
         return Err(GraphDbError::Cancelled);
     }
     if starts.len() > MAX_BATCH_TRAVERSAL_STARTS {
-        return Err(GraphDbError::BudgetExhausted);
+        return Err(read_budget(MAX_BATCH_TRAVERSAL_STARTS));
     }
     Ok(())
 }
@@ -360,7 +364,7 @@ fn validate_request(request: &TraversalRequest) -> Result<(), GraphDbError> {
         return Err(GraphDbError::Cancelled);
     }
     if request.max_visits == 0 {
-        return Err(GraphDbError::BudgetExhausted);
+        return Err(read_budget(request.max_visits));
     }
     Ok(())
 }
@@ -413,15 +417,15 @@ fn native_outgoing_traversal(
         match event {
             TraversalEvent::Discover(node) => {
                 let Some(next_admitted) = admitted.checked_add(1) else {
-                    return Control::Break(NativeTraversalStop::Error(
-                        GraphDbError::BudgetExhausted,
-                    ));
+                    return Control::Break(NativeTraversalStop::Error(read_budget(
+                        request.max_visits,
+                    )));
                 };
                 admitted = next_admitted;
                 if admitted > request.max_visits {
-                    return Control::Break(NativeTraversalStop::Error(
-                        GraphDbError::BudgetExhausted,
-                    ));
+                    return Control::Break(NativeTraversalStop::Error(read_budget(
+                        request.max_visits,
+                    )));
                 }
                 let Some(depth) = depths.get(&node).copied() else {
                     return Control::Break(NativeTraversalStop::Error(GraphDbError::Corrupt {
@@ -433,9 +437,9 @@ fn native_outgoing_traversal(
                         entities.insert(node, identity);
                         let unfinished = unfinished_by_depth.entry(depth).or_default();
                         let Some(next_unfinished) = unfinished.checked_add(1) else {
-                            return Control::Break(NativeTraversalStop::Error(
-                                GraphDbError::BudgetExhausted,
-                            ));
+                            return Control::Break(NativeTraversalStop::Error(read_budget(
+                                request.max_visits,
+                            )));
                         };
                         *unfinished = next_unfinished;
                         if entities.len() >= request.max_results && cutoff_depth.is_none() {
@@ -463,9 +467,9 @@ fn native_outgoing_traversal(
                     return Control::Prune;
                 }
                 let Some(target_depth) = source_depth.checked_add(1) else {
-                    return Control::Break(NativeTraversalStop::Error(
-                        GraphDbError::BudgetExhausted,
-                    ));
+                    return Control::Break(NativeTraversalStop::Error(read_budget(
+                        request.max_depth,
+                    )));
                 };
                 let relation = match relation_identity(
                     store,
@@ -609,9 +613,9 @@ fn directional_traversal(
         }
         admitted = admitted
             .checked_add(1)
-            .ok_or(GraphDbError::BudgetExhausted)?;
+            .ok_or_else(|| read_budget(request.max_visits))?;
         if admitted > request.max_visits {
-            return Err(GraphDbError::BudgetExhausted);
+            return Err(read_budget(request.max_visits));
         }
         visits.push(TraversalVisit {
             entity: entity_identity(store, node, &request.namespace)?,
@@ -649,7 +653,9 @@ fn directional_traversal(
                 return Err(GraphDbError::Cancelled);
             }
             if discovered.insert(target) {
-                let next_depth = depth.checked_add(1).ok_or(GraphDbError::BudgetExhausted)?;
+                let next_depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| read_budget(request.max_depth))?;
                 queue.push_back((target, next_depth, Some(relation)));
             }
         }
@@ -752,9 +758,9 @@ fn edge_belongs_to_projection(
 fn admit_visit(admitted: &mut usize, max_visits: usize) -> Result<(), GraphDbError> {
     *admitted = admitted
         .checked_add(1)
-        .ok_or(GraphDbError::BudgetExhausted)?;
+        .ok_or_else(|| read_budget(max_visits))?;
     if *admitted > max_visits {
-        Err(GraphDbError::BudgetExhausted)
+        Err(read_budget(max_visits))
     } else {
         Ok(())
     }

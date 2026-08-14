@@ -8,10 +8,10 @@ use tracedecay_domain::{
     CodeGenerationId, RefId, RepositoryId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDbError, GraphDbRegistration, GraphGenerationDependency,
-    GraphGenerationManifest, GraphIdempotencyKey, GraphProjectionIdentity, GraphProjectorRevision,
-    GraphReplayCollectionOutcome, GraphWriteBatch, SealedCodeGenerationReplay,
-    VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
+    GraphBudgetKind, GraphCancellation, GraphDbError, GraphDbRegistration,
+    GraphGenerationDependency, GraphGenerationManifest, GraphIdempotencyKey,
+    GraphProjectionIdentity, GraphProjectorRevision, GraphReplayCollectionOutcome, GraphWriteBatch,
+    SealedCodeGenerationReplay, VerifiedGenerationBatchCommit, VerifiedGraphSnapshot,
 };
 use tracedecay_runtime_core::store_runtime::registry::{
     CanonicalCodeGraphStoreLeaseV1, CanonicalGraphStoreLeaseV1, StoreRuntimeKey,
@@ -1125,9 +1125,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
         let mut cleanup_sequence = 0_u64;
         loop {
-            cleanup_sequence = cleanup_sequence
-                .checked_add(1)
-                .ok_or(GraphDbError::BudgetExhausted)?;
+            cleanup_sequence = cleanup_sequence.checked_add(1).ok_or_else(|| {
+                GraphDbError::budget_exhausted(GraphBudgetKind::Capacity, u64::MAX)
+            })?;
             let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
             let cancellation_identity = RuntimeCancellationIdentityV1 {
                 cancellation_id: RuntimeCancellationIdV1::new(format!(
@@ -1225,7 +1225,9 @@ fn map_code_graph_error(
     use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
     match error {
         CodeGraphProjectionError::Cancelled => GraphDbError::Cancelled,
-        CodeGraphProjectionError::BudgetExhausted => GraphDbError::BudgetExhausted,
+        CodeGraphProjectionError::BudgetExhausted => {
+            GraphDbError::budget_exhausted(GraphBudgetKind::Read, u64::MAX)
+        }
         CodeGraphProjectionError::DeadlineExceeded => GraphDbError::DeadlineExceeded,
         CodeGraphProjectionError::Conflict => GraphDbError::Conflict,
         CodeGraphProjectionError::ProjectionMismatch {

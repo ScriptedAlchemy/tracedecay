@@ -8,9 +8,10 @@ use tracedecay_domain::{
     RetrievalAnchorId,
 };
 use tracedecay_graph_db::{
-    GraphEntityId, GraphIdempotencyKey, GraphNamespace, GraphProjectionId, GraphProjectionIdentity,
-    GraphProjectionReadRequest, GraphRelationKind, GraphRelationRef, GraphTraversalDirection,
-    MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS, TraversalRequest,
+    GraphBudgetKind, GraphEntityId, GraphIdempotencyKey, GraphNamespace, GraphProjectionId,
+    GraphProjectionIdentity, GraphProjectionReadRequest, GraphRelationKind, GraphRelationRef,
+    GraphTraversalDirection, MAX_VERIFIED_GENERATION_ENTITIES, MAX_VERIFIED_GENERATION_RELATIONS,
+    TraversalRequest,
 };
 use tracedecay_store::{
     FactReadControl, FactStoreError, FactStoreResult, ProjectMemoryEntityIdV1,
@@ -107,9 +108,12 @@ pub(super) async fn project_memory_graph(
     let page = tokio::task::spawn_blocking(move || {
         let cancellation: Arc<dyn tracedecay_graph_db::GraphCancellation> =
             Arc::new(SharedGraphCancellation(control_for_read));
-        let max_page = max_relations
-            .checked_add(1)
-            .ok_or(tracedecay_graph_db::GraphDbError::BudgetExhausted)?;
+        let max_page = max_relations.checked_add(1).ok_or_else(|| {
+            tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Read,
+                max_relations,
+            )
+        })?;
         let relations = if roots.is_empty() {
             let projection_page =
                 snapshot_for_read.read_projection(GraphProjectionReadRequest {
@@ -122,7 +126,10 @@ pub(super) async fn project_memory_graph(
                     cancellation,
                 })?;
             if projection_page.next_relation.is_some() {
-                return Err(tracedecay_graph_db::GraphDbError::BudgetExhausted);
+                return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Read,
+                    max_relations,
+                ));
             }
             projection_page
                 .relations
@@ -135,12 +142,18 @@ pub(super) async fn project_memory_graph(
                 .collect()
         } else {
             let relation_kinds = relation_kinds()?;
-            let relation_sentinel = max_relations
-                .checked_add(1)
-                .ok_or(tracedecay_graph_db::GraphDbError::BudgetExhausted)?;
-            let entity_sentinel = relation_sentinel
-                .checked_add(1)
-                .ok_or(tracedecay_graph_db::GraphDbError::BudgetExhausted)?;
+            let relation_sentinel = max_relations.checked_add(1).ok_or_else(|| {
+                tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Read,
+                    max_relations,
+                )
+            })?;
+            let entity_sentinel = relation_sentinel.checked_add(1).ok_or_else(|| {
+                tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                    GraphBudgetKind::Read,
+                    max_relations,
+                )
+            })?;
             let mut accepted_entities = BTreeSet::new();
             for root in roots {
                 let start = fact_entity_id(&root)?;
@@ -155,7 +168,10 @@ pub(super) async fn project_memory_graph(
                     cancellation: Arc::clone(&cancellation),
                 })?;
                 if result.visits.len() == entity_sentinel {
-                    return Err(tracedecay_graph_db::GraphDbError::BudgetExhausted);
+                    return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                        GraphBudgetKind::Read,
+                        max_relations,
+                    ));
                 }
                 accepted_entities
                     .extend(result.visits.into_iter().map(|visit| visit.entity.identity));
@@ -184,7 +200,10 @@ pub(super) async fn project_memory_graph(
             validate_rooted_relations(&accepted_entities, relations, max_relations)?
         };
         if relations.len() > max_relations {
-            return Err(tracedecay_graph_db::GraphDbError::BudgetExhausted);
+            return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Read,
+                max_relations,
+            ));
         }
         Ok::<_, tracedecay_graph_db::GraphDbError>(relations)
     })
@@ -311,7 +330,10 @@ pub(super) fn validate_rooted_relations(
         return Err(tracedecay_graph_db::GraphDbError::Conflict);
     }
     if relations.len() > max_relations {
-        return Err(tracedecay_graph_db::GraphDbError::BudgetExhausted);
+        return Err(tracedecay_graph_db::GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Read,
+            max_relations,
+        ));
     }
     Ok(relations)
 }
@@ -859,7 +881,9 @@ pub(super) fn graph_error(
     match error {
         tracedecay_graph_db::GraphDbError::Conflict => FactStoreError::GraphConflict,
         tracedecay_graph_db::GraphDbError::Cancelled => FactStoreError::GraphCancelled,
-        tracedecay_graph_db::GraphDbError::BudgetExhausted => FactStoreError::GraphBudgetExhausted,
+        tracedecay_graph_db::GraphDbError::BudgetExhausted { .. } => {
+            FactStoreError::GraphBudgetExhausted
+        }
         tracedecay_graph_db::GraphDbError::DeadlineExceeded => {
             FactStoreError::GraphDeadlineExceeded
         }

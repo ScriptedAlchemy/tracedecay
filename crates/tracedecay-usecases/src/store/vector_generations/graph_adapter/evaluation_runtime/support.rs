@@ -3,8 +3,8 @@ use tracedecay_domain::{
     BrainId, CodeGenerationId, ProjectId, RepositoryId, UserProfileId, WorktreeId, canonical_sha256,
 };
 use tracedecay_graph_db::{
-    GraphDbError, GraphGenerationId, GraphGenerationManifest, GraphProjectionIdentity,
-    GraphWatermark, SourceGeneration,
+    GraphBudgetKind, GraphDbError, GraphGenerationId, GraphGenerationManifest,
+    GraphProjectionIdentity, GraphWatermark, SourceGeneration,
 };
 use tracedecay_store::{
     CodeShardScopeV1, GraphPublicationStoreErrorV1, RuntimeInterruptionV1,
@@ -140,7 +140,9 @@ pub(super) fn map_code_graph_error(error: CodeGraphProjectionError) -> GraphDbEr
         CodeGraphProjectionError::Conflict | CodeGraphProjectionError::GenerationMismatch => {
             GraphDbError::Conflict
         }
-        CodeGraphProjectionError::BudgetExhausted => GraphDbError::BudgetExhausted,
+        CodeGraphProjectionError::BudgetExhausted => {
+            GraphDbError::budget_exhausted(GraphBudgetKind::Read, u64::MAX)
+        }
         CodeGraphProjectionError::ProjectionMismatch {
             namespace,
             projection,

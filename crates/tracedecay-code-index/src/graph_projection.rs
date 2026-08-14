@@ -110,7 +110,7 @@ impl From<GraphDbError> for CodeGraphProjectionError {
             GraphDbError::Cancelled => Self::Cancelled,
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Conflict => Self::Conflict,
-            GraphDbError::BudgetExhausted => Self::BudgetExhausted,
+            GraphDbError::BudgetExhausted { .. } => Self::BudgetExhausted,
             GraphDbError::DeadlineExceeded => Self::DeadlineExceeded,
             GraphDbError::ProjectionMismatch {
                 namespace,

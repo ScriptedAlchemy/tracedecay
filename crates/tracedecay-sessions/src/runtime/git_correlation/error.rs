@@ -53,7 +53,9 @@ impl From<tracedecay_graph_db::GraphDbError> for GitCorrelationError {
 
         match error {
             GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => Self::BudgetExhausted,
+            GraphDbError::BudgetExhausted { .. } | GraphDbError::DeadlineExceeded => {
+                Self::BudgetExhausted
+            }
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Corrupt { message }
             | GraphDbError::ResetRequired { message }

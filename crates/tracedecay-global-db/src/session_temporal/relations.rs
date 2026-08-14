@@ -891,7 +891,7 @@ fn map_graph_error(error: GraphDbError) -> SessionRelationError {
     match error {
         GraphDbError::Cancelled => SessionRelationError::Cancelled,
         GraphDbError::DeadlineExceeded => SessionRelationError::DeadlineExceeded,
-        GraphDbError::BudgetExhausted => SessionRelationError::BudgetExhausted,
+        GraphDbError::BudgetExhausted { .. } => SessionRelationError::BudgetExhausted,
         GraphDbError::Conflict => SessionRelationError::Conflict,
         GraphDbError::InvalidRequest { .. } => SessionRelationError::Invalid,
         GraphDbError::ResetRequired { .. } => SessionRelationError::ResetRequired,

@@ -19,9 +19,9 @@ use crate::state::{
     latest_projection, load_entity, load_relation, projection_node_counts, publication,
 };
 use crate::{
-    GraphCommit, GraphDb, GraphDbError, GraphGenerationDependency, GraphGenerationId,
-    GraphGenerationManifest, GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId,
-    GraphProjectionIdentity, GraphWriteBatch, SourceGeneration, mutation,
+    GraphBudgetKind, GraphCommit, GraphDb, GraphDbError, GraphGenerationDependency,
+    GraphGenerationId, GraphGenerationManifest, GraphIdempotencyKey, GraphMutation, GraphNamespace,
+    GraphProjectionId, GraphProjectionIdentity, GraphWriteBatch, SourceGeneration, mutation,
 };
 
 #[path = "generation_staging_runtime/native_contract.rs"]
@@ -89,16 +89,22 @@ impl GraphDb {
                 GraphMutation::UpsertEntity(entity)
                     if load_entity(database, &batch.namespace, &entity.identity)?.is_none() =>
                 {
-                    new_entities = new_entities
-                        .checked_add(1)
-                        .ok_or(GraphDbError::BudgetExhausted)?;
+                    new_entities = new_entities.checked_add(1).ok_or_else(|| {
+                        GraphDbError::budget_exhausted_count(
+                            GraphBudgetKind::Capacity,
+                            MAX_VERIFIED_GENERATION_ENTITIES,
+                        )
+                    })?;
                 }
                 GraphMutation::UpsertRelation(relation)
                     if load_relation(database, &batch.namespace, &relation.identity)?.is_none() =>
                 {
-                    new_relations = new_relations
-                        .checked_add(1)
-                        .ok_or(GraphDbError::BudgetExhausted)?;
+                    new_relations = new_relations.checked_add(1).ok_or_else(|| {
+                        GraphDbError::budget_exhausted_count(
+                            GraphBudgetKind::Capacity,
+                            MAX_VERIFIED_GENERATION_RELATIONS,
+                        )
+                    })?;
                 }
                 GraphMutation::UpsertEntity(_)
                 | GraphMutation::DeleteEntity(_)
@@ -466,7 +472,10 @@ impl GraphWriteBatch {
 
 fn require_staged_batch_mutation_count(count: usize) -> Result<(), GraphDbError> {
     if count > MAX_VERIFIED_GENERATION_BATCH_MUTATIONS {
-        return Err(GraphDbError::BudgetExhausted);
+        return Err(GraphDbError::budget_exhausted_count(
+            GraphBudgetKind::Mutation,
+            MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+        ));
     }
     Ok(())
 }
@@ -511,8 +520,8 @@ mod tests {
         staged_publication_digest,
     };
     use crate::{
-        GraphDbError, GraphNamespace, GraphProjectionId, GraphWatermark, GraphWriteBatch,
-        MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration,
+        GraphBudgetKind, GraphDbError, GraphNamespace, GraphProjectionId, GraphWatermark,
+        GraphWriteBatch, MAX_VERIFIED_GENERATION_BATCH_MUTATIONS, NeverCancelled, SourceGeneration,
     };
     use tracedecay_store::{
         SemanticVectorBatchOutputDigest, SemanticVectorBatchReceiptDigest,
@@ -523,7 +532,10 @@ mod tests {
     fn semantic_vector_stage_rejects_more_than_one_bounded_native_batch() {
         assert_eq!(
             require_staged_batch_mutation_count(MAX_VERIFIED_GENERATION_BATCH_MUTATIONS + 1),
-            Err(GraphDbError::BudgetExhausted)
+            Err(GraphDbError::budget_exhausted_count(
+                GraphBudgetKind::Mutation,
+                MAX_VERIFIED_GENERATION_BATCH_MUTATIONS,
+            ))
         );
     }
 

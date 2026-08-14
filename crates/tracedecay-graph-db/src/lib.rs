@@ -22,7 +22,7 @@ mod traversal;
 mod vector;
 
 pub use backup::GraphBackupReceipt;
-pub use error::GraphDbError;
+pub use error::{GraphBudgetKind, GraphDbError};
 pub use generation::{
     GraphEntityRef, GraphGenerationDependency, GraphGenerationManifest,
     GraphGenerationManifestProvider, GraphGenerationRelation, GraphGenerationReplayMetadata,

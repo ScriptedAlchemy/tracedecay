@@ -5,13 +5,13 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity, GraphEntityId,
-    GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace, GraphProjectionId,
-    GraphProperty, GraphPropertyName, GraphPublication, GraphPublicationInputDigest, GraphRelation,
-    GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphVector,
-    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark, GraphWriteBatch,
-    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest, VectorMetric,
-    VectorSearchRequest,
+    GraphBudgetKind, GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity,
+    GraphEntityId, GraphIdempotencyKey, GraphLabel, GraphMutation, GraphNamespace,
+    GraphProjectionId, GraphProperty, GraphPropertyName, GraphPublication,
+    GraphPublicationInputDigest, GraphRelation, GraphRelationId, GraphRelationKind,
+    GraphTraversalDirection, GraphVector, GraphVectorIndexRequest, GraphVectorIndexStatus,
+    GraphWatermark, GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration,
+    TraversalRequest, VectorMetric, VectorSearchRequest,
 };
 
 mod support;
@@ -542,7 +542,7 @@ fn traversal_budget_exhaustion_is_typed() {
     request.max_visits = 0;
     assert_eq!(
         db.traverse(request).unwrap_err(),
-        GraphDbError::BudgetExhausted
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 0)
     );
 }
 
@@ -568,7 +568,7 @@ fn traversal_visit_budget_stops_before_scanning_a_wide_frontier() {
     request.cancellation = Arc::new(CancelOnPoll::new(6));
     assert_eq!(
         db.traverse(request).unwrap_err(),
-        GraphDbError::BudgetExhausted
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 1)
     );
 }
 
@@ -645,7 +645,7 @@ fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
     assert_eq!(
         db.outgoing_relation_ids(&namespace(), &starts, &kinds, 0, live())
             .unwrap_err(),
-        GraphDbError::BudgetExhausted
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 0)
     );
     assert_eq!(
         db.outgoing_relations(&namespace(), &starts, &kinds, 1, Arc::new(Cancelled),)
@@ -708,7 +708,7 @@ fn batch_incoming_reads_are_filtered_ordered_and_budgeted() {
     assert_eq!(
         db.incoming_relation_ids(&namespace(), &starts, &kinds, 0, live())
             .unwrap_err(),
-        GraphDbError::BudgetExhausted
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 0)
     );
     assert_eq!(
         db.incoming_relation_ids(&namespace(), &starts, &kinds, 1, Arc::new(Cancelled))
@@ -773,7 +773,7 @@ fn multi_source_reachability_uses_overlay_and_global_budget() {
             live(),
         )
         .unwrap_err(),
-        GraphDbError::BudgetExhausted
+        GraphDbError::budget_exhausted(GraphBudgetKind::Read, 3)
     );
 }
 

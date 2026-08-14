@@ -153,7 +153,9 @@ impl From<GraphDbError> for GitTopologyProjectionError {
     fn from(error: GraphDbError) -> Self {
         match error {
             GraphDbError::Cancelled => Self::Cancelled,
-            GraphDbError::BudgetExhausted | GraphDbError::DeadlineExceeded => Self::BudgetExhausted,
+            GraphDbError::BudgetExhausted { .. } | GraphDbError::DeadlineExceeded => {
+                Self::BudgetExhausted
+            }
             GraphDbError::InvalidRequest { message } => Self::Contract(message),
             GraphDbError::Corrupt { message }
             | GraphDbError::ResetRequired { message }

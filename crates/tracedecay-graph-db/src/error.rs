@@ -1,4 +1,37 @@
+use std::fmt;
+
 use thiserror::Error;
+
+/// Named graph-operation budget that was exhausted.
+///
+/// `GraphDbError::BudgetExhausted` carries this identity plus the numeric
+/// limit so callers can name the actual ceiling instead of collapsing every
+/// class to a generic "read budget".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphBudgetKind {
+    Read,
+    Write,
+    Capacity,
+    Mutation,
+}
+
+impl GraphBudgetKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Capacity => "capacity",
+            Self::Mutation => "mutation",
+        }
+    }
+}
+
+impl fmt::Display for GraphBudgetKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GraphDbError {
@@ -8,8 +41,8 @@ pub enum GraphDbError {
     InvalidRequest { message: String },
     #[error("graph database conflict")]
     Conflict,
-    #[error("graph operation budget exhausted")]
-    BudgetExhausted,
+    #[error("graph {kind} budget exhausted (limit {limit})")]
+    BudgetExhausted { kind: GraphBudgetKind, limit: u64 },
     #[error("graph operation deadline exceeded")]
     DeadlineExceeded,
     #[error(
@@ -55,6 +88,18 @@ impl GraphDbError {
             message: message.into(),
         }
     }
+
+    /// Constructs a typed budget-exhaustion failure that names the ceiling.
+    #[must_use]
+    pub const fn budget_exhausted(kind: GraphBudgetKind, limit: u64) -> Self {
+        Self::BudgetExhausted { kind, limit }
+    }
+
+    /// Constructs a typed budget-exhaustion failure from a `usize` ceiling.
+    #[must_use]
+    pub fn budget_exhausted_count(kind: GraphBudgetKind, limit: usize) -> Self {
+        Self::budget_exhausted(kind, u64::try_from(limit).unwrap_or(u64::MAX))
+    }
 }
 
 pub(crate) fn rollback_failure(
@@ -69,7 +114,21 @@ pub(crate) fn rollback_failure(
 
 #[cfg(test)]
 mod tests {
-    use super::{GraphDbError, rollback_failure};
+    use super::{GraphBudgetKind, GraphDbError, rollback_failure};
+
+    #[test]
+    fn budget_exhausted_names_kind_and_limit() {
+        let error = GraphDbError::budget_exhausted(GraphBudgetKind::Mutation, 4_096);
+        assert_eq!(
+            error.to_string(),
+            "graph mutation budget exhausted (limit 4096)"
+        );
+        assert_eq!(
+            GraphDbError::budget_exhausted_count(GraphBudgetKind::Write, 4 * 1024 * 1024)
+                .to_string(),
+            "graph write budget exhausted (limit 4194304)"
+        );
+    }
 
     #[test]
     fn rollback_failure_preserves_both_errors_and_context() {
