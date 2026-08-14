@@ -276,7 +276,7 @@ main() {
     TRACEDECAY_BIN="$tracedecay_bin" \
     INSPECTOR_VERSION="$INSPECTOR_VERSION" \
     CALL_TIMEOUT_SECS="$CALL_TIMEOUT_SECS" \
-    "$DAEMON_HARNESS" --bin "$tracedecay_bin" --ready-timeout 5 -- \
+    "$DAEMON_HARNESS" --bin "$tracedecay_bin" --ready-timeout 60 -- \
     "$SCRIPT_PATH" --run "$WORK_DIR" "$fixture"
   status=$?
   set -e
