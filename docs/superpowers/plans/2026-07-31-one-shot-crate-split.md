@@ -1,5 +1,19 @@
 # One-Shot Crate Split (owner decision 2026-07-31)
 
+> **SUPERSEDED BY LANDING (2026-08-14).** The target map below shipped:
+> `tracedecay-agent-hosts`, `tracedecay-application`, `tracedecay-dashboard-api`,
+> `tracedecay-global-db`, `tracedecay-runtime-core`, `tracedecay-sessions`, and
+> `tracedecay-usecases` are all workspace members with clean
+> `cargo check --workspace`; `tracedecay-migrate` was deleted outright
+> (`923816ed3`) rather than landed, folding its surface into `global-db` and
+> `runtime-core`. The "scar cleanup" item this plan called for — delete each
+> mover's `SEAMS.md` as its rows resolve — is done: all seven were retired,
+> with their few still-durable contracts (fail-open/fail-closed port
+> semantics, dependency/forbidden-edge proofs, sealed benchmark provenance,
+> the `tracedecay-application`-vs-`tracedecay-usecases` layer-naming split)
+> folded into each crate's `lib.rs` module doc. Treat the target map and
+> execution-model sections below as historical planning, not open work.
+
 Supersedes the phased breakup plans (deleted). Owner rulings: **no phases** —
 one mass move of all root subsystems into workspace crates; **breakage during
 the move is acceptable** ("move all crate code first, then deal with the
