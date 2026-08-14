@@ -278,7 +278,7 @@ async fn user_cursor_hook_event_without_workspace_fails_closed_on_slug_collision
 // Intentional: this test pins process-wide HOME/TRACEDECAY_GLOBAL_DB while the
 // hook resolves its storage paths.
 #[allow(clippy::await_holding_lock)]
-async fn cursor_pre_compact_without_native_payload_is_read_only_and_unavailable() {
+async fn cursor_pre_compact_without_native_payload_is_read_only_and_reports_no_backlog() {
     let tmp = TempDir::new().unwrap();
     let _env_lock = GLOBAL_DB_ENV_LOCK
         .lock()
@@ -302,7 +302,7 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_unavailable(
     std::fs::write(
         &transcript,
         r#"{"role":"user","message":{"content":[{"type":"text","text":"First durable decision: publish only authenticated native compaction payloads."}]}}
-{"role":"assistant","message":{"content":[{"type":"text","text":"Cursor exposes pressure without native summary content, so publication stays unavailable."}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Cursor exposes pressure without native summary content; the daemon-owned store stays empty."}]}}
 {"role":"user","message":{"content":[{"type":"text","text":"Fresh tail should remain replayable."}]}}
 {"role":"assistant","message":{"content":[{"type":"text","text":"Acknowledged fresh tail."}]}}
 "#,
@@ -354,9 +354,13 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_unavailable(
         "context_window_size": 128000
     });
     let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
+    // Pressure-only preCompact never carries Cursor's own summary text. The
+    // daemon still runs its owned compaction route against the (empty)
+    // session store and reports no backlog instead of treating the missing
+    // host payload as unavailable.
     assert_eq!(
         (outcome.status.as_str(), outcome.reason.as_str()),
-        ("unavailable", "host_payload_unavailable"),
+        ("ok", "no_backlog_to_compress"),
     );
     assert_eq!(outcome.summary_nodes_created, 0);
     assert!(outcome.summary_node_ids.is_empty());
@@ -367,12 +371,14 @@ async fn cursor_pre_compact_without_native_payload_is_read_only_and_unavailable(
     let runtime = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id)
         .await
         .unwrap();
-    assert!(
+    // Compaction may create a session identity for the pressure event, but it
+    // must not persist the transcript the host only attached as path metadata.
+    assert_eq!(
         runtime
-            .session_for_test(HostAdmissionScope::Project, "cursor", "cursor-session")
+            .project_session_message_count_for_test()
             .await
-            .unwrap()
-            .is_none(),
+            .unwrap(),
+        0,
         "pressure-only compaction must not ingest the transcript"
     );
 }
