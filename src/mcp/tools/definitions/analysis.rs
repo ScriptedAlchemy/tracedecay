@@ -105,23 +105,43 @@ pub(super) fn def_unmounted_files() -> ToolDefinition {
     def(
         "tracedecay_unmounted_files",
         "Unmounted Files",
-        "Find Rust source files present on disk that no `mod` declaration reaches from any cargo \
-         target root — files the code graph indexes as healthy symbols but the compiler never \
-         parses. Walks each workspace crate from its own roots (src/lib.rs, src/main.rs, \
-         src/bin/*.rs, every tests/*.rs and tests/<name>/main.rs, benches, examples, build.rs), \
-         follows `mod name;` and `#[path = \"...\"]`, and diffs the reachable set against the \
-         .rs files under that crate's source directories. Each finding names the crate, the \
-         nearest mounted parent module that could declare it, and the exact `mod` line to add. \
-         cfg-gated modules count as mounted (predicates are not evaluated). Known blind spots: a \
-         file pulled in by `include!` and a `mod` declared inside a function body are reported as \
-         unmounted. Paths listed in the workspace's `[workspace.metadata.cargo-shear] \
-         ignored-paths` are excluded.",
+        "Find source files present on disk that nothing reaches — files the code graph indexes as \
+         healthy symbols while no compiler, bundler, or test runner ever loads them. Reports one \
+         section per ecosystem in a typed `ecosystems` field, each carrying its own verdict, \
+         counts, and blind-spot list. RUST (cargo): walks every package found by manifest sweep \
+         — workspace members, path dependencies, nested independent workspaces — from its own \
+         roots (src/lib.rs, src/main.rs, src/bin/*, every tests/*.rs and tests/<name>/main.rs, \
+         benches, examples, build.rs), follows `mod name;`, `#[path = \"...\"]`, \
+         `#[cfg_attr(..., path = \"...\")]` and `include!(\"literal.rs\")`, and diffs the \
+         reachable set against the .rs files under that package's source directories; a finding \
+         means the compiler never parses the file, and names the nearest mounted parent module \
+         plus the exact `mod` line to add. TYPESCRIPT/JAVASCRIPT (npm, incl. pnpm/npm/yarn \
+         workspaces, discovered per package.json rather than per glob): walks static `import`, \
+         `require`, `export ... from`, and literal dynamic `import()` from declared entry points \
+         — package.json main/module/browser/types/bin/exports and the file paths named in \
+         `scripts`, string literals in root `*.config.*` files (how an rsbuild/vite entry or a \
+         vitest setup file is found without executing the config), tsconfig `files` and `paths` \
+         aliases, plus conventional roots (tests, stories, `*.d.ts`, `src/index.*`, Next.js \
+         app/pages route files); a finding means only that no static import path reaches the file \
+         — `tsc` may still type-check it via a tsconfig `include`, so no repair line is invented. \
+         Predicates are never evaluated: a cfg-gated module or a conditionally-aliased file \
+         counts as mounted. Languages with no reachability model here (Python, Go, Java, C/C++, \
+         Ruby, and the rest) are reported with status `unsupported` and a file count, never \
+         silently omitted. Per-ecosystem blind spots ride in the response; the standing ones are \
+         macro-expanded `mod`s and computed `include!` paths for Rust, and non-literal dynamic \
+         imports, non-tsconfig bundler aliases, glob imports, `.vue`/`.svelte`/`.astro` files, \
+         and HTML/CSS-only references for TypeScript. Paths listed in the workspace's \
+         `[workspace.metadata.cargo-shear] ignored-paths` are excluded.",
         json!({
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Filter findings to files under this directory path (e.g. 'src/daemon'). The whole workspace is still walked — mount status is not a per-directory question."
+                    "description": "Filter findings to files under this directory path (e.g. 'src/daemon'). The whole project is still walked — reachability is not a per-directory question."
+                },
+                "ecosystem": {
+                    "type": "string",
+                    "description": "Filter findings to one ecosystem ('rust' or 'typescript'). Every ecosystem section is still reported, so the scope of the answer stays visible."
                 },
                 "limit": {
                     "type": "number",

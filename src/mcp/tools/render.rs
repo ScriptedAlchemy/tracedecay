@@ -658,8 +658,11 @@ pub(super) fn unused_imports_md(value: &Value) -> String {
 /// Dedicated markdown renderer for `tracedecay_unmounted_files`.
 ///
 /// An empty answer here is a real and welcome verdict — "every source file is
-/// mounted" — so it is spelled out rather than left as the generic renderer's
-/// silence. When findings exist, each one leads with the repair (`add
+/// reachable" — so it is spelled out rather than left as the generic renderer's
+/// silence. The per-ecosystem section is not decoration: "unmounted" means
+/// something stronger for cargo than for a bundler, and a language nobody
+/// modelled must say so out loud rather than let a clean report imply coverage
+/// it never had. When findings exist, each one leads with the repair (`add
 /// `mod foo;` to src/daemon.rs`) because the reader's next action is an edit,
 /// not further investigation.
 pub(super) fn unmounted_files_md(value: &Value) -> String {
@@ -675,15 +678,6 @@ pub(super) fn unmounted_files_md(value: &Value) -> String {
         .and_then(Value::as_u64)
         .unwrap_or(unmounted.len() as u64);
     md.field("Unmounted file count", &count.to_string());
-    for (key, label) in [
-        ("crate_count", "Crates walked"),
-        ("scanned_file_count", "Files scanned"),
-        ("mounted_file_count", "Files mounted"),
-    ] {
-        if let Some(number) = value.get(key).and_then(Value::as_u64) {
-            md.field(label, &number.to_string());
-        }
-    }
     // A truncated list must never read as the whole finding.
     if value.get("complete").and_then(Value::as_bool) == Some(false)
         && let Some(omitted) = value.get("omitted_count").and_then(Value::as_u64)
@@ -693,11 +687,31 @@ pub(super) fn unmounted_files_md(value: &Value) -> String {
     }
     md.blank();
 
+    let ecosystems = value
+        .get("ecosystems")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    if !ecosystems.is_empty() {
+        md.heading(3, "Ecosystems");
+        for ecosystem in ecosystems {
+            render_ecosystem(&mut md, ecosystem);
+        }
+        md.blank();
+    }
+
     if unmounted.is_empty() {
-        if value.get("crate_count").and_then(Value::as_u64) == Some(0) {
-            md.empty_note("No cargo package was found; this audit covers Rust crates.");
+        let audited = ecosystems.iter().any(|ecosystem| {
+            ecosystem.get("status").and_then(Value::as_str) == Some("audited")
+        });
+        if audited {
+            md.empty_note(
+                "Every scanned source file is reachable from a declared entry point in the \
+                 ecosystems listed above.",
+            );
         } else {
-            md.empty_note("Every scanned source file is reachable from a cargo target root.");
+            md.empty_note(
+                "No package of a modelled ecosystem (cargo, npm) was found; nothing was audited.",
+            );
         }
         return md.render();
     }
@@ -708,20 +722,70 @@ pub(super) fn unmounted_files_md(value: &Value) -> String {
             .get("file")
             .and_then(Value::as_str)
             .unwrap_or("<unknown>");
-        let crate_name = entry.get("crate").and_then(Value::as_str).unwrap_or("");
-        md.bullet(&format!("**{file}** (crate `{crate_name}`)"));
-        let declaration = entry
-            .get("suggested_declaration")
-            .and_then(Value::as_str)
-            .unwrap_or("mod <module>;");
-        match entry.get("nearest_mounted_parent").and_then(Value::as_str) {
-            Some(parent) => md.line(&format!("  **Fix:** add `{declaration}` to {parent}")),
-            None => md.line(&format!(
+        let ecosystem = entry.get("ecosystem").and_then(Value::as_str).unwrap_or("");
+        let package = entry.get("package").and_then(Value::as_str).unwrap_or("");
+        md.bullet(&format!("**{file}** ({ecosystem} package `{package}`)"));
+        match (
+            entry.get("suggested_declaration").and_then(Value::as_str),
+            entry.get("nearest_mounted_parent").and_then(Value::as_str),
+        ) {
+            (Some(declaration), Some(parent)) => {
+                md.line(&format!("  **Fix:** add `{declaration}` to {parent}"))
+            }
+            (Some(declaration), None) => md.line(&format!(
                 "  **Fix:** no mounted ancestor exists; the whole branch needs a root, then `{declaration}`"
             )),
+            // No canonical repair: the file is either dead or reached through
+            // a blind spot, and naming an importer would invent one.
+            (None, _) => md.line(
+                "  **Next:** delete it, or confirm it is reached through a blind spot listed above",
+            ),
         };
     }
     md.render()
+}
+
+/// One ecosystem's line in the report, including what its verdict claims.
+fn render_ecosystem(md: &mut Md, ecosystem: &Value) {
+    let name = ecosystem
+        .get("ecosystem")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let status = ecosystem
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let number = |key: &str| ecosystem.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let findings = number("unmounted_file_count");
+    md.bullet(&format!(
+        "**{name}** — {status} · {} package(s) · {} entry point(s) · {} file(s) scanned · {findings} unmounted",
+        number("package_count"),
+        number("entry_point_count"),
+        number("scanned_file_count"),
+    ));
+    if let Some(note) = ecosystem.get("note").and_then(Value::as_str) {
+        md.line(&format!("  {note}"));
+    }
+    if status != "audited" {
+        return;
+    }
+    if let Some(verdict) = ecosystem.get("verdict").and_then(Value::as_str) {
+        md.line(&format!("  **Unmounted here means:** {verdict}"));
+    }
+    // Blind spots are what turns a finding into a judgement, so they ride with
+    // the findings rather than with the clean runs.
+    if findings == 0 {
+        return;
+    }
+    for blind_spot in ecosystem
+        .get("blind_spots")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(Value::as_str)
+    {
+        md.line(&format!("  **Blind spot:** {blind_spot}"));
+    }
 }
 
 fn render_diagnostic_record(md: &mut Md, diagnostic: &Value) {
