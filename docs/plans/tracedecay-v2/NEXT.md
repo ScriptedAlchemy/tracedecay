@@ -605,9 +605,30 @@ the commit as attribution evidence.
 - Regenerate SDK operations/types only after Work, TaskSession, terminal
   problems, source edit, retained surfaces, native topology, and automation are
   mounted and compile together.
-- Build a fresh binary and rerun supported host install/update/doctor/stock
-  journeys for Claude, Codex, Cursor agents/in-composer, Kimi, Kiro as currently
-  scoped, and opencode. Do not add Cursor Cloud or expand Kiro scope.
+- DONE 2026-08-14: supported host install/update/doctor/stock journeys rerun
+  against a fresh isolated binary (`CARGO_TARGET_DIR=/tmp/host-stock-target`,
+  `tracedecay 0.0.73+afe627324a73.dirty` after `f214e1a89`). Hermes stays the
+  earlier close (`8d9d57f2e`). CI mirrors: `scripts/claude_stock_integration.sh`
+  PASS (local Claude Code 2.1.232; CI pin 2.1.224), `claude plugin validate
+  plugin --strict` PASS, `scripts/opencode_stock_integration.sh` PASS (stock
+  OpenCode 1.18.4 matches CI; host `debug config` accepted 8 agents +
+  `duplicateAnalyzerAvoidance`; `mcp list` connected). Cursor agents/in-composer
+  (not Cloud): packaged-manifest + JSON parse PASS; default install was failing
+  closed because `embedded/extension.js` (1.15 MiB) exceeded the 1 MiB artifact
+  cap — `f214e1a89` raises it to 2 MiB; rerun installed Core+Agent+Context MCP
+  (8 agents, in-composer `mcp.json`, native extension), `update-plugin`
+  refreshed 3 components, and `tracedecay doctor` Cursor section is clean.
+  Codex: stage + stock `codex plugin add tracedecay@personal` installed/enabled
+  0.0.73; doctor Codex section clean (hooks remain host-untrusted until
+  `/hooks`). Kimi: global install stages
+  `~/.tracedecay/host-bundle-stage/kimi/tracedecay` and defers to interactive
+  `/plugins install` (in scope); `update-plugin` ok; stock `kimi doctor` PASS.
+  Kiro as scoped: typed `kiro-cli` absence (not on PATH; not expanded). Shared
+  `--local` is a typed unavailable (`project-local host lifecycle is
+  unavailable`); do not add Cursor Cloud. Remaining gaps: Kimi/Kiro doctor
+  stay silent until `~/.kimi-code` / `~/.kiro` exist; Kiro's typed absence is
+  wrapped by a secondary `StorageFailure` at
+  `host_component_registration.rs:197`.
 - Complete the default package/install/start journey. npm OIDC setup is the
   explicit remaining operator-owned publication action.
 - The npm publish WORKFLOW side is complete: `92d701086` (2026-08-07) rewired
