@@ -253,8 +253,11 @@ fn enter_test_daemon_database_scope(
     profile_root: &std::path::Path,
     label: &str,
 ) -> crate::db::DaemonDatabaseScope {
-    crate::db::enter_daemon_database_scope(profile_root, 1, label)
-        .expect("enter test daemon database scope")
+    // One election token per profile so nested fixture helpers (initialize,
+    // then a later sibling-project init) refcount the same daemon scope
+    // instead of overlapping a maintenance lease.
+    crate::db::enter_daemon_database_scope(profile_root, 1, "test-daemon")
+        .unwrap_or_else(|error| panic!("enter test daemon database scope ({label}): {error}"))
 }
 
 async fn initialize_test_project(
@@ -267,12 +270,10 @@ async fn initialize_test_project(
         "daemon test fixture initialization",
     )
     .expect("acquire fixture lifecycle authority");
-    let _database_scope = crate::db::enter_maintenance_database_scope(
-        &lifecycle,
+    let _database_scope = enter_test_daemon_database_scope(
         &client_identity.profile_root,
         "daemon test fixture initialization",
-    )
-    .expect("enter fixture maintenance database scope");
+    );
     let project = crate::tracedecay::TraceDecay::init_with_exclusive_maintenance(
         project_root,
         crate::tracedecay::TraceDecayOpenOptions {

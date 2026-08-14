@@ -486,6 +486,8 @@ async fn catalog_refresh_rejects_untrusted_ids_and_stops_at_capacity() {
 async fn daemon_refreshes_once_only_after_generation_change() {
     let profile = TempDir::new().unwrap();
     let profile_root = profile.path().join("profile");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "catalog refresh generation");
     let mut handshake = test_handshake_defaults();
     handshake.client_identity = DaemonClientIdentity {
         global_db_path: profile_root.join("global.db"),
@@ -558,6 +560,8 @@ async fn daemon_refreshes_once_only_after_generation_change() {
 async fn initialized_ack_preserves_pending_catalog_refresh_notification() {
     let profile = TempDir::new().unwrap();
     let profile_root = profile.path().join("profile");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "initialized catalog refresh ack");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let mut handshake = test_handshake_defaults();
     handshake.client_identity = DaemonClientIdentity {
