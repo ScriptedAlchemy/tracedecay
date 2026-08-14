@@ -46,6 +46,7 @@ Per repository policy, each implemented-but-unmounted item below must be wired
 to a real production caller or deleted.
 
 | ID | Rank | Consolidated item | Evidence and witness verdicts |
+| A22 | OWNER-DESIGN | Noncooperative authoritative-effect task retention | Added 2026-08-14 (settlement wave): a permanently noncooperative authoritative effect now correctly returns typed `ResetRequired` after the response grace, but its detached task remains unjoined; safely retaining/joining that task needs explicit owner design (settlement agent's architectural handoff — see dispatch settlement commits `232ed9411`…`f5f255818`). |
 | A21 | RC-BLOCKING | Advisory host-delivery consume path | Added post-consolidation (hawk rerun triage, 2026-08-14): `crates/tracedecay-usecases/src/advisory/host_delivery.rs` delivery/consume/hook-notice surface is registered at daemon startup (`src/daemon/service/invocation/registrars.rs`) but the production call site uses only `.runtime().run_once()`; the consume/deliver half has zero production callers. Wire the delivery consumption or retire that half. |
 |---|---|---|---|
 | A1 | RC-BLOCKING | Generalized external-source acquisition, canonical refetch, correction, and tombstone production | Host-observation specialization is mounted, but `GitHubExternalSourceAcquisitionV1` and the generalized owner remain uncalled (`crates/tracedecay-usecases/src/external_source_github.rs:213-425`; `external_source_acquisition.rs:341-510`). Plans 02 and 03 independently verdict this `IMPLEMENTED-UNMOUNTED`. |
