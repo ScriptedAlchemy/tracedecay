@@ -751,10 +751,38 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         servers,
     )
     .await;
-    let _ = resources
+    match resources
         .store_administration
-        .close_session_relation_graphs()
-        .await;
+        .prepare_memory_graph_reconciliation_shutdown()
+        .await
+    {
+        Ok(owner) => {
+            owner.cancel();
+            if let Err(error) = resources
+                .store_administration
+                .close_session_relation_graphs()
+                .await
+            {
+                tracing::warn!(
+                    event = "production_harness_graph_shutdown_failed",
+                    error = %error,
+                    "production-composition graph runtimes did not close cleanly"
+                );
+            }
+            if let Err(error) = owner.shutdown().await {
+                tracing::warn!(
+                    event = "production_harness_graph_shutdown_failed",
+                    error = %error,
+                    "production-composition graph reconciliation tasks did not stop cleanly"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            event = "production_harness_graph_shutdown_failed",
+            error = %error,
+            "production-composition graph shutdown owner was unavailable"
+        ),
+    }
     drop(resources);
 }
 
