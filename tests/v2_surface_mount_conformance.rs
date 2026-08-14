@@ -205,10 +205,7 @@ impl MountFixture {
                 .current_dir(&project),
             "git init",
         );
-        run_ok(
-            isolated_command(&home).arg("init").current_dir(&project),
-            "tracedecay init",
-        );
+        common::initialize_tracedecay_cli_project(&home, &project);
 
         let daemon = common::spawn_tracedecay_daemon(&home);
         let authority = wait_for_http_authority(&common::daemon_authority_path(&profile));

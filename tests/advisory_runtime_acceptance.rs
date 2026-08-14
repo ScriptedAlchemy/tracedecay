@@ -947,16 +947,7 @@ async fn packaged_host_ingest_delivers_a_registered_advisory_cycle() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let init = common::tracedecay_command_with_home(environment.home())
-        .arg("init")
-        .current_dir(&project)
-        .output()
-        .expect("initialize production project");
-    assert!(
-        init.status.success(),
-        "tracedecay init failed: {}",
-        String::from_utf8_lossy(&init.stderr)
-    );
+    common::initialize_tracedecay_cli_project(environment.home(), &project);
     let _daemon = common::spawn_tracedecay_daemon(environment.home());
     let transcript = project.join("cursor-proximity.jsonl");
     std::fs::write(

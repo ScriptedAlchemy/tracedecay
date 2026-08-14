@@ -70,18 +70,7 @@ fn initialize_project(home: &Path, project: &Path, marker: &str) {
         .output()
         .expect("initialize fixture git repository");
     assert!(git.status.success(), "git init failed: {git:?}");
-    let init = tracedecay_command_with_home(home)
-        .arg("init")
-        .current_dir(project)
-        .stdin(Stdio::null())
-        .output()
-        .expect("initialize TraceDecay project");
-    assert!(
-        init.status.success(),
-        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init.stdout),
-        String::from_utf8_lossy(&init.stderr)
-    );
+    crate::common::initialize_tracedecay_cli_project(home, project);
 }
 
 /// Tampers an already-initialized project's unified graph/memory SQLite store

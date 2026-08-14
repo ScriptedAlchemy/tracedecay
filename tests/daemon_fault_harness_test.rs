@@ -335,16 +335,7 @@ async fn assert_daemon_crash_stage(
     .unwrap();
     std::fs::create_dir_all(&general_chat).unwrap();
 
-    let init = tracedecay_command_with_home(home.path())
-        .arg("init")
-        .current_dir(project.path())
-        .output()
-        .unwrap();
-    assert!(
-        init.status.success(),
-        "fixture init failed: {}",
-        String::from_utf8_lossy(&init.stderr)
-    );
+    crate::common::initialize_tracedecay_cli_project(home.path(), project.path());
 
     let barrier_dir = home.path().join("observation-persist-barrier");
     std::fs::create_dir_all(&barrier_dir).unwrap();

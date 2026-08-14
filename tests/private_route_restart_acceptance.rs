@@ -20,18 +20,7 @@ fn initialize_project(home: &Path, project: &Path, marker: &str) {
         .output()
         .expect("initialize fixture git repository");
     assert!(git.status.success(), "git init failed: {git:?}");
-    let initialized = common::tracedecay_command_with_home(home)
-        .arg("init")
-        .current_dir(project)
-        .stdin(Stdio::null())
-        .output()
-        .expect("initialize TraceDecay project");
-    assert!(
-        initialized.status.success(),
-        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&initialized.stdout),
-        String::from_utf8_lossy(&initialized.stderr)
-    );
+    common::initialize_tracedecay_cli_project(home, project);
 }
 
 fn admitted_project_id(home: &Path, project: &Path) -> String {

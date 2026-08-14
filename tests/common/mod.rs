@@ -679,9 +679,67 @@ pub fn tracedecay_command_with_home(home: &Path) -> Command {
     command
 }
 
+/// Starts the isolated test daemon if needed, then builds a `tracedecay init` command.
+///
+/// CLI project initialization requires the daemon-owned code-index scheduler.
+/// Suites that must prove daemon absence should keep using
+/// [`tracedecay_command_with_home`] without this helper.
+pub fn tracedecay_init_command_with_home(home: &Path) -> Command {
+    ensure_tracedecay_daemon(home);
+    let mut command = tracedecay_command_with_home(home);
+    command.arg("init");
+    command
+}
+
+/// Runs `tracedecay init` against `project` after starting the isolated test daemon.
+pub fn initialize_tracedecay_cli_project(home: &Path, project: &Path) {
+    let output = tracedecay_init_command_with_home(home)
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("tracedecay init should run");
+    assert!(
+        output.status.success(),
+        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 thread_local! {
     static TEST_DAEMONS: std::cell::RefCell<std::collections::HashMap<PathBuf, DaemonProcess>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn take_managed_daemon(home: &Path) -> Option<DaemonProcess> {
+    TEST_DAEMONS.with(|daemons| {
+        let mut daemons = daemons.borrow_mut();
+        daemons.retain(|existing_home, daemon| existing_home == &home && daemon.is_running());
+        daemons.remove(home)
+    })
+}
+
+fn daemon_is_connectable(home: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(daemon_socket_path(home)).is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let authority_path =
+            daemon_authority_path(&canonical_existing_path(home).join(".tracedecay"));
+        std::fs::read(&authority_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|record| {
+                (record["endpoint"]["kind"] == "loopback")
+                    .then(|| record["endpoint"]["address"].as_str().map(str::to_owned))
+                    .flatten()
+            })
+            .is_some_and(|address| TcpStream::connect(address).is_ok())
+    }
 }
 
 /// Keeps one managed daemon alive for the current test thread and profile.
@@ -689,15 +747,19 @@ thread_local! {
 /// Nextest runs each test in its own process, while the standard test harness
 /// runs each test on a dedicated thread. Thread-local ownership therefore
 /// keeps command factories concise without leaking daemon children across
-/// otherwise unrelated tests.
+/// otherwise unrelated tests. An already-connectable socket (an explicitly
+/// spawned daemon) is left in place so spawn-then-init journeys keep working.
 pub fn ensure_tracedecay_daemon(home: &Path) {
     let home = canonical_existing_path(home);
+    if daemon_is_connectable(&home) {
+        return;
+    }
     TEST_DAEMONS.with(|daemons| {
         let mut daemons = daemons.borrow_mut();
         daemons.retain(|existing_home, daemon| existing_home == &home && daemon.is_running());
         daemons
             .entry(home.clone())
-            .or_insert_with(|| spawn_tracedecay_daemon(&home));
+            .or_insert_with(|| spawn_tracedecay_daemon_process(&home, |_| {}));
     });
 }
 
@@ -732,7 +794,11 @@ pub fn daemon_authority_path(profile_root: &Path) -> PathBuf {
 }
 
 pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
-    spawn_tracedecay_daemon_with(home, |_| {})
+    let home = canonical_existing_path(home);
+    if let Some(daemon) = take_managed_daemon(&home) {
+        return daemon;
+    }
+    spawn_tracedecay_daemon_process(&home, |_| {})
 }
 
 /// Spawns a test daemon after applying caller-supplied command customization.
@@ -740,7 +806,18 @@ pub fn spawn_tracedecay_daemon(home: &Path) -> DaemonProcess {
 /// The callback runs after the standard test environment, arguments, working
 /// directory, and stdio have been installed, so fault tests can override or
 /// extend them without duplicating daemon startup and readiness handling.
+/// A daemon previously started by [`ensure_tracedecay_daemon`] is stopped first
+/// so the customized process can bind the same isolated socket.
 pub fn spawn_tracedecay_daemon_with(
+    home: &Path,
+    configure: impl FnOnce(&mut Command),
+) -> DaemonProcess {
+    let home = canonical_existing_path(home);
+    drop(take_managed_daemon(&home));
+    spawn_tracedecay_daemon_process(&home, configure)
+}
+
+fn spawn_tracedecay_daemon_process(
     home: &Path,
     configure: impl FnOnce(&mut Command),
 ) -> DaemonProcess {

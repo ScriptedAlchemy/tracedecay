@@ -68,14 +68,7 @@ fn init_project(home: &Path, project: &Path) {
     std::fs::create_dir_all(project.join("src")).expect("create project source");
     std::fs::write(project.join("src/lib.rs"), "pub fn marker() {}\n")
         .expect("write project source");
-    let mut command = tracedecay_command_with_home(home);
-    command.arg("init").current_dir(project);
-    let result = run_command_with_timeout(command, CHILD_TIMEOUT);
-    assert!(
-        !result.killed_by_harness && result.output.status.success(),
-        "tracedecay init failed or hung: {}",
-        String::from_utf8_lossy(&result.output.stderr)
-    );
+    crate::common::initialize_tracedecay_cli_project(home, project);
 }
 
 fn tool_command(home: &Path, project: &Path, socket: &Path, query: &str) -> Command {

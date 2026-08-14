@@ -111,17 +111,7 @@ async fn codex_post_compact_hook_commits_app_server_summary_through_daemon_effec
     // first, then daemon enrollment mounts the already-initialized layout
     // (the canonical enrollment composition itself creates the project graph
     // database, so init must come first — as it does in a real install).
-    let init = tracedecay_command_with_home(&home)
-        .arg("init")
-        .current_dir(&project)
-        .output()
-        .expect("initialize codex compaction project");
-    assert!(
-        init.status.success(),
-        "fixture init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init.stdout),
-        String::from_utf8_lossy(&init.stderr)
-    );
+    crate::common::initialize_tracedecay_cli_project(&home, &project);
     let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
         .await
         .unwrap();

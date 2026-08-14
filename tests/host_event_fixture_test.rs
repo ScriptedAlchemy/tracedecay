@@ -84,17 +84,7 @@ async fn native_host_event_fixtures_execute_provider_admission_paths() {
     let _data_dir = EnvVarGuard::set(tracedecay::config::USER_DATA_DIR_ENV, &data_root);
     let boundary_project = initialize_boundary_project(&home);
     let _daemon = spawn_tracedecay_daemon(&home);
-    let init = tracedecay_command_with_home(&home)
-        .arg("init")
-        .current_dir(&boundary_project)
-        .output()
-        .expect("initialize host event fixture project");
-    assert!(
-        init.status.success(),
-        "host event fixture init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&init.stdout),
-        String::from_utf8_lossy(&init.stderr)
-    );
+    crate::common::initialize_tracedecay_cli_project(&home, &boundary_project);
     let transcript_path = write_claude_boundary_transcript(&home, &boundary_project);
     let unavailable = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
 

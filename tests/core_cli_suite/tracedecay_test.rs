@@ -4,7 +4,7 @@
 use std::{
     fs,
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -26,20 +26,7 @@ fn init_daemon_project(project: &Path, home: &Path, source: &str) {
         String::from_utf8_lossy(&git.stderr)
     );
 
-    let output = tracedecay_command_with_home(home)
-        .arg("init")
-        .current_dir(project)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay init should run");
-    assert!(
-        output.status.success(),
-        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
+    crate::common::initialize_tracedecay_cli_project(home, project);
 }
 
 fn run_tool(project: &Path, home: &Path, args: &[&str]) -> std::process::Output {

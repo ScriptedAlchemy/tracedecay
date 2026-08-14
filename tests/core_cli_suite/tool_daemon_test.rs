@@ -255,20 +255,7 @@ fn init_project_with_cli(home: &Path, project: &Path) {
     )
     .unwrap();
 
-    let output = tracedecay_command_with_home(home)
-        .arg("init")
-        .current_dir(project)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay init should run");
-    assert!(
-        output.status.success(),
-        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    crate::common::initialize_tracedecay_cli_project(home, project);
 }
 
 fn git(project: &Path, args: &[&str]) {
@@ -1591,20 +1578,7 @@ fn daemon_project_handshake_uses_registry_backed_profile_store_without_marker() 
     )
     .unwrap();
 
-    let output = tracedecay_command_with_home(&client_home_path)
-        .arg("init")
-        .current_dir(&project_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("tracedecay init should run");
-    assert!(
-        output.status.success(),
-        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    crate::common::initialize_tracedecay_cli_project(&client_home_path, &project_path);
     std::fs::remove_dir_all(project_path.join(".tracedecay")).unwrap();
 
     let _daemon = spawn_tracedecay_daemon(&daemon_home_path);

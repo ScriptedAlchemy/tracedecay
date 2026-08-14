@@ -401,13 +401,7 @@ fn initialize_project(home: &Path, project: &Path) {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/managed_run_overlay"),
         project,
     );
-    let output = common::tracedecay_command_with_home(home)
-        .arg("init")
-        .current_dir(project)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run tracedecay init");
-    assert_command_success("tracedecay init", &output);
+    common::initialize_tracedecay_cli_project(home, project);
 }
 
 fn copy_dir(source: &Path, destination: &Path) {

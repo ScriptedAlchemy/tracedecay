@@ -59,18 +59,7 @@ fn init_indexed_git_project(home: &Path, project: &Path) {
     git(project, &["add", "."]);
     git(project, &["commit", "-m", "initial"]);
 
-    let output = tracedecay_command_with_home(home)
-        .arg("init")
-        .current_dir(project)
-        .stdin(Stdio::null())
-        .output()
-        .expect("tracedecay init should run");
-    assert!(
-        output.status.success(),
-        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    crate::common::initialize_tracedecay_cli_project(home, project);
 }
 
 struct SurfaceOutcome {
