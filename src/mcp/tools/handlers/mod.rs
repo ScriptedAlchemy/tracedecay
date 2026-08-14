@@ -155,6 +155,7 @@ use tracedecay_tool_catalog::{ProfileId, SurfaceOperationName};
 
 use super::binding::{
     McpToolDispatchGroup, dispatch_group_for_tool, tool_accepts_registered_project_selector,
+    tool_is_selector_bound_effect,
 };
 use super::{LegacyToolCompatibilityOwner, ToolResult};
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
@@ -462,6 +463,7 @@ pub fn handle_tool_call_with_registry_options<'a>(
             });
         }
         if tool_accepts_registered_project_selector(tool_name)
+            && !tool_is_selector_bound_effect(tool_name)
             && crate::mcp::project_route::arguments_have_project_selector(&args)
             && options.resolved_project_route.is_none()
         {

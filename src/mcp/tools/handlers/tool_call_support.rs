@@ -11,7 +11,9 @@ use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
 
 use super::super::ToolResult;
-use super::super::binding::tool_accepts_registered_project_selector;
+use super::super::binding::{
+    tool_accepts_registered_project_selector, tool_is_selector_bound_effect,
+};
 use super::super::render;
 use super::support;
 use super::support::registered_project_context;
@@ -51,7 +53,9 @@ pub(crate) async fn resolve_registered_project_route_for_tool(
     global_db: Option<&RegisteredGlobalDb>,
     resolver: Option<crate::mcp::server::RetainedProjectServerResolver>,
 ) -> Result<Option<crate::mcp::project_route::ResolvedProjectRoute>> {
-    if !tool_accepts_registered_project_selector(&tool_name) {
+    if !tool_accepts_registered_project_selector(&tool_name)
+        || tool_is_selector_bound_effect(&tool_name)
+    {
         return Ok(None);
     }
     let semantic_top_level_fields = match tool_name.as_str() {

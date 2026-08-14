@@ -315,6 +315,16 @@ pub(crate) fn tool_dispatches_registered_project_reader(tool_name: &str) -> bool
     )
 }
 
+/// Selector-bound effects accept a project selector but must not open the
+/// selected project's store. The calling session stays admitted; the retained
+/// owner denies a foreign selector as `NotFoundOrNotAuthorized`.
+pub(super) fn tool_is_selector_bound_effect(tool_name: &str) -> bool {
+    matches!(
+        binding(tool_name).map(|binding| binding.project),
+        Some(RegisteredProjectAccess::SelectorOnly)
+    ) && direct_effect(tool_name).is_effect()
+}
+
 fn direct_effect(tool_name: &str) -> EffectClass {
     match tool_name {
         "tracedecay_multi_root_scope_set_compare_and_swap"
@@ -932,6 +942,26 @@ mod tests {
         ] {
             assert!(tool_accepts_registered_project_selector(tool_name));
             assert!(!tool_dispatches_registered_project_reader(tool_name));
+        }
+        for tool_name in [
+            "tracedecay_fact_store_add",
+            "tracedecay_fact_store_update",
+            "tracedecay_fact_store_remove",
+        ] {
+            assert!(
+                tool_is_selector_bound_effect(tool_name),
+                "{tool_name} must stay selector-bound so writes are not dispatched into the selected store"
+            );
+        }
+        for tool_name in [
+            "tracedecay_fact_store_search",
+            "tracedecay_fact_store_get",
+            "tracedecay_memory_status",
+        ] {
+            assert!(
+                !tool_is_selector_bound_effect(tool_name),
+                "{tool_name} is a selector-bound read and must keep its existing selected-project route"
+            );
         }
     }
 
