@@ -2678,8 +2678,11 @@ fn publish_corpus_with_scale(
         repository: id::<RepositoryId>("repository.candidate.fixture")?,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         policy_revision: id::<PolicyRevisionId>("policy.candidate.v1")?,
-        chunker_revision: id::<ChunkerRevision>("chunker.candidate.v2")?,
-        privacy_domain: id::<PrivacyDomainId>("privacy.candidate.fixture")?,
+        // Must match the daemon production code-index projection identity so
+        // evaluate-and-publish can activate the same embedding projection the
+        // mounted journey pins (`chunker.daemon.v2` / `privacy.local-code-index`).
+        chunker_revision: id::<ChunkerRevision>("chunker.daemon.v2")?,
+        privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
         privacy_key_epoch: 1,
         max_snapshot_age_micros: None,
     };
@@ -3241,7 +3244,7 @@ fn retrieval_request(
     Ok(RetrievalRequest {
         principal: id::<PrincipalId>("principal.candidate")?,
         scope: RetrievalScope {
-            privacy_domain: id("privacy.candidate.fixture")?,
+            privacy_domain: id("privacy.local-code-index")?,
             root: SingleRootScopeV1 {
                 repository: id("repository.candidate.fixture")?,
                 worktree: None,

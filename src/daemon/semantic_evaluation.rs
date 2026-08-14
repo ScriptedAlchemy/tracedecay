@@ -384,6 +384,21 @@ impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
     }
 }
 
+fn semantic_projection_pin_mismatch(
+    prepared: &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
+    pinned: &tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
+) -> CandidateOutputError {
+    let prepared = prepared.embedding_key();
+    let pinned = pinned.embedding_key();
+    CandidateOutputError::Contract(format!(
+        "semantic resource projection does not match candidate pins: prepared chunker={} privacy={}; pinned chunker={} privacy={}",
+        prepared.chunker_revision,
+        prepared.privacy_domain,
+        pinned.chunker_revision,
+        pinned.privacy_domain,
+    ))
+}
+
 impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationSnapshotAuthorityV1 {
     fn with_query_inputs(
         &self,
@@ -434,9 +449,9 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 )
                 .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
             if generation.projection() != &required.projection {
-                return Err(CandidateOutputError::Contract(
-                    "semantic evaluator artifact/projection does not match the candidate pins"
-                        .to_owned(),
+                return Err(semantic_projection_pin_mismatch(
+                    generation.projection(),
+                    &required.projection,
                 ));
             }
             prepared.insert(context.code_generation.clone(), Arc::new(generation));
@@ -447,9 +462,9 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             )
         })?;
         if generation.projection() != &required.projection {
-            return Err(CandidateOutputError::Contract(
-                "cached semantic evaluator projection no longer matches the candidate pins"
-                    .to_owned(),
+            return Err(semantic_projection_pin_mismatch(
+                generation.projection(),
+                &required.projection,
             ));
         }
         let rerank_authority = self
@@ -502,8 +517,9 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                     )
                     .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
                 if generation.projection() != &required.projection {
-                    return Err(CandidateOutputError::Contract(
-                        "semantic resource projection does not match candidate pins".to_owned(),
+                    return Err(semantic_projection_pin_mismatch(
+                        generation.projection(),
+                        &required.projection,
                     ));
                 }
                 prepared.insert(context.code_generation.clone(), Arc::new(generation));
