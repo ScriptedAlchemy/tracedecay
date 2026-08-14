@@ -88,7 +88,7 @@ impl TryFrom<&str> for PrivacyDomainBoundLocatorDigest {
 /// }
 /// ```
 /// Compatibility-only target shape for the V1 research-manifest wire format.
-/// New authoritative anchors use `RetrievalAnchorTarget`.
+/// New authoritative anchors use `RetrievalAnchorTargetV3`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct SanitizedOutputDigest(ManifestDigest);

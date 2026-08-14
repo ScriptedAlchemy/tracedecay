@@ -296,8 +296,6 @@ pub enum RetrievalAnchorTargetV3 {
     RetrieverContribution(RetrieverContributionIdV1),
 }
 
-pub type RetrievalAnchorTarget = RetrievalAnchorTargetV3;
-
 impl RetrievalAnchorTargetV3 {
     pub fn validate(&self) -> Result<(), DomainError> {
         if let Some(legacy) = self.as_v2() {
@@ -737,20 +735,12 @@ impl AnchorLineageRefV3 {
         self.source_ordinal
     }
 
-    pub const fn relation(&self) -> AnchorProvenanceRelationV2 {
-        self.relation
-    }
-
     pub fn anchor_id(&self) -> &RetrievalAnchorId {
         &self.anchor_id
     }
 
     pub fn owner(&self) -> &AnchorOwnerBindingV1 {
         &self.owner
-    }
-
-    pub fn privacy_domain_id(&self) -> &PrivacyDomainId {
-        self.owner.privacy_domain_id()
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -1149,83 +1139,12 @@ impl RetrievalAnchorRecordV3 {
         &self.owner
     }
 
-    pub fn aliases(&self) -> &[NativeAliasV2] {
-        &self.aliases
-    }
-
-    pub fn occurred_at(&self) -> Option<TimeInterval> {
-        self.occurred_at
-    }
-
-    pub fn ingested_at(&self) -> UtcMicros {
-        self.ingested_at
-    }
-
-    /// V3 owner/privacy binding is immutable; the local ingest clock is not.
-    /// Exact re-observation may therefore replay one anchor under a later
-    /// materialization timestamp while every authority-bearing field remains
-    /// byte-equivalent.
-    pub fn is_semantic_replay_of(&self, other: &Self) -> bool {
-        self.anchor_id == other.anchor_id
-            && self.target == other.target
-            && self.owner == other.owner
-            && self.aliases == other.aliases
-            && self.occurred_at == other.occurred_at
-            && self.evidence_class == other.evidence_class
-            && self.source_generation == other.source_generation
-            && self.projection_generation == other.projection_generation
-            && self.projection_watermark == other.projection_watermark
-            && self.coverage == other.coverage
-            && self.source_observations == other.source_observations
-            && self.source_anchors == other.source_anchors
-            && self.authorization == other.authorization
-            && self.payload_access == other.payload_access
-            && self.retention_class == other.retention_class
-            && self.durability == other.durability
-    }
-
-    pub fn evidence_class(&self) -> EvidenceClass {
-        self.evidence_class
-    }
-
-    pub fn source_generation(&self) -> &AnchorSourceGenerationV3 {
-        &self.source_generation
-    }
-
     pub fn projection_generation(&self) -> &ProjectionGenerationId {
         &self.projection_generation
     }
 
-    pub fn projection_watermark(&self) -> &VectorWatermark {
-        &self.projection_watermark
-    }
-
-    pub fn coverage(&self) -> &CoverageReportV1 {
-        &self.coverage
-    }
-
-    pub fn source_observations(&self) -> &[CanonicalObservationIdV1] {
-        &self.source_observations
-    }
-
     pub fn source_anchors(&self) -> &[AnchorLineageRefV3] {
         &self.source_anchors
-    }
-
-    pub fn authorization(&self) -> &ResolutionAuthorizationV1 {
-        &self.authorization
-    }
-
-    pub fn payload_access(&self) -> PayloadAccessState {
-        self.payload_access
-    }
-
-    pub fn retention_class(&self) -> &RetentionClass {
-        &self.retention_class
-    }
-
-    pub fn durability(&self) -> &AnchorDurabilityClass {
-        &self.durability
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
@@ -1348,28 +1267,6 @@ pub fn derive_exact_source_occurrence_anchor_id(
     derive_v3_anchor_id(
         owner,
         &RetrievalAnchorTargetV3::ExactSourceOccurrence(occurrence_id.clone()),
-    )
-}
-
-/// Derive the canonical public anchor for one immutable evidence span.
-pub fn derive_exact_evidence_span_anchor_id(
-    owner: &AnchorOwnerBindingV1,
-    span_id: &EvidenceSpanIdV1,
-) -> Result<RetrievalAnchorId, DomainError> {
-    derive_v3_anchor_id(
-        owner,
-        &RetrievalAnchorTargetV3::ExactEvidenceSpan(span_id.clone()),
-    )
-}
-
-/// Derive the canonical public anchor for one retriever contribution.
-pub fn derive_retriever_contribution_anchor_id(
-    owner: &AnchorOwnerBindingV1,
-    contribution_id: &RetrieverContributionIdV1,
-) -> Result<RetrievalAnchorId, DomainError> {
-    derive_v3_anchor_id(
-        owner,
-        &RetrievalAnchorTargetV3::RetrieverContribution(contribution_id.clone()),
     )
 }
 
@@ -1538,19 +1435,6 @@ fn derive_v3_anchor_id(
         target,
     })?;
     RetrievalAnchorId::new(format!("retrieval.v3.{}", digest.as_str()))
-}
-
-/// Derives the exact profile/project/privacy-bound identity for a Git topology
-/// target before publication. Callers still must publish and resolve the full
-/// V3 record through the canonical retrieval-anchor authority.
-pub fn derive_git_topology_anchor_id_v3(
-    owner: &AnchorOwnerBindingV1,
-    target: &GitTopologyAnchorTargetV1,
-) -> Result<RetrievalAnchorId, DomainError> {
-    derive_v3_anchor_id(
-        owner,
-        &RetrievalAnchorTargetV3::GitTopology(Box::new(target.clone())),
-    )
 }
 
 fn validate_owner(owner: &ObservationScopeV1) -> Result<(), DomainError> {
