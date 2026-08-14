@@ -1546,10 +1546,10 @@ fn daemon_first_touch_uses_registered_runtime_without_rewriting_legacy_config() 
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("Fact Store"),
-        "registered runtime should execute the requested tool\nstdout:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        stdout.contains("Status: `success`") && stdout.contains("fact_store_add"),
+        "registered runtime should execute the requested tool\nstdout:\n{stdout}"
     );
     assert_eq!(
         std::fs::read_to_string(config_path).unwrap(),
