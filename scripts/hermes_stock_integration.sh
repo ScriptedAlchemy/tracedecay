@@ -114,12 +114,18 @@ main() {
     git -C "$project" -c user.email=ci@tracedecay -c user.name=ci commit -qm init
 
     # Installation must precede the sole-owner daemon. Keep every user/profile
-    # path inside the throwaway HOME.
+    # path inside the throwaway HOME. `which_tracedecay()` prefers a PATH
+    # install over a cargo-target current_exe when CARGO_TARGET_DIR is set, so
+    # isolate PATH and drop that var or the generated plugin stamps the
+    # operator binary (the eight-check stale-binary failure mode).
+    export PATH="$(dirname "$tracedecay_bin"):$PATH"
     echo "== tracedecay install --agent hermes"
     HOME="$fake_home" \
         HERMES_HOME="$hermes_home" \
         TRACEDECAY_DATA_DIR="$profile" \
         TRACEDECAY_DAEMON_SOCKET="$socket" \
+        TRACEDECAY_BIN="$tracedecay_bin" \
+        env -u CARGO_TARGET_DIR \
         "$tracedecay_bin" install --agent hermes
     test -f "$hermes_home/plugins/tracedecay/plugin.yaml"
 
@@ -129,6 +135,7 @@ main() {
         TRACEDECAY_BIN="$tracedecay_bin" \
         HERMES_UPSTREAM_DIR="$hermes_upstream_dir" \
         HERMES_VENV="$hermes_venv" \
+        env -u CARGO_TARGET_DIR \
         "$DAEMON_HARNESS" --bin "$tracedecay_bin" --ready-timeout 30 \
         --lifecycle-label "temporary tracedecay daemon" -- \
         "$SCRIPT_PATH" --run "$project"

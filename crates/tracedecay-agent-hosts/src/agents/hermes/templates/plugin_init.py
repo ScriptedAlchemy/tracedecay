@@ -115,11 +115,37 @@ MEMORY_ACTION_DESCRIPTIONS = {
     "fact_list": "List holographic memory facts.",
 }
 
-MEMORY_TOOL_MAP = {"fact_store": {"tracedecay_name": "tracedecay_fact_store"}}
+FACT_STORE_EXACT_ROUTES = {
+    "add": "tracedecay_fact_store_add",
+    "search": "tracedecay_fact_store_search",
+    "probe": "tracedecay_fact_store_probe",
+    "related": "tracedecay_fact_store_related",
+    "reason": "tracedecay_fact_store_reason",
+    "contradict": "tracedecay_fact_store_contradict",
+    "get": "tracedecay_fact_store_get",
+    "update": "tracedecay_fact_store_update",
+    "remove": "tracedecay_fact_store_remove",
+    "list": "tracedecay_fact_store_list",
+    "curate": "tracedecay_fact_store_curate",
+}
+READ_ONLY_FACT_STORE_ROUTES = frozenset(
+    FACT_STORE_EXACT_ROUTES[action]
+    for action in (
+        "search",
+        "probe",
+        "related",
+        "reason",
+        "contradict",
+        "get",
+        "list",
+    )
+)
+
+MEMORY_TOOL_MAP = {"fact_store": {"resolve_action": True}}
 for _hermes_name, _action in MEMORY_FACT_ACTIONS.items():
     MEMORY_TOOL_MAP[_hermes_name] = {
-        "tracedecay_name": "tracedecay_fact_store",
-        "fixed_args": {"action": _action},
+        "tracedecay_name": FACT_STORE_EXACT_ROUTES[_action],
+        "legacy_alias": True,
     }
 MEMORY_TOOL_MAP["fact_feedback"] = {"tracedecay_name": "tracedecay_fact_feedback"}
 MEMORY_TOOL_MAP["memory_status"] = {"tracedecay_name": "tracedecay_memory_status"}
@@ -370,10 +396,17 @@ LCM_PROVIDER_LOCAL_TOOL_NAMES = frozenset((
 # exposed twice per API call. tracedecay_message_search stays registered —
 # the provider does not expose transcript search.
 MEMORY_PROVIDER_TOOLS = frozenset((
-    "tracedecay_fact_store",
+    *FACT_STORE_EXACT_ROUTES.values(),
     "tracedecay_fact_feedback",
     "tracedecay_memory_status",
 ))
+
+
+def _is_memory_provider_tool(name: str) -> bool:
+    return name.startswith("tracedecay_fact_store") or name in (
+        "tracedecay_fact_feedback",
+        "tracedecay_memory_status",
+    )
 
 # Tool names successfully registered with this host. Consulted by the
 # first-turn guidance nudge so it never advertises tools that are not
@@ -651,16 +684,20 @@ def _tracedecay_status(raw_args: str = "", hermes_home=None):
     if not isinstance(payload, dict) or payload.get("error"):
         return raw
     lines = ["tracedecay status:"]
-    for label, key in (
-        ("project", "project_root"),
-        ("files", "file_count"),
-        ("nodes", "node_count"),
-        ("edges", "edge_count"),
-        ("branch", "branch"),
-        ("db", "db_path"),
-        ("last sync", "last_sync"),
+    freshness = payload.get("code_index_freshness")
+    freshness_status = (
+        freshness.get("status") if isinstance(freshness, dict) else None
+    )
+    for label, value in (
+        ("project", payload.get("project_root")),
+        ("files", payload.get("file_count")),
+        ("nodes", payload.get("node_count")),
+        ("edges", payload.get("edge_count")),
+        ("branch", payload.get("active_branch") or payload.get("branch")),
+        ("index", freshness_status),
+        ("db", payload.get("db_path")),
+        ("last sync", payload.get("last_sync")),
     ):
-        value = payload.get(key)
         if value not in (None, ""):
             lines.append(f"  {label}: {value}")
     if len(lines) == 1:
@@ -890,6 +927,37 @@ def _memory_schema(tracedecay_name: str, hermes_name: str, action: str = None) -
         "parameters": {"type": "object", "properties": {}},
     }
 
+
+def _collapsed_fact_store_schema() -> dict:
+    """Hermes-facing fact_store(action=...) built from the exact-route catalog."""
+    properties = {
+        "action": {
+            "type": "string",
+            "enum": sorted(FACT_STORE_EXACT_ROUTES),
+            "description": "Exact fact-store operation to invoke.",
+        }
+    }
+    for tracedecay_name in FACT_STORE_EXACT_ROUTES.values():
+        for schema in schemas.TOOL_SCHEMAS:
+            if schema.get("name") != tracedecay_name:
+                continue
+            params = schema.get("parameters") or {}
+            for key, value in (params.get("properties") or {}).items():
+                if key not in properties:
+                    properties[key] = value
+    return {
+        "name": "fact_store",
+        "description": (
+            "Holographic memory fact store. Set action to select an exact route "
+            "(add, search, list, and the other catalog operations)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": ["action"],
+        },
+    }
+
 def _agent_visible_schema(schema: dict) -> dict:
     """Hide routing fields selected by the Hermes session integration."""
     visible = json.loads(json.dumps(schema))
@@ -1113,11 +1181,9 @@ def _project_selector_path(selector):
     return selector.get("path") or selector.get("project_path")
 
 def _read_only_selector_call(name, args):
-    if name in _READ_ONLY_SELECTOR_TOOLS:
+    if name in _READ_ONLY_SELECTOR_TOOLS or name in READ_ONLY_FACT_STORE_ROUTES:
         return True
-    return name == "tracedecay_fact_store" and str(args.get("action") or "") in (
-        "search", "probe", "related", "reason", "contradict", "list"
-    )
+    return False
 
 def _make_project_safe_handler(name, handler, hermes_home):
     def safe_handler(args, **kwargs):
@@ -1191,11 +1257,7 @@ def _make_project_safe_handler(name, handler, hermes_home):
         if name.startswith("tracedecay_lcm_"):
             tool_args.setdefault("storage_scope", "user")
             return handler(tool_args, **routed_kwargs)
-        if name in (
-            "tracedecay_fact_store",
-            "tracedecay_fact_feedback",
-            "tracedecay_memory_status",
-        ):
+        if _is_memory_provider_tool(name):
             tool_args.setdefault("memory_scope", "user")
             return handler(tool_args, **routed_kwargs)
         if name == "tracedecay_message_search":
@@ -2442,13 +2504,12 @@ class TracedecayMemoryProvider(MemoryProvider):
         for scope in scopes:
             try:
                 args = {
-                    "action": "search",
                     "query": text[:512],
                     "limit": 3,
                     "memory_scope": scope,
                 }
                 payload = call_tracedecay_json(
-                    "tracedecay_fact_store",
+                    "tracedecay_fact_store_search",
                     args,
                     **_project_call_kwargs(self.project_root if scope == "project" else None),
                 )
@@ -2460,7 +2521,12 @@ class TracedecayMemoryProvider(MemoryProvider):
         lines = []
         seen_content = set()
         for scope, payload in payloads:
-            facts = payload.get("facts") or payload.get("results") or []
+            facts = (
+                payload.get("hits")
+                or payload.get("facts")
+                or payload.get("results")
+                or []
+            )
             for item in facts:
                 if not isinstance(item, dict):
                     continue
@@ -2556,7 +2622,6 @@ class TracedecayMemoryProvider(MemoryProvider):
             if value:
                 fact_metadata[key] = str(value)
         fact_args = {
-            "action": "add",
             "content": text,
             "category": "user_pref" if target == "user" else "general",
             "metadata": fact_metadata,
@@ -2564,7 +2629,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         }
         try:
             tools.call_tracedecay_tool(
-                "tracedecay_fact_store",
+                "tracedecay_fact_store_add",
                 fact_args,
                 **_project_call_kwargs(
                     self.project_root if fact_args["memory_scope"] == "project" else None
@@ -2649,7 +2714,7 @@ class TracedecayMemoryProvider(MemoryProvider):
         # handle_tool_call for compatibility with older transcripts/configs
         # but no longer cost per-call schema footprint.
         return [
-            _memory_schema("tracedecay_fact_store", "fact_store"),
+            _collapsed_fact_store_schema(),
             _memory_schema("tracedecay_fact_feedback", "fact_feedback"),
             _memory_schema("tracedecay_memory_status", "memory_status"),
         ]
@@ -2659,16 +2724,30 @@ class TracedecayMemoryProvider(MemoryProvider):
         mapping = MEMORY_TOOL_MAP.get(tool_name)
         if mapping is None:
             return tools.error_payload(f"unknown memory tool: {tool_name}")
-        tracedecay_name = mapping["tracedecay_name"]
-        fixed_args = mapping.get("fixed_args")
-        if fixed_args:
-            tool_args = dict(tool_args)
-            tool_args.update(fixed_args)
-            # Hermes' legacy fixed-action provider wire calls the taxonomy
-            # field ``fact_type``.  Translate that compatibility field only
-            # for the fixed aliases; the canonical generic ``fact_store``
-            # surface remains category-shaped and is passed through as-is.
-            if "fact_type" in tool_args:
+        tool_args = dict(tool_args)
+        resolved_action = ""
+        if mapping.get("resolve_action"):
+            resolved_action = str(tool_args.pop("action", "") or "")
+            tracedecay_name = FACT_STORE_EXACT_ROUTES.get(resolved_action)
+            if tracedecay_name is None:
+                return tools.error_payload(
+                    f"fact_store action {resolved_action!r} does not map to an exact route"
+                )
+        else:
+            tracedecay_name = mapping["tracedecay_name"]
+            resolved_action = next(
+                (
+                    action
+                    for action, route in FACT_STORE_EXACT_ROUTES.items()
+                    if route == tracedecay_name
+                ),
+                "",
+            )
+            if mapping.get("legacy_alias") and "fact_type" in tool_args:
+                # Hermes' legacy fixed-action provider wire calls the taxonomy
+                # field ``fact_type``.  Translate that compatibility field only
+                # for the fixed aliases; the canonical generic ``fact_store``
+                # surface remains category-shaped and is passed through as-is.
                 fact_type = tool_args.pop("fact_type")
                 category = tool_args.get("category")
                 if category is not None and str(category) != str(fact_type):
@@ -2678,9 +2757,10 @@ class TracedecayMemoryProvider(MemoryProvider):
                 if category is None:
                     tool_args["category"] = fact_type
         if "memory_scope" not in tool_args:
-            action = str(tool_args.get("action") or "")
             category = str(tool_args.get("category") or "")
-            if not self.project_root or (action in ("add", "update") and category == "user_pref"):
+            if not self.project_root or (
+                resolved_action in ("add", "update") and category == "user_pref"
+            ):
                 tool_args["memory_scope"] = "user"
             else:
                 tool_args["memory_scope"] = "project"
@@ -2767,7 +2847,7 @@ def register(ctx):
             name = schema["name"]
             if name in MESSAGE_DEPENDENT_TOOLS and not host_forwards_messages:
                 continue
-            if name in MEMORY_PROVIDER_TOOLS and tracedecay_is_memory_provider:
+            if _is_memory_provider_tool(name) and tracedecay_is_memory_provider:
                 # The active memory provider already exposes this store as
                 # fact_store/fact_feedback/memory_status — registering the
                 # prefixed twins would double the schema footprint.

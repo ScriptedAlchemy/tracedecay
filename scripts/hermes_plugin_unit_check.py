@@ -64,6 +64,7 @@ def generate_plugin(work: Path) -> Path:
     # lock or inspect its managed skills.
     env["TRACEDECAY_DATA_DIR"] = str(home / ".tracedecay")
     env["PATH"] = f"{bin_path.parent}{os.pathsep}{env.get('PATH', '')}"
+    env.pop("CARGO_TARGET_DIR", None)
     env["HERMES_HOME"] = str(work / "ignored-hermes-host-home")
     subprocess.run(
         [str(bin_path), "install", "--agent", "hermes", "--no-dashboard"],
@@ -286,7 +287,7 @@ def _check_hermes_home_scope(work: Path, plugin, host_home: Path) -> Path:
         assert "--project" not in tool_argv[-1], tool_argv[-1]
         assert tool_run_kwargs[-1]["cwd"] == os.path.abspath(os.sep)
         for name, args in (
-            ("tracedecay_fact_store", {"action": "list", "memory_scope": "user"}),
+            ("tracedecay_fact_store_list", {"memory_scope": "user"}),
             ("tracedecay_lcm_status", {"storage_scope": "user"}),
             (
                 "tracedecay_message_search",
@@ -364,6 +365,7 @@ def _check_registration_split(
     assert "tracedecay_context" in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_message_search" in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_fact_store" not in ctx.tools, sorted(ctx.tools)
+    assert not any(name.startswith("tracedecay_fact_store_") for name in ctx.tools), sorted(ctx.tools)
     assert "tracedecay_fact_feedback" not in ctx.tools, sorted(ctx.tools)
     assert "tracedecay_memory_status" not in ctx.tools, sorted(ctx.tools)
 
@@ -446,7 +448,9 @@ def _check_registration_split(
 
     other = OtherProviderCtx()
     plugin.register(other)
-    assert "tracedecay_fact_store" in other.tools, sorted(other.tools)
+    assert "tracedecay_fact_store" not in other.tools, sorted(other.tools)
+    assert "tracedecay_fact_store_add" in other.tools, sorted(other.tools)
+    assert "tracedecay_fact_store_search" in other.tools, sorted(other.tools)
     ok("fact tools register when another memory provider is active")
 
     class ForwardingCtx(StubCtx):
@@ -600,16 +604,15 @@ def _check_response_handle_deref(plugin):
 
         plugin.tools.call_tracedecay_tool = _handled_response
         resolved = plugin.call_tracedecay_json(
-            "tracedecay_fact_store",
+            "tracedecay_fact_store_search",
             {
-                "action": "search",
                 "query": "remember",
                 "project_selector": {"path": "/tmp/selected-project"},
             },
         )
         assert resolved.get("count") == 1, resolved
         assert [call[0] for call in bridge_calls] == [
-            "tracedecay_fact_store",
+            "tracedecay_fact_store_search",
             "tracedecay_retrieve",
         ], bridge_calls
         assert bridge_calls[1][1]["project_selector"] == {
@@ -834,7 +837,8 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
 
         provider.handle_tool_call("fact_store", {"action": "search", "query": "rust"})
         name, args, kwargs = calls[-1]
-        assert name == "tracedecay_fact_store", calls
+        assert name == "tracedecay_fact_store_search", calls
+        assert "action" not in args, args
         assert "project_root" not in args, args
         assert args["memory_scope"] == "project", args
         assert kwargs["project_root"] == expected_project_root, kwargs
@@ -845,8 +849,9 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
             {"content": "legacy alias", "fact_type": "decision"},
         )
         name, args, kwargs = calls[-1]
-        assert name == "tracedecay_fact_store", calls
-        assert args["action"] == "add" and args["category"] == "decision", args
+        assert name == "tracedecay_fact_store_add", calls
+        assert "action" not in args, args
+        assert args["category"] == "decision", args
         assert "fact_type" not in args, args
         assert kwargs["project_root"] == expected_project_root, kwargs
         conflict = provider.handle_tool_call(
@@ -863,7 +868,8 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
             {"action": "add", "content": "canonical field", "fact_type": "decision"},
         )
         name, args, _kwargs = calls[-1]
-        assert name == "tracedecay_fact_store", calls
+        assert name == "tracedecay_fact_store_add", calls
+        assert "action" not in args, args
         assert args["fact_type"] == "decision" and "category" not in args, args
         ok("legacy fact aliases translate fact_type without narrowing generic fact_store")
 
@@ -910,8 +916,9 @@ def _check_provider_verbs(plugin, ctx, host_home: Path, messages: list):
 
         provider.on_memory_write("add", "user", "likes rust", {"session_id": "s"})
         name, args, kwargs = calls[-1]
-        assert name == "tracedecay_fact_store", calls
-        assert args["action"] == "add" and args["category"] == "user_pref"
+        assert name == "tracedecay_fact_store_add", calls
+        assert "action" not in args, args
+        assert args["category"] == "user_pref"
         assert args["memory_scope"] == "user"
         assert args["metadata"]["hermes_action"] == "add"
         assert "project_root" not in args, args
@@ -988,11 +995,11 @@ def _check_prefetch_cache(plugin, ctx):
         # Real search responses nest each row under "fact" (with scores
         # beside it); flat rows must keep working too.
         plugin.call_tracedecay_json = lambda name, args, **kw: {
-            "facts": [
+            "hits": [
                 {"fact": {"fact_id": 7, "content": "zack prefers rust"}, "score": 0.9},
                 {"fact_id": 8, "content": "flat row"},
             ],
-            "count": 2,
+            "owner": {"kind": "user"},
         }
         # prefetch() is the fast inline half: it only serves what
         # queue_prefetch() recalled in the background after the last turn.

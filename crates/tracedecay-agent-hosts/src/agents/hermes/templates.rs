@@ -78,7 +78,10 @@ import os
 import subprocess
 import tempfile
 
-TRACEDECAY_BIN = {bin}
+# Stock/isolation harnesses export TRACEDECAY_BIN so a cargo-target binary
+# under test wins over a PATH install. `which_tracedecay()` otherwise prefers
+# the PATH binary and would stamp it into this module.
+TRACEDECAY_BIN = os.environ.get("TRACEDECAY_BIN") or {bin}
 # Default per-call ceiling. Long-running transcript ingestion/compression and
 # bounded diagnostic reads keep a higher ceiling.
 TRACEDECAY_TIMEOUT_SECONDS = 120
