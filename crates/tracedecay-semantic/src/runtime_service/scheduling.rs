@@ -30,15 +30,40 @@ pub struct SemanticGenerationPointerV1 {
     pub projection_key: ProjectionKeyV1,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticRuntimeScheduleFailureV1 {
     Artifact,
     Runtime,
     Projection,
     Publication,
+    PublicationDetail(String),
     Cancelled,
     DeadlineExceeded,
+}
+
+impl SemanticRuntimeScheduleFailureV1 {
+    pub fn publication(error: impl fmt::Display) -> Self {
+        Self::PublicationDetail(error.to_string())
+    }
+
+    pub fn is_publication(&self) -> bool {
+        matches!(self, Self::Publication | Self::PublicationDetail(_))
+    }
+}
+
+impl fmt::Display for SemanticRuntimeScheduleFailureV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Artifact => write!(f, "Artifact"),
+            Self::Runtime => write!(f, "Runtime"),
+            Self::Projection => write!(f, "Projection"),
+            Self::Publication => write!(f, "Publication"),
+            Self::PublicationDetail(detail) => write!(f, "Publication: {detail}"),
+            Self::Cancelled => write!(f, "Cancelled"),
+            Self::DeadlineExceeded => write!(f, "DeadlineExceeded"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -665,4 +690,25 @@ async fn join_next_worker(workers: &mut Vec<(u64, JoinHandle<()>)>) -> bool {
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod schedule_failure_tests {
+    use super::*;
+
+    #[test]
+    fn publication_detail_preserves_the_source_chain() {
+        let failure = SemanticRuntimeScheduleFailureV1::publication(
+            "isolated evaluation graph rejected identity",
+        );
+        assert!(failure.is_publication());
+        assert_eq!(
+            failure.to_string(),
+            "Publication: isolated evaluation graph rejected identity"
+        );
+        assert!(
+            format!("{failure:?}").contains("isolated evaluation graph rejected identity"),
+            "Debug must also carry the source: {failure:?}"
+        );
+    }
 }

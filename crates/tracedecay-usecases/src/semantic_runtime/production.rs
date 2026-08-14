@@ -545,7 +545,7 @@ impl ProductionSemanticRuntimeV1 {
             ],
             graph_cancellation,
         )
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         self.measure_evaluation_projection_cases_in_store(&graph, clean, sources)
             .await
     }
@@ -578,7 +578,7 @@ impl ProductionSemanticRuntimeV1 {
         };
         let clean_retained = graph
             .retained(&clean.source_generation)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         let cancellation = Arc::clone(clean_retained.cancellation());
         let store = evaluation_projection_case_store(&clean_retained, clean_prepared)?;
         let clean_build = store
@@ -683,7 +683,7 @@ impl ProductionSemanticRuntimeV1 {
         )?;
         let one_symbol_retained = graph
             .retained(&one_symbol.request.changes.to_generation)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         let one_symbol_store = evaluation_projection_case_store(&one_symbol_retained, &one_symbol)?;
         let one_symbol_publication = publish_evaluation_projection_case_isolated(
             &one_symbol_store,
@@ -715,7 +715,7 @@ impl ProductionSemanticRuntimeV1 {
         )?;
         let no_op_retained = graph
             .retained(&no_op.request.changes.to_generation)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         let no_op_store = evaluation_projection_case_store(&no_op_retained, &no_op)?;
         let no_op_publication = publish_evaluation_projection_case_isolated(
             &no_op_store,
@@ -747,7 +747,7 @@ impl ProductionSemanticRuntimeV1 {
         )?;
         let deletion_retained = graph
             .retained(&deletion.request.changes.to_generation)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         let deletion_store = evaluation_projection_case_store(&deletion_retained, &deletion)?;
         let _deletion_publication = publish_evaluation_projection_case_isolated(
             &deletion_store,
@@ -850,7 +850,7 @@ impl ProductionSemanticRuntimeV1 {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
         let cancellation_after_store = GraphVectorGenerationStoreV1::open(&deletion_retained)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
         if cancellation_after_store
             .generation(&cancellation_generation, Arc::clone(&cancellation))
             .await
@@ -1453,7 +1453,7 @@ impl ProductionSemanticRuntimeV1 {
                             // decided by the corpus and the projection key, not
                             // by this attempt. Memoize it so the next published
                             // generation does not pay the full re-embed again.
-                            if matches!(reason, SemanticRuntimeScheduleFailureV1::Publication) {
+                            if reason.is_publication() {
                                 super::semantic_publish_failure_memo().record_failure(
                                     &failure_key,
                                     &failure_witness,
@@ -2347,7 +2347,7 @@ fn evaluation_projection_case_store_for_changes(
     changes: &ChangedCodeChunkSetV1,
 ) -> Result<GraphVectorGenerationStoreV1, SemanticRuntimeScheduleFailureV1> {
     let store = GraphVectorGenerationStoreV1::open(retained)
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
     let descriptor = SemanticVectorStageDescriptorV1::from_changes(projection, changes)
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
     store

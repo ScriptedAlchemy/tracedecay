@@ -515,7 +515,7 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                         Arc::clone(&self.control)
                             as Arc<dyn tracedecay_semantic::SemanticEvaluationCancellationV1>,
                     )
-                    .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
+                    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
                 if generation.projection() != &required.projection {
                     return Err(semantic_projection_pin_mismatch(
                         generation.projection(),
@@ -553,10 +553,10 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                 })?;
             let mut resources = runtime
                 .measure_incremental_evaluation_projection(prepared, context.incremental_code)
-                .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
+                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
             resources.projection_cases = runtime
                 .measure_evaluation_projection_cases(prepared, &context.semantic_projection_sources)
-                .map_err(|error| CandidateOutputError::Contract(format!("{error:?}")))?;
+                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
             resources
         } else {
             return Ok(SemanticNativeStageResultV1::Pending {
