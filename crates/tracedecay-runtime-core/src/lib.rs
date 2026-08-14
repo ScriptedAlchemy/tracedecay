@@ -10,9 +10,30 @@
 //! one thin `pub use` shim per module so every historical `crate::<module>`
 //! path still resolves.
 //!
-//! Outward seams that could not follow the kernel (daemon store runtimes,
-//! `global_db`, sessions, semantic projection) are documented in `SEAMS.md`
-//! next to this crate's manifest.
+//! ## Outward seams that could not follow the kernel
+//!
+//! `daemon::store_runtime::session_registry` stayed in the root crate: it
+//! stores `Arc<RegisteredGlobalDb>` in its public surface, and
+//! `tracedecay-global-db` depends on this kernel — so the kernel taking that
+//! edge back would be a Cargo cycle. `global_db`, sessions, and semantic
+//! projection are above this crate for the same reason.
+//!
+//! [`ports::registered_schema`] is the port a freshly opened profile- or
+//! session-scoped shard uses to install the registered global/session schema
+//! (owned by `tracedecay-global-db`, which this crate cannot name). It
+//! **fails closed**: an unregistered installer refuses the open rather than
+//! publishing an uninitialised store. The root registers it from
+//! `daemon::store_runtime::register_registered_schema_installer()`, called at
+//! the top of `DaemonSessionRuntimeRegistryV1::open()` — the sole constructor
+//! of the production registry.
+//!
+//! `test-transport` forwards to `tracedecay-rusqlite-runtime/test-transport`.
+//! Platform cfgs travel with the code that needs them: `cfg(windows)`
+//! (`lifecycle_lease`, `os_str_bytes`, `windows_file`, `db/access/owner_io`),
+//! `cfg(unix)` (`os_str_bytes`, `branch_meta`), `cfg(target_os = "linux")` /
+//! `cfg(target_os = "macos")` (`open_store_holders`), with matching
+//! `[target.'cfg(…)'.dependencies]` blocks (`xattr`, `libc`, `fsys`,
+//! `windows-sys`) in the crate manifest.
 
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]

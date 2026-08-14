@@ -4,7 +4,8 @@
 //! it is kernel code in every direction that matters: it opens `db::Database`
 //! facades, holds `db::DatabaseAuthority`, and resolves `storage` layouts. The
 //! root keeps a `daemon::store_runtime` shim so every historical path resolves,
-//! and still owns `session_registry`, which could not follow (see `SEAMS.md`).
+//! and still owns `session_registry`, which could not follow (see this
+//! crate's `lib.rs` module doc for why).
 //!
 //! The lifecycle publisher and registry are the canonical runtime authority for
 //! shard attachment, maintenance, and retrieval.
