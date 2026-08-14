@@ -6216,6 +6216,153 @@ async fn witness_verified_mount_activates_without_rebuild() {
     registry.shutdown().await;
 }
 
+/// A retained generation is not serving until its persistent graph replay
+/// activates. A typed replay failure leaves the slot empty while the ordinary
+/// refresh remains pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_cold_mount_graph_replay_never_seats_retained_generation() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let scoped_store = super::scoped_code_index_store_root(
+        store.path(),
+        &fixture.path().canonicalize().expect("canonical fixture"),
+    );
+    let scope = {
+        let mut scheduler = scheduler(&fixture, scoped_store, bytes);
+        published(scheduler.reconcile_now().expect("seed generation"));
+        let latest = scheduler.latest_complete().expect("seeded generation");
+        let snapshot = latest.generation.snapshot();
+        ResolvedScope::new(
+            test_project_id(),
+            snapshot.repository.clone(),
+            snapshot.worktree.clone().expect("worktree id"),
+            snapshot.reference.clone(),
+        )
+        .expect("resolved scope")
+    };
+
+    let profile = TempDir::new().expect("profile root");
+    let profile_root = profile.path().join("profile");
+    let project_id = test_project_id();
+    crate::storage::write_enrollment_marker(
+        fixture.path(),
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .expect("project enrollment");
+    let identity =
+        crate::daemon::profile_identity::load_or_create(&profile_root).expect("profile identity");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 93, "failed cold-mount graph replay")
+            .expect("daemon database scope");
+    let graph_runtime = Arc::new(
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            identity,
+        )
+        .await
+        .expect("graph runtime registry"),
+    );
+    let _writable_project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("initialize writable project database");
+    let read_only_project_database = Arc::new(
+        graph_runtime
+            .project_memory_read_only(project_id.clone(), [fixture.path().to_path_buf()])
+            .await
+            .expect("read-only project database"),
+    );
+    assert!(
+        read_only_project_database
+            .graph_publication_storage()
+            .is_err(),
+        "the fixture must refuse persistent graph publication"
+    );
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold background activation");
+    registry
+        .mount_worktree_with_graph_runtime(
+            project_id,
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+            Arc::clone(&graph_runtime),
+            read_only_project_database,
+        )
+        .await
+        .expect("mount retained generation");
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal scheduler held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("scheduler lock acquired");
+    drop(admission);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry.pending_wake_micros_for_scope(&scope).await == Some(0) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "worker did not dequeue the retained graph replay"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    release_tx.send(()).expect("release scheduler");
+    lock_thread.join().expect("join scheduler holder");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if registry
+            .pending_wake_micros_for_scope(&scope)
+            .await
+            .is_some_and(|pending| pending != 0)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "failed graph replay did not restore its pending retry arrival"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        registry.latest_generation_id(fixture.path()).await,
+        None,
+        "a retained generation cannot serve after persistent graph replay fails"
+    );
+    registry.shutdown().await;
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join graph reconciliation tasks");
+}
+
 /// A retained seal is only a candidate for activation. If source-authority
 /// verification fails after the seal decodes, the worker must not copy that
 /// unverified generation into the serving slot. The failed arrival remains

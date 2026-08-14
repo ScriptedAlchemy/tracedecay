@@ -819,46 +819,56 @@ impl CodeIndexSchedulerRegistryV1 {
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         let retained = scheduler.servable_retained_generation()?;
-                        let replay_binding = scheduler
-                            .code_graph_replay_binding(
-                                &retained.generation().manifest().generation_id,
-                            )
-                            .ok();
+                        let replay_binding = scheduler.code_graph_replay_binding(
+                            &retained.generation().manifest().generation_id,
+                        );
                         Some((retained, replay_binding))
                     })
                     .await;
                     if let Ok(Some((retained, replay_binding))) = remount {
-                        if let Some(replay_binding) = replay_binding {
-                            let _ = worker_graph_activation
-                                .activate(
-                                    &worker_project_id,
-                                    &worker_repository_id,
-                                    &worker_worktree_id,
-                                    retained.clone(),
-                                    replay_binding,
-                                    Arc::clone(&worker_shutting_down),
-                                )
-                                .await;
-                        }
-                        let swap_scheduler = Arc::clone(&scheduler);
-                        let swap_serving = Arc::clone(&serving_generation);
-                        let _ = tokio::task::spawn_blocking(move || {
-                            let scheduler = swap_scheduler
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            if scheduler
-                                .active_publication_matches(&retained)
-                                .unwrap_or(false)
-                            {
-                                *swap_serving
-                                    .write()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                    Some(retained.clone());
-                                let _ =
-                                    scheduler.schedule_semantic_generation(retained.generation());
+                        let activation = match replay_binding {
+                            Ok(replay_binding) => {
+                                worker_graph_activation
+                                    .activate(
+                                        &worker_project_id,
+                                        &worker_repository_id,
+                                        &worker_worktree_id,
+                                        retained.clone(),
+                                        replay_binding,
+                                        Arc::clone(&worker_shutting_down),
+                                    )
+                                    .await
                             }
-                        })
-                        .await;
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = activation {
+                            tracing::warn!(
+                                event = "code_index_retained_seat_failed",
+                                path = "background_worker",
+                                error = %error,
+                                "code-index retained generation did not activate; refresh continues without stale serving"
+                            );
+                        } else {
+                            let swap_scheduler = Arc::clone(&scheduler);
+                            let swap_serving = Arc::clone(&serving_generation);
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let scheduler = swap_scheduler
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if scheduler
+                                    .active_publication_matches(&retained)
+                                    .unwrap_or(false)
+                                {
+                                    *swap_serving
+                                        .write()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                        Some(retained.clone());
+                                    let _ = scheduler
+                                        .schedule_semantic_generation(retained.generation());
+                                }
+                            })
+                            .await;
+                        }
                     }
                 }
                 let mut result = tokio::task::spawn_blocking(move || {
