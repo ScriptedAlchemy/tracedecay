@@ -1,11 +1,17 @@
 use std::time::Duration;
 
 use serde_json::Value;
-use tracedecay_domain::{CanonicalObservationEnvelopeV1, CanonicalObservationFactV1};
+use tracedecay_domain::CanonicalObservationEnvelopeV1;
 
-use crate::db::engine::{QueryExecutor, params};
+use crate::db::engine::params;
 use crate::global_db::RegisteredGlobalDb;
 use tracedecay_sessions::runtime::lcm::{LcmError, LcmSummaryRequest};
+
+mod provider_capabilities;
+
+use provider_capabilities::{
+    NativeSummaryCandidate, authoritative_summarizer, native_summary_recognizers,
+};
 
 pub(super) struct AuthoritativeSummary {
     pub(super) text: String,
@@ -30,33 +36,20 @@ async fn generate_provider_summary(
     request: LcmSummaryRequest,
     timeout: Duration,
 ) -> Result<AuthoritativeSummary, SummaryResolutionError> {
-    match provider {
-        "codex" => {
-            let mut config =
-                tracedecay_sessions::runtime::codex_app_server::CodexAppServerSummaryConfig::from_env();
-            config.timeout = config.timeout.min(timeout);
-            let result = tokio::task::spawn_blocking(move || {
-                tracedecay_sessions::runtime::codex_app_server::summarize_with_codex_app_server(
-                    &request, &config,
-                )
-            })
-            .await
-            .map_err(|_| SummaryResolutionError::Unavailable("codex_app_server_unavailable"))?
-            .map_err(|_| SummaryResolutionError::Unavailable("codex_app_server_unavailable"))?;
-            Ok(AuthoritativeSummary {
-                text: result.text,
-                route: result.model.map_or_else(
-                    || "codex_app_server".to_string(),
-                    |model| format!("codex_app_server:{model}"),
-                ),
-            })
-        }
-        _ => Err(SummaryResolutionError::Unavailable(
+    let Some(summarizer) = authoritative_summarizer(provider) else {
+        return Err(SummaryResolutionError::Unavailable(
             "authoritative_summarizer_unavailable",
-        )),
-    }
+        ));
+    };
+    summarizer.summarize(request, timeout).await
 }
 
+/// Scans a session's newest messages for evidence that the host itself already
+/// produced an authoritative compaction summary.
+///
+/// The scan is provider-neutral: it decodes each row once and offers it to the
+/// recognizers registered for this provider, which own every provider-specific
+/// recognition rule, corroboration query, and route label.
 pub(super) async fn native_summary_evidence(
     database: &RegisteredGlobalDb,
     provider: &str,
@@ -96,6 +89,7 @@ pub(super) async fn native_summary_evidence(
         ));
     }
     drop(rows);
+    let recognizers = native_summary_recognizers(provider);
     for (message_id, text, kind, metadata_json) in candidates {
         let Some(metadata) = metadata_json
             .as_deref()
@@ -103,109 +97,35 @@ pub(super) async fn native_summary_evidence(
         else {
             continue;
         };
-        if provider == "codex"
-            && kind.as_deref() == Some("summary")
-            && metadata.get("source").and_then(Value::as_str) == Some("codex_context_compacted")
-            && metadata.get("summary_body").and_then(Value::as_str) == Some("plaintext")
-        {
-            return Ok(Some(AuthoritativeSummary {
-                text,
-                route: "codex_native_compaction".to_string(),
-            }));
-        }
-        let Ok(envelope) =
-            serde_json::from_value::<CanonicalObservationEnvelopeV1>(metadata.clone())
-        else {
-            continue;
+        // Envelope decoding is best-effort rather than a gate: a provider that
+        // records raw metadata instead of a canonical envelope still has to be
+        // recognizable, so failure to decode leaves `envelope` empty and lets
+        // the recognizers decide.
+        let envelope =
+            serde_json::from_value::<CanonicalObservationEnvelopeV1>(metadata.clone()).ok();
+        let candidate = NativeSummaryCandidate {
+            provider,
+            message_id: &message_id,
+            text: &text,
+            kind: kind.as_deref(),
+            metadata: &metadata,
+            envelope: envelope.as_ref(),
         };
-        let Some(native_summary) = envelope.facts().iter().find_map(|fact| match fact {
-            CanonicalObservationFactV1::Compaction {
-                summary: Some(summary),
-                ..
-            } => Some(summary),
-            _ => None,
-        }) else {
-            continue;
-        };
-        if provider == "cursor" && native_summary.as_str() == Some(text.as_str()) {
-            return Ok(Some(AuthoritativeSummary {
-                text,
-                route: "cursor_native_compaction".to_string(),
-            }));
+        let mut route = None;
+        for recognizer in &recognizers {
+            if recognizer.recognizes(&snapshot, &candidate).await? {
+                route = Some(recognizer.route());
+                break;
+            }
         }
-        if provider == "claude"
-            && native_summary
-                .get("isCompactSummary")
-                .and_then(Value::as_bool)
-                == Some(true)
-            && native_summary
-                .get("isVisibleInTranscriptOnly")
-                .and_then(Value::as_bool)
-                == Some(true)
-            && claude_summary_pair_is_exact(&snapshot, &envelope, &message_id).await?
-        {
+        if let Some(route) = route {
             return Ok(Some(AuthoritativeSummary {
                 text,
-                route: "claude_native_compaction".to_string(),
+                route: route.to_string(),
             }));
         }
     }
     Ok(None)
-}
-
-async fn claude_summary_pair_is_exact(
-    snapshot: &impl QueryExecutor,
-    summary: &CanonicalObservationEnvelopeV1,
-    summary_message_id: &str,
-) -> Result<bool, LcmError> {
-    let Some(boundary_id) = summary.relations().parent_message_id() else {
-        return Ok(false);
-    };
-    let Some(summary_id) = summary.relations().message_id() else {
-        return Ok(false);
-    };
-    let session_id = summary.relations().session_id();
-    if summary_id.as_str() != summary_message_id {
-        return Ok(false);
-    }
-    let mut rows = snapshot
-        .query(
-            "SELECT metadata_json
-             FROM session_messages
-             WHERE provider = 'claude' AND message_id = ?1
-               AND session_id = ?2
-               AND kind IN ('compact_boundary', 'compaction')
-             LIMIT 1",
-            params![boundary_id.as_str(), session_id.as_str()],
-        )
-        .await
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| LcmError::Db(error.to_string()))?
-    else {
-        return Ok(false);
-    };
-    let metadata = row
-        .get::<Option<String>>(0)
-        .map_err(|error| LcmError::Db(error.to_string()))?;
-    let Some(boundary) = metadata
-        .as_deref()
-        .and_then(|metadata| serde_json::from_str::<CanonicalObservationEnvelopeV1>(metadata).ok())
-    else {
-        return Ok(false);
-    };
-    let anchor = boundary.facts().iter().find_map(|fact| match fact {
-        CanonicalObservationFactV1::Compaction {
-            summary: Some(metadata),
-            ..
-        } => metadata
-            .pointer("/preservedSegment/anchorUuid")
-            .and_then(Value::as_str),
-        _ => None,
-    });
-    Ok(anchor == Some(summary_id.as_str()))
 }
 
 pub(super) enum SummaryResolutionError {
