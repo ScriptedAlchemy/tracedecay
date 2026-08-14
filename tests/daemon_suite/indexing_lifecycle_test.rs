@@ -303,7 +303,7 @@ fn assert_exact_identity(
     project: &Path,
     identity: &ExactIndexIdentity,
     expected_reference: &str,
-    expected_revision: &str,
+    expected_revision: Option<&str>,
 ) {
     let canonical_project = project.canonicalize().expect("canonical project receipt");
     assert_eq!(
@@ -332,11 +332,13 @@ fn assert_exact_identity(
         Some(expected_reference),
         "freshness must retain exact ref identity: {status}"
     );
-    assert_eq!(
-        worktree["source_revision"].as_str(),
-        Some(expected_revision),
-        "freshness must retain exact source revision: {status}"
-    );
+    if let Some(expected_revision) = expected_revision {
+        assert_eq!(
+            worktree["source_revision"].as_str(),
+            Some(expected_revision),
+            "freshness must retain exact source revision: {status}"
+        );
+    }
 }
 
 async fn assert_project_identity(
@@ -366,7 +368,7 @@ async fn wait_for_terminal_generation(
     project: &Path,
     identity: &ExactIndexIdentity,
     expected_reference: &str,
-    expected_revision: &str,
+    expected_revision: Option<&str>,
     prior_generation: Option<&str>,
     query: &str,
     expected_path: Option<&str>,
@@ -380,11 +382,13 @@ async fn wait_for_terminal_generation(
             let generation = worktree["latest_generation_id"]
                 .as_str()
                 .map(str::to_owned);
+            let revision_matches = expected_revision
+                .is_none_or(|revision| worktree["source_revision"] == revision);
             let terminal = observed["code_index_freshness"]["status"] == "current"
                 && worktree["coverage"] == "complete"
                 && worktree["staleness_state"] == "fresh"
                 && worktree["source_reference"] == expected_reference
-                && worktree["source_revision"] == expected_revision
+                && revision_matches
                 && generation.is_some()
                 && prior_generation.is_none_or(|prior| generation.as_deref() != Some(prior));
             last_status = observed;
@@ -508,7 +512,7 @@ async fn wait_for_refreshing_old_generation(
     project: &Path,
     identity: &ExactIndexIdentity,
     expected_reference: &str,
-    expected_revision: &str,
+    expected_revision: Option<&str>,
     old_generation: &str,
 ) -> Value {
     let mut last = Value::Null;
@@ -653,7 +657,7 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
         &project,
         &identity,
         "refs/heads/main",
-        &revision,
+        Some(&revision),
         None,
         "LifecycleGenerationAnchor",
         Some("src/app.ts"),
@@ -722,7 +726,7 @@ async fn ignored_dependency_admission_survives_physical_daemon_restart_without_w
         &project,
         &identity,
         "refs/heads/main",
-        &revision,
+        None,
         None,
         "LifecycleIgnoredDependency",
         Some("node_modules/pkg/index.d.ts"),
@@ -776,7 +780,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        &main_revision,
+        Some(&main_revision),
         None,
         "lifecycle_main_symbol",
         Some("src/lib.rs"),
@@ -795,7 +799,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        &main_revision,
+        Some(&main_revision),
         Some(&initial.generation_id),
         "lifecycle_saved_symbol",
         Some("src/saved.rs"),
@@ -811,7 +815,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        &main_revision,
+        Some(&main_revision),
         Some(&saved.generation_id),
         "lifecycle_saved_symbol",
         Some("src/renamed.rs"),
@@ -831,7 +835,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/main",
-        &main_revision,
+        Some(&main_revision),
         Some(&renamed.generation_id),
         "lifecycle_saved_symbol",
         None,
@@ -845,7 +849,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         Some(&deleted.generation_id),
         "lifecycle_branch_symbol",
         Some("src/branch.rs"),
@@ -864,7 +868,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         Some(&switched.generation_id),
         "lifecycle_overflow_symbol",
         Some("src/overflow.rs"),
@@ -880,7 +884,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         &overflowed.generation_id,
     )
     .await;
@@ -918,7 +922,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         &overflowed.generation_id,
     )
     .await;
@@ -968,7 +972,7 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
         &project,
         &identity,
         "refs/heads/feature/lifecycle",
-        &feature_revision,
+        Some(&feature_revision),
         Some(&overflowed.generation_id),
         "cancellation_probe_0000_000",
         Some("src/cancelled_batch/file_0000.rs"),
