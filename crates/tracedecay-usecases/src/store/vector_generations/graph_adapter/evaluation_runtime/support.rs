@@ -115,8 +115,11 @@ pub(super) fn map_staging_error(error: SemanticVectorStagingStoreError) -> Graph
         SemanticVectorStagingStoreError::Interrupted(RuntimeInterruptionV1::DeadlineExceeded) => {
             GraphDbError::DeadlineExceeded
         }
-        SemanticVectorStagingStoreError::Infrastructure | SemanticVectorStagingStoreError::Busy => {
-            GraphDbError::unavailable("semantic evaluation staging is unavailable")
+        SemanticVectorStagingStoreError::Infrastructure => {
+            GraphDbError::unavailable("semantic evaluation staging persistence is unavailable")
+        }
+        SemanticVectorStagingStoreError::Busy => {
+            GraphDbError::unavailable("semantic evaluation staging authority is busy")
         }
         SemanticVectorStagingStoreError::CensusRevisionChanged { expected, actual } => {
             GraphDbError::ResetRequired {
@@ -171,5 +174,24 @@ pub(super) fn map_code_graph_error(error: CodeGraphProjectionError) -> GraphDbEr
         }
         CodeGraphProjectionError::Closed => GraphDbError::Closed,
         CodeGraphProjectionError::Contract(message) => GraphDbError::InvalidRequest { message },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_store::SemanticVectorStagingStoreError;
+
+    use super::map_staging_error;
+
+    #[test]
+    fn map_staging_error_names_busy_and_infrastructure_separately() {
+        assert_eq!(
+            map_staging_error(SemanticVectorStagingStoreError::Infrastructure).to_string(),
+            "graph database unavailable: semantic evaluation staging persistence is unavailable",
+        );
+        assert_eq!(
+            map_staging_error(SemanticVectorStagingStoreError::Busy).to_string(),
+            "graph database unavailable: semantic evaluation staging authority is busy",
+        );
     }
 }
