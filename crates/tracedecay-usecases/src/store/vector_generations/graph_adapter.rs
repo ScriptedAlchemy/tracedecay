@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
+use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, ChangedCodeChunkSetV1, CodeGenerationId, CodeSearchChunkId,
-    ManifestDigest, ProjectionKeyV1, VectorGenerationIdV1,
+    ManifestDigest, VectorGenerationIdV1,
 };
-use tracedecay_graph_db::{GraphCancellation, GraphProperty, GraphWatermark};
+use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_store::{
     GraphNamespaceV1, GraphProjectionIdV1, GraphProjectionIdentityV1, SemanticVectorChunkDigest,
     SemanticVectorChunkId, SemanticVectorChunkManifestMember, SemanticVectorPublishedGenerationKey,
@@ -29,7 +30,6 @@ mod evaluation_runtime;
 mod native_records;
 mod persistence;
 mod retention;
-mod search;
 mod snapshot;
 mod stage_identity;
 pub(super) mod transitions;
@@ -39,8 +39,7 @@ use native_records::{
     read_generation_metadata, read_state_metadata,
 };
 use persistence::{
-    check_cancelled, generation_label, map_graph_error, measured_resident_bytes, required_string,
-    resident_size_overflow, search_vector_property, storage_error, vector_metric,
+    check_cancelled, generation_label, map_graph_error, resident_size_overflow, storage_error,
 };
 use snapshot::SemanticVectorVerifiedReadV1;
 
@@ -49,10 +48,6 @@ pub use evaluation_runtime::{
 };
 
 pub const SEMANTIC_VECTOR_GRAPH_PROJECTION: &str = "tracedecay.semantic-vector.graph";
-pub const MAX_SEMANTIC_VECTOR_SEARCH_RESULTS: usize = 1_024;
-pub const MAX_SEMANTIC_HYBRID_LEXICAL_CANDIDATES: usize = 4_096;
-const CHUNK_ID_PROPERTY: &str = "chunk_id";
-const GENERATION_ID_PROPERTY: &str = "generation_id";
 const GRAPH_OPERATION_DEADLINE: Duration = Duration::from_secs(30);
 pub(super) const MAX_RESIDENT_VECTOR_ROWS: usize = 100_000;
 
@@ -145,68 +140,6 @@ impl SemanticVectorStageDescriptorV1 {
     }
 }
 
-pub struct SemanticVectorGraphSearchRequestV1 {
-    pub generation_id: VectorGenerationIdV1,
-    pub embedding_key: AdmittedEmbeddingProjectionKeyV1,
-    pub source_generation: CodeGenerationId,
-    pub source_manifest_digest: ManifestDigest,
-    pub query: Vec<f32>,
-    pub limit: usize,
-    pub cancellation: Arc<dyn GraphCancellation>,
-    pub deadline: Instant,
-}
-
-struct DeadlineGraphCancellationV1 {
-    request: Arc<dyn GraphCancellation>,
-    deadline: Instant,
-}
-
-impl GraphCancellation for DeadlineGraphCancellationV1 {
-    fn is_cancelled(&self) -> bool {
-        self.request.is_cancelled() || Instant::now() >= self.deadline
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SemanticVectorGraphMatchV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub distance: f64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SemanticVectorGraphSearchResultV1 {
-    pub generation_id: VectorGenerationIdV1,
-    pub matches: Vec<SemanticVectorGraphMatchV1>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SemanticHybridLexicalCandidateV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub score: f64,
-}
-
-pub struct SemanticHybridGraphSearchRequestV1 {
-    pub vector: SemanticVectorGraphSearchRequestV1,
-    pub lexical: Vec<SemanticHybridLexicalCandidateV1>,
-    pub vector_weight: f64,
-    pub lexical_weight: f64,
-    pub limit: usize,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SemanticHybridGraphMatchV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub vector_distance: Option<f64>,
-    pub lexical_score: Option<f64>,
-    pub combined_score: f64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SemanticHybridGraphSearchResultV1 {
-    pub generation_id: VectorGenerationIdV1,
-    pub matches: Vec<SemanticHybridGraphMatchV1>,
-}
-
 #[derive(Clone, Debug)]
 pub struct VerifiedGraphVectorGenerationSnapshotV1 {
     revision: u64,
@@ -229,15 +162,6 @@ pub struct VerifiedVectorResidentPlanV1 {
     pub generation_id: VectorGenerationIdV1,
     pub retained_bytes: u64,
     pub hydration_peak_bytes: u64,
-}
-
-pub struct ResidentVectorGenerationV1 {
-    pub generation_id: VectorGenerationIdV1,
-    pub projection_key: ProjectionKeyV1,
-    pub source_generation: CodeGenerationId,
-    pub source_manifest_digest: ManifestDigest,
-    pub rows: Vec<ResidentVectorRowV1>,
-    pub retained_bytes: u64,
 }
 
 pub struct ResidentVectorRowV1 {
@@ -604,96 +528,6 @@ impl GraphVectorGenerationStoreV1 {
             generation_id: expected_generation.clone(),
             retained_bytes,
             hydration_peak_bytes,
-        }))
-    }
-
-    pub async fn read_resident_generation_for(
-        &self,
-        plan: &VerifiedVectorResidentPlanV1,
-        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
-        source_generation: &CodeGenerationId,
-        source_manifest_digest: &ManifestDigest,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Option<ResidentVectorGenerationV1>, VectorGenerationStoreErrorV1> {
-        check_cancelled(cancellation.as_ref())?;
-        let snapshot = self.snapshot()?;
-        let metadata = read_state_metadata(&snapshot, Arc::clone(&cancellation))?;
-        if metadata.watermark != plan.watermark {
-            return Ok(None);
-        }
-        let generation_id = &plan.generation_id;
-        let Some(generation) =
-            read_generation_metadata(&snapshot, generation_id, Arc::clone(&cancellation))?
-        else {
-            return Ok(None);
-        };
-        if &generation.embedding_key != embedding_key
-            || &generation.source_generation != source_generation
-            || &generation.source_manifest_digest != source_manifest_digest
-        {
-            return Ok(None);
-        }
-        let entities =
-            self.generation_entities(&snapshot, generation_id, Arc::clone(&cancellation))?;
-        let expected_dimension =
-            usize::try_from(embedding_key.embedding_key().dimensions).map_err(storage_error)?;
-        let expected_metric = vector_metric(embedding_key.embedding_key().metric);
-        let vector_property = search_vector_property(generation_id)?;
-        let mut rows = Vec::with_capacity(entities.len());
-        for entity in entities {
-            check_cancelled(cancellation.as_ref())?;
-            if required_string(&entity, GENERATION_ID_PROPERTY)?
-                != generation_id.as_digest().as_str()
-            {
-                return Err(VectorGenerationStoreErrorV1::Corrupt(
-                    "resident vector row names a foreign generation".to_owned(),
-                ));
-            }
-            let vector = match entity.properties.get(&vector_property) {
-                Some(GraphProperty::Vector(vector)) => vector,
-                Some(_) => {
-                    return Err(VectorGenerationStoreErrorV1::Corrupt(
-                        "resident vector property has the wrong type".to_owned(),
-                    ));
-                }
-                None => {
-                    return Err(VectorGenerationStoreErrorV1::Corrupt(
-                        "resident vector property is missing".to_owned(),
-                    ));
-                }
-            };
-            if vector.dimension != expected_dimension || vector.metric != expected_metric {
-                return Err(VectorGenerationStoreErrorV1::Corrupt(
-                    "resident vector shape does not match its projection".to_owned(),
-                ));
-            }
-            rows.push(ResidentVectorRowV1 {
-                chunk_id: CodeSearchChunkId::try_from(
-                    required_string(&entity, CHUNK_ID_PROPERTY)?.to_owned(),
-                )
-                .map_err(storage_error)?,
-                values: vector.values.clone().into_boxed_slice(),
-            });
-        }
-        rows.sort_by(|left, right| left.chunk_id.cmp(&right.chunk_id));
-        if rows
-            .windows(2)
-            .any(|pair| pair[0].chunk_id == pair[1].chunk_id)
-        {
-            return Err(VectorGenerationStoreErrorV1::Corrupt(
-                "resident vector generation contains duplicate chunks".to_owned(),
-            ));
-        }
-        let retained_bytes = measured_resident_bytes(&rows)?;
-        drop(snapshot);
-        check_cancelled(cancellation.as_ref())?;
-        Ok(Some(ResidentVectorGenerationV1 {
-            generation_id: generation_id.clone(),
-            projection_key: generation.projection_key,
-            source_generation: source_generation.clone(),
-            source_manifest_digest: source_manifest_digest.clone(),
-            rows,
-            retained_bytes,
         }))
     }
 }
