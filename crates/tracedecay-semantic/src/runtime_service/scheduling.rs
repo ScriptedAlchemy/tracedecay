@@ -36,6 +36,7 @@ pub enum SemanticRuntimeScheduleFailureV1 {
     Artifact,
     Runtime,
     Projection,
+    ProjectionDetail(String),
     Publication,
     PublicationDetail(String),
     Cancelled,
@@ -43,6 +44,14 @@ pub enum SemanticRuntimeScheduleFailureV1 {
 }
 
 impl SemanticRuntimeScheduleFailureV1 {
+    pub fn projection(error: impl fmt::Display) -> Self {
+        Self::ProjectionDetail(error.to_string())
+    }
+
+    pub fn is_projection(&self) -> bool {
+        matches!(self, Self::Projection | Self::ProjectionDetail(_))
+    }
+
     pub fn publication(error: impl fmt::Display) -> Self {
         Self::PublicationDetail(error.to_string())
     }
@@ -58,6 +67,7 @@ impl fmt::Display for SemanticRuntimeScheduleFailureV1 {
             Self::Artifact => write!(f, "Artifact"),
             Self::Runtime => write!(f, "Runtime"),
             Self::Projection => write!(f, "Projection"),
+            Self::ProjectionDetail(detail) => write!(f, "Projection: {detail}"),
             Self::Publication => write!(f, "Publication"),
             Self::PublicationDetail(detail) => write!(f, "Publication: {detail}"),
             Self::Cancelled => write!(f, "Cancelled"),
@@ -708,6 +718,23 @@ mod schedule_failure_tests {
         );
         assert!(
             format!("{failure:?}").contains("isolated evaluation graph rejected identity"),
+            "Debug must also carry the source: {failure:?}"
+        );
+    }
+
+    #[test]
+    fn projection_detail_preserves_the_source_chain() {
+        let failure = SemanticRuntimeScheduleFailureV1::projection(
+            "rebuild_generation: vector generation plan is invalid",
+        );
+        assert!(failure.is_projection());
+        assert_eq!(
+            failure.to_string(),
+            "Projection: rebuild_generation: vector generation plan is invalid"
+        );
+        assert!(
+            format!("{failure:?}")
+                .contains("rebuild_generation: vector generation plan is invalid"),
             "Debug must also carry the source: {failure:?}"
         );
     }

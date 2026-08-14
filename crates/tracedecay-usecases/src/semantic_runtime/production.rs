@@ -563,7 +563,9 @@ impl ProductionSemanticRuntimeV1 {
         if clean_prepared.request.changes.to_generation != clean.source_generation
             || clean_prepared.request.changes.from_generation.is_some()
         {
-            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+            return Err(SemanticRuntimeScheduleFailureV1::projection(
+                "clean evaluation projection is not a root generation",
+            ));
         }
         let clean_plan = VectorGenerationPlanV1 {
             target_projection_key: clean_prepared.request.target_projection_key.clone(),
@@ -584,7 +586,7 @@ impl ProductionSemanticRuntimeV1 {
         let clean_build = store
             .rebuild_generation(clean_plan.clone(), Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
             .build_id()
             .clone();
 
@@ -600,7 +602,7 @@ impl ProductionSemanticRuntimeV1 {
         let replay_build = match replay_store
             .begin_generation(clean_plan.clone(), Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
         {
             VectorGenerationBeginOutcomeV1::ReplayFromStart { build_id }
                 if build_id == clean_build =>
@@ -609,7 +611,9 @@ impl ProductionSemanticRuntimeV1 {
             }
             VectorGenerationBeginOutcomeV1::ReplayFromStart { .. }
             | VectorGenerationBeginOutcomeV1::AlreadyPublished { .. } => {
-                return Err(SemanticRuntimeScheduleFailureV1::Projection);
+                return Err(SemanticRuntimeScheduleFailureV1::projection(
+                    "clean evaluation replay did not recover the started build",
+                ));
             }
         };
         replay_store
@@ -620,19 +624,21 @@ impl ProductionSemanticRuntimeV1 {
                 Arc::clone(&cancellation),
             )
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let clean_publication = replay_store
             .publish_generation(&replay_build, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let replay_elapsed = elapsed_micros(replay_started);
         if replay_store
             .generation(&clean_publication.generation_id, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
             .is_none()
         {
-            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+            return Err(SemanticRuntimeScheduleFailureV1::projection(
+                "clean evaluation publication is not visible after publish",
+            ));
         }
         // Durable idempotency: a third partition observes the published
         // generation without re-doing any work.
@@ -640,7 +646,7 @@ impl ProductionSemanticRuntimeV1 {
         let idempotent = idempotent_store
             .begin_generation(clean_plan, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         if !matches!(
             idempotent,
             VectorGenerationBeginOutcomeV1::AlreadyPublished {
@@ -648,7 +654,9 @@ impl ProductionSemanticRuntimeV1 {
                 ..
             } if publication == clean_publication
         ) {
-            return Err(SemanticRuntimeScheduleFailureV1::Projection);
+            return Err(SemanticRuntimeScheduleFailureV1::projection(
+                "clean evaluation idempotent begin did not observe the published generation",
+            ));
         }
 
         let mut samples = BTreeMap::new();
@@ -805,21 +813,21 @@ impl ProductionSemanticRuntimeV1 {
         );
         let cancellation_revision_before = cancellation_store
             .verified_revision(Arc::clone(&cancellation))
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let cancellation_head_before = deletion_retained
             .runtime()
             .verified_head(&graph_authority)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let cancellation_plan =
             evaluation_projection_plan_from_request(sources.deletion, &cancellation_request, None)?;
         let cancellation_generation = VectorGenerationIdV1::new(
             generation_identity_digest(&cancellation_plan)
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?,
+                .map_err(SemanticRuntimeScheduleFailureV1::projection)?,
         );
         let cancellation_build = cancellation_store
             .begin_generation(cancellation_plan, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let VectorGenerationBeginOutcomeV1::ReplayFromStart {
             build_id: cancellation_build,
         } = cancellation_build
@@ -829,7 +837,7 @@ impl ProductionSemanticRuntimeV1 {
         if cancellation_store
             .generation(&cancellation_generation, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
             .is_some()
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
@@ -845,7 +853,7 @@ impl ProductionSemanticRuntimeV1 {
         if !cancellation_store
             .cancel_generation(&cancellation_build, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -854,18 +862,18 @@ impl ProductionSemanticRuntimeV1 {
         if cancellation_after_store
             .generation(&cancellation_generation, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
             .is_some()
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
         let cancellation_revision_after = cancellation_after_store
             .verified_revision(Arc::clone(&cancellation))
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let cancellation_head_after = deletion_retained
             .runtime()
             .verified_head(&graph_authority)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         if cancellation_revision_after != cancellation_revision_before
             || cancellation_head_after != cancellation_head_before
         {
@@ -909,7 +917,7 @@ impl ProductionSemanticRuntimeV1 {
         let incompatible_build = incompatible_store
             .rebuild_generation(incompatible_plan, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
             .build_id()
             .clone();
         incompatible_store
@@ -920,11 +928,11 @@ impl ProductionSemanticRuntimeV1 {
                 Arc::clone(&cancellation),
             )
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         if !incompatible_store
             .cancel_generation(&incompatible_build, Arc::clone(&cancellation))
             .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -1660,14 +1668,14 @@ impl PreparedSemanticEvaluationGenerationV1 {
         let projection = prepared.prepared.embedding_key.clone();
         let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
             .and_then(|profile| profile.index_key())
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let vectors = PublishedSemanticVectorReadPortV1::from_prepared(
             &prepared.prepared,
             vector_generation.clone(),
             search_index_key.clone(),
             &code,
         )
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         let secret = canonical_sha256(&(
             "tracedecay.semantic-evaluation-query-key.v1",
             code.manifest().generation_id.clone(),
@@ -2276,14 +2284,14 @@ fn semantic_projection_request(
         };
         changes.manifest_digest = changes
             .compute_digest()
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+            .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
         changes
     };
     // Recompute the manifest digest even for an incremental retarget so a
     // malformed source handoff cannot cross the semantic boundary.
     changes.manifest_digest = changes
         .compute_digest()
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
     let mut request = ProjectionBatchRequestV1 {
         request_digest: changes.manifest_digest.clone(),
         changes,
@@ -2295,8 +2303,8 @@ fn semantic_projection_request(
             ProjectionReplayReasonV1::FullRebuildIncompatible
         },
     };
-    request.request_digest = expected_request_digest(&request)
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+    request.request_digest =
+        expected_request_digest(&request).map_err(SemanticRuntimeScheduleFailureV1::projection)?;
     Ok(request)
 }
 
@@ -2349,10 +2357,10 @@ fn evaluation_projection_case_store_for_changes(
     let store = GraphVectorGenerationStoreV1::open(retained)
         .map_err(SemanticRuntimeScheduleFailureV1::publication)?;
     let descriptor = SemanticVectorStageDescriptorV1::from_changes(projection, changes)
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
     store
         .configure_stage(descriptor)
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
     Ok(store)
 }
 
@@ -2363,7 +2371,7 @@ fn evaluation_vector_generation_id(
     let plan = evaluation_projection_plan(generation, prepared, None)?;
     generation_identity_digest(&plan)
         .map(VectorGenerationIdV1::new)
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)
 }
 
 async fn publish_evaluation_projection_case_isolated(
@@ -2380,21 +2388,21 @@ async fn publish_evaluation_projection_case_isolated(
     let build = store
         .rebuild_generation(plan, Arc::clone(cancellation))
         .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?
         .build_id()
         .clone();
     store
         .commit_batch(&build, None, prepared, Arc::clone(cancellation))
         .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
     let publication = store
         .publish_generation(&build, Arc::clone(cancellation))
         .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?;
     if store
         .generation(&publication.generation_id, Arc::clone(cancellation))
         .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+        .map_err(SemanticRuntimeScheduleFailureV1::projection)?
         .is_none()
     {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);

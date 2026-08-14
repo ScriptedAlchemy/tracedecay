@@ -868,6 +868,7 @@ impl DaemonSemanticRuntimeHandleV1 {
                     }
                     SemanticRuntimeScheduleFailureV1::Runtime
                     | SemanticRuntimeScheduleFailureV1::Projection
+                    | SemanticRuntimeScheduleFailureV1::ProjectionDetail(_)
                     | SemanticRuntimeScheduleFailureV1::Publication
                     | SemanticRuntimeScheduleFailureV1::PublicationDetail(_) => {
                         SemanticFallbackReasonV1::RuntimeFailure
