@@ -1,7 +1,7 @@
 mod common;
 
 use std::path::Path;
-use std::process::{Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -22,7 +22,28 @@ fn initialize_project(home: &Path, project: &Path) {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/managed_run_overlay"),
         project,
     );
+    // Context fail-closes without a verified generation. Sibling graph
+    // journeys commit a checkout so the daemon-owned scheduler can publish one.
+    git(project, &["init", "--quiet"]);
+    git(project, &["config", "user.name", "TraceDecay Test"]);
+    git(project, &["config", "user.email", "tracedecay@example.com"]);
+    git(project, &["add", "."]);
+    git(project, &["commit", "--quiet", "-m", "grafeo restart fixture"]);
     common::initialize_tracedecay_cli_project(home, project);
+}
+
+fn git(project: &Path, args: &[&str]) {
+    let output = Command::new(common::git_program())
+        .current_dir(project)
+        .args(args)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn copy_dir(source: &Path, destination: &Path) {
@@ -90,21 +111,34 @@ async fn assert_client_project_identity(
     expected_project_id: &str,
     request_id: &str,
 ) {
-    let status = resolve_mcp_application_surface(
-        ApplicationSurfaceOperation::StorageStatus,
-        RequestId::new(request_id).expect("storage identity request id"),
-        storage_status_request(),
-        RequestedOutputFormat::Json,
-        Some(client),
-    )
+    let mut last = None;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let status = resolve_mcp_application_surface(
+                ApplicationSurfaceOperation::StorageStatus,
+                RequestId::new(request_id).expect("storage identity request id"),
+                storage_status_request(),
+                RequestedOutputFormat::Json,
+                Some(client),
+            )
+            .await
+            .expect("fresh daemon client storage-status dispatch");
+            match status.result {
+                Ok(ok) => {
+                    assert_eq!(ok.scope.project_id.as_str(), expected_project_id);
+                    return;
+                }
+                Err(problem) if problem.problem.retryable => {
+                    let delay = problem.problem.retry_after_millis.unwrap_or(250);
+                    last = Some(problem);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                }
+                Err(problem) => panic!("fresh daemon client was rejected: {problem:?}"),
+            }
+        }
+    })
     .await
-    .expect("fresh daemon client storage-status dispatch");
-    let scope = &status
-        .result
-        .as_ref()
-        .unwrap_or_else(|problem| panic!("fresh daemon client was rejected: {problem:?}"))
-        .scope;
-    assert_eq!(scope.project_id.as_str(), expected_project_id);
+    .unwrap_or_else(|_| panic!("fresh daemon client stayed unavailable: {last:?}"));
 }
 
 async fn fact_store_payload(
@@ -459,21 +493,104 @@ fn telemetry(fact: &Value) -> Value {
     })
 }
 
-async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -> Value {
+fn graph_publication_retryable(error: &str) -> bool {
+    error.contains("warming in the background")
+        || error.contains("verified code graph is not ready")
+        || error.contains("exact project code graph is unavailable")
+        || error.contains("retired before response completion")
+}
+
+async fn request_authoritative_reconcile(handshake: &DaemonHandshake, label: &str) {
     let result = call_default_tool(
         handshake,
-        "tracedecay_context",
-        json!({
-            "task": task,
-            "format": "json",
-            "memory_limit": 20,
-            "memory_min_trust": 0.0,
-        }),
+        "tracedecay_admin_sync",
+        json!({ "force": true, "format": "json" }),
     )
     .await
-    .unwrap_or_else(|error| panic!("{label} failed: {error}"));
-    tracedecay::daemon::tool_json_payload(&result, "tracedecay_context")
-        .unwrap_or_else(|error| panic!("{label} returned no JSON payload: {error}"))
+    .unwrap_or_else(|error| panic!("{label} admin_sync failed: {error}"));
+    let receipt = tracedecay::daemon::tool_json_payload(&result, "tracedecay_admin_sync")
+        .unwrap_or_else(|error| panic!("{label} admin_sync returned no JSON: {error}"));
+    assert_eq!(
+        receipt["status"], "queued",
+        "{label} overflow receipt: {receipt}"
+    );
+    assert_eq!(
+        receipt["reconcile_scope"], "authoritative_project",
+        "{label} must route to the mounted project authority: {receipt}"
+    );
+}
+
+async fn wait_for_current_graph(handshake: &DaemonHandshake, label: &str) {
+    let mut last = String::new();
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            match call_default_tool(
+                handshake,
+                "tracedecay_status",
+                json!({
+                    "format": "json",
+                    "include_branch_diagnostics": false,
+                    "include_storage_health": false,
+                    "include_session_ingest": false,
+                    "include_staleness": false,
+                }),
+            )
+            .await
+            {
+                Ok(result) => {
+                    let status = tracedecay::daemon::tool_json_payload(&result, "tracedecay_status")
+                        .unwrap_or_else(|error| panic!("{label} status payload: {error}"));
+                    last = status.to_string();
+                    match status["code_index_freshness"]["status"].as_str() {
+                        Some("current") => return,
+                        Some("warming") => tokio::time::sleep(Duration::from_millis(100)).await,
+                        actual => panic!("{label} graph readiness became {actual:?}: {status}"),
+                    }
+                }
+                Err(error) if graph_publication_retryable(&error.to_string()) => {
+                    last = error.to_string();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("{label} status failed: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label} graph did not become current: {last}"));
+}
+
+async fn context_payload(handshake: &DaemonHandshake, task: &str, label: &str) -> Value {
+    let mut last = String::new();
+    tokio::time::timeout(Duration::from_secs(180), async {
+        loop {
+            match call_default_tool(
+                handshake,
+                "tracedecay_context",
+                json!({
+                    "task": task,
+                    "format": "json",
+                    "memory_limit": 20,
+                    "memory_min_trust": 0.0,
+                }),
+            )
+            .await
+            {
+                Ok(result) => {
+                    return tracedecay::daemon::tool_json_payload(&result, "tracedecay_context")
+                        .unwrap_or_else(|error| {
+                            panic!("{label} returned no JSON payload: {error}")
+                        });
+                }
+                Err(error) if graph_publication_retryable(&error.to_string()) => {
+                    last = error.to_string();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(error) => panic!("{label} failed: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{label} failed: {last}"))
 }
 
 async fn assert_context_matches_fact(
@@ -554,6 +671,8 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
         "request.memory-restart.first-project-b",
     )
     .await;
+    request_authoritative_reconcile(&first_a, "initial A reconcile").await;
+    wait_for_current_graph(&first_a, "initial A verified graph").await;
 
     let add_a = || {
         json!({
@@ -736,6 +855,8 @@ async fn memory_relation_graph_survives_physical_daemon_restart_and_isolates_pro
         "request.memory-restart.second-project-b",
     )
     .await;
+    request_authoritative_reconcile(&restarted_a, "restarted A reconcile").await;
+    wait_for_current_graph(&restarted_a, "restarted A verified graph").await;
 
     assert_eq!(
         wait_for_related_fact(&restarted_a, &added_a, "project", "restarted A").await,
