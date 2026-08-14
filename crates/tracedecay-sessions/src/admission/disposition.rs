@@ -25,6 +25,25 @@ impl HostAdmissionStatus {
     pub fn from_wire(value: &str) -> Option<Self> {
         serde_json::from_value(Value::String(value.to_owned())).ok()
     }
+
+    /// The serde wire spelling of this status.
+    ///
+    /// Exists so a status can travel through layers that sit below this crate
+    /// (the runtime kernel's hook-runtime error context) and be reconstituted
+    /// with [`Self::from_wire`] without anyone re-deriving it from a reason
+    /// code.
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+            Self::Unknown => "unknown",
+            Self::Backpressured => "backpressured",
+            Self::AcceptedForReplay => "accepted_for_replay",
+            Self::Committed => "committed",
+            Self::ExactDuplicate => "exact_duplicate",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -224,5 +243,31 @@ impl HostAdmissionStatus {
             self,
             Self::Committed | Self::ExactDuplicate | Self::AcceptedForReplay
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_wire_spelling_round_trips_through_serde() {
+        for status in [
+            HostAdmissionStatus::Supported,
+            HostAdmissionStatus::Degraded,
+            HostAdmissionStatus::Unavailable,
+            HostAdmissionStatus::Unknown,
+            HostAdmissionStatus::Backpressured,
+            HostAdmissionStatus::AcceptedForReplay,
+            HostAdmissionStatus::Committed,
+            HostAdmissionStatus::ExactDuplicate,
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                Value::String(status.as_wire().to_owned()),
+                "{status:?} wire spelling drifted from serde"
+            );
+            assert_eq!(HostAdmissionStatus::from_wire(status.as_wire()), Some(status));
+        }
     }
 }

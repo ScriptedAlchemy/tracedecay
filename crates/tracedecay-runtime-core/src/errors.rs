@@ -7,6 +7,16 @@ struct HookRuntimeErrorContext {
     reason_code: String,
     retryable: bool,
     detail: String,
+    /// The admission authority's own disposition, in the canonical
+    /// `HostAdmissionStatus` wire form, when one produced this failure.
+    ///
+    /// The status enum is defined above this crate (`tracedecay-sessions`
+    /// depends on this kernel, not the other way round), so the value travels
+    /// as its serde wire string and the hook boundary reconstitutes it typed
+    /// with `HostAdmissionStatus::from_wire`. Carrying it verbatim is what
+    /// keeps the boundary from re-deriving a status by matching reason-code
+    /// strings.
+    status: Option<String>,
 }
 
 /// Errors that can occur during code graph operations.
@@ -161,24 +171,60 @@ impl TraceDecayError {
         matches!(self, Self::Database { .. })
     }
 
+    /// A hook-runtime failure raised without an admission authority behind it
+    /// (spool I/O, refresh ownership, test fixtures).
+    ///
+    /// Prefer [`Self::hook_runtime_with_status`] wherever an admission outcome
+    /// is in hand: a status recorded here is reported verbatim instead of
+    /// being inferred at the hook boundary.
     pub fn hook_runtime(
         reason_code: impl Into<String>,
         retryable: bool,
         detail: impl Into<String>,
     ) -> Self {
+        Self::hook_runtime_context_error(reason_code, retryable, detail, None)
+    }
+
+    /// A hook-runtime failure that carries the admission authority's own
+    /// status, in `HostAdmissionStatus` wire form.
+    pub fn hook_runtime_with_status(
+        reason_code: impl Into<String>,
+        retryable: bool,
+        detail: impl Into<String>,
+        status: impl Into<String>,
+    ) -> Self {
+        Self::hook_runtime_context_error(reason_code, retryable, detail, Some(status.into()))
+    }
+
+    fn hook_runtime_context_error(
+        reason_code: impl Into<String>,
+        retryable: bool,
+        detail: impl Into<String>,
+        status: Option<String>,
+    ) -> Self {
         Self::Io(std::io::Error::other(HookRuntimeErrorContext {
             reason_code: reason_code.into(),
             retryable,
             detail: detail.into(),
+            status,
         }))
     }
 
     pub fn hook_runtime_context(&self) -> Option<(&str, bool, &str)> {
+        let context = self.hook_runtime_error_context()?;
+        Some((&context.reason_code, context.retryable, &context.detail))
+    }
+
+    /// The admission status recorded with this failure, in wire form.
+    pub fn hook_runtime_status(&self) -> Option<&str> {
+        self.hook_runtime_error_context()?.status.as_deref()
+    }
+
+    fn hook_runtime_error_context(&self) -> Option<&HookRuntimeErrorContext> {
         let Self::Io(error) = self else {
             return None;
         };
-        let context = error.get_ref()?.downcast_ref::<HookRuntimeErrorContext>()?;
-        Some((&context.reason_code, context.retryable, &context.detail))
+        error.get_ref()?.downcast_ref::<HookRuntimeErrorContext>()
     }
 }
 
@@ -357,7 +403,28 @@ mod tests {
             err.hook_runtime_context(),
             Some(("cursor_conflict", true, "cursor advanced"))
         );
+        assert!(err.hook_runtime_status().is_none());
         assert!(err.to_string().contains("cursor advanced"));
+    }
+
+    #[test]
+    fn hook_runtime_error_carries_the_admission_status_verbatim() {
+        let err = TraceDecayError::hook_runtime_with_status(
+            "project_authority_unbound",
+            false,
+            "daemon observation authority is unavailable",
+            "unavailable",
+        );
+
+        assert_eq!(
+            err.hook_runtime_context(),
+            Some((
+                "project_authority_unbound",
+                false,
+                "daemon observation authority is unavailable"
+            ))
+        );
+        assert_eq!(err.hook_runtime_status(), Some("unavailable"));
     }
 
     #[test]

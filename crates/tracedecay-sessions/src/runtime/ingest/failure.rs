@@ -5,6 +5,7 @@ use crate::{
 use serde::Serialize;
 use tracedecay_domain::ObservationSourceRangeV1;
 
+use crate::admission::HostAdmissionStatus;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::{claude_observation, source};
 
@@ -12,6 +13,12 @@ use crate::runtime::{claude_observation, source};
 pub struct ClaudeObservationFailureClass {
     pub reason_code: &'static str,
     pub retryable: bool,
+    /// The admission disposition this failure reports.
+    ///
+    /// Declared here, in the same arm that names the reason code, so no
+    /// consumer has to recover a status by matching the reason-code string
+    /// after the fact.
+    pub status: HostAdmissionStatus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -263,11 +270,24 @@ pub(super) fn scheduling_write_required(
     )
 }
 
-pub fn classify_transcript_ingest_failure(
-    provider: &'static str,
-    source: &'static str,
+/// Reason code, retryability, and admission status of one transcript ingest
+/// failure.
+///
+/// A single match owns all three so every consumer — provider folds, catch-up
+/// telemetry, and the MCP hook boundary alike — reads the same declared
+/// disposition instead of recovering one from the reason-code string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscriptIngestDisposition {
+    pub reason_code: &'static str,
+    pub retryable: bool,
+    pub status: HostAdmissionStatus,
+    pub source_locator: Option<ObservationSourceRangeV1>,
+}
+
+pub fn classify_transcript_ingest_disposition(
     error: &source::TranscriptIngestError,
-) -> TranscriptCatchUpFailure {
+) -> TranscriptIngestDisposition {
+    use HostAdmissionStatus::{Backpressured, Degraded, Unavailable};
     use tracedecay_store::TranscriptStoreError;
 
     if let source::TranscriptIngestError::NonDurableRecord {
@@ -277,61 +297,88 @@ pub fn classify_transcript_ingest_failure(
         ..
     } = error
     {
-        return TranscriptCatchUpFailure::new(
-            provider,
-            source,
-            non_durable_reason_code(reason),
-            false,
-        )
-        .with_source_locator(ObservationSourceRangeV1::new(*offset, *end_offset).ok());
+        // The record itself is rejected: nothing about the authority is
+        // degraded beyond this one non-durable record.
+        return TranscriptIngestDisposition {
+            reason_code: non_durable_reason_code(reason),
+            retryable: false,
+            status: Degraded,
+            source_locator: ObservationSourceRangeV1::new(*offset, *end_offset).ok(),
+        };
     }
 
-    let (reason_code, retryable) = match error {
+    let (reason_code, retryable, status) = match error {
         // Admission-origin failures carry the admission authority's own
         // retryability verdict; hard-coding either answer here launders a
         // transient still-mounting authority into a terminal Blocked state.
         source::TranscriptIngestError::HostAdmission {
             reason, retryable, ..
-        } => (*reason, *retryable),
-        source::TranscriptIngestError::Cancelled { .. } => ("ingest_pass_cancelled", true),
+        } => (*reason, *retryable, Unavailable),
+        source::TranscriptIngestError::Cancelled { .. } => {
+            ("ingest_pass_cancelled", true, Backpressured)
+        }
         source::TranscriptIngestError::Store(TranscriptStoreError::Conflict { .. }) => {
-            ("transcript_cursor_conflict", true)
+            ("transcript_cursor_conflict", true, Backpressured)
         }
         source::TranscriptIngestError::Store(TranscriptStoreError::Storage { .. }) => {
-            ("transcript_storage_failed", true)
+            ("transcript_storage_failed", true, Unavailable)
         }
         source::TranscriptIngestError::Store(TranscriptStoreError::InvalidCursorPath) => {
-            ("transcript_cursor_path_invalid", false)
+            ("transcript_cursor_path_invalid", false, Degraded)
         }
         source::TranscriptIngestError::Store(TranscriptStoreError::InvalidTranscriptPath) => {
-            ("transcript_path_invalid", false)
+            ("transcript_path_invalid", false, Degraded)
         }
         source::TranscriptIngestError::Store(TranscriptStoreError::MissingTranscriptPath {
             ..
-        }) => ("transcript_path_missing", false),
+        }) => ("transcript_path_missing", false, Degraded),
         source::TranscriptIngestError::Store(TranscriptStoreError::MessageIdentityMismatch {
             ..
-        }) => ("transcript_message_identity_mismatch", false),
+        }) => ("transcript_message_identity_mismatch", false, Degraded),
         source::TranscriptIngestError::CursorKeyMismatch { .. } => {
-            ("transcript_cursor_key_mismatch", false)
+            ("transcript_cursor_key_mismatch", false, Degraded)
         }
-        source::TranscriptIngestError::ScanIo { .. } => ("transcript_source_io_failed", true),
+        source::TranscriptIngestError::ScanIo { .. } => {
+            ("transcript_source_io_failed", true, Unavailable)
+        }
         source::TranscriptIngestError::ScanGenerationChanged { .. } => {
-            ("transcript_source_generation_changed", true)
+            ("transcript_source_generation_changed", true, Backpressured)
         }
         source::TranscriptIngestError::BlockingScanTaskFailed { .. } => {
-            ("transcript_blocking_scan_failed", true)
+            ("transcript_blocking_scan_failed", true, Unavailable)
         }
-        source::TranscriptIngestError::Privacy(_) => ("transcript_privacy_rejected", false),
+        source::TranscriptIngestError::Privacy(_) => {
+            ("transcript_privacy_rejected", false, Degraded)
+        }
         source::TranscriptIngestError::NonDurableRecord { .. } => unreachable!(),
         source::TranscriptIngestError::Domain(_)
         | source::TranscriptIngestError::ObservationContract(_)
         | source::TranscriptIngestError::InvalidFrameState { .. }
         | source::TranscriptIngestError::InvalidSourceIdentity { .. } => {
-            ("transcript_source_contract_invalid", false)
+            ("transcript_source_contract_invalid", false, Degraded)
         }
     };
-    TranscriptCatchUpFailure::new(provider, source, reason_code, retryable)
+    TranscriptIngestDisposition {
+        reason_code,
+        retryable,
+        status,
+        source_locator: None,
+    }
+}
+
+pub fn classify_transcript_ingest_failure(
+    provider: &'static str,
+    source: &'static str,
+    error: &source::TranscriptIngestError,
+) -> TranscriptCatchUpFailure {
+    let disposition = classify_transcript_ingest_disposition(error);
+    TranscriptCatchUpFailure::new(
+        provider,
+        source,
+        disposition.reason_code,
+        disposition.retryable,
+    )
+    .with_source_locator(disposition.source_locator)
 }
 
 fn non_durable_reason_code(reason: &'static str) -> &'static str {
@@ -394,16 +441,30 @@ pub fn classify_claude_observation_failure(
     use claude_observation::ClaudeObservationIngestError as Ingest;
     use tracedecay_store::{ObservationStoreError as Store, ProjectionStoreError as Projection};
 
+    use HostAdmissionStatus::{Backpressured, Degraded, Unavailable};
+
+    // A permanent classification is an application-level rejection of this
+    // record: the authority itself is healthy, so the disposition is Degraded.
     let permanent = |reason_code| ClaudeObservationFailureClass {
         reason_code,
         retryable: false,
+        status: Degraded,
     };
-    let retryable = |reason_code| ClaudeObservationFailureClass {
+    // Retryable classifications split by *why* they converge: a contended
+    // cursor or a deferred retry is backpressure, an unreachable store is
+    // unavailability.
+    let contended = |reason_code| ClaudeObservationFailureClass {
         reason_code,
         retryable: true,
+        status: Backpressured,
+    };
+    let unavailable = |reason_code| ClaudeObservationFailureClass {
+        reason_code,
+        retryable: true,
+        status: Unavailable,
     };
     let store = |error: &Store| match error {
-        Store::CursorConflict { .. } => retryable("observation_cursor_conflict"),
+        Store::CursorConflict { .. } => contended("observation_cursor_conflict"),
         Store::CursorAdvanceCollision => permanent("observation_cursor_advance_collision"),
         Store::ObservationCollision { .. } => permanent("observation_identity_collision"),
         Store::SanitizationReceiptCollision => permanent("sanitization_receipt_collision"),
@@ -411,11 +472,11 @@ pub fn classify_claude_observation_failure(
         Store::CursorCoverageMismatch => permanent("observation_cursor_coverage_gap"),
         Store::InvalidReplayLimit { .. } => permanent("observation_replay_limit_invalid"),
         Store::Contract(_) => permanent("observation_contract_invalid"),
-        _ => retryable("observation_storage_failed"),
+        _ => unavailable("observation_storage_failed"),
     };
     let projection = |error: &Projection| match error {
-        Projection::Storage { .. } => retryable("observation_projection_storage_failed"),
-        Projection::RetryDeferred { .. } => retryable("observation_projection_retry_deferred"),
+        Projection::Storage { .. } => unavailable("observation_projection_storage_failed"),
+        Projection::RetryDeferred { .. } => contended("observation_projection_retry_deferred"),
         Projection::Gap { .. } => permanent("observation_projection_checkpoint_gap"),
         Projection::OutputCollision { .. } => permanent("observation_projection_output_collision"),
         Projection::ProvenanceCollision => permanent("observation_projection_provenance_collision"),
@@ -432,10 +493,11 @@ pub fn classify_claude_observation_failure(
         }
     };
     let transcript = |error: &source::TranscriptIngestError| {
-        let failure = classify_transcript_ingest_failure("claude", "transcript", error);
+        let disposition = classify_transcript_ingest_disposition(error);
         ClaudeObservationFailureClass {
-            reason_code: failure.reason_code,
-            retryable: failure.retryable,
+            reason_code: disposition.reason_code,
+            retryable: disposition.retryable,
+            status: disposition.status,
         }
     };
 
@@ -451,10 +513,10 @@ pub fn classify_claude_observation_failure(
         Ingest::Application(error) => match error {
             crate::observation::ObservationApplicationError::Store(error) => store(error),
             crate::observation::ObservationApplicationError::Cancelled => {
-                retryable("observation_cancelled")
+                contended("observation_cancelled")
             }
             crate::observation::ObservationApplicationError::PersistedObservationUnavailable => {
-                retryable("observation_persisted_value_unavailable")
+                unavailable("observation_persisted_value_unavailable")
             }
             crate::observation::ObservationApplicationError::Contract(_) => {
                 permanent("observation_contract_invalid")
@@ -466,6 +528,10 @@ pub fn classify_claude_observation_failure(
         Ingest::MissingParsedRecord => permanent("observation_parsed_record_missing"),
         Ingest::InvalidFrameState => permanent("observation_frame_state_invalid"),
         Ingest::NonContiguousCoverage => permanent("observation_scanner_coverage_gap"),
+        // The multi-source fold keeps only the first source's reason code and
+        // retryability, so its status is reconstructed from that verdict: a
+        // pass that can be re-run failed against an unreachable source or
+        // authority, one that cannot is a rejected record.
         Ingest::SourceFailures {
             first_reason_code,
             first_retryable,
@@ -473,6 +539,11 @@ pub fn classify_claude_observation_failure(
         } => ClaudeObservationFailureClass {
             reason_code: first_reason_code,
             retryable: *first_retryable,
+            status: if *first_retryable {
+                Unavailable
+            } else {
+                Degraded
+            },
         },
     }
 }

@@ -355,10 +355,11 @@ impl HostAdmissionRuntime {
 }
 
 fn open_outcome_error(outcome: HostAdmissionOutcome) -> TraceDecayError {
-    TraceDecayError::hook_runtime(
+    TraceDecayError::hook_runtime_with_status(
         outcome.reason_code.unwrap_or("spool_unavailable"),
         outcome.retryable,
         "host-admission spool open failed",
+        outcome.status.as_wire(),
     )
 }
 

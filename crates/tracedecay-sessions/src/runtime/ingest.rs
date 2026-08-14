@@ -9,7 +9,8 @@ mod user_provider;
 
 pub use authority::{IngestAdmissionBinding, SessionIngestAuthority};
 pub use failure::{
-    IngestPassCoverage, TranscriptCatchUpFailure, classify_claude_observation_failure,
+    IngestPassCoverage, TranscriptCatchUpFailure, TranscriptIngestDisposition,
+    classify_claude_observation_failure, classify_transcript_ingest_disposition,
     classify_transcript_ingest_failure,
 };
 pub use project::{
