@@ -19,7 +19,7 @@ const MIGRATION_NAME: &str = "git_correlation";
 const MESSAGE_WORKTREE_KEYS: [&str; 9] = [
     "codex_turn_worktree",
     "claude_message_worktree",
-    "cursor_event_worktree",
+    "cursor_session_worktree",
     "kiro_workspace_worktree",
     "cline_like_task_worktree",
     "vibe_session_worktree",

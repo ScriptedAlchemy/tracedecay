@@ -457,22 +457,22 @@ async fn cursor_transcript_ingest_populates_searchable_messages() {
     );
     let session_metadata: serde_json::Value =
         serde_json::from_str(results[0].session.metadata_json.as_deref().unwrap()).unwrap();
-    assert_metadata_path_eq(&session_metadata["cursor_event_cwd"], &project);
-    assert_metadata_path_eq(&session_metadata["cursor_event_worktree"], &project);
+    assert_metadata_path_eq(&session_metadata["cursor_session_cwd"], &project);
+    assert_metadata_path_eq(&session_metadata["cursor_session_worktree"], &project);
     assert_eq!(
-        session_metadata["cursor_event_location_provenance"].as_str(),
+        session_metadata["cursor_session_location_provenance"].as_str(),
         Some("workspace_root")
     );
-    assert!(session_metadata.get("cursor_event_git_branch").is_none());
+    assert!(session_metadata.get("cursor_session_git_branch").is_none());
     let message_metadata: serde_json::Value =
         serde_json::from_str(results[0].message.metadata_json.as_deref().unwrap()).unwrap();
-    assert_metadata_path_eq(&message_metadata["cursor_event_cwd"], &project);
-    assert_metadata_path_eq(&message_metadata["cursor_event_worktree"], &project);
+    assert_metadata_path_eq(&message_metadata["cursor_session_cwd"], &project);
+    assert_metadata_path_eq(&message_metadata["cursor_session_worktree"], &project);
     assert_eq!(
-        message_metadata["cursor_event_location_provenance"].as_str(),
+        message_metadata["cursor_session_location_provenance"].as_str(),
         Some("workspace_root")
     );
-    assert!(message_metadata.get("cursor_event_git_branch").is_none());
+    assert!(message_metadata.get("cursor_session_git_branch").is_none());
 }
 
 #[tokio::test]
@@ -528,13 +528,13 @@ async fn cursor_transcript_ingest_reads_nested_dispatch_tool_input_model() {
     {
         let metadata: serde_json::Value =
             serde_json::from_str(hit.message.metadata_json.as_deref().unwrap()).unwrap();
-        assert_metadata_path_eq(&metadata["cursor_event_cwd"], &project);
-        assert_metadata_path_eq(&metadata["cursor_event_worktree"], &project);
+        assert_metadata_path_eq(&metadata["cursor_session_cwd"], &project);
+        assert_metadata_path_eq(&metadata["cursor_session_worktree"], &project);
         assert_eq!(
-            metadata["cursor_event_location_provenance"].as_str(),
+            metadata["cursor_session_location_provenance"].as_str(),
             Some("workspace_root")
         );
-        assert!(metadata.get("cursor_event_git_branch").is_none());
+        assert!(metadata.get("cursor_session_git_branch").is_none());
     }
 }
 

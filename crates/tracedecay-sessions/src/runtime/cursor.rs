@@ -44,11 +44,11 @@ use crate::runtime::source::{
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
-const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
+const CURSOR_SESSION_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     TranscriptLocationMetadataKeys::new(
-        "cursor_event_cwd",
-        "cursor_event_worktree",
-        "cursor_event_location_provenance",
+        "cursor_session_cwd",
+        "cursor_session_worktree",
+        "cursor_session_location_provenance",
     );
 const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
 
@@ -1613,7 +1613,7 @@ fn session_metadata(event: &Value, event_cwd: Option<&Path>, location_provenance
     }
     append_location_metadata(
         &mut metadata,
-        CURSOR_EVENT_LOCATION_KEYS,
+        CURSOR_SESSION_LOCATION_KEYS,
         TranscriptLocation::new(event_cwd, location_provenance),
     );
     Value::Object(metadata)
@@ -1640,7 +1640,7 @@ fn message_metadata(
     append_host_event_ordering(&mut metadata, event, source_offset);
     append_location_metadata(
         &mut metadata,
-        CURSOR_EVENT_LOCATION_KEYS,
+        CURSOR_SESSION_LOCATION_KEYS,
         TranscriptLocation::new(event_cwd, location_provenance),
     );
     append_tool_calls_metadata(&mut metadata, message);
@@ -1712,7 +1712,7 @@ fn dispatch_message_metadata(
     append_host_event_ordering(&mut metadata, event, source_offset);
     append_location_metadata(
         &mut metadata,
-        CURSOR_EVENT_LOCATION_KEYS,
+        CURSOR_SESSION_LOCATION_KEYS,
         TranscriptLocation::new(event_cwd, location_provenance),
     );
     Value::Object(metadata)
