@@ -395,6 +395,13 @@ pub(super) fn code_index_search_executor(
             };
             let authority = match admission.authorize(&scope, request.authority.as_ref()) {
                 Ok(authority) => authority,
+                // The executor resolves live HEAD. A mid-session checkout mints a
+                // new grant for the new ref while the route-constructed authority
+                // still names the open-time revision. This authority is daemon
+                // state, not client input; rebind to the grant just issued.
+                Err(query_mcp_admission::QueryMcpAdmissionUnavailableV1::AuthorizationStale) => {
+                    admission.search_authority()
+                }
                 Err(error) => {
                     return code_index_search_unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,

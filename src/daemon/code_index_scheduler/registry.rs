@@ -1300,12 +1300,16 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 continue;
             }
-            let Some((scope_digest, authority)) = &worktree.query_authority else {
+            let Some((_scope_digest, authority)) = &worktree.query_authority else {
                 return None;
             };
-            if scope_digest != &scope.scope_digest || matched.is_some() {
+            if matched.is_some() {
                 return None;
             }
+            // Same worktree isolation as `latest_matches_scope_identity`: a
+            // mid-session ref switch keeps the mounted ranking authority until
+            // the route remounts. Exact digest is a remount key, not a reason
+            // to deny search after HEAD moved.
             matched = Some(Arc::clone(authority));
         }
         matched
