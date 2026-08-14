@@ -6,25 +6,25 @@
       "state": "supported", "admission_provider": "kiro",
       "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "prompt": "<REDACTED_PROMPT>"},
       "admission": {"status": "supported", "retryable": false},
-      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
     },
     {
       "state": "degraded", "admission_provider": "kiro",
       "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "prompt": "<REDACTED_PROMPT>"},
       "admission": {"status": "degraded", "retryable": false, "reason_code": "spool_record_too_large"},
-      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
     },
     {
       "state": "unavailable", "admission_provider": "kiro",
       "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "prompt": "<REDACTED_PROMPT>"},
       "admission": {"status": "unavailable", "retryable": false, "reason_code": "project_authority_unbound"},
-      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
     },
     {
       "state": "unknown", "admission_provider": "kiro-future",
       "request": {"hook_event_name": "userPromptSubmit", "session_id": "<SESSION_ID>", "cwd": "<PROJECT_ROOT>", "prompt": "<REDACTED_PROMPT>"},
       "admission": {"status": "unknown", "retryable": false, "reason_code": "unknown_provider"},
-      "response": {"exit_code": 0, "stdout": "", "stderr": ""}
+      "response": {"exit_code": 0, "stdout": "{}", "stderr": ""}
     }
   ]
 }
