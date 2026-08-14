@@ -35,7 +35,6 @@ pub(crate) use identity::generation_identity_digest;
 const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-build.v1";
 const VECTOR_COMMITTED_BATCH_DIGEST_DOMAIN: &str = "tracedecay.vector-committed-batch.v1";
 const PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN: &str = "tracedecay.physical-vector-reuse.v1";
-#[cfg(test)]
 /// Bytes per sealed slice of a corpus-sized externalized collection, keeping
 /// each sealed unit bounded no matter how large the collection is.
 const VECTOR_STATE_SLICE_BYTES: usize = 32 * 1024;
@@ -268,7 +267,6 @@ impl<T> ExternalV1<T> {
         self.value
     }
 
-    #[cfg(test)]
     /// Mutable access that keeps the address intact.
     ///
     /// Only for edits the externalized encoding cannot observe: filling the
@@ -334,7 +332,6 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ExternalV1<T> {
     }
 }
 
-#[cfg(test)]
 /// One externalized collection, seen by the load/seal walk without knowing
 /// which collection it is.
 ///
@@ -342,7 +339,6 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for ExternalV1<T> {
 /// were cut into.
 type SealedCollectionV1 = (ContentDigest, Vec<Vec<u8>>);
 
-#[cfg(test)]
 trait ExternalSlotV1 {
     /// The address this slot's bytes are stored under, if it is sealed.
     fn address(&self) -> Option<&ContentDigest>;
@@ -362,7 +358,6 @@ trait ExternalSlotV1 {
     fn fill(&mut self, slices: &[Vec<u8>]) -> Result<(), VectorGenerationStoreErrorV1>;
 }
 
-#[cfg(test)]
 impl<T> ExternalSlotV1 for ExternalV1<T>
 where
     T: Serialize + serde::de::DeserializeOwned,
@@ -1420,6 +1415,44 @@ impl VectorGenerationStateMachineV1 {
         self.published.generations.get(generation_id)
     }
 
+    /// Seal every externalized collection, then serialize the state document.
+    ///
+    /// The document stores only content addresses. Serializing an unsealed
+    /// slot fails closed rather than writing a fabricated address. Physical
+    /// vector bytes are persisted beside the document because the row map
+    /// elides them.
+    pub fn persist_sealed(&mut self) -> Result<Vec<u8>, VectorGenerationStoreErrorV1> {
+        let collections = seal_external_state(self, &BTreeSet::new())?;
+        let document = serde_json::to_vec(self).map_err(storage_error)?;
+        serde_json::to_vec(&PersistedSealedStateV1 {
+            document,
+            collections,
+            physical_vectors: self.published.physical_vectors.clone(),
+        })
+        .map_err(storage_error)
+    }
+
+    /// Reload a document persisted by [`Self::persist_sealed`].
+    pub fn reopen_sealed(bytes: &[u8]) -> Result<Self, VectorGenerationStoreErrorV1> {
+        let persisted: PersistedSealedStateV1 =
+            serde_json::from_slice(bytes).map_err(storage_error)?;
+        let mut state: Self = serde_json::from_slice(&persisted.document).map_err(storage_error)?;
+        state.published.physical_vectors = persisted.physical_vectors;
+        state.visit_external_slots(&mut |slot| {
+            let Some(address) = slot.address().cloned() else {
+                return Ok(());
+            };
+            let slices = persisted.collections.get(&address).ok_or_else(|| {
+                VectorGenerationStoreErrorV1::Storage(format!(
+                    "externalized state collection {address} is missing"
+                ))
+            })?;
+            slot.fill(slices)
+        })?;
+        hydrate_elided_vector_values(&mut state)?;
+        Ok(state)
+    }
+
     /// Resolve the shared immutable vector bytes behind one logical generation
     /// occurrence. The returned allocation is reused only inside the exact
     /// projection/privacy authority named by the generation.
@@ -1532,8 +1565,8 @@ fn intern_generation_vectors(
 
 /// Seal a hand-built fixture so its document can be serialized.
 ///
-/// The store's own writers seal inside their mutation path; fixtures that
-/// build state directly go through here instead.
+/// Production persist goes through [`VectorGenerationStateMachineV1::persist_sealed`];
+/// fixtures that build state directly go through here instead.
 #[cfg(test)]
 fn seal_test_state(
     state: &mut VectorGenerationStateMachineV1,
@@ -1541,11 +1574,9 @@ fn seal_test_state(
     seal_external_state(state, &BTreeSet::new()).expect("seal externalized state")
 }
 
-#[cfg(test)]
 type ExternalSlotVisitV1<'visit> =
     dyn FnMut(&mut dyn ExternalSlotV1) -> Result<(), VectorGenerationStoreErrorV1> + 'visit;
 
-#[cfg(test)]
 impl PublishedVectorGenerationV1 {
     fn visit_external_slots(
         &mut self,
@@ -1680,7 +1711,6 @@ fn validate_published_receipts(
     Ok(())
 }
 
-#[cfg(test)]
 impl VectorGenerationStateMachineV1 {
     /// Every externalized collection in the state document, in a stable order.
     fn visit_external_slots(
@@ -1704,7 +1734,37 @@ impl VectorGenerationStateMachineV1 {
     }
 }
 
-#[cfg(test)]
+/// Address-only state document plus the sealed slices and physical bytes
+/// needed to reopen it.
+#[derive(Serialize, Deserialize)]
+struct PersistedSealedStateV1 {
+    document: Vec<u8>,
+    collections: BTreeMap<ContentDigest, Vec<Vec<u8>>>,
+    physical_vectors: BTreeMap<ManifestDigest, PhysicalVectorPayloadV1>,
+}
+
+fn hydrate_elided_vector_values(
+    state: &mut VectorGenerationStateMachineV1,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    for (generation_id, generation) in state.published.generations.iter_mut() {
+        let Some(bindings) = state.published.physical_vector_bindings.get(generation_id) else {
+            continue;
+        };
+        for (chunk_id, vector) in generation.vectors.elided_mut().iter_mut() {
+            let Some(physical_id) = bindings.get(chunk_id) else {
+                continue;
+            };
+            let Some(payload) = state.published.physical_vectors.get(physical_id) else {
+                return Err(VectorGenerationStoreErrorV1::Storage(format!(
+                    "physical vector payload for {chunk_id} is missing after reopen"
+                )));
+            };
+            vector.values = payload.values.0.to_vec();
+        }
+    }
+    Ok(())
+}
+
 /// Seal every externalized collection and collect the slices to write.
 ///
 /// A slot whose address is already durable is left alone, so a mutation

@@ -1291,9 +1291,9 @@ async fn graph_store_survives_reopen_and_preserves_superseded_generations() {
         .publish_generation(&initial_build)
         .expect("initial publication");
 
-    let encoded = serde_json::to_vec(&store).expect("persist vector state");
-    let mut restarted: VectorGenerationStateMachineV1 =
-        serde_json::from_slice(&encoded).expect("reopen vector state");
+    let encoded = store.persist_sealed().expect("persist vector state");
+    let mut restarted =
+        VectorGenerationStateMachineV1::reopen_sealed(&encoded).expect("reopen vector state");
     assert_eq!(
         restarted
             .generation(&initial_publication.generation_id)
@@ -1366,9 +1366,10 @@ async fn graph_store_survives_reopen_and_preserves_superseded_generations() {
             .contains_key(&alpha_v1.id)
     );
 
-    let encoded = serde_json::to_vec(&restarted).expect("persist superseded generations");
-    let reopened: VectorGenerationStateMachineV1 =
-        serde_json::from_slice(&encoded).expect("second reopen");
+    let encoded = restarted
+        .persist_sealed()
+        .expect("persist superseded generations");
+    let reopened = VectorGenerationStateMachineV1::reopen_sealed(&encoded).expect("second reopen");
     assert!(
         reopened
             .generation(&initial_publication.generation_id)
