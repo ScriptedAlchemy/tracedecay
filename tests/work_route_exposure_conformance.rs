@@ -36,6 +36,8 @@ mod common;
 
 #[path = "work_route_exposure_conformance/work_evidence.rs"]
 mod work_evidence;
+#[path = "work_route_exposure_conformance/work_task_session.rs"]
+mod work_task_session;
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -223,6 +225,41 @@ impl ProductionDaemon {
             self.base_url, self.project_id, route_path
         )
     }
+
+    /// Kills the daemon process and starts a new one over the same profile.
+    ///
+    /// This is a physical restart, not a handle reset: the old process is
+    /// reaped and the published authority record is removed first, so the new
+    /// endpoint and token are the ones this daemon minted rather than a stale
+    /// read of its predecessor's. Everything a journey asserts afterwards was
+    /// therefore reconstructed from durable state.
+    fn restart(&mut self) {
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+        let authority_path = common::daemon_authority_path(&self.profile);
+        let _ = fs::remove_file(&authority_path);
+        let mut daemon = isolated(self.home.path(), &self.profile)
+            .args(["daemon", "run"])
+            .current_dir(&self.project)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("daemon should restart");
+        let authority = wait_for_authority(&mut daemon, &authority_path);
+        let endpoint = authority["http_application_endpoint"]
+            .as_str()
+            .expect("republished HTTP application endpoint")
+            .to_owned();
+        let token = authority["auth_token"]
+            .as_str()
+            .expect("republished auth token")
+            .to_owned();
+        self.daemon = daemon;
+        self.base_url = format!("http://{endpoint}");
+        self.origin = self.base_url.clone();
+        self.authorization = format!("Bearer {token}");
+    }
 }
 
 impl Drop for ProductionDaemon {
@@ -242,6 +279,10 @@ impl Drop for ProductionDaemon {
 struct DashboardProcess {
     process: Child,
     base_url: String,
+    /// Everything the launcher wrote to stderr, so a dashboard that never
+    /// becomes reachable can name its own cause instead of surfacing as a bare
+    /// connection refusal at whichever request happened to be next.
+    diagnostics: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl DashboardProcess {
@@ -256,10 +297,56 @@ impl DashboardProcess {
             .stderr(Stdio::piped())
             .spawn()
             .expect("dashboard should start");
+        let diagnostics = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(stderr) = process.stderr.take() {
+            let sink = std::sync::Arc::clone(&diagnostics);
+            std::thread::spawn(move || {
+                use std::io::{BufRead, BufReader};
+
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while matches!(reader.read_line(&mut line), Ok(read) if read > 0) {
+                    if let Ok(mut sink) = sink.lock() {
+                        sink.push_str(&line);
+                    }
+                    line.clear();
+                }
+            });
+        }
         let stdout = process.stdout.take().expect("dashboard stdout");
         let base_url = read_listening_url(stdout, &mut process);
-        Self { process, base_url }
+        Self {
+            process,
+            base_url,
+            diagnostics,
+        }
     }
+
+    /// Waits until the daemon-hosted dashboard actually accepts connections.
+    ///
+    /// The launcher exits as soon as it has printed the URL, so process
+    /// liveness says nothing about whether the mount is reachable. Polling the
+    /// bound address is the only real readiness signal.
+    fn wait_until_serving(&self, agent: &ureq::Agent, label: &str) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if agent.get(&format!("{}/", self.base_url)).call().is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the daemon-hosted dashboard at {} never accepted connections before {label}\n\
+                 launcher stderr:\n{}",
+                self.base_url,
+                self.diagnostics
+                    .lock()
+                    .map(|captured| captured.clone())
+                    .unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
 }
 
 impl Drop for DashboardProcess {
@@ -276,6 +363,7 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
     let mut reader = BufReader::new(stdout);
     let deadline = Instant::now() + Duration::from_secs(90);
     let mut seen = String::new();
+    let mut listening = None;
     while Instant::now() < deadline {
         let mut line = String::new();
         match reader.read_line(&mut line) {
@@ -285,11 +373,25 @@ fn read_listening_url(stdout: std::process::ChildStdout, process: &mut Child) ->
                 if let Some(rest) = line.split_once("listening on ")
                     && let Some(url) = rest.1.split_whitespace().next()
                 {
-                    return url.trim_end_matches('/').to_owned();
+                    listening = Some(url.trim_end_matches('/').to_owned());
+                    break;
                 }
             }
             Err(error) => panic!("dashboard stdout failed: {error}\nseen:\n{seen}"),
         }
+    }
+    if let Some(url) = listening {
+        // Keep draining the pipe for the server's whole life. Dropping the read
+        // end here would turn the dashboard's next stdout write into SIGPIPE,
+        // killing the very mount the journey is about to exercise — a failure
+        // that surfaces later as a connection refusal with no cause attached.
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            while matches!(reader.read_line(&mut line), Ok(read) if read > 0) {
+                line.clear();
+            }
+        });
+        return url;
     }
     let mut stderr = String::new();
     if let Some(mut piped) = process.stderr.take() {
@@ -872,6 +974,34 @@ fn the_work_surface_answers_real_requests_on_both_published_mounts() {
             "{label} must not alias product graph tasks into executor topology: {body}"
         );
     }
+}
+
+/// The dashboard Work journey past its verified task root.
+///
+/// `the_work_surface_answers_real_requests_on_both_published_mounts` proves the
+/// TaskId-rooted read at its floor: a task with no accepted attempt, whose only
+/// truthful answer is zero selected sources. The question a dashboard user
+/// actually opens a task to ask — *who worked on this, and in which provider
+/// session* — was never driven on either mount. This runs one real pinned
+/// provider through the production spawn path, links the accepted attempt,
+/// imports the provider transcript, and grades the answer on the daemon mount
+/// and the dashboard mount, in all four temporal modes, across a physical
+/// daemon restart.
+#[cfg(unix)]
+#[test]
+fn the_dashboard_work_surface_answers_who_worked_on_a_task_on_both_published_mounts() {
+    let mut fixture = ProductionDaemon::start();
+    // This journey drives real provider execution and a daemon restart, so a
+    // request may legitimately queue behind a rebinding project runtime. The
+    // budget is generous on purpose: a client timeout here would read as a
+    // surface failure it is not.
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(120)))
+        .build()
+        .into();
+
+    work_task_session::assert_provider_qualified_task_session_evidence(&agent, &mut fixture);
 }
 
 #[test]
