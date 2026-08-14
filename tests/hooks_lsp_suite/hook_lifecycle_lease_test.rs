@@ -133,7 +133,10 @@ fn native_host_hooks_do_not_create_a_missing_profile() {
             // transport-only `{}` acknowledgement.
             "hook-claude-post-tool-use"
             | "hook-codex-post-tool-use"
-            | "hook-cursor-post-tool-use" => b"",
+            | "hook-cursor-post-tool-use"
+            | "hook-kimi-event"
+            | "hook-opencode-event"
+            | "hook-opencode-tool-after" => b"",
             // Cursor sessionStart has a host-specific response even when no
             // project is bound: empty context and no session environment.
             "hook-cursor-session-start" => b"{\"additional_context\":\"\",\"env\":{}}\n",
@@ -254,6 +257,39 @@ fn response_capable_native_hooks_use_each_hosts_stdout_contract() {
                 "workspace_roots": [temp.path()],
                 "tool_name": "Write",
                 "tool_input": { "file_path": temp.path().join("src/lib.rs") },
+            }),
+            b"".as_slice(),
+        ),
+        (
+            "hook-kimi-event",
+            serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "session_id": "kimi-session",
+                "cwd": temp.path(),
+                "tool_name": "Edit",
+                "tool_input": { "path": temp.path().join("src/lib.rs") },
+            }),
+            b"".as_slice(),
+        ),
+        (
+            "hook-opencode-event",
+            serde_json::json!({
+                "id": "opencode-event",
+                "type": "session.idle",
+                "properties": { "sessionID": "opencode-session" },
+            }),
+            b"".as_slice(),
+        ),
+        (
+            "hook-opencode-tool-after",
+            serde_json::json!({
+                "input": {
+                    "tool": "apply_patch",
+                    "sessionID": "opencode-session",
+                    "callID": "call-1",
+                    "args": { "patchText": "*** Begin Patch\n*** End Patch" },
+                },
+                "output": { "title": "Done", "output": "Done" },
             }),
             b"".as_slice(),
         ),

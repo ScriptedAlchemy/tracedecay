@@ -168,6 +168,9 @@ fn native_response_command_from_name(command: &str) -> bool {
             | "hook-codex-post-tool-use"
             | "hook-hermes-terminal-receipt"
             | "hook-kiro-prompt-submit"
+            | "hook-kimi-event"
+            | "hook-opencode-event"
+            | "hook-opencode-tool-after"
     )
 }
 
