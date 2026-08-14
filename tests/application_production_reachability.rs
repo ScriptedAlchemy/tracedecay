@@ -73,6 +73,12 @@ async fn production_fixture() -> ProductionFixture {
         &project,
     );
     write_pagination_probe(&project);
+    common::fixture::git_run(&project, &["init", "-q"]);
+    common::fixture::git_run(&project, &["add", "."]);
+    common::fixture::git_run(
+        &project,
+        &["commit", "-qm", "application reachability fixture"],
+    );
     let daemon = common::spawn_tracedecay_daemon(environment.home());
     let initialized = common::tracedecay_command_with_home(environment.home())
         .arg("init")
