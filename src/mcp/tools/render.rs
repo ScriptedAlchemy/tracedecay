@@ -700,9 +700,9 @@ pub(super) fn unmounted_files_md(value: &Value) -> String {
     }
 
     if unmounted.is_empty() {
-        let audited = ecosystems.iter().any(|ecosystem| {
-            ecosystem.get("status").and_then(Value::as_str) == Some("audited")
-        });
+        let audited = ecosystems
+            .iter()
+            .any(|ecosystem| ecosystem.get("status").and_then(Value::as_str) == Some("audited"));
         if audited {
             md.empty_note(
                 "Every scanned source file is reachable from a declared entry point in the \

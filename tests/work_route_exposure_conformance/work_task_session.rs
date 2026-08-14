@@ -315,15 +315,18 @@ fn assert_both_mounts(
 ) {
     for (mode, temporal) in [
         ("current", json!({ "kind": "current" })),
-        (
-            "as-of",
-            json!({ "kind": "as_of", "cutoff": now_micros() }),
-        ),
+        ("as-of", json!({ "kind": "as_of", "cutoff": now_micros() })),
         ("evolution", json!({ "kind": "evolution" })),
         ("forensic", json!({ "kind": "forensic" })),
     ] {
         // 1. The task root, unexpanded: who worked on this task.
-        let rooted = evidence_request(selection.clone(), verified_version, temporal.clone(), None, None);
+        let rooted = evidence_request(
+            selection.clone(),
+            verified_version,
+            temporal.clone(),
+            None,
+            None,
+        );
         let payload = both_mounts(
             agent,
             fixture,
@@ -343,10 +346,9 @@ fn assert_both_mounts(
         // decoder is what every typed client uses, and it is what must say
         // `claude`.
         let session: tracedecay_domain::ObservationSourceIdentityV1 =
-            serde_json::from_value(receipt["evidence"]["provider_session"].clone())
-                .unwrap_or_else(|error| {
-                    panic!("{phase} {mode} provider session must decode: {error}; {payload}")
-                });
+            serde_json::from_value(receipt["evidence"]["provider_session"].clone()).unwrap_or_else(
+                |error| panic!("{phase} {mode} provider session must decode: {error}; {payload}"),
+            );
         assert_eq!(
             session.provider().as_str(),
             PROVIDER_PROVIDER_ID,
@@ -380,10 +382,9 @@ fn assert_both_mounts(
         );
         assert_task_session_unavailable(&payload, &format!("{phase} {mode} expanded"));
         assert!(
-            payload["sources"]
-                .as_array()
-                .is_some_and(|sources| !sources.iter().any(|source| source["kind"]
-                    == "task_session")),
+            payload["sources"].as_array().is_some_and(|sources| !sources
+                .iter()
+                .any(|source| source["kind"] == "task_session")),
             "{phase} {mode} must not publish a TaskSession source without its authority: {payload}"
         );
         assert!(
@@ -500,7 +501,9 @@ fn attempt_receipt(payload: &Value, identity: &Value) -> Option<Value> {
     payload["sources"]
         .as_array()?
         .iter()
-        .find(|source| source["kind"] == "attempt_receipt" && source["receipt"]["identity"] == *identity)
+        .find(|source| {
+            source["kind"] == "attempt_receipt" && source["receipt"]["identity"] == *identity
+        })
         .map(|source| source["receipt"].clone())
 }
 
@@ -667,11 +670,8 @@ fn execution_snapshot(
         backend: WorkProviderBackendV1::ClaudeCodeCli,
         protocol: WorkProviderProtocol::ClaudeStreamJson,
         model: "model.work-surface-task-session".to_owned(),
-        executable: WorkExecutableReference::new(
-            EXECUTABLE_ID.to_owned(),
-            artifact_digest.clone(),
-        )
-        .expect("pinned executable reference"),
+        executable: WorkExecutableReference::new(EXECUTABLE_ID.to_owned(), artifact_digest.clone())
+            .expect("pinned executable reference"),
         sandbox: WorkSandboxPolicy::Required,
         approval: WorkApprovalPolicy::Never,
         filesystem: WorkFilesystemPolicy::WorkspaceWrite,

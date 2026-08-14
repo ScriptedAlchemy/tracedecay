@@ -119,7 +119,12 @@ fn marker_count(database: &TestDatabase) -> i64 {
     }
 }
 
-fn request(project: &str, operation_id: &str, key: &str, digest_byte: char) -> RuntimeSubmitRequestV1 {
+fn request(
+    project: &str,
+    operation_id: &str,
+    key: &str,
+    digest_byte: char,
+) -> RuntimeSubmitRequestV1 {
     let metadata: StoreOperationMetadataV1 = serde_json::from_value(serde_json::json!({
         "operation_id": operation_id,
         "client_id": format!("client.{project}"),
@@ -234,7 +239,11 @@ impl RuntimeRequestProbeV1 for FixedProbe {
     }
 }
 
-fn writer(database: &TestDatabase, request: &RuntimeSubmitRequestV1, fail: bool) -> PersistentWriter {
+fn writer(
+    database: &TestDatabase,
+    request: &RuntimeSubmitRequestV1,
+    fail: bool,
+) -> PersistentWriter {
     let binding = request.binding().clone();
     let locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
@@ -274,9 +283,11 @@ fn apply_inbox_commits_the_native_effect_against_a_real_sqlite_store() {
     assert_eq!(marker_count(&database), 1);
     let stored_effect_id: String = database
         .connect()
-        .query_row(&format!("SELECT effect_id FROM {MARKER_TABLE}"), [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            &format!("SELECT effect_id FROM {MARKER_TABLE}"),
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(stored_effect_id, "effect.operation.inbox.success");
 }
@@ -333,7 +344,8 @@ fn a_failing_apply_leaves_no_partial_effect_after_rollback() {
         'a',
     );
     let writer = writer(&database, &request, true);
-    let outcome = runtime().block_on(writer.submit(request.clone(), FixedProbe::for_request(&request)));
+    let outcome =
+        runtime().block_on(writer.submit(request.clone(), FixedProbe::for_request(&request)));
     assert!(
         matches!(outcome, Err(WriterActorError::StorageFailure(_))),
         "a native apply failure must surface as a storage failure, not silently succeed"
