@@ -418,7 +418,7 @@ fn directory_identity(directory: &Dir) -> io::Result<ScopeDirectoryIdentityV1> {
         },
         #[cfg(windows)]
         created_100ns: {
-            use std::os::windows::fs::MetadataExt;
+            use cap_std::fs::MetadataExt;
             metadata.creation_time()
         },
     })
