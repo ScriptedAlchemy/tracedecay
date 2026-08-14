@@ -256,7 +256,7 @@ async fn project_context(socket: &Path, handshake: &DaemonHandshake, project: &P
 }
 
 async fn search(socket: &Path, handshake: &DaemonHandshake, query: &str) -> Value {
-    tool(
+    let payload = tool(
         socket,
         handshake,
         "tracedecay_search",
@@ -266,7 +266,38 @@ async fn search(socket: &Path, handshake: &DaemonHandshake, query: &str) -> Valu
             "format": "json",
         }),
     )
-    .await
+    .await;
+    resolve_truncated_tool_payload(socket, handshake, payload).await
+}
+
+/// Large `tracedecay_search` bodies are replaced by a handle envelope once they
+/// exceed the MCP response cap. Journey waits read `code_generation` / `results`
+/// from the stored original, not the truncated preview.
+async fn resolve_truncated_tool_payload(
+    socket: &Path,
+    handshake: &DaemonHandshake,
+    payload: Value,
+) -> Value {
+    if payload.get("truncated") != Some(&json!(true)) {
+        return payload;
+    }
+    let handle = payload["handle"]
+        .as_str()
+        .unwrap_or_else(|| panic!("truncated search omitted retrieve handle: {payload}"));
+    let retrieved = tool(
+        socket,
+        handshake,
+        "tracedecay_retrieve",
+        json!({
+            "handle": handle,
+            "format": "json",
+        }),
+    )
+    .await;
+    retrieved["content"]
+        .as_str()
+        .and_then(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| panic!("truncated search handle did not retrieve JSON: {retrieved}"))
 }
 
 async fn exact_symbol(
