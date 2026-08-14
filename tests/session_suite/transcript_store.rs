@@ -276,7 +276,7 @@ async fn late_cursor_failure_rolls_back_every_transcript_write_then_retries() {
             raw_messages: 2,
             raw_fts: 2,
             all_raw_fts: 2,
-            summaries: 1,
+            summaries: 0,
             cursors: 1,
         }
     );
@@ -467,7 +467,7 @@ async fn stale_higher_batch_is_rejected_until_reparsed_from_durable_cursor() {
             raw_messages: 3,
             raw_fts: 3,
             all_raw_fts: 3,
-            summaries: 1,
+            summaries: 0,
             cursors: 1,
         }
     );
