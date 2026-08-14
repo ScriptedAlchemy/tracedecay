@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -76,37 +77,25 @@ def daemon_environment(
 
 
 def wait_for_daemon(
-    binary: Path,
-    project: Path,
-    environment: dict[str, str],
     daemon: subprocess.Popen[bytes],
+    socket_path: Path,
 ) -> None:
     deadline = time.monotonic() + TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if daemon.poll() is not None:
             fail(f"packaged daemon exited before bridge startup with {daemon.returncode}")
-        try:
-            probe = subprocess.run(
-                [
-                    binary,
-                    "tool",
-                    "active_project",
-                    "--args",
-                    '{"format":"json"}',
-                ],
-                cwd=project,
-                env=environment,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=2,
-                check=False,
-            )
-            if probe.returncode == 0:
+        if socket_path.exists():
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(0.25)
+            try:
+                client.connect(str(socket_path))
+            except OSError:
+                pass
+            else:
                 return
-        except subprocess.TimeoutExpired:
-            pass
-        if time.monotonic() < deadline:
-            time.sleep(0.05)
+            finally:
+                client.close()
+        time.sleep(0.05)
     fail("packaged daemon endpoint did not become ready")
 
 
@@ -134,20 +123,6 @@ def main() -> None:
     base_environment["HOME"] = str(home)
     base_environment["USERPROFILE"] = str(home)
     environment = daemon_environment(base_environment, socket_path)
-    initialized = subprocess.run(
-        [binary, "init", project],
-        cwd=project,
-        env=environment,
-        capture_output=True,
-        timeout=TIMEOUT_SECONDS,
-        check=False,
-    )
-    if initialized.returncode != 0:
-        fail(
-            "packaged binary could not initialize bridge fixture:\n"
-            + initialized.stderr.decode(errors="replace")
-        )
-
     daemon: subprocess.Popen[bytes] | None = None
     bridge: subprocess.Popen[bytes] | None = None
     try:
@@ -160,7 +135,20 @@ def main() -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=daemon_stderr,
             )
-            wait_for_daemon(binary, project, environment, daemon)
+            wait_for_daemon(daemon, socket_path)
+            initialized = subprocess.run(
+                [binary, "init", project],
+                cwd=project,
+                env=environment,
+                capture_output=True,
+                timeout=TIMEOUT_SECONDS,
+                check=False,
+            )
+            if initialized.returncode != 0:
+                fail(
+                    "packaged binary could not initialize bridge fixture:\n"
+                    + initialized.stderr.decode(errors="replace")
+                )
             with bridge_log.open("wb") as bridge_stderr:
                 bridge = subprocess.Popen(
                     [binary, "lsp", "bridge", "--stdio", "--project", project],

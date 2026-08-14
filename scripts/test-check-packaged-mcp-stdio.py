@@ -34,7 +34,23 @@ def main() -> int:
         binary = bin_directory / "tracedecay.exe"
         write_executable(
             binary,
-            "#!/usr/bin/env python3\nimport sys\nraise SystemExit(0 if sys.argv[1:] == ['init'] else 1)\n",
+            """#!/usr/bin/env python3
+import sys
+import time
+from pathlib import Path
+
+args = sys.argv[1:]
+if args[:2] == ["daemon", "run"]:
+    if "--socket" in args:
+        socket = Path(args[args.index("--socket") + 1])
+        socket.parent.mkdir(parents=True, exist_ok=True)
+        socket.write_text("", encoding="utf-8")
+    while True:
+        time.sleep(60)
+if args == ["init"]:
+    raise SystemExit(0)
+raise SystemExit(1)
+""",
         )
 
         tools = [
