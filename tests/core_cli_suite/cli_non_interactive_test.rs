@@ -360,6 +360,14 @@ fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Pa
     .unwrap();
 }
 
+/// Writable first open publishes the daemon-owned canonical configuration
+/// revision. Branch commands then open that store read-only and must not
+/// invent a revision or migrate in place.
+fn seed_canonical_configuration(home: &Path, project: &Path) {
+    crate::common::ensure_tracedecay_daemon(home);
+    crate::common::initialize_tracedecay_cli_project(home, project);
+}
+
 fn write_empty_sqlite_fixture(path: &Path) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
@@ -1822,6 +1830,7 @@ async fn branch_remove_deletes_branch_db_from_profile_shard() {
     register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
+    seed_canonical_configuration(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
@@ -1858,6 +1867,7 @@ async fn branch_remove_deletes_branch_local_memory_without_cutover_receipt() {
     register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
+    seed_canonical_configuration(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
@@ -1902,6 +1912,7 @@ async fn branch_removeall_deletes_profile_shard_branch_dbs() {
     register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
+    seed_canonical_configuration(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
@@ -1942,6 +1953,7 @@ async fn branch_gc_preserves_profile_shard_without_repository_evidence() {
     register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
+    seed_canonical_configuration(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
         &shard_root,
