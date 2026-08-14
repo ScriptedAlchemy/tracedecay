@@ -513,12 +513,18 @@ the commit as attribution evidence.
   reconcile, and retried warming identity. Selected-project writes stay
   denied (`c74e4d8c4`). Do not replace this journey with the narrow
   registry test.
-- Finish and checkpoint the exact-route Hermes plugin, unit, and stock changes
-  described by the host lane, then build a fresh binary. `c635423a56` contains
-  the retained Hermes surface, and `c061d3b883` (2026-08-11) removed the old
-  broad fact-store router from the tree, so the stale-binary finding is
-  code-fixed; the fresh binary build and the eight-check stock rerun remain
-  open.
+- DONE 2026-08-14: exact-route Hermes plugin, unit, and stock checks closed
+  against a fresh isolated binary (`CARGO_TARGET_DIR=/tmp/hermes-close-target`,
+  `tracedecay 0.0.73+623a12cbcd51`, stock Hermes `9dd9ef0ec99a`). CI's
+  hermes-integration job is green end to end: `hermes_plugin_unit_check.py`
+  39/39, `hermes_stock_integration.sh` TAP 1-25 PASS, `hermes plugins list`
+  shows tracedecay enabled, and `tracedecay doctor` Hermes section is clean.
+  TAP 25 (`sync_turn` → `tracedecay_lcm_grep`) was not semantic-publication
+  fallout (`semantic_publication_failure` / `store_unknown_build` absent after
+  `ab01a31e5`); retained LCM grep used default multi-MiB `ExecutionLimits` and
+  failed `within_request_budgets` as persistent `application.retained.saturated`.
+  `abc6b23e6` caps those limits to the admitted 64KiB request budget. Exact-route
+  + PATH isolation remain in `ded031f58` / `455a3aed7` (merge `9673f03db`).
 - DONE 2026-08-13: the provider decoding/materialization work in
   `github_runtime/stack.rs` landed committed in `74ebfe3cc` (canonical stack
   identities) and `92d1d7225` (verified V2 authorities — the restored V3
