@@ -6,8 +6,13 @@
 
 use super::*;
 
+mod code_index_activation;
 mod runtime;
 mod session_database_admission;
+use code_index_activation::{
+    CodeIndexActivationMountInputs, code_index_activation_hint_sink, code_index_activation_mount,
+    code_index_hook_sink, code_index_reconcile_sink,
+};
 pub(in crate::daemon) use runtime::ProductionProjectCompositionRuntime;
 use runtime::bind_verified_project_graph_runtime;
 use session_database_admission::{join_independent_session_opens, log_session_database_admission};
@@ -53,22 +58,14 @@ pub(super) async fn production_project_server(
     )
     .await?;
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
-    if let Some(server) = {
-        let mut servers = store_administration.project_servers().lock().await;
-        servers
-            .get_route_and_touch(&route)
-            .map(|(key, server)| (key.clone(), Arc::clone(server)))
-    } {
-        return Ok(ProductionProjectComposition {
-            #[cfg(unix)]
-            key: server.0,
-            canonical_project_path: canonical_project_path.to_path_buf(),
-            server: server.1,
-            #[cfg(unix)]
-            inserted: false,
-            #[cfg(any(test, feature = "test-transport"))]
-            semantic_auto_download_enabled: None,
-        });
+    if let Some((cached_key, cached_server)) = cached_route_server(store_administration, &route).await
+    {
+        return Ok(cached_project_composition(
+            canonical_project_path,
+            cached_key,
+            cached_server,
+            None,
+        ));
     }
 
     let gate = project_open_gate(project_open_gates, &route).await;
@@ -77,22 +74,16 @@ pub(super) async fn production_project_server(
         () = cancellation.cancelled() => return Err(project_open_cancellation_error()),
         singleflight = gate.lock() => singleflight,
     };
-    if let Some(server) = {
-        let mut servers = store_administration.project_servers().lock().await;
-        servers
-            .get_route_and_touch(&route)
-            .map(|(key, server)| (key.clone(), Arc::clone(server)))
-    } {
-        return Ok(ProductionProjectComposition {
-            #[cfg(unix)]
-            key: server.0,
-            canonical_project_path: canonical_project_path.to_path_buf(),
-            server: server.1,
-            #[cfg(unix)]
-            inserted: false,
-            #[cfg(any(test, feature = "test-transport"))]
-            semantic_auto_download_enabled: None,
-        });
+    // Order-sensitive: the same lookup runs again behind the single-flight gate
+    // so a concurrent open that published while this caller waited is reused.
+    if let Some((cached_key, cached_server)) = cached_route_server(store_administration, &route).await
+    {
+        return Ok(cached_project_composition(
+            canonical_project_path,
+            cached_key,
+            cached_server,
+            None,
+        ));
     }
 
     #[cfg(test)]
@@ -133,29 +124,14 @@ pub(super) async fn production_project_server(
         .map_err(|error| TraceDecayError::Config {
             message: format!("authoritative runtime configuration unavailable: {error}"),
         })?;
-    let semantic_config = &runtime_configuration.config.semantic;
-    let semantic_resources = &semantic_config.resources;
-    // The configured ceiling still caps concurrency; this only narrows it to
-    // what the serving reservation leaves room for and adds one slot so an
-    // interactive query keeps a warm session while a rebuild holds the rest.
-    let semantic_runtime = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
-        tracedecay_semantic::embedding_parallelism::embedding_pool_sessions(
-            semantic_resources.max_threads,
-            semantic_resources.max_concurrent_sessions,
-        ),
-        usize::try_from(semantic_resources.max_resident_bytes / 4096)
-            .unwrap_or(usize::MAX)
-            .max(semantic_resources.max_batch_size as usize),
-        semantic_resources.max_resident_bytes,
-    )
-    .map_err(|_| TraceDecayError::Config {
-        message: "semantic runtime resource ceilings are invalid".to_owned(),
-    })?;
-    let semantic_auto_download_enabled =
-        semantic_config.auto_download && runtime.semantic_auto_download();
-    let semantic_startup_selection = semantic_config.selected_model.clone();
+    let SemanticProjectRuntime {
+        handle: semantic_runtime,
+        lifecycle: semantic_lifecycle,
+        resources: semantic_resources,
+        auto_download_enabled: semantic_auto_download_enabled,
+        startup_selection: semantic_startup_selection,
+    } = semantic_project_runtime(&runtime_configuration, &runtime)?;
     let project_database_is_read_only = !cg.db().is_writable();
-    let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
         let existing = servers.get_ready(&key).cloned();
@@ -165,16 +141,12 @@ pub(super) async fn production_project_server(
         existing
     };
     if let Some(existing) = existing {
-        return Ok(ProductionProjectComposition {
-            #[cfg(unix)]
+        return Ok(cached_project_composition(
+            canonical_project_path,
             key,
-            canonical_project_path: canonical_project_path.to_path_buf(),
-            server: existing,
-            #[cfg(unix)]
-            inserted: false,
-            #[cfg(any(test, feature = "test-transport"))]
-            semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
-        });
+            existing,
+            Some(semantic_auto_download_enabled),
+        ));
     }
 
     let current_key = Arc::new(tokio::sync::Mutex::new(key.clone()));
@@ -208,230 +180,44 @@ pub(super) async fn production_project_server(
     let profile_identity = store_administration.profile_identity()?.clone();
     let accounting_db =
         crate::global_db::global_accounting_enabled().then(|| Arc::clone(&registered_profile_db));
-    let code_index_publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver =
-        Arc::new(invocation.code_index_schedulers.clone());
-    let code_search_project_id =
-        tracedecay_domain::ProjectId::new(authoritative_project_id.clone()).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("project search identity is invalid: {error}"),
-            }
-        })?;
-    let code_search_scope =
-        project_open_owners::resolved_scope_for_project(cg.project_root(), &code_search_project_id)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("project search scope is invalid: {error:?}"),
-            })?;
-    let code_graph_projection_read_port =
-        project_open_owners::project_code_graph_projection_read_port(
-            invocation.code_index_schedulers.clone(),
-            canonical_project_path.to_path_buf(),
-            code_search_scope.clone(),
-        );
-    let code_index_ignored_dependency_admission =
-        project_open_owners::project_code_index_ignored_dependency_admission_port(
-            invocation.code_index_schedulers.clone(),
-            canonical_project_path.to_path_buf(),
-            code_search_scope.clone(),
-            !project_database_is_read_only,
-        );
-    let generation_census_reader = project_open_owners::project_code_index_generation_census_reader(
+    let ProjectCodeIndexAuthorities {
+        publication_identity: code_index_publication_identity,
+        project_id: code_search_project_id,
+        scope: code_search_scope,
+        graph_projection_read_port: code_graph_projection_read_port,
+        ignored_dependency_admission: code_index_ignored_dependency_admission,
+        generation_census_reader,
+        graph_read_admission_port: code_graph_read_admission_port,
+        search_authority: code_search_authority,
+        read_admission_provider,
+    } = project_code_index_authorities(
+        invocation,
+        &cg,
+        canonical_project_path,
+        &authoritative_project_id,
+        &profile_identity,
+        &route_registered,
+        project_database_is_read_only,
+    )?;
+    let code_index_mount = code_index_activation_mount(CodeIndexActivationMountInputs {
+        invocation: invocation.clone(),
+        project_id: code_search_project_id.clone(),
+        project_root: canonical_project_path.to_path_buf(),
+        store_root: code_index_store_root.clone(),
+        semantic_runtime: semantic_runtime.clone(),
+        semantic_lifecycle: semantic_lifecycle.clone(),
+        semantic_resources,
+        scope: code_search_scope.clone(),
+        route_registered: Arc::clone(&route_registered),
+        cancellation: cancellation.clone(),
+        graph_runtime: Arc::clone(&graph_runtime),
+        graph_publication_database: Arc::new(cg.db().clone()),
+        profile_id: cg.store_runtime_registry().profile_id().clone(),
+    });
+    let code_index_hint_sink = code_index_activation_hint_sink(
         invocation.code_index_schedulers.clone(),
         canonical_project_path.to_path_buf(),
-        code_search_scope.clone(),
     );
-    let code_graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort = Arc::new(
-        crate::daemon::callable_code_authorization::DaemonCodeGraphReadAdmission::production(
-            canonical_project_path.to_path_buf(),
-            code_search_scope.clone(),
-            Arc::clone(cg.configuration_runtime()),
-        ),
-    );
-    let code_search_admission = query_mcp_admission::admit_query_mcp_read(
-        Some(&profile_identity),
-        &code_search_project_id,
-        &code_search_scope,
-        Arc::clone(&route_registered),
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("project search admission is unavailable: {error}"),
-    })?;
-    let code_search_authority = code_search_admission.search_authority();
-    let read_admission_provider = query_mcp_admission::QueryMcpReadAdmissionProviderV1::new(
-        profile_identity.clone(),
-        code_search_project_id.clone(),
-        Arc::clone(&route_registered),
-    );
-    let code_index_mount: code_index_scheduler::CodeIndexActivationMountV1 = {
-        let invocation = invocation.clone();
-        let project_id = code_search_project_id.clone();
-        let project_root = canonical_project_path.to_path_buf();
-        let store_root = code_index_store_root.clone();
-        let semantic_runtime = semantic_runtime.clone();
-        let semantic_lifecycle = semantic_lifecycle.clone();
-        let semantic_resources = *semantic_resources;
-        let scope = code_search_scope.clone();
-        let route_registered = Arc::clone(&route_registered);
-        let cancellation = cancellation.clone();
-        let graph_runtime = Arc::clone(&graph_runtime);
-        let graph_publication_database = Arc::new(cg.db().clone());
-        let profile_id = cg.store_runtime_registry().profile_id().clone();
-        Arc::new(move || {
-            let invocation = invocation.clone();
-            let project_id = project_id.clone();
-            let project_root = project_root.clone();
-            let store_root = store_root.clone();
-            let semantic_runtime = semantic_runtime.clone();
-            let semantic_lifecycle = semantic_lifecycle.clone();
-            let semantic_resources = semantic_resources;
-            let scope = scope.clone();
-            let route_registered = Arc::clone(&route_registered);
-            let cancellation = cancellation.clone();
-            let graph_runtime = Arc::clone(&graph_runtime);
-            let graph_publication_database = Arc::clone(&graph_publication_database);
-            let profile_id = profile_id.clone();
-            Box::pin(async move {
-                if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
-                    return Err("project route was revoked before code-index mount".to_owned());
-                }
-                let mut publications = invocation
-                    .code_index_schedulers
-                    .subscribe_generation_publications();
-                let mount = invocation.mount_code_index(
-                    project_id,
-                    &project_root,
-                    store_root,
-                    Some(&semantic_runtime),
-                    semantic_lifecycle,
-                    Some(semantic_resources),
-                    graph_runtime,
-                    graph_publication_database,
-                );
-                tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => {
-                        return Err("project route was cancelled during code-index mount".to_owned());
-                    }
-                    outcome = mount => outcome.map_err(|error| error.to_string())?,
-                }
-                if cancellation.is_cancelled() || !route_registered.load(Ordering::Acquire) {
-                    return Err("project route was revoked after code-index mount".to_owned());
-                }
-
-                // Query authority depends on the first sealed generation, but
-                // hook hints must become deliverable as soon as the scheduler is
-                // mounted. Keep that wait in its own route-fenced task.
-                let authority_invocation = invocation.clone();
-                let authority_project = project_root.clone();
-                let authority_scope = scope.clone();
-                let authority_profile_id = profile_id.clone();
-                let authority_route_registered = Arc::clone(&route_registered);
-                let authority_cancellation = cancellation.clone();
-                tokio::spawn(async move {
-                    let mut route_poll = tokio::time::interval(std::time::Duration::from_secs(1));
-                    route_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    let generation_ready = if authority_invocation
-                        .code_index_schedulers
-                        .latest_generation_id(&authority_project)
-                        .await
-                        .is_some()
-                    {
-                        true
-                    } else {
-                        loop {
-                            if !authority_route_registered.load(Ordering::Acquire) {
-                                break false;
-                            }
-                            tokio::select! {
-                                () = authority_cancellation.cancelled() => break false,
-                                _ = route_poll.tick() => {
-                                    if !authority_route_registered.load(Ordering::Acquire) {
-                                        break false;
-                                    }
-                                }
-                                publication = publications.recv() => match publication {
-                                    Ok(publication)
-                                        if publication.project_root == authority_project =>
-                                    {
-                                        break true;
-                                    }
-                                    Ok(_) => {}
-                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                        if authority_invocation
-                                            .code_index_schedulers
-                                            .latest_generation_id(&authority_project)
-                                            .await
-                                            .is_some()
-                                        {
-                                            break true;
-                                        }
-                                    }
-                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                        break false;
-                                    }
-                                }
-                            }
-                        }
-                    };
-                    if !generation_ready
-                        || authority_cancellation.is_cancelled()
-                        || !authority_route_registered.load(Ordering::Acquire)
-                    {
-                        return;
-                    }
-                    let outcome = tokio::select! {
-                        biased;
-                        () = authority_cancellation.cancelled() => return,
-                        outcome = authority_invocation.mount_query_authority_for_project(
-                            &authority_project,
-                            &authority_profile_id,
-                            &authority_scope,
-                        ) => outcome,
-                    };
-                    if authority_cancellation.is_cancelled()
-                        || !authority_route_registered.load(Ordering::Acquire)
-                    {
-                        return;
-                    }
-                    let mut fields = vec![
-                        ("project", authority_project.display().to_string()),
-                        ("phase", "code_index_query_authority".to_owned()),
-                    ];
-                    match outcome {
-                        Ok(()) => fields.push(("outcome", "mounted".to_owned())),
-                        Err(error) => {
-                            fields.push(("outcome", "degraded".to_owned()));
-                            fields.push(("error", error.to_string()));
-                        }
-                    }
-                    log_daemon_event("project_open_phase", &fields);
-                });
-                Ok(())
-            })
-        })
-    };
-    let code_index_hint_sink: code_index_scheduler::CodeIndexActivationHintSinkV1 = {
-        let schedulers = invocation.code_index_schedulers.clone();
-        let project_root = canonical_project_path.to_path_buf();
-        Arc::new(move |batch| {
-            let schedulers = schedulers.clone();
-            let project_root = project_root.clone();
-            Box::pin(async move {
-                let paths_accepted = if batch.paths.is_empty() {
-                    true
-                } else {
-                    schedulers
-                        .notify_hook_paths(&project_root, &batch.paths)
-                        .await
-                };
-                let overflow_accepted = if batch.overflow {
-                    schedulers.notify_hook_overflow(&project_root).await
-                } else {
-                    true
-                };
-                paths_accepted && overflow_accepted
-            })
-        })
-    };
     let code_index_activation = Arc::new(code_index_scheduler::CodeIndexActivationV1::new(
         canonical_project_path,
         Arc::clone(&route_registered),
@@ -439,20 +225,8 @@ pub(super) async fn production_project_server(
         code_index_mount,
         code_index_hint_sink,
     ));
-    // Accept after-edit hints before mount completes. The activation owner
-    // bounds/coalesces them and keeps this hook path independent of indexing.
-    let hook_activation = Arc::clone(&code_index_activation);
-    let code_index_hook_sink: crate::mcp::server::CodeIndexHookSink =
-        Arc::new(move |root: PathBuf, rel_paths: Vec<String>| {
-            let activation = Arc::clone(&hook_activation);
-            Box::pin(async move { activation.notify_hook_paths(&root, rel_paths).await })
-        });
-    let reconcile_activation = Arc::clone(&code_index_activation);
-    let code_index_reconcile_sink: crate::mcp::server::CodeIndexReconcileSink =
-        Arc::new(move |root: PathBuf| {
-            let activation = Arc::clone(&reconcile_activation);
-            Box::pin(async move { activation.notify_hook_overflow(&root).await })
-        });
+    let code_index_hook_sink = code_index_hook_sink(Arc::clone(&code_index_activation));
+    let code_index_reconcile_sink = code_index_reconcile_sink(Arc::clone(&code_index_activation));
     // The daemon mounts the same broker the MCP server and the directly
     // served dashboard open: persisted analyzer settings (with a recorded
     // degradation for an unreadable file) plus the home-level OpenCode
@@ -472,13 +246,8 @@ pub(super) async fn production_project_server(
         code_search_project_id.clone(),
         read_admission_provider,
     );
-    let dashboard_code_index_schedulers = invocation.code_index_schedulers.clone();
-    let dashboard_code_index_freshness_reader:
-        crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader =
-        Arc::new(move |project_root| {
-            let schedulers = dashboard_code_index_schedulers.clone();
-            Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
-        });
+    let dashboard_code_index_freshness_reader =
+        project_dashboard_freshness_reader(invocation.code_index_schedulers.clone());
     let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
         invocation.feedback_runtime_registrar(),
     );
@@ -773,39 +542,16 @@ pub(super) async fn production_project_server(
             > = session_sync_owner;
             let session_sync_service = Arc::downgrade(&session_sync_port);
             let store_telemetry_sampling = store_administration.store_telemetry_sampling();
-            let record_telemetry_registration = |path: &Path, registered: bool| {
-                if !registered {
-                    log_daemon_event(
-                        "store_telemetry_registration",
-                        &[
-                            ("store", path.display().to_string()),
-                            ("outcome", "unavailable".to_owned()),
-                        ],
-                    );
-                }
-            };
-            record_telemetry_registration(
-                cg.db().database_path(),
-                store_telemetry_sampling.register_port(
-                    cg.db().database_path(),
-                    &code_search_scope,
-                    || cg.storage_telemetry_handle(),
-                ),
+            register_route_store_telemetry(
+                &store_telemetry_sampling,
+                &cg,
+                &code_search_scope,
+                [
+                    registry_db.as_ref(),
+                    user_session_db.as_ref(),
+                    session_db.as_ref(),
+                ],
             );
-            for database in [
-                registry_db.as_ref(),
-                user_session_db.as_ref(),
-                session_db.as_ref(),
-            ] {
-                record_telemetry_registration(
-                    database.db_path(),
-                    store_telemetry_sampling.register_port(
-                        database.db_path(),
-                        &code_search_scope,
-                        || database.storage_telemetry_handle(),
-                    ),
-                );
-            }
             let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
                 canonical_project_path.to_path_buf(),
                 code_search_project_id.clone(),
@@ -824,23 +570,8 @@ pub(super) async fn production_project_server(
                 store_telemetry_sampling,
                 Arc::clone(cg.configuration_runtime()),
             );
-            let delivery_settlement_authority = invocation
-                .service
-                .delivery_settlement_authority(Some(canonical_project_path))
-                .await
-                .map_err(|error| TraceDecayError::Config {
-                    message: format!("delivery settlement authority is invalid: {error}"),
-                })?
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "delivery settlement authority is not mounted".to_owned(),
-                })?;
-            let delivery_settlement_recorder = invocation
-                .service
-                .delivery_settlement_recorder(Some(canonical_project_path))
-                .await
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "delivery settlement recorder is not mounted".to_owned(),
-                })?;
+            let (delivery_settlement_authority, delivery_settlement_recorder) =
+                project_delivery_settlement_ports(invocation, canonical_project_path).await?;
             let mut full_context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
                 Arc::clone(&cg),
                 handshake.scope_prefix.clone(),
@@ -1087,22 +818,13 @@ pub(super) async fn production_project_server(
                 let failed_key = current_key.lock().await.clone();
                 let retain_core = !cancellation.is_cancelled() && failed_key == key;
                 let (core_retained, failed_full_server) = if retain_core {
-                    let mut servers = store_administration.project_servers().lock().await;
-                    match published_full_candidate.as_ref() {
-                        Some(failed_full_server) => {
-                            let displaced =
-                                servers.swap_ready_if(&key, Arc::clone(&resolved), |current| {
-                                    Arc::ptr_eq(current, failed_full_server)
-                                });
-                            (displaced.is_some(), displaced)
-                        }
-                        None => (
-                            servers
-                                .get_ready(&key)
-                                .is_some_and(|current| Arc::ptr_eq(current, &resolved)),
-                            None,
-                        ),
-                    }
+                    reclaim_core_after_failed_upgrade(
+                        store_administration,
+                        &key,
+                        &resolved,
+                        published_full_candidate.as_ref(),
+                    )
+                    .await
                 } else {
                     (false, None)
                 };
@@ -1137,31 +859,12 @@ pub(super) async fn production_project_server(
                         ],
                     );
                 } else {
-                    let mut removed = store_administration
-                        .project_servers()
-                        .lock()
-                        .await
-                        .remove_owner(&failed_key.owner);
-                    if session_capabilities_published.load(Ordering::Acquire)
-                        && removed.iter().all(|server| !Arc::ptr_eq(server, &resolved))
-                    {
-                        removed.push(Arc::clone(&resolved));
-                    }
-                    for server in &removed {
-                        server.revoke_project_server_responses();
-                    }
-                    debug_assert!(
-                        !removed.is_empty(),
-                        "failed core upgrade must retire its published owner"
-                    );
-                    // Request execution may itself need the owner writer held by
-                    // this open attempt. The tracked retirement starts draining
-                    // after this closure returns and releases that writer.
-                    schedule_project_server_retirement(
+                    retire_failed_project_open_owner(
                         store_administration,
-                        failed_key.owner.clone(),
-                        removed,
-                        Some(Arc::clone(&route_registered)),
+                        &failed_key,
+                        &resolved,
+                        session_capabilities_published.load(Ordering::Acquire),
+                        &route_registered,
                     )
                     .await;
                     return Err(error);
@@ -1179,4 +882,313 @@ pub(super) async fn production_project_server(
         #[cfg(any(test, feature = "test-transport"))]
         semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
     })
+}
+
+/// Look this route up in the published project-server cache, refreshing its
+/// recency on a hit. Callers reuse the returned server instead of opening.
+async fn cached_route_server(
+    store_administration: &StoreAdministration,
+    route: &ProjectRouteKey,
+) -> Option<(ProjectServerKey, Arc<crate::mcp::McpServer>)> {
+    let mut servers = store_administration.project_servers().lock().await;
+    servers
+        .get_route_and_touch(route)
+        .map(|(key, server)| (key.clone(), Arc::clone(server)))
+}
+
+/// The composition returned by every cache hit. `inserted` is always false:
+/// reusing a published server never publishes a route.
+fn cached_project_composition(
+    canonical_project_path: &Path,
+    key: ProjectServerKey,
+    server: Arc<crate::mcp::McpServer>,
+    semantic_auto_download_enabled: Option<bool>,
+) -> ProductionProjectComposition {
+    #[cfg(not(unix))]
+    let _ = key;
+    #[cfg(not(any(test, feature = "test-transport")))]
+    let _ = semantic_auto_download_enabled;
+    ProductionProjectComposition {
+        #[cfg(unix)]
+        key,
+        canonical_project_path: canonical_project_path.to_path_buf(),
+        server,
+        #[cfg(unix)]
+        inserted: false,
+        #[cfg(any(test, feature = "test-transport"))]
+        semantic_auto_download_enabled,
+    }
+}
+
+/// Semantic-code choices this route resolves once from its authoritative
+/// runtime configuration.
+struct SemanticProjectRuntime {
+    handle: crate::semantic_code::DaemonSemanticRuntimeHandleV1,
+    lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
+    resources: crate::config::SemanticResourceCeilings,
+    auto_download_enabled: bool,
+    startup_selection: Option<String>,
+}
+
+/// Derive this route's semantic runtime handle and startup choices. The
+/// composition runtime can veto auto-download even when configuration allows
+/// it, so both inputs are consulted here rather than at the use site.
+fn semantic_project_runtime(
+    runtime_configuration: &tracedecay_usecases::config::PinnedRuntimeConfiguration,
+    runtime: &ProductionProjectCompositionRuntime,
+) -> Result<SemanticProjectRuntime> {
+    let semantic_config = &runtime_configuration.config.semantic;
+    let semantic_resources = &semantic_config.resources;
+    // The configured ceiling still caps concurrency; this only narrows it to
+    // what the serving reservation leaves room for and adds one slot so an
+    // interactive query keeps a warm session while a rebuild holds the rest.
+    let handle = crate::semantic_code::DaemonSemanticRuntimeHandleV1::new(
+        tracedecay_semantic::embedding_parallelism::embedding_pool_sessions(
+            semantic_resources.max_threads,
+            semantic_resources.max_concurrent_sessions,
+        ),
+        usize::try_from(semantic_resources.max_resident_bytes / 4096)
+            .unwrap_or(usize::MAX)
+            .max(semantic_resources.max_batch_size as usize),
+        semantic_resources.max_resident_bytes,
+    )
+    .map_err(|_| TraceDecayError::Config {
+        message: "semantic runtime resource ceilings are invalid".to_owned(),
+    })?;
+    Ok(SemanticProjectRuntime {
+        handle,
+        lifecycle: crate::semantic_code::shared_lifecycle_owner(),
+        resources: *semantic_resources,
+        auto_download_enabled: semantic_config.auto_download && runtime.semantic_auto_download(),
+        startup_selection: semantic_config.selected_model.clone(),
+    })
+}
+
+/// Every exact-scope code-index port this route publishes to its MCP servers.
+struct ProjectCodeIndexAuthorities {
+    publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver,
+    project_id: tracedecay_domain::ProjectId,
+    scope: tracedecay_application::ResolvedScope,
+    graph_projection_read_port: Arc<dyn tracedecay_usecases::graph::CodeGraphProjectionReadPort>,
+    ignored_dependency_admission:
+        Arc<dyn tracedecay_usecases::code_index::CodeIndexIgnoredDependencyAdmissionPortV1>,
+    generation_census_reader: crate::runtime_telemetry::GenerationCensusReader,
+    graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort,
+    search_authority: tracedecay_query::code_search::CodeIndexSearchAuthorityV1,
+    read_admission_provider: query_mcp_admission::QueryMcpReadAdmissionProviderV1,
+}
+
+/// Resolve the project's search identity and bind every code-index read port to
+/// that one exact scope. Scope resolution reads the graph's own project root,
+/// not the handshake path, so a relocated store still binds its own scope.
+fn project_code_index_authorities(
+    invocation: &DaemonInvocationState,
+    cg: &Arc<crate::tracedecay::TraceDecay>,
+    canonical_project_path: &Path,
+    authoritative_project_id: &str,
+    profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    route_registered: &Arc<AtomicBool>,
+    project_database_is_read_only: bool,
+) -> Result<ProjectCodeIndexAuthorities> {
+    let publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver =
+        Arc::new(invocation.code_index_schedulers.clone());
+    let project_id = tracedecay_domain::ProjectId::new(authoritative_project_id.to_owned())
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project search identity is invalid: {error}"),
+        })?;
+    let scope = project_open_owners::resolved_scope_for_project(cg.project_root(), &project_id)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project search scope is invalid: {error:?}"),
+        })?;
+    let graph_projection_read_port = project_open_owners::project_code_graph_projection_read_port(
+        invocation.code_index_schedulers.clone(),
+        canonical_project_path.to_path_buf(),
+        scope.clone(),
+    );
+    let ignored_dependency_admission =
+        project_open_owners::project_code_index_ignored_dependency_admission_port(
+            invocation.code_index_schedulers.clone(),
+            canonical_project_path.to_path_buf(),
+            scope.clone(),
+            !project_database_is_read_only,
+        );
+    let generation_census_reader = project_open_owners::project_code_index_generation_census_reader(
+        invocation.code_index_schedulers.clone(),
+        canonical_project_path.to_path_buf(),
+        scope.clone(),
+    );
+    let graph_read_admission_port: crate::mcp::server::CodeGraphReadAdmissionPort = Arc::new(
+        crate::daemon::callable_code_authorization::DaemonCodeGraphReadAdmission::production(
+            canonical_project_path.to_path_buf(),
+            scope.clone(),
+            Arc::clone(cg.configuration_runtime()),
+        ),
+    );
+    let search_admission = query_mcp_admission::admit_query_mcp_read(
+        Some(profile_identity),
+        &project_id,
+        &scope,
+        Arc::clone(route_registered),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project search admission is unavailable: {error}"),
+    })?;
+    let search_authority = search_admission.search_authority();
+    let read_admission_provider = query_mcp_admission::QueryMcpReadAdmissionProviderV1::new(
+        profile_identity.clone(),
+        project_id.clone(),
+        Arc::clone(route_registered),
+    );
+    Ok(ProjectCodeIndexAuthorities {
+        publication_identity,
+        project_id,
+        scope,
+        graph_projection_read_port,
+        ignored_dependency_admission,
+        generation_census_reader,
+        graph_read_admission_port,
+        search_authority,
+        read_admission_provider,
+    })
+}
+
+/// Dashboard-facing freshness reader for this route's code-index schedulers.
+fn project_dashboard_freshness_reader(
+    schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+) -> crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader {
+    let reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader =
+        Arc::new(move |project_root| {
+            let schedulers = schedulers.clone();
+            Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
+        });
+    reader
+}
+
+/// Register the project graph and the session databases this route owns with
+/// the sampling authority. An unavailable registration is recorded and skipped,
+/// never fatal: telemetry must not fail an otherwise healthy project open.
+fn register_route_store_telemetry(
+    sampling: &crate::daemon::maintenance::StoreTelemetrySamplingRegistry,
+    cg: &Arc<crate::tracedecay::TraceDecay>,
+    scope: &tracedecay_application::ResolvedScope,
+    session_databases: [&crate::global_db::RegisteredGlobalDb; 3],
+) {
+    let record_telemetry_registration = |path: &Path, registered: bool| {
+        if !registered {
+            log_daemon_event(
+                "store_telemetry_registration",
+                &[
+                    ("store", path.display().to_string()),
+                    ("outcome", "unavailable".to_owned()),
+                ],
+            );
+        }
+    };
+    record_telemetry_registration(
+        cg.db().database_path(),
+        sampling.register_port(cg.db().database_path(), scope, || {
+            cg.storage_telemetry_handle()
+        }),
+    );
+    for database in session_databases {
+        record_telemetry_registration(
+            database.db_path(),
+            sampling.register_port(database.db_path(), scope, || {
+                database.storage_telemetry_handle()
+            }),
+        );
+    }
+}
+
+/// Read this project's mounted delivery settlement ports. Both are required:
+/// the full server refuses to publish without a settlement authority and a
+/// recorder, so an unmounted port fails the upgrade instead of degrading.
+async fn project_delivery_settlement_ports(
+    invocation: &DaemonInvocationState,
+    canonical_project_path: &Path,
+) -> Result<(
+    Arc<tracedecay_usecases::observability::DeliverySettlementAuthorityV1>,
+    Arc<tracedecay_usecases::observability::BoundedDeliverySettlementRecorderV1>,
+)> {
+    let authority = invocation
+        .service
+        .delivery_settlement_authority(Some(canonical_project_path))
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("delivery settlement authority is invalid: {error}"),
+        })?
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "delivery settlement authority is not mounted".to_owned(),
+        })?;
+    let recorder = invocation
+        .service
+        .delivery_settlement_recorder(Some(canonical_project_path))
+        .await
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "delivery settlement recorder is not mounted".to_owned(),
+        })?;
+    Ok((authority, recorder))
+}
+
+/// Put the published core back in front of a failed full upgrade. Returns
+/// whether the core is the live server again, plus the displaced full server
+/// when one had already been published.
+async fn reclaim_core_after_failed_upgrade(
+    store_administration: &StoreAdministration,
+    key: &ProjectServerKey,
+    resolved: &Arc<crate::mcp::McpServer>,
+    published_full_candidate: Option<&Arc<crate::mcp::McpServer>>,
+) -> (bool, Option<Arc<crate::mcp::McpServer>>) {
+    let mut servers = store_administration.project_servers().lock().await;
+    match published_full_candidate {
+        Some(failed_full_server) => {
+            let displaced = servers.swap_ready_if(key, Arc::clone(resolved), |current| {
+                Arc::ptr_eq(current, failed_full_server)
+            });
+            (displaced.is_some(), displaced)
+        }
+        None => (
+            servers
+                .get_ready(key)
+                .is_some_and(|current| Arc::ptr_eq(current, resolved)),
+            None,
+        ),
+    }
+}
+
+/// Retire every server this failed open attempt published, including the core
+/// itself when session capabilities had already gone live.
+async fn retire_failed_project_open_owner(
+    store_administration: &StoreAdministration,
+    failed_key: &ProjectServerKey,
+    resolved: &Arc<crate::mcp::McpServer>,
+    session_capabilities_published: bool,
+    route_registered: &Arc<AtomicBool>,
+) {
+    let mut removed = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .remove_owner(&failed_key.owner);
+    if session_capabilities_published && removed.iter().all(|server| !Arc::ptr_eq(server, resolved))
+    {
+        removed.push(Arc::clone(resolved));
+    }
+    for server in &removed {
+        server.revoke_project_server_responses();
+    }
+    debug_assert!(
+        !removed.is_empty(),
+        "failed core upgrade must retire its published owner"
+    );
+    // Request execution may itself need the owner writer held by this open
+    // attempt. The tracked retirement starts draining after the caller returns
+    // and releases that writer.
+    schedule_project_server_retirement(
+        store_administration,
+        failed_key.owner.clone(),
+        removed,
+        Some(Arc::clone(route_registered)),
+    )
+    .await;
 }
