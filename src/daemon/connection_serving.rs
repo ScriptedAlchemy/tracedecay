@@ -778,7 +778,9 @@ async fn serve_broker_socket_client(
                     .ok()
                     .and_then(invocation_lsp_session_transition);
                 let response = match invocation {
-                    Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
+                    Ok(request) => {
+                        Box::pin(execute_daemon_invocation(&engine, &handshake, request)).await
+                    }
                     Err(response) => response,
                 };
                 update_connection_lsp_sessions(

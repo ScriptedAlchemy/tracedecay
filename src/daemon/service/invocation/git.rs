@@ -499,156 +499,218 @@ pub(super) async fn execute_git_preview(
     let Some(owner) = owner else {
         return runtime_mounting_problem(wire_request_id);
     };
+    // Snapshot, preview input, and the built request are too large to live in
+    // this async state machine: constructing that future on the socket poll
+    // stack overflows. Keep every payload on a blocking thread or the heap.
+    let join_id = wire_request_id.clone();
+    let prepared = match tokio::task::spawn_blocking(move || {
+        prepare_git_preview(wire_request_id, owner, request, deadline, cancellation)
+    })
+    .await
+    {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(response)) => return response,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                join_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    Box::pin(settle_prepared_git_preview(operation_events, prepared)).await
+}
+
+pub(super) async fn execute_git_apply(
+    operation_events: &OperationEventAuthority,
+    wire_request_id: String,
+    owner: Option<DaemonGitInvocationOwner>,
+    request: GitApplySurfaceRequest,
+    _observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(owner) = owner else {
+        return runtime_mounting_problem(wire_request_id);
+    };
+    let join_id = wire_request_id.clone();
+    let prepared = match tokio::task::spawn_blocking(move || {
+        prepare_git_apply(wire_request_id, owner, request, deadline, cancellation)
+    })
+    .await
+    {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(response)) => return response,
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                join_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    Box::pin(settle_prepared_git_apply(operation_events, prepared)).await
+}
+
+struct PreparedGitPreview {
+    wire_request_id: String,
+    service: Arc<DaemonProjectGitIndexTransactionService>,
+    request: GitIndexPreviewRequestV1,
+}
+
+struct PreparedGitApply {
+    wire_request_id: String,
+    service: Arc<DaemonProjectGitIndexTransactionService>,
+    request: GitIndexApplyRequestV1,
+}
+
+fn prepare_git_preview(
+    wire_request_id: String,
+    owner: DaemonGitInvocationOwner,
+    request: GitPreviewSurfaceRequest,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Result<Box<PreparedGitPreview>, DaemonInvocationResponse> {
     let service = Arc::clone(&owner.service);
     let operation = request.operation;
-    let authority_owner = owner.clone();
-    let authority =
-        match tokio::task::spawn_blocking(move || authority_owner.current_authority(operation))
-            .await
-        {
-            Ok(Ok(authority)) => authority,
-            Ok(Err(error)) => {
-                return application_problem(wire_request_id, map_git_port_problem(error));
-            }
-            Err(_) => {
-                return DaemonInvocationResponse::problem(
-                    wire_request_id,
-                    DaemonInvocationProblem::Unavailable,
-                );
-            }
-        };
+    let authority = owner.current_authority(operation).map_err(|error| {
+        application_problem(wire_request_id.clone(), map_git_port_problem(error))
+    })?;
     let preview_input = match operation {
         GitIndexTransactionOperationV1::CommitIndex => {
             let Some(commit_intent) = request.commit_intent.clone() else {
-                return application_problem(wire_request_id, invalid_git_request());
+                return Err(application_problem(wire_request_id, invalid_git_request()));
             };
             if request.preview_input_id.is_some() || !request.selected_hunk_digests.is_empty() {
-                return application_problem(wire_request_id, invalid_git_request());
+                return Err(application_problem(wire_request_id, invalid_git_request()));
             }
-            let preview_id = match mint_git_preview_id() {
-                Ok(preview_id) => preview_id,
-                Err(problem) => return application_problem(wire_request_id, problem),
-            };
-            let root = owner.repository_root.clone();
-            let scope = authority.scope.clone();
-            let captured_at = authority.evaluated_at;
-            let snapshot = match tokio::task::spawn_blocking(move || {
-                capture_exact_snapshot(
-                    &root,
-                    scope.project_id,
-                    scope.repository_id,
-                    scope.worktree_id,
-                    captured_at,
-                )
-            })
-            .await
-            {
-                Ok(Ok(snapshot)) => snapshot,
-                Ok(Err(error)) => {
-                    return application_problem(wire_request_id, map_git_port_problem(error));
-                }
-                Err(_) => {
-                    return DaemonInvocationResponse::problem(
-                        wire_request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                }
-            };
-            let input = match GitIndexPreviewInputV1::new_commit(
+            let preview_id = mint_git_preview_id()
+                .map_err(|problem| application_problem(wire_request_id.clone(), problem))?;
+            let snapshot = capture_exact_snapshot(
+                &owner.repository_root,
+                authority.scope.project_id.clone(),
+                authority.scope.repository_id.clone(),
+                authority.scope.worktree_id.clone(),
+                authority.evaluated_at,
+            )
+            .map_err(|error| {
+                application_problem(wire_request_id.clone(), map_git_port_problem(error))
+            })?;
+            let input = GitIndexPreviewInputV1::new_commit(
                 preview_id,
                 snapshot,
                 commit_intent,
                 authority.evaluated_at,
                 UtcMicros(authority.evaluated_at.0.saturating_add(30_000_000)),
-            ) {
-                Ok(input) => input,
-                Err(_) => return application_problem(wire_request_id, invalid_git_request()),
-            };
-            let input_for_store = input.clone();
-            let input_store = Arc::clone(&service);
-            match tokio::task::spawn_blocking(move || {
-                input_store.save_preview_input(input_for_store)
-            })
-            .await
-            {
-                Ok(Ok(())) => input,
-                Ok(Err(error)) => {
-                    return application_problem(wire_request_id, map_git_port_problem(error));
-                }
-                Err(_) => {
-                    return DaemonInvocationResponse::problem(
-                        wire_request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                }
-            }
+            )
+            .map_err(|_| application_problem(wire_request_id.clone(), invalid_git_request()))?;
+            service.save_preview_input(input.clone()).map_err(|error| {
+                application_problem(wire_request_id.clone(), map_git_port_problem(error))
+            })?;
+            input
         }
         GitIndexTransactionOperationV1::StageHunks
         | GitIndexTransactionOperationV1::UnstageHunks => {
             if request.commit_intent.is_some() || request.selected_hunk_digests.is_empty() {
-                return application_problem(wire_request_id, invalid_git_request());
+                return Err(application_problem(wire_request_id, invalid_git_request()));
             }
             let Some(preview_input_id) = request.preview_input_id.clone() else {
-                return application_problem(wire_request_id, invalid_git_request());
+                return Err(application_problem(wire_request_id, invalid_git_request()));
             };
-            let input_store = Arc::clone(&service);
-            let observed_at = authority.evaluated_at;
-            match tokio::task::spawn_blocking(move || {
-                input_store.read_preview_input(&preview_input_id, observed_at)
-            })
-            .await
-            {
-                Ok(Ok(input)) if input.operation == operation => input,
-                Ok(Ok(_)) => return concealed_application_problem(wire_request_id),
-                Ok(Err(error)) => {
-                    return application_problem(wire_request_id, map_git_port_problem(error));
-                }
-                Err(_) => {
-                    return DaemonInvocationResponse::problem(
+            match service.read_preview_input(&preview_input_id, authority.evaluated_at) {
+                Ok(input) if input.operation == operation => input,
+                Ok(_) => return Err(concealed_application_problem(wire_request_id)),
+                Err(error) => {
+                    return Err(application_problem(
                         wire_request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
+                        map_git_port_problem(error),
+                    ));
                 }
             }
         }
     };
     if preview_input.repository_snapshot.project_id != owner.project_id {
-        return concealed_application_problem(wire_request_id);
+        return Err(concealed_application_problem(wire_request_id));
     }
-    let request = match build_git_preview_request(
+    let request = build_git_preview_request(
         &wire_request_id,
         request,
         preview_input,
         &authority,
         deadline,
         cancellation,
-    ) {
-        Ok(request) => request,
-        Err(problem) => return application_problem(wire_request_id, problem),
-    };
-    let scope = request.context.scope().clone();
+    )
+    .map_err(|problem| application_problem(wire_request_id.clone(), problem))?;
+    Ok(Box::new(PreparedGitPreview {
+        wire_request_id,
+        service,
+        request,
+    }))
+}
+
+fn prepare_git_apply(
+    wire_request_id: String,
+    owner: DaemonGitInvocationOwner,
+    request: GitApplySurfaceRequest,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Result<Box<PreparedGitApply>, DaemonInvocationResponse> {
+    let service = Arc::clone(&owner.service);
+    let preview = service.read_preview(&request.preview_id).map_err(|error| {
+        application_problem(wire_request_id.clone(), map_git_port_problem(error))
+    })?;
+    if preview.preview_digest != request.preview_digest
+        || preview.repository_snapshot.project_id != owner.project_id
+    {
+        return Err(concealed_application_problem(wire_request_id));
+    }
+    let authority = owner
+        .current_authority(preview.operation)
+        .map_err(|error| {
+            application_problem(wire_request_id.clone(), map_git_port_problem(error))
+        })?;
+    let request = build_git_apply_request(
+        &wire_request_id,
+        request,
+        &preview,
+        &authority,
+        deadline,
+        cancellation,
+    )
+    .map_err(|problem| application_problem(wire_request_id.clone(), problem))?;
+    Ok(Box::new(PreparedGitApply {
+        wire_request_id,
+        service,
+        request,
+    }))
+}
+
+async fn settle_prepared_git_preview(
+    operation_events: &OperationEventAuthority,
+    prepared: Box<PreparedGitPreview>,
+) -> DaemonInvocationResponse {
+    let scope = prepared.request.context.scope().clone();
     let Ok(emitter) = operation_events
         .begin(
-            &request.context,
+            &prepared.request.context,
             OperationKind::GitPreview,
-            request.observed_at,
+            prepared.request.observed_at,
         )
         .await
     else {
         return DaemonInvocationResponse::problem(
-            wire_request_id,
+            prepared.wire_request_id,
             DaemonInvocationProblem::Unavailable,
         );
     };
     let _ = emitter.progress(0, Some(1)).await;
-    let started_at = request.observed_at;
-    let effective_deadline = request.context.deadline().clone();
+    let started_at = prepared.request.observed_at;
+    let effective_deadline = prepared.request.context.deadline().clone();
+    let wire_request_id = prepared.wire_request_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         GitIndexTransactionService::new(SharedGitTransactionPort {
-            service,
+            service: prepared.service,
             cancellation: None,
         })
-        .preview(request)
+        .preview(prepared.request)
     })
     .await;
     let response = match result {
@@ -671,94 +733,35 @@ pub(super) async fn execute_git_preview(
     response
 }
 
-pub(super) async fn execute_git_apply(
+async fn settle_prepared_git_apply(
     operation_events: &OperationEventAuthority,
-    wire_request_id: String,
-    owner: Option<DaemonGitInvocationOwner>,
-    request: GitApplySurfaceRequest,
-    _observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
+    prepared: Box<PreparedGitApply>,
 ) -> DaemonInvocationResponse {
-    let Some(owner) = owner else {
-        return runtime_mounting_problem(wire_request_id);
-    };
-    let service = Arc::clone(&owner.service);
-    let preview_id = request.preview_id.clone();
-    let preview_service = Arc::clone(&service);
-    let preview = match tokio::task::spawn_blocking(move || {
-        preview_service.read_preview(&preview_id)
-    })
-    .await
-    {
-        Ok(Ok(preview)) => preview,
-        Ok(Err(error)) => {
-            return application_problem(wire_request_id, map_git_port_problem(error));
-        }
-        Err(_) => {
-            return DaemonInvocationResponse::problem(
-                wire_request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
-    };
-    if preview.preview_digest != request.preview_digest
-        || preview.repository_snapshot.project_id != owner.project_id
-    {
-        return concealed_application_problem(wire_request_id);
-    }
-    let operation = preview.operation;
-    let authority_owner = owner.clone();
-    let authority =
-        match tokio::task::spawn_blocking(move || authority_owner.current_authority(operation))
-            .await
-        {
-            Ok(Ok(authority)) => authority,
-            Ok(Err(error)) => {
-                return application_problem(wire_request_id, map_git_port_problem(error));
-            }
-            Err(_) => {
-                return DaemonInvocationResponse::problem(
-                    wire_request_id,
-                    DaemonInvocationProblem::Unavailable,
-                );
-            }
-        };
-    let request = match build_git_apply_request(
-        &wire_request_id,
-        request,
-        &preview,
-        &authority,
-        deadline,
-        cancellation,
-    ) {
-        Ok(request) => request,
-        Err(problem) => return application_problem(wire_request_id, problem),
-    };
-    let scope = request.context.scope().clone();
+    let scope = prepared.request.context.scope().clone();
     let Ok(emitter) = operation_events
         .begin(
-            &request.context,
+            &prepared.request.context,
             OperationKind::GitApply,
-            request.observed_at,
+            prepared.request.observed_at,
         )
         .await
     else {
         return DaemonInvocationResponse::problem(
-            wire_request_id,
+            prepared.wire_request_id,
             DaemonInvocationProblem::Unavailable,
         );
     };
     let _ = emitter.progress(0, Some(1)).await;
-    let started_at = request.observed_at;
-    let effective_deadline = request.context.deadline().clone();
+    let started_at = prepared.request.observed_at;
+    let effective_deadline = prepared.request.context.deadline().clone();
+    let wire_request_id = prepared.wire_request_id.clone();
     let cancellation = emitter.clone();
     let result = tokio::task::spawn_blocking(move || {
         GitIndexTransactionService::new(SharedGitTransactionPort {
-            service,
+            service: prepared.service,
             cancellation: Some(cancellation),
         })
-        .apply(request)
+        .apply(prepared.request)
     })
     .await;
     let response = match result {

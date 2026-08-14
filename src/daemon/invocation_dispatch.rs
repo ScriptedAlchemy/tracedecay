@@ -607,15 +607,13 @@ pub(super) async fn execute_daemon_invocation(
         }
         project_path = Some(resolved_project_path);
     }
-    engine
-        .invocation
-        .invoke_for_project(
-            &engine.store_administration,
-            project_path.as_deref(),
-            request,
-            lsp_cancellation,
-        )
-        .await
+    Box::pin(engine.invocation.invoke_for_project(
+        &engine.store_administration,
+        project_path.as_deref(),
+        request,
+        lsp_cancellation,
+    ))
+    .await
 }
 
 fn project_open_problem(
