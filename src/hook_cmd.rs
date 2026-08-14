@@ -32,6 +32,10 @@ pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors
             Some(tracedecay::hooks::hook_codex_session_start().await)
         }
         Commands::HookCodexPostToolUse => Some(tracedecay::hooks::hook_codex_post_tool_use().await),
+        Commands::HookHermesTerminalReceipt => {
+            Some(tracedecay::hooks::hook_hermes_terminal_receipt().await)
+        }
+        Commands::HookKiroPromptSubmit => Some(tracedecay::hooks::hook_kiro_prompt_submit().await),
         _ => None,
     };
     if let Some(code) = native_response_code {

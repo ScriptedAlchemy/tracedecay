@@ -165,6 +165,8 @@ fn native_response_command_from_name(command: &str) -> bool {
             | "hook-cursor-session-start"
             | "hook-codex-session-start"
             | "hook-codex-post-tool-use"
+            | "hook-hermes-terminal-receipt"
+            | "hook-kiro-prompt-submit"
     )
 }
 
