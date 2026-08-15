@@ -276,10 +276,16 @@ fn recovered_generation_digest_cost_scaling_probe() {
             .try_ready(&mut authority, &plan, "digest.ready")
             .expect("digest probe ready");
         let ready_ms = ready_started.elapsed().as_millis();
-        let per_chunk_us = (ready_ms as f64) * 1000.0 / (chunk_count as f64);
+        let publish_started = std::time::Instant::now();
+        let committed = fixture.publish(&mut authority, &plan, "digest.publish");
+        settle_publication(&mut authority, &plan, &committed, "digest.publication-settle");
+        let publish_ms = publish_started.elapsed().as_millis();
+        let case_ms = ready_ms.saturating_add(publish_ms);
+        let per_chunk_us = (case_ms as f64) * 1000.0 / (chunk_count as f64);
         eprintln!(
             "[digest-probe] dims=768 pages={pages} chunks={chunk_count} \
-             prepare_publication_ms={ready_ms} per_chunk_us={per_chunk_us:.1}"
+             prepare_publication_ms={ready_ms} publish_settle_ms={publish_ms} \
+             case_total_ms={case_ms} per_chunk_us={per_chunk_us:.1}"
         );
     }
 }
