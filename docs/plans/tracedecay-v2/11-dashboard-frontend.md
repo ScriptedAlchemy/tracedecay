@@ -85,12 +85,44 @@ truthful rather than being replaced with fabricated values.
   the same graph version — and the tool activity from the
   `/api/plugins/analytics/diagnostics` members the page already fetched and was
   discarding (`tool_call_count`, `by_tool_category`, `ratios`, `recent_hooks`).
-  Two gaps stay open and are NOT claimed by this correction: the daemon serves
-  no route that enumerates handoff tokens (`open_investigation_handoff` and
-  `open_task_handoff` redeem a token the caller already holds and cannot list a
-  frontier), and no read model attributes a subagent TREE — parent/child session
-  edges — so Agents still shows subagent delegation as a per-agent session
-  rollup rather than as a tree.
+  Two gaps stayed open under that correction and are both closed by the
+  correction below.
+- **Correction 2026-08-15 (Agents):** the two gaps the 2026-08-08 note left
+  open — no handoff-token enumeration route, and no subagent TREE read model —
+  are closed.
+
+  *Subagent tree.* `GET /api/plugins/analytics/subagent-tree`
+  (`crates/tracedecay-dashboard-api/src/analytics_api.rs`, mounted in that
+  crate's `lib.rs`) assembles the `sessions` table's `parent_session_id` edges
+  into a pre-order tree and serves it as `AnalyticsSubagentTreePayloadV1`. The
+  four link kinds are kept distinct on purpose: a session with no parent
+  (`root`) and one whose parent was never ingested (`missing_parent`) both draw
+  at the margin, and only the first is really a root; `cycle` members are
+  surfaced rather than dropped so no delegation goes missing from the count.
+  The walk is iterative, so a pathological chain cannot overflow the daemon
+  stack, and edges never join two providers that minted the same session id.
+  `dashboard/src/workspaces/agents/SubagentTree.tsx` consumes it, so Agents now
+  shows delegation as a tree beside — not instead of — the per-agent rollup,
+  which cannot carry an edge.
+
+  *Handoff-token enumeration.* `operation.handoff.list_task_handoffs`
+  (`POST /api/application/handoff/list-task`) enumerates issued handoff-open
+  grants. It is catalogued as `EffectClass::Read` with a non-required
+  idempotency contract and an operation receipt — the first handoff operation
+  that is not effect-shaped — and takes an evidence path in the daemon rather
+  than minting an effect id for an operation that commits nothing. It is
+  recipient-scoped: the daemon returns exactly the grants the caller could
+  itself redeem (same session, scope, and recipient principal that redemption
+  checks), so listing grants no authority the caller did not already hold. No
+  bearer exists anywhere in it — the authority never stored one — and expired
+  grants are retained and reported, because a lapsed handoff leaves no
+  work-graph record and is otherwise invisible. Both SDKs project it and
+  `dashboard/src/workspaces/agents/AgentHandoffTokens.tsx` reads it.
+
+  One consequence is stated rather than hidden: because the read is
+  recipient-scoped, an empty answer means nothing was addressed to *this*
+  reader in that session, and the surface says exactly that instead of
+  reporting that no handoff tokens exist.
 - **Plan 11 owner:** `redacted` and `locked` are defined in `StateChip`
   but no workspace currently exercises them with supplied backend state.
 - **Plan 16 owner:** Explorer's multi-project/repository/worktree pivots

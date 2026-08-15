@@ -878,7 +878,7 @@
           "type": "string"
         },
         "started_at": {
-          "description": "Epoch micros, as the session store records them.",
+          "description": "Unix SECONDS, as the session store records them — capture parses\nprovider stamps with `parse_rfc3339_timestamp`, which yields seconds,\nand normalizes millisecond inputs down to seconds before storing. This\nis not the microsecond convention the Work contracts use, and reading\nit as micros would place every session in 1970.",
           "format": "int64",
           "type": [
             "integer",
@@ -9613,6 +9613,10 @@
       ],
       "type": "string"
     },
+    "FeedbackFindingId": {
+      "description": "Strongly typed canonical identity: `FeedbackFindingId`.",
+      "type": "string"
+    },
     "FeedbackObservationDenominatorsV1": {
       "additionalProperties": false,
       "properties": {
@@ -10601,6 +10605,63 @@
       ],
       "type": "object"
     },
+    "HandoffOpenKindV1": {
+      "enum": [
+        "investigation",
+        "task"
+      ],
+      "type": "string"
+    },
+    "HandoffOpenTargetV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "finding_id": {
+              "$ref": "#/$defs/FeedbackFindingId"
+            },
+            "kind": {
+              "const": "investigation",
+              "type": "string"
+            },
+            "owner_version_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            }
+          },
+          "required": [
+            "kind",
+            "finding_id",
+            "owner_version_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "task",
+              "type": "string"
+            },
+            "owner_version_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "task_id": {
+              "$ref": "#/$defs/TaskId"
+            },
+            "version": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "version",
+            "owner_version_digest"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "HistoryRewritePolicyV1": {
       "enum": [
         "forbid_force_and_rebase"
@@ -11582,6 +11643,116 @@
         "based_on_version",
         "identity",
         "mutation"
+      ],
+      "type": "object"
+    },
+    "ListTaskHandoffsRequestV1": {
+      "additionalProperties": false,
+      "description": "Enumerates the handoff tokens this caller could redeem in one session.\n\nThe two `open_*` operations redeem a bearer the caller already holds; they\ncannot answer \"what has been handed to me and not yet taken up\". This one\ncan, and it does so without any bearer: the request carries no token, and\nthe result carries only digests.",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "ListTaskHandoffsResultV1": {
+      "additionalProperties": false,
+      "description": "The handoff-token frontier for one session.",
+      "properties": {
+        "consumed_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expired_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "handoffs": {
+          "items": {
+            "$ref": "#/$defs/ListedTaskHandoffV1"
+          },
+          "type": "array"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros",
+          "description": "The instant the states below were decided at. Without it, `open` and\n`expired` are claims with no clock behind them."
+        },
+        "open_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "True when the enumeration ceiling was reached, so the counts describe a\nprefix of the frontier rather than all of it.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "observed_at",
+        "handoffs",
+        "open_count",
+        "consumed_count",
+        "expired_count",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "ListedTaskHandoffV1": {
+      "additionalProperties": false,
+      "description": "One handoff token, projected for public reading.\n\nMirrors [`IssueTaskHandoffResultV1`]'s doctrine: the complete binding stays\ninside the daemon authority, and only these identifiers cross the wire. No\nbearer secret exists to leak here — the authority never stored one — and the\nissuer's grant identity and policy digests stay concealed.",
+      "properties": {
+        "consumed_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set only when `state` is `consumed`."
+        },
+        "expires_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "issued_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "issued_request_id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/HandoffOpenKindV1"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/TaskHandoffTokenStateV1"
+        },
+        "target": {
+          "$ref": "#/$defs/HandoffOpenTargetV1"
+        },
+        "token_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "token_digest",
+        "issued_request_id",
+        "session_id",
+        "kind",
+        "target",
+        "issued_at",
+        "expires_at",
+        "state",
+        "consumed_at"
       ],
       "type": "object"
     },
@@ -18409,6 +18580,26 @@
         "observed_at"
       ],
       "type": "object"
+    },
+    "TaskHandoffTokenStateV1": {
+      "description": "Where one enumerated token stands at the observed instant.",
+      "oneOf": [
+        {
+          "const": "open",
+          "description": "Not yet redeemed, and not yet expired — the live frontier.",
+          "type": "string"
+        },
+        {
+          "const": "consumed",
+          "description": "Redeemed. Single-use, so it can never be redeemed again.",
+          "type": "string"
+        },
+        {
+          "const": "expired",
+          "description": "Its window closed with no redemption. A dropped handoff, which is\nexactly the fact a frontier exists to surface.",
+          "type": "string"
+        }
+      ]
     },
     "TaskId": {
       "description": "Strongly typed canonical identity: `TaskId`.",
@@ -26858,6 +27049,13 @@
     "graph_test_map": {
       "$ref": "#/$defs/StructureReadV14"
     },
+    "handoff_list_task_handoffs": {
+      "$ref": "#/$defs/ListTaskHandoffsResultV1"
+    },
+    "handoff_list_task_handoffs_request": {
+      "$ref": "#/$defs/ListTaskHandoffsRequestV1",
+      "description": "The handoff-token frontier. Contracted here because the Agents surface\nreads it directly off the mounted application route; the two `open_*`\noperations stay uncontracted for the dashboard because it never redeems\na bearer and must not grow a client that could."
+    },
     "lcm_overview": {
       "$ref": "#/$defs/DashboardEnvelopeV125"
     },
@@ -27120,6 +27318,8 @@
     "analytics_usage",
     "analytics_agents",
     "analytics_subagent_tree",
+    "handoff_list_task_handoffs_request",
+    "handoff_list_task_handoffs",
     "analytics_hints",
     "analytics_underused",
     "analytics_diagnostics",

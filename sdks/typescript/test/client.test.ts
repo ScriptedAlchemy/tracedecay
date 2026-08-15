@@ -744,6 +744,9 @@ describe("TraceDecayClient generated operation bindings", () => {
     // Handoff and multi-root are mounted HTTP families and belong in the same
     // canonical operation union as Work and Workflow.
     const mountedFamilies = [
+      // The frontier read, alongside the two redemptions. It is the only
+      // handoff operation a caller can invoke without already holding a bearer.
+      "handoff_list_task_handoffs",
       "handoff_open_investigation_handoff",
       "handoff_open_task_handoff",
       "multi_root_scope_set_read",
