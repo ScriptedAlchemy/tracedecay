@@ -977,6 +977,145 @@ async fn feedback_telemetry_does_not_reconcile_unchanged_memory_graph() {
     assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
 }
 
+#[tokio::test]
+async fn settled_workload_telemetry_stays_flat_until_exact_source_mutation() {
+    let (_directory, database) = database("settled-workload-telemetry").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let observer = database.project_memory_reconciliation_telemetry_observer();
+    let seed = seed_high_level_fact(
+        &store,
+        &runtime,
+        "settled-workload",
+        "A settled memory graph must not reconcile for retrieval or feedback telemetry.",
+    )
+    .await;
+    let seeded = observer.snapshot();
+
+    store
+        .record_project_memory_fact_retrieval(
+            ProjectMemoryFactRetrievalCommandV1::new(
+                FactOwnerV1::Profile,
+                ProvenanceId::new("graph.reconciliation.settled.retrieval".to_owned())
+                    .expect("settled retrieval operation id"),
+                vec![seed.target.clone()],
+                true,
+            )
+            .expect("settled retrieval command"),
+            &write_control(),
+        )
+        .await
+        .expect("record settled retrieval telemetry");
+    store
+        .record_project_memory_fact_feedback(
+            ProjectMemoryFactFeedbackCommandV1::new(
+                seed.target.clone(),
+                ProvenanceId::new("graph.reconciliation.settled.feedback".to_owned())
+                    .expect("settled feedback operation id"),
+                None,
+                ProjectMemoryFactFeedbackActionV1::Helpful,
+                None,
+                Some("settled workload telemetry".to_owned()),
+                Some("feedback does not change graph source rows".to_owned()),
+            )
+            .expect("settled feedback command"),
+            &write_control(),
+        )
+        .await
+        .expect("record settled feedback telemetry");
+    let settled = observer.snapshot();
+
+    assert_eq!(settled.reconciliation_passes, seeded.reconciliation_passes);
+    assert_eq!(settled.source_rows_loaded, seeded.source_rows_loaded);
+    assert_eq!(settled.source_bytes_loaded, seeded.source_bytes_loaded);
+    assert_eq!(settled.publication_attempts, seeded.publication_attempts);
+    assert_eq!(
+        settled.retained_reconciliation_task_count,
+        seeded.retained_reconciliation_task_count
+    );
+    assert_eq!(
+        settled.retained_graph_owner_count,
+        seeded.retained_graph_owner_count
+    );
+
+    store
+        .record_project_memory_fact_retrieval(
+            ProjectMemoryFactRetrievalCommandV1::new(
+                FactOwnerV1::Profile,
+                ProvenanceId::new("graph.reconciliation.settled.retrieval".to_owned())
+                    .expect("replayed settled retrieval operation id"),
+                vec![seed.target.clone()],
+                true,
+            )
+            .expect("replayed settled retrieval command"),
+            &write_control(),
+        )
+        .await
+        .expect("replay settled retrieval telemetry");
+    store
+        .record_project_memory_fact_feedback(
+            ProjectMemoryFactFeedbackCommandV1::new(
+                seed.target,
+                ProvenanceId::new("graph.reconciliation.settled.feedback".to_owned())
+                    .expect("replayed settled feedback operation id"),
+                None,
+                ProjectMemoryFactFeedbackActionV1::Helpful,
+                None,
+                Some("settled workload telemetry".to_owned()),
+                Some("feedback does not change graph source rows".to_owned()),
+            )
+            .expect("replayed settled feedback command"),
+            &write_control(),
+        )
+        .await
+        .expect("replay settled feedback telemetry");
+    let repeated = observer.snapshot();
+
+    assert_eq!(
+        repeated.reconciliation_passes,
+        settled.reconciliation_passes
+    );
+    assert_eq!(repeated.source_rows_loaded, settled.source_rows_loaded);
+    assert_eq!(repeated.source_bytes_loaded, settled.source_bytes_loaded);
+    assert_eq!(repeated.publication_attempts, settled.publication_attempts);
+    assert_eq!(
+        repeated.retained_reconciliation_task_count,
+        settled.retained_reconciliation_task_count
+    );
+    assert_eq!(
+        repeated.retained_graph_owner_count,
+        settled.retained_graph_owner_count
+    );
+
+    seed_high_level_fact(
+        &store,
+        &runtime,
+        "settled-workload-source-mutation",
+        "A real graph source mutation must reconcile exactly once after settlement.",
+    )
+    .await;
+    let source_mutated = observer.snapshot();
+
+    assert_eq!(
+        source_mutated.reconciliation_passes,
+        repeated.reconciliation_passes + 1
+    );
+    assert_eq!(
+        source_mutated.publication_attempts,
+        repeated.publication_attempts + 1
+    );
+    assert!(source_mutated.source_rows_loaded > repeated.source_rows_loaded);
+    assert!(source_mutated.source_bytes_loaded > repeated.source_bytes_loaded);
+    assert_eq!(
+        source_mutated.retained_reconciliation_task_count,
+        repeated.retained_reconciliation_task_count
+    );
+    assert_eq!(
+        source_mutated.retained_graph_owner_count,
+        repeated.retained_graph_owner_count
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn caller_drop_after_high_level_remove_commit_start_cannot_lose_reconciliation() {
     let (_directory, database) = database("dropped-high-level-remove-caller").await;
