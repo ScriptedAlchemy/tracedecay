@@ -14,7 +14,8 @@ use tracedecay_domain::CodeGenerationId;
 use crate::config::retrieval::RetrievalRuntimeCompatibilityV1;
 use crate::search_eval::semantic_native::{
     SemanticNativePendingReasonV1, SemanticNativeResourceProvenanceV1,
-    SemanticNativeResourceSampleV1, SemanticNativeStageResultV1,
+    SemanticNativeResourceSampleV1, SemanticNativeStageResultV1, SemanticProjectionCaseSampleV1,
+    SemanticProjectionCaseV1,
 };
 use crate::search_eval::{
     CandidateOutputError, ProductionCandidateNativeExecutionAuthorityV1,
@@ -348,6 +349,17 @@ impl DaemonSemanticEvaluationWorkerOwnerV1 {
     }
 }
 
+/// Identity of an isolated projection-case measurement: the clean generation
+/// plus the three mutation sources it is measured against. The measurement is a
+/// pure function of exactly these four generations — it never reads the profile
+/// or the partition — so every pass that shares them shares its result.
+type SemanticProjectionCaseKeyV1 = (
+    CodeGenerationId,
+    CodeGenerationId,
+    CodeGenerationId,
+    CodeGenerationId,
+);
+
 #[derive(Clone)]
 pub(super) struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
     project_root: PathBuf,
@@ -360,6 +372,14 @@ pub(super) struct DaemonSemanticEvaluationSnapshotAuthorityV1 {
             BTreeMap<
                 CodeGenerationId,
                 Arc<tracedecay_usecases::semantic_runtime::PreparedSemanticEvaluationGenerationV1>,
+            >,
+        >,
+    >,
+    projection_cases: Arc<
+        Mutex<
+            BTreeMap<
+                SemanticProjectionCaseKeyV1,
+                BTreeMap<SemanticProjectionCaseV1, SemanticProjectionCaseSampleV1>,
             >,
         >,
     >,
@@ -380,6 +400,7 @@ impl DaemonSemanticEvaluationSnapshotAuthorityV1 {
             candidate,
             control,
             prepared_native: Arc::new(Mutex::new(BTreeMap::new())),
+            projection_cases: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -554,9 +575,69 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
             let mut resources = runtime
                 .measure_incremental_evaluation_projection(prepared, context.incremental_code)
                 .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-            resources.projection_cases = runtime
-                .measure_evaluation_projection_cases(prepared, &context.semantic_projection_sources)
-                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+            // The isolated projection-case measurement stands up a fresh
+            // TempDir, graph, and metadata store and re-projects the whole
+            // corpus, so it is the most expensive term in a pass. It depends
+            // only on the four generations below, while the driver runs one
+            // pass per profile x partition x scale — so without this memo the
+            // identical measurement is rebuilt once per profile and partition
+            // at each scale. Keyed exactly like the `prepared_native` cache
+            // above, it collapses to one measurement per distinct input set.
+            let projection_cases_key: SemanticProjectionCaseKeyV1 = (
+                context.code_generation.clone(),
+                context
+                    .semantic_projection_sources
+                    .one_symbol
+                    .manifest()
+                    .generation_id
+                    .clone(),
+                context
+                    .semantic_projection_sources
+                    .no_op
+                    .manifest()
+                    .generation_id
+                    .clone(),
+                context
+                    .semantic_projection_sources
+                    .deletion
+                    .manifest()
+                    .generation_id
+                    .clone(),
+            );
+            let cached = self
+                .projection_cases
+                .lock()
+                .map_err(|_| {
+                    CandidateOutputError::Contract(
+                        "semantic projection case cache is unavailable".to_owned(),
+                    )
+                })?
+                .get(&projection_cases_key)
+                .cloned();
+            resources.projection_cases = match cached {
+                Some(cases) => cases,
+                None => {
+                    // Measured without the cache lock held: the work is long
+                    // and idempotent, so a racing pass may duplicate it once
+                    // rather than block, and the first result installed wins.
+                    let measured = runtime
+                        .measure_evaluation_projection_cases(
+                            prepared,
+                            &context.semantic_projection_sources,
+                        )
+                        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+                    self.projection_cases
+                        .lock()
+                        .map_err(|_| {
+                            CandidateOutputError::Contract(
+                                "semantic projection case cache is unavailable".to_owned(),
+                            )
+                        })?
+                        .entry(projection_cases_key)
+                        .or_insert(measured)
+                        .clone()
+                }
+            };
             resources
         } else {
             return Ok(SemanticNativeStageResultV1::Pending {
