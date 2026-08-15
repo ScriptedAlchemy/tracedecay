@@ -242,6 +242,7 @@ fn recovered_generation_digest_cost_scaling_probe() {
         let mut authority = fixture.authority();
         let plan = fixture.plan_with_chunk_count("digest", "digest", chunk_count);
         let mut expected = plan.initial_checkpoint_digest.clone();
+        let corpus_started = std::time::Instant::now();
         for ordinal in 0..pages {
             let start = ordinal.checked_mul(page).unwrap();
             let next = unique_page_checkpoint(ordinal);
@@ -271,6 +272,7 @@ fn recovered_generation_digest_cost_scaling_probe() {
             fixture.settle_batch(&mut authority, &receipt, &format!("digest.settle.{ordinal}"));
             expected = next;
         }
+        let corpus_ms = corpus_started.elapsed().as_millis();
         let ready_started = std::time::Instant::now();
         fixture
             .try_ready(&mut authority, &plan, "digest.ready")
@@ -284,8 +286,11 @@ fn recovered_generation_digest_cost_scaling_probe() {
         let per_chunk_us = (case_ms as f64) * 1000.0 / (chunk_count as f64);
         eprintln!(
             "[digest-probe] dims=768 pages={pages} chunks={chunk_count} \
+             corpus_build_ms={corpus_ms} \
              prepare_publication_ms={ready_ms} publish_settle_ms={publish_ms} \
-             case_total_ms={case_ms} per_chunk_us={per_chunk_us:.1}"
+             case_total_ms={case_ms} per_chunk_us={per_chunk_us:.1} \
+             pass_total_ms={pass_total}",
+            pass_total = corpus_ms.saturating_add(case_ms)
         );
     }
 }
