@@ -3466,6 +3466,36 @@ mod tests {
     use super::*;
     use crate::semantic_native::SemanticNativePendingReasonV1;
 
+    /// Diagnostic probe: price one `publish_corpus_with_scale` build at each
+    /// evaluation scale, against the real packaged workload.
+    ///
+    /// `generate_candidate_outputs_with_native` published the 1x and 10x
+    /// corpora twice per evaluation — once for the fallback phase, once for
+    /// the native phase — so this probe prices exactly what the shared corpus
+    /// cache now saves: one build at each scale.
+    #[test]
+    #[ignore = "diagnostic probe, run explicitly"]
+    fn published_corpus_build_cost_probe() {
+        let assets = crate::packaged_assets::materialize().expect("packaged evaluator assets");
+        for copies in [1usize, 10] {
+            let started = std::time::Instant::now();
+            let published = publish_corpus_with_scale(
+                assets.root(),
+                assets.workload(),
+                copies,
+                crate::packaged_assets::admitted_scope,
+            )
+            .expect("publish corpus at scale");
+            let build_ms = started.elapsed().as_millis();
+            let chunks = published.eligible_chunks;
+            let per_chunk_us = (build_ms as f64) * 1000.0 / (chunks as f64);
+            eprintln!(
+                "[corpus-probe] copies={copies} eligible_chunks={chunks} \
+                 build_ms={build_ms} per_chunk_us={per_chunk_us:.1}"
+            );
+        }
+    }
+
     struct TestRepositoryFixture {
         _temp: tempfile::TempDir,
         root: PathBuf,
