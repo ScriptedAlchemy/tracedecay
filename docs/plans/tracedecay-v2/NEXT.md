@@ -611,13 +611,17 @@ the commit as attribution evidence.
   is pending or unavailable. Measurements: 1811s wall on a heavily contended
   host (2026-08-14), then 1801.6s on a quiet host (2026-08-15, clean worktree
   at `d7c4a4c43`) — within 0.5% of each other despite very different load.
-  The load-sensitivity judgment is DISPROVEN: `evaluate-and-publish` now
-  deterministically costs ~1800s, ~2.9x the 625s the 900s ceiling was sized
-  from, so every semantic-activation journey dies at
-  `semantic_evaluation_deadline_exceeded` before reaching the recorded
-  `InvalidRequest` blocker. Root-cause lane in flight
-  (`codex/rc-semantic-timing`): find what tripled the work; the ceiling
-  stays 900s — do not resize it from a regressed measurement.
+  The load-sensitivity judgment is DISPROVEN, and so is "the work tripled":
+  both walls ≈ exactly 2×900s — the time is CEILING-CLAMPED, not
+  work-clamped. Diagnosis (probe-backed, `37b7e5be2`): paging/commit/publish
+  are exonerated (~33s extrapolated at 43-page/21700-chunk scale);
+  `8120f4e9e` raised `EVALUATION_GRAPH_OPERATION_DEADLINE` 30s→900s to
+  survive registration "hashing the recovered generation" (its own test
+  comment) instead of fixing that cost, and the two evaluation passes
+  (1x+10x) each clamp there. Fix lane in flight
+  (`codex/rc-semantic-timing`): cache/incrementalize the generation digest,
+  then lower the eval-op ceiling back from the fixed cost. Both ceilings
+  stay un-raised by owner ruling.
 - Re-run the doctor authority-audit journey and a clean Cursor agents/in-
   composer install -> version bump -> doctor lifecycle. Preserve Cursor Core
   drift versus ownership-conflict distinctions and do not add Cursor Cloud.
