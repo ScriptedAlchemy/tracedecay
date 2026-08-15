@@ -6,7 +6,9 @@ use crate::db::{DatabaseAuthority, engine::Connection};
 use crate::errors::TraceDecayError;
 // The store-runtime registry moved into this kernel, so the facade retains the
 // concrete handle rather than an erased port.
-use super::memory_graph_reconciliation::MemoryGraphReconciliationCoordinatorV1;
+use super::memory_graph_reconciliation::{
+    MemoryGraphReconciliationCoordinatorV1, ProjectMemoryReconciliationTelemetryV1,
+};
 use crate::store_runtime::registry::StoreRuntimeHandle;
 
 pub(super) struct DatabaseInner {
@@ -27,6 +29,8 @@ pub(super) struct DatabaseInner {
     /// Coalesces and retains background memory-graph catch-up for this exact
     /// relational attachment.
     pub(super) memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1,
+    /// Monotonic reconciliation work observed for this exact database attachment.
+    pub(super) memory_graph_reconciliation_telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
     /// Canonical path from the runtime's verified locator.
     pub(super) canonical_path: PathBuf,
     /// The exact capability retained when this physical attachment was
@@ -105,6 +109,9 @@ impl DatabaseInner {
             opened_file_identity,
             writer: tokio::sync::Mutex::new(()),
             memory_graph_reconciliation: MemoryGraphReconciliationCoordinatorV1::default(),
+            memory_graph_reconciliation_telemetry: Arc::new(
+                ProjectMemoryReconciliationTelemetryV1::default(),
+            ),
             _authority: authority,
             _slot: slot,
             memory_graph_runtime: OnceLock::new(),
