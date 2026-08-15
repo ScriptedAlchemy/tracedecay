@@ -625,13 +625,27 @@ the commit as attribution evidence.
   (`recovered_generation_digest_from_database`, linear at 682µs/chunk —
   5.5s per full 768-d digest at 22k chunks, NOT a 900s clamp) ≈ ~990s of
   digest+publish plus ~96 DB close/reopen cycles; FastEmbed inference is
-  the unmeasured remainder. Levers approved by owner (verification-first):
-  (a) eliminate the redundant pre-reopen prepare digest IF the post-reopen
-  digest is proven to subsume its integrity role, or make it incremental at
-  page-commit; (b) build/share the immutable evaluation corpus once across
-  the 12 passes; (c) measure inference — if identical content is re-embedded
-  across passes, cache embeddings. No ceiling may be raised or lowered from
-  unfixed measurements.
+  the unmeasured remainder. RESOLVED 2026-08-15 (merge `ddf5fff36`, lane
+  `codex/rc-semantic-timing`): (a) digest lever CLOSED-BY-RULING — the
+  prepare-time digest is the baseline the post-reopen durability proof
+  verifies (`replay.expected_recovered_digest`, publication.rs:514/567);
+  exact-value incremental hashing is impossible (content-derived
+  lexicographic entity order ≠ page arrival order) and per-page subdigests
+  would change the persisted digest value, failing every published
+  generation's own durability verification. Owner accepted the blocker:
+  the digest algorithm stays; post-sharing residual digest cost (~40s)
+  does not justify a persisted-evidence break. (b) LANDED — corpora
+  published once per scale and shared (4→2 lexical publishes, 12→2
+  projection-case sets, 12→2 incremental measurements; ~207s structural
+  savings at quiet-box costs) plus projection-case and
+  incremental-projection memos whose provenance is generation-id/digest
+  composed (honest under sharing; binding checks reject mismatched cache
+  entries). (c) CLOSED — no cross-pass re-embedding exists;
+  `prepared_native` cache already keys by generation id (= content digest
+  + pinned model). Ceilings untouched. REMAINING: one end-to-end
+  `advanced_workflow` run on a quiet host to measure the true un-clamped
+  wall (the pre-change wall was censored at the 1800s clamp, so savings
+  cannot honestly be subtracted from it).
 - Re-run the doctor authority-audit journey and a clean Cursor agents/in-
   composer install -> version bump -> doctor lifecycle. Preserve Cursor Core
   drift versus ownership-conflict distinctions and do not add Cursor Cloud.
