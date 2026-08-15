@@ -21,7 +21,8 @@ use std::collections::BTreeSet;
 use tracedecay_application::{
     AddWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot, CreateWorkProductRequestV1,
     Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
+    WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
+    WorkProductBindingV1,
     WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationServiceV1,
     WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
     WorkRelationScopeV1,
@@ -31,7 +32,8 @@ use tracedecay_domain::{
     ManifestDigest, MilestoneId, PolicyRevisionId, ProjectId, RepositoryId, TaskId, UtcMicros,
     WorkAcceptanceCriterionV1, WorkCommandId, WorkGraphVersionV1, WorkHierarchyV1,
     WorkInitiativeV1, WorkItemInputV1, WorkItemV1, WorkMilestoneV1, WorkPlanId, WorkPlanV1,
-    WorkProductEventPayloadV1, WorkProductGraphV1, WorkRuntimeProjectionCoverageV1, WorktreeId,
+    WorkProductEventPayloadV1, WorkProductEventSequenceV1, WorkProductGraphV1,
+    WorkRuntimeProjectionCoverageV1, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -555,8 +557,11 @@ fn a_selection_naming_another_project_is_refused_rather_than_narrowed() {
     assert_eq!(refused, WorkProductApplicationErrorV1::NotAuthorized);
 }
 
+/// A selection that covers no event at all has no version to point at, so a
+/// `Current` read is the same typed absence an owner with no journal gets.
+/// This is the empty-covered-slice case, not the poisoning one below.
 #[test]
-fn a_narrower_selection_than_the_journal_was_written_under_is_not_answered_partially() {
+fn a_selection_that_covers_no_event_has_no_current_version() {
     let store = RegisteredWorkStore::start("work-product-narrow");
     create(
         &store,
@@ -566,9 +571,10 @@ fn a_narrower_selection_than_the_journal_was_written_under_is_not_answered_parti
     )
     .expect("create the work product");
 
-    // The journal was written under a repository relation scope. A no-Git
-    // selection covers none of it, so folding what it does cover would produce
-    // a graph that never existed.
+    // The journal was written under a repository relation scope from its very
+    // first event, so a no-Git selection covers none of it. `Current` is a
+    // point read of a version and there is no version inside this selection to
+    // read, which is exactly the absence an empty journal reports.
     let refused = reads(&store)
         .read_graph(
             &context(),
@@ -577,10 +583,171 @@ fn a_narrower_selection_than_the_journal_was_written_under_is_not_answered_parti
                 PROJECTED_AT,
             ),
         )
-        .expect_err("a selection that does not cover the journal must be refused");
+        .expect_err("a selection covering no event has no current version");
     assert_eq!(
         refused,
         WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
+    );
+}
+
+/// The no-Git poisoning defect, stated as the contract that replaced it.
+///
+/// A profile owner creates work with no Git relation, and later an authority
+/// that can only act under a repository scope — attempt admission is the real
+/// one — appends a repository-scoped event to the same owner journal. The old
+/// rule refused the entire no-Git read from that moment on, permanently, so
+/// work the caller was plainly authorized for became unreadable because of an
+/// event admitted beside it.
+///
+/// The ruled contract: the covered prefix is answered, and the answer says what
+/// it left out.
+#[test]
+fn a_scoped_event_beside_no_git_work_does_not_poison_the_no_git_selection() {
+    let store = RegisteredWorkStore::start("work-product-no-git-prefix");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.no-git", UtcMicros(100)),
+            },
+        )
+        .expect("create profile-owned work with no Git relation");
+
+    // The event beside it: admitted under a repository relation scope, on the
+    // same owner journal. This is what a settled provider attempt publishes.
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository-scoped", &[], 3),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.repository", UtcMicros(200))
+                },
+            },
+        )
+        .expect("publish a repository-scoped event beside the no-Git work");
+
+    let read = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                PROJECTED_AT,
+            ),
+        )
+        .expect("the covered prefix is readable, not poisoned by the event beside it");
+
+    // The disclosure is the whole point: the caller is told, in the read model's
+    // own coverage vocabulary, that one event lies outside this selection and
+    // where the boundary is. Answering the prefix silently would be the real
+    // falsification.
+    assert_eq!(
+        read.selection_coverage(),
+        &WorkGraphSelectionCoverageV1::Partial {
+            covered_events: 1,
+            excluded_events: 1,
+            first_excluded_sequence: WorkProductEventSequenceV1::new(2).unwrap(),
+        },
+        "the read must disclose the scoped event outside this selection"
+    );
+    let WorkGraphReadV1::Current { snapshot, .. } = read else {
+        panic!("a current read must answer with a current snapshot");
+    };
+    // The answer is the covered slice folded on its own: the no-Git task, at
+    // the version its own event published, and nothing from the event outside
+    // the selection.
+    assert_eq!(snapshot.verified_version().graph_version().get(), 1);
+    assert_eq!(
+        snapshot
+            .graph()
+            .items()
+            .iter()
+            .map(|item| item.task_id().as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["task.no-git".to_owned()],
+        "the covered slice must not carry the scoped task folded beside it"
+    );
+    assert_eq!(snapshot.projections().workload().total_effort(), 2);
+
+    // A repository selection covers the scope-free events too, so the same
+    // journal reads whole under it — with a `Complete` disclosure. That is the
+    // remedy the mutation refusal names, proven to actually work.
+    let whole = reads(&store)
+        .read_graph(
+            &context(),
+            WorkGraphReadRequestV1::current(repository_selection(), PROJECTED_AT),
+        )
+        .expect("the widened selection covers the whole journal");
+    assert_eq!(
+        whole.selection_coverage(),
+        &WorkGraphSelectionCoverageV1::Complete { covered_events: 2 }
+    );
+}
+
+/// Reads answer over a covered slice; mutations do not. A prepared change pins
+/// the head it read, and under partial coverage that head is the slice's head,
+/// not the journal's — so the refusal is kept, but typed by its actual cause
+/// with the selection remedy in it, instead of the concealed
+/// `not_found_or_not_authorized` the old rule produced.
+#[test]
+fn a_mutation_over_a_partially_covered_selection_is_refused_by_name() {
+    let store = RegisteredWorkStore::start("work-product-no-git-mutation");
+    let created = mutations(&store)
+        .create(
+            &context(),
+            &binding(),
+            CreateWorkProductRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                initial_graph: graph(vec![item("task.no-git", &[], 2)]),
+                mutation: mutation("command.work-product.no-git-mutation", UtcMicros(100)),
+            },
+        )
+        .expect("create profile-owned work with no Git relation");
+    mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: repository_selection(),
+                item: item("task.repository-scoped", &[], 3),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.repository-mutation", UtcMicros(200))
+                },
+            },
+        )
+        .expect("publish a repository-scoped event beside the no-Git work");
+
+    let refused = mutations(&store)
+        .add_task(
+            &context(),
+            &binding(),
+            AddWorkTaskRequestV1 {
+                selection: WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                item: item("task.third", &[], 1),
+                mutation: WorkProductMutationIdentityV1 {
+                    expected_authority: WorkProductExpectedAuthorityV1::Verified {
+                        verified_version: created.verified_graph_version().clone(),
+                    },
+                    ..mutation("command.work-product.no-git-second", UtcMicros(300))
+                },
+            },
+        )
+        .expect_err("a mutation cannot be submitted over a covered slice");
+    assert_eq!(
+        refused,
+        WorkProductApplicationErrorV1::SelectionCoverageIncomplete,
+        "the refusal must name the coverage cause, not conceal it as an absence"
     );
 }
 
