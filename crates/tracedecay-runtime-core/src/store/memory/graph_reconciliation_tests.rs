@@ -14,7 +14,10 @@ use tracedecay_graph_db::{
 };
 use tracedecay_store::{
     FactCommitOutcome, FactCurrentQuery, FactReadControl, FactStore, FactStoreError,
-    FactWriteControl, ProjectMemoryGraphQueryV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    FactWriteBatch, FactWriteControl, ProjectMemoryFactFeedbackActionV1,
+    ProjectMemoryFactFeedbackCommandV1, ProjectMemoryFactIdV1, ProjectMemoryFactRemoveCommandV1,
+    ProjectMemoryFactRetrievalCommandV1, ProjectMemoryFactStore, ProjectMemoryGraphQueryV1,
+    StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
@@ -203,6 +206,52 @@ async fn wait_for_reconciliation(runtime: &RecordingGraphRuntime) {
     );
 }
 
+fn non_graph_write_fixture_batch(label: &str) -> FactWriteBatch {
+    let content = format!("canonical {label} fact without a graph source change");
+    let sanitized = sanitize_payload(
+        &content,
+        FactCategoryV1::General,
+        &[],
+        &[],
+        &json!({"fixture": label}),
+        None,
+    )
+    .expect("sanitize non-graph write fixture payload")
+    .expect("non-graph write fixture remains durable");
+    initial_batch(
+        &FactOwnerV1::Profile,
+        &ProvenanceId::new(format!("graph.reconciliation.{label}.seed"))
+            .expect("non-graph write seed operation id"),
+        sanitized.payload,
+        sanitized.access,
+        Confidence::new(0.8).expect("non-graph write fixture confidence"),
+        None,
+        UtcMicros(1_000_000),
+    )
+    .expect("non-graph write fact batch")
+}
+
+async fn seed_fact_for_non_graph_write(
+    store: &DatabaseFactStore<'_>,
+    runtime: &RecordingGraphRuntime,
+    label: &str,
+) -> ProjectMemoryFactIdV1 {
+    let batch = non_graph_write_fixture_batch(label);
+    let target = ProjectMemoryFactIdV1::new(FactOwnerV1::Profile, batch.fact_id().clone())
+        .expect("non-graph write target");
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit non-graph write fixture");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+    wait_for_reconciliation(runtime).await;
+    runtime.reconcile_calls.store(0, Ordering::SeqCst);
+    runtime
+        .reconciliation_observed
+        .store(false, Ordering::Release);
+    target
+}
+
 #[tokio::test]
 async fn graph_read_inspects_verified_snapshot_without_publishing() {
     let (_directory, database) = database("snapshot-only-read").await;
@@ -273,9 +322,11 @@ async fn successful_project_memory_transaction_schedules_lifecycle_reconciliatio
     let store = DatabaseFactStore::new(&database);
 
     store
-        .project_memory_write(&write_control(), |_transaction| {
-            Box::pin(async { Ok::<(), FactStoreError>(()) })
-        })
+        .project_memory_write(
+            &write_control(),
+            |_| true,
+            |_transaction| Box::pin(async { Ok::<(), FactStoreError>(()) }),
+        )
         .await
         .expect("commit project-memory transaction");
     wait_for_reconciliation(&runtime).await;
@@ -319,6 +370,157 @@ async fn committed_low_level_fact_batch_schedules_lifecycle_reconciliation() {
     wait_for_reconciliation(&runtime).await;
 
     assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn retrieval_telemetry_does_not_reconcile_unchanged_memory_graph() {
+    let (_directory, database) = database("retrieval-telemetry-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let target = seed_fact_for_non_graph_write(&store, &runtime, "retrieval-telemetry").await;
+
+    store
+        .record_project_memory_fact_retrieval(
+            ProjectMemoryFactRetrievalCommandV1::new(
+                FactOwnerV1::Profile,
+                ProvenanceId::new("graph.reconciliation.retrieval.record".to_owned())
+                    .expect("retrieval record operation id"),
+                vec![target],
+                true,
+            )
+            .expect("retrieval telemetry command"),
+            &write_control(),
+        )
+        .await
+        .expect("record retrieval telemetry");
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn idempotent_fact_replay_does_not_reconcile_unchanged_memory_graph() {
+    let (_directory, database) = database("idempotent-replay-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let batch = non_graph_write_fixture_batch("idempotent-replay");
+    let replay = batch.clone();
+
+    let outcome = store
+        .commit_fact(batch, &write_control())
+        .await
+        .expect("commit idempotent replay fixture");
+    assert!(matches!(outcome, FactCommitOutcome::Committed(_)));
+    wait_for_reconciliation(&runtime).await;
+    runtime.reconcile_calls.store(0, Ordering::SeqCst);
+    runtime
+        .reconciliation_observed
+        .store(false, Ordering::Release);
+
+    let outcome = store
+        .commit_fact(replay, &write_control())
+        .await
+        .expect("replay idempotent fact commit");
+    assert!(matches!(outcome, FactCommitOutcome::IdempotentReplay(_)));
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn high_level_remove_source_change_replays_and_noops_without_reconciliation() {
+    let (_directory, database) = database("high-level-remove-replay-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let target = seed_fact_for_non_graph_write(&store, &runtime, "high-level-remove-replay").await;
+
+    let removed = store
+        .remove_project_memory_fact(
+            ProjectMemoryFactRemoveCommandV1::new(
+                target.clone(),
+                ProvenanceId::new("graph.reconciliation.remove.changed".to_owned())
+                    .expect("changed remove operation id"),
+                None,
+                None,
+            )
+            .expect("changed remove command"),
+            &write_control(),
+        )
+        .await
+        .expect("remove fact");
+    assert!(removed.was_removed());
+    assert!(!removed.commit_replayed());
+    wait_for_reconciliation(&runtime).await;
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
+    runtime.reconcile_calls.store(0, Ordering::SeqCst);
+    runtime
+        .reconciliation_observed
+        .store(false, Ordering::Release);
+
+    let replay = store
+        .remove_project_memory_fact(
+            ProjectMemoryFactRemoveCommandV1::new(
+                target.clone(),
+                ProvenanceId::new("graph.reconciliation.remove.changed".to_owned())
+                    .expect("replayed remove operation id"),
+                None,
+                None,
+            )
+            .expect("replayed remove command"),
+            &write_control(),
+        )
+        .await
+        .expect("replay remove fact");
+    assert!(replay.was_removed());
+    assert!(replay.commit_replayed());
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+
+    let no_op = store
+        .remove_project_memory_fact(
+            ProjectMemoryFactRemoveCommandV1::new(
+                target,
+                ProvenanceId::new("graph.reconciliation.remove.no-op".to_owned())
+                    .expect("no-op remove operation id"),
+                None,
+                None,
+            )
+            .expect("no-op remove command"),
+            &write_control(),
+        )
+        .await
+        .expect("remove already removed fact");
+    assert!(!no_op.was_removed());
+    assert!(!no_op.commit_replayed());
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn feedback_telemetry_does_not_reconcile_unchanged_memory_graph() {
+    let (_directory, database) = database("feedback-telemetry-reconciliation").await;
+    let runtime = bind_runtime(&database);
+    let store = DatabaseFactStore::new(&database);
+    let target = seed_fact_for_non_graph_write(&store, &runtime, "feedback-telemetry").await;
+
+    store
+        .record_project_memory_fact_feedback(
+            ProjectMemoryFactFeedbackCommandV1::new(
+                target,
+                ProvenanceId::new("graph.reconciliation.feedback.record".to_owned())
+                    .expect("feedback record operation id"),
+                None,
+                ProjectMemoryFactFeedbackActionV1::Helpful,
+                None,
+                Some("graph reconciliation regression".to_owned()),
+                Some("feedback does not change graph source rows".to_owned()),
+            )
+            .expect("feedback telemetry command"),
+            &write_control(),
+        )
+        .await
+        .expect("record feedback telemetry");
+
+    assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 0);
     assert_eq!(runtime.publish_calls.load(Ordering::SeqCst), 0);
 }
 

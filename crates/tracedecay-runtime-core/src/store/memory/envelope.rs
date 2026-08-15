@@ -211,6 +211,7 @@ impl DatabaseFactStore<'_> {
     pub(super) async fn project_memory_write<T: Send + 'static>(
         &self,
         write_control: &FactWriteControl,
+        graph_source_changed: impl FnOnce(&T) -> bool + Send + 'static,
         work: impl for<'tx> FnOnce(
             &'tx Transaction<'_>,
         )
@@ -225,7 +226,7 @@ impl DatabaseFactStore<'_> {
         // that transition the bounded transaction commit runs to completion.
         tokio::spawn(async move {
             let result = execute_project_memory_write(db.clone(), write_control, work).await;
-            if result.is_ok() {
+            if result.as_ref().is_ok_and(graph_source_changed) {
                 super::graph::publish_project_memory_graph_after_write(db).await;
             }
             result
@@ -325,12 +326,16 @@ mod write_control_tests {
         let control = FactWriteControl::new(Arc::new(|| true), Arc::new(|| true));
 
         let result: FactStoreResult<()> = DatabaseFactStore::new(&db)
-            .project_memory_write(&control, move |_| {
-                Box::pin(async move {
-                    work_ran_in_task.store(true, Ordering::Release);
-                    Ok(())
-                })
-            })
+            .project_memory_write(
+                &control,
+                |_| true,
+                move |_| {
+                    Box::pin(async move {
+                        work_ran_in_task.store(true, Ordering::Release);
+                        Ok(())
+                    })
+                },
+            )
             .await;
 
         assert!(matches!(result, Err(FactStoreError::Storage { .. })));
@@ -351,18 +356,24 @@ mod write_control_tests {
         );
 
         let result: FactStoreResult<()> = DatabaseFactStore::new(&db)
-            .project_memory_write(&control, |transaction| {
-                Box::pin(async move {
-                    transaction
-                        .execute_batch(
-                            "CREATE TABLE write_control_probe(value TEXT NOT NULL);
-                             INSERT INTO write_control_probe(value) VALUES('uncommitted');",
-                        )
-                        .await
-                        .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))?;
-                    Ok(())
-                })
-            })
+            .project_memory_write(
+                &control,
+                |_| true,
+                |transaction| {
+                    Box::pin(async move {
+                        transaction
+                            .execute_batch(
+                                "CREATE TABLE write_control_probe(value TEXT NOT NULL);
+                                 INSERT INTO write_control_probe(value) VALUES('uncommitted');",
+                            )
+                            .await
+                            .map_err(|error| {
+                                storage_error(PROJECT_MEMORY_WRITE_OPERATION, error)
+                            })?;
+                        Ok(())
+                    })
+                },
+            )
             .await;
 
         assert!(matches!(result, Err(FactStoreError::Storage { .. })));
