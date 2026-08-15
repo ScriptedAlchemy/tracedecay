@@ -2,6 +2,7 @@ use tracedecay_application::{
     ExecutionDuplicateKindV1, ExecutionQuantityUnitV1, ExecutionTopologyDimensionV1,
     ExecutionTopologyRollupFragmentV1, ExecutionTopologyRollupRetentionV1, ObservabilityHorizonV1,
     ObservabilityPageV1, build_execution_topology_rollup_fragment,
+    canonical_execution_topology_rollup_fragment_bytes,
     check_execution_topology_rollup_retention_json, project_execution_topology_fragments,
 };
 use tracedecay_domain::{
@@ -207,7 +208,9 @@ fn conflict_prediction_event(sequence: u64, event_time_micros: i64) -> Observabi
 }
 
 fn compact_json(fragment: &ExecutionTopologyRollupFragmentV1, now_micros: i64) -> String {
-    let source = serde_json::to_string(fragment).unwrap();
+    let source =
+        String::from_utf8(canonical_execution_topology_rollup_fragment_bytes(fragment).unwrap())
+            .unwrap();
     match check_execution_topology_rollup_retention_json(&source, now_micros).unwrap() {
         ExecutionTopologyRollupRetentionV1::Updated { fragment_json } => fragment_json,
         ExecutionTopologyRollupRetentionV1::Unchanged => {
