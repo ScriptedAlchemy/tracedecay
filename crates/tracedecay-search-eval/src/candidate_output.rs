@@ -1085,8 +1085,60 @@ pub fn validate_workload_for_tuning(
 
 /// Generate deterministic train/validation outputs using the production
 /// retrieval kernel.
+/// The corpora published for one candidate-generation call, memoized by scale.
+///
+/// `publish_corpus_with_scale` is a pure function of its four arguments: every
+/// identity it mints is content-derived (`content_identity` hashes the corpus
+/// digest and the copy count), both of its timestamps are constants, and it
+/// sorts its files before building. Two calls with equal arguments therefore
+/// produce byte-identical generations down to the generation id, and the store
+/// they publish through is created and dropped inside the call, so nothing
+/// observable distinguishes one build from two.
+///
+/// The fallback phase and the native phase of one evaluation each published
+/// their own 1x and 10x corpora, so the identical build ran twice per scale.
+/// This cache lets the two phases share one build apiece.
+#[derive(Default)]
+struct PublishedCorpusCache {
+    by_scale: BTreeMap<usize, PublishedCorpus>,
+}
+
+impl PublishedCorpusCache {
+    /// Publish the corpus at `copies` scale unless it is already cached.
+    fn ensure(
+        &mut self,
+        repo_root: &Path,
+        workload: &CandidateWorkloadV1,
+        copies: usize,
+        admitted_scope: AdmittedCorpusScopeFn,
+    ) -> Result<(), CandidateOutputError> {
+        if !self.by_scale.contains_key(&copies) {
+            let published = publish_corpus_with_scale(repo_root, workload, copies, admitted_scope)?;
+            self.by_scale.insert(copies, published);
+        }
+        Ok(())
+    }
+
+    /// Borrow a corpus a prior `ensure` published. Kept separate from `ensure`
+    /// so two scales can be borrowed at once.
+    fn get(&self, copies: usize) -> Result<&PublishedCorpus, CandidateOutputError> {
+        self.by_scale.get(&copies).ok_or_else(|| {
+            CandidateOutputError::Contract(format!(
+                "{copies}x evaluation corpus was not published before use"
+            ))
+        })
+    }
+}
+
 pub fn generate_candidate_outputs(
     options: &GenerateCandidateOutputsOptions<'_>,
+) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
+    generate_candidate_outputs_sharing_corpora(options, &mut PublishedCorpusCache::default())
+}
+
+fn generate_candidate_outputs_sharing_corpora(
+    options: &GenerateCandidateOutputsOptions<'_>,
+    corpora: &mut PublishedCorpusCache,
 ) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
     let workload_path = options.workload_path.map_or_else(
         || options.repo_root.join(WORKLOAD_RELATIVE),
@@ -1127,23 +1179,27 @@ pub fn generate_candidate_outputs(
             "no profiles selected for candidate generation".to_owned(),
         ));
     }
-    let published = publish_corpus(options.repo_root, &workload, options.admitted_scope)?;
+    corpora.ensure(options.repo_root, &workload, 1, options.admitted_scope)?;
 
     let mut outputs = Vec::new();
-    for &profile in &profiles {
-        for partition in ["train", "validation"] {
-            let output = generate_partition_output(
-                &workload,
-                &workload_digest,
-                &published,
-                profile,
-                partition,
-            )?;
-            outputs.push(output);
+    {
+        let published = corpora.get(1)?;
+        for &profile in &profiles {
+            for partition in ["train", "validation"] {
+                let output = generate_partition_output(
+                    &workload,
+                    &workload_digest,
+                    published,
+                    profile,
+                    partition,
+                )?;
+                outputs.push(output);
+            }
         }
     }
-    let ten_x_published =
-        publish_corpus_with_scale(options.repo_root, &workload, 10, options.admitted_scope)?;
+    corpora.ensure(options.repo_root, &workload, 10, options.admitted_scope)?;
+    let published = corpora.get(1)?;
+    let ten_x_published = corpora.get(10)?;
     let expected_ten_x_chunks = published.eligible_chunks.checked_mul(10).ok_or_else(|| {
         CandidateOutputError::Contract("current eligible chunk count overflows 10x".to_owned())
     })?;
@@ -1171,7 +1227,7 @@ pub fn generate_candidate_outputs(
             .collect();
         output.resources.insert(
             "10x".to_owned(),
-            measure_partition_resources(&ten_x_published, profile, &queries)?,
+            measure_partition_resources(ten_x_published, profile, &queries)?,
         );
     }
 
@@ -1190,15 +1246,20 @@ pub fn generate_candidate_outputs_with_native(
     options: &GenerateCandidateOutputsOptions<'_>,
     authority: &dyn ProductionCandidateNativeExecutionAuthorityV1,
 ) -> Result<GenerateCandidateOutputsResultV1, CandidateOutputError> {
-    let mut generated = generate_candidate_outputs(options)?;
+    // One cache across both phases: the fallback phase below publishes the 1x
+    // and 10x corpora, and the native phase reuses those exact builds instead
+    // of republishing byte-identical ones.
+    let mut corpora = PublishedCorpusCache::default();
+    let mut generated = generate_candidate_outputs_sharing_corpora(options, &mut corpora)?;
     let workload_path = options.workload_path.map_or_else(
         || options.repo_root.join(WORKLOAD_RELATIVE),
         Path::to_path_buf,
     );
     let workload = load_candidate_workload(&workload_path)?;
-    let published = publish_corpus(options.repo_root, &workload, options.admitted_scope)?;
-    let ten_x_published =
-        publish_corpus_with_scale(options.repo_root, &workload, 10, options.admitted_scope)?;
+    corpora.ensure(options.repo_root, &workload, 1, options.admitted_scope)?;
+    corpora.ensure(options.repo_root, &workload, 10, options.admitted_scope)?;
+    let published = corpora.get(1)?;
+    let ten_x_published = corpora.get(10)?;
     if ten_x_published.eligible_chunks
         != published.eligible_chunks.checked_mul(10).ok_or_else(|| {
             CandidateOutputError::Contract("current eligible chunk count overflows 10x".to_owned())
@@ -1228,7 +1289,7 @@ pub fn generate_candidate_outputs_with_native(
             .filter(|query| query.partition == output.partition)
             .collect::<Vec<_>>();
         let (rows, current) = measure_native_partition(
-            &published,
+            published,
             profile,
             &queries,
             authority,
@@ -1237,7 +1298,7 @@ pub fn generate_candidate_outputs_with_native(
             "current",
         )?;
         let (_, ten_x) = measure_native_partition(
-            &ten_x_published,
+            ten_x_published,
             profile,
             &queries,
             authority,
