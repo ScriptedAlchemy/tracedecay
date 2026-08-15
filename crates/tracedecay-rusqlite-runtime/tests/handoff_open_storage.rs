@@ -371,11 +371,14 @@ fn enumeration_reads_the_durable_frontier_secret_free_across_a_restart() {
     // No bearer anywhere in the projection, exactly as none is in the table.
     let rendered = serde_json::to_string(&live).unwrap();
     assert!(!rendered.contains(TOKEN_SECRET));
-    assert_eq!(live.handoffs[0].token_digest.as_str(), {
-        let expected = token.digest().unwrap();
-        expected.as_str().to_owned()
-    }
-    .as_str());
+    assert_eq!(
+        live.handoffs[0].token_digest.as_str(),
+        {
+            let expected = token.digest().unwrap();
+            expected.as_str().to_owned()
+        }
+        .as_str()
+    );
 
     // Redeem it, then read again: consumed, not expired, and still one row.
     run(service.open_task(

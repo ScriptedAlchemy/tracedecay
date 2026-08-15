@@ -183,10 +183,10 @@ pub fn project_for_publication<S: CodeChunkProjectionSink>(
     eprintln!("[republish-phase] projection=evidence_complete");
     let sink_receipt = if request_is_true_noop(&request) {
         ProjectionSinkReceiptV1::sealed(build_batch_receipt_verified(
-                &request,
-                &evidence,
-                &decisions_for_noop(&request.changes),
-            )?)
+            &request,
+            &evidence,
+            &decisions_for_noop(&request.changes),
+        )?)
     } else {
         sink.project_changed_chunks(
             &request,

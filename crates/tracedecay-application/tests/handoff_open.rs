@@ -744,7 +744,9 @@ async fn enumeration_conceals_grants_the_caller_could_not_have_redeemed() {
     let mine = service
         .list_task(
             &context("request.list-mine"),
-            ListTaskHandoffsRequestV1 { session_id: session },
+            ListTaskHandoffsRequestV1 {
+                session_id: session,
+            },
             ISSUED_AT,
         )
         .await

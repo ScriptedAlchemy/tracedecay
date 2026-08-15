@@ -186,8 +186,11 @@ fn mcp_tool_call(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child =
-        TestChildProcess::new(command.spawn().expect("spawn the tracedecay MCP stdio host"));
+    let mut child = TestChildProcess::new(
+        command
+            .spawn()
+            .expect("spawn the tracedecay MCP stdio host"),
+    );
 
     let mut params = json!({ "name": tool, "arguments": arguments });
     if let Some(deadline) = deadline_micros {
@@ -335,10 +338,18 @@ fn sdk_problem(error: ClientError, context: &str) -> (String, Value) {
 
 #[test]
 fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
-    const HTTP_MARKER: &str = "typed-terminal-boundaries-partial-effect-http-4a71c8";
-    const MCP_MARKER: &str = "typed-terminal-boundaries-partial-effect-mcp-4a71c8";
-    const SDK_MARKER: &str = "typed-terminal-boundaries-partial-effect-sdk-4a71c8";
-    const POST_RESTART_MARKER: &str = "typed-terminal-boundaries-partial-effect-restart-4a71c8";
+    // Each marker stays under `MAX_MARKER_TOKEN_BYTES` so production memory
+    // hygiene stores the fact instead of refusing it as secret-like.
+    const HTTP_MARKER: &str = "boundaries-partial-http-4a71c8";
+    const MCP_MARKER: &str = "boundaries-partial-mcp-4a71c8";
+    const SDK_MARKER: &str = "boundaries-partial-sdk-4a71c8";
+    const POST_RESTART_MARKER: &str = "boundaries-partial-restart-4a71c8";
+    /// Query that must retrieve every marker above after the restart.
+    const MARKER_QUERY: &str = "boundaries-partial";
+
+    for marker in [HTTP_MARKER, MCP_MARKER, SDK_MARKER, POST_RESTART_MARKER] {
+        assert_marker_is_storable(marker);
+    }
 
     let home = tempfile::TempDir::new().expect("isolated home");
     let home_path = crate::common::canonical_existing_path(home.path());
@@ -406,18 +417,21 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
     let sdk_identity = identity.clone();
     let sdk_error = park_at_commit_barrier(&barrier_path, move || {
         let client = sdk_client(&sdk_mount, &sdk_identity);
-        let request = serde_json::from_value(fact_add_body(SDK_MARKER))
-            .expect("canonical fact-add request");
-        client
-            .execute_with_options::<ApplicationFactStoreAdd>(
-                &request,
-                OperationRequestOptions {
-                    deadline_micros: Some(parked_request_deadline_micros()),
-                    request_id: None,
-                },
-            )
-            .err()
-            .expect("a parked fact add must not settle as a plain success")
+        let request =
+            serde_json::from_value(fact_add_body(SDK_MARKER)).expect("canonical fact-add request");
+        match client.execute_with_options::<ApplicationFactStoreAdd>(
+            &request,
+            OperationRequestOptions {
+                deadline_micros: Some(parked_request_deadline_micros()),
+                request_id: None,
+            },
+        ) {
+            Ok(response) => panic!(
+                "a parked fact add must not settle as a plain success: {}",
+                response.envelope
+            ),
+            Err(error) => error,
+        }
     });
     let (sdk_kind, sdk_envelope) = sdk_problem(sdk_error, "Rust SDK partial effect");
     assert_eq!(
@@ -450,7 +464,7 @@ fn partial_effect_survives_http_mcp_and_rust_sdk_across_restart() {
         &mount,
         &identity,
         "/application/retained/fact_store_search",
-        &json!({ "query": "typed-terminal-boundaries-partial-effect" }),
+        &json!({ "query": MARKER_QUERY }),
         None,
     );
     assert_eq!(

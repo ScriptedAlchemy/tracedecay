@@ -390,9 +390,9 @@ impl MessageSearchInput {
                 // `ExecutionLimits::default()`, which the admitted binding
                 // refuses terminally — every message search would answer
                 // `Saturated` instead of searching.
-                .with_execution_limits(
-                    crate::daemon::session_retrieval::admitted_execution_limits(self.limit),
-                )
+                .with_execution_limits(crate::daemon::session_retrieval::admitted_execution_limits(
+                    self.limit,
+                ))
         })
     }
 

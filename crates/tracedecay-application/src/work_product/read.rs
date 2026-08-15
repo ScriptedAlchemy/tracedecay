@@ -304,8 +304,7 @@ impl WorkGraphSelectionCoverageV1 {
             } => {
                 // Sequences are monotonic, so the event after `covered_events`
                 // covered ones always carries a strictly greater sequence.
-                *excluded_events > 0
-                    && u64::from(*covered_events) < first_excluded_sequence.get()
+                *excluded_events > 0 && u64::from(*covered_events) < first_excluded_sequence.get()
             }
         };
         if valid {

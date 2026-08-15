@@ -130,10 +130,7 @@ fn reseal_import_envelope(mut envelope: Value) -> Vec<u8> {
     serde_json::to_vec(&envelope).expect("forged sealed generation JSON")
 }
 
-fn resealed_import_payload_error(
-    envelope: Value,
-    mutation: &str,
-) -> CodeIndexProductionErrorV1 {
+fn resealed_import_payload_error(envelope: Value, mutation: &str) -> CodeIndexProductionErrorV1 {
     let bytes = reseal_import_envelope(envelope);
 
     match CodeIndexPublishedGenerationV1::decode_sealed(&bytes) {

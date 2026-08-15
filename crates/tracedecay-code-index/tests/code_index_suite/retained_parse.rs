@@ -4,19 +4,17 @@ use std::{
     time::Duration,
 };
 
-use tree_sitter::Tree;
 use tracedecay_code_extraction::{
     AstroExtractor, LanguageExtractor, RustExtractor,
     incremental::{ParseDocumentIdentity, ParseLimits, ParseReuse},
-    parsed_extraction::{
-        ParsedExtraction, ParsedExtractionDisposition, ParsedExtractionScope,
-    },
+    parsed_extraction::{ParsedExtraction, ParsedExtractionDisposition, ParsedExtractionScope},
 };
 use tracedecay_code_index::retained_parse::{RetainedParsePoolLimits, SharedRetainedParsePool};
 use tracedecay_domain::{
     CommitId, ExtractionResult, ProjectId, RefId, RepositoryDirtyStateV1, RepositoryId, TreeId,
     WorktreeId,
 };
+use tree_sitter::Tree;
 
 use crate::support::id;
 

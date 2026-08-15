@@ -581,7 +581,9 @@ fn resolve_args_payload(
 /// Falls back to a JSON string when the schema is absent or specifies an
 /// unknown type.
 fn coerce_value(key: &str, prop_schema: Option<&Value>, raw: &str) -> Result<Value> {
-    let ty = prop_schema.and_then(schema_primary_type).unwrap_or("string");
+    let ty = prop_schema
+        .and_then(schema_primary_type)
+        .unwrap_or("string");
 
     match ty {
         "string" => Ok(Value::String(raw.to_string())),

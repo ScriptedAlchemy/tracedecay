@@ -273,9 +273,8 @@ fn probe_trait_source() -> String {
 /// One trait whose supertrait bounds exceed a page, which is the only shape in
 /// Rust that gives a single node more outgoing hierarchy edges than a page.
 fn probe_hierarchy_source() -> String {
-    let mut source = format!(
-        "pub fn application_pagination_probe_leaf_canary() -> u32 {{\n    0\n}}\n\n"
-    );
+    let mut source =
+        format!("pub fn application_pagination_probe_leaf_canary() -> u32 {{\n    0\n}}\n\n");
     for index in 0..PROBE_SYMBOL_COUNT {
         source.push_str(&format!("pub trait ProbeBaseCanary{index:02} {{}}\n\n"));
     }
@@ -440,12 +439,7 @@ fn terminal_disposition(value: &Value) -> (&str, &str) {
             assert!(
                 matches!(
                     termination,
-                    "completed"
-                        | "partial"
-                        | "unavailable"
-                        | "failed"
-                        | "cancelled"
-                        | "timed_out"
+                    "completed" | "partial" | "unavailable" | "failed" | "cancelled" | "timed_out"
                 ),
                 "evidence must be terminal rather than a route placeholder: {value:#}"
             );

@@ -17,8 +17,8 @@ use tracedecay_code_index::incremental::{GenerationChunkManifestV1, plan_chunk_i
 use tracedecay_code_index::intake::{CodeIndexIntake, ReceiptBoundCodeFileV1, SanitizedCodeIntake};
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
-    ProjectionReceiptBuilderV1, ProjectionSinkReceiptV1, expected_request_digest,
+    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
+    ProjectionSinkErrorV1, ProjectionSinkReceiptV1, expected_request_digest,
     project_for_publication,
 };
 use tracedecay_domain::{

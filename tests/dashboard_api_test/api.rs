@@ -176,8 +176,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         );
         assert!(
             overview["holographic"]["facts_coverage"]["graph"]["root_count"].is_number()
-                && overview["holographic"]["facts_coverage"]["graph"]["relation_count"]
-                    .is_number()
+                && overview["holographic"]["facts_coverage"]["graph"]["relation_count"].is_number()
                 && overview["holographic"]["facts_coverage"]["graph"]["expanded_fact_count"]
                     .is_number(),
             "complete graph-assist coverage carries its measured counts: {overview}"

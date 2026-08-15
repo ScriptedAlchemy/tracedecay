@@ -860,9 +860,7 @@ mod tests {
                     "wrong-schema read-only open must remain a schema ResetRequired: {reason:?}"
                 );
             }
-            other => panic!(
-                "nonempty graph at another schema must require a reset, got {other:?}"
-            ),
+            other => panic!("nonempty graph at another schema must require a reset, got {other:?}"),
         }
     }
 }

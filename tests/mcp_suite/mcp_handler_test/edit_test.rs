@@ -411,7 +411,9 @@ async fn outline_markdown_section_carries_preview_handle_and_checklist_state() {
     assert_eq!(section["title"], "Remaining work");
     assert_eq!(section["preview_truncated"], true);
     assert!(
-        section["read_lines"].as_str().is_some_and(|lines| lines.contains('-')),
+        section["read_lines"]
+            .as_str()
+            .is_some_and(|lines| lines.contains('-')),
         "the section must publish a read span even when a handle exists: {section}"
     );
 

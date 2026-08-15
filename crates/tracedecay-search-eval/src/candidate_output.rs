@@ -44,8 +44,8 @@ use tracedecay_code_index::production::{
     CodeIndexRepositoryParseIdentityV1,
 };
 use tracedecay_code_index::projection::{
-    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
-    ProjectionReceiptBuilderV1, ProjectionSinkReceiptV1,
+    ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
+    ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
 };
 use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
@@ -54,13 +54,13 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, ExactClass, FileOccurrenceId, FusionProfile, FusionProfileId,
     HydrationReceipt, HydrationRevision, LanguageId, ManifestDigest, PolicyRevisionId, PrincipalId,
     PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionOperationV1, ProjectionOutcomeV1,
-    PublicRetrieverStatus, QueryFallbackSubpayload, QueryNormalizationRevision, RelationEdgeKindV1,
-    RepositoryDirtyStateV1, RepositoryId, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
-    RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot, RetrieverKind,
-    RetrieverOutcome, SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1,
-    SnapshotFileDispositionV1, TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
+    ProjectionOperationV1, ProjectionOutcomeV1, PublicRetrieverStatus, QueryFallbackSubpayload,
+    QueryNormalizationRevision, RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId,
+    RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalFailure, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, RetrieverKind, RetrieverOutcome, SanitizationReceiptId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainCalibrationV1,
+    ScoreDomainId, SingleRootScopeV1, SnapshotFileDispositionV1, TemporalModeV1, UtcMicros,
+    VectorGenerationIdV1, VectorWatermark,
 };
 use tracedecay_query::retrieval::exact::{
     CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneRequest,

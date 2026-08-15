@@ -734,8 +734,7 @@ fn partial_terminal(admission: &DurableAutomationAdmission) -> AutomationSettled
         &FactIdentityMaterialV1::new(
             owner.clone(),
             FactIdentitySourceV1::Application {
-                operation_id: ProvenanceId::new("operation.memory-journal")
-                    .expect("operation id"),
+                operation_id: ProvenanceId::new("operation.memory-journal").expect("operation id"),
             },
         )
         .expect("identity material"),

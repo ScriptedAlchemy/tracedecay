@@ -12,12 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
-    WorkGraphSelectionCoverageV1,
     AuthorizedWorkProductScopeV1, CancellationContext, CapabilityGrantSnapshot, Deadline,
     DisclosureClass, GenerateProposalRequest, RequestContext, RequestId, ResolvedScope,
     VerifiedWorkGraphVersionV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1,
-    WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphVersionEntryV1, WorkIntelligenceServiceV1,
-    WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
+    WorkGraphReadRequestV1, WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkGraphVersionEntryV1,
+    WorkIntelligenceServiceV1, WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
     WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductSelectionScopeV1,
     WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1,
 };

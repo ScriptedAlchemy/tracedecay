@@ -19,8 +19,7 @@ pub const MAX_SEALED_CODE_GENERATION_BYTES_V1: u64 = 1024 * 1024 * 1024;
 pub const fn sealed_generation_format_revision_is_compatible(revision: u32) -> bool {
     matches!(
         revision,
-        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION
-            | SEALED_GENERATION_FORMAT_REVISION_V1
+        LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION | SEALED_GENERATION_FORMAT_REVISION_V1
     )
 }
 
@@ -31,8 +30,9 @@ pub fn sealed_generation_payload_digest<T: Serialize>(
     match format_revision {
         LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => canonical_sha256(generation)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string())),
-        SEALED_GENERATION_FORMAT_REVISION_V1 => json_generation_bytes_and_digest(generation)
-            .map(|(_, digest)| digest),
+        SEALED_GENERATION_FORMAT_REVISION_V1 => {
+            json_generation_bytes_and_digest(generation).map(|(_, digest)| digest)
+        }
         _ => Err(CodeIndexProductionErrorV1::Contract(
             "sealed generation format revision is incompatible".to_owned(),
         )),
@@ -144,9 +144,7 @@ fn decode_admitted_json<T: DeserializeOwned, R: std::io::Read>(
 ) -> Result<T, CodeIndexProductionErrorV1> {
     let bytes = read_admitted_bytes(reader, admitted_len)?;
     serde_json::from_slice(&bytes).map_err(|error| {
-        CodeIndexProductionErrorV1::Contract(format!(
-            "sealed generation decoding failed: {error}"
-        ))
+        CodeIndexProductionErrorV1::Contract(format!("sealed generation decoding failed: {error}"))
     })
 }
 
@@ -262,25 +260,24 @@ impl CodeIndexPublishedGenerationV1 {
         admitted_len: u64,
     ) -> Result<Self, CodeIndexProductionErrorV1> {
         let bytes = read_admitted_bytes(reader, admitted_len)?;
-        let probe: SealedPublishedGenerationFormatProbeV1 =
-            serde_json::from_slice(&bytes).map_err(|error| {
+        let probe: SealedPublishedGenerationFormatProbeV1 = serde_json::from_slice(&bytes)
+            .map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation format probe failed: {error}"
                 ))
             })?;
         let envelope = match probe.generation.format_revision {
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
-                serde_json::from_slice::<SealedPublishedGenerationEnvelopeV1>(&bytes).map_err(
-                    |error| {
-                        CodeIndexProductionErrorV1::Contract(format!(
-                            "sealed generation decoding failed: {error}"
-                        ))
-                    },
-                )?
-            }
+            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => serde_json::from_slice::<
+                SealedPublishedGenerationEnvelopeV1,
+            >(&bytes)
+            .map_err(|error| {
+                CodeIndexProductionErrorV1::Contract(format!(
+                    "sealed generation decoding failed: {error}"
+                ))
+            })?,
             SEALED_GENERATION_FORMAT_REVISION_V1 => {
-                let raw: SealedPublishedGenerationRawEnvelopeV1 =
-                    serde_json::from_slice(&bytes).map_err(|error| {
+                let raw: SealedPublishedGenerationRawEnvelopeV1 = serde_json::from_slice(&bytes)
+                    .map_err(|error| {
                         CodeIndexProductionErrorV1::Contract(format!(
                             "sealed generation decoding failed: {error}"
                         ))
@@ -314,12 +311,10 @@ impl CodeIndexPublishedGenerationV1 {
             }
         };
         let expected_digest = match envelope.generation.format_revision.0 {
-            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => {
-                sealed_generation_payload_digest(
-                    LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION,
-                    &envelope.generation,
-                )?
-            }
+            LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION => sealed_generation_payload_digest(
+                LEGACY_CANONICAL_SEALED_GENERATION_FORMAT_REVISION,
+                &envelope.generation,
+            )?,
             SEALED_GENERATION_FORMAT_REVISION_V1 => envelope.state_digest.clone(),
             _ => {
                 return Err(CodeIndexProductionErrorV1::Contract(

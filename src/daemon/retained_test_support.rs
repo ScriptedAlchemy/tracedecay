@@ -17,8 +17,7 @@ use tracedecay_lsp::LspSessionRegistry;
 
 use super::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use super::project_open_owners::{
-    daemon_owned_project_source_access_at, project_open_retained_grant,
-    resolved_scope_for_project,
+    daemon_owned_project_source_access_at, project_open_retained_grant, resolved_scope_for_project,
 };
 use super::service::invocation::{DaemonInvocationService, DaemonRetainedRuntimeRegistrar};
 use crate::daemon_client::invocation_now_micros;
@@ -115,12 +114,11 @@ pub(crate) async fn mcp_server_with_project_retained_owner_for_test(
         tracedecay_domain::ProjectId::new(project_id).map_err(|error| TraceDecayError::Config {
             message: format!("retained test owner project id is invalid: {error}"),
         })?;
-    let scope =
-        resolved_scope_for_project(&project_root, &project_id).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("retained test owner scope is invalid: {error}"),
-            }
-        })?;
+    let scope = resolved_scope_for_project(&project_root, &project_id).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("retained test owner scope is invalid: {error}"),
+        }
+    })?;
     let resident_memory = Arc::new(
         tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1::new(
             tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
@@ -149,8 +147,8 @@ pub(crate) async fn mcp_server_with_project_retained_owner_for_test(
     let access =
         daemon_owned_project_source_access_at(&scope, &project_root, &configuration, observed_at)
             .map_err(|error| TraceDecayError::Config {
-                message: format!("retained test owner access is invalid: {error}"),
-            })?;
+            message: format!("retained test owner access is invalid: {error}"),
+        })?;
     let grant = project_open_retained_grant(&access, observed_at).map_err(|error| {
         TraceDecayError::Config {
             message: format!("retained test owner grant is invalid: {error}"),

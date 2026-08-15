@@ -83,8 +83,7 @@ impl WorkGraphReadPortV1 for WorkSqliteStorage {
         // ones inside. The read is answered over the covered prefix and carries
         // the coverage that says what was left out, so a caller can never
         // mistake a slice for the whole.
-        let covered =
-            load_covered_journal(&self.handle, scope).ok_or(PortError::Unavailable)?;
+        let covered = load_covered_journal(&self.handle, scope).ok_or(PortError::Unavailable)?;
         let selection_coverage = covered.coverage;
 
         let entries = build_entries(&covered.journal, &covered.published, request.observed_at)?;

@@ -22,10 +22,9 @@ use tracedecay_application::{
     AddWorkTaskRequestV1, CancellationContext, CapabilityGrantSnapshot, CreateWorkProductRequestV1,
     Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope, WorkGraphReadRequestV1,
     WorkGraphReadV1, WorkGraphSelectionCoverageV1, WorkProductApplicationErrorV1,
-    WorkProductBindingV1,
-    WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1, WorkProductMutationServiceV1,
-    WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
-    WorkRelationScopeV1,
+    WorkProductBindingV1, WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1,
+    WorkProductMutationServiceV1, WorkProductReadServiceV1, WorkProductRevisionPinsV1,
+    WorkProductSelectionScopeV1, WorkRelationScopeV1,
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,

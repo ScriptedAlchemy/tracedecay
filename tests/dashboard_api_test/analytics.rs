@@ -653,10 +653,7 @@ fn subagent_tree_route_answers_seeded_delegation_edges_as_a_tree() {
 
         let (status, response) = get_json(
             &agent,
-            &format!(
-                "{}/api/plugins/analytics/subagent-tree",
-                fixture.base_url
-            ),
+            &format!("{}/api/plugins/analytics/subagent-tree", fixture.base_url),
         );
         assert_eq!(status, 200);
         assert_eq!(response["schema_revision"], 1);

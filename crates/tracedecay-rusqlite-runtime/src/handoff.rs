@@ -201,14 +201,14 @@ impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {
             if !filter.matches(grant.context()) {
                 continue;
             }
-            let consumed_at = match optional_text(&row.values, 1).map_err(|_| codec_unavailable())?
-            {
-                Some(payload) => {
-                    let consumption: HandoffOpenConsumptionV1 = decode(payload)?;
-                    Some(*consumption.consumed_at())
-                }
-                None => None,
-            };
+            let consumed_at =
+                match optional_text(&row.values, 1).map_err(|_| codec_unavailable())? {
+                    Some(payload) => {
+                        let consumption: HandoffOpenConsumptionV1 = decode(payload)?;
+                        Some(*consumption.consumed_at())
+                    }
+                    None => None,
+                };
             listings.push(HandoffOpenListingV1 { grant, consumed_at });
             if listings.len() as u32 >= limit {
                 break;

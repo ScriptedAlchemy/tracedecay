@@ -1304,11 +1304,8 @@ fn dashboard_diagnostics_summary_aggregates_hook_completed_rows_safely() {
         window: tracedecay_dashboard_api::analytics_api::HookAnalyticsWindow::default(),
     };
 
-    let summary = crate::dashboard::analytics_api::diagnostics_summary_from_parts(
-        0,
-        &hook_analytics,
-        None,
-    );
+    let summary =
+        crate::dashboard::analytics_api::diagnostics_summary_from_parts(0, &hook_analytics, None);
     let readiness = &summary["hook_readiness"];
 
     assert_eq!(readiness["collection_status"], "measured");
@@ -1326,7 +1323,10 @@ fn dashboard_diagnostics_summary_aggregates_hook_completed_rows_safely() {
         "no_samples"
     );
     // An unrecognised disposition class is `unknown`, never echoed verbatim.
-    assert_eq!(readiness["disposition_counts_by_host"][0]["class"], "unknown");
+    assert_eq!(
+        readiness["disposition_counts_by_host"][0]["class"],
+        "unknown"
+    );
 
     let encoded = serde_json::to_string(readiness).expect("readiness encodes");
     for forbidden in [

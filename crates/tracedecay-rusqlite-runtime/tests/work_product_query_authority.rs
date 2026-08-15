@@ -31,12 +31,11 @@ use tracedecay_application::{
     CreateWorkProductRequestV1, Deadline, DisclosureClass, OpaqueCursor, RequestContext, RequestId,
     ResolvedScope, SelectedWorkEvidenceV1, VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1,
     WorkEvidenceSelectRequestV1, WorkGraphReadRequestV1, WorkGraphReadV1,
-    WorkGraphSelectionCoverageV1, WorkHistoryCoverageV1,
-    WorkHistoryRequestV1, WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1,
-    WorkProductBindingV1, WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1,
-    WorkProductMutationIdentityV1, WorkProductMutationReceiptV1, WorkProductMutationServiceV1,
-    WorkProductReadServiceV1, WorkProductRevisionPinsV1, WorkProductSelectionScopeV1,
-    WorkRelationScopeV1,
+    WorkGraphSelectionCoverageV1, WorkHistoryCoverageV1, WorkHistoryRequestV1,
+    WorkHistoryServiceV1, WorkHistoryV1, WorkProductApplicationErrorV1, WorkProductBindingV1,
+    WorkProductEvidenceServiceV1, WorkProductExpectedAuthorityV1, WorkProductMutationIdentityV1,
+    WorkProductMutationReceiptV1, WorkProductMutationServiceV1, WorkProductReadServiceV1,
+    WorkProductRevisionPinsV1, WorkProductSelectionScopeV1, WorkRelationScopeV1,
 };
 use tracedecay_domain::{
     AcceptanceCriterionId, ActorId, CatalogGenerationId, ConfigurationRevisionId, InitiativeId,

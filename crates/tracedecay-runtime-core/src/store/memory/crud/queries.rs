@@ -1,11 +1,11 @@
 //! Current/as-of/lineage read paths and the commit-batch entry point.
 
+use super::super::DatabaseFactStore;
 use super::super::primitives::{
     COMMIT_OPERATION, OwnerKey, QUERY_OPERATION, ensure_project_memory_read_active, from_json,
     parse_payload_access, row_i64, row_optional_f64, row_optional_string, row_string,
     storage_error, storage_message,
 };
-use super::super::DatabaseFactStore;
 use super::{Projection, anchor_matches, commit_fact_tx};
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;

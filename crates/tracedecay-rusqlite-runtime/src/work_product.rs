@@ -131,10 +131,7 @@ pub(crate) fn selection_covers(
 pub(crate) fn covered_prefix(
     selection: &WorkProductSelectionScopeV1,
     mut journal: Vec<WorkProductJournalEntryV1>,
-) -> Option<(
-    Vec<WorkProductJournalEntryV1>,
-    WorkGraphSelectionCoverageV1,
-)> {
+) -> Option<(Vec<WorkProductJournalEntryV1>, WorkGraphSelectionCoverageV1)> {
     let total = journal.len();
     let covered = journal
         .iter()

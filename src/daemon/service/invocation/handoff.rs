@@ -496,7 +496,12 @@ fn handoff_evidence(
             }],
         }
     } else {
-        EvidenceCoverage::complete(vec![EvidenceDomain::Operational], returned, returned, returned)?
+        EvidenceCoverage::complete(
+            vec![EvidenceDomain::Operational],
+            returned,
+            returned,
+            returned,
+        )?
     };
     coverage.validate()?;
     Ok(ApplicationOutcome::Evidence(EvidencePacket {

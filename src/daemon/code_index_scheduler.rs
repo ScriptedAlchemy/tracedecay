@@ -49,8 +49,8 @@ use crate::{
             SharedPhysicalCodeArtifactPoolV1,
         },
         projection::{
-            ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
-            ProjectionReceiptBuilderV1, ProjectionSinkReceiptV1,
+            ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
+            ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
         },
     },
     privacy::CODE_SOURCE_SANITIZER_VERSION_V1,

@@ -620,12 +620,7 @@ fn build_subagent_tree(rows: Vec<SubagentSessionRow>) -> Vec<AnalyticsSubagentNo
     let index: BTreeMap<(&str, &str), usize> = rows
         .iter()
         .enumerate()
-        .map(|(position, row)| {
-            (
-                (row.provider.as_str(), row.session_id.as_str()),
-                position,
-            )
-        })
+        .map(|(position, row)| ((row.provider.as_str(), row.session_id.as_str()), position))
         .collect();
 
     let mut children: BTreeMap<usize, Vec<usize>> = BTreeMap::new();

@@ -18,8 +18,8 @@ use tracedecay_code_index::{
         sealed_generation_payload_digest,
     },
     projection::{
-        ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
-        ProjectionReceiptBuilderV1, ProjectionSinkReceiptV1,
+        ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionReceiptBuilderV1,
+        ProjectionSinkErrorV1, ProjectionSinkReceiptV1,
     },
     provider::GenerationTestAttributionJoinReadPort,
 };
@@ -570,11 +570,11 @@ fn sealed_generation_validation_is_memoized_but_decode_stays_fail_closed() {
         serde_json::from_slice(&sealed).expect("sealed generation JSON");
     envelope["generation"]["files"][0]["authority"]["project_id"] =
         serde_json::Value::String("project.foreign".to_owned());
-        let state_digest = sealed_generation_payload_digest(
-            SEALED_GENERATION_FORMAT_REVISION_V1,
-            &envelope["generation"],
-        )
-        .expect("forged payload has a state digest");
+    let state_digest = sealed_generation_payload_digest(
+        SEALED_GENERATION_FORMAT_REVISION_V1,
+        &envelope["generation"],
+    )
+    .expect("forged payload has a state digest");
     envelope["state_digest"] = serde_json::Value::String(state_digest.as_str().to_owned());
     let forged = serde_json::to_vec(&envelope).expect("forged sealed generation JSON");
 

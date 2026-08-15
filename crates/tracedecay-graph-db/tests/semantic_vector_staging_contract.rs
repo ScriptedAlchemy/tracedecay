@@ -269,7 +269,11 @@ fn recovered_generation_digest_cost_scaling_probe() {
                     &format!("digest.apply.{ordinal}"),
                 )
                 .expect("digest probe apply");
-            fixture.settle_batch(&mut authority, &receipt, &format!("digest.settle.{ordinal}"));
+            fixture.settle_batch(
+                &mut authority,
+                &receipt,
+                &format!("digest.settle.{ordinal}"),
+            );
             expected = next;
         }
         let corpus_ms = corpus_started.elapsed().as_millis();
@@ -280,7 +284,12 @@ fn recovered_generation_digest_cost_scaling_probe() {
         let ready_ms = ready_started.elapsed().as_millis();
         let publish_started = std::time::Instant::now();
         let committed = fixture.publish(&mut authority, &plan, "digest.publish");
-        settle_publication(&mut authority, &plan, &committed, "digest.publication-settle");
+        settle_publication(
+            &mut authority,
+            &plan,
+            &committed,
+            "digest.publication-settle",
+        );
         let publish_ms = publish_started.elapsed().as_millis();
         let case_ms = ready_ms.saturating_add(publish_ms);
         let per_chunk_us = (case_ms as f64) * 1000.0 / (chunk_count as f64);
