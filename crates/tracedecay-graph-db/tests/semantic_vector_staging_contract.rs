@@ -222,6 +222,137 @@ fn paged_synthetic_corpus_publishes_after_eval_sized_admission() {
     );
 }
 
+/// TEMPORARY scaling probe (rc-semantic-timing lane): isolates the cost of
+/// hashing the recovered generation. `prepare_publication_from_staged_native`
+/// builds an EMPTY manifest and an EMPTY write batch, so the only work inside
+/// it that scales with corpus size is
+/// `recovered_generation_digest_from_database`, which walks every entity and
+/// relation of the projection, serde_json-encodes each, and SHA256s the frames.
+/// `prepare_publication_ms` below is therefore the recovered-generation hashing
+/// cost plus O(1). Runs to real production width (43 pages / ~21.7k chunks at
+/// 768-d) so the `EVALUATION_GRAPH_OPERATION_DEADLINE` ceiling can be sized
+/// from a measurement instead of an extrapolation.
+#[test]
+#[ignore = "diagnostic probe, run explicitly"]
+fn recovered_generation_digest_cost_scaling_probe() {
+    let page = u64::try_from(MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH).unwrap();
+    for pages in [4_u64, 8, 16, 43] {
+        let chunk_count = page.checked_mul(pages).unwrap();
+        let fixture = ContractFixture::new_with_embedding_dimensions(768);
+        let mut authority = fixture.authority();
+        let plan = fixture.plan_with_chunk_count("digest", "digest", chunk_count);
+        let mut expected = plan.initial_checkpoint_digest.clone();
+        let corpus_started = std::time::Instant::now();
+        for ordinal in 0..pages {
+            let start = ordinal.checked_mul(page).unwrap();
+            let next = unique_page_checkpoint(ordinal);
+            let (batch, receipt) = fixture.page_batch_and_receipt(
+                &plan,
+                "digest",
+                ordinal,
+                start,
+                page,
+                expected.clone(),
+                next.clone(),
+                ordinal as f32,
+            );
+            if ordinal == 0 {
+                fixture.begin_and_append(&mut authority, &plan, &receipt, "digest");
+            } else {
+                fixture.append(&mut authority, &plan, &receipt, "digest");
+            }
+            fixture
+                .apply(
+                    &mut authority,
+                    &receipt,
+                    batch,
+                    &format!("digest.apply.{ordinal}"),
+                )
+                .expect("digest probe apply");
+            fixture.settle_batch(&mut authority, &receipt, &format!("digest.settle.{ordinal}"));
+            expected = next;
+        }
+        let corpus_ms = corpus_started.elapsed().as_millis();
+        let ready_started = std::time::Instant::now();
+        fixture
+            .try_ready(&mut authority, &plan, "digest.ready")
+            .expect("digest probe ready");
+        let ready_ms = ready_started.elapsed().as_millis();
+        let publish_started = std::time::Instant::now();
+        let committed = fixture.publish(&mut authority, &plan, "digest.publish");
+        settle_publication(&mut authority, &plan, &committed, "digest.publication-settle");
+        let publish_ms = publish_started.elapsed().as_millis();
+        let case_ms = ready_ms.saturating_add(publish_ms);
+        let per_chunk_us = (case_ms as f64) * 1000.0 / (chunk_count as f64);
+        eprintln!(
+            "[digest-probe] dims=768 pages={pages} chunks={chunk_count} \
+             corpus_build_ms={corpus_ms} \
+             prepare_publication_ms={ready_ms} publish_settle_ms={publish_ms} \
+             case_total_ms={case_ms} per_chunk_us={per_chunk_us:.1} \
+             pass_total_ms={pass_total}",
+            pass_total = corpus_ms.saturating_add(case_ms)
+        );
+    }
+}
+
+/// TEMPORARY scaling probe (rc-semantic-timing lane): if per-page settle cost
+/// is flat, total time is linear in pages; if each page rehashes the recovered
+/// generation, total time grows with pages^2. Prints per-scale timings.
+#[test]
+#[ignore = "diagnostic probe, run explicitly"]
+fn paged_corpus_settle_cost_scaling_probe() {
+    let page = u64::try_from(MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH).unwrap();
+    for (dims, pages) in [(3_u32, 4_u64), (3, 8), (768, 4), (768, 8)] {
+        let chunk_count = page.checked_mul(pages).unwrap();
+        let fixture = ContractFixture::new_with_embedding_dimensions(dims);
+        let mut authority = fixture.authority();
+        let plan = fixture.plan_with_chunk_count("probe", "probe", chunk_count);
+        let mut expected = plan.initial_checkpoint_digest.clone();
+        let started = std::time::Instant::now();
+        let mut last_page_ms = 0_u128;
+        for ordinal in 0..pages {
+            let page_started = std::time::Instant::now();
+            let start = ordinal.checked_mul(page).unwrap();
+            let next = unique_page_checkpoint(ordinal);
+            let (batch, receipt) = fixture.page_batch_and_receipt(
+                &plan,
+                "probe",
+                ordinal,
+                start,
+                page,
+                expected.clone(),
+                next.clone(),
+                ordinal as f32,
+            );
+            if ordinal == 0 {
+                fixture.begin_and_append(&mut authority, &plan, &receipt, "probe");
+            } else {
+                fixture.append(&mut authority, &plan, &receipt, "probe");
+            }
+            fixture
+                .apply(
+                    &mut authority,
+                    &receipt,
+                    batch,
+                    &format!("probe.apply.{ordinal}"),
+                )
+                .expect("probe apply");
+            fixture.settle_batch(&mut authority, &receipt, &format!("probe.settle.{ordinal}"));
+            expected = next;
+            last_page_ms = page_started.elapsed().as_millis();
+        }
+        let commit_ms = started.elapsed().as_millis();
+        let ready_started = std::time::Instant::now();
+        fixture
+            .try_ready(&mut authority, &plan, "probe.ready")
+            .expect("probe ready");
+        let ready_ms = ready_started.elapsed().as_millis();
+        eprintln!(
+            "[probe] dims={dims} pages={pages} chunks={chunk_count} commit_all_ms={commit_ms} last_page_ms={last_page_ms} prepare_publication_ms={ready_ms}"
+        );
+    }
+}
+
 #[test]
 fn production_width_page_applies_and_publishes_through_named_budgets() {
     let page = u64::try_from(MAX_SEMANTIC_VECTOR_STAGE_CHUNKS_PER_BATCH).unwrap();
