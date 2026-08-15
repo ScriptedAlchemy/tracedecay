@@ -1,6 +1,144 @@
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracedecay_domain::RetrievalAnchorId;
 use tracedecay_sessions::lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
+
+#[tokio::test]
+async fn fifty_non_summary_results_share_one_frozen_reconstruction_batch() {
+    const RESULTS: usize = 50;
+    let snapshot_opens = Arc::new(AtomicUsize::new(0));
+    let batch = NonSummaryReconstructionBatch::recording(
+        Arc::clone(&snapshot_opens),
+        [
+            (
+                7,
+                "store.alpha",
+                "provider.alpha",
+                "session.alpha",
+                "anchor.07",
+                "available",
+            ),
+            (
+                11,
+                "store.beta",
+                "provider.beta",
+                "session.beta",
+                "anchor.11",
+                "denied",
+            ),
+            (
+                23,
+                "store.alpha",
+                "provider.alpha",
+                "session.alpha",
+                "anchor.23",
+                "redacted",
+            ),
+            (
+                31,
+                "store.beta",
+                "provider.beta",
+                "session.beta",
+                "anchor.31",
+                "unavailable",
+            ),
+        ],
+    );
+    let inputs = (0..RESULTS)
+        .map(|rank| {
+            let store = if rank % 2 == 0 {
+                "store.alpha"
+            } else {
+                "store.beta"
+            };
+            let provider = if rank % 2 == 0 {
+                "provider.alpha"
+            } else {
+                "provider.beta"
+            };
+            let session = if rank % 2 == 0 {
+                "session.alpha"
+            } else {
+                "session.beta"
+            };
+            NonSummaryReconstructionBatch::input(
+                rank,
+                store,
+                provider,
+                session,
+                format!("anchor.{rank:02}"),
+                format!("message {rank}").into_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let rendered = batch
+        .render(inputs, NonSummaryReconstructionBatch::not_cancelled())
+        .await;
+
+    assert_eq!(
+        snapshot_opens.load(Ordering::SeqCst),
+        1,
+        "one page of non-summary results must open exactly one frozen reconstruction snapshot"
+    );
+    assert_eq!(
+        rendered.rendered_ranks(),
+        (0..RESULTS)
+            .filter(|rank| !matches!(rank, 11 | 23 | 31))
+            .collect::<Vec<_>>(),
+        "available messages must retain ranked order without promoting a lower result"
+    );
+    assert_eq!(
+        rendered.owner_store_for_rank(7),
+        Some("store.beta"),
+        "each reconstructed message must retain its own owning-store identity"
+    );
+    assert_eq!(
+        rendered.owner_store_for_rank(8),
+        Some("store.alpha"),
+        "adjacent messages may resolve through distinct owning stores"
+    );
+    assert_eq!(
+        rendered.omission_for_rank(11),
+        Some(HydrationStateV1::Unauthorized),
+        "denial must remain a typed omission at its original rank"
+    );
+    assert_eq!(
+        rendered.omission_for_rank(23),
+        Some(HydrationStateV1::Redacted),
+        "redaction must remain typed instead of becoming a message"
+    );
+    assert_eq!(
+        rendered.omission_for_rank(31),
+        Some(HydrationStateV1::RetainedButUnavailable),
+        "an unavailable reconstruction must remain a typed omission"
+    );
+
+    let cancelled = batch
+        .render(
+            (0..RESULTS)
+                .map(|rank| {
+                    NonSummaryReconstructionBatch::input(
+                        rank,
+                        "store.alpha",
+                        "provider.alpha",
+                        "session.alpha",
+                        format!("cancelled.anchor.{rank:02}"),
+                        format!("cancelled message {rank}").into_bytes(),
+                    )
+                })
+                .collect(),
+            NonSummaryReconstructionBatch::cancelled(),
+        )
+        .await;
+    assert!(cancelled.is_cancelled());
+    assert_eq!(
+        snapshot_opens.load(Ordering::SeqCst),
+        1,
+        "cancellation before batch admission must not open another reconstruction snapshot"
+    );
+}
 
 #[test]
 fn stored_retrieval_does_not_require_refresh_worker() {
