@@ -2450,13 +2450,13 @@ mod authority_tests {
         let application = ActiveProjectApplicationRoutes {
             http_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::NO_CONTENT }))
-                .route("/work/snapshot", post(|| async { StatusCode::NO_CONTENT })),
+                .route("/work/views", post(|| async { StatusCode::NO_CONTENT })),
             dashboard_configuration_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::ACCEPTED })),
             dashboard_feedback_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::OK })),
             dashboard_work_router: Router::new()
-                .route("/snapshot", post(|| async { StatusCode::NO_CONTENT })),
+                .route("/views", post(|| async { StatusCode::NO_CONTENT })),
             executor: None,
         };
         let app = router_with_active_application(state, Some(application), Router::new());
@@ -2852,10 +2852,25 @@ mod authority_tests {
             );
             assert_eq!(selected_project_application_read(&Method::GET, tail), None);
         }
-        for tail in ["work/snapshot", "work/delta"] {
+        // `views` is the canonical Work projection read a selected project may
+        // ask for; naming it keeps the intent legible even as the inventory
+        // moves underneath the derived loop below.
+        assert_eq!(
+            selected_project_application_read(&Method::POST, "work/views"),
+            Some(SelectedProjectApplicationRead::Work)
+        );
+        for operation in WorkOperation::ALL {
+            if !operation.is_read_only() {
+                continue;
+            }
+            let tail = operation
+                .route_path()
+                .strip_prefix("/")
+                .expect("a rooted route path");
             assert_eq!(
                 selected_project_application_read(&Method::POST, tail),
-                Some(SelectedProjectApplicationRead::Work)
+                Some(SelectedProjectApplicationRead::Work),
+                "{tail} is a read-only Work operation a selected project may read"
             );
             assert_eq!(selected_project_application_read(&Method::GET, tail), None);
         }
