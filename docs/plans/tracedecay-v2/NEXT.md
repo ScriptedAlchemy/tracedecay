@@ -510,6 +510,13 @@ the commit as attribution evidence.
 
 ### Additional wound-down lane handoffs
 
+- DONE 2026-08-15: the TypeScript SDK is regenerated for the Work-read
+  `selection_coverage` addition through the canonical generator; the
+  codegen drift check is green again (it was red because the Rust side
+  landed without the regen) and the full TypeScript client suite passed
+  34/34. The Grafeo restart/isolation journey re-passed twice more and
+  the Hermes stock TAP re-passed 1-25 against the current tip's fresh
+  binary, corroborating the 08-14 closures below on the merged lineage.
 - DONE 2026-08-14: Grafeo memory relations remain mounted in `f0708a7fda`
   with profile/project identity, CAS projection, hydration, and dashboard
   consumption. The full daemon restart/isolation journey
