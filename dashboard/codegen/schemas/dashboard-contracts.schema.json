@@ -21758,6 +21758,9 @@
               "const": "current",
               "type": "string"
             },
+            "selection_coverage": {
+              "$ref": "#/$defs/WorkGraphSelectionCoverageV1"
+            },
             "snapshot": {
               "$ref": "#/$defs/WorkGraphVersionEntryV1"
             }
@@ -21765,6 +21768,7 @@
           "required": [
             "mode",
             "authorized_scope",
+            "selection_coverage",
             "snapshot"
           ],
           "type": "object"
@@ -21778,6 +21782,9 @@
               "const": "as_of",
               "type": "string"
             },
+            "selection_coverage": {
+              "$ref": "#/$defs/WorkGraphSelectionCoverageV1"
+            },
             "snapshot": {
               "$ref": "#/$defs/WorkGraphVersionEntryV1"
             }
@@ -21785,6 +21792,7 @@
           "required": [
             "mode",
             "authorized_scope",
+            "selection_coverage",
             "snapshot"
           ],
           "type": "object"
@@ -21798,6 +21806,9 @@
               "const": "evolution",
               "type": "string"
             },
+            "selection_coverage": {
+              "$ref": "#/$defs/WorkGraphSelectionCoverageV1"
+            },
             "timeline": {
               "$ref": "#/$defs/WorkGraphTimelineV1"
             }
@@ -21805,6 +21816,7 @@
           "required": [
             "mode",
             "authorized_scope",
+            "selection_coverage",
             "timeline"
           ],
           "type": "object"
@@ -21818,6 +21830,9 @@
               "const": "forensic",
               "type": "string"
             },
+            "selection_coverage": {
+              "$ref": "#/$defs/WorkGraphSelectionCoverageV1"
+            },
             "timeline": {
               "$ref": "#/$defs/WorkGraphTimelineV1"
             }
@@ -21825,7 +21840,63 @@
           "required": [
             "mode",
             "authorized_scope",
+            "selection_coverage",
             "timeline"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkGraphSelectionCoverageV1": {
+      "description": "How much of the owner's journal the read's selection actually covers.\n\nA selection names a slice of the owner's work, not the whole journal: an\nevent records the relation scopes it was admitted under, and a selection\nthat does not name them puts that event *outside* the slice. The events\noutside a selection do not poison the ones inside it, but they must never be\nconcealed either — a caller who is shown the covered slice with no way to\nlearn that more exists is reading a silently incomplete graph.\n\nSo the read answers over the covered slice and says so, in the same\n`Complete`/`Partial` vocabulary [`WorkGraphTimelineCoverageV1`] and\n[`WorkHistoryCoverageV1`](crate::WorkHistoryCoverageV1) already use.\n\nThe covered slice is always a *prefix* of the journal, and that is a\nproperty of folding rather than a simplification. A graph version is folded\nfrom every event up to its own sequence, so the first event a selection does\nnot cover ends the readable slice: every later version, whatever scopes its\nown event named, would have to be folded across that event to exist at all.\n`excluded_events` therefore counts every event from the first uncovered one\nonward.",
+      "oneOf": [
+        {
+          "description": "The selection covers the owner's whole journal. Nothing was withheld.",
+          "properties": {
+            "coverage": {
+              "const": "complete",
+              "type": "string"
+            },
+            "covered_events": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "coverage",
+            "covered_events"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The selection covers `covered_events` events and `excluded_events`\nevents lie outside it, starting at `first_excluded_sequence`. Every\nentry this read returned was folded from covered events alone.",
+          "properties": {
+            "coverage": {
+              "const": "partial",
+              "type": "string"
+            },
+            "covered_events": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "excluded_events": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "first_excluded_sequence": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "coverage",
+            "covered_events",
+            "excluded_events",
+            "first_excluded_sequence"
           ],
           "type": "object"
         }
