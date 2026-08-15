@@ -288,22 +288,20 @@ pub(super) fn assert_provider_qualified_task_session_evidence(
     // facts; a restart that reconstructed any of them differently would be a
     // silent authority change.
     //
-    // The durability pass is graded on the daemon mount alone, and that is a
-    // recorded limitation rather than a preference. Because the dashboard is
-    // hosted inside the daemon, a restart takes the server down with it, and
-    // relaunching against the new daemon reports a *fresh* bound URL — a
-    // different port from the pre-restart one — that never accepts a
-    // connection within a 60s poll. Grading the dashboard mount through the
-    // pre-restart URL would be grading a dead server, and grading it through
-    // the new one would be asserting a bind that does not happen; until the
-    // daemon-hosted dashboard comes back after a restart there is no honest
-    // third option.
+    // The dashboard is hosted inside the daemon, so the restart takes its
+    // server down with it and the pre-restart URL is dead. Relaunching the
+    // launcher against the *new* daemon is therefore part of what durability
+    // means here: the browser-facing mount has to come back, on its own fresh
+    // port, and answer the same graded reads. Grading only the daemon mount
+    // would let a dashboard that never resumes pass unnoticed.
     drop(dashboard);
     fixture.restart();
+    let dashboard = DashboardProcess::start(fixture);
+    dashboard.wait_until_serving(agent, "the post-restart graded pass");
     assert_both_mounts(
         agent,
         fixture,
-        None,
+        Some(&dashboard),
         &selection,
         &verified_version,
         &identity,
