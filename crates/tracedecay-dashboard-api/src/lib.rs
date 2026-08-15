@@ -1988,6 +1988,37 @@ mod authority_tests {
 
     mod automatic_fact_receipts_routes;
 
+    /// The loopback authority every admitted-router fixture binds. Requests
+    /// must carry it as their `Host` header for the admission layer to admit
+    /// them.
+    const TEST_DASHBOARD_AUTHORITY: &str = "127.0.0.1:43127";
+
+    /// A GET that the dashboard HTTP admission layer admits.
+    fn admitted_request(uri: impl AsRef<str>) -> Request<Body> {
+        Request::builder()
+            .uri(uri.as_ref())
+            .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
+            .body(Body::empty())
+            .expect("admitted dashboard request")
+    }
+
+    /// The router as production serves it.
+    ///
+    /// [`run_until_shutdown_inner`] wraps every served route in
+    /// [`with_dashboard_http_admission`], which is what supplies the
+    /// [`DashboardHttpRequestControlV1`] extension every canonical read
+    /// requires. A bare [`router_with_active_application`] is not a stack that
+    /// exists in production: its handlers can only fail closed on the missing
+    /// control, so route behaviour must be asserted through this one.
+    fn admitted_router(state: DashboardState) -> Router {
+        with_dashboard_http_admission(
+            router_with_active_application(state, None, Router::new()),
+            TEST_DASHBOARD_AUTHORITY
+                .parse()
+                .expect("loopback dashboard authority"),
+        )
+    }
+
     struct UnavailableCodeGraphPort;
 
     impl crate::graph::CodeGraphReadAdmissionPort for UnavailableCodeGraphPort {
@@ -2332,13 +2363,14 @@ mod authority_tests {
     #[tokio::test]
     async fn dashboard_user_job_run_without_automation_authority_fails_closed() {
         let fixture = DashboardStateFixture::open("project.dashboard-job-observation").await;
-        let app = router_with_active_application(fixture.state, None, Router::new());
+        let app = admitted_router(fixture.state);
         let create = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/automation/jobs")
+                    .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
@@ -2359,6 +2391,7 @@ mod authority_tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri("/api/automation/jobs/observation-required/run")
+                    .header(header::HOST, TEST_DASHBOARD_AUTHORITY)
                     .body(Body::empty())
                     .expect("run automation job request"),
             )
@@ -2586,21 +2619,34 @@ mod authority_tests {
         }
     }
 
+    /// Graph reads are served only from an admitted, verified projection, so a
+    /// dashboard that never mounted one cannot answer `ready` — it must answer
+    /// an enveloped `unknown` naming the missing registry, and must never
+    /// fabricate totals from the raw store connection the state still holds.
+    ///
+    /// The `ready` side of this contract needs a real verified generation, so
+    /// it is proven end-to-end against a mounted graph authority by
+    /// `graph_api_returns_seeded_overview_search_detail_and_subgraph` in
+    /// `tests/dashboard_api_test/graph.rs`.
     #[tokio::test]
-    async fn graph_overview_returns_the_canonical_dashboard_envelope() {
+    async fn graph_overview_without_a_verified_projection_is_an_enveloped_unknown_read() {
         let fixture = DashboardStateFixture::open("project.dashboard-graph-envelope").await;
-        let app = router_with_active_application(fixture.state, None, Router::new());
+        assert!(
+            fixture.state.code_graph_read_admission.is_none()
+                && fixture.state.code_graph_projection_read_port.is_none(),
+            "this fixture must not mount a graph authority",
+        );
+        let app = admitted_router(fixture.state);
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/plugins/graph/overview")
-                    .body(Body::empty())
-                    .expect("graph overview request"),
-            )
+            .oneshot(admitted_request("/api/plugins/graph/overview"))
             .await
             .expect("graph overview response");
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the daemon answered; source unavailability belongs in the envelope"
+        );
         let body = axum::body::to_bytes(response.into_body(), 1 << 20)
             .await
             .expect("graph overview body");
@@ -2610,9 +2656,21 @@ mod authority_tests {
             value["schema_revision"],
             crate::read_model::DASHBOARD_SCHEMA_REVISION_V1
         );
-        assert_eq!(value["domain_state"], "ready");
+        assert_eq!(value["domain_state"], "unknown");
         assert_eq!(value["authorization"]["outcome"], "authorized");
-        assert!(value["payload"]["totals"].is_object());
+        assert_eq!(value["coverage"]["completeness"], "unknown");
+        assert_eq!(
+            value["coverage"]["omission_reasons"],
+            json!(["missing_registry"])
+        );
+        assert!(
+            value["payload"].is_null(),
+            "an unmounted graph authority must not fabricate a payload: {value}"
+        );
+        assert!(
+            value["version"]["graph_version"].is_null(),
+            "an unmounted graph authority has no verified generation: {value}"
+        );
     }
 
     #[tokio::test]
@@ -2648,15 +2706,10 @@ mod authority_tests {
     #[tokio::test]
     async fn memory_status_returns_the_canonical_dashboard_envelope() {
         let fixture = DashboardStateFixture::open("project.dashboard-memory-envelope").await;
-        let app = router_with_active_application(fixture.state, None, Router::new());
+        let app = admitted_router(fixture.state);
 
         let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/plugins/holographic/status")
-                    .body(Body::empty())
-                    .expect("memory status request"),
-            )
+            .oneshot(admitted_request("/api/plugins/holographic/status"))
             .await
             .expect("memory status response");
         assert_eq!(response.status(), StatusCode::OK);
