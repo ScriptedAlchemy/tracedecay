@@ -35,6 +35,9 @@ pub use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
     DatabaseMemoryTransaction, DatabaseWriteTransaction,
 };
+pub use connection::{
+    ProjectMemoryReconciliationTelemetryObserverV1, ProjectMemoryReconciliationTelemetrySnapshotV1,
+};
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
 pub use external_source::install_external_source_schema;

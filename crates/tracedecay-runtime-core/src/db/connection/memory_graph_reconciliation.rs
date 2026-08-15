@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -15,6 +16,88 @@ pub(crate) enum MemoryGraphReconciliationTaskScheduleV1 {
     Scheduled,
     AlreadyScheduled,
     Closed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProjectMemoryReconciliationTelemetrySnapshotV1 {
+    pub reconciliation_passes: u64,
+    pub source_rows_loaded: u64,
+    pub source_bytes_loaded: u64,
+    pub publication_attempts: u64,
+    pub retained_reconciliation_task_count: usize,
+    pub retained_graph_owner_count: usize,
+}
+
+#[derive(Default)]
+pub(crate) struct ProjectMemoryReconciliationTelemetryV1 {
+    reconciliation_passes: AtomicU64,
+    source_rows_loaded: AtomicU64,
+    source_bytes_loaded: AtomicU64,
+    publication_attempts: AtomicU64,
+}
+
+#[derive(Clone)]
+pub struct ProjectMemoryReconciliationTelemetryObserverV1 {
+    telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
+    database: Weak<super::registry::DatabaseInner>,
+}
+
+impl ProjectMemoryReconciliationTelemetryObserverV1 {
+    pub(crate) fn new(
+        telemetry: Arc<ProjectMemoryReconciliationTelemetryV1>,
+        database: Weak<super::registry::DatabaseInner>,
+    ) -> Self {
+        Self {
+            telemetry,
+            database,
+        }
+    }
+
+    pub fn snapshot(&self) -> ProjectMemoryReconciliationTelemetrySnapshotV1 {
+        let (retained_reconciliation_task_count, retained_graph_owner_count) =
+            self.database.upgrade().map_or((0, 0), |database| {
+                (
+                    database.memory_graph_reconciliation.retained_task_count(),
+                    usize::from(database.memory_graph_runtime.get().is_some()),
+                )
+            });
+        ProjectMemoryReconciliationTelemetrySnapshotV1 {
+            reconciliation_passes: self.telemetry.reconciliation_passes.load(Ordering::SeqCst),
+            source_rows_loaded: self.telemetry.source_rows_loaded.load(Ordering::SeqCst),
+            source_bytes_loaded: self.telemetry.source_bytes_loaded.load(Ordering::SeqCst),
+            publication_attempts: self.telemetry.publication_attempts.load(Ordering::SeqCst),
+            retained_reconciliation_task_count,
+            retained_graph_owner_count,
+        }
+    }
+}
+
+impl ProjectMemoryReconciliationTelemetryV1 {
+    pub(crate) fn record_reconciliation_pass(&self) -> Result<(), &'static str> {
+        increment_counter(&self.reconciliation_passes, 1, "reconciliation passes")
+    }
+
+    pub(crate) fn record_source_load(&self, rows: u64, bytes: u64) -> Result<(), &'static str> {
+        increment_counter(&self.source_rows_loaded, rows, "source rows loaded")?;
+        increment_counter(&self.source_bytes_loaded, bytes, "source bytes loaded")
+    }
+
+    pub(crate) fn record_publication_attempt(&self) -> Result<(), &'static str> {
+        increment_counter(&self.publication_attempts, 1, "publication attempts")
+    }
+}
+
+fn increment_counter(
+    counter: &AtomicU64,
+    increment: u64,
+    counter_name: &'static str,
+) -> Result<(), &'static str> {
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            current.checked_add(increment)
+        })
+        .map(|_| ())
+        .map_err(|_| counter_name)
 }
 
 #[derive(Default)]
@@ -157,6 +240,14 @@ impl MemoryGraphReconciliationCoordinatorV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pending
+    }
+
+    fn retained_task_count(&self) -> usize {
+        let state = match self.shared.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        usize::from(state.current.is_some()) + state.retired.len()
     }
 }
 
