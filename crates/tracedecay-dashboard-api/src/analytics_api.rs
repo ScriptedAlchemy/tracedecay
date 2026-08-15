@@ -2566,8 +2566,18 @@ mod tests {
         );
     }
 
+    /// This crate owns the diagnostics summary but not the readiness
+    /// aggregation: it reads that through the port the composition root
+    /// installs. With no projection mounted the summary must fail closed —
+    /// naming the blocker and counting rows only — and must never echo an
+    /// untrusted row's own values back out.
+    ///
+    /// The mounted counterpart, which is the only composition that can answer
+    /// `measured`, is proven by
+    /// `dashboard_diagnostics_summary_aggregates_hook_completed_rows_safely`
+    /// in `src/hooks/analytics/tests.rs`.
     #[test]
-    fn diagnostics_summary_aggregates_real_hook_completed_rows_safely() {
+    fn diagnostics_summary_without_a_readiness_projection_fails_closed_safely() {
         let hook_analytics = HookAnalyticsRows {
             rows: vec![json!({
                 "event": "hook_completed",
@@ -2590,26 +2600,22 @@ mod tests {
         };
 
         let summary = diagnostics_summary_from_parts(0, &hook_analytics, None);
-        assert_eq!(summary["hook_readiness"]["collection_status"], "measured");
-        assert_eq!(summary["hook_readiness"]["events_considered"], 1);
-        assert_eq!(
-            summary["hook_readiness"]["hook_wall_time_distribution"][0]["host"],
-            "other"
-        );
-        assert_eq!(
-            summary["hook_readiness"]["hook_wall_time_distribution"][0]["summary"]["min"],
-            0
-        );
-        assert_eq!(
-            summary["hook_readiness"]["host_ipc_rtt_distribution"][0]["summary"]["availability"],
-            "no_samples"
-        );
-        assert_eq!(
-            summary["hook_readiness"]["disposition_counts_by_host"][0]["class"],
-            "unknown"
-        );
+        let readiness = &summary["hook_readiness"];
 
-        let encoded = serde_json::to_string(&summary["hook_readiness"]).unwrap();
+        // Fail closed: no projection means no measurement, said plainly.
+        assert_eq!(readiness["collection_status"], "unavailable");
+        assert_eq!(readiness["events_considered"], 0);
+        assert_eq!(readiness["input_rows_received"], 1);
+        assert_eq!(readiness["input_rows_processed"], 0);
+        assert_eq!(
+            readiness["unavailable_metrics"][0]["blocker"],
+            "hook readiness projection is not mounted"
+        );
+        // The row count is still real, so the frontend cannot read this as an
+        // empty stream.
+        assert_eq!(summary["hook_call_count"], 0);
+
+        let encoded = serde_json::to_string(readiness).expect("readiness encodes");
         for forbidden in [
             "untrusted-host",
             "privateHookName",
@@ -2617,7 +2623,10 @@ mod tests {
             "hook_name",
             "reason_code",
         ] {
-            assert!(!encoded.contains(forbidden));
+            assert!(
+                !encoded.contains(forbidden),
+                "the unmounted envelope must not leak {forbidden}: {encoded}"
+            );
         }
     }
 }

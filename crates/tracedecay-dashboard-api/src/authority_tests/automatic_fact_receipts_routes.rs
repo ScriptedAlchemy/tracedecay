@@ -18,16 +18,6 @@ use crate::tracedecay::facts::memory_application_for_db;
 
 use super::*;
 
-const TEST_DASHBOARD_AUTHORITY: &str = "127.0.0.1:43127";
-
-fn admitted_request(uri: impl AsRef<str>) -> Request<Body> {
-    Request::builder()
-        .uri(uri.as_ref())
-        .header(axum::http::header::HOST, TEST_DASHBOARD_AUTHORITY)
-        .body(Body::empty())
-        .expect("admitted automatic fact receipt request")
-}
-
 fn admitted_fact(content: &str, metadata: Value) -> Value {
     json!({
         "add_fact_request": {

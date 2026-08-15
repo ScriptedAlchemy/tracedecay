@@ -1268,3 +1268,77 @@ fn telemetry_contract_separates_host_ipc_rtt_from_daemon_processing() {
         "unavailable"
     );
 }
+
+/// The dashboard's diagnostics summary must carry a *measured* readiness
+/// aggregate, and must never echo untrusted row values back out.
+///
+/// `tracedecay-dashboard-api` owns the summary but not the aggregation: it
+/// calls the readiness projection through a port this crate installs
+/// (`install_dashboard_hook_readiness_projection`). Only that composition can
+/// answer `measured`, so the safety contract is proven here, over the real
+/// projection, rather than in the dashboard crate's own lib tests where the
+/// port is never mounted.
+#[test]
+fn dashboard_diagnostics_summary_aggregates_hook_completed_rows_safely() {
+    crate::hooks::install_dashboard_hook_readiness_projection()
+        .expect("dashboard hook readiness projection installs");
+
+    let hook_analytics = tracedecay_dashboard_api::analytics_api::HookAnalyticsRows {
+        rows: vec![serde_json::json!({
+            "event": "hook_completed",
+            "agent": "untrusted-host",
+            "hook_name": "privateHookName",
+            "hook_wall_time_us": 0,
+            "daemon_rtt_us": null,
+            "payload_bytes": 0,
+            "daemon_ipc_payload_bytes": null,
+            "timeout": {"budget_ms": null, "timed_out": null},
+            "disposition": {
+                "class": "untrusted-class",
+                "status": "untrusted-status",
+                "retryable": null,
+                "reason_code": "private-reason"
+            }
+        })],
+        sources: Vec::new(),
+        window: tracedecay_dashboard_api::analytics_api::HookAnalyticsWindow::default(),
+    };
+
+    let summary = crate::dashboard::analytics_api::diagnostics_summary_from_parts(
+        0,
+        &hook_analytics,
+        None,
+    );
+    let readiness = &summary["hook_readiness"];
+
+    assert_eq!(readiness["collection_status"], "measured");
+    assert_eq!(readiness["events_considered"], 1);
+    // An unrecognised host folds into the bounded `other` bucket rather than
+    // opening an unbounded series keyed by attacker-chosen text.
+    assert_eq!(readiness["hook_wall_time_distribution"][0]["host"], "other");
+    assert_eq!(
+        readiness["hook_wall_time_distribution"][0]["summary"]["min"],
+        0
+    );
+    // A present-but-zero sample is measured; an absent one stays honest.
+    assert_eq!(
+        readiness["host_ipc_rtt_distribution"][0]["summary"]["availability"],
+        "no_samples"
+    );
+    // An unrecognised disposition class is `unknown`, never echoed verbatim.
+    assert_eq!(readiness["disposition_counts_by_host"][0]["class"], "unknown");
+
+    let encoded = serde_json::to_string(readiness).expect("readiness encodes");
+    for forbidden in [
+        "untrusted-host",
+        "privateHookName",
+        "private-reason",
+        "hook_name",
+        "reason_code",
+    ] {
+        assert!(
+            !encoded.contains(forbidden),
+            "readiness must not leak {forbidden}: {encoded}"
+        );
+    }
+}
